@@ -1,0 +1,9 @@
+{
+  "last_verified_at": "2026-04-07T00:00:00Z",
+  "updated_by": "operator",
+  "positions": [],
+  "cash_pct": 100,
+  "total_long_pct": 0,
+  "total_short_pct": 0,
+  "notes": "Initialize with real positions before running trade pipeline."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "portfolio",
+  "description": "Show current portfolio state: positions, exposure, sector concentration, P&L",
+  "trigger": "/portfolio",
+  "mode": "flash",
+  "version": "2.0"
+}

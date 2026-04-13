@@ -1,0 +1,27 @@
+{
+  "name": "openclaw",
+  "version": "2.0.0",
+  "description": "OpenClaw — AI Hedge Fund System (BotJohn PTC Architecture)",
+  "main": "src/channels/discord/bot.js",
+  "scripts": {
+    "start": "node src/channels/discord/bot.js",
+    "dev": "node --watch src/channels/discord/bot.js",
+    "db:migrate": "node -e \"require('./src/database/postgres').migrate()\"",
+    "workspace:init": "node -e \"require('./src/workspace/manager').initDefault()\"",
+    "integrity:generate": "node -e \"require('./src/security/integrity').generateManifest()\"",
+    "integrity:verify": "node -e \"const r=require('./src/security/integrity').verifyManifest();process.exit(r.valid?0:1)\"",
+    "security:audit": "node -e \"require('./src/security/skill-vetter').vetAllSkills('./src/skills').then(rs=>rs.forEach(r=>console.log(r.approved?'✓':'✗',r.skillName,r.violations.length?'('+r.violations.length+' violations)':''))).catch(console.error)\""
+  },
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.22.1",
+    "ioredis": "^5.3.0",
+    "node-cron": "^4.2.1",
+    "pg": "^8.11.0",
+    "uuid": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

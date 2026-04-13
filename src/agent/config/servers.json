@@ -1,0 +1,64 @@
+{
+  "servers": [
+    {
+      "name": "fmp",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 1,
+      "fallback": "yahoo",
+      "description": "Financial Modeling Prep — financials, ratios, peers, earnings, price targets, company profiles",
+      "tool_count": 18,
+      "import_path": "from tools.fmp import ..."
+    },
+    {
+      "name": "polygon",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 1,
+      "fallback": "alpha_vantage",
+      "description": "Polygon — OHLCV prices, snapshots, market movers, trading signals",
+      "tool_count": 12,
+      "import_path": "from tools.polygon import ..."
+    },
+    {
+      "name": "alpha_vantage",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 2,
+      "fallback": null,
+      "description": "Alpha Vantage — macro data (GDP, CPI, rates), technical indicators (RSI, SMA, BBands), intraday",
+      "tool_count": 15,
+      "import_path": "from tools.alpha_vantage import ..."
+    },
+    {
+      "name": "sec_edgar",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 1,
+      "fallback": null,
+      "description": "SEC EDGAR — 10-K, 10-Q, 8-K, DEF 14A, Form 4 full text and structured data",
+      "tool_count": 5,
+      "import_path": "from tools.sec_edgar import ..."
+    },
+    {
+      "name": "tavily",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 1,
+      "fallback": null,
+      "description": "Tavily — news search, web research, press releases, earnings call transcripts",
+      "tool_count": 2,
+      "import_path": "from tools.tavily import ..."
+    },
+    {
+      "name": "yahoo",
+      "enabled": true,
+      "exposure": "summary",
+      "tier": 2,
+      "fallback": null,
+      "description": "Yahoo Finance (Tier 2 fallback) — options chains, VIX, insider transactions, short interest, real-time quotes",
+      "tool_count": 6,
+      "import_path": "from tools.yahoo import ..."
+    }
+  ]
+}

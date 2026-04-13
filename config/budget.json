@@ -1,0 +1,8 @@
+{
+  "monthly_budget_usd": 400,
+  "daily_burn_yellow_usd": 20,
+  "daily_burn_red_usd": 35,
+  "monthly_pct_yellow": 75,
+  "monthly_pct_red": 90,
+  "mode": "GREEN"
+}

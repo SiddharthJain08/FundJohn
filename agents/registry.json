@@ -1,0 +1,172 @@
+{
+  "version": "1.0",
+  "agents": [
+    {
+      "id": "bull",
+      "name": "Bull Case",
+      "emoji": "🐂",
+      "dir": "agents/bull",
+      "model": "claude-haiku-4-5-20251001",
+      "timeout": 300000,
+      "description": "Builds the strongest investment thesis. Variant perception, catalysts, upside model.",
+      "killSignalPattern": "BULL SIGNAL:",
+      "mcpPreamble": "edgar_yahoo"
+    },
+    {
+      "id": "bear",
+      "name": "Bear Case",
+      "emoji": "🐻",
+      "dir": "agents/bear",
+      "model": "claude-haiku-4-5-20251001",
+      "timeout": 300000,
+      "description": "Constructs the bear case. Checks all 6 kill criteria. Downside model.",
+      "killSignalPattern": "KILL SIGNAL:",
+      "mcpPreamble": "edgar_yahoo"
+    },
+    {
+      "id": "mgmt",
+      "name": "Management Credibility",
+      "emoji": "📋",
+      "dir": "agents/mgmt",
+      "model": "claude-haiku-4-5-20251001",
+      "timeout": 300000,
+      "description": "Scores mgmt guidance accuracy over 12 quarters. Credibility score 0-100.",
+      "killSignalPattern": "MGMT SIGNAL:",
+      "mcpPreamble": "edgar"
+    },
+    {
+      "id": "filing",
+      "name": "Filing Diff",
+      "emoji": "📄",
+      "dir": "agents/filing",
+      "model": "claude-haiku-4-5-20251001",
+      "timeout": 300000,
+      "description": "Diffs the two most recent 10-Q filings. Flags going concern, risk factor changes.",
+      "killSignalPattern": "KILL SIGNAL:",
+      "mcpPreamble": "edgar"
+    },
+    {
+      "id": "revenue",
+      "name": "Revenue Quality",
+      "emoji": "📊",
+      "dir": "agents/revenue",
+      "model": "claude-haiku-4-5-20251001",
+      "timeout": 300000,
+      "description": "Assesses revenue quality, concentration, NRR. Evaluates checklist items 2, 3, 6.",
+      "killSignalPattern": "KILL SIGNAL:",
+      "mcpPreamble": "edgar_yahoo"
+    }
+  ],
+  "trade_agents": [
+    {
+      "id": "quant",
+      "name": "Quant",
+      "role": "Trade Structurer",
+      "emoji": "📐",
+      "dir": "agents/quant",
+      "model": "claude-sonnet-4-6",
+      "timeout": 300000,
+      "pipeline": "trade",
+      "pipeline_order": 1,
+      "receives_from": ["orchestrator", "mcp:yahoo_finance"],
+      "sends_to": ["risk"],
+      "kill_signals": ["[NEGATIVE EV — NO TRADE]", "[CONCENTRATION RISK]", "[CORRELATION FLAG]"]
+    },
+    {
+      "id": "risk_gk",
+      "name": "Risk",
+      "role": "Portfolio Risk Manager",
+      "emoji": "🛡️",
+      "dir": "agents/risk",
+      "model": "claude-sonnet-4-6",
+      "timeout": 300000,
+      "pipeline": "trade",
+      "pipeline_order": 2,
+      "receives_from": ["quant", "mcp:yahoo_finance", "mcp:fred"],
+      "sends_to": ["timing"],
+      "kill_signals": ["[TRADE BLOCKED]"],
+      "override_authority": true
+    },
+    {
+      "id": "timing",
+      "name": "Timing",
+      "role": "Entry Signal Analyst",
+      "emoji": "🎯",
+      "dir": "agents/timing",
+      "model": "claude-sonnet-4-6",
+      "timeout": 300000,
+      "pipeline": "trade",
+      "pipeline_order": 3,
+      "receives_from": ["risk_gk", "mcp:yahoo_finance", "mcp:fred"],
+      "sends_to": ["botjohn"],
+      "kill_signals": ["[EARNINGS WARNING]"]
+    }
+  ],
+  "quant_desk": {
+    "screener": {
+      "name": "Screener",
+      "role": "Trade Signal Scanner",
+      "emoji": "📡",
+      "pipeline_order": 1,
+      "model": "claude-sonnet-4-6",
+      "dir": "agents/quant/screener",
+      "receives_from": ["output/memos", "mcp:yahoo_finance", "mcp:fred"],
+      "sends_to": ["desk-controller"],
+      "signals": [],
+      "timeout_seconds": 180
+    },
+    "sizer": {
+      "name": "Sizer",
+      "role": "Position Allocator",
+      "emoji": "⚖️",
+      "pipeline_order": 2,
+      "model": "claude-sonnet-4-6",
+      "dir": "agents/quant/sizer",
+      "receives_from": ["screener", "output/portfolio.json", "mcp:yahoo_finance"],
+      "sends_to": ["desk-controller"],
+      "signals": ["[SIZE REJECT]"],
+      "timeout_seconds": 180
+    },
+    "timer": {
+      "name": "Timer",
+      "role": "Entry/Exit Tactician",
+      "emoji": "⏱️",
+      "pipeline_order": 3,
+      "model": "claude-sonnet-4-6",
+      "dir": "agents/quant/timer",
+      "receives_from": ["screener", "sizer", "mcp:yahoo_finance"],
+      "sends_to": ["desk-controller"],
+      "signals": ["[URGENT ENTRY]"],
+      "timeout_seconds": 180
+    },
+    "risk": {
+      "name": "Risk",
+      "role": "Risk Guardian",
+      "emoji": "🛡️",
+      "pipeline_order": 4,
+      "model": "claude-sonnet-4-6",
+      "dir": "agents/quant/risk",
+      "receives_from": ["screener", "sizer", "timer", "output/portfolio.json"],
+      "sends_to": ["desk-controller"],
+      "signals": ["[RISK VETO]", "[ELEVATED RISK]"],
+      "timeout_seconds": 180,
+      "has_veto": true
+    },
+    "reporter": {
+      "name": "Reporter",
+      "role": "Trade Report Analyst",
+      "emoji": "📊",
+      "pipeline_order": 5,
+      "model": "claude-sonnet-4-6",
+      "dir": "agents/quant/reporter",
+      "receives_from": ["screener", "sizer", "timer", "risk"],
+      "sends_to": ["desk-controller", "botjohn", "discord"],
+      "signals": ["[TRADE ALERT]", "[EXIT ALERT]"],
+      "timeout_seconds": 180
+    }
+  },
+  "mcpPreambles": {
+    "edgar": "You have access to MCP servers:\n\n1. **fetch** — HTTP GET requests to SEC EDGAR:\n   - Search: GET https://efts.sec.gov/LATEST/search-index?q=%22{{TICKER}}%22&forms=10-Q,10-K,8-K,4\n   - Always set header: User-Agent: \"JohnBot HedgeFund Research siddharthj1908@gmail.com\"\n   - Rate limit: max 10 req/sec\n2. **puppeteer** — Headless browser for JS-rendered pages and earnings transcripts\n\nFetch real data before constructing analysis. Do not fabricate numbers.",
+    "edgar_yahoo": "You have access to MCP servers:\n\n1. **fetch** — HTTP GET requests for:\n   - SEC EDGAR: https://efts.sec.gov/LATEST/search-index?q=%22{{TICKER}}%22&forms=10-K,10-Q,8-K,4\n   - Yahoo Finance: https://query1.finance.yahoo.com/v10/finance/quoteSummary/{{TICKER}}?modules=financialData,defaultKeyStatistics,summaryDetail,incomeStatementHistory\n   - Always set header: User-Agent: \"JohnBot HedgeFund Research siddharthj1908@gmail.com\"\n2. **puppeteer** — Headless browser for earnings transcripts and IR pages\n\nFetch real data. Cite each source with URL and date. Do not fabricate numbers."
+  }
+}

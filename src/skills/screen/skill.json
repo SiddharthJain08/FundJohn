@@ -1,0 +1,7 @@
+{
+  "name": "screen",
+  "description": "Run sector screen against watchlist: filter by checklist thresholds, rank by EV/NTM",
+  "trigger": "/screen",
+  "mode": "ptc",
+  "version": "2.0"
+}

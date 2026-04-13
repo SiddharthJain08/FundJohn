@@ -1,0 +1,45 @@
+{
+  "thresholds": {
+    "checklist": {
+      "min_revenue_growth_pct": 10,
+      "min_gross_margin_pct": 40,
+      "max_insider_sell_usd": 10000000,
+      "max_customer_concentration_pct": 25,
+      "no_restatements_years": 3,
+      "max_ev_ntm_revenue_growth": 20,
+      "max_ev_ebitda_mature": 12
+    },
+    "risk": {
+      "max_position_pct": 10,
+      "max_sector_pct": 30,
+      "max_correlation": 0.7,
+      "max_drawdown_contribution_pct": 5,
+      "max_portfolio_drawdown_pct": 15
+    },
+    "sizing": {
+      "kelly_fraction": 0.5,
+      "target_volatility_pct": 15
+    }
+  },
+  "rate_limits": {
+    "fmp": { "per_minute": 300, "per_day": 250 },
+    "polygon": { "per_minute": 100, "per_day": null },
+    "alpha_vantage": { "per_minute": 5, "per_day": 25 },
+    "sec_edgar": { "per_second": 10, "per_day": null },
+    "tavily": { "per_minute": 60, "per_day": null },
+    "yahoo": { "per_minute": 60, "per_day": null }
+  },
+  "staleness_windows": {
+    "research_days": 7,
+    "prices_hours": 24,
+    "statements_days": 30,
+    "filings": "on_new_filing",
+    "compute_hours": 24
+  },
+  "fallback_chain": {
+    "prices": ["polygon", "alpha_vantage", "yahoo"],
+    "fundamentals": ["fmp", "yahoo"],
+    "filings": ["sec_edgar"],
+    "news": ["tavily"]
+  }
+}

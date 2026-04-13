@@ -1,0 +1,29 @@
+[Unit]
+Description=BotJohn v2 — Hedge Fund Discord Bot (Claude Code backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw/johnbot
+ExecStart=/usr/bin/node /root/openclaw/johnbot/index.js
+Restart=on-failure
+RestartSec=10
+
+# Environment
+Environment="JOHN_WORKDIR=/root"
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="CLAUDE_BIN=/usr/local/bin/claude-bin"
+Environment="CLAUDE_UID=1001"
+Environment="CLAUDE_GID=1001"
+Environment="CLAUDE_HOME=/home/claudebot"
+Environment="CLAUDE_TIMEOUT_MS=600000"
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=johnbot
+
+[Install]
+WantedBy=default.target

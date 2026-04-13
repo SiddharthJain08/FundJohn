@@ -1,0 +1,929 @@
+'use strict';
+
+require('dotenv').config({ path: require('path').join(__dirname, '../../../.env') });
+
+const express = require('express');
+const { getAllSubagentStatuses, getBucketStatus } = require('../../database/redis');
+const { verdictCache, query: dbQuery } = require('../../database/postgres');
+
+const app  = express();
+const PORT = process.env.DASHBOARD_PORT || 3000;
+
+// SSE clients
+const sseClients = new Set();
+
+function broadcast(data) {
+  const msg = `data: ${JSON.stringify(data)}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(msg); } catch { sseClients.delete(res); }
+  }
+}
+module.exports.broadcast = broadcast;
+
+// ── DB-backed API routes ────────────────────────────────────────────────────────
+
+// Full universe grouped by category
+app.get('/api/db/universe', async (req, res) => {
+  try {
+    const result = await dbQuery(
+      `SELECT ticker, name, category, has_options, has_fundamentals, snapshot_24h
+       FROM universe_config WHERE active=true ORDER BY category, ticker`
+    );
+    const grouped = {};
+    for (const row of result.rows) {
+      if (!grouped[row.category]) grouped[row.category] = [];
+      grouped[row.category].push(row);
+    }
+    res.json(grouped);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Market overview — latest price + change for all instruments
+app.get('/api/db/market-overview', async (req, res) => {
+  try {
+    const result = await dbQuery(`
+      WITH latest AS (
+        SELECT DISTINCT ON (ticker) ticker, date, open, high, low, close, volume
+        FROM price_data ORDER BY ticker, date DESC
+      ), prev AS (
+        SELECT DISTINCT ON (p.ticker) p.ticker, p.close AS prev_close
+        FROM price_data p
+        JOIN latest l ON l.ticker = p.ticker AND p.date < l.date
+        ORDER BY p.ticker, p.date DESC
+      )
+      SELECT l.ticker, l.date, l.close, l.open, l.high, l.low, l.volume,
+             pr.prev_close,
+             CASE WHEN pr.prev_close > 0
+               THEN ROUND(((l.close - pr.prev_close) / pr.prev_close * 100)::numeric, 2)
+             END AS change_pct,
+             u.name, u.category
+      FROM latest l
+      LEFT JOIN prev pr ON pr.ticker = l.ticker
+      JOIN universe_config u ON u.ticker = l.ticker
+      WHERE u.active = true
+      ORDER BY u.category, l.ticker
+    `);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Price history from DB — no external calls
+app.get('/api/db/prices/:ticker', async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  try {
+    let result;
+    if (req.query.limit) {
+      // ?limit=N  → last N trading days (row count, chronological order)
+      const n = Math.min(parseInt(req.query.limit) || 5, 3650);
+      result = await dbQuery(
+        `SELECT date, open, high, low, close, volume FROM price_data
+         WHERE ticker=$1 ORDER BY date DESC LIMIT $2`,
+        [ticker, n]
+      );
+      result = { rows: result.rows.reverse() }; // back to chronological
+    } else {
+      // ?days=N → calendar day window
+      const days = Math.min(parseInt(req.query.days) || 365, 3650);
+      result = await dbQuery(
+        `SELECT date, open, high, low, close, volume FROM price_data
+         WHERE ticker=$1 AND date >= CURRENT_DATE - ($2 * INTERVAL '1 day')
+         ORDER BY date ASC`,
+        [ticker, days]
+      );
+    }
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Options contracts from DB (top by open interest)
+app.get('/api/db/options/:ticker', async (req, res) => {
+  const ticker   = req.params.ticker.toUpperCase();
+  const limit    = Math.min(parseInt(req.query.limit) || 30, 100);
+  const type     = req.query.type; // 'call' or 'put'
+  try {
+    const result = await dbQuery(
+      `SELECT expiry, strike, contract_type, delta, gamma, theta, vega, iv,
+              open_interest, volume, last_price, bid, ask
+       FROM options_data WHERE ticker=$1
+         ${type ? `AND contract_type = '${type === 'call' ? 'call' : 'put'}'` : ''}
+       ORDER BY snapshot_date DESC, open_interest DESC NULLS LAST LIMIT $2`,
+      [ticker, limit]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Fundamentals from DB (last 4 quarters)
+app.get('/api/db/fundamentals/:ticker', async (req, res) => {
+  const ticker = req.params.ticker.toUpperCase();
+  try {
+    const result = await dbQuery(
+      `SELECT period, period_end, revenue, gross_profit, ebitda, net_income, eps,
+              gross_margin, operating_margin, net_margin, revenue_growth_yoy, source
+       FROM fundamentals WHERE ticker=$1 ORDER BY period_end DESC LIMIT 4`,
+      [ticker]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Pipeline + agent status (existing)
+app.get('/api/status', async (req, res) => {
+  const [agents, rateLimits] = await Promise.all([
+    getAllSubagentStatuses().catch(() => []),
+    getBucketStatus().catch(() => ({})),
+  ]);
+  res.json({ agents, rateLimits, timestamp: new Date().toISOString() });
+});
+
+app.get('/api/pipeline/status', async (req, res) => {
+  try {
+    const store    = require('../../pipeline/store');
+    const coverage = await store.getCoverageStats();
+    res.json({ coverage, timestamp: new Date().toISOString() });
+  } catch (err) { res.json({ error: err.message, coverage: null }); }
+});
+
+app.get('/api/verdicts', async (req, res) => {
+  try {
+    const result = await dbQuery(
+      `SELECT ticker, analysis_date, verdict, score, signals, stale_after
+       FROM verdict_cache WHERE stale_after > NOW()
+       ORDER BY analysis_date DESC LIMIT 50`
+    );
+    res.json(result.rows);
+  } catch { res.json([]); }
+});
+
+// News feed from DB — supports ?ticker=X, ?tickers=X,Y,Z, ?q=keyword, ?since=ISO, ?limit=N
+app.get('/api/db/news', async (req, res) => {
+  try {
+    const store   = require('../../pipeline/store');
+    const ticker  = req.query.ticker;
+    const tickers = req.query.tickers ? req.query.tickers.split(',').map(t => t.trim()).filter(Boolean) : null;
+    const q       = req.query.q;
+    const since   = req.query.since;
+    const limit   = Math.min(parseInt(req.query.limit) || 30, 200);
+    const news    = await store.getNews({ ticker, tickers, q, since, limit });
+    res.json(news);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Trigger news collection on demand (runs in background, streams status via SSE)
+app.post('/api/trigger/news', async (req, res) => {
+  try {
+    const collector = require('../../pipeline/collector');
+    const store     = require('../../pipeline/store');
+    res.json({ ok: true, message: 'News collection started' });
+    // Run in background after response sent
+    const fullUniverse  = await store.getActiveUniverse();
+    const equityTickers = fullUniverse.filter(u => u.category === 'equity').map(u => u.ticker);
+    collector.runNewsCollection(equityTickers).then(async () => {
+      const { query: dbQuery } = require('../../database/postgres');
+      const r = await dbQuery('SELECT COUNT(*) FROM market_news');
+      broadcast({ type: 'news', total: parseInt(r.rows[0].count) });
+    }).catch(err => broadcast({ type: 'news_error', error: err.message }));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Recent collection cycles
+app.get('/api/db/cycles', async (req, res) => {
+  const n = Math.min(parseInt(req.query.n) || 10, 50);
+  try {
+    const result = await dbQuery(
+      `SELECT id, started_at, completed_at, duration_ms, snapshot_tickers,
+              price_rows, options_contracts, technical_rows, fundamental_records,
+              polygon_calls, fmp_calls, yfinance_calls, total_rows, errors, status
+       FROM collection_cycles ORDER BY id DESC LIMIT $1`,
+      [n]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// SSE stream
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write('data: {"type":"connected"}\n\n');
+  sseClients.add(res);
+  req.on('close', () => sseClients.delete(res));
+});
+
+// ── Dashboard ──────────────────────────────────────────────────────────────────
+app.get('/', (req, res) => res.send(getDashboardHtml()));
+
+function getDashboardHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--panel:#161b22;--border:#30363d;--border2:#21262d;
+  --text:#e6edf3;--muted:#8b949e;--dim:#484f58;
+  --blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff;
+}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',monospace;font-size:13px;display:flex;flex-direction:column}
+
+/* Header */
+#header{background:var(--panel);border-bottom:1px solid var(--border);padding:0 20px;height:44px;display:flex;align-items:center;gap:14px;flex-shrink:0}
+#header h1{font-size:15px;font-weight:700;color:var(--blue);letter-spacing:-0.02em}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+#clock{color:var(--dim);font-size:11px;margin-left:auto}
+#pipeline-badge{font-size:10px;color:var(--muted);background:var(--border2);padding:2px 8px;border-radius:10px;cursor:pointer}
+#pipeline-badge:hover{background:var(--border)}
+
+/* Market Strip */
+#strip{background:#0a0e14;border-bottom:1px solid var(--border2);height:32px;display:flex;align-items:center;overflow:hidden;flex-shrink:0;position:relative}
+#strip-inner{display:flex;gap:0;white-space:nowrap;animation:scroll 60s linear infinite}
+#strip-inner:hover{animation-play-state:paused}
+@keyframes scroll{0%{transform:translateX(0)}100%{transform:translateX(-50%)}}
+.strip-item{display:inline-flex;align-items:center;gap:6px;padding:0 16px;font-size:11px;border-right:1px solid var(--border2);cursor:pointer;height:32px}
+.strip-item:hover{background:var(--panel)}
+.strip-item .s-ticker{color:var(--muted);font-weight:600}
+.strip-item .s-price{color:var(--text)}
+.strip-item .s-chg{font-size:10px}
+
+/* Body layout */
+#body{display:flex;flex:1;overflow:hidden}
+
+/* Sidebar */
+#sidebar{width:230px;min-width:230px;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
+#search-wrap{padding:10px 12px 6px;border-bottom:1px solid var(--border2)}
+#search{width:100%;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:5px 10px;color:var(--text);font-size:12px;font-family:inherit;outline:none}
+#search:focus{border-color:var(--blue)}
+#cat-tabs{display:flex;gap:0;padding:6px 12px;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--border2)}
+.cat-tab{font-size:10px;padding:2px 7px;border-radius:10px;cursor:pointer;color:var(--muted);background:var(--border2);border:none;font-family:inherit}
+.cat-tab.active{background:var(--blue);color:#fff}
+#ticker-list{flex:1;overflow-y:auto;padding:4px 0}
+.t-item{display:flex;justify-content:space-between;align-items:center;padding:5px 14px;cursor:pointer;border-left:2px solid transparent}
+.t-item:hover{background:var(--panel)}
+.t-item.active{background:var(--panel);border-left-color:var(--blue)}
+.t-item .t-sym{font-size:12px;font-weight:600;color:var(--text)}
+.t-item .t-name{font-size:10px;color:var(--dim);max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.t-item .t-chg{font-size:11px;text-align:right}
+.t-sep{font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);padding:8px 14px 3px;margin-top:4px}
+#sidebar-footer{padding:10px 12px;border-top:1px solid var(--border2);font-size:10px;color:var(--dim)}
+
+/* Main */
+#main{flex:1;overflow-y:auto;display:flex;flex-direction:column}
+
+/* Market overview */
+#overview{padding:16px}
+.ov-group{margin-bottom:20px}
+.ov-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.ov-label::after{content:'';flex:1;height:1px;background:var(--border2)}
+.ov-cards{display:flex;flex-wrap:wrap;gap:8px}
+.ov-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:130px;cursor:pointer;transition:border-color .15s}
+.ov-card:hover{border-color:var(--blue)}
+.ov-card .ov-sym{font-size:11px;font-weight:700;color:var(--text)}
+.ov-card .ov-name{font-size:10px;color:var(--dim);margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:110px}
+.ov-card .ov-price{font-size:15px;font-weight:700}
+.ov-card .ov-chg{font-size:11px;margin-top:2px}
+.ov-card .ov-date{font-size:9px;color:var(--dim);margin-top:4px}
+
+/* Ticker detail */
+#detail{flex:1;display:flex;flex-direction:column;padding:0}
+#detail-header{padding:14px 20px 10px;border-bottom:1px solid var(--border2);display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap}
+#detail-sym{font-size:22px;font-weight:700;color:var(--text)}
+#detail-name{font-size:12px;color:var(--muted);margin-top:2px}
+#detail-price{font-size:28px;font-weight:700;margin-left:auto}
+#detail-chg{font-size:13px;margin-top:4px;text-align:right}
+#detail-date{font-size:10px;color:var(--dim);margin-top:2px;text-align:right}
+
+/* Range + type selectors */
+#chart-controls{display:flex;gap:6px;padding:10px 20px;align-items:center;border-bottom:1px solid var(--border2)}
+.range-btn{background:var(--border2);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font-size:11px;cursor:pointer;color:var(--muted);font-family:inherit}
+.range-btn.active,.range-btn:hover{background:var(--blue);border-color:var(--blue);color:#fff}
+#chart-type-toggle{margin-left:auto;display:flex;gap:4px}
+.type-btn{background:var(--border2);border:1px solid var(--border);border-radius:4px;padding:3px 9px;font-size:11px;cursor:pointer;color:var(--muted);font-family:inherit}
+.type-btn.active{background:var(--panel);border-color:var(--blue);color:var(--blue)}
+
+/* Chart */
+#chart-wrap{position:relative;padding:16px 20px 8px;flex:0 0 300px}
+#priceChart{width:100%!important}
+
+/* Technicals */
+#tech-bar{display:flex;gap:12px;padding:10px 20px;border-top:1px solid var(--border2);border-bottom:1px solid var(--border2);flex-wrap:wrap;align-items:center}
+.tech-item{display:flex;flex-direction:column;gap:2px;min-width:80px}
+.tech-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.tech-val{font-size:13px;font-weight:600}
+.rsi-wrap{flex:1;min-width:200px;max-width:300px}
+.rsi-track{background:var(--border2);border-radius:4px;height:6px;position:relative;margin-top:4px}
+.rsi-fill{height:100%;border-radius:4px;transition:width .4s}
+.rsi-zones{display:flex;font-size:8px;color:var(--dim);justify-content:space-between;margin-top:2px}
+
+/* Data tabs */
+#data-tabs{display:flex;gap:0;padding:0 20px;border-bottom:1px solid var(--border2)}
+.data-tab{padding:8px 14px;font-size:11px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.data-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.data-tab:hover{color:var(--text)}
+#tab-content{padding:16px 20px;overflow-y:auto}
+
+/* Tables */
+.db-table{width:100%;border-collapse:collapse;font-size:11px}
+.db-table th{color:var(--dim);font-weight:600;text-align:left;padding:4px 8px;border-bottom:1px solid var(--border2);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.db-table td{padding:5px 8px;border-bottom:1px solid var(--border2)}
+.db-table tr:last-child td{border:none}
+.db-table .call{color:#58a6ff}.db-table .put{color:#f0883e}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* Cycles table */
+.cycle-row td:first-child{color:var(--muted)}
+.status-complete{color:var(--green)}.status-running{color:var(--blue)}.status-abandoned{color:var(--dim)}.status-complete-with-errors{color:var(--yellow)}
+
+/* News */
+.news-feed{display:flex;flex-direction:column;gap:8px}
+.news-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:11px 14px;transition:border-color .15s}
+.news-card:hover{border-color:var(--blue)}
+.news-card a{text-decoration:none;color:inherit}
+.news-meta{display:flex;align-items:center;gap:8px;margin-bottom:5px;flex-wrap:wrap}
+.news-source{font-size:10px;font-weight:600;color:var(--blue);text-transform:uppercase;letter-spacing:.04em}
+.news-time{font-size:10px;color:var(--dim)}
+.news-ticker-badge{font-size:9px;background:var(--border2);color:var(--muted);padding:1px 5px;border-radius:3px;cursor:pointer}
+.news-ticker-badge:hover{color:var(--blue)}
+.news-title{font-size:12px;font-weight:600;color:var(--text);line-height:1.4;margin-bottom:4px}
+.news-summary{font-size:11px;color:var(--muted);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.news-read-more{display:inline-block;margin-top:7px;font-size:10px;color:var(--blue);text-decoration:none;opacity:.75}
+.news-read-more:hover{opacity:1;text-decoration:underline}
+.news-section-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:14px 0 8px;display:flex;align-items:center;gap:8px}
+.news-section-label::after{content:'';flex:1;height:1px;background:var(--border2)}
+
+/* Misc */
+.positive{color:var(--green)}.negative{color:var(--red)}.neutral{color:var(--muted)}
+.empty{color:var(--dim);text-align:center;padding:30px;font-size:11px}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border)}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <span class="dot" id="dot"></span>
+  <h1>🦞 OpenClaw</h1>
+  <span id="pipeline-badge" onclick="showOverview()">Loading pipeline...</span>
+  <span id="clock"></span>
+</div>
+
+<div id="strip"><div id="strip-inner"></div></div>
+
+<div id="body">
+  <div id="sidebar">
+    <div id="search-wrap">
+      <input id="search" placeholder="Search ticker or name..." oninput="filterTickers()" />
+    </div>
+    <div id="cat-tabs">
+      <button class="cat-tab active" onclick="setCat('all')">All</button>
+      <button class="cat-tab" onclick="setCat('equity')">SP500</button>
+      <button class="cat-tab" onclick="setCat('index')">Index</button>
+      <button class="cat-tab" onclick="setCat('etf')">ETF</button>
+      <button class="cat-tab" onclick="setCat('crypto')">Crypto</button>
+      <button class="cat-tab" onclick="setCat('commodity')">Cmdty</button>
+      <button class="cat-tab" onclick="setCat('forex')">FX</button>
+    </div>
+    <div id="ticker-list"></div>
+    <div id="sidebar-footer" id="sidebar-footer">— instruments</div>
+  </div>
+
+  <div id="main">
+    <div id="overview" style="display:none"></div>
+    <div id="detail" style="display:none"></div>
+    <div id="loading" style="color:var(--dim);text-align:center;padding:60px;font-size:12px;">Loading market data...</div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let universeData = {};     // {category: [{ticker, name, ...}]}
+let marketData   = {};     // {ticker: {close, change_pct, name, category, date, ...}}
+let currentTicker = null;
+let currentRange  = 365;
+let currentCat    = 'all';
+let priceChart    = null;
+
+const CAT_LABELS = {equity:'S&P 100',index:'Indices',etf:'ETFs',crypto:'Crypto',commodity:'Commodities',forex:'Forex'};
+const CAT_ICONS  = {equity:'📊',index:'📈',etf:'🏦',crypto:'₿',commodity:'🛢️',forex:'💱'};
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+(async () => {
+  setInterval(() => {
+    document.getElementById('clock').textContent =
+      new Date().toLocaleTimeString('en-US',{timeZone:'America/New_York',hour12:true}) + ' ET';
+  }, 1000);
+
+  const [univ, mkt] = await Promise.all([
+    fetch('/api/db/universe').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/db/market-overview').then(r=>r.json()).catch(()=>[]),
+  ]);
+
+  universeData = univ;
+  for (const row of mkt) marketData[row.ticker] = row;
+
+  buildStrip();
+  buildSidebar();
+  showOverview();
+  document.getElementById('loading').style.display = 'none';
+
+  // Pipeline badge
+  refreshPipeline();
+  setInterval(refreshPipeline, 60000);
+
+  // SSE
+  const es = new EventSource('/events');
+  es.onmessage = e => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'pipeline') refreshPipeline();
+  };
+  es.onerror = () => { document.getElementById('dot').style.background = 'var(--red)'; };
+
+  // Refresh market data every 5min
+  setInterval(async () => {
+    const mkt2 = await fetch('/api/db/market-overview').then(r=>r.json()).catch(()=>[]);
+    for (const row of mkt2) marketData[row.ticker] = row;
+    buildStrip();
+    buildSidebar();
+    if (!currentTicker) showOverview();
+  }, 300000);
+})();
+
+// ── Formatters ────────────────────────────────────────────────────────────────
+function fmtPrice(ticker, price) {
+  if (price == null) return '—';
+  const n = parseFloat(price);
+  if (ticker.includes('=X')) return n.toFixed(4);          // Forex
+  if (ticker.startsWith('^')) return n.toLocaleString('en-US',{maximumFractionDigits:2}); // Index
+  if (n > 1000) return '$' + n.toLocaleString('en-US',{maximumFractionDigits:0});
+  if (n < 1)    return '$' + n.toFixed(4);
+  return '$' + n.toFixed(2);
+}
+function fmtChg(chg) {
+  if (chg == null) return {text:'—',cls:'neutral'};
+  const n = parseFloat(chg);
+  const sign = n >= 0 ? '+' : '';
+  return {text: sign + n.toFixed(2) + '%', cls: n >= 0 ? 'positive' : 'negative'};
+}
+function fmtNum(n, decimals=2) {
+  if (n == null) return '—';
+  const v = parseFloat(n);
+  if (Math.abs(v) >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
+  if (Math.abs(v) >= 1e6) return '$' + (v/1e6).toFixed(1) + 'M';
+  return v.toFixed(decimals);
+}
+function fmtVol(v) {
+  if (!v) return '—';
+  const n = parseInt(v);
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(0) + 'K';
+  return n.toString();
+}
+
+// ── Market Strip ──────────────────────────────────────────────────────────────
+const STRIP_TICKERS = ['^GSPC','^DJI','^IXIC','^RUT','^VIX','^TNX',
+  'BTC-USD','ETH-USD','SOL-USD','GC=F','CL=F','EURUSD=X','GBPUSD=X',
+  'SPY','QQQ','GLD','TLT','XLF','XLK','XLE'];
+
+function buildStrip() {
+  const items = STRIP_TICKERS
+    .filter(t => marketData[t])
+    .map(t => {
+      const d = marketData[t];
+      const c = fmtChg(d.change_pct);
+      const name = d.name || t;
+      const shortName = name.length > 14 ? name.slice(0,14) : name;
+      return \`<div class="strip-item" onclick="selectTicker('\${t}')">
+        <span class="s-ticker">\${t}</span>
+        <span class="s-price">\${fmtPrice(t, d.close)}</span>
+        <span class="s-chg \${c.cls}">\${c.text}</span>
+      </div>\`;
+    }).join('');
+  const inner = document.getElementById('strip-inner');
+  inner.innerHTML = items + items; // duplicate for seamless loop
+}
+
+// ── Sidebar ───────────────────────────────────────────────────────────────────
+function buildSidebar() {
+  const search = (document.getElementById('search').value || '').toUpperCase();
+  const el = document.getElementById('ticker-list');
+  const frag = [];
+  let total = 0;
+
+  const catOrder = ['equity','index','etf','crypto','commodity','forex'];
+  for (const cat of catOrder) {
+    if (currentCat !== 'all' && currentCat !== cat) continue;
+    const tickers = (universeData[cat] || []).filter(t => {
+      if (!search) return true;
+      return t.ticker.includes(search) || (t.name || '').toUpperCase().includes(search);
+    });
+    if (!tickers.length) continue;
+
+    if (currentCat === 'all') {
+      frag.push(\`<div class="t-sep">\${CAT_ICONS[cat] || ''} \${CAT_LABELS[cat] || cat}</div>\`);
+    }
+
+    for (const t of tickers) {
+      const d = marketData[t.ticker];
+      const c = d ? fmtChg(d.change_pct) : {text:'—',cls:'neutral'};
+      const isActive = t.ticker === currentTicker ? ' active' : '';
+      frag.push(\`<div class="t-item\${isActive}" onclick="selectTicker('\${t.ticker}')">
+        <div>
+          <div class="t-sym">\${t.ticker}</div>
+          <div class="t-name">\${t.name || ''}</div>
+        </div>
+        <div class="t-chg \${c.cls}">\${c.text}</div>
+      </div>\`);
+      total++;
+    }
+  }
+
+  el.innerHTML = frag.join('');
+  document.getElementById('sidebar-footer').textContent = total + ' instruments';
+}
+
+function setCat(cat) {
+  currentCat = cat;
+  document.querySelectorAll('.cat-tab').forEach(b => b.classList.toggle('active', b.textContent === {
+    all:'All',equity:'SP500',index:'Index',etf:'ETF',crypto:'Crypto',commodity:'Cmdty',forex:'FX'
+  }[cat]));
+  buildSidebar();
+}
+
+function filterTickers() { buildSidebar(); }
+
+// ── Market Overview (default view) ────────────────────────────────────────────
+function showOverview() {
+  currentTicker = null;
+  document.getElementById('detail').style.display = 'none';
+  const ov = document.getElementById('overview');
+  ov.style.display = 'block';
+  document.querySelectorAll('.t-item').forEach(el => el.classList.remove('active'));
+
+  const groups = [
+    { label:'US Indices',   tickers:['^GSPC','^DJI','^IXIC','^RUT','^VIX'] },
+    { label:'Bond Yields',  tickers:['^TNX','^TYX','^FVX'] },
+    { label:'Global Indices',tickers:['^STOXX50E','^N225','^FTSE','^GDAXI','^HSI'] },
+    { label:'Major ETFs',   tickers:['SPY','QQQ','IWM','DIA','TLT','GLD'] },
+    { label:'Sectors',      tickers:['XLF','XLK','XLE','XLV','XLI','XLY','XLP','XLU'] },
+    { label:'Crypto',       tickers:['BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD','AVAX-USD'] },
+    { label:'Commodities',  tickers:['GC=F','SI=F','CL=F','NG=F','HG=F'] },
+    { label:'Forex',        tickers:['EURUSD=X','GBPUSD=X','USDJPY=X','AUDUSD=X','DX-Y.NYB'] },
+  ];
+
+  const html = groups.map(g => {
+    const cards = g.tickers.filter(t => marketData[t]).map(t => {
+      const d = marketData[t];
+      const c = fmtChg(d.change_pct);
+      const name = (d.name || t).replace(' ETF','').replace(' Select Sector','').replace(' Futures','');
+      return \`<div class="ov-card" onclick="selectTicker('\${t}')">
+        <div class="ov-sym">\${t}</div>
+        <div class="ov-name">\${name}</div>
+        <div class="ov-price \${c.cls}">\${fmtPrice(t, d.close)}</div>
+        <div class="ov-chg \${c.cls}">\${c.text}</div>
+        <div class="ov-date">\${d.date ? String(d.date).slice(0,10) : ''}</div>
+      </div>\`;
+    }).join('');
+    return cards ? \`<div class="ov-group">
+      <div class="ov-label">\${g.label}</div>
+      <div class="ov-cards">\${cards}</div>
+    </div>\` : '';
+  }).join('');
+
+  const newsHtml = \`<div class="ov-group">
+    <div class="ov-label">Market News</div>
+    <div id="overview-news" style="padding:4px 0"><div class="empty">Loading news...</div></div>
+  </div>\`;
+  ov.innerHTML = (html || '<div class="empty">No market data yet — pipeline runs at 6:00 AM ET</div>') + newsHtml;
+  loadNewsSection('overview-news', null);
+}
+
+// ── Ticker Detail ─────────────────────────────────────────────────────────────
+async function selectTicker(ticker) {
+  currentTicker = ticker;
+  buildSidebar();
+  document.getElementById('overview').style.display = 'none';
+  const det = document.getElementById('detail');
+  det.style.display = 'flex';
+  det.innerHTML = '<div class="empty">Loading \${ticker}...</div>';
+  await loadDetail(ticker);
+}
+
+async function loadDetail(ticker) {
+  const det = document.getElementById('detail');
+  const d   = marketData[ticker] || {};
+  const c   = fmtChg(d.change_pct);
+
+  det.innerHTML = \`
+    <div id="detail-header">
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <button onclick="showOverview()" style="background:none;border:none;color:var(--muted);font-size:11px;cursor:pointer;text-align:left;padding:0;font-family:inherit;display:flex;align-items:center;gap:4px;width:fit-content" onmouseover="this.style.color='var(--blue)'" onmouseout="this.style.color='var(--muted)'">← Market Overview</button>
+        <div id="detail-sym">\${ticker}</div>
+        <div id="detail-name">\${d.name || ''}</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div id="detail-price" class="\${c.cls}">\${fmtPrice(ticker, d.close)}</div>
+        <div id="detail-chg" class="\${c.cls}">\${c.text}</div>
+        <div id="detail-date">\${d.date ? String(d.date).slice(0,10) : ''}</div>
+      </div>
+    </div>
+    <div id="chart-controls">
+      \${['5D','1M','3M','6M','1Y','5Y','10Y'].map(r =>
+        \`<button class="range-btn\${r==='1Y'?' active':''}" onclick="setRange('\${r}',this)">\${r}</button>\`
+      ).join('')}
+    </div>
+    <div id="chart-wrap"><canvas id="priceChart"></canvas></div>
+    <div id="data-tabs">
+      <div class="data-tab active" onclick="showTab('overview',this)">Overview</div>
+      <div class="data-tab" onclick="showTab('options',this)">Options</div>
+      <div class="data-tab" onclick="showTab('fundamentals',this)">Fundamentals</div>
+      <div class="data-tab" onclick="showTab('cycles',this)">Cycles</div>
+      <div class="data-tab" onclick="showTab('news',this)">News</div>
+    </div>
+    <div id="tab-content"></div>
+  \`;
+
+  await Promise.all([
+    loadChart(ticker, currentRangeLabel),
+    showTab('overview', null),
+  ]);
+}
+
+// Maps range label → query string for /api/db/prices/:ticker
+const RANGE_PARAMS = {
+  '5D':  'limit=5',     // last 5 trading day rows (calendar days miss weekends)
+  '1M':  'days=30',
+  '3M':  'days=90',
+  '6M':  'days=180',
+  '1Y':  'days=365',
+  '5Y':  'days=1825',
+  '10Y': 'days=3650',
+};
+let currentRangeLabel = '1Y';
+
+async function setRange(label, btn) {
+  currentRangeLabel = label;
+  document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  if (currentTicker) await loadChart(currentTicker, label);
+}
+
+async function loadChart(ticker, rangeLabel) {
+  const qs = RANGE_PARAMS[rangeLabel] || 'days=365';
+  const prices = await fetch(\`/api/db/prices/\${ticker}?\${qs}\`).then(r=>r.json()).catch(()=>[]);
+  if (!prices || !prices.length) {
+    document.getElementById('chart-wrap').innerHTML = '<div class="empty">No price data in DB yet for \${ticker}</div>';
+    return;
+  }
+
+  const labels = prices.map(p => String(p.date).slice(0,10));
+  const closes = prices.map(p => parseFloat(p.close));
+  const isIndex = ticker.startsWith('^');
+
+  if (priceChart) { priceChart.destroy(); priceChart = null; }
+  const wrap = document.getElementById('chart-wrap');
+  wrap.innerHTML = '<canvas id="priceChart"></canvas>';
+  const ctx = document.getElementById('priceChart').getContext('2d');
+
+  const startPrice = closes[0];
+  const color = closes[closes.length-1] >= startPrice ? '#3fb950' : '#f85149';
+  const colorAlpha = closes[closes.length-1] >= startPrice ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)';
+
+  priceChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: ticker,
+        data: closes,
+        borderColor: color,
+        backgroundColor: colorAlpha,
+        borderWidth: 1.5,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#161b22',
+          borderColor: '#30363d',
+          borderWidth: 1,
+          titleColor: '#8b949e',
+          bodyColor: '#e6edf3',
+          callbacks: {
+            label: ctx => (isIndex ? '' : '$') + parseFloat(ctx.parsed.y).toLocaleString('en-US',{maximumFractionDigits:isIndex?2:2})
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#484f58', maxTicksLimit: 8, font:{size:10} },
+          grid: { color: '#21262d' }
+        },
+        y: {
+          position: 'right',
+          ticks: {
+            color: '#484f58',
+            font: { size:10 },
+            callback: v => isIndex ? v.toLocaleString('en-US',{maximumFractionDigits:0}) : '$'+parseFloat(v).toLocaleString('en-US',{maximumFractionDigits:ticker.includes('=X')?4:0})
+          },
+          grid: { color: '#21262d' }
+        }
+      }
+    }
+  });
+}
+
+// ── Data Tabs ─────────────────────────────────────────────────────────────────
+async function showTab(name, btn) {
+  if (btn) {
+    document.querySelectorAll('.data-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+  }
+  const el = document.getElementById('tab-content');
+  if (!el) return;
+
+  if (name === 'overview') {
+    const d = marketData[currentTicker] || {};
+    el.innerHTML = \`<table class="db-table">
+      <tr><th>Field</th><th>Value</th></tr>
+      <tr><td>Open</td><td class="num">\${fmtPrice(currentTicker, d.open)}</td></tr>
+      <tr><td>High</td><td class="num">\${fmtPrice(currentTicker, d.high)}</td></tr>
+      <tr><td>Low</td><td class="num">\${fmtPrice(currentTicker, d.low)}</td></tr>
+      <tr><td>Close</td><td class="num">\${fmtPrice(currentTicker, d.close)}</td></tr>
+      <tr><td>Prev Close</td><td class="num">\${fmtPrice(currentTicker, d.prev_close)}</td></tr>
+      <tr><td>Volume</td><td class="num">\${fmtVol(d.volume)}</td></tr>
+      <tr><td>Category</td><td>\${d.category || '—'}</td></tr>
+      <tr><td>As of</td><td>\${d.date ? String(d.date).slice(0,10) : '—'}</td></tr>
+    </table>\`;
+
+  } else if (name === 'options') {
+    const opts = await fetch(\`/api/db/options/\${currentTicker}?limit=40\`).then(r=>r.json()).catch(()=>[]);
+    if (!opts.length) { el.innerHTML = '<div class="empty">No options data in DB for this instrument</div>'; return; }
+
+    // Split calls/puts
+    const calls = opts.filter(o=>o.contract_type==='call').slice(0,15);
+    const puts  = opts.filter(o=>o.contract_type==='put').slice(0,15);
+
+    const rowHtml = (o,type) => \`<tr>
+      <td class="\${type}">\${String(o.expiry).slice(0,10)}</td>
+      <td class="num">\${o.strike ? '$'+parseFloat(o.strike).toFixed(0) : '—'}</td>
+      <td class="num">\${o.delta ? parseFloat(o.delta).toFixed(3) : '—'}</td>
+      <td class="num">\${o.iv ? (parseFloat(o.iv)*100).toFixed(1)+'%' : '—'}</td>
+      <td class="num">\${o.open_interest ? parseInt(o.open_interest).toLocaleString() : '—'}</td>
+      <td class="num">\${o.last_price ? '$'+parseFloat(o.last_price).toFixed(2) : '—'}</td>
+    </tr>\`;
+
+    el.innerHTML = \`<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div>
+        <div style="font-size:10px;color:var(--blue);margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Calls</div>
+        <table class="db-table"><tr><th>Expiry</th><th>Strike</th><th>Δ</th><th>IV</th><th>OI</th><th>Last</th></tr>
+        \${calls.map(o=>rowHtml(o,'call')).join('')}</table>
+      </div>
+      <div>
+        <div style="font-size:10px;color:#f0883e;margin-bottom:6px;text-transform:uppercase;letter-spacing:.06em">Puts</div>
+        <table class="db-table"><tr><th>Expiry</th><th>Strike</th><th>Δ</th><th>IV</th><th>OI</th><th>Last</th></tr>
+        \${puts.map(o=>rowHtml(o,'put')).join('')}</table>
+      </div>
+    </div>\`;
+
+  } else if (name === 'fundamentals') {
+    const fund = await fetch(\`/api/db/fundamentals/\${currentTicker}\`).then(r=>r.json()).catch(()=>[]);
+    if (!fund.length) { el.innerHTML = '<div class="empty">No fundamentals in DB for this instrument</div>'; return; }
+    const pct = v => v != null ? (parseFloat(v)*100).toFixed(1)+'%' : '—';
+    el.innerHTML = \`<table class="db-table">
+      <tr><th>Period</th>\${fund.map(f=>\`<th class="num">\${String(f.period_end||f.period).slice(0,7)}</th>\`).join('')}</tr>
+      <tr><td>Revenue</td>\${fund.map(f=>\`<td class="num">\${fmtNum(f.revenue)}</td>\`).join('')}</tr>
+      <tr><td>Gross Profit</td>\${fund.map(f=>\`<td class="num">\${fmtNum(f.gross_profit)}</td>\`).join('')}</tr>
+      <tr><td>EBITDA</td>\${fund.map(f=>\`<td class="num">\${fmtNum(f.ebitda)}</td>\`).join('')}</tr>
+      <tr><td>Net Income</td>\${fund.map(f=>\`<td class="num">\${fmtNum(f.net_income)}</td>\`).join('')}</tr>
+      <tr><td>EPS</td>\${fund.map(f=>\`<td class="num">\${f.eps ? '$'+parseFloat(f.eps).toFixed(2) : '—'}</td>\`).join('')}</tr>
+      <tr><td>Gross Margin</td>\${fund.map(f=>\`<td class="num">\${pct(f.gross_margin)}</td>\`).join('')}</tr>
+      <tr><td>Net Margin</td>\${fund.map(f=>\`<td class="num">\${pct(f.net_margin)}</td>\`).join('')}</tr>
+      <tr><td>Rev Growth YoY</td>\${fund.map(f=>\`<td class="num \${f.revenue_growth_yoy>0?'positive':'negative'}">\${pct(f.revenue_growth_yoy)}</td>\`).join('')}</tr>
+    </table>\`;
+
+  } else if (name === 'cycles') {
+    const cycles = await fetch('/api/db/cycles?n=10').then(r=>r.json()).catch(()=>[]);
+    if (!cycles.length) { el.innerHTML = '<div class="empty">No collection cycles recorded yet</div>'; return; }
+    const dur = ms => !ms ? '—' : ms < 60000 ? Math.round(ms/1000)+'s' : Math.round(ms/60000)+'m '+Math.round((ms%60000)/1000)+'s';
+    el.innerHTML = \`<table class="db-table">
+      <tr><th>#</th><th>Started (ET)</th><th>Dur</th><th>Prices</th><th>Options</th><th>Fund</th><th>API P/F/Y</th><th>Errors</th><th>Status</th></tr>
+      \${cycles.map(c => \`<tr class="cycle-row">
+        <td>\${c.id}</td>
+        <td>\${new Date(c.started_at).toLocaleString('en-US',{timeZone:'America/New_York',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false})}</td>
+        <td>\${dur(c.duration_ms)}</td>
+        <td class="num">\${parseInt(c.price_rows||0).toLocaleString()}</td>
+        <td class="num">\${parseInt(c.options_contracts||0).toLocaleString()}</td>
+        <td class="num">\${c.fundamental_records||0}</td>
+        <td class="num">\${c.polygon_calls||0}/\${c.fmp_calls||0}/\${c.yfinance_calls||0}</td>
+        <td class="num \${(c.errors||0)>0?'negative':''}">\${c.errors||0}</td>
+        <td class="status-\${(c.status||'').replace('-','')}">\${c.status}</td>
+      </tr>\`).join('')}
+    </table>\`;
+
+  } else if (name === 'news') {
+    el.innerHTML = '<div class="empty">Loading news...</div>';
+    await loadNewsSection('tab-content', currentTicker);
+  }
+}
+
+// ── News rendering ────────────────────────────────────────────────────────────
+function timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1)  return 'just now';
+  if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24);
+  return d + 'd ago';
+}
+
+function renderNewsCards(articles, maxRelated = 3) {
+  if (!articles.length) return '<div class="empty">No news articles in DB yet — pipeline collects at 6 AM ET</div>';
+  return '<div class="news-feed">' + articles.map((a, idx) => {
+    const related = (a.related_tickers || []).slice(0, maxRelated)
+      .map(t => \`<span class="news-ticker-badge" onclick="selectTicker('\${t}')">\${t}</span>\`).join('');
+    const url = a.url || '';
+    const readMore = url
+      ? \`<a class="news-read-more" href="\${url}" target="_blank" rel="noopener">Read full article →</a>\`
+      : '';
+    const extras = a.related_articles || [];
+    const extraHtml = extras.length ? \`
+      <div class="news-extras" id="extras-\${idx}" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--border2)">
+        \${extras.map(e => {
+          const eu = e.url || '';
+          return \`<div style="margin-bottom:7px">
+            <div style="font-size:10px;color:var(--muted);margin-bottom:2px">\${e.publisher || ''} · \${timeAgo(e.published_at)}</div>
+            \${eu
+              ? \`<a href="\${eu}" target="_blank" rel="noopener" style="font-size:11px;color:var(--text);text-decoration:none;line-height:1.4;display:block">\${e.title}</a>\`
+              : \`<div style="font-size:11px;color:var(--text);line-height:1.4">\${e.title}</div>\`
+            }
+            \${e.summary ? \`<div style="font-size:10px;color:var(--dim);margin-top:2px;line-height:1.4;display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden">\${e.summary}</div>\` : ''}
+          </div>\`;
+        }).join('')}
+      </div>
+      <span class="news-read-more" style="cursor:pointer" onclick="(function(el,btn){el.style.display=el.style.display==='none'?'block':'none';btn.textContent=el.style.display==='none'?'\${extras.length} more articles ▾':'\${extras.length} more articles ▴'})(document.getElementById('extras-\${idx}'),this)">\${extras.length} more articles ▾</span>\`
+    : '';
+    return \`<div class="news-card">
+      <div class="news-meta">
+        <span class="news-source">\${a.publisher || 'News'}</span>
+        <span class="news-time">\${timeAgo(a.published_at)}</span>
+        \${a.primary_ticker ? \`<span class="news-ticker-badge" onclick="selectTicker('\${a.primary_ticker}')">\${a.primary_ticker}</span>\` : ''}
+        \${related}
+      </div>
+      \${url
+        ? \`<a class="news-title" href="\${url}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit;display:block">\${a.title}</a>\`
+        : \`<div class="news-title">\${a.title}</div>\`
+      }
+      \${a.summary ? \`<div class="news-summary">\${a.summary}</div>\` : ''}
+      \${readMore}
+      \${extraHtml}
+    </div>\`;
+  }).join('') + '</div>';
+}
+
+async function loadNewsSection(containerId, ticker) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = '<div class="empty">Loading news...</div>';
+  const qs = ticker ? \`?ticker=\${ticker}&limit=25\` : '?limit=30';
+  const articles = await fetch(\`/api/db/news\${qs}\`).then(r=>r.json()).catch(()=>[]);
+  el.innerHTML = renderNewsCards(articles);
+}
+
+// ── Pipeline badge ────────────────────────────────────────────────────────────
+async function refreshPipeline() {
+  const data = await fetch('/api/pipeline/status').then(r=>r.json()).catch(()=>null);
+  if (!data?.coverage) return;
+  const cov = data.coverage;
+  const total = Object.values(universeData).flat().length || 456;
+  document.getElementById('pipeline-badge').textContent =
+    \`📡 prices:\${cov.price_coverage} options:\${cov.options_coverage} tech:\${cov.tech_coverage} fund:\${cov.fund_coverage}\`;
+}
+</script>
+</body>
+</html>`;
+}
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[dashboard] OpenClaw dashboard → http://0.0.0.0:${PORT}`);
+});
+
+module.exports.app = app;

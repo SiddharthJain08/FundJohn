@@ -1,0 +1,39 @@
+# === Secrets & Credentials ===
+.env
+.mcp.json
+
+# === Dependencies ===
+node_modules/
+
+# === Runtime / Generated Data ===
+workspaces/
+logs/
+data/
+output/
+results/
+signals/
+work/
+
+# === Python Cache ===
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# === Agent Runtime State ===
+.agents/market-state/
+.agents/verdict-cache/
+.agents/portfolio.json
+.agents/watchlist.json
+.claude/
+
+# === Security (auto-generated, machine-specific) ===
+src/agent/config/integrity-manifest.json
+src/agent/config/skill-allowlist.json
+
+# === Misc ===
+*.log
+*.tmp
+*.swp
+.DS_Store

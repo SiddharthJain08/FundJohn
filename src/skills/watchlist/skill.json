@@ -1,0 +1,7 @@
+{
+  "name": "watchlist",
+  "description": "Show watchlist with latest signal status and staleness. Re-scan for entry signals.",
+  "trigger": "/watchlist",
+  "mode": "flash",
+  "version": "2.0"
+}
