@@ -632,6 +632,54 @@ async function handlePtcCommand(cmdText, message, userId) {
         break;
       }
 
+      case 'git': {
+        const sub = args[0]?.toLowerCase();
+        if (sub !== 'sync') { await notify('Usage: `!john /git sync`'); break; }
+
+        await notify('🔄 Syncing to GitHub...');
+        const { execSync } = require('child_process');
+        const GIT_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
+
+        try {
+          // Collect diff stat before staging (unstaged changes)
+          let diffStat = '';
+          try {
+            diffStat = execSync('git diff --stat HEAD', { cwd: GIT_DIR, encoding: 'utf8' }).trim();
+          } catch {}
+
+          // Stage everything (respecting .gitignore)
+          execSync('git add -A', { cwd: GIT_DIR });
+
+          // Check if there's anything to commit
+          const staged = execSync('git diff --cached --stat', { cwd: GIT_DIR, encoding: 'utf8' }).trim();
+          if (!staged) {
+            await notify('✅ **GitHub in sync** — nothing new to commit.');
+            break;
+          }
+
+          // Commit with timestamp
+          const ts  = new Date().toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+          const msg = `Auto-sync: ${ts}`;
+          execSync(`git commit -m "${msg}"`, { cwd: GIT_DIR });
+
+          // Push
+          execSync('git push origin main', { cwd: GIT_DIR });
+
+          // Build summary (cap at 1800 chars to stay under Discord limit)
+          const lines = staged.split('\n');
+          const fileLines = lines.filter(l => l.includes('|') || l.includes('changed'));
+          const summary  = fileLines.slice(0, 20).join('\n');
+          const truncated = fileLines.length > 20 ? `\n…and ${fileLines.length - 20} more files` : '';
+
+          await notify(
+            `✅ **GitHub synced** — \`${msg}\`\n\`\`\`\n${summary}${truncated}\n\`\`\``
+          );
+        } catch (err) {
+          await notify(`⚠️ **Git sync failed**\n\`\`\`\n${err.message.slice(0, 500)}\n\`\`\``);
+        }
+        break;
+      }
+
       case 'approve': {
         const tradeId = args[0];
         if (!tradeId) { await notify('Usage: `!john /approve {trade_id}`'); break; }

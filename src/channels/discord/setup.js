@@ -162,7 +162,10 @@ ${ch('agent-chat')} — Freeform PTC tasks (!john <anything>)`,
 \`!john /agents\` — status board: BotJohn · DataBot · ResearchDesk · TradeDesk
 
 **🔌 System**
-\`!john /shutdown confirm\` · \`!john /shutdown server confirm\``,
+\`!john /shutdown confirm\` · \`!john /shutdown server confirm\`
+
+**⬆️ GitHub**
+\`!john /git sync\` — commit + push all changes to SiddharthJain08/FundJohn`,
   ];
 }
 
