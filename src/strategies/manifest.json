@@ -1,0 +1,152 @@
+{
+  "schema_version": "1.0",
+  "updated_at": "2026-04-15T00:00:00+00:00",
+  "strategies": {
+    "S5_max_pain": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s5_max_pain.py",
+        "class": "MaxPainGravity",
+        "description": "Max-pain gravity — options-derived price attractor signal"
+      },
+      "history": []
+    },
+    "S9_dual_momentum": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s09_dual_momentum.py",
+        "class": "DualMomentum",
+        "description": "Dual-momentum cross-asset rotation"
+      },
+      "history": []
+    },
+    "S10_quality_value": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s10_quality_value.py",
+        "class": "QualityValue",
+        "description": "Quality-value factor composite score"
+      },
+      "history": []
+    },
+    "S12_insider": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s12_insider.py",
+        "class": "InsiderClusterBuy",
+        "description": "Insider cluster-buy signal — SEC Form 4 aggregation"
+      },
+      "history": []
+    },
+    "S15_iv_rv_arb": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s15_iv_rv_arb.py",
+        "class": "IVRVArb",
+        "description": "IV/RV spread arbitrage — implied vs realised volatility"
+      },
+      "history": []
+    },
+    "S_custom_jt_momentum_12mo": {
+      "state": "live",
+      "state_since": "2025-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_custom_jt_momentum_12mo.py",
+        "class": "JTMomentum12Mo",
+        "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
+      },
+      "history": []
+    },
+    "S23_regime_momentum": {
+      "state": "paper",
+      "state_since": "2026-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S23_regime_momentum.py",
+        "class": "RegimeMomentumStrategy",
+        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
+      },
+      "history": []
+    },
+    "S24_52wk_high_proximity": {
+      "state": "paper",
+      "state_since": "2026-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S24_52wk_high_proximity.py",
+        "class": "FiftyTwoWeekHighProximityStrategy",
+        "description": "52-week high proximity breakout signal"
+      },
+      "history": []
+    },
+    "S25_dual_momentum_v2": {
+      "state": "paper",
+      "state_since": "2026-01-01T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S25_dual_momentum.py",
+        "class": "DualMomentum",
+        "description": "Dual-momentum v2 — successor candidate to S9"
+      },
+      "history": []
+    },
+    "S_custom_momentum_trend_v1": {
+      "state": "deprecated",
+      "state_since": "2026-04-13T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_custom_momentum_trend_v1.py",
+        "description": "Orphaned momentum-trend hybrid — no registry entry, no ID in trade_agent.py. Flagged by Audit R3 for evaluation.",
+        "audit_note": "F3 — strategy file with no lifecycle state assigned. Marked deprecated pending review; archive via lifecycle.transition() when review complete."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "deprecated",
+          "timestamp": "2026-04-13T00:00:00+00:00",
+          "actor": "audit",
+          "reason": "Deliverable-A audit finding F3: orphaned file with no registry entry or HOLDING_PERIOD entry",
+          "metadata": {}
+        }
+      ]
+    }
+  },
+  "decommissioned": {
+    "dual_momentum_original": {
+      "archived_at": "2026-04-13T00:00:00+00:00",
+      "original_file": "implementations/decommissioned/dual_momentum.py",
+      "replaced_by": "S9_dual_momentum",
+      "canonical_file": "s09_dual_momentum.py",
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "quality_value_original": {
+      "archived_at": "2026-04-13T00:00:00+00:00",
+      "original_file": "implementations/decommissioned/quality_value.py",
+      "replaced_by": "S10_quality_value",
+      "canonical_file": "s10_quality_value.py",
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "insider_cluster_buy_original": {
+      "archived_at": "2026-04-13T00:00:00+00:00",
+      "original_file": "implementations/decommissioned/insider_cluster_buy.py",
+      "replaced_by": "S12_insider",
+      "canonical_file": "s12_insider.py",
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "iv_rv_arb_original": {
+      "archived_at": "2026-04-13T00:00:00+00:00",
+      "original_file": "implementations/decommissioned/iv_rv_arb.py",
+      "replaced_by": "S15_iv_rv_arb",
+      "canonical_file": "s15_iv_rv_arb.py",
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "max_pain_original": {
+      "archived_at": "2026-04-13T00:00:00+00:00",
+      "original_file": "implementations/decommissioned/max_pain.py",
+      "replaced_by": "S5_max_pain",
+      "canonical_file": "s5_max_pain.py",
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    }
+  }
+}
