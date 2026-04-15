@@ -1,90 +1,55 @@
 'use strict';
-
 /**
- * BotJohn — Main PTC Agent Entrypoint
- * Handles complex tasks via the full subagent swarm with workspace management.
+ * FundJohn / OpenClaw — Main Agent Entrypoint
+ * 4-agent quant hedge fund system: BotJohn → DataJohn → ResearchJohn → TradeJohn
  */
-
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
-
 const swarm = require('./subagents/swarm');
-const { verdictCache: pgVerdictCache } = require('../database/postgres');
-const { initRateLimitBuckets } = require('../database/redis');
-const workspaceManager = require('../workspace/manager');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 
 /**
- * Run a full diligence analysis for a ticker.
- * This is the primary PTC-mode entry point called by the Discord bot.
+ * Run a full FundJohn cycle.
+ * Orchestrates: DataJohn → ResearchJohn → TradeJohn → BotJohn approval.
  *
  * @param {Object} opts
- * @param {string} opts.ticker
- * @param {string} opts.workspaceId
- * @param {string} opts.threadId
- * @param {Function} opts.notify — async function to post progress to Discord
- * @returns {Promise<Object>} — pipeline result
+ * @param {string}   opts.cycleDate       — ISO date string (e.g. '2026-04-15')
+ * @param {Object}   opts.portfolioState  — current portfolio state (NAV, positions, etc.)
+ * @param {Array}    opts.strategyList    — live/paper strategies from manifest.json
+ * @param {string}   [opts.threadId]      — Discord thread ID for status updates
+ * @param {Function} [opts.notify]        — async fn to post progress to Discord
+ * @returns {Promise<Object>}             — cycle result with all agent outputs
  */
-async function runDiligence({ ticker, workspaceId, threadId, notify, scheduled = false }) {
-  const workspace = await workspaceManager.getOrCreate(workspaceId);
+async function runCycle({ cycleDate, portfolioState, strategyList, threadId, notify }) {
+  // Ensure output directories exist
+  ['output/memos', 'output/reports', 'output/signals'].forEach(dir => {
+    fs.mkdirSync(path.join(OPENCLAW_DIR, dir), { recursive: true });
+  });
 
-  // Check verdict cache — skip if fresh results exist
-  const cached = await pgVerdictCache.getFresh(ticker, 'diligence').catch(() => null);
-  if (cached) {
-    const staleDays = Math.round((new Date(cached.stale_after) - new Date()) / 86400000);
-    if (notify) await notify(`📋 Using cached diligence for ${ticker} (fresh for ${staleDays} more days) — verdict: **${cached.verdict}** (${cached.score})`);
-    return { cached: true, result: cached };
-  }
+  const memoDir    = path.join(OPENCLAW_DIR, 'output', 'memos');
+  const reportPath = path.join(OPENCLAW_DIR, 'output', 'reports', `${cycleDate}_research.md`);
 
-  // Initialize rate limit buckets from workspace preferences
-  const prefsPath = path.join(workspace, '.agents', 'user', 'preferences.json');
-  if (fs.existsSync(prefsPath)) {
-    const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
-    await initRateLimitBuckets(prefs).catch((err) => console.warn('[main] Redis unavailable, rate limits not initialized:', err.message));
-  }
-
-  return swarm.runDiligence(ticker, workspace, threadId, notify, { scheduled });
+  return swarm.runCycle({ cycleDate, portfolioState, strategyList, memoDir, reportPath, threadId, notify });
 }
 
 /**
- * Run a trade pipeline for a ticker (assumes diligence already complete).
+ * Handle a general PM task (Discord operator command).
+ * Routes directly to BotJohn.
+ *
+ * @param {Object}   opts
+ * @param {string}   opts.task       — operator task/command text
+ * @param {string}   [opts.ticker]   — ticker context if relevant
+ * @param {string}   [opts.threadId] — Discord thread ID
+ * @param {Function} [opts.notify]   — Discord notify function
+ * @returns {Promise<Object>}
  */
-async function runTrade({ ticker, workspaceId, threadId, notify }) {
-  const workspace = await workspaceManager.getOrCreate(workspaceId);
-  const taskDir = path.join(workspace, 'work', `${ticker}-diligence`);
-
-  // Check portfolio staleness
-  const portfolioPath = path.join(workspace, '.agents', 'user', 'portfolio.json');
-  if (fs.existsSync(portfolioPath)) {
-    const portfolio = JSON.parse(fs.readFileSync(portfolioPath, 'utf8'));
-    const lastVerified = new Date(portfolio.last_verified_at);
-    const hoursStale = (Date.now() - lastVerified.getTime()) / 3600000;
-    if (hoursStale > 24) {
-      const warning = `⚠️ PORTFOLIO STATE STALE — ${Math.round(hoursStale)} hours. Update portfolio.json before trade execution.`;
-      if (notify) await notify(warning);
-      console.warn(`[main] ${warning}`);
-    }
-  }
-
-  return swarm.runTradePipeline(ticker, workspace, taskDir, threadId, notify);
-}
-
-/**
- * Handle a general PTC-mode task (not diligence or trade).
- * Spawns appropriate subagents based on task description.
- */
-async function runTask({ task, ticker, workspaceId, threadId, notify }) {
-  const workspace = await workspaceManager.getOrCreate(workspaceId);
-
-  // All general PM requests go to BotJohn directly — he is the master agent
-  // with full project access, orchestrator authority, and file write permissions.
-  // PM_TASK mode bypasses the deployment gate (BotJohn is always permitted).
+async function runTask({ task, ticker, threadId, notify }) {
   return swarm.init({
     type:      'botjohn',
-    ticker,
-    workspace: workspace || '/root/openclaw',
+    ticker:    ticker || 'N/A',
+    workspace: OPENCLAW_DIR,
     threadId,
     prompt:    task,
     notify,
@@ -92,4 +57,4 @@ async function runTask({ task, ticker, workspaceId, threadId, notify }) {
   });
 }
 
-module.exports = { runDiligence, runTrade, runTask };
+module.exports = { runCycle, runTask };
