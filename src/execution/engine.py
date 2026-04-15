@@ -31,7 +31,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.strategies.registry import get_approved_strategies
+from strategies.registry import get_approved_strategies
 
 logging.basicConfig(
     level=logging.INFO,

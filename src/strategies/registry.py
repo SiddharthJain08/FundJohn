@@ -15,19 +15,22 @@ logger = logging.getLogger(__name__)
 # Map strategy DB id → Python class
 # Canonical IDs (no numeric prefix)
 _IMPL_MAP = {
-    'max_pain':          ('src.strategies.implementations.max_pain',          'MaxPainGravity'),
-    'dual_momentum':     ('src.strategies.implementations.dual_momentum',     'DualMomentum'),
-    'quality_value':     ('src.strategies.implementations.quality_value',     'QualityValue'),
-    'insider_cluster_buy': ('src.strategies.implementations.insider_cluster_buy', 'InsiderClusterBuy'),
-    'iv_rv_arb':         ('src.strategies.implementations.iv_rv_arb',         'IVRVArb'),
-    'jt_momentum_12mo':  ('src.strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
+    'max_pain':          ('strategies.implementations.s5_max_pain',          'MaxPainGravity'),
+    'dual_momentum':     ('strategies.implementations.s09_dual_momentum',     'DualMomentum'),
+    'quality_value':     ('strategies.implementations.s10_quality_value',     'QualityValue'),
+    'insider_cluster_buy': ('strategies.implementations.s12_insider', 'InsiderClusterBuy'),
+    'iv_rv_arb':         ('strategies.implementations.s15_iv_rv_arb',         'IVRVArb'),
+    'jt_momentum_12mo':  ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
     # Legacy aliases — keeps existing DB signal records valid
-    'S5_max_pain':       ('src.strategies.implementations.max_pain',          'MaxPainGravity'),
-    'S9_dual_momentum':  ('src.strategies.implementations.dual_momentum',     'DualMomentum'),
-    'S10_quality_value': ('src.strategies.implementations.quality_value',     'QualityValue'),
-    'S12_insider':       ('src.strategies.implementations.insider_cluster_buy', 'InsiderClusterBuy'),
-    'S15_iv_rv_arb':     ('src.strategies.implementations.iv_rv_arb',         'IVRVArb'),
-    'S_custom_jt_momentum_12mo': ('src.strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
+    'S5_max_pain':       ('strategies.implementations.s5_max_pain',          'MaxPainGravity'),
+    'S9_dual_momentum':  ('strategies.implementations.s09_dual_momentum',     'DualMomentum'),
+    'S10_quality_value': ('strategies.implementations.s10_quality_value',     'QualityValue'),
+    'S12_insider':       ('strategies.implementations.s12_insider', 'InsiderClusterBuy'),
+    'S15_iv_rv_arb':     ('strategies.implementations.s15_iv_rv_arb',         'IVRVArb'),
+    'S_custom_jt_momentum_12mo': ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
+    'S23_regime_momentum':      ('strategies.implementations.S23_regime_momentum',      'RegimeMomentumStrategy'),
+    'S24_52wk_high_proximity':  ('strategies.implementations.S24_52wk_high_proximity',  'FiftyTwoWeekHighProximityStrategy'),
+    'S25_dual_momentum_v2':     ('strategies.implementations.S25_dual_momentum',         'DualMomentum'),
 }
 
 
