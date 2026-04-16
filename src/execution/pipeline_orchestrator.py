@@ -325,3 +325,66 @@ if __name__ == '__main__':
 
     finally:
         release_lock(r, run_date)
+
+def refresh_earnings_calendar():
+    """
+    Refresh earnings.parquet with upcoming earnings (next 90 days).
+    Uses FMP stable/earnings-calendar endpoint.
+    Merges into data/master/earnings.parquet.
+    """
+    import asyncio, os
+    import aiohttp
+    import pandas as pd
+    from datetime import date, timedelta
+    from pathlib import Path
+
+    FMP_KEY  = os.environ.get("FMP_API_KEY", "")
+    MASTER   = Path(__file__).resolve().parent.parent.parent / "data" / "master"
+    FMP_BASE = "https://financialmodelingprep.com/stable"
+
+    if not FMP_KEY:
+        log("[earnings] FMP_API_KEY not set — skipping")
+        return
+
+    async def _fetch():
+        from_d = date.today().isoformat()
+        to_d   = (date.today() + timedelta(days=90)).isoformat()
+        url    = f"{FMP_BASE}/earnings-calendar"
+        params = {"from": from_d, "to": to_d, "apikey": FMP_KEY}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status == 200:
+                    return await r.json()
+                log(f"[earnings] HTTP {r.status}")
+                return []
+
+    try:
+        data = asyncio.run(_fetch())
+        if not data:
+            log("[earnings] No upcoming earnings returned")
+            return
+
+        df = pd.DataFrame(data).rename(columns={
+            "symbol":           "ticker",
+            "epsActual":        "eps_actual",
+            "epsEstimated":     "eps_estimated",
+            "revenueActual":    "revenue_actual",
+            "revenueEstimated": "revenue_estimated",
+            "lastUpdated":      "last_updated",
+        })
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date", "ticker"])
+
+        out = MASTER / "earnings.parquet"
+        if out.exists():
+            existing = pd.read_parquet(out)
+            existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
+            df = pd.concat([existing, df]).drop_duplicates(subset=["ticker","date"]).sort_values(["ticker","date"])
+
+        df.to_parquet(out, index=False)
+        upcoming = df[df["date"] >= pd.Timestamp.today()]
+        log(f"[earnings] Refreshed: {len(upcoming)} upcoming events across {upcoming['ticker'].nunique()} tickers")
+
+    except Exception as e:
+        log(f"[earnings] Refresh failed: {e}")
+

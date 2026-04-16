@@ -212,6 +212,19 @@ def load_aux_data(universe: list) -> dict:
             if 'date' in opts.columns:
                 opts['date'] = pd.to_datetime(opts['date'], errors='coerce')
 
+            # Load earnings calendar for earnings_dte (S-HV17)
+            _earnings_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'master' / 'earnings.parquet'
+            _earnings_df   = None
+            _upcoming_earnings = None
+            if _earnings_path.exists():
+                try:
+                    _earnings_df = pd.read_parquet(_earnings_path)
+                    _earnings_df['date'] = pd.to_datetime(_earnings_df['date'], errors='coerce')
+                    _today_ts = pd.Timestamp.today().normalize()
+                    _upcoming_earnings = _earnings_df[_earnings_df['date'] >= _today_ts].copy()
+                    logger.info(f"Earnings calendar loaded: {len(_upcoming_earnings)} upcoming events")
+                except Exception as _e:
+                    logger.warning(f"Could not load earnings.parquet: {_e}")
             opts_dict = {}
             for ticker, grp in opts.groupby('ticker'):
                 if ticker not in universe:
@@ -398,6 +411,15 @@ def load_aux_data(universe: list) -> dict:
                         _atm5 = _td5[_td5['delta'].abs().between(0.45, 0.55)]
                         _atm_iv5 = float(_atm5['implied_volatility'].mean()) if not _atm5.empty else _vwiv
                         surface_premium = round(_vwiv - _atm_iv5, 4)
+
+                
+                # earnings_dte (S-HV17): days to next earnings announcement
+                earnings_dte = None
+                if _upcoming_earnings is not None and not _upcoming_earnings.empty:
+                    _t_earn = _upcoming_earnings[_upcoming_earnings['ticker'] == ticker]
+                    if not _t_earn.empty:
+                        _next_earn = _t_earn['date'].min()
+                        earnings_dte = int((_next_earn - _today_ts).days)
 
                 opts_dict[ticker] = {
                     'iv_rank':                 iv_rank,

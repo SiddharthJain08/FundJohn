@@ -503,6 +503,32 @@ async def _process_symbol(
     return bar
 
 
+
+async def fetch_fmp_earnings_calendar(
+    session:  aiohttp.ClientSession,
+    fmp_key:  str,
+    from_date: str,
+    to_date:   str,
+) -> list:
+    """
+    Fetch upcoming earnings calendar from FMP for a date window.
+    GET /earning_calendar?from=YYYY-MM-DD&to=YYYY-MM-DD
+    Returns list of dicts: {symbol, date, eps, epsEstimated, revenue, revenueEstimated}
+    Called daily by pipeline_orchestrator to keep earnings.parquet current.
+    """
+    url = f'{FMP_BASE}/earning_calendar'
+    params = {"from": from_date, "to": to_date, "apikey": fmp_key}
+    async with _fmp_semaphore:
+        try:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data if isinstance(data, list) else []
+                logger.warning("FMP earning_calendar HTTP %s", resp.status)
+        except Exception as e:
+            logger.warning("FMP earning_calendar error: %s", e)
+    return []
+
 async def run_pipeline(
     symbols:    List[str],
     date:       Optional[str] = None,
