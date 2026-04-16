@@ -1,85 +1,99 @@
-"""S-HV8: Gamma-Theta Carry  STAGING (theta_atm + unusual_flow not yet in aux_data).
-Carr & Wu (2009) variance risk premium; theta-gamma carry."""
+"""S-HV8: Gamma-Theta Carry  BUY_VOL when ATM gamma carry exceeds theta bleed.
+
+Gate: gt_ratio = gamma_atm / |theta_atm| >= 1.5 AND iv_rank < 55
+      (cheap gamma relative to theta cost  long vol has positive carry)
+Data: gamma, theta from options_eod (confirmed live). Zero LLM tokens.
+Academic: Black-Scholes P&L decomp (1973); Ramkumar (2025) SSRN 5285239.
+"""
 from __future__ import annotations
-import numpy as np
-import pandas as pd
-from typing import List
-from strategies.base import BaseStrategy, Signal
+from typing import Any
+from src.strategies.base import BaseStrategy, Signal
+
+GT_RATIO_MIN   = 1.5    # gamma / |theta| threshold
+IV_RANK_MAX    = 55     # only buy vol when IV not already elevated
+MIN_GAMMA      = 1e-5   # sanity floor
 
 
 class GammaThetaCarry(BaseStrategy):
-    id            = 'S_HV8_gamma_theta_carry'
-    name          = 'Gamma-Theta Carry'
-    version       = '1.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL']
+    id             = 'S_HV8_gamma_theta_carry'
+    name           = 'Gamma-Theta Carry'
+    version        = '2.0.0'
+    regime_filter  = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
 
-    def default_parameters(self) -> dict:
-        return {
-            'min_gamma_theta_ratio': 1.5,
-            'min_iv_rank':           30.0,
-            'max_iv_rank':           70.0,
-            'base_size_pct':         0.02,
-        }
+    def generate(self, aux_data: dict[str, Any]) -> list[Signal]:
+        prices   = aux_data.get('prices', {})
+        opts_map = aux_data.get('options', {})
+        regime   = aux_data.get('regime', {})
+        regime_state = regime.get('state', 'LOW_VOL')
 
-    def generate_signals(self, prices, regime, universe, aux_data=None) -> List[Signal]:
-        """STAGING: requires theta_atm and unusual_flow (not yet available).
-        Full logic implemented  will fire once data is present."""
-        if prices is None or prices.empty:
-            return []
-        regime_state = (regime or {}).get('state', 'LOW_VOL')
         if not self.should_run(regime_state):
             return []
-        options_data = (aux_data or {}).get('options', {})
-        scale  = self.position_scale(regime_state)
-        p      = self.parameters
-        signals = []
 
-        for ticker in universe:
-            if ticker not in prices.columns:
-                continue
-            opts = options_data.get(ticker, {})
-            if not opts:
-                continue
-            gamma_atm    = opts.get('gamma_atm')
-            theta_atm    = opts.get('theta_atm')       # NOT YET AVAILABLE
-            unusual_flow = opts.get('unusual_flow')    # NOT YET AVAILABLE
-            iv_rank      = opts.get('iv_rank', 50.0)
+        signals: list[Signal] = []
 
-            if gamma_atm is None or theta_atm is None or unusual_flow is None:
-                continue  # staging guard  missing data keeps this silent
-            if not unusual_flow:
+        for ticker, opts in opts_map.items():
+            gamma_atm = opts.get('gamma_atm')
+            theta_atm = opts.get('theta_atm')
+            iv_rank   = opts.get('iv_rank')
+            iv30      = opts.get('iv30')
+
+            # Gate: both Greeks must be live
+            if gamma_atm is None or theta_atm is None:
                 continue
-            if iv_rank < p['min_iv_rank'] or iv_rank > p['max_iv_rank']:
+            if iv_rank is None or iv30 is None:
+                continue
+
+            # IV rank cap  don't buy already-expensive vol
+            if iv_rank >= IV_RANK_MAX:
+                continue
+
+            # Gamma must be positive and theta negative (standard sign convention)
+            if gamma_atm < MIN_GAMMA:
                 continue
             theta_abs = abs(float(theta_atm))
-            if theta_abs < 1e-6:
-                continue
-            gt_ratio = float(gamma_atm) / theta_abs
-            if gt_ratio < p['min_gamma_theta_ratio']:
+            if theta_abs < 1e-8:
                 continue
 
-            ts            = prices[ticker].dropna()
-            current_price = float(ts.iloc[-1])
-            stops         = self.compute_stops_and_targets(ts, 'LONG', current_price, atr_multiplier=2.0)
-            conf          = 'HIGH' if gt_ratio >= 2.5 else 'MED'
-            size          = min(p['base_size_pct'] * (gt_ratio / 3.0) * scale, 0.04)
+            gt_ratio = gamma_atm / theta_abs
+
+            if gt_ratio < GT_RATIO_MIN:
+                continue
+
+            # Entry price
+            ts = prices.get(ticker, [])
+            if len(ts) < 2:
+                continue
+            current_price = float(ts[-1])
+            if current_price <= 0:
+                continue
+
+            stops = self.compute_stops_and_targets(
+                ts, 'LONG', current_price, atr_multiplier=2.0
+            )
+
+            scale = self.position_scale(regime_state)
+            # Size proportional to gt_ratio advantage (capped)
+            size = min(0.02 * min(gt_ratio / GT_RATIO_MIN, 2.0) * scale, 0.06)
+
+            confidence = 'HIGH' if gt_ratio >= 2.5 else 'MED'
+
             signals.append(Signal(
-                ticker            = ticker,
-                direction         = 'BUY_VOL',
-                entry_price       = current_price,
-                stop_loss         = current_price * 0.93,
-                target_1          = current_price * 1.05,
-                target_2          = current_price * 1.10,
-                target_3          = current_price * 1.18,
+                ticker          = ticker,
+                direction       = 'BUY_VOL',
+                entry_price     = current_price,
+                stop_loss       = stops['stop'],
+                target_1        = stops['t1'],
+                target_2        = stops['t2'],
+                target_3        = stops['t3'],
                 position_size_pct = round(size, 4),
-                confidence        = conf,
-                signal_params     = {
-                    'gamma_atm':    round(float(gamma_atm), 6),
-                    'theta_atm':    round(float(theta_atm), 6),
-                    'gt_ratio':     round(gt_ratio, 4),
-                    'iv_rank':      round(iv_rank, 2),
-                    'unusual_flow': unusual_flow,
+                confidence      = confidence,
+                signal_params   = {
+                    'gamma_atm':  round(gamma_atm, 6),
+                    'theta_atm':  round(float(theta_atm), 6),
+                    'gt_ratio':   round(gt_ratio, 3),
+                    'iv_rank':    iv_rank,
+                    'iv30':       iv30,
                 },
             ))
-        signals.sort(key=lambda s: s.signal_params.get('gt_ratio', 0), reverse=True)
-        return signals[:4]
+
+        return signals

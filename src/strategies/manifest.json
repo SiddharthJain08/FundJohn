@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-15T00:00:00+00:00",
+  "updated_at": "2026-04-16T00:00:00+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -122,12 +122,12 @@
       "history": []
     },
     "S_HV8_gamma_theta_carry": {
-      "state": "staging",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state": "paper",
+      "state_since": "2026-04-16",
       "metadata": {
         "canonical_file": "shv8_gamma_theta_carry.py",
         "class": "GammaThetaCarry",
-        "description": "Gamma-Theta Carry  STAGING: awaiting theta_atm + unusual_flow data"
+        "description": "Gamma-Theta Carry  BUY_VOL when gamma/|theta| >= 1.5 ATM (theta now live in chain)"
       },
       "history": []
     },
@@ -168,6 +168,76 @@
         "canonical_file": "shv12_vrp_normalization.py",
         "class": "VRPNormalization",
         "description": "VRP Normalization  VRP z-score mean reversion (Carr & Wu 2009)"
+      },
+      "history": []
+    },
+    "S_HV13_call_put_iv_spread": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv13_call_put_iv_spread.py",
+        "class": "CallPutIVSpread",
+        "description": "ATM call IV - put IV spread signal (Cremers & Weinbaum 2010 JFQA)"
+      },
+      "history": []
+    },
+    "S_HV14_otm_skew_factor": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv14_otm_skew_factor.py",
+        "class": "OTMSkewFactor",
+        "description": "OTM put skew vs ATM call IV (Xing, Zhang & Zhao 2010 JFQA)"
+      },
+      "history": []
+    },
+    "S_HV15_iv_term_structure": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv15_iv_term_structure.py",
+        "class": "IVTermStructure",
+        "description": "IV term structure backwardation/contango signal"
+      },
+      "history": []
+    },
+    "S_HV16_gex_regime": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv16_gex_regime.py",
+        "class": "GEXRegime",
+        "description": "Dealer gamma exposure regime classifier (Bollen & Whaley 2004 JF)"
+      },
+      "history": []
+    },
+    "S_HV17_earnings_straddle_fade": {
+      "state": "staging",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv17_earnings_straddle_fade.py",
+        "class": "EarningsStraddleFade",
+        "description": "SELL_VOL implied > 1.20x realized near earnings (Muravyev & Pearson 2020 JFE). staging: needs earnings_dte in engine.py"
+      },
+      "history": []
+    },
+    "S_HV19_iv_surface_tilt": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv19_iv_surface_tilt.py",
+        "class": "IVSurfaceTilt",
+        "description": "Vega*OI-weighted IV surface centroid tilt signal (Carr & Wu 2009 JFE)"
+      },
+      "history": []
+    },
+    "S_HV20_iv_dispersion_reversion": {
+      "state": "paper",
+      "state_since": "2026-04-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "shv20_iv_dispersion_reversion.py",
+        "class": "IVDispersionReversion",
+        "description": "Cross-section iv_rank z-score mean reversion (Driessen et al 2009 JoF; Goyal & Saretto 2009 JFE)"
       },
       "history": []
     }

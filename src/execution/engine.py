@@ -295,6 +295,14 @@ def load_aux_data(universe: list) -> dict:
                     if not atm_opts.empty:
                         gamma_atm = round(float(atm_opts['gamma'].mean()), 6)
 
+
+                # theta_atm: mean theta of near-ATM options (|delta| 0.40-0.60)
+                theta_atm = None
+                if 'delta' in chain.columns and 'theta' in chain.columns:
+                    atm_src2 = chain[chain['date'] == chain['date'].max()] if 'date' in chain.columns else chain
+                    atm_opts2 = atm_src2[atm_src2['delta'].abs().between(0.40, 0.60)]
+                    if not atm_opts2.empty:
+                        theta_atm = round(float(atm_opts2['theta'].mean()), 6)
                 # rv_20: current HV20; vrp: implied vol premium over realized vol
                 rv_20 = None
                 if 'hv20' in grp.columns:
@@ -326,6 +334,71 @@ def load_aux_data(universe: list) -> dict:
                             if not hv_d2.empty: vrp_history.append(round(float(day['implied_volatility'].mean())-float(hv_d2.mean()),4))
                 # 
 
+
+                #  S-HV13: iv_spread (call_iv - put_iv, ATM, front-month) 
+                iv_spread = None
+                if 'date' in chain.columns and 'option_type' in chain.columns and 'delta' in chain.columns:
+                    import pandas as _pd
+                    _ld = chain['date'].max()
+                    _td = chain[chain['date'] == _ld].copy()
+                    _td['_dte'] = (_pd.to_datetime(_td['expiry']) - _pd.to_datetime(_ld)).dt.days if 'expiry' in _td.columns else 999
+                    _fm = _td[_td['_dte'].between(5, 40)]
+                    _calls_atm = _fm[(_fm['option_type'].str.upper()=='CALL') & (_fm['delta'].between(0.40,0.60))]
+                    _puts_atm  = _fm[(_fm['option_type'].str.upper()=='PUT')  & (_fm['delta'].abs().between(0.40,0.60))]
+                    if not _calls_atm.empty and not _puts_atm.empty:
+                        iv_spread = round(float(_calls_atm['implied_volatility'].mean()) - float(_puts_atm['implied_volatility'].mean()), 4)
+
+                #  S-HV14: skew_20d (20-delta put IV - 50-delta call IV, smirk) 
+                skew_20d = None
+                if 'date' in chain.columns and 'delta' in chain.columns and 'option_type' in chain.columns:
+                    _ld2 = chain['date'].max()
+                    _td2 = chain[chain['date'] == _ld2]
+                    _otm_puts = _td2[(_td2['option_type'].str.upper()=='PUT') & (_td2['delta'].between(-0.25,-0.15))]
+                    _atm_calls = _td2[(_td2['option_type'].str.upper()=='CALL') & (_td2['delta'].between(0.45,0.55))]
+                    if not _otm_puts.empty and not _atm_calls.empty:
+                        skew_20d = round(float(_otm_puts['implied_volatility'].mean()) - float(_atm_calls['implied_volatility'].mean()), 4)
+
+                #  S-HV15: term structure (near_iv / far_iv) 
+                near_iv_ts = None; far_iv_ts = None; ts_ratio = None
+                if 'date' in chain.columns and 'delta' in chain.columns and 'expiry' in chain.columns:
+                    import pandas as _pd2
+                    _ld3 = chain['date'].max()
+                    _td3 = chain[chain['date'] == _ld3].copy()
+                    _td3['_dte3'] = (_pd2.to_datetime(_td3['expiry']) - _pd2.to_datetime(_ld3)).dt.days
+                    _atm3 = _td3[_td3['delta'].abs().between(0.40, 0.60)]
+                    _near = _atm3[_atm3['_dte3'].between(5, 35)]
+                    _far  = _atm3[_atm3['_dte3'].between(55, 95)]
+                    if not _near.empty and not _far.empty:
+                        near_iv_ts = round(float(_near['implied_volatility'].mean()), 4)
+                        far_iv_ts  = round(float(_far['implied_volatility'].mean()), 4)
+                        ts_ratio   = round(near_iv_ts / far_iv_ts, 4) if far_iv_ts > 0 else None
+
+                #  S-HV16: gex (net dealer gamma exposure) 
+                gex = None
+                if 'gamma' in chain.columns and 'open_interest' in chain.columns and 'option_type' in chain.columns:
+                    _ld4 = chain['date'].max() if 'date' in chain.columns else None
+                    _td4 = chain[chain['date'] == _ld4] if _ld4 is not None else chain
+                    _c4  = _td4[_td4['option_type'].str.upper() == 'CALL']
+                    _p4  = _td4[_td4['option_type'].str.upper() == 'PUT']
+                    _gc  = float((_c4['gamma'] * _c4['open_interest']).sum())
+                    _gp  = float((_p4['gamma'] * _p4['open_interest']).sum())
+                    gex  = round((_gc - _gp) * 100, 2)   # per 1-point move, scaled
+
+                #  S-HV19: iv_centroid_delta + surface_premium 
+                iv_centroid_delta = None; surface_premium = None
+                if all(c in chain.columns for c in ['vega','delta','open_interest','implied_volatility']):
+                    _ld5 = chain['date'].max() if 'date' in chain.columns else None
+                    _td5 = chain[chain['date'] == _ld5] if _ld5 is not None else chain
+                    _td5 = _td5.copy()
+                    _td5['_w'] = _td5['vega'].abs() * _td5['open_interest']
+                    _tw = float(_td5['_w'].sum())
+                    if _tw > 0:
+                        iv_centroid_delta = round(float((_td5['delta'] * _td5['_w']).sum() / _tw), 4)
+                        _vwiv = float((_td5['implied_volatility'] * _td5['_w']).sum() / _tw)
+                        _atm5 = _td5[_td5['delta'].abs().between(0.45, 0.55)]
+                        _atm_iv5 = float(_atm5['implied_volatility'].mean()) if not _atm5.empty else _vwiv
+                        surface_premium = round(_vwiv - _atm_iv5, 4)
+
                 opts_dict[ticker] = {
                     'iv_rank':                 iv_rank,
                     'iv30':                    iv30,
@@ -334,6 +407,15 @@ def load_aux_data(universe: list) -> dict:
                     'expiry_date':             nearest_expiry.date().isoformat(),
                     'pc_ratio':               pc_ratio,
                     'gamma_atm':              gamma_atm,
+                'theta_atm':             theta_atm,
+                'iv_spread':           iv_spread,
+                'skew_20d':            skew_20d,
+                'ts_ratio':            ts_ratio,
+                'near_iv':             near_iv_ts,
+                'far_iv':              far_iv_ts,
+                'gex':                 gex,
+                'iv_centroid_delta':   iv_centroid_delta,
+                'surface_premium':     surface_premium,
                     'rv_20':                  rv_20,
                     'vrp':                    vrp,
                     'iv_rank_history':         iv_rank_history,
