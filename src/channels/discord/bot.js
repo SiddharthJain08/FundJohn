@@ -523,7 +523,7 @@ async function handlePtcCommand(cmdText, message, userId) {
         const dilTaskId = memoryWriter.openTask(`Diligence: ${ticker}`, `threadId:${threadId}`);
         agentPersonas.setStatus('researchdesk', 'busy', `Diligence: ${ticker}`).catch(() => {});
         agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning subagents`).catch(() => {});
-        const result = await main.runDiligence({ ticker, workspaceId, threadId, notify });
+        const result = await main.runTask({ task: `Research ${ticker} strategy`, ticker, workspaceId, threadId, notify });
         await postResult(message, ticker, result, 'diligence');
         // ResearchDesk posts verdict to #strategy-memos
         const verdict = result?.verdict || result?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
@@ -543,7 +543,7 @@ async function handlePtcCommand(cmdText, message, userId) {
         const tradeTaskId = memoryWriter.openTask(`Trade optimization: ${ticker}`, `threadId:${threadId}`);
         agentPersonas.setStatus('tradedesk', 'busy', `Trade: ${ticker}`).catch(() => {});
         agentPersonas.post('tradedesk', 'trade-signals', `📐 Trade pipeline starting for **${ticker}**`).catch(() => {});
-        const result = await main.runTrade({ ticker, workspaceId, threadId, notify });
+        const result = await main.runTask({ task: `Generate trade signal for ${ticker}`, ticker, workspaceId, threadId, notify });
         await postResult(message, ticker, result, 'trade');
         // TradeDesk posts final report to #trade-reports
         const tradeVerdict = result?.verdict || result?.output?.match(/\b(APPROVED|BLOCKED|PENDING REVIEW)\b/)?.[0];

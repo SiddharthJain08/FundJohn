@@ -38,10 +38,10 @@ async function run(context) {
   state.stage = 'execute';
   let result;
   if (type === 'diligence') {
-    result = await swarm.runDiligence(ticker, workspace, threadId, notify);
+    result = await swarm.runCycle(ticker, workspace, threadId, notify);
   } else if (type === 'trade') {
     const taskDir = require('path').join(workspace, 'work', `${ticker}-diligence`);
-    result = await swarm.runTradePipeline(ticker, workspace, taskDir, threadId, notify);
+    result = await swarm.runCycle(ticker, workspace, taskDir, threadId, notify);
   } else {
     result = await swarm.init({ type: 'research', ticker, workspace, threadId, notify });
   }

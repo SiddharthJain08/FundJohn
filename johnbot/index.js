@@ -49,16 +49,10 @@ discordRelay.setFeed(feed);
 
 // Direct agent address map — maps @name → { dir, model }
 const DIRECT_AGENTS = {
-  bull:     { dir: 'agents/bull',           model: MODEL_FAST },
-  bear:     { dir: 'agents/bear',           model: MODEL_FAST },
-  mgmt:     { dir: 'agents/mgmt',           model: MODEL_FAST },
-  filing:   { dir: 'agents/filing',         model: MODEL_FAST },
-  revenue:  { dir: 'agents/revenue',        model: MODEL_FAST },
-  screener: { dir: 'agents/quant/screener', model: MODEL_FULL },
-  sizer:    { dir: 'agents/quant/sizer',    model: MODEL_FULL },
-  timer:    { dir: 'agents/quant/timer',    model: MODEL_FULL },
-  risk:     { dir: 'agents/quant/risk',     model: MODEL_FULL },
-  reporter: { dir: 'agents/quant/reporter', model: MODEL_FULL },
+  botjohn:{label:"BotJohn"},
+  datajohn:{label:"DataJohn"},
+  researchjohn:{label:"ResearchJohn"},
+  tradejohn:{label:"TradeJohn"},
 };
 
 // ── Discord client ────────────────────────────────────────────────────────────
@@ -333,7 +327,7 @@ function runOrchestrator(ticker) {
  * Parses TRADE_PROGRESS:{json} lines for real-time feed updates.
  * Returns the final trade report (stdout minus progress lines).
  */
-function runTradePipeline(ticker, memoPath = null) {
+function runCycle(ticker, memoPath = null) {
   return new Promise((resolve, reject) => {
     let report  = '';
     let stderr  = '';
@@ -1423,7 +1417,7 @@ client.on('messageCreate', async (message) => {
 
       let tradeOutput;
       try {
-        tradeOutput = await runTradePipeline(ticker, memoPath);
+        tradeOutput = await runCycle(ticker, memoPath);
       } catch (err) {
         stopTyping();
         await message.reply({ content: `⚠️ Trade pipeline error: ${err.message}`, allowedMentions: { repliedUser: false } });
@@ -1559,7 +1553,7 @@ client.on('messageCreate', async (message) => {
         // Re-run trade pipeline on each watchlist ticker sequentially
         for (const entry of wl.tickers) {
           try {
-            const raw      = await runTradePipeline(entry.symbol, entry.memo_path || null);
+            const raw      = await runCycle(entry.symbol, entry.memo_path || null);
             const vmatch   = raw.match(/\nTRADE_VERDICT:(GO|WAIT|PASS|BLOCKED)\s*$/);
             const newSig   = vmatch ? vmatch[1] : 'UNKNOWN';
             const oldSig   = entry.last_signal;
