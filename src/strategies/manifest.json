@@ -212,7 +212,7 @@
       "history": []
     },
     "S_HV17_earnings_straddle_fade": {
-      "state": "staging",
+      "state": "paper",
       "state_since": "2026-04-16T00:00:00+00:00",
       "metadata": {
         "canonical_file": "shv17_earnings_straddle_fade.py",
