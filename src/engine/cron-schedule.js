@@ -227,42 +227,9 @@ function start(swarm, generateId, notifyDiscord) {
     // 23:59 ET daily — reset token budget
     cron.schedule('59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
 
-    // Every 30 minutes during off-hours weeknights — check if strategist should activate
-    // Also checks if a budget-paused pipeline needs to resume
-    cron.schedule('*/30 18-23,0-5 * * 1-5', async () => {
-        // Resume paused pipeline first (budget may have recovered)
-        await checkPipelineResume().catch(() => {});
 
-        const scheduler = require('../agent/graph/strategist-scheduler');
-        const check     = await scheduler.canActivate(WORKSPACE_ID).catch(() => ({ allowed: false }));
-        if (check.allowed) {
-            log('Strategist conditions met — activating DEPLOY session');
-            await swarm.init({
-                type:      'strategist',
-                mode:      'EXPLORE',
-                workspace: WORKSPACE_DIR,
-                threadId:  generateId(),
-            });
-        }
-    }, { timezone: 'America/New_York' });
 
-    // Saturday/Sunday every 30 minutes — strategist eligible all day
-    cron.schedule('*/30 * * * 0,6', async () => {
-        // Resume paused pipeline first
-        await checkPipelineResume().catch(() => {});
 
-        const scheduler = require('../agent/graph/strategist-scheduler');
-        const check     = await scheduler.canActivate(WORKSPACE_ID).catch(() => ({ allowed: false }));
-        if (check.allowed) {
-            log('Weekend strategist conditions met — activating');
-            await swarm.init({
-                type:      'strategist',
-                mode:      'EXPLORE',
-                workspace: WORKSPACE_DIR,
-                threadId:  generateId(),
-            });
-        }
-    });
 
     // Sunday 08:00 ET — weekly memory synthesis
     // BotJohn reads all memory/*.md files and writes consolidated learnings to agent.md

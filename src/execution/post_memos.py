@@ -27,13 +27,25 @@ WEBHOOKS = {
     'tradedesk_trade_signals':     'https://discord.com/api/webhooks/1492082674309791886/90a-LQ9bTj4e1vYW31OgY7krJtQNUqVusCQepzI3bPpZJt0uVqVtGNu4b3y-4YVIHFhU',
 }
 
-STRATEGY_LABELS = {
-    'S9_dual_momentum':          'S9 — Antonacci Dual Momentum',
-    'S_custom_jt_momentum_12mo': 'JT — 12-Month Cross-Sectional Momentum',
-    'S10_quality_value':         'S10 — Quality/Value',
-    'S12_insider':               'S12 — Insider Cluster Buy',
-    'S15_iv_rv_arb':             'S15 — IV/RV Arbitrage',
-}
+# ── Strategy labels: built dynamically from registry ─────────
+def _build_strategy_labels() -> dict:
+    """Load all registered strategy IDs and build human-readable labels."""
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT / 'src'))
+        from strategies.registry import list_all_strategy_ids
+        labels = {}
+        for sid in list_all_strategy_ids():
+            # Convert 'S_HV16_gex_regime' -> 'S-HV16 Gex Regime'
+            parts = sid.replace('S_HV', 'S-HV').replace('_', ' ').split()
+            label = ' '.join(p.capitalize() if not p.startswith('S-') else p for p in parts)
+            labels[sid] = label
+        return labels
+    except Exception as e:
+        print(f'[post_memos] Could not load registry labels: {e}')
+        return {}
+
+STRATEGY_LABELS = _build_strategy_labels()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -126,8 +138,18 @@ def build_strategy_memo(result, signals, run_date):
         by_strat.setdefault(s['strategy_id'], []).append(s)
 
     # Strategy summary table
-    all_approved = ['S9_dual_momentum', 'S_custom_jt_momentum_12mo',
-                    'S10_quality_value', 'S12_insider', 'S15_iv_rv_arb']
+    # Dynamically pull approved strategies from DB for this run date
+    try:
+        conn2 = psycopg2.connect(os.environ.get('POSTGRES_URI',''))
+        cur2  = conn2.cursor()
+        cur2.execute(
+            "SELECT DISTINCT strategy_id FROM execution_signals WHERE signal_date = %s",
+            (run_date,)
+        )
+        all_approved = [r[0] for r in cur2.fetchall()]
+        conn2.close()
+    except Exception:
+        all_approved = list(by_strat.keys())
     status_lines = []
     for sid in all_approved:
         label  = STRATEGY_LABELS.get(sid, sid)
@@ -135,9 +157,7 @@ def build_strategy_memo(result, signals, run_date):
         bullet = '✅' if count > 0 else '⏸'
         reason = ''
         if count == 0:
-            if sid == 'S10_quality_value':  reason = ' (regime-gated: LOW_VOL only)'
-            elif sid == 'S12_insider':       reason = ' (no Form 4 data collected yet)'
-            elif sid == 'S15_iv_rv_arb':     reason = ' (IV rank threshold not met)'
+            reason = ' (no signals this cycle)'
         status_lines.append(f'{bullet} {label}: {count} signals{reason}')
 
     total_exposure = sum(float(s['position_size_pct']) for s in signals) * 100

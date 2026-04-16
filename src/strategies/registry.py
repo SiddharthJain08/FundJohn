@@ -109,3 +109,7 @@ def validate_all() -> Dict[str, bool]:
         cls = load_strategy_class(sid)
         results[sid] = cls is not None
     return results
+
+def list_all_strategy_ids() -> list:
+    """Return all registered strategy IDs."""
+    return list(_IMPL_MAP.keys())
