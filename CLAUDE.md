@@ -3,9 +3,9 @@
 This project contains all system optimizations for FundJohn, a bot-network quantitative hedge fund built on OpenClaw using Claude Code agents.
 
 ## System Overview
-4-agent autonomous quant PM system:
+3-agent autonomous quant PM system + hardcoded data pipeline:
 - **BotJohn** (claude-opus-4-6): Orchestrator and portfolio manager
-- **DataJohn** (claude-haiku-4-5): Data collection, strategy deployment, strategy memo dispatch
+- **DataPipeline** (hardcoded, src/execution/runner.js): Strategy execution, data collection, memo dispatch
 - **ResearchJohn** (claude-sonnet-4-6): Strategy memo synthesis and research reporting
 - **TradeJohn** (claude-sonnet-4-6): Signal generation and position sizing
 

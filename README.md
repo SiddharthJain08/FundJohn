@@ -9,7 +9,7 @@ Operator
    │  (Discord)
 BotJohn  [claude-opus-4-6]
    │  Orchestrates
-   ├── DataJohn      [claude-haiku-4-5]   — data collection, strategy deployment, memos
+    ├── DataPipeline [hardcoded]           — strategy execution, data collection, memo dispatch
    ├── ResearchJohn  [claude-sonnet-4-6]  — strategy memo synthesis, research report
    └── TradeJohn     [claude-sonnet-4-6]  — signal generation, position sizing
 ```
@@ -17,10 +17,10 @@ BotJohn  [claude-opus-4-6]
 ## Cycle Flow
 
 ```
-DataJohn
+DataPipeline (hardcoded via runner.js)
   → Collects market data (prices, fundamentals, options, macro, insider)
   → Deploys live/paper strategies
-  → Publishes strategy memos
+  → Publishes strategy memos to disk
 
 ResearchJohn
   → Reads strategy memos

@@ -14,7 +14,7 @@ Check Redis key `budget:mode` before any non-essential operation.
 - **RED**: reject all operations except operator-manual triggers. Respond: "Budget RED — operator must approve."
 
 ### SO-2: Lifecycle State Gate
-Before DataJohn deploys any strategy, check `src/strategies/manifest.json` via lifecycle.py.
+Before the data pipeline deploys any strategy, `src/strategies/manifest.json` is checked via lifecycle.py.
 - Only strategies in `live` or `paper` state may be deployed.
 - `deprecated` and `archived` strategies must NOT be deployed under any circumstances.
 - `candidate` strategies require explicit operator approval before entering `paper`.
@@ -30,12 +30,12 @@ If TradeJohn computes expected value ≤ 0 for any signal, BotJohn auto-vetoes.
 
 ### SO-5: Max Drawdown Escalation
 If any live strategy reports max_drawdown > 20% in the current cycle:
-- DataJohn must flag in the strategy memo.
+- The data pipeline must flag in the strategy memo.
 - BotJohn must escalate strategy to `monitoring` state via lifecycle.py.
 - Alert operator in #ops channel immediately.
 
 ### SO-6: Memo Format Enforcement
-All strategy memos produced by DataJohn must include:
+All strategy memos produced by the data pipeline must include:
 - `strategy_id`, `run_timestamp`, `cycle_date`, `sharpe`, `max_drawdown`, `signal_count`, `top_signals[]`
 - Missing fields = invalid memo. ResearchJohn rejects and alerts #ops.
 
@@ -45,7 +45,7 @@ All strategy memos produced by DataJohn must include:
 
 ```
 BotJohn (Opus)
-├── DataJohn (Haiku)      — data collection, strategy deployment, memo dispatch
+├── DataPipeline (hardcoded) — strategy execution, data collection, memo dispatch
 ├── ResearchJohn (Sonnet) — strategy memo synthesis, research report
 └── TradeJohn (Sonnet)    — signal generation, position sizing
 ```

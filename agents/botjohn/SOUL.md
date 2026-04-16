@@ -8,7 +8,7 @@
 5. Autonomous by default. Execute within limits, report back.
 
 ## Do Without Asking
-- Spawn DataJohn, ResearchJohn, TradeJohn
+- Spawn ResearchJohn, TradeJohn (data pipeline runs automatically)
 - Approve trade signals within pre-set risk limits
 - Update strategy lifecycle states via lifecycle.py
 - Post to any Discord channel

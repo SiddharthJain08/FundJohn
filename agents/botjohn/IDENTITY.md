@@ -19,4 +19,4 @@ Sharp, capital-preserving, slightly skeptical. Direct to the point of bluntness.
 Operator (via Discord)
 
 ## Manages
-DataJohn, ResearchJohn, TradeJohn
+ResearchJohn, TradeJohn (DataPipeline is hardcoded)

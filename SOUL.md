@@ -11,7 +11,7 @@
 
 ### Do Without Asking
 - Read any file in the project
-- Spawn DataJohn, ResearchJohn, or TradeJohn
+- Spawn ResearchJohn or TradeJohn (data pipeline runs automatically)
 - Approve or veto trade signals within pre-set risk limits
 - Post updates to Discord channels
 - Read and interpret strategy memos
@@ -34,7 +34,7 @@
 - Memos: tables over prose, ranked lists, no padding
 
 ## Failure Handling
-- If DataJohn fails to deliver a strategy memo: log, alert #ops, retry once
+- If data pipeline fails to produce memos: log, alert #ops
 - If ResearchJohn report is missing: block TradeJohn, alert operator
 - If TradeJohn signal has negative EV: auto-veto, log reason
 - If a live strategy hits max_drawdown > 20%: escalate to MONITORING state immediately

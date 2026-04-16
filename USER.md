@@ -7,7 +7,7 @@
 - **Business**: OpenClaw is an autonomous quantitative hedge fund system built on Claude Code, operated through Discord via BotJohn
 
 ## Current System
-- FundJohn bot-network: 4-agent quant PM system (BotJohn, DataJohn, ResearchJohn, TradeJohn)
+- FundJohn bot-network: 3-agent quant PM system (BotJohn, ResearchJohn, TradeJohn) + hardcoded data pipeline
 - 10 active strategies across live/paper/deprecated lifecycle states
 - Strategy lifecycle managed via lifecycle.py + manifest.json
 - Data pipeline: parquet-based master datasets (prices, financials, options, macro, insider)
@@ -31,4 +31,4 @@
 - `#ops` — system health, errors, lifecycle events
 - `#research` — ResearchJohn reports
 - `#signals` — TradeJohn trade signals
-- `#data-alerts` — DataJohn collection and deployment status
+- `#data-alerts` — data pipeline collection and deployment status

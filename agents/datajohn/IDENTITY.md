@@ -1,3 +1,5 @@
+> **DEPRECATED**: DataJohn LLM agent has been replaced by the hardcoded data pipeline (`src/execution/runner.js`). This file is archived for reference only.
+
 # IDENTITY.md — DataJohn
 
 ## Name

@@ -18,15 +18,16 @@ Operator (Discord)
     BotJohn  ◄── claude-opus-4-6  (orchestrator, portfolio manager)
     /  |  \
    /   |   \
-DataJohn  ResearchJohn  TradeJohn
-(Haiku)   (Sonnet)      (Sonnet)
+ResearchJohn  TradeJohn
+(Sonnet)      (Sonnet)
+DataPipeline: hardcoded
 ```
 
 ### Agent Responsibilities
 | Agent | Model | Job |
 |---|---|---|
 | BotJohn | claude-opus-4-6 | Orchestrate, approve trades, manage portfolio, Discord interface |
-| DataJohn | claude-haiku-4-5 | Collect market data, deploy strategies, send strategy memos |
+| DataPipeline | hardcoded | Collect market data, deploy strategies, send strategy memos |
 | ResearchJohn | claude-sonnet-4-6 | Read strategy memos, produce research report |
 | TradeJohn | claude-sonnet-4-6 | Signal generation, position sizing |
 
@@ -49,8 +50,8 @@ States: candidate → paper → live → monitoring → deprecated → archived
 - Configs: `.env`, `src/agent/config/`
 
 ## Decisions Already Made — Do Not Revisit
-1. **Architecture**: 4-agent system. No sub-swarms. No diligence pipeline. No equity analyst agents.
-2. **Models**: BotJohn=Opus, DataJohn=Haiku, ResearchJohn=Sonnet, TradeJohn=Sonnet. Fixed.
+1. **Architecture**: 3-agent system (BotJohn + ResearchJohn + TradeJohn) + hardcoded data pipeline. No sub-swarms.
+2. **Models**: BotJohn=Opus, ResearchJohn=Sonnet, TradeJohn=Sonnet. DataPipeline=hardcoded (runner.js).
 3. **Strategy lifecycle**: lifecycle.py is the single source of truth. No manual state edits in manifest.json.
-4. **Data pipeline**: Append-only parquet files. DataJohn queues collection; never executes directly.
+4. **Data pipeline**: Hardcoded runner.js (runDailyClose). Append-only parquet files. No LLM agent.
 5. **Promotion gate**: paper→live requires Sharpe ≥ 0.5 AND max_drawdown ≤ 20%.
