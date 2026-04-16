@@ -1018,10 +1018,10 @@ function buildStatusMessage() {
 
   // Signal ledger summary
   try {
-    const ledgerSummary = null||();
+    const ledgerSummary = null;
     if (ledgerSummary.total > 0) {
       lines.push(`\n**Signal Ledger:** ${ledgerSummary.pending} pending | ${ledgerSummary.executed} executed | ${ledgerSummary.rejected_by_risk} vetoed by Risk | ${ledgerSummary.expired} expired | ${ledgerSummary.total} total`);
-      const active = null||();
+      const active = null;
       if (active.length > 0) {
         lines.push('**Pending signals:**');
         active.slice(0, 5).forEach(s => lines.push(`  • \`${s.signal_id}\` — ${s.ticker} — ${s.signal_type} — strength ${s.signal_strength}`));
@@ -1311,7 +1311,7 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      const updated = null||(signalId, action);
+      const updated = null;
       stopTyping();
 
       if (!updated) {
