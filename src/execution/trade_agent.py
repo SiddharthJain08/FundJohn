@@ -457,11 +457,24 @@ if __name__ == '__main__':
 
     green = [o for o in all_opts if o['kelly_net'] > MIN_KELLY]
 
+    # ── Alpaca paper trading ──────────────────────────────────────────────
+    alpaca_results = []
+    if green:
+        logger.info(f"[TradeJohn] {len(green)} green signal(s) → submitting Alpaca orders")
+        alpaca_results = execute_alpaca_orders(green, run_date)
+    else:
+        logger.info("[TradeJohn] No green signals — no Alpaca orders")
+    alpaca_discord = build_alpaca_post(alpaca_results, run_date)
+
+
     print(f'\n[trade_agent] Green signals: {len(green)} / {len(all_opts)}')
 
     if green:
         total_kelly = sum(o['kelly_pos'] for o in green) * 100
         msg = build_green_post(green, run_date, total_kelly)
+        if alpaca_discord:
+            msg = msg + "\n\n" + alpaca_discord
+
     else:
         msg = build_no_action_post(all_opts, run_date)
 
