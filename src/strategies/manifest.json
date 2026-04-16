@@ -8,7 +8,7 @@
       "metadata": {
         "canonical_file": "s5_max_pain.py",
         "class": "MaxPainGravity",
-        "description": "Max-pain gravity — options-derived price attractor signal"
+        "description": "Max-pain gravity \u2014 options-derived price attractor signal"
       },
       "history": []
     },
@@ -38,7 +38,7 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal — SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
       },
       "history": []
     },
@@ -48,7 +48,7 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage — implied vs realised volatility"
+        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility"
       },
       "history": []
     },
@@ -58,7 +58,7 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
+        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation"
       },
       "history": []
     },
@@ -68,7 +68,7 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
+        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching"
       },
       "history": []
     },
@@ -88,7 +88,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 — successor candidate to S9"
+        "description": "Dual-momentum v2 \u2014 successor candidate to S9"
       },
       "history": []
     },
@@ -97,8 +97,8 @@
       "state_since": "2026-04-13T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_custom_momentum_trend_v1.py",
-        "description": "Orphaned momentum-trend hybrid — no registry entry, no ID in trade_agent.py. Flagged by Audit R3 for evaluation.",
-        "audit_note": "F3 — strategy file with no lifecycle state assigned. Marked deprecated pending review; archive via lifecycle.transition() when review complete."
+        "description": "Orphaned momentum-trend hybrid \u2014 no registry entry, no ID in trade_agent.py. Flagged by Audit R3 for evaluation.",
+        "audit_note": "F3 \u2014 strategy file with no lifecycle state assigned. Marked deprecated pending review; archive via lifecycle.transition() when review complete."
       },
       "history": [
         {
@@ -110,6 +110,66 @@
           "metadata": {}
         }
       ]
+    },
+    "S_HV7_iv_crush_fade": {
+      "state": "paper",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv7_iv_crush_fade.py",
+        "class": "IVCrushFade",
+        "description": "IV Crush Fade  sell vol after peak iv_rank declines (Stein 1989)"
+      },
+      "history": []
+    },
+    "S_HV8_gamma_theta_carry": {
+      "state": "staging",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv8_gamma_theta_carry.py",
+        "class": "GammaThetaCarry",
+        "description": "Gamma-Theta Carry  STAGING: awaiting theta_atm + unusual_flow data"
+      },
+      "history": []
+    },
+    "S_HV9_rv_momentum_div": {
+      "state": "paper",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv9_rv_momentum_div.py",
+        "class": "RVMomentumDivergence",
+        "description": "RV Momentum Divergence  price/RV divergence signals (Bollerslev 2009)"
+      },
+      "history": []
+    },
+    "S_HV10_triple_gate_fear": {
+      "state": "staging",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv10_triple_gate_fear.py",
+        "class": "TripleGateFear",
+        "description": "Triple-Gate Fear  STAGING: awaiting unusual_flow data (Whaley 2000)"
+      },
+      "history": []
+    },
+    "S_HV11_cross_stock_dispersion": {
+      "state": "paper",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv11_cross_stock_dispersion.py",
+        "class": "CrossStockDispersion",
+        "description": "Cross-Stock Dispersion  decorrelated high-IV stocks (Drechsler 2011)"
+      },
+      "history": []
+    },
+    "S_HV12_vrp_normalization": {
+      "state": "paper",
+      "state_since": "2026-04-16T07:17:59+00:00",
+      "metadata": {
+        "canonical_file": "shv12_vrp_normalization.py",
+        "class": "VRPNormalization",
+        "description": "VRP Normalization  VRP z-score mean reversion (Carr & Wu 2009)"
+      },
+      "history": []
     }
   },
   "decommissioned": {
@@ -118,35 +178,35 @@
       "original_file": "implementations/decommissioned/dual_momentum.py",
       "replaced_by": "S9_dual_momentum",
       "canonical_file": "s09_dual_momentum.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "quality_value_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/quality_value.py",
       "replaced_by": "S10_quality_value",
       "canonical_file": "s10_quality_value.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "insider_cluster_buy_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/insider_cluster_buy.py",
       "replaced_by": "S12_insider",
       "canonical_file": "s12_insider.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "iv_rv_arb_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/iv_rv_arb.py",
       "replaced_by": "S15_iv_rv_arb",
       "canonical_file": "s15_iv_rv_arb.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "max_pain_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/max_pain.py",
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     }
   }
 }

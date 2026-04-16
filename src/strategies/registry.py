@@ -21,6 +21,13 @@ _IMPL_MAP = {
     'insider_cluster_buy': ('strategies.implementations.s12_insider', 'InsiderClusterBuy'),
     'iv_rv_arb':         ('strategies.implementations.s15_iv_rv_arb',         'IVRVArb'),
     'jt_momentum_12mo':  ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
+    # S-HV7  S-HV12: hardcoded HV strategies (zero LLM tokens)
+    'S_HV7_iv_crush_fade':           ('strategies.implementations.shv7_iv_crush_fade',            'IVCrushFade'),
+    'S_HV8_gamma_theta_carry':       ('strategies.implementations.shv8_gamma_theta_carry',        'GammaThetaCarry'),
+    'S_HV9_rv_momentum_div':         ('strategies.implementations.shv9_rv_momentum_div',          'RVMomentumDivergence'),
+    'S_HV10_triple_gate_fear':       ('strategies.implementations.shv10_triple_gate_fear',        'TripleGateFear'),
+    'S_HV11_cross_stock_dispersion': ('strategies.implementations.shv11_cross_stock_dispersion',  'CrossStockDispersion'),
+    'S_HV12_vrp_normalization':      ('strategies.implementations.shv12_vrp_normalization',       'VRPNormalization'),
     # Legacy aliases — keeps existing DB signal records valid
     'S5_max_pain':       ('strategies.implementations.s5_max_pain',          'MaxPainGravity'),
     'S9_dual_momentum':  ('strategies.implementations.s09_dual_momentum',     'DualMomentum'),

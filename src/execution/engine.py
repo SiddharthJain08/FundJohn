@@ -274,12 +274,72 @@ def load_aux_data(universe: list) -> dict:
                 if 'volume' in chain.columns:
                     chain_volume = float(chain['volume'].fillna(0).sum())
 
+                #  HV-strategy enrichments 
+                # pc_ratio: put/call volume ratio (most recent date)
+                pc_ratio = None
+                if 'option_type' in chain.columns and 'volume' in chain.columns:
+                    if 'date' in chain.columns:
+                        latest_dt = chain['date'].max()
+                        today_chain = chain[chain['date'] == latest_dt]
+                    else:
+                        today_chain = chain
+                    c_v = float(today_chain[today_chain['option_type'].str.upper() == 'CALL']['volume'].fillna(0).sum())
+                    p_v = float(today_chain[today_chain['option_type'].str.upper() == 'PUT']['volume'].fillna(0).sum())
+                    pc_ratio = round(p_v / c_v, 4) if c_v > 0 else None
+
+                # gamma_atm: mean gamma of near-ATM options (|delta| 0.40-0.60)
+                gamma_atm = None
+                if 'delta' in chain.columns and 'gamma' in chain.columns:
+                    atm_src = chain[chain['date'] == chain['date'].max()] if 'date' in chain.columns else chain
+                    atm_opts = atm_src[atm_src['delta'].abs().between(0.40, 0.60)]
+                    if not atm_opts.empty:
+                        gamma_atm = round(float(atm_opts['gamma'].mean()), 6)
+
+                # rv_20: current HV20; vrp: implied vol premium over realized vol
+                rv_20 = None
+                if 'hv20' in grp.columns:
+                    latest_hv = grp[grp['date'] == grp['date'].max()]['hv20'].dropna() if 'date' in grp.columns else grp['hv20'].dropna()
+                    if not latest_hv.empty:
+                        rv_20 = round(float(latest_hv.mean()), 4)
+                vrp = round(iv30 - rv_20, 4) if (iv30 is not None and rv_20 is not None) else None
+
+                # History arrays (last 8 trading days)
+                iv_rank_history = []; pc_ratio_history = []; vrp_history = []; hv20_history = []
+                if 'date' in grp.columns:
+                    for d in sorted(grp['date'].unique())[-8:]:
+                        day = grp[grp['date'] == d]
+                        if 'implied_volatility' in day.columns:
+                            day_iv = float(day['implied_volatility'].mean())
+                            hist_iv = grp[grp['date'] <= d].groupby('date')['implied_volatility'].mean().dropna()
+                            if len(hist_iv) >= 5:
+                                lo_d, hi_d = float(hist_iv.min()), float(hist_iv.max())
+                                iv_rank_history.append(round((day_iv-lo_d)/(hi_d-lo_d)*100,1) if hi_d>lo_d else 50.0)
+                        if 'option_type' in day.columns and 'volume' in day.columns:
+                            c_dv = float(day[day['option_type'].str.upper()=='CALL']['volume'].fillna(0).sum())
+                            p_dv = float(day[day['option_type'].str.upper()=='PUT']['volume'].fillna(0).sum())
+                            pc_ratio_history.append(round(p_dv/c_dv,4) if c_dv>0 else None)
+                        if 'hv20' in day.columns:
+                            hv_d = day['hv20'].dropna()
+                            if not hv_d.empty: hv20_history.append(round(float(hv_d.mean()),4))
+                        if 'implied_volatility' in day.columns and 'hv20' in day.columns:
+                            hv_d2 = day['hv20'].dropna()
+                            if not hv_d2.empty: vrp_history.append(round(float(day['implied_volatility'].mean())-float(hv_d2.mean()),4))
+                # 
+
                 opts_dict[ticker] = {
-                    'iv_rank':               iv_rank,
-                    'iv30':                  iv30,
-                    'volume':                chain_volume,
+                    'iv_rank':                 iv_rank,
+                    'iv30':                    iv30,
+                    'volume':                  chain_volume,
                     'open_interest_by_strike': oi_by_strike,
-                    'expiry_date':            nearest_expiry.date().isoformat(),
+                    'expiry_date':             nearest_expiry.date().isoformat(),
+                    'pc_ratio':               pc_ratio,
+                    'gamma_atm':              gamma_atm,
+                    'rv_20':                  rv_20,
+                    'vrp':                    vrp,
+                    'iv_rank_history':         iv_rank_history,
+                    'pc_ratio_history':       pc_ratio_history,
+                    'vrp_history':            vrp_history,
+                    'hv20_history':           hv20_history,
                 }
 
             aux['options'] = opts_dict

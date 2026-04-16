@@ -287,7 +287,10 @@ function start(swarm, generateId, notifyDiscord) {
         }).catch((e) => log(`Memory synthesis error: ${e.message}`));
     }, { timezone: 'America/New_York' });
 
-    log('Cron schedule registered. Zero-token pipeline active.');
+    // 4:20 PM ET Mon-Fri: run full market-close pipeline (market state + signals cache + signal_runner.py)
+  cron.schedule('20 16 * * 1-5', runMarketClosePipeline, { timezone: 'America/New_York' });
+
+  log('Cron schedule registered. Zero-token pipeline active.');
     log('Agents will only activate for DEPLOY, REPORT, and weekly synthesis tasks.');
 }
 
