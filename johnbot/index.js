@@ -10,8 +10,6 @@ const TradeFeed       = require('../agents/channels/trade-feed');
 const TokenFeed       = require('../agents/channels/token-feed');
 const tokenBudget     = require('../scripts/token-budget');
 const discordRelay    = require('../agents/channels/discord-relay');
-const deskController  = require('../agents/quant/desk-controller');
-const signalLedger    = require('../agents/quant/signal-ledger');
 const { setupServer } = require('./discord-setup');
 const channelMap      = require('./channel-map');
 
@@ -1020,10 +1018,10 @@ function buildStatusMessage() {
 
   // Signal ledger summary
   try {
-    const ledgerSummary = signalLedger.getSummary();
+    const ledgerSummary = null||();
     if (ledgerSummary.total > 0) {
       lines.push(`\n**Signal Ledger:** ${ledgerSummary.pending} pending | ${ledgerSummary.executed} executed | ${ledgerSummary.rejected_by_risk} vetoed by Risk | ${ledgerSummary.expired} expired | ${ledgerSummary.total} total`);
-      const active = signalLedger.getActiveSignals();
+      const active = null||();
       if (active.length > 0) {
         lines.push('**Pending signals:**');
         active.slice(0, 5).forEach(s => lines.push(`  • \`${s.signal_id}\` — ${s.ticker} — ${s.signal_type} — strength ${s.signal_strength}`));
@@ -1259,7 +1257,7 @@ client.on('messageCreate', async (message) => {
 
       let reportOutput;
       try {
-        reportOutput = await deskController.runTradeScan(message.channel);
+        reportOutput = await console.warn("[DEPRECATED] deskController removed  use /cycle"); (async()=>{})(message.channel);
       } catch (err) {
         stopTyping();
         await message.reply({ content: `⚠️ Trade scan error: ${err.message}`, allowedMentions: { repliedUser: false } });
@@ -1278,7 +1276,7 @@ client.on('messageCreate', async (message) => {
 
       let result;
       try {
-        result = await deskController.runTradeReport(message.channel);
+        result = await console.warn("[DEPRECATED] deskController removed  use /cycle"); (async()=>{})(message.channel);
       } catch (err) {
         stopTyping();
         await message.reply({ content: `⚠️ Report error: ${err.message}`, allowedMentions: { repliedUser: false } });
@@ -1313,7 +1311,7 @@ client.on('messageCreate', async (message) => {
         return;
       }
 
-      const updated = signalLedger.operatorAction(signalId, action);
+      const updated = null||(signalId, action);
       stopTyping();
 
       if (!updated) {
@@ -1335,7 +1333,7 @@ client.on('messageCreate', async (message) => {
 
       let result;
       try {
-        result = await deskController.runRiskStandalone(message.channel);
+        result = await console.warn("[DEPRECATED] deskController removed  use /cycle"); (async()=>{})(message.channel);
       } catch (err) {
         stopTyping();
         await message.reply({ content: `⚠️ Risk error: ${err.message}`, allowedMentions: { repliedUser: false } });
@@ -1363,7 +1361,7 @@ client.on('messageCreate', async (message) => {
 
       let result;
       try {
-        result = await deskController.runExitAnalysis(ticker, message.channel);
+        result = await console.warn("[DEPRECATED] deskController removed  use /cycle"); (async()=>{})(ticker, message.channel);
       } catch (err) {
         stopTyping();
         await message.reply({ content: `⚠️ Exit analysis error: ${err.message}`, allowedMentions: { repliedUser: false } });
@@ -1923,7 +1921,6 @@ client.once('clientReady', async () => {
       tokenFeed.setChannelMap(channelMap, client);
       startBudgetAlertPoller();
       // Wire channel map into desk-controller for agent-to-channel posting
-      deskController.setDiscordClient(client, channelMap);
       console.log(`   Channel setup   : complete (${Object.keys(channelMap.getAll()).length} channels mapped)`);
 
       // Post startup notice to #botjohn-log
