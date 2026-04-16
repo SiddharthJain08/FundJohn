@@ -6,8 +6,7 @@ Source: Driessen, Maenhout & Vilkov (2009) JoF; Goyal & Saretto (2009) JFE
 from __future__ import annotations
 import statistics
 from typing import List
-from ..base_strategy import BaseStrategy
-from ...models.signal import Signal
+from ..base import BaseStrategy, Signal
 
 class IVDispersionReversion(BaseStrategy):
     id = "S_HV20_iv_dispersion_reversion"

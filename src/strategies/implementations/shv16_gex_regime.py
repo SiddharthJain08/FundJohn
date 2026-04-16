@@ -6,8 +6,7 @@ Source: Bollen & Whaley (2004) JF
 """
 from __future__ import annotations
 from typing import List
-from ..base_strategy import BaseStrategy
-from ...models.signal import Signal
+from ..base import BaseStrategy, Signal
 
 class GEXRegime(BaseStrategy):
     id = "S_HV16_gex_regime"

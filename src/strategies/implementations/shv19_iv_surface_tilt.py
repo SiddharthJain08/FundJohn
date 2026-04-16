@@ -5,8 +5,7 @@ Source: Carr & Wu (2009) JFE; Pan (2002) JFE
 """
 from __future__ import annotations
 from typing import List
-from ..base_strategy import BaseStrategy
-from ...models.signal import Signal
+from ..base import BaseStrategy, Signal
 
 class IVSurfaceTilt(BaseStrategy):
     id = "S_HV19_iv_surface_tilt"

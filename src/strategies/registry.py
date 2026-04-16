@@ -1,10 +1,3 @@
-from .implementations.shv13_call_put_iv_spread import CallPutIVSpread
-from .implementations.shv14_otm_skew_factor import OTMSkewFactor
-from .implementations.shv15_iv_term_structure import IVTermStructure
-from .implementations.shv16_gex_regime import GEXRegime
-from .implementations.shv17_earnings_straddle_fade import EarningsStraddleFade
-from .implementations.shv19_iv_surface_tilt import IVSurfaceTilt
-from .implementations.shv20_iv_dispersion_reversion import IVDispersionReversion
 """
 Strategy Registry — loads and validates all approved strategy implementations.
 The execution engine calls get_approved_strategies() to get the active set.
@@ -45,13 +38,13 @@ _IMPL_MAP = {
     'S23_regime_momentum':      ('strategies.implementations.S23_regime_momentum',      'RegimeMomentumStrategy'),
     'S24_52wk_high_proximity':  ('strategies.implementations.S24_52wk_high_proximity',  'FiftyTwoWeekHighProximityStrategy'),
     'S25_dual_momentum_v2':     ('strategies.implementations.S25_dual_momentum',         'DualMomentum'),
-    'S_HV13_call_put_iv_spread': CallPutIVSpread,
-    'S_HV14_otm_skew_factor': OTMSkewFactor,
-    'S_HV15_iv_term_structure': IVTermStructure,
-    'S_HV16_gex_regime': GEXRegime,
-    'S_HV17_earnings_straddle_fade': EarningsStraddleFade,
-    'S_HV19_iv_surface_tilt': IVSurfaceTilt,
-    'S_HV20_iv_dispersion_reversion': IVDispersionReversion,
+        'S_HV13_call_put_iv_spread': ('strategies.implementations.shv13_call_put_iv_spread', 'CallPutIVSpread'),
+        'S_HV14_otm_skew_factor':      ('strategies.implementations.shv14_otm_skew_factor',      'OTMSkewFactor'),
+        'S_HV15_iv_term_structure':    ('strategies.implementations.shv15_iv_term_structure',    'IVTermStructure'),
+        'S_HV16_gex_regime':           ('strategies.implementations.shv16_gex_regime',           'GEXRegime'),
+        'S_HV17_earnings_straddle_fade': ('strategies.implementations.shv17_earnings_straddle_fade', 'EarningsStraddleFade'),
+        'S_HV19_iv_surface_tilt':      ('strategies.implementations.shv19_iv_surface_tilt',      'IVSurfaceTilt'),
+        'S_HV20_iv_dispersion_reversion': ('strategies.implementations.shv20_iv_dispersion_reversion', 'IVDispersionReversion'),
 
 }
 

@@ -7,8 +7,7 @@ State: staging — requires earnings_dte in engine.py opts_dict via FMP calendar
 from __future__ import annotations
 import math
 from typing import List
-from ..base_strategy import BaseStrategy
-from ...models.signal import Signal
+from ..base import BaseStrategy, Signal
 
 class EarningsStraddleFade(BaseStrategy):
     id = "S_HV17_earnings_straddle_fade"
