@@ -20,10 +20,9 @@ class CallPutIVSpread(BaseStrategy):
     version       = '2.0.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL']
 
-    def generate(self, aux_data: dict[str, Any]) -> list[Signal]:
-        prices       = aux_data.get('prices', {})
-        opts_map     = aux_data.get('options', {})
-        regime       = aux_data.get('regime', {})
+    def generate_signals(self, market_data: dict, opts_map: dict) -> list[Signal]:
+        prices       = market_data.get('prices', {})
+        regime       = market_data.get('regime', {})
         regime_state = regime.get('state', 'LOW_VOL')
 
         if not self.should_run(regime_state):
