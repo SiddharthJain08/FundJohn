@@ -72,7 +72,7 @@ async function runEngine(workspaceId = 'default') {
 /**
  * Full daily close run: engine → notify Discord → update Redis status key.
  */
-async function runDailyClose(workspaceId = 'default') {
+async function runDailyClose(workspaceId = 'default', memoDir = null) {
     const redis = getClient();
     const key   = `engine:last_run:${workspaceId}`;
 
@@ -97,6 +97,16 @@ async function runDailyClose(workspaceId = 'default') {
         if (signals.length > 0) {
             const memo = buildStrategyMemo(result, signals, runDate);
             await notifications.notifyStrategyMemo(memo).catch(() => {});
+
+            // Write memo to disk for ResearchJohn
+            if (memoDir) {
+              try {
+                const fsp = require('fs').promises;
+                const nodePath = require('path');
+                await fsp.mkdir(memoDir, { recursive: true });
+                await fsp.writeFile(nodePath.join(memoDir, `${runDate}_strategy.md`), memo, 'utf8');
+              } catch (e) { console.warn('[runner] memo disk write failed:', e.message); }
+            }
 
             const synthesis = buildSignalSynthesis(result, signals, runDate);
             await notifications.notifySignalSynthesis(synthesis).catch(() => {});

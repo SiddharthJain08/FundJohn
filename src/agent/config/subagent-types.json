@@ -11,30 +11,25 @@
     "botjohn": {
       "promptFile": "src/agent/prompts/subagents/botjohn.md",
       "components": [],
-      "tools": ["fmp", "polygon", "alpha_vantage", "sec_edgar", "tavily", "yahoo"],
+      "tools": [
+        "fmp",
+        "polygon",
+        "alpha_vantage",
+        "sec_edgar",
+        "tavily",
+        "yahoo"
+      ],
       "iterationLimit": 40,
       "timeoutSeconds": 600,
       "parallel": false,
       "vetoAuthority": true,
       "effortLevel": "high",
-      "maxBudgetUsd": 1.00,
+      "maxBudgetUsd": 1.0,
       "sandbox": false,
-      "modes": ["PM_TASK"],
+      "modes": [
+        "PM_TASK"
+      ],
       "description": "Orchestrator and portfolio manager. Approves/vetoes trade signals. Interfaces with operator via Discord."
-    },
-    "datajohn": {
-      "promptFile": "src/agent/prompts/subagents/datajohn.md",
-      "components": [],
-      "tools": ["polygon", "fmp", "alpha_vantage", "sec_edgar", "yahoo"],
-      "iterationLimit": 20,
-      "timeoutSeconds": 360,
-      "parallel": false,
-      "vetoAuthority": false,
-      "effortLevel": "low",
-      "maxBudgetUsd": 0.10,
-      "model": "claude-haiku-4-5-20251001",
-      "modes": ["PM_TASK"],
-      "description": "Data collection queuing, strategy deployment, strategy memo dispatch. Haiku for speed and cost."
     },
     "researchjohn": {
       "promptFile": "src/agent/prompts/subagents/researchjohn.md",
@@ -45,8 +40,10 @@
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 0.30,
-      "modes": ["PM_TASK"],
+      "maxBudgetUsd": 0.3,
+      "modes": [
+        "PM_TASK"
+      ],
       "description": "Reads strategy memos, produces consolidated research report: regime, performance table, convergence analysis, recommendations."
     },
     "tradejohn": {
@@ -58,8 +55,10 @@
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 0.30,
-      "modes": ["PM_TASK"],
+      "maxBudgetUsd": 0.3,
+      "modes": [
+        "PM_TASK"
+      ],
       "description": "Signal generation and position sizing. Reads research report, outputs ranked trade signals with EV, sizing, entry/stop/target."
     }
   }

@@ -357,7 +357,7 @@ async function handlePtcCommand(cmdText, message, userId) {
           `Datasets: ${plan.datasets.map(d => d.name).join(', ')}`,
           `Starting collection now...`,
         ].join('\n'));
-        await agentPersonas.setStatus('databot', 'busy', `Filling ${fillTickers.length} tickers`);
+        await agentPersonas.setStatus('botjohn', 'busy', `Filling ${fillTickers.length} tickers`);
 
         const executor = require('../../pipeline/data-task-executor');
         executor.executeTask(taskId, dbPost).catch(err => {
@@ -421,7 +421,7 @@ async function handlePtcCommand(cmdText, message, userId) {
           `*${description}*\n\n` +
           `Planning collection...`
         );
-        await agentPersonas.setStatus('databot', 'busy', description.slice(0, 60));
+        await agentPersonas.setStatus('botjohn', 'busy', description.slice(0, 60));
 
         const workspace = await workspaceManager.getOrCreate(workspaceId);
         try {
@@ -1049,9 +1049,9 @@ client.once('ready', async () => {
     // Expose alertPost for data-task-executor (used by /data command handler)
     _dataAlertsPost = alertPost;
 
-    // Discord presence — routes to DataJohn's status so progress shows under DataJohn's profile
+    // Discord presence — routes to BotJohn's status
     const setPresence = (text) => {
-      agentPersonas.setStatus('databot', 'busy', text.slice(0, 128)).catch(() => {});
+      agentPersonas.setStatus('botjohn', 'busy', text.slice(0, 128)).catch(() => {});
     };
 
     // Completion callback — fires once when all tickers are fully covered

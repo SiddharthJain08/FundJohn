@@ -270,7 +270,7 @@ async function parallel(configs) {
 
 /**
  * Run a full FundJohn cycle.
- * DataJohn → ResearchJohn → TradeJohn → BotJohn approval + digest.
+ * DataPipeline (hardcoded) → ResearchJohn → TradeJohn → BotJohn approval + digest.
  *
  * @param {Object} opts
  * @param {string}   opts.cycleDate      — ISO date string
@@ -285,18 +285,12 @@ async function runCycle({ cycleDate, portfolioState, strategyList, memoDir, repo
   const workspace   = process.env.OPENCLAW_DIR || '/root/openclaw';
   const signalsPath = path.join(workspace, 'output', 'signals', `${cycleDate}_signals.md`);
 
-  if (notify) notify(`🦞 Cycle ${cycleDate} — DataJohn → ResearchJohn → TradeJohn`);
+    if (notify) notify(`📊 Cycle ${cycleDate} — DataPipeline → ResearchJohn → TradeJohn`);
 
-  // Step 1: DataJohn — data collection queuing + strategy deployment + memos
-  const dataResult = await init({
-    type:      'datajohn',
-    ticker:    cycleDate,
-    workspace,
-    threadId,
-    notify,
-    mode:      'PM_TASK',
-    prompt:    `CYCLE_DATE=${cycleDate}\nSTRATEGY_LIST=${JSON.stringify(strategyList)}\nMEMO_DIR=${memoDir}`,
-  });
+  // Step 1: Hardcoded data pipeline — strategy execution + memos (no LLM agent)
+  if (notify) notify('📈 Running hardcoded data pipeline...');
+  const runner = require('../../execution/runner');
+  const dataResult = await runner.runDailyClose('default', memoDir);
 
   // Step 2: ResearchJohn — synthesize memos into research report
   const researchResult = await init({

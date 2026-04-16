@@ -28,13 +28,6 @@ const AGENTS = {
     description: 'Portfolio Manager & Orchestrator',
     channelKeys: ['general', 'botjohn-log'],
   },
-  databot: {
-    displayName: '📡 DataJohn',
-    emoji:       '📡',
-    model:       'claude-haiku-4-5-20251001',
-    description: 'Data Pipeline & Collection',
-    channelKeys: ['pipeline-feed', 'data-alerts', 'strategy-memos'],
-  },
   researchdesk: {
     displayName: '🔬 ResearchDesk',
     emoji:       '🔬',

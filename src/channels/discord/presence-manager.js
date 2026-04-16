@@ -24,13 +24,6 @@ const Redis = require('ioredis');
 
 const AGENTS = [
   {
-    id:          'databot',
-    token:       process.env.DATABOT_TOKEN,
-    displayName: 'DataJohn',
-    defaultStatus:   'online',
-    defaultActivity: '📡 Data pipeline idle',
-  },
-  {
     id:          'researchdesk',
     token:       process.env.RESEARCHDESK_TOKEN,
     displayName: 'ResearchDesk',

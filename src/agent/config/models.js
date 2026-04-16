@@ -14,7 +14,7 @@ const MODELS = {
   fast: {
     provider: 'anthropic',
     model: 'claude-haiku-4-5-20251001',
-    description: 'DataJohn — data collection, deployment, memos. Speed + cost.',
+    description: 'Fast/cheap model for lightweight tasks.',
   },
   failover: {
     provider: 'anthropic',
@@ -26,12 +26,11 @@ const MODELS = {
 // Subagent model assignments — 4-agent FundJohn system
 const SUBAGENT_MODELS = {
   botjohn:      MODELS.orchestrator,
-  datajohn:     MODELS.fast,
   researchjohn: MODELS.primary,
   tradejohn:    MODELS.primary,
 };
 
-// Flash model alias (DataJohn equivalent for quick lookups)
+// Flash model alias for quick lookups
 const FLASH_MODEL = MODELS.fast;
 
 // Context window limits per model

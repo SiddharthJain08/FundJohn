@@ -1,7 +1,7 @@
 'use strict';
 /**
  * FundJohn / OpenClaw — Main Agent Entrypoint
- * 4-agent quant hedge fund system: BotJohn → DataJohn → ResearchJohn → TradeJohn
+ * 3-agent quant hedge fund system: DataPipeline → ResearchJohn → TradeJohn → BotJohn
  */
 const fs   = require('fs');
 const path = require('path');
@@ -12,7 +12,7 @@ const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 
 /**
  * Run a full FundJohn cycle.
- * Orchestrates: DataJohn → ResearchJohn → TradeJohn → BotJohn approval.
+ * Orchestrates: DataPipeline (hardcoded) → ResearchJohn → TradeJohn → BotJohn approval.
  *
  * @param {Object} opts
  * @param {string}   opts.cycleDate       — ISO date string (e.g. '2026-04-15')
