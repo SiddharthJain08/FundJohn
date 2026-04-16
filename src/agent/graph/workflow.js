@@ -46,6 +46,8 @@ async function run(context) {
     result = await swarm.init({ type: 'research', ticker, workspace, threadId, notify });
   }
   state.results = result;
+  // Broadcast dashboard refresh on cycle completion
+  try { require("../../channels/api/server").broadcast({ type: "pipeline", message: "cycle_complete:" + ticker }); } catch(e) {}
 
   // Stage 4: Report (handled by report-builder subagent — nothing to do here)
   state.stage = 'report';

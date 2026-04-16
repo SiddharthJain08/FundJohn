@@ -19,6 +19,8 @@ function broadcast(data) {
   }
 }
 module.exports.broadcast = broadcast;
+// Wire SSE broadcast into the pipeline collector so all data collection events push live updates
+require("../../pipeline/collector").setBroadcast(broadcast);
 
 // ── DB-backed API routes ────────────────────────────────────────────────────────
 
