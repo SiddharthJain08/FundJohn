@@ -44,15 +44,36 @@ WEBHOOKS = {
 }
 
 STRATEGY_LABELS = {
-    'S9_dual_momentum':          'Dual Momentum (S9)',
-    'S_custom_jt_momentum_12mo': 'JT 12-Month (JT)',
+    'S9_dual_momentum':              'Dual Momentum (S9)',
+    'S_custom_jt_momentum_12mo':     'JT 12-Month (JT)',
+    'S10_quality_value':             'Quality Value (S10)',
+    'S12_insider':                   'Insider Cluster (S12)',
+    'S15_iv_rv_arb':                 'IV-RV Arb (S15)',
+    'S_HV13_call_put_iv_spread':     'Call-Put IV Spread (HV13)',
+    'S_HV14_otm_skew_factor':        'OTM Skew Factor (HV14)',
+    'S_HV15_iv_term_structure':      'IV Term Structure (HV15)',
+    'S_HV16_gex_regime':             'GEX Regime (HV16)',
+    'S_HV17_earnings_straddle_fade': 'Earnings Straddle Fade (HV17)',
+    'S_HV19_iv_surface_tilt':        'IV Surface Tilt (HV19)',
+    'S_HV20_iv_dispersion_reversion':'IV Dispersion Rev (HV20)',
 }
 
 # Strategy holding period assumptions (trading days)
 # DM: monthly rebalance; JT: 3-6 month momentum persistence window
+_HP_OPTIONS = {'min': 1, 'target': 5, 'max': 21}   # vol strategies: weekly horizon
 HOLDING_PERIOD = {
-    'S9_dual_momentum':          {'min': 21, 'target': 63,  'max': 126},
-    'S_custom_jt_momentum_12mo': {'min': 42, 'target': 105, 'max': 189},
+    'S9_dual_momentum':              {'min': 21, 'target': 63,  'max': 126},
+    'S_custom_jt_momentum_12mo':     {'min': 42, 'target': 105, 'max': 189},
+    'S10_quality_value':             {'min': 21, 'target': 63,  'max': 126},
+    'S12_insider':                   {'min': 10, 'target': 30,  'max': 63},
+    'S15_iv_rv_arb':                 {'min': 1,  'target': 10,  'max': 21},
+    'S_HV13_call_put_iv_spread':     _HP_OPTIONS,
+    'S_HV14_otm_skew_factor':        _HP_OPTIONS,
+    'S_HV15_iv_term_structure':      _HP_OPTIONS,
+    'S_HV16_gex_regime':             _HP_OPTIONS,
+    'S_HV17_earnings_straddle_fade': {'min': 1, 'target': 3, 'max': 7},
+    'S_HV19_iv_surface_tilt':        _HP_OPTIONS,
+    'S_HV20_iv_dispersion_reversion':_HP_OPTIONS,
 }
 
 TRADING_DAYS_PER_YEAR = 252
@@ -202,7 +223,7 @@ def compute_signal_analytics(sig, px, spy_returns):
     # Under GBM: prob of hitting upper barrier b before lower barrier a
     # P(hit T1 before stop) = (1 - exp(-2μτ/σ²)) corrected Brownian motion
     # Simplified: use drift = momentum / holding_period, vol = daily_vol
-    hp    = HOLDING_PERIOD[strat]
+    hp    = HOLDING_PERIOD.get(strat, {'min': 1, 'target': 5, 'max': 21})
     mu_d  = (mom_12m / hp['target']) if not math.isnan(mom_12m) else 0.0  # daily drift proxy
     sig_d = hv21 / math.sqrt(TRADING_DAYS_PER_YEAR)  # daily vol
 
@@ -440,6 +461,7 @@ def build_full_report(analytics, port, run_date):
         row = f'{t1:<6} '
         for t2 in tickers:
             val = port['corr'].loc[t1, t2] if t1 in port['corr'].index and t2 in port['corr'].columns else np.nan
+            if hasattr(val, 'iloc'): val = float(val.iloc[0] if val.ndim == 1 else val.iloc[0, 0]) if val.size > 0 else np.nan
             row += f' {val:>5.2f}' if not math.isnan(val) else '   N/A'
         lines.append(row)
     lines.append('```')

@@ -19,7 +19,7 @@ class IVSurfaceTilt(BaseStrategy):
 
     def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
         candidates = []
-        for ticker, opts in aux_data.items():
+        for ticker, opts in aux_data.get('options', {}).items():
             cd = opts.get("iv_centroid_delta")
             if cd is None:
                 continue

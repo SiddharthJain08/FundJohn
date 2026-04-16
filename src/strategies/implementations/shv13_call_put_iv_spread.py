@@ -32,7 +32,7 @@ class CallPutIVSpread(BaseStrategy):
 
         candidates: list[tuple[float, str, str, float, dict]] = []
 
-        for ticker, opts in aux_data.items():
+        for ticker, opts in aux_data.get('options', {}).items():
             iv_spread = opts.get('iv_spread')
             iv_rank   = opts.get('iv_rank')
             if iv_spread is None or iv_rank is None:

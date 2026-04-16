@@ -22,7 +22,7 @@ class EarningsStraddleFade(BaseStrategy):
     def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
         candidates = []
         prices_df = prices
-        for ticker, opts in aux_data.items():
+        for ticker, opts in aux_data.get('options', {}).items():
             iv_rank = opts.get("iv_rank")
             if iv_rank is None or iv_rank < self.IV_RANK_MIN:
                 continue

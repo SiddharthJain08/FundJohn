@@ -33,7 +33,7 @@ class OTMSkewFactor(BaseStrategy):
         shorts: list[tuple[float, str, dict]] = []
         longs:  list[tuple[float, str, dict]] = []
 
-        for ticker, opts in aux_data.items():
+        for ticker, opts in aux_data.get('options', {}).items():
             skew_20d = opts.get('skew_20d')
             iv_rank  = opts.get('iv_rank')
             if skew_20d is None or iv_rank is None:

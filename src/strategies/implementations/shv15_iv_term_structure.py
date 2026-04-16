@@ -34,7 +34,7 @@ class IVTermStructure(BaseStrategy):
 
         candidates: list[tuple[float, str, str, dict]] = []
 
-        for ticker, opts in aux_data.items():
+        for ticker, opts in aux_data.get('options', {}).items():
             ts_ratio = opts.get('ts_ratio')
             near_iv  = opts.get('near_iv')
             far_iv   = opts.get('far_iv')

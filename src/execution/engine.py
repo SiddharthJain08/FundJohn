@@ -446,6 +446,17 @@ def load_aux_data(universe: list) -> dict:
                     'hv20_history':           hv20_history,
                 }
 
+            # Inject last_price from prices.parquet (long-format, always available)
+            try:
+                _px_path = master_dir / 'prices.parquet'
+                if _px_path.exists():
+                    import pandas as _pd2
+                    _px = _pd2.read_parquet(_px_path, columns=['ticker','close'])
+                    _lp = _px.groupby('ticker')['close'].last().to_dict()
+                    for _tk, _od in opts_dict.items():
+                        _od['last_price'] = _lp.get(_tk)
+            except Exception as _lpe:
+                logger.warning(f'last_price load failed: {_lpe}')
             aux['options'] = opts_dict
             logger.info(f"Options loaded: {len(opts_dict)} tickers")
         except Exception as e:
@@ -798,6 +809,15 @@ def main():
             logger.warning("Prices DataFrame empty — signals will be minimal")
 
         # 4. Run strategies
+
+        # Inject last_price from prices DataFrame into each ticker's opts entry
+        if 'options' in aux_data and prices is not None:
+            try:
+                latest_px = prices.groupby('ticker')['close'].last().to_dict()
+                for _tk, _opts in aux_data['options'].items():
+                    _opts['last_price'] = latest_px.get(_tk)
+            except Exception as _e:
+                logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe, aux_data)
 
         # 5. Write signals
