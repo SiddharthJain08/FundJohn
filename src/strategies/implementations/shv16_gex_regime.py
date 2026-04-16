@@ -18,9 +18,9 @@ class GEXRegime(BaseStrategy):
     IV_RANK_MIN_SELL: float = 45.0
     TOP_N: int = 8
 
-    def generate_signals(self, market_data: dict, opts_map: dict) -> List[Signal]:
+    def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
         candidates = []
-        for ticker, opts in opts_map.items():
+        for ticker, opts in aux_data.items():
             gex = opts.get("gex")
             if gex is None:
                 continue

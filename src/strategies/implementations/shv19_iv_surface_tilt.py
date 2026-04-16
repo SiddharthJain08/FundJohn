@@ -17,9 +17,9 @@ class IVSurfaceTilt(BaseStrategy):
     IV_RANK_MIN_BUY: float = 50.0
     TOP_N: int = 8
 
-    def generate_signals(self, market_data: dict, opts_map: dict) -> List[Signal]:
+    def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
         candidates = []
-        for ticker, opts in opts_map.items():
+        for ticker, opts in aux_data.items():
             cd = opts.get("iv_centroid_delta")
             if cd is None:
                 continue

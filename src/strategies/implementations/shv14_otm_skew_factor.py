@@ -22,9 +22,9 @@ class OTMSkewFactor(BaseStrategy):
     version       = '1.0.0'
     regime_filter = ['HIGH_VOL', 'NEUTRAL']
 
-    def generate_signals(self, market_data: dict, opts_map: dict) -> list[Signal]:
-        prices       = market_data.get('prices', {})
-        regime       = market_data.get('regime', {})
+    def generate_signals(self, prices, regime, universe, aux_data) -> list[Signal]:
+        prices       = prices.get('prices', {})
+        regime       = prices.get('regime', {})
         regime_state = regime.get('state', 'LOW_VOL')
 
         if not self.should_run(regime_state):
@@ -33,7 +33,7 @@ class OTMSkewFactor(BaseStrategy):
         shorts: list[tuple[float, str, dict]] = []
         longs:  list[tuple[float, str, dict]] = []
 
-        for ticker, opts in opts_map.items():
+        for ticker, opts in aux_data.items():
             skew_20d = opts.get('skew_20d')
             iv_rank  = opts.get('iv_rank')
             if skew_20d is None or iv_rank is None:

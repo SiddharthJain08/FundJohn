@@ -74,7 +74,7 @@ def wh_post(webhook_key, text):
 # ── Engine run ────────────────────────────────────────────────────────────────
 
 def run_engine():
-    env = {**os.environ, 'PYTHONPATH': str(ROOT)}
+    env = {**os.environ, 'PYTHONPATH': str(ROOT) + ':' + str(ROOT / 'src')}
     result = subprocess.run(
         ['python3', '-m', 'src.execution.engine'],
         cwd=str(ROOT), env=env,

@@ -18,8 +18,8 @@ class IVDispersionReversion(BaseStrategy):
     MIN_UNIVERSE: int = 10
     TOP_N: int = 10
 
-    def generate_signals(self, market_data: dict, opts_map: dict) -> List[Signal]:
-        rank_data = [(t, float(o["iv_rank"]), o) for t, o in opts_map.items() if o.get("iv_rank") is not None]
+    def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
+        rank_data = [(t, float(o["iv_rank"]), o) for t, o in aux_data.items() if o.get("iv_rank") is not None]
         if len(rank_data) < self.MIN_UNIVERSE:
             return []
         ranks = [r[1] for r in rank_data]
