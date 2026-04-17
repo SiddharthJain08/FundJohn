@@ -57,8 +57,8 @@ Full architecture: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | **16:20** | Regime + signals cache + signal runner (`src/engine/cron-schedule.js::runMarketClosePipeline`) | 0 |
 | 16:20+ | `runner.js::runDailyClose()` posts strategy memos to `#strategy-memos` | 0 |
 | ~16:30 | ResearchJohn reads memos, posts report to `#research-feed` | LLM |
-| ~16:45 | TradeJohn reads report, posts sized signals to `#trade-desk` | LLM |
-| ~16:50 | BotJohn reviews, operator approves with `@FundJohn approve <id>` | LLM |
+| ~16:45 | TradeJohn reads report, posts Kelly-sized signals to `#trade-signals` + execution log to `#trade-reports`; green signals auto-submit to Alpaca paper as bracket orders | LLM |
+| ~16:50 | BotJohn reviews, operator approves live routes with `@FundJohn approve <id>` (Alpaca paper bypasses approval) | LLM |
 | 23:59 | Redis token counters reset | 0 |
 | Sun 08:00 | Weekly memory synthesis (BotJohn consolidates learnings) | LLM |
 
@@ -94,7 +94,7 @@ Promotion gate (paper → live): **Sharpe ≥ 0.5** AND **max drawdown ≤ 20%**
 | # | Rule |
 |---|---|
 | SO-1 | Budget gate — no LLM call when `budget:mode == RED` |
-| SO-2 | Lifecycle gate — only `approved` strategies reach `trade_agent`; paper/monitoring sized at 50% |
+| SO-2 | Lifecycle gate — only `live` / `paper` strategies reach `trade_agent`; sizing is **half-Kelly × regime-scale**, capped at `MAX_POSITION_PCT` (5% of equity). Paper vs live is not currently a sizing lever. |
 | SO-3 | Research gate — `trade_agent` runs only after `research_report` succeeds |
 | SO-4 | Negative EV auto-veto — BotJohn skips without prompting if EV < 0 |
 | SO-5 | Max-DD escalation — DD > 20% auto-demotes live → monitoring |
@@ -151,7 +151,8 @@ Full file-by-file map: [ARCHITECTURE.md §12](ARCHITECTURE.md).
 |---|---|---|
 | `#strategy-memos` | DataBot | Per-strategy memos from signal runner |
 | `#research-feed` | ResearchJohn | Consolidated research report |
-| `#trade-desk` | TradeJohn | Ranked trade signals with EV + sizing |
+| `#trade-signals` | TradeJohn | Green/yellow/red ranked signals with Kelly sizing + EV |
+| `#trade-reports` | TradeJohn | Alpaca paper-trading execution log (bracket orders, fills, errors) |
 | `#ops` | BotJohn + dashboard heartbeat | Pipeline state, budget, alerts |
 
 Commands:
@@ -206,6 +207,7 @@ Full deployment workflow, rollback, migrations: [ARCHITECTURE.md §13](ARCHITECT
 
 ## What's new / changed recently
 
+- **2026-04-16 (`9f326f3`)** — **Alpaca paper trading wired into TradeJohn**. Green signals auto-submit as bracket orders sized `kelly_pos × equity`; execution summary posted to `#trade-reports`. Note: helper functions `execute_alpaca_orders` / `build_alpaca_post` are referenced but their bodies are not yet defined in the repo — will `NameError` at runtime until the follow-up module lands. See [LEARNINGS.md §13](LEARNINGS.md) and [ARCHITECTURE.md §7.5](ARCHITECTURE.md).
 - **2026-04-16** — `pipeline_orchestrator` wired to cron, signature fixes for S_HV13–15.
 - **2026-04-15** — removed strategist cron, dynamic memo labels, S_HV17 promoted to paper.
 - **2026-04-14** — **DataJohn removed**, replaced by hardcoded data pipeline (biggest architectural change since reinit; see [LEARNINGS.md §3](LEARNINGS.md)).

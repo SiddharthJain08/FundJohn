@@ -18,7 +18,7 @@ FundJohn runs on a fixed intraday schedule. All timestamps are ET.
 | **16:20** | **Signal pipeline (zero-LLM)** | `cron.schedule('20 16 * * 1-5')` in `src/engine/cron-schedule.js` → `runMarketClosePipeline()` | 0 | `regime.json`, `signals_cache.parquet`, `signals` table |
 | 16:20 (chained) | Strategy memo publisher | `src/execution/runner.js::runDailyClose()` spawned by pipeline orchestrator | 0 | `output/memos/*_{date}.md`, Discord `#strategy-memos` |
 | ~16:30 | Research pipeline | Discord `#strategy-memos` post → `bot.js::handleBotMessage()` → `runResearchPipeline()` → `src/execution/research_report.py` | LLM | `output/reports/{date}_research.md`, Discord `#research-feed` |
-| ~16:45 | Trade pipeline | `#research-feed` post → `runTradePipeline()` → `src/execution/trade_agent.py` | LLM | `output/signals/{date}_signals.md`, Discord `#trade-desk` |
+| ~16:45 | Trade pipeline | `#research-feed` post → `runTradePipeline()` → `src/execution/trade_agent.py` | LLM | `output/signals/{date}_signals.md`, Discord `#trade-signals` + Alpaca paper bracket orders |
 | **23:59** | Token-budget reset | `cron.schedule('59 23 * * *')` → `resetTokenBudgets()` | 0 | Redis key cleanup |
 | **Sun 08:00** | Weekly memory synthesis | `cron.schedule('0 8 * * 0')` → `swarm.init({type:'strategist', mode:'REPORT'})` | LLM | `agent.md`, `memory/*.md` consolidated |
 
@@ -59,9 +59,29 @@ Reads the per-strategy raw signals emitted by `signal_runner.py`, consults the l
 
 Reads every memo in `output/memos/*_{cycle_date}.md`, plus today's regime file and recent portfolio state, then produces `output/reports/{cycle_date}_research.md` with six mandated sections: (1) executive summary, (2) regime assessment, (3) per-strategy performance table, (4) convergence / divergence analysis, (5) warnings, (6) recommendation. Emits to `#research-feed`.
 
-### 2.3 `trade_agent.py`
+### 2.3 `trade_agent.py` — Kelly optimizer + Alpaca paper execution
 
-Reads the research report plus current portfolio, applies confluence scoring (`MIN_CONFLUENCE=2`, `confidence ≥ 0.50`) and lifecycle-state position scaling (paper/monitoring strategies get a 50% sizing reduction), then writes `output/signals/{cycle_date}_signals.md`. Each signal is 1% NAV base + 0.5% per confirming strategy, capped at 3% per ticker, then scaled by regime (`REGIME_POSITION_SCALE` in `src/strategies/base.py`). Emits to `#trade-desk`. BotJohn must approve before any order reaches the broker.
+Reads today's execution signals from Postgres, runs Kelly-criterion optimization across each signal's available exit targets (T1, T2, T3), picks the best (target, Kelly) pair per signal, and posts only **GREEN** signals (`kelly_net > MIN_KELLY`) to `#trade-signals` via TradeDesk. If nothing clears the bar, a "no actionable signals" post with per-signal diagnostics goes out instead.
+
+Key constants (top of `trade_agent.py`):
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `MAX_POSITION_PCT` | `0.05` | Hard cap per signal (5% of equity) |
+| `MIN_KELLY` | `0.005` | Minimum net Kelly to be called actionable |
+| `HALF_KELLY` | `0.50` | Safety fraction applied to raw Kelly |
+| `CAPTURE_RATIO` | `0.80` | Slippage haircut on reward (80% of target captured) |
+
+Optimization math (`kelly_optimize`):
+
+1. `p_hit_upper(entry, stop, target, mu_daily, sigma_daily)` — GBM two-barrier probability that target is hit before stop, parameterised on SPY-relative drift/vol.
+2. For each (T1, T2, T3), compute `R = reward / risk`, `kelly_raw = (p·R - (1-p)) / R`.
+3. Apply `kelly_net = kelly_raw * HALF_KELLY`; then `kelly_pos = clip(kelly_net, 0, MAX_POSITION_PCT)`.
+4. Best pair per signal = max by `kelly_net`.
+
+**Alpaca paper-trading (added 2026-04-16, commit `9f326f3`)**: immediately after green signals are identified, `execute_alpaca_orders(green, run_date)` submits **bracket orders** (market + take-profit + stop-loss) sized `kelly_pos × equity` to Alpaca. `build_alpaca_post()` appends a condensed order summary to the `#trade-signals` green post. Credentials are read from `.env` at runtime: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` (point at the Alpaca paper endpoint for paper mode). Orders fire before BotJohn approval — this is **paper** trading by design; promoting to live will add a gate here.
+
+Operator override: BotJohn remains the authority for any *real-money* routing (SO-1..SO-6). The Alpaca execution path is the paper-mode shortcut.
 
 ---
 
@@ -177,16 +197,19 @@ Data dependencies of note: `S_HV8` requires `theta` live in the options chain; `
                                                                        │
                                                                        ▼
                                                                  trade_agent.py
+                                                                   (Kelly opt.)
                                                                        │
-                                                                       ▼
-                                                                  #trade-desk
-                                                                       │
-                                                                       ▼
-                                                               BotJohn approval
-                                                               (SO-1..SO-6 gates)
-                                                                       │
-                                                                       ▼
-                                                                 broker route
+                                                   ┌───────────────────┼─────────────────────┐
+                                                   ▼                                         ▼
+                                             #trade-signals                         Alpaca (paper)
+                                             #trade-reports                         bracket orders
+                                                   │
+                                                   ▼
+                                             BotJohn review
+                                             (SO-1..SO-6 gates)
+                                                   │
+                                                   ▼
+                                           live broker route (future)
 ```
 
 Routing lives in `src/channels/discord/bot.js::handleBotMessage()`. Each channel handler is idempotent; reposting a memo does not re-enter the pipeline if `pipeline:running:{date}` is still held.

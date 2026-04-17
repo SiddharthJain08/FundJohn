@@ -165,23 +165,23 @@ Current `PERMITTED_MODES`: `DEPLOY`, `REPORT`, `SIGNAL_PROCESSING`, `MARKET_STAT
 
 ---
 
-## 8. 50% paper sizing rule
+## 8. Sizing is Kelly-based, not tier-based
 
-Paper and monitoring strategies receive 50% of the normal position size in `trade_agent.py`. Live strategies receive 100% (further scaled by regime).
+Position sizing in `trade_agent.py` is pure Kelly criterion with a hard cap: `kelly_net = kelly_raw × HALF_KELLY (0.50)`, then `kelly_pos = clip(kelly_net, 0, MAX_POSITION_PCT=0.05)`. Only signals with `kelly_net > MIN_KELLY (0.005)` post to `#trade-signals`.
 
-**Why**: a paper strategy that hasn't cleared the Sharpe/DD gate is not trusted for full size. But zero-sizing means no P&L learning signal during paper; 50% gives a real-money learning signal at half the risk. Once it clears the gate, it promotes to live and gets full size.
+**Why**: Kelly gives a principled, EV-maximising sizing that scales with the probability edge of each signal. Half-Kelly caps downside volatility at the cost of some growth, which is the right trade for a paper-scale fund. A flat "1% base + confluence adder" scheme would ignore the actual edge per signal.
 
-**How to apply**: do not add new size tiers. `live=1.0`, `paper|monitoring=0.5`, everything else=0 is the policy. If it's more complex than that, raise it with the operator.
+**How to apply**: paper vs live lifecycle state is *not* a sizing lever in the current code — if it should be, wire it explicitly (e.g. a `SIZE_MULT_PAPER = 0.5` constant applied before the cap). Don't assume it's in there. Regime scaling *does* happen, but upstream in `BaseStrategy.regime_position_scale()` (LOW_VOL 1.00 / TRANSITIONING 0.55 / HIGH_VOL 0.35 / CRISIS 0.15), not inside `trade_agent.py`.
 
 ---
 
-## 9. Confluence scoring
+## 9. Confluence detection lives in `engine.py`, not `trade_agent.py`
 
-`MIN_CONFLUENCE = 2` and `confidence ≥ 0.50` required for high-conviction candidates in `trade_agent.py`.
+Cross-strategy confluence is detected by `src/execution/engine.py::detect_confluence()` — when ≥ `CONFLUENCE_MIN (2)` strategies agree on the same ticker + direction, a row is written to the `confluence_signals` table with `combined_size_pct` and the list of agreeing strategies. `trade_agent.py` consumes signal rows (including confluence metadata) but does not itself compute confluence.
 
-**Why**: a single strategy firing is noise; two independent strategies firing on the same ticker with the same direction is a signal. This is why we run ~20 strategies and not one big one — we're buying decorrelated alpha streams and then demanding confluence.
+**Why**: confluence is a property of the signal *set*, not of individual sizing decisions. Putting it in the engine — which runs once per cycle over all strategies — makes it O(1) per run. Putting it in `trade_agent.py` would couple it to Kelly sizing and make it harder to reason about.
 
-**How to apply**: if you add a strategy that correlates too heavily with an existing one (e.g. a second 12-month momentum variant), it pollutes the confluence count. Check correlation against existing live strategies before merging. The manifest has space for audit notes — use them.
+**How to apply**: if you add a strategy that correlates too heavily with an existing one (e.g. a second 12-month momentum variant), it pollutes the confluence count. Check correlation against existing live strategies before merging. If you need to change the confluence threshold, it's `CONFLUENCE_MIN` at the top of `engine.py`.
 
 ---
 
@@ -239,6 +239,8 @@ If `pipeline_orchestrator.py` crashes hard between acquiring `pipeline:running:{
 
 ## 13. What changed recently (for context)
 
+- **2026-04-16** (`9f326f3`) — **Alpaca paper-trading wired into TradeJohn**. `execute_alpaca_orders()` fires bracket orders (market + TP + SL) sized `kelly_pos × equity` immediately after green signals are identified; `build_alpaca_post()` appends the order receipt to the Discord `#trade-signals` green post. Requires `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` / `ALPACA_BASE_URL` in `.env`. Note: the commit added the call sites but the function bodies live in a follow-up — when you run this, make sure `execute_alpaca_orders` + `build_alpaca_post` are defined somewhere (currently not in `trade_agent.py` itself).
+- **2026-04-16** (`d9f86fe`) — full pipeline wiring + new strategy integration.
 - **2026-04-16** (`68a81a1`) — wired `pipeline_orchestrator` to cron properly, fixed strategy `generate_signals` signatures across S_HV13-15.
 - **2026-04-15** (`19d55fb`) — removed the strategist subagent cron (never used in v2) and made `post_memos` use dynamic strategy labels instead of hardcoded names.
 - **2026-04-15** (`ad2a9f2`, `183dba6`) — promoted S_HV17 to paper after earnings_calendar backfill went live.
@@ -250,6 +252,9 @@ If `pipeline_orchestrator.py` crashes hard between acquiring `pipeline:running:{
 
 ## 14. Open questions / tech debt
 
+- **Alpaca function bodies** — `9f326f3` added call-sites for `execute_alpaca_orders` and `build_alpaca_post` but the bodies aren't defined in `trade_agent.py`. Wherever they live (or will live), make sure they're imported before this code path runs — else `NameError` the first time a green signal fires.
+- **Paper vs live sizing lever** — currently no sizing discount for paper-state strategies in `trade_agent.py`. If we want one, add an explicit `SIZE_MULT_PAPER` constant and apply pre-cap.
+- **BotJohn approval bypass for Alpaca** — Alpaca paper orders fire automatically after green-signal identification, ahead of any BotJohn review. Fine for paper, must be gated before live-broker routing is wired.
 - **S_HV10 staging** — needs `unusual_flow` data. Either find a provider that exposes this cleanly, or rewrite S_HV10 to use what we have.
 - **Backtest harness** — `src/backtesting/` exists but is not integrated with the promotion gate. Sharpe/DD for promotion is currently computed ad-hoc from `signal_performance`.
 - **Dashboard auth** — the web dashboard has read-only auth; write actions (pause pipeline, veto strategy) still go through Discord.

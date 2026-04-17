@@ -168,9 +168,13 @@ Each provider has a Node-side generator at `src/agent/tools/mcp/<name>.js`. `gen
 
 Generation entry point: `src/agent/tools/registry.js::generateToolModules(workspaceDir)`. Called at startup; writes to `workspaces/default/tools/`.
 
-### 6.1 MCP keys (`.env.example`)
+### 6.1 Environment variables (`.env.example`)
 
-`ANTHROPIC_API_KEY`, `FMP_API_KEY`, `POLYGON_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `TAVILY_API_KEY`, `SEC_USER_AGENT`, `POSTGRES_URI`, `REDIS_URL`, `DISCORD_BOT_TOKEN`.
+**LLM + MCPs**: `ANTHROPIC_API_KEY`, `FMP_API_KEY`, `POLYGON_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `TAVILY_API_KEY`, `SEC_USER_AGENT`.
+
+**Infra**: `POSTGRES_URI`, `REDIS_URL`, `DISCORD_BOT_TOKEN`, `WORKSPACE_ID`.
+
+**Broker (Alpaca paper trading, added 2026-04-16 for TradeJohn)**: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` (use the Alpaca paper endpoint `https://paper-api.alpaca.markets` for paper mode).
 
 ---
 
@@ -220,7 +224,25 @@ Full list at `src/strategies/manifest.json`. Grouped by origin:
 - `S_custom_momentum_trend_v1` — deprecated 2026-04-13 by Audit R3 (orphan file, no DB registry row, no HOLDING_PERIOD entry).
 - `decommissioned/`: `dual_momentum.py`, `quality_value.py`, `insider_cluster_buy.py`, `iv_rv_arb.py`, `max_pain.py` — predecessors of the canonical `sXX_` versions. Retained for backtest reproducibility only; not imported anywhere.
 
-### 7.5 Strategy contract (recap)
+### 7.5 Execution math (engine vs trade_agent split)
+
+Two files share the execution-side math; keep their roles clear.
+
+**`src/execution/engine.py`** — master execution engine. Runs the strategy loop, persists raw `Signal` rows to Postgres, and detects **cross-strategy confluence**: `detect_confluence()` writes to the `confluence_signals` table when ≥ `CONFLUENCE_MIN` (default `2`) strategies agree on the same ticker and direction. `combined_size_pct` per confluence row is used downstream by reporting.
+
+**`src/execution/trade_agent.py`** — the Kelly-sizing layer. Reads today's signal rows (including confluence metadata when relevant) and runs:
+
+- GBM two-barrier probability `p_hit_upper(entry, stop, target, mu_daily, sigma_daily)` for each T1/T2/T3 exit.
+- `kelly_raw = (p·R - (1-p)) / R`, then `kelly_net = kelly_raw × HALF_KELLY (0.50)`.
+- `kelly_pos = clip(kelly_net, 0, MAX_POSITION_PCT)` where `MAX_POSITION_PCT = 0.05`.
+- Keeps the best (target, Kelly) pair per signal. GREEN if `kelly_net > MIN_KELLY (0.005)`.
+- Slippage haircut: multiplies reward by `CAPTURE_RATIO (0.80)`.
+- Post: condensed green summary to `#trade-signals`; no-action diagnostic otherwise.
+- **Alpaca** (2026-04-16): `execute_alpaca_orders(green, run_date)` submits bracket orders (market + TP + SL) sized `kelly_pos × equity`; `build_alpaca_post()` appends the order receipt to the Discord message.
+
+Regime scaling is applied at signal-generation time in `BaseStrategy.regime_position_scale()` — *not* inside `trade_agent.py`. `trade_agent.py` treats the incoming position sizes as already regime-adjusted and applies only Kelly + MAX_POSITION_PCT on top.
+
+### 7.6 Strategy contract (recap)
 
 Every strategy inherits `BaseStrategy` from `src/strategies/base.py` and implements:
 
@@ -289,11 +311,13 @@ Redis keys in active use:
 
 ## 9. Discord interface
 
-`src/channels/discord/bot.js` is the entry point. Roles:
+`src/channels/discord/bot.js` is the entry point. Channel topology is defined in `src/channels/discord/setup.js` and agent-channel binding in `src/channels/discord/agent-personas.js`. Active channels include `#strategy-memos`, `#research-feed`, `#trade-signals`, `#trade-reports` (and operator channels).
+
+Personas:
 
 - **DataBot** — auto-posts strategy memos to `#strategy-memos` (runner.js after signal runner).
 - **ResearchDesk** — listens on `#strategy-memos`; when a memo is posted, calls `runResearchPipeline()` → `research_report.py` → `#research-feed`.
-- **TradeDesk** — listens on `#research-feed`; calls `runTradePipeline()` → `trade_agent.py` → `#trade-desk`.
+- **TradeDesk** — listens on `#research-feed`; calls `runTradePipeline()` → `trade_agent.py`. Posts green-signal summaries + appended Alpaca paper-order receipts to `#trade-signals`, and longer performance / risk digests to `#trade-reports`. Channel keys bound in `agent-personas.js`: `['trade-signals', 'trade-reports']`.
 - **BotJohn** — operator-facing. Responds to `@FundJohn` mentions. Two response modes: **flash** (single-call <10s reply) and **PTC** (Plan-Then-Commit — spawns subagents via `swarm.init` for multi-step tasks).
 
 Bot command surface (Discord slash + `@`-mention):
@@ -301,7 +325,7 @@ Bot command surface (Discord slash + `@`-mention):
 | Command / trigger | Handler | Effect |
 |---|---|---|
 | `@FundJohn status` | flash | Dumps pipeline / budget / regime state |
-| `@FundJohn approve <signal_id>` | PTC | BotJohn routes to broker |
+| `@FundJohn approve <signal_id>` | PTC | BotJohn routes to broker (live path — Alpaca paper orders fire automatically without this gate) |
 | `@FundJohn veto <signal_id>` | flash | Marks signal rejected, writes reason |
 | `@FundJohn report <strategy_id>` | PTC | Enqueues REPORT invocation |
 | `#strategy-memos` post | event | Starts research pipeline |
