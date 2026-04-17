@@ -22,6 +22,7 @@ import os, sys, math, json, warnings
 import numpy as np
 import pandas as pd
 import requests
+from execution.alpaca_trader import execute_alpaca_orders, build_alpaca_post
 import psycopg2, psycopg2.extras
 from datetime import date, timedelta
 from pathlib import Path
