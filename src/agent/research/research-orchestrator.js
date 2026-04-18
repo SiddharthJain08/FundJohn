@@ -409,6 +409,7 @@ class ResearchOrchestrator {
     }
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
+    // validate_strategy.py exits 0 on valid, 1 on invalid — capture stdout on throw.
     let validResult;
     try {
       const raw = execSync(
@@ -417,7 +418,12 @@ class ResearchOrchestrator {
       ).toString();
       validResult = JSON.parse(raw);
     } catch (e) {
-      validResult = { ok: false, errors: [e.message] };
+      const stdout = e.stdout?.toString?.() || '';
+      try {
+        validResult = JSON.parse(stdout);
+      } catch (_) {
+        validResult = { ok: false, errors: [e.message.slice(0, 300)] };
+      }
     }
 
     if (!validResult.ok) {
@@ -433,6 +439,8 @@ class ResearchOrchestrator {
     notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
 
     // ── Phase 2: Auto-backtest convergence gate ───────────────────────────────
+    // Note: auto_backtest.py exits 0 on pass, 1 on fail — execSync throws on
+    // non-zero exit. Parse stdout from the error object to retain JSON metrics.
     let btResult;
     try {
       const raw = execSync(
@@ -441,7 +449,12 @@ class ResearchOrchestrator {
       ).toString();
       btResult = JSON.parse(raw);
     } catch (e) {
-      btResult = { passed: false, error: e.message, windows: [] };
+      const stdout = e.stdout?.toString?.() || '';
+      try {
+        btResult = JSON.parse(stdout);
+      } catch (_) {
+        btResult = { passed: false, error: e.message.slice(0, 300), windows: [] };
+      }
     }
 
     if (!btResult.passed) {
