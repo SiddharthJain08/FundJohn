@@ -109,7 +109,7 @@ def discover(days: int = 7) -> list[dict]:
             if p['id'] not in seen_ids:
                 seen_ids.add(p['id'])
                 p['score'] = _score(p)
-                if p['score'] > 0:
+                if p['score'] >= 4:
                     all_papers.append(p)
 
     all_papers.sort(key=lambda p: -p['score'])

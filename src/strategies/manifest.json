@@ -231,6 +231,42 @@
         "description": "IV term structure crush + post-event momentum on SP500 catalyst events"
       },
       "history": []
+    },
+    "S_markov_frontier_regimes": {
+      "state": "paper",
+      "state_since": "2026-04-18T08:30:28.841439+00:00",
+      "metadata": {
+        "canonical_file": "S_markov_frontier_regimes.py",
+        "class": "MarkovFrontierRegimes",
+        "description": "Monthly Markov frontier: cluster EF parabola coefficients, regime-weighted tangency E[w]"
+      },
+      "history": [
+        {
+          "from": "candidate",
+          "to": "paper",
+          "at": "2026-04-18T08:30:28.841439+00:00",
+          "actor": "system",
+          "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
+        }
+      ]
+    },
+    "S_regime_specialist_vol": {
+      "state": "paper",
+      "state_since": "2026-04-18T08:30:28.841439+00:00",
+      "metadata": {
+        "canonical_file": "S_regime_specialist_vol.py",
+        "class": "RegimeSpecialistVol",
+        "description": "IF HIGH_VOL: GARCH-t/FIGARCH/HAR-RV; ELSE GRU/HAR-RV/XGBoost vol ensemble"
+      },
+      "history": [
+        {
+          "from": "candidate",
+          "to": "paper",
+          "at": "2026-04-18T08:30:28.841439+00:00",
+          "actor": "system",
+          "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
+        }
+      ]
     }
   },
   "decommissioned": {
