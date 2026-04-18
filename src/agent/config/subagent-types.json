@@ -72,28 +72,6 @@
       ],
       "description": "Signal generation and position sizing. Reads research report, outputs ranked trade signals with EV, sizing, entry/stop/target."
     },
-    "strategist": {
-      "promptFile": "src/agent/prompts/subagents/strategist.md",
-      "components": [],
-      "tools": [],
-      "iterationLimit": 20,
-      "timeoutSeconds": 420,
-      "parallel": false,
-      "vetoAuthority": false,
-      "effortLevel": "medium",
-      "maxBudgetUsd": 0.5,
-      "modes": [
-        "DEPLOY",
-        "REPORT"
-      ],
-      "skills": [
-        "fundjohn:paper-to-strategy",
-        "fundjohn:strategy-coder",
-        "fundjohn:backtest-plumb",
-        "fundjohn:memo-schema"
-      ],
-      "description": "Off-hours strategy lifecycle reviewer. Analyzes signal quality, regime alignment, and strategy performance. Proposes lifecycle transitions (paper→live, live→monitoring)."
-    },
     "paperhunter": {
       "promptFile": "src/agent/prompts/subagents/paperhunter.md",
       "components": [],

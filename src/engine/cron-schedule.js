@@ -7,9 +7,7 @@
  *
  * Jobs registered here:
  *   23:59 ET daily          — reset token budget counters in Redis
- *   every 30min off-hours  — check if strategist should activate (DEPLOY mode)
- *                            + resume any budget-paused pipeline
- *   every 30min weekends   — strategist eligible all day
+ *   resume any budget-paused pipeline on schedule
  */
 
 'use strict';
@@ -290,27 +288,9 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
-    // Sunday 08:00 ET — weekly memory synthesis
-    // BotJohn reads all memory/*.md files and writes consolidated learnings to agent.md
-    // and promotes high-value patterns to CLAUDE.md. Zero user interaction required.
+    // Sunday 08:00 ET — weekly memory synthesis + reaper + universe sync
     cron.schedule('0 8 * * 0', async () => {
-        log('Weekly memory synthesis starting — consolidating agent learnings');
-        await swarm.init({
-            type:      'strategist',
-            mode:      'REPORT',
-            workspace: WORKSPACE_DIR,
-            threadId:  generateId(),
-            prompt: (
-                `MEMORY SYNTHESIS SESSION. Read the entire workspace/memory/ directory ` +
-                `(signal_patterns.md, trade_learnings.md, regime_context.md, fund_journal.md). ` +
-                `Extract durable patterns — not one-off observations. ` +
-                `Write a "## Lessons Learned (auto-synthesized YYYY-MM-DD)" section to agent.md. ` +
-                `Promote the 3-5 most important cross-run patterns to the top of signal_patterns.md ` +
-                `and trade_learnings.md under a "## Key Patterns" header. ` +
-                `Be ruthlessly terse — only write what will change how a future agent acts. ` +
-                `Log to /root/.learnings/LEARNINGS.md with area tag 'memory-synthesis'.`
-            ),
-        }).catch((e) => log(`Memory synthesis error: ${e.message}`));
+        log('Weekly maintenance starting — reaper, signatures, universe sync');
 
         // Weekly reaper: detect orphaned data columns → data_deprecation_queue
         try {

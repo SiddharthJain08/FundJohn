@@ -2,7 +2,7 @@
  * Token Budget Monitor
  *
  * Tracks cumulative token usage across the current calendar day.
- * The strategist only runs if >= 20% of the daily session budget remains.
+ * Agents only run if >= 20% of the daily session budget remains.
  *
  * Usage is tracked in two places:
  *   1. Redis — fast real-time check (reset daily at midnight)
@@ -80,13 +80,13 @@ async function getBudgetStatus(workspaceId) {
         remaining:       remaining,
         pct_remaining:   pct_remaining,
         pct_used:        1 - pct_remaining,
-        budget_ok:       pct_remaining >= 0.20,  // strategist threshold
+        budget_ok:       pct_remaining >= 0.20,
         critical:        pct_remaining < 0.10,   // under 10% = critical, pause everything
         formatted:       `${(pct_remaining * 100).toFixed(1)}% remaining (${remaining.toLocaleString()} / ${limit.toLocaleString()} tokens)`,
     };
 }
 
-// Hard check — call this before starting the strategist
+// Hard check — call this before starting an agent session
 async function canStrategistRun(workspaceId) {
     const budget = await getBudgetStatus(workspaceId);
     if (!budget.budget_ok) {

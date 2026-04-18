@@ -267,6 +267,16 @@
           "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
         }
       ]
+    },
+    "S_epistemic_rank_gate": {
+      "state": "candidate",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_epistemic_rank_gate.py",
+        "class": "EpistemicRankGate",
+        "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate"
+      },
+      "history": []
     }
   },
   "decommissioned": {

@@ -73,24 +73,15 @@ All three must be true (RISK_SCAN bypasses all):
 2. >= 20% daily token budget remaining
 3. Pipeline idle (no other subagents running)
 
-### Yield Behavior
-- Saves state and exits immediately when pipeline becomes active
-- Pauses when token budget drops below 20%
-- Resumes exactly where it left off on next eligible session
-- RISK_SCAN mode ignores all constraints — emergency use only
-
 ### Session Status
-- last_session: (updated by strategist)
+- last_session: —
 - hypotheses_explored_total: 0
 - hypotheses_validated_total: 0
 - reports_published_total: 0
 - highest_sharpe_found: 0
 
 ### Published Strategies Pending Review
-(strategist updates — operator marks IMPLEMENTED or REJECTED)
-
-### Emergency Alerts History
-(strategist logs all alerts)
+(operator marks IMPLEMENTED or REJECTED)
 
 ### Operator Approvals Needed
-(new datasets added by strategist requiring /approve-dataset)
+(new datasets requiring /approve-dataset)

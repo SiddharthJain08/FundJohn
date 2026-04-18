@@ -199,14 +199,8 @@ client.on('messageCreate', async (message) => {
 function classifyRequest(content) {
     const lower = content.toLowerCase();
 
-    if (/\/(deploy|new-strategy|create-strategy|build-strategy)/.test(lower))
-        return { mode: 'DEPLOY', agent: 'strategist' };
-
     if (/\/(strategy-report|performance-report|show-report)/.test(lower))
         return { mode: 'REPORT', agent: 'report-builder' };
-
-    if (/\/risk-scan/.test(lower))
-        return { mode: 'RISK_SCAN', agent: 'strategist' };
 
     // Known slash-commands route to STATUS (handled in switch, no gate needed)
     if (/^\/(signals|strategies|regime|status|portfolio|engine|approve|activate|deactivate|reject|pause|fetch|fill|data|data-status|agents|chart|pipeline|trade|diligence|run|help|sweep|update-profile|cycles|approve-dataset|approve-strategy|strategy-review|engine-status|engine-run|pause-strategy|adjust-strategy|strategy-versions|research|risk-scan|approve-data|veto-data|approve-deprecation|refresh-map)\b/.test(lower.trimStart()))
@@ -719,61 +713,6 @@ async function handlePtcCommand(cmdText, message, userId) {
         break;
       }
 
-      case 'deploy-strategy':
-      case 'new-strategy':
-      case 'create-strategy':
-      case 'build-strategy': {
-        const description = args.join(' ');
-        if (!description || description.replace(/--force/g, '').trim().length < 20) {
-          await notify(
-            '📋 **Usage:** `/deploy-strategy {description}`\n\n' +
-            'Describe the strategy in enough detail for the strategist to research and build it.\n\n' +
-            '**Examples:**\n' +
-            '• `/deploy-strategy momentum strategy using 20-day vs 50-day moving average crossover for SP100`\n' +
-            '• `/deploy-strategy value strategy using P/B ratio below 1.5 combined with positive FCF yield`\n' +
-            '• `/deploy-strategy options strategy selling covered calls on high-IV names after earnings`'
-          );
-          break;
-        }
-
-        const forceFlag = args.includes('--force');
-        const scheduler = require('../agent/graph/strategist-scheduler');
-        const check     = await scheduler.canActivate(workspaceId, forceFlag);
-
-        if (!check.allowed && !forceFlag) {
-          await notify(
-            `⛔ Strategist unavailable:\n${check.summary}\n\n` +
-            `Use \`/deploy-strategy ${description} --force\` to override off-hours/budget constraints.`
-          );
-          break;
-        }
-
-        await notify(
-          `🔬 **DEPLOY session starting.**\n` +
-          `Strategy brief: *${description.replace(' --force', '')}*\n\n` +
-          `Budget: ${check.budget?.formatted || 'checking...'}\n` +
-          `The strategist will research, backtest, and write the strategy file.\n` +
-          `You'll receive a Discord notification when the strategy is ready for review.`
-        );
-
-        const workspace = await workspaceManager.getOrCreate(workspaceId);
-        await swarm.init({
-          type:      'strategist',
-          mode:      'EXPLORE',
-          workspace: workspace?.path || workspace,
-          threadId,
-          notify,
-          force:     forceFlag,
-          prompt: (
-            `DEPLOY SESSION. Strategy brief from operator: "${description.replace(' --force', '')}". ` +
-            `Research this strategy, backtest it against the master dataset, ` +
-            `and if validated, write the Python strategy file and register it. ` +
-            `The strategy must read exclusively from the signals cache (master dataset). ` +
-            `No external API calls during execution.`
-          ),
-        });
-        break;
-      }
 
       case 'strategy-report': {
         const stratId = args[0];
@@ -934,7 +873,7 @@ async function handlePtcCommand(cmdText, message, userId) {
       }
 
       default: {
-        // Try relay strategist commands first (research, signals, engine-*, strategy-*, etc.)
+        // Try relay commands first (research, signals, engine-*, strategy-*, etc.)
         const wsCtx = await workspaceManager.getOrCreate(workspaceId);
         const relayCtx = {
           workspace: wsCtx,
@@ -1272,12 +1211,12 @@ client.once('ready', async () => {
     console.log('[bot] Data pipeline started');
   }
 
-  // Start background cron jobs — token budget reset, strategist activation
+  // Start background cron jobs — token budget reset, weekly maintenance
   try {
     const cronSchedule = require('../../engine/cron-schedule');
     const notifyBotjohn = (msg) => agentPersonas.post('botjohn', 'botjohn-log', msg).catch(() => {});
     cronSchedule.start(swarm, uuidv4, notifyBotjohn);
-    console.log('[bot] Cron schedule started (token reset, strategist checks)');
+    console.log('[bot] Cron schedule started (token reset, weekly maintenance)');
   } catch (err) {
     console.warn('[bot] Cron schedule failed to start:', err.message);
   }

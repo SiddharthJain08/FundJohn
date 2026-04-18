@@ -143,7 +143,7 @@ async function notifySignalSynthesis(synthesis) {
 }
 
 /**
- * Post a strategist status message to #botjohn-log.
+ * Post a status message to #botjohn-log.
  * Callers pass a plain string — this replaces the old (channel, status) signature.
  */
 async function notifyStrategistStatus(msg) {

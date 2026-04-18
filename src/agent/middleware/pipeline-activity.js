@@ -2,13 +2,11 @@
  * Pipeline Activity Tracker
  *
  * Tracks which agents are currently running using Redis.
- * The strategist checks this before starting and polls it during its run.
- * Any active non-strategist pipeline causes the strategist to yield.
  *
  * Pattern:
  *   - When any subagent starts:  SET pipeline:agent:{workspaceId}:{agentType}:{threadId}  EX 1800
  *   - When any subagent ends:    DEL pipeline:agent:{workspaceId}:{agentType}:{threadId}
- *   - Strategist checks:         KEYS pipeline:agent:{workspaceId}:* → any non-strategist keys?
+ *   - Check active:              KEYS pipeline:agent:{workspaceId}:*
  */
 
 'use strict';
@@ -23,7 +21,6 @@ const AGENT_PATTERN = (workspaceId) =>
 
 // Call when any subagent starts
 async function registerAgentActive(workspaceId, agentType, threadId) {
-    if (agentType === 'strategist') return; // strategist doesn't block itself
     const r   = getClient();
     const key = AGENT_KEY(workspaceId, agentType, threadId);
     await r.set(key, '1', 'EX', 1800); // 30 min TTL prevents stale locks
@@ -36,14 +33,14 @@ async function registerAgentDone(workspaceId, agentType, threadId) {
     await r.del(key);
 }
 
-// Returns list of currently active agent types (excluding strategist)
+// Returns list of currently active agent types
 async function getActivePipelineAgents(workspaceId) {
     const r       = getClient();
     const pattern = AGENT_PATTERN(workspaceId);
     const keys    = await r.keys(pattern);
     return keys
         .map(k => k.split(':')[3])               // extract agentType from key
-        .filter(t => t && t !== 'strategist');
+        .filter(t => t);
 }
 
 // Core check: is the pipeline idle?

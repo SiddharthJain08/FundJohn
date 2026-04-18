@@ -83,11 +83,9 @@ Agents are ONLY permitted to be online for two tasks:
 
 ### 1. DEPLOY
 Writing, validating, and registering a new strategy Python file.
-This includes the strategist's full research-to-validation pipeline,
-which culminates in writing a strategy file.
 
 A DEPLOY activation covers:
-- Strategist EXPLORE → BACKTEST → VALIDATE → writing the strategy .py file
+- Research → BACKTEST → VALIDATE → writing the strategy .py file
 - Registering the strategy in strategy_registry (inactive by default)
 - Running the deployment validation tests
 - Generating the initial deployment report

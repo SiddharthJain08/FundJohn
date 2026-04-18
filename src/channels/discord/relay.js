@@ -52,7 +52,7 @@ function formatTrade(ticker, direction, entryLow, entryHigh, stop, target1, size
 }
 
 /**
- * Handle strategist Discord commands.
+ * Handle relay Discord commands.
  * Call from bot.js command router:
  *   await handleStrategistCommand(cmd, args, { workspace, relay, swarm, generateId })
  * Returns true if handled, false if unknown command.
@@ -66,49 +66,6 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
     const rpPost   = (msg) => agentPersonas?.post('tradedesk', 'trade-reports', msg).catch(() => {});
 
     switch (cmd) {
-        case '/research':
-        case '/strategist': {
-            const scheduler = require('../../agent/graph/strategist-scheduler');
-            const force = args.includes('--force');
-            const check = await scheduler.canActivate(workspace.id, force);
-            if (!check.allowed) {
-                await relay.reply(check.summary);
-            } else {
-                await relay.reply(`🔬 Starting strategist session...\n${check.budget.formatted}`);
-                await rdPost(`🔬 **Strategist session started** — workspace: \`${workspace.name || 'default'}\`\nBudget: ${check.budget.formatted}`);
-                await swarm.init({ type: 'strategist', mode: 'EXPLORE', workspace, threadId: generateId(), force });
-                await rdPost(`✅ **Strategist session complete**`);
-            }
-            break;
-        }
-        case '/research status': {
-            const { Pool }    = require('pg');
-            const p           = new Pool({ connectionString: process.env.POSTGRES_URI });
-            const scheduler   = require('../../agent/graph/strategist-scheduler');
-            const tokenBudget = require('../../agent/middleware/token-budget');
-            const pipeline    = require('../../agent/middleware/pipeline-activity');
-            const [budget, pipelineStatus, sessions] = await Promise.all([
-                tokenBudget.getBudgetStatus(workspace.id),
-                pipeline.isPipelineIdle(workspace.id),
-                p.query(
-                    `SELECT id,status,phase,total_tokens_used,started_at,pause_reason
-                     FROM research_sessions WHERE workspace_id=$1 ORDER BY started_at DESC LIMIT 3`,
-                    [workspace.id]
-                ),
-            ]);
-            await relay.reply(
-                `🔬 **Strategist Status**\n` +
-                `💰 Tokens: ${budget.formatted} | Budget OK: ${budget.budget_ok ? '✅' : '❌'}\n` +
-                `🔄 Pipeline: ${pipelineStatus.formatted}\n` +
-                `⏰ Off-hours: ${scheduler.isOffHours() ? 'Yes ✅' : `No — ${scheduler.minutesUntilOffHours()}min until 6pm ET`}\n\n` +
-                `**Recent sessions:**\n` +
-                (sessions.rows.length === 0 ? 'None' :
-                    sessions.rows.map(s =>
-                        `• ${s.status} | ${s.phase} | ${s.total_tokens_used} tokens | ${s.pause_reason || '—'}`
-                    ).join('\n'))
-            );
-            break;
-        }
         case '/research reports': {
             const { Pool } = require('pg');
             const p        = new Pool({ connectionString: process.env.POSTGRES_URI });
@@ -127,13 +84,6 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
                         `• **${r.name}** | ${r.status} | Sharpe: ${r.sharpe_ratio?.toFixed(2) || 'N/A'} | ${r.annualized_return_pct?.toFixed(1) || 'N/A'}%/yr`
                     ).join('\n'))
             );
-            break;
-        }
-        case '/risk-scan': {
-            await relay.reply('🔍 Running emergency portfolio risk scan...');
-            await rdPost('🚨 **Emergency risk scan initiated** by operator');
-            await swarm.init({ type: 'strategist', mode: 'RISK_SCAN', workspace, threadId: generateId(), force: true });
-            await rdPost('✅ **Risk scan complete** — findings above');
             break;
         }
         case '/approve-dataset': {

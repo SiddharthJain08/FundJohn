@@ -48,6 +48,7 @@ _IMPL_MAP = {
     'S1_event_driven_new_news':       ('strategies.implementations.s1_event_driven_new_news',       'EventDrivenNewNews'),
     'S_markov_frontier_regimes':      ('strategies.implementations.S_markov_frontier_regimes',      'MarkovFrontierRegimes'),
     'S_regime_specialist_vol':        ('strategies.implementations.S_regime_specialist_vol',        'RegimeSpecialistVol'),
+    'S_epistemic_rank_gate':          ('strategies.implementations.S_epistemic_rank_gate',          'EpistemicRankGate'),
 
 }
 

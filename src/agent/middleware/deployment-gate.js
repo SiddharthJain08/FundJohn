@@ -6,11 +6,9 @@
  * to any message — this gate does not apply to his direct responses.
  *
  * Permitted subagent activations:
- *   DEPLOY  — strategist writes + validates + registers a strategy file
  *   REPORT  — report-builder generates performance report for a deployed strategy
  *   SIGNAL_PROCESSING — compute/equity-analyst/research processing a confluence candidate
  *   MARKET_STATE — data-prep running the scheduled market state update
- *   RISK_SCAN — emergency strategist scan (bypasses off-hours/budget constraints)
  *
  * Blocked subagent activations:
  *   - research invoked directly (not via signal processing pipeline)
@@ -31,8 +29,7 @@ const BLOCKED_PATTERNS = [
     { pattern: /fetch.{0,20}data/i,       reason: 'Data fetching runs in the market-state pipeline. No LLM needed.' },
     { pattern: /update.{0,20}price/i,     reason: 'Prices update via master_dataset.py on schedule. No LLM needed.' },
     { pattern: /score.{0,20}confluence/i, reason: 'Confluence scoring runs in signal_runner.py. No LLM needed.' },
-    { pattern: /run.{0,20}backtest/i,     reason: 'Backtests run via the strategist agent in off-hours DEPLOY mode.' },
-    { pattern: /diligence/i,              reason: 'Individual diligence runs are superseded by the zero-token signal engine. Use /signals.' },
+{ pattern: /diligence/i,              reason: 'Individual diligence runs are superseded by the zero-token signal engine. Use /signals.' },
     { pattern: /research.{0,20}ticker/i,  reason: 'Per-ticker research is no longer an agent task. Signals come from the strategy library.' },
 ];
 
@@ -47,19 +44,6 @@ function validateInvocation(agentType, mode, prompt) {
     // The constraint is on pipeline automation, not on BotJohn's own responses.
     if (mode === 'PM_TASK') {
         return { allowed: true, effective_mode: 'PM_TASK' };
-    }
-
-    // Strategist in off-hours is always DEPLOY mode
-    if (agentType === 'strategist') {
-        if (!mode || mode === 'EXPLORE' || mode === 'BACKTEST' || mode === 'VALIDATE') {
-            return { allowed: true, effective_mode: 'DEPLOY' };
-        }
-        if (mode === 'RISK_SCAN') {
-            return { allowed: true, effective_mode: 'RISK_SCAN' };
-        }
-        if (mode === 'REPORT') {
-            return { allowed: true, effective_mode: 'REPORT' };
-        }
     }
 
     // Report-builder: only permitted in REPORT mode
