@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv7_iv_crush_fade",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

@@ -1,0 +1,8 @@
+{
+  "strategy_id": "s09_dual_momentum",
+  "required": [
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

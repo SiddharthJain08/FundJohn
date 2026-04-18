@@ -92,25 +92,6 @@
       },
       "history": []
     },
-    "S_custom_momentum_trend_v1": {
-      "state": "deprecated",
-      "state_since": "2026-04-13T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_custom_momentum_trend_v1.py",
-        "description": "Orphaned momentum-trend hybrid \u2014 no registry entry, no ID in trade_agent.py. Flagged by Audit R3 for evaluation.",
-        "audit_note": "F3 \u2014 strategy file with no lifecycle state assigned. Marked deprecated pending review; archive via lifecycle.transition() when review complete."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "deprecated",
-          "timestamp": "2026-04-13T00:00:00+00:00",
-          "actor": "audit",
-          "reason": "Deliverable-A audit finding F3: orphaned file with no registry entry or HOLDING_PERIOD entry",
-          "metadata": {}
-        }
-      ]
-    },
     "S_HV7_iv_crush_fade": {
       "state": "paper",
       "state_since": "2026-04-16T07:17:59+00:00",
@@ -240,6 +221,16 @@
         "description": "Cross-section iv_rank z-score mean reversion (Driessen et al 2009 JoF; Goyal & Saretto 2009 JFE)"
       },
       "history": []
+    },
+    "S1_event_driven_new_news": {
+      "state": "candidate",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s1_event_driven_new_news.py",
+        "class": "EventDrivenNewNews",
+        "description": "IV term structure crush + post-event momentum on SP500 catalyst events"
+      },
+      "history": []
     }
   },
   "decommissioned": {
@@ -277,6 +268,13 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+    },
+    "S_custom_momentum_trend_v1": {
+      "archived_at": "2026-04-17T00:00:00+00:00",
+      "original_file": "implementations/S_custom_momentum_trend_v1.py",
+      "canonical_file": "implementations/decommissioned/S_custom_momentum_trend_v1.py",
+      "replaced_by": null,
+      "reason": "Audit F3: orphaned file with no registry entry or HOLDING_PERIOD entry. Momentum-trend hybrid superseded by S23/S24/S25 variants. Archived after deprecation review."
     }
   }
 }

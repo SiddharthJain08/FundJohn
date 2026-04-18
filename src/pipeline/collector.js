@@ -260,53 +260,14 @@ async function rateLimitedCall(fn) {
   return result;
 }
 
-// ── Phase 1: Snapshot — try Polygon multi-ticker, fallback to stored price_data ─
+// ── Phase 1: Snapshot — derive from stored price_data (Massive is options-only) ─
 
 async function runSnapshots() {
   const tickers = await getActiveTickers();
   const start = Date.now();
   notify(`📡 Snapshot: ${tickers.length} tickers`);
 
-  // Attempt Polygon multi-ticker snapshot (requires Starter+ tier)
-  try {
-    const url = `https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers?tickers=${tickers.join(',')}&apiKey=${POLYGON_KEY}`;
-    const data = await rateLimitedCall(() => httpGet(url));
-    const results = data.tickers || [];
-
-    let written = 0;
-    for (const t of results) {
-      const day = t.day || {};
-      const prev = t.prevDay || {};
-      await store.upsertSnapshot(t.ticker, {
-        price:      t.lastTrade?.p || day.c,
-        change_pct: t.todaysChangePerc,
-        volume:     day.v,
-        vwap:       day.vw,
-        day_high:   day.h,
-        day_low:    day.l,
-        prev_close: prev.c,
-        market_cap: null,
-        source:     'polygon',
-      });
-      written++;
-    }
-
-    _stats.snapshots += written;
-    await store.logRun(null, 'snapshot', 'success', written, null, Date.now() - start, 1);
-    notify(`✅ Snapshot: ${written} tickers (Polygon)`);
-    return;
-  } catch (err) {
-    // 403 = free tier restriction — fall through to stored-data approach
-    if (!err.message.includes('403')) {
-      _stats.errors++;
-      await store.logRun(null, 'snapshot', 'error', 0, err.message, Date.now() - start, 1);
-      notify(`⚠️ Snapshot error: ${err.message}`);
-      return;
-    }
-    notify(`📡 Snapshot: Polygon tier limit (403) — deriving from stored price data`);
-  }
-
-  // Fallback: populate snapshots from the most recent price_data rows (no extra API calls)
+  // Populate snapshots from the most recent price_data rows (no extra API calls)
   try {
     const { query: dbQuery } = require('../database/postgres');
     const result = await dbQuery(`
@@ -362,20 +323,8 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 
   let skipped = 0;
   let totalCalls = 0;
-
-  // Probe Polygon OHLCV access with a single call before processing all tickers.
-  // Options Starter doesn't include /v2/aggs — detect once, avoid cascading 403→429 flood.
-  let usePolygonOHLCV = true;
-  try {
-    const probeUrl = `https://api.polygon.io/v2/aggs/ticker/SPY/range/1/day/${toDate}/${toDate}?adjusted=true&limit=1&apiKey=${POLYGON_KEY}`;
-    await httpGet(probeUrl);
-  } catch (probeErr) {
-    if (probeErr.message.includes('403')) {
-      usePolygonOHLCV = false;
-      notify(`📊 Prices: Polygon OHLCV not authorised (Options Starter plan) — using Yahoo Finance for gap fill`);
-    }
-    // 429 or other transient errors: assume Polygon works, let per-ticker handler deal with it
-  }
+  // Massive/Polygon is options-only — all stock OHLCV comes from Yahoo Finance
+  const usePolygonOHLCV = false;
 
   for (let i = 0; i < tickers.length; i++) {
     const ticker = tickers[i];
@@ -395,34 +344,14 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 
     for (const gap of gaps) {
       try {
-        if (!usePolygonOHLCV) throw new Error('yfinance_mode'); // skip straight to fallback
-
-        const url = `https://api.polygon.io/v2/aggs/ticker/${ticker}/range/1/day/${gap.from}/${gap.to}?adjusted=true&sort=asc&limit=5000&apiKey=${POLYGON_KEY}`;
-        const data = await rateLimitedCall(() => httpGet(url));
-        const bars = data.results || [];
-        const written = await store.upsertPrices(ticker, bars);
+        const written = await fillPricesYFinance(ticker, gap.from, gap.to);
         await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
         totalWritten += written;
         totalCalls++;
       } catch (err) {
-        const isAuthErr = err.message.includes('403') || err.message.includes('yfinance_mode');
-        if (isAuthErr) {
-          if (err.message.includes('403')) {
-            usePolygonOHLCV = false; // flip flag so all remaining tickers skip Polygon
-          }
-          try {
-            const written = await fillPricesYFinance(ticker, gap.from, gap.to);
-            await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
-            totalWritten += written;
-          } catch (yfErr) {
-            _stats.errors++;
-            await store.logRun(ticker, 'prices', 'error', 0, yfErr.message, Date.now() - start, 1);
-          }
-        } else {
-          _stats.errors++;
-          await store.logRun(ticker, 'prices', 'error', 0, err.message, Date.now() - start, 1);
-          notify(`⚠️ ${ticker} prices error: ${err.message}`);
-        }
+        _stats.errors++;
+        await store.logRun(ticker, 'prices', 'error', 0, err.message, Date.now() - start, 1);
+        notify(`⚠️ ${ticker} prices error: ${err.message}`);
       }
     }
 

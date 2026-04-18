@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getModelForSubagent } = require('../config/models');
+const { loadSkillDefinition } = require('../middleware/skills-loader');
 
 const TYPES_CONFIG = path.join(__dirname, '../config/subagent-types.json');
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
@@ -38,7 +39,7 @@ function getPromptFile(name) {
  * 3. Custom prompt addition (if any)
  * 4. API key injections
  */
-function buildPrompt(type, ticker, workspace, additionalPrompt = '') {
+function buildPrompt(type, ticker, workspace, additionalPrompt = '', templateVars = {}) {
   const def = getType(type);
   if (!def) throw new Error(`Unknown subagent type: ${type}`);
 
@@ -68,7 +69,16 @@ function buildPrompt(type, ticker, workspace, additionalPrompt = '') {
   const POLYGON_KEY = process.env.POLYGON_API_KEY || '';
   const TAVILY_KEY = process.env.TAVILY_API_KEY || '';
 
-  let prompt = `${basePrompt}${components}`;
+  // Inject plugin skill definitions
+  let skillsBlock = '';
+  for (const skillId of (def.skills || [])) {
+    const definition = loadSkillDefinition(skillId);
+    if (definition) {
+      skillsBlock += `\n\n---\n\n## Skill: ${skillId}\n\n${definition}`;
+    }
+  }
+
+  let prompt = `${basePrompt}${components}${skillsBlock}`;
   if (additionalPrompt) prompt += `\n\n---\n\nAdditional context:\n${additionalPrompt}`;
 
   prompt = prompt
@@ -80,6 +90,11 @@ function buildPrompt(type, ticker, workspace, additionalPrompt = '') {
     .replace(/\$\{FMP_API_KEY\}/g, FMP_KEY)
     .replace(/\$\{ALPHA_VANTAGE_API_KEY\}/g, AV_KEY)
     .replace(/TICKER/g, ticker || '');  // bare TICKER references
+
+  // Substitute caller-supplied template vars (e.g. SEARCH_THEME from context JSON)
+  for (const [key, val] of Object.entries(templateVars)) {
+    prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), String(val || ''));
+  }
 
   if (workspace) {
     prompt = prompt.replace(/\{WORKSPACE\}/g, workspace).replace(/WORKSPACE/g, workspace);

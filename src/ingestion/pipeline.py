@@ -2,8 +2,8 @@
 OpenClaw Ingestion Pipeline — 3-layer async ETL.
 
 Layer 1 — Fetch:  aiohttp with semaphore rate-limiting
-  FMP Starter:    300 req/min  → semaphore(5 concurrent)
-  Massive Starter: 60 req/min → semaphore(2 concurrent)
+  FMP Starter:    300 req/min   → semaphore(5 concurrent)
+  Polygon:        unlimited     → semaphore(10 concurrent)
 
 Layer 2 — Transform: normalize raw API responses into MasterBar,
   compute EMA20, EMA50, RSI(14) from OHLCV history.
@@ -36,11 +36,11 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 CACHE_DIR = ROOT / 'data' / 'cache'
 CACHE_TTL_SECONDS = 23 * 3600  # 23 hours
 
-FMP_BASE   = 'https://financialmodelingprep.com/api/v3'
-MASSIVE_BASE = 'https://api.massivetrader.com/v1'   # placeholder — swap for real host
+FMP_BASE     = 'https://financialmodelingprep.com/api/v3'
+POLYGON_BASE = 'https://api.polygon.io'
 
-FMP_CONCURRENCY    = 5   # semaphore slots for FMP (300 req/min → safe at 5 parallel)
-MASSIVE_CONCURRENCY = 2  # semaphore slots for Massive (60 req/min → safe at 2 parallel)
+FMP_CONCURRENCY     = 5   # semaphore slots for FMP (300 req/min → safe at 5 parallel)
+POLYGON_CONCURRENCY = 10  # Polygon standard tier: no hard per-minute cap
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +221,8 @@ def _safe_float(v) -> Optional[float]:
 # Layer 1 — Fetch (async)
 # ---------------------------------------------------------------------------
 
-_fmp_semaphore:    Optional[asyncio.Semaphore] = None
-_massive_semaphore: Optional[asyncio.Semaphore] = None
+_fmp_semaphore:     Optional[asyncio.Semaphore] = None
+_polygon_semaphore: Optional[asyncio.Semaphore] = None
 
 
 def _get_fmp_sem() -> asyncio.Semaphore:
@@ -232,11 +232,11 @@ def _get_fmp_sem() -> asyncio.Semaphore:
     return _fmp_semaphore
 
 
-def _get_massive_sem() -> asyncio.Semaphore:
-    global _massive_semaphore
-    if _massive_semaphore is None:
-        _massive_semaphore = asyncio.Semaphore(MASSIVE_CONCURRENCY)
-    return _massive_semaphore
+def _get_polygon_sem() -> asyncio.Semaphore:
+    global _polygon_semaphore
+    if _polygon_semaphore is None:
+        _polygon_semaphore = asyncio.Semaphore(POLYGON_CONCURRENCY)
+    return _polygon_semaphore
 
 
 async def fetch_fmp_earnings(
@@ -362,95 +362,131 @@ async def fetch_fmp_prices(
             return None
 
 
-async def fetch_massive_chain(
+async def _fetch_polygon_options_results(
     session: aiohttp.ClientSession,
     symbol:  str,
     api_key: str,
+) -> Optional[List[Dict]]:
+    """Shared helper: fetch raw options contracts from Polygon /v3/snapshot/options/{symbol}."""
+    url = f'{POLYGON_BASE}/v3/snapshot/options/{symbol}'
+    async with _get_polygon_sem():
+        try:
+            async with session.get(
+                url,
+                headers={'Authorization': f'Bearer {api_key}'},
+                params={'limit': 250},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning('Polygon options %s: HTTP %s', symbol, resp.status)
+                    return None
+                data = await resp.json(content_type=None)
+                return data.get('results') or []
+        except Exception as e:
+            logger.warning('Polygon options %s error: %s', symbol, e)
+            return None
+
+
+async def fetch_polygon_chain(
+    session: aiohttp.ClientSession,
+    symbol:  str,
+    api_key: str,
+    _results: Optional[List[Dict]] = None,
 ) -> Optional[Dict]:
     """
-    GET /chain/{symbol}
+    Polygon options snapshot → chain shape.
     Returns {iv_rank, open_interest_by_strike: {strike: oi}, expiry_date} or None.
+    Pass _results to avoid a second HTTP call when fetch_polygon_flow already fetched them.
     """
-    url = f'{MASSIVE_BASE}/chain/{symbol}'
-    async with _get_massive_sem():
-        try:
-            async with session.get(
-                url,
-                headers={'X-API-Key': api_key},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning('Massive chain %s: HTTP %s', symbol, resp.status)
-                    return None
-                data = await resp.json(content_type=None)
+    results = _results if _results is not None else await _fetch_polygon_options_results(session, symbol, api_key)
+    if not results:
+        return None
 
-                # Normalise OI: expect list of {strike, call_oi, put_oi} or {strike, oi}
-                raw_chain = data.get('chain') or data.get('contracts') or []
-                oi_dict: Dict[float, float] = {}
-                for contract in raw_chain:
-                    strike = _safe_float(contract.get('strike') or contract.get('strikePrice'))
-                    if strike is None:
-                        continue
-                    oi = _safe_float(contract.get('oi') or contract.get('openInterest'))
-                    call_oi = _safe_float(contract.get('call_oi') or contract.get('callOI'))
-                    put_oi  = _safe_float(contract.get('put_oi')  or contract.get('putOI'))
-                    total = (oi or 0) + (call_oi or 0) + (put_oi or 0)
-                    if total > 0:
-                        oi_dict[strike] = total
+    oi_dict: Dict[float, float] = {}
+    iv_values: List[float] = []
+    expiries:  List[str]   = []
+    today = datetime.utcnow().strftime('%Y-%m-%d')
 
-                # Nearest expiry — try top-level field
-                expiry = (
-                    data.get('expiry_date')
-                    or data.get('expiryDate')
-                    or data.get('expiration')
-                )
+    for contract in results:
+        details = contract.get('details') or {}
+        strike  = _safe_float(details.get('strike_price'))
+        if strike is None:
+            continue
+        oi = _safe_float(contract.get('open_interest', 0)) or 0
+        if oi > 0:
+            oi_dict[strike] = oi_dict.get(strike, 0) + oi
+        iv = _safe_float(contract.get('implied_volatility'))
+        if iv is not None and iv > 0:
+            iv_values.append(iv)
+        exp = details.get('expiration_date')
+        if exp:
+            expiries.append(exp)
 
-                return {
-                    'iv_rank':                _safe_float(data.get('iv_rank') or data.get('ivRank')),
-                    'open_interest_by_strike': oi_dict,
-                    'expiry_date':             expiry,
-                }
-        except Exception as e:
-            logger.warning('Massive chain %s error: %s', symbol, e)
-            return None
+    iv_rank = None
+    if len(iv_values) >= 2:
+        min_iv, max_iv = min(iv_values), max(iv_values)
+        if max_iv > min_iv:
+            mean_iv = sum(iv_values) / len(iv_values)
+            iv_rank = round((mean_iv - min_iv) / (max_iv - min_iv) * 100, 2)
+
+    future_expiries = sorted(e for e in expiries if e >= today)
+    expiry_date = future_expiries[0] if future_expiries else (sorted(expiries)[0] if expiries else None)
+
+    return {
+        'iv_rank':                 iv_rank,
+        'open_interest_by_strike': oi_dict,
+        'expiry_date':             expiry_date,
+    }
 
 
-async def fetch_massive_flow(
+async def fetch_polygon_flow(
     session: aiohttp.ClientSession,
     symbol:  str,
     api_key: str,
+    _results: Optional[List[Dict]] = None,
 ) -> Optional[Dict]:
     """
-    GET /flow/unusual/{symbol}
-    Returns {unusual_call_flow: bool, unusual_put_flow: bool} or None.
+    Polygon options snapshot → unusual flow detection.
+    Returns {unusual_call_flow: bool, unusual_put_flow: bool}.
+    Day volume > 30% of open interest signals unusual activity.
+    Pass _results to avoid a second HTTP call when fetch_polygon_chain already fetched them.
     """
-    url = f'{MASSIVE_BASE}/flow/unusual/{symbol}'
-    async with _get_massive_sem():
-        try:
-            async with session.get(
-                url,
-                headers={'X-API-Key': api_key},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning('Massive flow %s: HTTP %s', symbol, resp.status)
-                    return None
-                data = await resp.json(content_type=None)
-                return {
-                    'unusual_call_flow': bool(
-                        data.get('unusual_call_flow')
-                        or data.get('unusualCallFlow')
-                        or data.get('call_unusual')
-                    ),
-                    'unusual_put_flow': bool(
-                        data.get('unusual_put_flow')
-                        or data.get('unusualPutFlow')
-                        or data.get('put_unusual')
-                    ),
-                }
-        except Exception as e:
-            logger.warning('Massive flow %s error: %s', symbol, e)
-            return None
+    # Check live Redis cache from MassiveOptionsCapture (near-real-time, updated per minute)
+    try:
+        import redis as _redis_sync
+        _r = _redis_sync.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                                   socket_connect_timeout=1)
+        _cached = _r.get(f'massive:flow:{symbol}')
+        if _cached:
+            _data = json.loads(_cached)
+            _updated = datetime.fromisoformat(_data.get('updated_at', '2000-01-01'))
+            if (datetime.utcnow() - _updated).total_seconds() < 7200:
+                return {'unusual_call_flow': _data['unusual_call_flow'],
+                        'unusual_put_flow':  _data['unusual_put_flow']}
+    except Exception:
+        pass  # Redis unavailable or key absent — fall through to REST
+
+    results = _results if _results is not None else await _fetch_polygon_options_results(session, symbol, api_key)
+    if not results:
+        return {'unusual_call_flow': False, 'unusual_put_flow': False}
+
+    call_vol = call_oi = put_vol = put_oi = 0.0
+    for contract in results:
+        details       = contract.get('details') or {}
+        contract_type = details.get('contract_type', '').lower()
+        day = contract.get('day') or {}
+        vol = _safe_float(day.get('volume', 0)) or 0.0
+        oi  = _safe_float(contract.get('open_interest', 0)) or 0.0
+        if contract_type == 'call':
+            call_vol += vol
+            call_oi  += oi
+        elif contract_type == 'put':
+            put_vol  += vol
+            put_oi   += oi
+
+    unusual_call = (call_oi > 0) and (call_vol > 0.3 * call_oi)
+    unusual_put  = (put_oi  > 0) and (put_vol  > 0.3 * put_oi)
+    return {'unusual_call_flow': unusual_call, 'unusual_put_flow': unusual_put}
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +498,7 @@ async def _process_symbol(
     symbol:      str,
     date:        str,
     fmp_key:     str,
-    massive_key: str,
+    polygon_key: str,
     force:       bool = False,
 ) -> Optional[MasterBar]:
     """Fetch, transform, cache one symbol. Returns MasterBar or None."""
@@ -472,17 +508,20 @@ async def _process_symbol(
             logger.debug('%s: cache hit', symbol)
             return cached
 
-    # Kick off all fetches in parallel
-    prices_task  = asyncio.create_task(fetch_fmp_prices(session, symbol, fmp_key))
+    # FMP fetches run in parallel with a single shared Polygon options call
+    prices_task   = asyncio.create_task(fetch_fmp_prices(session, symbol, fmp_key))
     earnings_task = asyncio.create_task(fetch_fmp_earnings(session, symbol, fmp_key))
     insider_task  = asyncio.create_task(fetch_fmp_insider(session, symbol, fmp_key))
-    chain_task    = asyncio.create_task(fetch_massive_chain(session, symbol, massive_key))
-    flow_task     = asyncio.create_task(fetch_massive_flow(session, symbol, massive_key))
+    options_task  = asyncio.create_task(_fetch_polygon_options_results(session, symbol, polygon_key))
 
-    ohlcv, earnings, insider, chain, flow = await asyncio.gather(
-        prices_task, earnings_task, insider_task, chain_task, flow_task,
+    ohlcv, earnings, insider, options_results = await asyncio.gather(
+        prices_task, earnings_task, insider_task, options_task,
         return_exceptions=False,
     )
+
+    # Parse chain and flow from the same options_results — avoids a duplicate API call
+    chain = await fetch_polygon_chain(session, symbol, polygon_key, _results=options_results)
+    flow  = await fetch_polygon_flow(session, symbol, polygon_key, _results=options_results)
 
     bar = transform_to_masterbar(
         symbol   = symbol,
@@ -530,21 +569,21 @@ async def fetch_fmp_earnings_calendar(
     return []
 
 async def run_pipeline(
-    symbols:    List[str],
-    date:       Optional[str] = None,
-    fmp_key:    Optional[str] = None,
-    massive_key: Optional[str] = None,
-    force:      bool = False,
+    symbols:     List[str],
+    date:        Optional[str] = None,
+    fmp_key:     Optional[str] = None,
+    polygon_key: Optional[str] = None,
+    force:       bool = False,
 ) -> List[MasterBar]:
     """
     Run the full ingestion pipeline for a list of symbols.
 
     Args:
-        symbols:    Ticker list, e.g. ['AAPL', 'MSFT']
-        date:       ISO date string 'YYYY-MM-DD'; defaults to today (UTC)
-        fmp_key:    FMP API key; falls back to $FMP_API_KEY env var
-        massive_key: Massive API key; falls back to $MASSIVE_API_KEY env var
-        force:      Bypass cache even if fresh
+        symbols:     Ticker list, e.g. ['AAPL', 'MSFT']
+        date:        ISO date string 'YYYY-MM-DD'; defaults to today (UTC)
+        fmp_key:     FMP API key; falls back to $FMP_API_KEY env var
+        polygon_key: Polygon API key; falls back to $POLYGON_API_KEY env var
+        force:       Bypass cache even if fresh
 
     Returns:
         List of MasterBar objects (one per symbol, may be partial if fetches fail)
@@ -553,17 +592,17 @@ async def run_pipeline(
         date = datetime.utcnow().strftime('%Y-%m-%d')
 
     fmp_key     = fmp_key     or os.environ.get('FMP_API_KEY', '')
-    massive_key = massive_key or os.environ.get('MASSIVE_API_KEY', '')
+    polygon_key = polygon_key or os.environ.get('POLYGON_API_KEY', '')
 
     # Reset semaphores on each run (handles reuse across event loops in tests)
-    global _fmp_semaphore, _massive_semaphore
-    _fmp_semaphore    = asyncio.Semaphore(FMP_CONCURRENCY)
-    _massive_semaphore = asyncio.Semaphore(MASSIVE_CONCURRENCY)
+    global _fmp_semaphore, _polygon_semaphore
+    _fmp_semaphore     = asyncio.Semaphore(FMP_CONCURRENCY)
+    _polygon_semaphore = asyncio.Semaphore(POLYGON_CONCURRENCY)
 
     connector = aiohttp.TCPConnector(limit=20)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [
-            _process_symbol(session, sym, date, fmp_key, massive_key, force)
+            _process_symbol(session, sym, date, fmp_key, polygon_key, force)
             for sym in symbols
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -577,6 +616,136 @@ async def run_pipeline(
 
     logger.info('Pipeline complete: %d/%d symbols ingested for %s', len(bars), len(symbols), date)
     return bars
+
+
+# ---------------------------------------------------------------------------
+# Universe sync — FMP + Polygon ticker reference
+# ---------------------------------------------------------------------------
+
+_VALID_EXCHANGES = {'NASDAQ', 'NYSE', 'AMEX', 'XNAS', 'XNYS', 'XASE'}
+
+
+async def fetch_fmp_universe(
+    session: aiohttp.ClientSession,
+    api_key: str,
+) -> List[Dict]:
+    """
+    GET /v3/available-traded/list — all tradeable US stocks from FMP.
+    Returns [{ticker, name, exchange}].
+    """
+    url = f'{FMP_BASE}/available-traded/list'
+    async with _get_fmp_sem():
+        try:
+            async with session.get(
+                url,
+                params={'apikey': api_key},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning('FMP universe: HTTP %s', resp.status)
+                    return []
+                data = await resp.json(content_type=None)
+                if not isinstance(data, list):
+                    return []
+                results = []
+                for row in data:
+                    exch = (row.get('exchangeShortName') or '').upper()
+                    typ  = (row.get('type') or '').lower()
+                    if typ == 'stock' and exch in {'NASDAQ', 'NYSE', 'AMEX'}:
+                        results.append({
+                            'ticker':   row.get('symbol', '').upper(),
+                            'name':     row.get('name', ''),
+                            'exchange': exch,
+                            'source':   'fmp',
+                        })
+                logger.info('FMP universe: %d tradeable US stocks', len(results))
+                return results
+        except Exception as e:
+            logger.warning('FMP universe error: %s', e)
+            return []
+
+
+async def sync_universe_to_db(
+    fmp_key: Optional[str] = None,
+) -> Dict:
+    """
+    Fetch FMP stock list and upsert into universe_config.
+    Deactivates tickers no longer present in FMP.
+    Returns {'added': int, 'deactivated': int, 'total': int}.
+    """
+    import psycopg2
+    from psycopg2.extras import execute_values
+
+    fmp_key = fmp_key or os.environ.get('FMP_API_KEY', '')
+
+    global _fmp_semaphore
+    _fmp_semaphore = asyncio.Semaphore(FMP_CONCURRENCY)
+
+    connector = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        fmp_rows = await fetch_fmp_universe(session, fmp_key)
+
+    merged: Dict[str, Dict] = {}
+    for row in fmp_rows:
+        t = row['ticker']
+        merged[t] = {'ticker': t, 'name': row['name'], 'exchange': row['exchange'],
+                     'has_fundamentals': True, 'category': 'equity', 'active': True}
+
+    if not merged:
+        logger.warning('sync_universe_to_db: no tickers fetched — aborting upsert')
+        return {'added': 0, 'deactivated': 0, 'total': 0}
+
+    postgres_uri = os.environ.get('POSTGRES_URI', '')
+    if not postgres_uri:
+        logger.warning('sync_universe_to_db: POSTGRES_URI not set')
+        return {'added': 0, 'deactivated': 0, 'total': len(merged)}
+
+    active_tickers = list(merged.keys())
+    rows = [
+        (
+            r['ticker'], r['name'], r['exchange'],
+            r.get('has_fundamentals', False), r.get('category', 'equity'),
+        )
+        for r in merged.values()
+    ]
+
+    conn = psycopg2.connect(postgres_uri)
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    """
+                    INSERT INTO universe_config
+                        (ticker, name, exchange, has_fundamentals, category, active)
+                    VALUES %s
+                    ON CONFLICT (ticker) DO UPDATE SET
+                        name=EXCLUDED.name,
+                        exchange=EXCLUDED.exchange,
+                        has_fundamentals=EXCLUDED.has_fundamentals,
+                        active=TRUE
+                    """,
+                    rows,
+                )
+                # Deactivate tickers not in fresh list (preserve existing non-equity entries)
+                cur.execute(
+                    """
+                    UPDATE universe_config
+                    SET active = FALSE
+                    WHERE category = 'equity'
+                      AND ticker NOT IN %s
+                    """,
+                    (tuple(active_tickers),),
+                )
+                deactivated = cur.rowcount
+        conn.close()
+    except Exception as e:
+        conn.close()
+        logger.error('sync_universe_to_db DB error: %s', e)
+        return {'added': 0, 'deactivated': 0, 'total': len(merged), 'error': str(e)}
+
+    logger.info('Universe sync complete: %d active equities, %d deactivated', len(merged), deactivated)
+    return {'added': len(merged), 'deactivated': deactivated, 'total': len(merged)}
 
 
 # ---------------------------------------------------------------------------

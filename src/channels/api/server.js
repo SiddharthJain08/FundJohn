@@ -7,6 +7,7 @@ const { getAllSubagentStatuses, getBucketStatus } = require('../../database/redi
 const { verdictCache, query: dbQuery } = require('../../database/postgres');
 
 const app  = express();
+app.use(express.json());
 const PORT = process.env.DASHBOARD_PORT || 3000;
 
 // SSE clients
@@ -203,6 +204,167 @@ app.get('/api/db/cycles', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Portfolio API ──────────────────────────────────────────────────────────────
+
+app.get('/api/portfolio/positions', async (req, res) => {
+  try {
+    const result = await dbQuery(`
+      SELECT es.id, es.strategy_id, es.ticker, es.direction,
+             es.entry_price, es.stop_loss, es.target_1, es.position_size_pct,
+             es.signal_date, es.status,
+             sp.close_price AS current_price,
+             sp.unrealized_pnl_pct, sp.days_held
+      FROM execution_signals es
+      LEFT JOIN LATERAL (
+        SELECT close_price, unrealized_pnl_pct, days_held
+        FROM signal_pnl WHERE signal_id = es.id ORDER BY pnl_date DESC LIMIT 1
+      ) sp ON true
+      WHERE es.status = 'open'
+      ORDER BY es.signal_date DESC
+    `);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/portfolio/history', async (req, res) => {
+  try {
+    const result = await dbQuery(`
+      SELECT es.strategy_id, es.ticker, es.direction, es.entry_price,
+             sp.closed_price, sp.realized_pnl_pct, sp.days_held,
+             sp.close_reason, sp.closed_at
+      FROM signal_pnl sp
+      JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.status = 'closed'
+      ORDER BY sp.closed_at DESC LIMIT 100
+    `);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/portfolio/summary', async (req, res) => {
+  try {
+    const [openRes, closedRes] = await Promise.all([
+      dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
+      dbQuery(`
+        SELECT COUNT(*) AS closed_count,
+               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins,
+               ROUND(AVG(realized_pnl_pct)::numeric, 2) AS avg_pnl,
+               ROUND(MAX(realized_pnl_pct)::numeric, 2) AS best,
+               ROUND(MIN(realized_pnl_pct)::numeric, 2) AS worst
+        FROM signal_pnl WHERE status = 'closed'
+      `),
+    ]);
+    const open        = openRes.rows[0];
+    const closed      = closedRes.rows[0];
+    const closedCount = parseInt(closed.closed_count) || 0;
+    const wins        = parseInt(closed.wins) || 0;
+    res.json({
+      open_count:   parseInt(open.open_count) || 0,
+      closed_count: closedCount,
+      win_rate:     closedCount > 0 ? Math.round(wins / closedCount * 100) : null,
+      avg_realized: closed.avg_pnl,
+      best_trade:   closed.best,
+      worst_trade:  closed.worst,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/portfolio/pnl-curve', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days) || 90, 365);
+  try {
+    const result = await dbQuery(`
+      SELECT pnl_date,
+             ROUND(AVG(unrealized_pnl_pct)::numeric, 2) AS avg_unrealized,
+             COUNT(*) AS open_count
+      FROM signal_pnl
+      WHERE pnl_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
+      GROUP BY pnl_date ORDER BY pnl_date
+    `, [days]);
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/portfolio/account', async (req, res) => {
+  const key    = process.env.ALPACA_API_KEY    || '';
+  const secret = process.env.ALPACA_SECRET_KEY || '';
+  const base   = process.env.ALPACA_BASE_URL   || 'https://paper-api.alpaca.markets';
+  try {
+    const https = require('https');
+    const fetch = (url) => new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const opts = {
+        hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
+        headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'Accept': 'application/json' },
+      };
+      const req2 = https.request(opts, r => {
+        let body = '';
+        r.on('data', c => body += c);
+        r.on('end', () => resolve({ status: r.statusCode, body }));
+      });
+      req2.on('error', reject);
+      req2.end();
+    });
+
+    const acct = await fetch(`${base}/v2/account`);
+    if (acct.status !== 200) return res.status(acct.status).json({ error: `Alpaca: ${acct.body}` });
+    const a = JSON.parse(acct.body);
+
+    res.json({
+      equity:          parseFloat(a.equity)          || 0,
+      cash:            parseFloat(a.cash)            || 0,
+      buying_power:    parseFloat(a.buying_power)    || 0,
+      last_equity:     parseFloat(a.last_equity)     || 0,
+      long_market_value:  parseFloat(a.long_market_value)  || 0,
+      short_market_value: parseFloat(a.short_market_value) || 0,
+      day_pnl:         (parseFloat(a.equity) - parseFloat(a.last_equity)) || 0,
+      day_pnl_pct:     parseFloat(a.last_equity) > 0
+                         ? ((parseFloat(a.equity) - parseFloat(a.last_equity)) / parseFloat(a.last_equity) * 100)
+                         : 0,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/portfolio/value-curve', async (req, res) => {
+  const key    = process.env.ALPACA_API_KEY    || '';
+  const secret = process.env.ALPACA_SECRET_KEY || '';
+  const base   = process.env.ALPACA_BASE_URL   || 'https://paper-api.alpaca.markets';
+  const period = req.query.period || '1M';
+  try {
+    const https = require('https');
+    const url   = `${base}/v2/account/portfolio/history?period=${period}&timeframe=1D&extended_hours=false`;
+    const u     = new URL(url);
+    const data  = await new Promise((resolve, reject) => {
+      const opts = {
+        hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
+        headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'Accept': 'application/json' },
+      };
+      const req2 = require('https').request(opts, r => {
+        let body = '';
+        r.on('data', c => body += c);
+        r.on('end', () => resolve({ status: r.statusCode, body }));
+      });
+      req2.on('error', reject);
+      req2.end();
+    });
+    if (data.status !== 200) return res.status(data.status).json({ error: `Alpaca: ${data.body}` });
+    const h = JSON.parse(data.body);
+    // Zip timestamps + equity into [{date, equity, profit_loss, profit_loss_pct}]
+    const rows = (h.timestamp || []).map((ts, i) => ({
+      date:             new Date(ts * 1000).toISOString().slice(0, 10),
+      equity:           h.equity?.[i]          ?? null,
+      profit_loss:      h.profit_loss?.[i]     ?? null,
+      profit_loss_pct:  h.profit_loss_pct?.[i] ?? null,
+    })).filter(r => r.equity !== null && r.equity > 0);
+    res.json({ rows, base_value: h.base_value ?? null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Called by cron after pipeline completes — pushes market_update to all SSE clients
+app.post('/api/events/data-updated', (req, res) => {
+  broadcast({ type: 'market_update' });
+  res.json({ ok: true });
+});
+
 // SSE stream
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -255,7 +417,8 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .strip-item .s-chg{font-size:10px}
 
 /* Body layout */
-#body{display:flex;flex:1;overflow:hidden}
+#view-wrap{flex:1;position:relative;overflow:hidden;min-height:0}
+#body{position:absolute;inset:0;display:flex;overflow:hidden}
 
 /* Sidebar */
 #sidebar{width:230px;min-width:230px;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0}
@@ -365,6 +528,28 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 ::-webkit-scrollbar{width:4px;height:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border)}
+
+/* Nav buttons */
+.nav-btn{background:none;border:none;color:var(--muted);font-size:12px;cursor:pointer;font-family:inherit;padding:4px 11px;border-radius:4px}
+.nav-btn.active,.nav-btn:hover{color:var(--blue);background:var(--border2)}
+.refresh-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:11px;cursor:pointer;font-family:inherit;padding:3px 9px;border-radius:4px}
+.refresh-btn:hover{color:var(--text);border-color:var(--blue)}
+
+/* Portfolio page */
+#portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
+.pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+.pf-stat-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.pf-stat-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px}
+.pf-stat-value{font-size:22px;font-weight:700;color:var(--text)}
+.pf-stat-sub{font-size:10px;color:var(--dim);margin-top:3px}
+.pf-chart-wrap{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;position:relative;height:180px}
+.pf-chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
+.pf-section{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.pf-section-header{padding:11px 16px;border-bottom:1px solid var(--border2);font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;justify-content:space-between}
+.pf-section-body{overflow-x:auto}
+.pf-pnl-pos{color:var(--green)}.pf-pnl-neg{color:var(--red)}
+.dir-long{color:var(--green);font-weight:600}.dir-short{color:var(--red);font-weight:600}
 </style>
 </head>
 <body>
@@ -372,12 +557,16 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 <div id="header">
   <span class="dot" id="dot"></span>
   <h1>🦞 OpenClaw</h1>
-  <span id="pipeline-badge" onclick="showOverview()">Loading pipeline...</span>
+  <button class="nav-btn active" id="nav-market" onclick="showMarket()">Market</button>
+  <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
+  <span id="pipeline-badge">Loading pipeline...</span>
+  <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
 </div>
 
 <div id="strip"><div id="strip-inner"></div></div>
 
+<div id="view-wrap">
 <div id="body">
   <div id="sidebar">
     <div id="search-wrap">
@@ -403,6 +592,42 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   </div>
 </div>
 
+<div id="portfolio-page">
+<div id="pf-inner">
+  <div id="pf-account-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px">
+    <div class="pf-stat-card"><div class="pf-stat-label">Portfolio Value</div><div class="pf-stat-value" id="pf-equity">—</div><div class="pf-stat-sub" id="pf-equity-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Cash</div><div class="pf-stat-value" id="pf-cash">—</div><div class="pf-stat-sub" id="pf-cash-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Day P&amp;L</div><div class="pf-stat-value" id="pf-daypnl">—</div><div class="pf-stat-sub" id="pf-daypnl-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Invested</div><div class="pf-stat-value" id="pf-invested">—</div><div class="pf-stat-sub" id="pf-invested-sub"></div></div>
+  </div>
+  <div class="pf-summary-row" id="pf-summary">
+    <div class="pf-stat-card"><div class="pf-stat-label">Open Positions</div><div class="pf-stat-value" id="pf-open">—</div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Closed Trades</div><div class="pf-stat-value" id="pf-closed">—</div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Win Rate</div><div class="pf-stat-value" id="pf-winrate">—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label">Avg Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
+  </div>
+  <div class="pf-chart-wrap">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <div class="pf-chart-label" style="margin-bottom:0" id="pf-chart-title">Portfolio P&amp;L Curve (90d)</div>
+      <div style="display:flex;gap:4px">
+        <button class="range-btn active" id="btn-pnl-mode" onclick="setPnlMode('pnl')" style="font-size:10px;padding:2px 8px">P&amp;L %</button>
+        <button class="range-btn" id="btn-value-mode" onclick="setPnlMode('value')" style="font-size:10px;padding:2px 8px">Value $</button>
+      </div>
+    </div>
+    <canvas id="pnlChart" style="width:100%;height:130px"></canvas>
+  </div>
+  <div class="pf-section">
+    <div class="pf-section-header"><span>Active Positions</span><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-body"><div id="pf-positions"><div class="empty">Loading...</div></div></div>
+  </div>
+  <div class="pf-section">
+    <div class="pf-section-header"><span>Closed Trades</span><span id="pf-hist-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-body"><div id="pf-history"><div class="empty">Loading...</div></div></div>
+  </div>
+</div><!-- #pf-inner -->
+</div><!-- #portfolio-page -->
+</div><!-- #view-wrap -->
+
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let universeData = {};     // {category: [{ticker, name, ...}]}
@@ -415,6 +640,16 @@ let priceChart    = null;
 const CAT_LABELS = {equity:'S&P 100',index:'Indices',etf:'ETFs',crypto:'Crypto',commodity:'Commodities',forex:'Forex'};
 const CAT_ICONS  = {equity:'📊',index:'📈',etf:'🏦',crypto:'₿',commodity:'🛢️',forex:'💱'};
 
+// ── Market data refresh ───────────────────────────────────────────────────────
+async function loadMarket() {
+  const mkt = await fetch('/api/db/market-overview').then(r=>r.json()).catch(()=>[]);
+  for (const row of mkt) marketData[row.ticker] = row;
+  buildStrip();
+  buildSidebar();
+  const onMarket = document.getElementById('portfolio-page').style.display === 'none';
+  if (onMarket && !currentTicker) showOverview();
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 (async () => {
   setInterval(() => {
@@ -422,39 +657,26 @@ const CAT_ICONS  = {equity:'📊',index:'📈',etf:'🏦',crypto:'₿',commodity
       new Date().toLocaleTimeString('en-US',{timeZone:'America/New_York',hour12:true}) + ' ET';
   }, 1000);
 
-  const [univ, mkt] = await Promise.all([
+  const [univ] = await Promise.all([
     fetch('/api/db/universe').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/db/market-overview').then(r=>r.json()).catch(()=>[]),
   ]);
-
   universeData = univ;
-  for (const row of mkt) marketData[row.ticker] = row;
 
-  buildStrip();
-  buildSidebar();
-  showOverview();
+  await loadMarket();
   document.getElementById('loading').style.display = 'none';
 
-  // Pipeline badge
   refreshPipeline();
   setInterval(refreshPipeline, 60000);
+  setInterval(loadMarket, 300000);
 
   // SSE
   const es = new EventSource('/events');
   es.onmessage = e => {
     const d = JSON.parse(e.data);
     if (d.type === 'pipeline') refreshPipeline();
+    if (d.type === 'market_update') { loadMarket(); refreshPipeline(); }
   };
   es.onerror = () => { document.getElementById('dot').style.background = 'var(--red)'; };
-
-  // Refresh market data every 5min
-  setInterval(async () => {
-    const mkt2 = await fetch('/api/db/market-overview').then(r=>r.json()).catch(()=>[]);
-    for (const row of mkt2) marketData[row.ticker] = row;
-    buildStrip();
-    buildSidebar();
-    if (!currentTicker) showOverview();
-  }, 300000);
 })();
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -907,6 +1129,226 @@ async function loadNewsSection(containerId, ticker) {
   const qs = ticker ? \`?ticker=\${ticker}&limit=25\` : '?limit=30';
   const articles = await fetch(\`/api/db/news\${qs}\`).then(r=>r.json()).catch(()=>[]);
   el.innerHTML = renderNewsCards(articles);
+}
+
+// ── Portfolio ─────────────────────────────────────────────────────────────────
+let pnlChart     = null;
+let pnlMode      = 'pnl';   // 'pnl' | 'value'
+let pnlCurveData = null;    // cached {rows, base_value}
+let valueCurveData = null;  // cached from /api/portfolio/value-curve
+
+function showMarket() {
+  document.getElementById('portfolio-page').style.display = 'none';
+  document.getElementById('body').style.display = 'flex';
+  document.getElementById('nav-market').classList.add('active');
+  document.getElementById('nav-portfolio').classList.remove('active');
+  showOverview();
+}
+
+async function showPortfolio() {
+  document.getElementById('body').style.display = 'none';
+  document.getElementById('portfolio-page').style.display = 'block';
+  document.getElementById('nav-portfolio').classList.add('active');
+  document.getElementById('nav-market').classList.remove('active');
+  await loadPortfolio();
+}
+
+async function loadPortfolio() {
+  const [summary, positions, history, curve, account, valCurve] = await Promise.all([
+    fetch('/api/portfolio/summary').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/portfolio/positions').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/portfolio/history').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/portfolio/pnl-curve?days=90').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/portfolio/account').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/portfolio/value-curve?period=1M').then(r=>r.json()).catch(()=>({})),
+  ]);
+  renderAccountRow(account);
+  renderPortfolioSummary(summary);
+  renderPositions(positions);
+  renderHistory(history);
+  pnlCurveData   = curve;
+  valueCurveData = valCurve;
+  renderChartForMode();
+}
+
+function setPnlMode(mode) {
+  pnlMode = mode;
+  document.getElementById('btn-pnl-mode').classList.toggle('active', mode === 'pnl');
+  document.getElementById('btn-value-mode').classList.toggle('active', mode === 'value');
+  renderChartForMode();
+}
+
+function renderChartForMode() {
+  if (pnlMode === 'value') {
+    const rows = valueCurveData?.rows || [];
+    const title = 'Portfolio Value — 1 Month';
+    document.getElementById('pf-chart-title').textContent = title;
+    renderValueChart(rows);
+  } else {
+    document.getElementById('pf-chart-title').textContent = 'Portfolio P&L Curve (90d)';
+    renderPnlChart(pnlCurveData || []);
+  }
+}
+
+function renderAccountRow(a) {
+  const fmt = (v) => v != null ? '$' + parseFloat(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
+  const fmtPct = (v) => v != null ? (v >= 0 ? '+' : '') + parseFloat(v).toFixed(2) + '%' : '';
+
+  const equity   = a.equity;
+  const cash     = a.cash;
+  const dayPnl   = a.day_pnl;
+  const dayPct   = a.day_pnl_pct;
+  const invested = a.long_market_value;
+
+  const equityEl = document.getElementById('pf-equity');
+  equityEl.textContent = fmt(equity);
+  equityEl.className   = 'pf-stat-value';
+  document.getElementById('pf-equity-sub').textContent = a.last_equity ? 'prev close ' + fmt(a.last_equity) : '';
+
+  document.getElementById('pf-cash').textContent     = fmt(cash);
+  document.getElementById('pf-cash-sub').textContent = a.buying_power ? 'buying power ' + fmt(a.buying_power) : '';
+
+  const dayEl  = document.getElementById('pf-daypnl');
+  const daySub = document.getElementById('pf-daypnl-sub');
+  dayEl.textContent  = fmt(dayPnl);
+  dayEl.className    = 'pf-stat-value ' + (dayPnl == null ? '' : dayPnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg');
+  daySub.textContent = fmtPct(dayPct);
+
+  document.getElementById('pf-invested').textContent     = fmt(invested);
+  document.getElementById('pf-invested-sub').textContent = a.short_market_value
+    ? 'short ' + fmt(a.short_market_value) : '';
+}
+
+function renderPortfolioSummary(s) {
+  const pnl = s.avg_realized != null ? parseFloat(s.avg_realized) : null;
+  const wr  = s.win_rate != null ? s.win_rate + '%' : '—';
+  document.getElementById('pf-open').textContent    = s.open_count ?? '—';
+  document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
+  document.getElementById('pf-winrate').textContent = wr;
+  document.getElementById('pf-winrate-sub').textContent = s.closed_count
+    ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
+  if (pnl != null) {
+    const el = document.getElementById('pf-avgpnl');
+    el.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
+    el.className = 'pf-stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
+    document.getElementById('pf-pnl-sub').textContent =
+      'Best: ' + (s.best_trade != null ? (s.best_trade > 0 ? '+' : '') + parseFloat(s.best_trade).toFixed(2) + '%' : '—') +
+      '  Worst: ' + (s.worst_trade != null ? parseFloat(s.worst_trade).toFixed(2) + '%' : '—');
+  } else {
+    document.getElementById('pf-avgpnl').textContent = '—';
+    document.getElementById('pf-pnl-sub').textContent = 'No closed trades';
+  }
+}
+
+function renderPositions(rows) {
+  const el = document.getElementById('pf-positions');
+  document.getElementById('pf-pos-count').textContent = rows.length ? rows.length + ' open' : '';
+  if (!rows.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  el.innerHTML = \`<table class="db-table" style="min-width:700px">
+    <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Current</th><th class="num">P&amp;L %</th><th class="num">Size %</th><th class="num">Days</th><th>Stop</th><th>Status</th></tr>
+    \${rows.map(r => {
+      const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) : null;
+      const pnlTxt = pnl != null ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
+      const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+      const dir = (r.direction || '').toUpperCase();
+      return \`<tr>
+        <td>\${r.strategy_id || '—'}</td>
+        <td style="font-weight:600;cursor:pointer;color:var(--blue)" onclick="showMarket();selectTicker('\${r.ticker}')">\${r.ticker}</td>
+        <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
+        <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${r.current_price != null ? '$' + parseFloat(r.current_price).toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls}">\${pnlTxt}</td>
+        <td class="num">\${r.position_size_pct != null ? (parseFloat(r.position_size_pct) * 100).toFixed(1) + '%' : '—'}</td>
+        <td class="num">\${r.days_held ?? '—'}</td>
+        <td class="num">\${r.stop_loss != null ? '$' + parseFloat(r.stop_loss).toFixed(2) : '—'}</td>
+        <td>\${r.status || '—'}</td>
+      </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+
+function renderHistory(rows) {
+  const el = document.getElementById('pf-history');
+  document.getElementById('pf-hist-count').textContent = rows.length ? rows.length + ' trades' : '';
+  if (!rows.length) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  el.innerHTML = \`<table class="db-table" style="min-width:680px">
+    <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Close</th><th class="num">P&amp;L %</th><th class="num">Days</th><th>Reason</th><th>Closed</th></tr>
+    \${rows.map(r => {
+      const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) : null;
+      const pnlTxt = pnl != null ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
+      const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+      const dir = (r.direction || '').toUpperCase();
+      const closedAt = r.closed_at ? new Date(r.closed_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
+      return \`<tr>
+        <td>\${r.strategy_id || '—'}</td>
+        <td style="font-weight:600;cursor:pointer;color:var(--blue)" onclick="showMarket();selectTicker('\${r.ticker}')">\${r.ticker}</td>
+        <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
+        <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${r.closed_price != null ? '$' + parseFloat(r.closed_price).toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls}">\${pnlTxt}</td>
+        <td class="num">\${r.days_held ?? '—'}</td>
+        <td style="color:var(--muted)">\${r.close_reason || '—'}</td>
+        <td style="color:var(--dim)">\${closedAt}</td>
+      </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+
+function _buildChart(labels, values, yFmt, tooltipFmt, color) {
+  const wrap = document.getElementById('pnlChart');
+  if (!wrap) return;
+  if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
+  const fill = color === '#3fb950' ? 'rgba(63,185,80,0.08)' : color === '#f85149' ? 'rgba(248,81,73,0.08)' : 'rgba(88,166,255,0.08)';
+  pnlChart = new Chart(wrap.getContext('2d'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      data: values, borderColor: color, backgroundColor: fill,
+      borderWidth: 1.5, pointRadius: 0, fill: true, tension: 0.1,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false },
+        tooltip: { backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#8b949e', bodyColor:'#e6edf3',
+          callbacks: { label: ctx => tooltipFmt(ctx.parsed.y) }
+        }
+      },
+      scales: {
+        x: { ticks: { color:'#484f58', maxTicksLimit:6, font:{size:10} }, grid: { color:'#21262d' } },
+        y: { position:'right', ticks: { color:'#484f58', font:{size:10}, callback: yFmt }, grid: { color:'#21262d' } }
+      }
+    }
+  });
+}
+
+function renderPnlChart(rows) {
+  if (!rows || !rows.length) {
+    const wrap = document.getElementById('pnlChart');
+    if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
+    if (wrap) wrap.getContext('2d').clearRect(0, 0, wrap.width, wrap.height);
+    return;
+  }
+  const labels = rows.map(r => String(r.pnl_date).slice(0,10));
+  const values = rows.map(r => parseFloat(r.avg_unrealized) || 0);
+  const last   = values[values.length - 1];
+  _buildChart(labels, values,
+    v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%',
+    v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%',
+    last >= 0 ? '#3fb950' : '#f85149');
+}
+
+function renderValueChart(rows) {
+  if (!rows || !rows.length) {
+    const wrap = document.getElementById('pnlChart');
+    if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
+    if (wrap) wrap.getContext('2d').clearRect(0, 0, wrap.width, wrap.height);
+    return;
+  }
+  const labels = rows.map(r => String(r.date).slice(0,10));
+  const values = rows.map(r => parseFloat(r.equity) || 0);
+  const fmt$   = v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0});
+  _buildChart(labels, values, fmt$, fmt$, '#58a6ff');
 }
 
 // ── Pipeline badge ────────────────────────────────────────────────────────────

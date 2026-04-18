@@ -6,6 +6,10 @@ import pandas as pd
 from typing import List
 from strategies.base import BaseStrategy, Signal
 
+# Pairwise correlation is O(N²) — cap the universe sampled for the correlation matrix.
+# At 5K+ tickers this would take minutes; 300 tickers runs in ~50ms.
+MAX_CORR_UNIVERSE = 300
+
 
 class CrossStockDispersion(BaseStrategy):
     id            = 'S_HV11_cross_stock_dispersion'
@@ -52,7 +56,13 @@ class CrossStockDispersion(BaseStrategy):
             return []
 
         # Compute pairwise correlations on 20-day returns
+        # Cap to MAX_CORR_UNIVERSE by IV rank to keep runtime bounded at large universes
         tickers_with_prices = [e['ticker'] for e in eligible if e['ticker'] in prices.columns]
+        if len(tickers_with_prices) > MAX_CORR_UNIVERSE:
+            iv_rank_map = {e['ticker']: e['iv_rank'] for e in eligible}
+            tickers_with_prices = sorted(
+                tickers_with_prices, key=lambda t: iv_rank_map.get(t, 0), reverse=True
+            )[:MAX_CORR_UNIVERSE]
         price_sub = prices[tickers_with_prices].iloc[-21:].pct_change().dropna()
         if price_sub.shape[0] < 15 or price_sub.shape[1] < 2:
             return []

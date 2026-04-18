@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:position-sizer",
+  "description": "Compute Kelly-optimal position sizes with confluence, regime, and lifecycle discounts",
+  "triggers": ["/position-sizer", "/size"],
+  "agents": ["tradejohn", "botjohn"]
+}

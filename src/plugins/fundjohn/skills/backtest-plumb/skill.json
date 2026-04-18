@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:backtest-plumb",
+  "description": "Diagnose failing backtests and run the strategy promotion gate check",
+  "triggers": ["/backtest-plumb", "/plumb"],
+  "agents": ["strategist", "strategycoder"]
+}

@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv15_iv_term_structure",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

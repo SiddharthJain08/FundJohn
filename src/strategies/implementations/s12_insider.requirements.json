@@ -1,0 +1,9 @@
+{
+  "strategy_id": "s12_insider",
+  "required": [
+    "insider",
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

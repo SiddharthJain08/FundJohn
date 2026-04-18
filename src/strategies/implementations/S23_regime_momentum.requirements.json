@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S23_regime_momentum",
+  "required": [
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

@@ -4,7 +4,8 @@ const fs   = require('fs');
 const path = require('path');
 const { vetSkill } = require('../../security/skill-vetter');
 
-const SKILLS_DIR = path.join(__dirname, '../../../src/skills');
+const SKILLS_DIR  = path.join(__dirname, '../../../src/skills');
+const PLUGINS_DIR = path.join(__dirname, '../../../src/plugins');
 
 let skillsManifest = null;
 const _vetCache    = {};  // skillName → { approved, ts }
@@ -13,15 +14,32 @@ const VET_TTL_MS   = 3600_000; // re-vet after 1h (catches integrity changes mid
 function loadSkillsManifest() {
   if (skillsManifest) return skillsManifest;
   const skills = [];
-  const dirs = fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
-    .filter((d) => d.isDirectory())
-    .map((d) => d.name);
 
-  for (const name of dirs) {
-    const jsonPath = path.join(SKILLS_DIR, name, 'skill.json');
-    if (!fs.existsSync(jsonPath)) continue;
-    const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    skills.push({ name, ...meta });
+  // Legacy skills: src/skills/{name}/skill.json
+  if (fs.existsSync(SKILLS_DIR)) {
+    for (const name of fs.readdirSync(SKILLS_DIR, { withFileTypes: true })
+        .filter((d) => d.isDirectory()).map((d) => d.name)) {
+      const jsonPath = path.join(SKILLS_DIR, name, 'skill.json');
+      if (!fs.existsSync(jsonPath)) continue;
+      const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+      skills.push({ name, ...meta });
+    }
+  }
+
+  // Plugin bundles: src/plugins/{plugin}/skills/{name}/skill.json
+  if (fs.existsSync(PLUGINS_DIR)) {
+    for (const pluginName of fs.readdirSync(PLUGINS_DIR, { withFileTypes: true })
+        .filter((d) => d.isDirectory()).map((d) => d.name)) {
+      const skillsDir = path.join(PLUGINS_DIR, pluginName, 'skills');
+      if (!fs.existsSync(skillsDir)) continue;
+      for (const name of fs.readdirSync(skillsDir, { withFileTypes: true })
+          .filter((d) => d.isDirectory()).map((d) => d.name)) {
+        const jsonPath = path.join(skillsDir, name, 'skill.json');
+        if (!fs.existsSync(jsonPath)) continue;
+        const meta = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+        skills.push({ name: `${pluginName}:${name}`, ...meta });
+      }
+    }
   }
 
   skillsManifest = skills;
@@ -39,9 +57,18 @@ function buildSkillsBlock(activeSkills = []) {
 }
 
 function loadSkillDefinition(skillName) {
-  const defPath = path.join(SKILLS_DIR, skillName, 'definition.md');
-  if (!fs.existsSync(defPath)) return null;
-  return fs.readFileSync(defPath, 'utf8');
+  if (skillName.includes(':')) {
+    // Plugin-namespaced: fundjohn:memo-schema → src/plugins/fundjohn/skills/memo-schema/SKILL.md
+    const [pluginId, skillId] = skillName.split(':');
+    const p = path.join(PLUGINS_DIR, pluginId, 'skills', skillId, 'SKILL.md');
+    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
+  }
+  // Legacy: try definition.md first, then SKILL.md
+  const defPath   = path.join(SKILLS_DIR, skillName, 'definition.md');
+  const skillPath = path.join(SKILLS_DIR, skillName, 'SKILL.md');
+  if (fs.existsSync(defPath))   return fs.readFileSync(defPath, 'utf8');
+  if (fs.existsSync(skillPath)) return fs.readFileSync(skillPath, 'utf8');
+  return null;
 }
 
 /**
@@ -117,6 +144,7 @@ async function skillsLoader(state, next) {
 }
 
 module.exports = skillsLoader;
-module.exports.loadSkillsManifest = loadSkillsManifest;
-module.exports.buildSkillsBlock   = buildSkillsBlock;
-module.exports.isSkillApproved    = isSkillApproved;
+module.exports.loadSkillsManifest  = loadSkillsManifest;
+module.exports.buildSkillsBlock    = buildSkillsBlock;
+module.exports.isSkillApproved     = isSkillApproved;
+module.exports.loadSkillDefinition = loadSkillDefinition;

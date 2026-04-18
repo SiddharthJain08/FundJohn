@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import requests
 import psycopg2, psycopg2.extras
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from scipy import stats
 
@@ -35,6 +35,13 @@ warnings.filterwarnings('ignore')
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+try:
+    from execution.handoff import write_handoff as _write_handoff
+    _HANDOFF_AVAILABLE = True
+except ImportError:
+    _HANDOFF_AVAILABLE = False
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────
 WEBHOOKS = {
@@ -273,7 +280,7 @@ def compute_signal_analytics(sig, px, spy_returns):
         days_to_stop = hp['min']
 
     expected_exit_days = int(p_t1 * days_to_t1 + p_stop * days_to_stop)
-    expected_exit_date = date(2026, 4, 11) + timedelta(days=int(expected_exit_days * 7/5))  # convert trading→calendar
+    expected_exit_date = datetime.strptime(run_date, '%Y-%m-%d').date() + timedelta(days=int(expected_exit_days * 7/5))  # convert trading→calendar
 
     # ── Regime validation ────────────────────────────────────────────────────
     # Is stop tight enough relative to 21d ATR?
@@ -663,4 +670,37 @@ if __name__ == '__main__':
 
     print('[research] Writing memory learnings...')
     write_signal_patterns(analytics, port, run_date)
+
+    if _HANDOFF_AVAILABLE:
+        # Derive regime from signals (first available regime_state)
+        regime = next((s.get('regime_state', 'UNKNOWN') for s in signals if s.get('regime_state')), 'UNKNOWN')
+        convergent_tickers = [
+            t for t, strats in
+            {s['ticker']: [] for s in signals}.items()
+            if sum(1 for ss in signals if ss['ticker'] == t) >= 2
+        ]
+        _write_handoff(run_date, 'research', {
+            'run_date':           run_date,
+            'regime':             regime,
+            'portfolio': {
+                'sharpe':              port['port_sharpe'] if not math.isnan(port['port_sharpe']) else None,
+                'worst_case_drawdown': port['worst_dd'],
+                'port_beta':           port['port_beta'],
+                'port_ev_ann':         port['port_ev_ann'],
+            },
+            'signals': [
+                {'ticker':      a['ticker'],
+                 'strategy_id': a['strategy'],
+                 'ev':          a['ev'],
+                 'kelly':       None,
+                 'hv21':        a['hv21'],
+                 'beta':        a['beta'] if not math.isnan(a['beta']) else None,
+                 'p_t1':        a['p_t1'],
+                 'exp_exit_date': a['exp_exit_date']}
+                for a in analytics
+            ],
+            'convergent_tickers': convergent_tickers,
+        })
+        print(f'[research] Research handoff written ({len(analytics)} signals).')
+
     print('[research] Done.')

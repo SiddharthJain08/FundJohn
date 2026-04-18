@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv8_gamma_theta_carry",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

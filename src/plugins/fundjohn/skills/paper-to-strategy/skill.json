@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:paper-to-strategy",
+  "description": "Translate an academic alpha paper into a concrete OpenClaw strategy spec",
+  "triggers": ["/paper-to-strategy", "/p2s"],
+  "agents": ["botjohn", "strategist", "paperhunter"]
+}

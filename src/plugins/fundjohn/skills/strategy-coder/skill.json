@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:strategy-coder",
+  "description": "Generate a complete strategy implementation file from a strategy spec",
+  "triggers": ["/strategy-coder", "/code-strategy"],
+  "agents": ["strategist", "strategycoder", "botjohn"]
+}

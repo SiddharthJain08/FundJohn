@@ -40,7 +40,7 @@ const AGENTS = {
     emoji:       '📈',
     model:       'claude-sonnet-4-6',
     description: 'Trade Execution & Risk',
-    channelKeys: ['trade-signals', 'trade-reports'],
+    channelKeys: ['trade-signals', 'trade-reports', 'position-recommendations'],
   },
 };
 

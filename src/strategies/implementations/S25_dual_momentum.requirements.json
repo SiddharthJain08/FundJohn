@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S25_dual_momentum",
+  "required": [
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

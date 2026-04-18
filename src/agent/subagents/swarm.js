@@ -134,11 +134,13 @@ async function init({ type, ticker, workspace, threadId, prompt, notify, mode, f
       let output  = stdout;
       let costUsd = null;
       let numTurns = null;
+      let _parsedUsage = {};
       try {
         const parsed = JSON.parse(stdout);
-        output    = parsed.result ?? parsed.message ?? stdout;
-        costUsd   = parsed.cost_usd ?? parsed.total_cost_usd ?? null;
-        numTurns  = parsed.num_turns ?? null;
+        output       = parsed.result ?? parsed.message ?? stdout;
+        costUsd      = parsed.cost_usd ?? parsed.total_cost_usd ?? null;
+        numTurns     = parsed.num_turns ?? null;
+        _parsedUsage = parsed.usage || {};
       } catch { /* text fallback */ }
 
       await setSubagentStatus(subagentId, {
@@ -152,16 +154,20 @@ async function init({ type, ticker, workspace, threadId, prompt, notify, mode, f
       if (checkpointId) await checkpoints.complete(checkpointId).catch(() => null);
       await pipelineActivity.registerAgentDone(workspace, type, threadId).catch(() => {});
 
-      // Record token usage
-      try {
-        const parsed = JSON.parse(stdout);
-        const usage  = parsed.usage || {};
-        const tokIn  = usage.input_tokens  || usage.cache_creation_input_tokens || 0;
-        const tokOut = usage.output_tokens || 0;
+      // Record token usage (use already-parsed _parsedUsage — no second JSON.parse)
+      {
+        const usage      = _parsedUsage;
+        const cacheWrite = usage.cache_creation_input_tokens || 0;
+        const cacheRead  = usage.cache_read_input_tokens     || 0;
+        const tokIn      = (usage.input_tokens || 0) + cacheWrite;
+        const tokOut     = usage.output_tokens || 0;
         if (tokIn + tokOut > 0) {
           await tokenBudget.recordUsage(workspace, type, tokIn, tokOut).catch(() => {});
         }
-      } catch { /* ignore */ }
+        if ((cacheWrite + cacheRead) > 0 && threadId) {
+          await tokenDb.patchSubagentCache(subagentId, cacheWrite, cacheRead).catch(() => null);
+        }
+      }
 
       if (code !== 0) {
         const rateLimitMatch = stderr.match(/429|rate.?limit|retry.?after[:\s]*(\d+)/i);

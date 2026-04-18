@@ -12,10 +12,30 @@
 
 require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 
+const fs            = require('fs');
 const { query }     = require('../src/database/postgres');
 const scheduler     = require('../src/agent/graph/strategist-scheduler');
 const swarm         = require('../src/agent/subagents/swarm');
 const notifications = require('../src/channels/discord/notifications');
+
+// Sync Claude credentials from root → claudebot user so subagents can authenticate.
+// Mirrors the syncClaudeAuth() call in bot.js startup.
+function syncClaudeAuth() {
+    const src  = '/root/.claude/.credentials.json';
+    const dest = '/home/claudebot/.claude/.credentials.json';
+    try {
+        if (fs.existsSync(src)) {
+            fs.mkdirSync('/home/claudebot/.claude', { recursive: true });
+            fs.copyFileSync(src, dest);
+            fs.chownSync(dest, parseInt(process.env.CLAUDE_UID || '1001'), parseInt(process.env.CLAUDE_GID || '1001'));
+            console.log('[cron_strategist] Claude credentials synced to claudebot user');
+        } else {
+            console.warn('[cron_strategist] Credentials source not found:', src);
+        }
+    } catch (err) {
+        console.warn('[cron_strategist] Credential sync failed:', err.message);
+    }
+}
 
 async function resolveWorkspaceId(nameOrId) {
     if (!nameOrId) {
@@ -38,6 +58,9 @@ async function resolveWorkspaceId(nameOrId) {
 }
 
 async function main() {
+    // Sync credentials first so claudebot subagent can authenticate
+    syncClaudeAuth();
+
     const args    = process.argv.slice(2);
     const wsIdx   = args.indexOf('--workspace');
     const nameArg = wsIdx !== -1 ? (args[wsIdx + 1] || null) : null;

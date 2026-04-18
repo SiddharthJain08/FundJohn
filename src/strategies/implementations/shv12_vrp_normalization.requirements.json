@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv12_vrp_normalization",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

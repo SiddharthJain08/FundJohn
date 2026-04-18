@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv9_rv_momentum_div",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

@@ -18,19 +18,34 @@ Posts to:
   #trade-signals  (TradeDesk webhook) — green signals only, condensed
 """
 
-import os, sys, math, json, warnings
+import os, sys, math, json, warnings, logging
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+try:
+    from execution.handoff import read_handoff, write_handoff as _write_handoff
+    _HANDOFF_AVAILABLE = True
+except ImportError:
+    _HANDOFF_AVAILABLE = False
+
 import numpy as np
 import pandas as pd
 import requests
 from execution.alpaca_trader import execute_alpaca_orders, build_alpaca_post
 import psycopg2, psycopg2.extras
-from datetime import date, timedelta
-from pathlib import Path
+from datetime import date, datetime, timedelta
 
 warnings.filterwarnings('ignore')
 
-ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(ROOT))
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [TRADE_AGENT] %(message)s',
+    datefmt='%H:%M:%S',
+)
+logger = logging.getLogger(__name__)
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────
 WEBHOOKS = {
@@ -204,7 +219,7 @@ def kelly_optimize(sig, px, spy_returns):
 
     # Expected exit date
     exp_days = int(best['p_win'] * best['hp_days'] + best['p_loss'] * min(10, best['hp_days']//4))
-    best['exp_exit_date'] = str(date(2026, 4, 11) + timedelta(days=int(exp_days * 1.4)))
+    best['exp_exit_date'] = str(datetime.strptime(run_date, '%Y-%m-%d').date() + timedelta(days=int(exp_days * 1.4)))
 
     # What drift would flip to positive EV at best target?
     # EV > 0 requires p_win > p_break
@@ -220,6 +235,38 @@ def kelly_optimize(sig, px, spy_returns):
     best['annual_drift_needed'] = (p_needed * (b - a) / best['hp_days'] + 0.5 * best['sig_d']**2) * 252
 
     return best
+
+
+def load_research_context(run_date):
+    if not _HANDOFF_AVAILABLE:
+        return {}
+    ctx = read_handoff(run_date, 'research')
+    if ctx:
+        print(f'[trade_agent] Research handoff loaded: regime={ctx.get("regime")}, {len(ctx.get("signals",[]))} signals')
+    else:
+        print('[trade_agent] Research handoff unavailable — proceeding without it')
+    return ctx or {}
+
+
+def write_ev_veto_rows(postgres_uri, run_date, vetoed_opts):
+    if not vetoed_opts:
+        return
+    try:
+        conn = psycopg2.connect(postgres_uri)
+        cur  = conn.cursor()
+        for opt in vetoed_opts:
+            cur.execute(
+                '''INSERT INTO veto_log (run_date, strategy_id, ticker, veto_reason, ev, kelly)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT DO NOTHING''',
+                (run_date, opt.get('strategy'), opt.get('ticker'),
+                 'negative_ev', opt.get('ev'), opt.get('kelly_net')),
+            )
+        conn.commit()
+        conn.close()
+        print(f'[trade_agent] {len(vetoed_opts)} negative_ev veto row(s) written')
+    except Exception as e:
+        print(f'[trade_agent] veto_log write failed: {e}')
 
 
 def load_prices():
@@ -428,11 +475,13 @@ def write_trade_learnings(all_opts, green_opts, run_date):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--date', default='2026-04-11')
+    parser.add_argument('--date', default=date.today().isoformat())
     args = parser.parse_args()
 
     postgres_uri = os.environ.get('POSTGRES_URI', '')
     run_date     = args.date
+
+    research_ctx = load_research_context(run_date)
 
     print(f'[trade_agent] Loading data...')
     px      = load_prices()
@@ -488,4 +537,22 @@ if __name__ == '__main__':
 
     print('[trade_agent] Writing memory learnings...')
     write_trade_learnings(all_opts, green, run_date)
+
+    # ── Veto logging + sized handoff ──────────────────────────────────────
+    vetoed = [o for o in all_opts if o['kelly_net'] <= MIN_KELLY]
+    write_ev_veto_rows(postgres_uri, run_date, vetoed)
+
+    if _HANDOFF_AVAILABLE:
+        _write_handoff(run_date, 'sized', {
+            'run_date':     run_date,
+            'signals':      [
+                {'ticker':     o['ticker'], 'strategy_id': o['strategy'],
+                 'kelly_pos':  o['kelly_pos'], 'ev': o['ev'],
+                 'target':     o['label'], 'exp_exit_date': o['exp_exit_date']}
+                for o in green
+            ],
+            'vetoed_count': len(vetoed),
+        })
+        print(f'[trade_agent] Sized handoff written — {len(green)} green, {len(vetoed)} vetoed.')
+
     print('[trade_agent] Done.')

@@ -39,15 +39,30 @@ All strategy memos produced by the data pipeline must include:
 - `strategy_id`, `run_timestamp`, `cycle_date`, `sharpe`, `max_drawdown`, `signal_count`, `top_signals[]`
 - Missing fields = invalid memo. ResearchJohn rejects and alerts #ops.
 
+### SO-7: Token Economy (Cache-First)
+Only pay for novel work. Every token spent must either generate new knowledge or size a position.
+- Check Redis handoff layer (`handoff:{date}:{stage}`) before re-running any upstream computation.
+- `cache_read_input_tokens` tracked separately in `subagent_costs`. Cache hit rate < 30% over 7 days triggers prompt structure review.
+- PaperHunter hard cap: $0.15 per invocation. Budget exceeded = immediate termination.
+
 ---
 
 ## AGENT CHAIN OF COMMAND
 
 ```
-BotJohn (Opus)
-├── DataPipeline (hardcoded) — strategy execution, data collection, memo dispatch
-├── ResearchJohn (Sonnet) — strategy memo synthesis, research report
-└── TradeJohn (Sonnet)    — signal generation, position sizing
+BotJohn (Opus) — final authority
+├── DataPipeline (hardcoded, daily cron 4:20 PM ET)
+│   ├── post_memos.py         — engine run + SO-6 memo generation
+│   ├── research_report.py    — signal enrichment (HV/beta/EV, pure Python, no LLM)
+│   ├── TradeJohn (Sonnet)    — daily: sizing + signal generation from memos
+│   └── portfolio_report.py   — portfolio metrics
+└── ResearchOrchestrator (independent, operator-controlled: /research start|pause|resume|status)
+    ├── PaperHunter (Haiku, parallel) — alpha paper search [$0.05/invocation cap]
+    ├── ResearchJohn (Sonnet)          — paper evaluation + strategy_spec generation
+    └── StrategyCoder (Sonnet)         — implementation + registry + manifest wiring
 ```
 
 BotJohn is the only agent with final authority over trade approval and strategy lifecycle transitions.
+
+**Daily pipeline:** `post_memos.py → research_report.py → trade_agent_llm.py → portfolio_report.py`
+**Research pipeline:** operator-triggered, pauseable, budget-capped at $2.00/session by default.

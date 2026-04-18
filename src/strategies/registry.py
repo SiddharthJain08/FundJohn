@@ -45,6 +45,7 @@ _IMPL_MAP = {
         'S_HV17_earnings_straddle_fade': ('strategies.implementations.shv17_earnings_straddle_fade', 'EarningsStraddleFade'),
         'S_HV19_iv_surface_tilt':      ('strategies.implementations.shv19_iv_surface_tilt',      'IVSurfaceTilt'),
         'S_HV20_iv_dispersion_reversion': ('strategies.implementations.shv20_iv_dispersion_reversion', 'IVDispersionReversion'),
+    'S1_event_driven_new_news':       ('strategies.implementations.s1_event_driven_new_news',       'EventDrivenNewNews'),
 
 }
 

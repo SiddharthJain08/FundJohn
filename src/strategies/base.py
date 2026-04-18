@@ -38,6 +38,16 @@ REGIME_POSITION_SCALE = {
     'CRISIS':        0.15,
 }
 
+# Tighten ATR-based stops in high-vol regimes to preserve R:R geometry.
+# Without this, 2× ATR stops balloon to 6-9% in TRANSITIONING/HIGH_VOL while
+# targets remain fixed at 5-20%, collapsing R:R to <1x and making EV negative.
+REGIME_ATR_SCALE = {
+    'LOW_VOL':       1.00,
+    'TRANSITIONING': 0.70,
+    'HIGH_VOL':      0.55,
+    'CRISIS':        0.35,
+}
+
 
 class BaseStrategy(ABC):
     """All hardcoded strategies inherit from this."""
@@ -50,6 +60,9 @@ class BaseStrategy(ABC):
     signal_frequency: str = 'daily'
     min_lookback:     int = 20
     active_in_regimes: List[str] = None
+    # Safety cap: generate_signals should not return more than this many signals.
+    # Prevents runaway signal counts at large universe sizes without slicing in each strategy.
+    MAX_SIGNALS:      int = 50
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -92,18 +105,23 @@ class BaseStrategy(ABC):
         bull_target:    float = None,
         bear_target:    float = None,
         atr_multiplier: float = 2.0,
+        regime_state:   str   = 'LOW_VOL',
     ) -> dict:
         """Standard stop/target computation. Reusable across strategies."""
         diff = prices_series.diff().abs()
         atr  = float(diff.rolling(14).mean().iloc[-1]) if len(diff) >= 14 else current_price * 0.02
 
+        # Scale ATR multiplier by regime to preserve R:R geometry in high-vol environments.
+        # High vol inflates ATR-based stops without expanding fixed-% targets, killing EV.
+        effective_atr_mult = atr_multiplier * REGIME_ATR_SCALE.get(regime_state, 1.0)
+
         if direction == 'LONG':
-            stop = current_price - atr * atr_multiplier
+            stop = current_price - atr * effective_atr_mult
             t1   = current_price * 1.05
             t2   = current_price * 1.10
             t3   = bull_target or current_price * 1.20
         else:
-            stop = current_price + atr * atr_multiplier
+            stop = current_price + atr * effective_atr_mult
             t1   = current_price * 0.95
             t2   = current_price * 0.90
             t3   = bear_target or current_price * 0.80

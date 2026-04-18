@@ -29,6 +29,10 @@
       "modes": [
         "PM_TASK"
       ],
+      "skills": [
+        "fundjohn:veto-explainer",
+        "fundjohn:paper-to-strategy"
+      ],
       "description": "Orchestrator and portfolio manager. Approves/vetoes trade signals. Interfaces with operator via Discord."
     },
     "researchjohn": {
@@ -43,6 +47,10 @@
       "maxBudgetUsd": 0.3,
       "modes": [
         "PM_TASK"
+      ],
+      "skills": [
+        "fundjohn:memo-schema",
+        "fundjohn:veto-explainer"
       ],
       "description": "Reads strategy memos, produces consolidated research report: regime, performance table, convergence analysis, recommendations."
     },
@@ -59,7 +67,78 @@
       "modes": [
         "PM_TASK"
       ],
+      "skills": [
+        "fundjohn:position-sizer"
+      ],
       "description": "Signal generation and position sizing. Reads research report, outputs ranked trade signals with EV, sizing, entry/stop/target."
+    },
+    "strategist": {
+      "promptFile": "src/agent/prompts/subagents/strategist.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 20,
+      "timeoutSeconds": 420,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "medium",
+      "maxBudgetUsd": 0.5,
+      "modes": [
+        "DEPLOY",
+        "REPORT"
+      ],
+      "skills": [
+        "fundjohn:paper-to-strategy",
+        "fundjohn:strategy-coder",
+        "fundjohn:backtest-plumb",
+        "fundjohn:memo-schema"
+      ],
+      "description": "Off-hours strategy lifecycle reviewer. Analyzes signal quality, regime alignment, and strategy performance. Proposes lifecycle transitions (paper→live, live→monitoring)."
+    },
+    "paperhunter": {
+      "promptFile": "src/agent/prompts/subagents/paperhunter.md",
+      "components": [],
+      "tools": ["fetch"],
+      "iterationLimit": 10,
+      "timeoutSeconds": 180,
+      "parallel": true,
+      "vetoAuthority": false,
+      "effortLevel": "low",
+      "maxBudgetUsd": 0.15,
+      "already_in_ledger_check": true,
+      "modes": ["RESEARCH"],
+      "skills": ["fundjohn:paper-to-strategy"],
+      "description": "Ephemeral parallel alpha-paper extractor. One paper per invocation. 4 self-rejection gates. $0.15 budget cap."
+    },
+    "strategycoder": {
+      "promptFile": "src/agent/prompts/subagents/strategycoder.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 20,
+      "timeoutSeconds": 420,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "medium",
+      "maxBudgetUsd": 0.5,
+      "modes": ["DEPLOY"],
+      "skills": [
+        "fundjohn:strategy-coder",
+        "fundjohn:backtest-plumb"
+      ],
+      "description": "On-demand strategy implementation. Produces implementations/*.py + registry + manifest wiring."
+    },
+    "datawiring": {
+      "promptFile": "src/agent/prompts/subagents/datawiring.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 15,
+      "timeoutSeconds": 600,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "high",
+      "maxBudgetUsd": 0.40,
+      "modes": ["WIRING"],
+      "skills": [],
+      "description": "Writes data ingestion/removal code. Tight tool allowlist: src/ingestion/, src/database/migrations/, signals_cache.py only."
     }
   }
 }

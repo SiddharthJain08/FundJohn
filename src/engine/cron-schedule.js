@@ -49,7 +49,17 @@ function log(msg) {
 // ── 17:30 ET — Signal Pipeline (after 17:00 data collection) ─────────────────
 
 async function runMarketClosePipeline() {
-    log('Market close pipeline starting (0 LLM tokens)');
+    // Skip if Massive WS already fired this (publishes pipeline:market_close at close)
+    try {
+        const r = redisClient();
+        const wsTriggered = await r.get('massive_ws:pipeline_fired_today');
+        if (wsTriggered) {
+            log('Market close pipeline already fired by Massive WS — skipping cron duplicate');
+            return;
+        }
+    } catch (_e) { /* Redis unavailable — proceed with cron */ }
+
+    log('Market close pipeline starting (0 LLM tokens — Kelly optimization only)');
 
     // 1. Market state: HMM, RORO, stress, write regime file
     log('Running market state...');
@@ -81,10 +91,40 @@ async function runMarketClosePipeline() {
         return;
     }
 
-    // 4. Check report triggers
+    // 4. Run execution engine → write signals to DB → post memos to Discord
+    log('Running post_memos (engine + Discord memos)...');
+    try {
+        const memosOut = runPython('src/execution/post_memos.py');
+        log(`post_memos complete: ${memosOut.slice(0, 200)}`);
+    } catch (e) {
+        log(`ERROR: post_memos failed — ${e.message.slice(0, 200)}`);
+        // Non-fatal: continue to trade_agent so Alpaca execution isn't blocked
+    }
+
+    // 5. Kelly optimization + submit GREEN signals to Alpaca paper trading
+    // Green = kelly_net > 0.5% (MIN_KELLY). Red signals are vetoed and logged.
+    log('Running trade_agent (Kelly optimization + Alpaca paper orders)...');
+    try {
+        const tradeOut = runPython('src/execution/trade_agent.py');
+        log(`trade_agent complete: ${tradeOut.slice(0, 200)}`);
+    } catch (e) {
+        log(`ERROR: trade_agent failed — ${e.message.slice(0, 200)}`);
+    }
+
+    // 6. Check report triggers
     await checkReportTriggers();
 
-    log('Market close pipeline complete');
+    log('Market close pipeline complete (post_memos + green-only Alpaca orders submitted)');
+
+    // Notify dashboard clients that fresh data is available
+    try {
+        const http = require('http');
+        const port = parseInt(process.env.DASHBOARD_PORT) || 3000;
+        const req  = http.request({ hostname: 'localhost', port, path: '/api/events/data-updated', method: 'POST',
+                                    headers: { 'Content-Type': 'application/json', 'Content-Length': '0' } });
+        req.on('error', () => {});
+        req.end();
+    } catch (_) {}
 }
 
 
@@ -252,6 +292,38 @@ function start(swarm, generateId, notifyDiscord) {
                 `Log to /root/.learnings/LEARNINGS.md with area tag 'memory-synthesis'.`
             ),
         }).catch((e) => log(`Memory synthesis error: ${e.message}`));
+
+        // Weekly reaper: detect orphaned data columns → data_deprecation_queue
+        try {
+            const ResearchOrchestrator = require('../agent/research/research-orchestrator');
+            const orch = new ResearchOrchestrator();
+            await orch.runReaperPass((msg) => log(`[reaper] ${msg}`));
+        } catch (e) {
+            log(`Reaper pass error: ${e.message}`);
+        }
+
+        // Refresh data_ledger materialized view
+        await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY data_ledger').catch((e) =>
+            log(`data_ledger refresh error: ${e.message}`)
+        );
+
+        // Regenerate strategy_signatures.json
+        try {
+            const { execSync } = require('child_process');
+            execSync(`python3 ${ROOT}/src/strategies/generate_signatures.py`, { cwd: ROOT, timeout: 30_000 });
+            log('strategy_signatures.json regenerated');
+        } catch (e) {
+            log(`strategy_signatures regeneration error: ${e.message}`);
+        }
+
+        // Sync full ticker universe from FMP + Polygon into universe_config
+        log('Universe sync starting (FMP + Polygon)...');
+        try {
+            const syncOut = runPython('src/ingestion/run_universe_sync.py');
+            log(`Universe sync complete: ${syncOut.slice(0, 200)}`);
+        } catch (e) {
+            log(`Universe sync error: ${e.message.slice(0, 200)}`);
+        }
     }, { timezone: 'America/New_York' });
 
     // 4:20 PM ET Mon-Fri: run full market-close pipeline (market state + signals cache + signal_runner.py)

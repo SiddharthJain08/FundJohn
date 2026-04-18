@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv14_otm_skew_factor",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

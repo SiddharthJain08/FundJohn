@@ -1,0 +1,10 @@
+{
+  "strategy_id": "s1_event_driven_new_news",
+  "required": [
+    "earnings",
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

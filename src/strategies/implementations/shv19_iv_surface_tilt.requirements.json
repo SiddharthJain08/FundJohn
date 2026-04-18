@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv19_iv_surface_tilt",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

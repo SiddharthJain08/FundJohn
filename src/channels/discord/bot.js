@@ -43,6 +43,13 @@ const activeRuns = new Map();
 let _dataAlertsPost = null;
 function getDataAlertsPost() { return _dataAlertsPost; }
 
+// Research orchestrator singleton — shared between /research command and 30s status monitor
+let _researchOrch = null;
+function getResearchOrch() {
+  if (!_researchOrch) _researchOrch = new (require('../../agent/research/research-orchestrator'))();
+  return _researchOrch;
+}
+
 // ── Discord client ─────────────────────────────────────────────────────────────
 const client = new Client({
   intents: [
@@ -190,7 +197,7 @@ function classifyRequest(content) {
         return { mode: 'RISK_SCAN', agent: 'strategist' };
 
     // Known slash-commands route to STATUS (handled in switch, no gate needed)
-    if (/^\/(signals|strategies|regime|status|portfolio|engine|approve|activate|deactivate|reject|pause|fetch|fill|data|data-status|agents|chart|pipeline|trade|diligence|run|help|sweep|update-profile|cycles|approve-dataset|approve-strategy|strategy-review|engine-status|engine-run|pause-strategy|adjust-strategy|strategy-versions|research|risk-scan|approve-dataset)\b/.test(lower.trimStart()))
+    if (/^\/(signals|strategies|regime|status|portfolio|engine|approve|activate|deactivate|reject|pause|fetch|fill|data|data-status|agents|chart|pipeline|trade|diligence|run|help|sweep|update-profile|cycles|approve-dataset|approve-strategy|strategy-review|engine-status|engine-run|pause-strategy|adjust-strategy|strategy-versions|research|risk-scan|approve-data|veto-data|approve-deprecation)\b/.test(lower.trimStart()))
         return { mode: 'STATUS', agent: null };
 
     // Everything else — freeform message to BotJohn as master PM agent
@@ -772,6 +779,125 @@ async function handlePtcCommand(cmdText, message, userId) {
         break;
       }
 
+      case 'research': {
+        const subcmd = args[0]?.toLowerCase();
+        const orch = getResearchOrch();
+        const channelNotify = (t) => agentPersonas.post('researchdesk', 'research-feed', t).catch(() => {});
+
+        switch (subcmd) {
+          case 'submit': {
+            const url = args[1];
+            if (!url) { await notify('Usage: `/research submit <url>`'); break; }
+            const { candidate_id, message } = await orch.submit({ url, submittedBy: userId });
+            await notify(`✅ ${message}`);
+            channelNotify?.(`📥 **Paper submitted** by <@${userId}>: ${url}\nID: \`${candidate_id}\``);
+            break;
+          }
+          case 'start': {
+            const msg = await orch.start({ notify: (t) => notify(t), channelNotify });
+            await notify(msg);
+            break;
+          }
+          case 'pause': {
+            await notify(await orch.pause());
+            break;
+          }
+          case 'status': {
+            await notify(await orch.getStatus());
+            break;
+          }
+          case 'queue': {
+            await notify(await orch.listQueue(10));
+            break;
+          }
+          default:
+            await notify('Usage: `/research [submit <url> | start | pause | status | queue]`');
+        }
+        break;
+      }
+
+      case 'approve-data': {
+        const reqId = args[0];
+        if (!reqId) { await notify('Usage: `/approve-data <request_id>`'); break; }
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+          const { rows } = await pool.query(
+            `UPDATE data_ingestion_queue SET status='APPROVED', approved_by=$1, approved_at=NOW()
+             WHERE request_id=$2 AND status='PENDING'
+             RETURNING request_id, column_name`,
+            [userId, reqId]
+          );
+          await pool.end();
+          if (rows.length === 0) { await notify(`⚠️ No pending request found for ID \`${reqId}\``); break; }
+          const col = rows[0].column_name;
+          await notify(`✅ Data column \`${col}\` approved — DataWiringAgent will wire it.`);
+          agentPersonas.post('researchdesk', 'research-feed',
+            `🔧 **Column approved:** \`${col}\` — DataWiringAgent wiring now...`).catch(() => {});
+          // Fire DataWiringAgent asynchronously
+          const orch = getResearchOrch();
+          orch._wireColumn(rows[0]).catch((e) => {
+            console.error('[bot] DataWiringAgent failed:', e.message);
+            agentPersonas.post('researchdesk', 'research-feed',
+              `❌ DataWiringAgent failed for \`${col}\`: ${e.message}`).catch(() => {});
+          });
+        } catch (e) {
+          await notify(`❌ approve-data error: ${e.message}`);
+        }
+        break;
+      }
+
+      case 'veto-data': {
+        const reqId = args[0];
+        if (!reqId) { await notify('Usage: `/veto-data <request_id>`'); break; }
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+          const { rows } = await pool.query(
+            `UPDATE data_ingestion_queue SET status='VETOED', approved_by=$1, approved_at=NOW()
+             WHERE request_id=$2 AND status='PENDING'
+             RETURNING column_name`,
+            [userId, reqId]
+          );
+          await pool.end();
+          if (rows.length === 0) { await notify(`⚠️ No pending request found for ID \`${reqId}\``); break; }
+          await notify(`🚫 Data column \`${rows[0].column_name}\` vetoed.`);
+        } catch (e) {
+          await notify(`❌ veto-data error: ${e.message}`);
+        }
+        break;
+      }
+
+      case 'approve-deprecation': {
+        const reqId = args[0];
+        if (!reqId) { await notify('Usage: `/approve-deprecation <request_id>`'); break; }
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+          const { rows } = await pool.query(
+            `UPDATE data_deprecation_queue SET status='APPROVED', approved_by=$1, approved_at=NOW()
+             WHERE request_id=$2 AND status='PENDING'
+             RETURNING request_id, column_name, recommended_action`,
+            [userId, reqId]
+          );
+          await pool.end();
+          if (rows.length === 0) { await notify(`⚠️ No pending deprecation found for ID \`${reqId}\``); break; }
+          const col = rows[0].column_name;
+          await notify(`✅ Deprecation of \`${col}\` approved — DataWiringAgent will remove it.`);
+          agentPersonas.post('researchdesk', 'research-feed',
+            `🗑️ **Column deprecation approved:** \`${col}\` — DataWiringAgent removing...`).catch(() => {});
+          const orch = getResearchOrch();
+          orch._unwireColumn(rows[0]).catch((e) => {
+            console.error('[bot] DataWiringAgent (remove) failed:', e.message);
+            agentPersonas.post('researchdesk', 'research-feed',
+              `❌ DataWiringAgent (remove) failed for \`${col}\`: ${e.message}`).catch(() => {});
+          });
+        } catch (e) {
+          await notify(`❌ approve-deprecation error: ${e.message}`);
+        }
+        break;
+      }
+
       default: {
         // Try relay strategist commands first (research, signals, engine-*, strategy-*, etc.)
         const wsCtx = await workspaceManager.getOrCreate(workspaceId);
@@ -1024,6 +1150,26 @@ client.once('ready', async () => {
     console.warn('[bot] Agent persona init failed:', err.message);
   }
 
+  // Research team go-live: set initial status + post announcement to #research-feed
+  try {
+    const _orch = getResearchOrch();
+    const { status: rStatus, text: rText } = await _orch.getStatusText().catch(() => ({ status: 'idle', text: 'Ready — /research submit <url>' }));
+    await agentPersonas.setStatus('researchdesk', rStatus, rText).catch(() => {});
+    await agentPersonas.post('researchdesk', 'research-feed',
+      '🔬 **ResearchJohn online** — queue-driven research ready.\nSubmit a paper with `/research submit <url>`, then run `/research start` to process the queue.'
+    ).catch(() => {});
+    // 30-second live token monitor — updates ResearchJohn's Discord presence with budget %
+    setInterval(async () => {
+      try {
+        const { status, text } = await getResearchOrch().getStatusText();
+        await agentPersonas.setStatus('researchdesk', status, text);
+      } catch { /* non-critical */ }
+    }, 30_000);
+    console.log('[bot] Research team online, 30s monitor started');
+  } catch (err) {
+    console.warn('[bot] Research team init failed:', err.message);
+  }
+
   // Start background data pipeline — broadcasts to #pipeline-feed
   if (collector) {
     const pipelineNotify = (data) => {
@@ -1098,6 +1244,78 @@ client.once('ready', async () => {
   if (activeTasks.length > 0) {
     console.log(`[memory] ${activeTasks.length} active task(s) restored from memory`);
     memoryWriter.journalEntry('OBSERVATION', `Resumed with ${activeTasks.length} open task(s): ${activeTasks.map(t => t.split('|')[1]?.trim()).join(', ')}`);
+  }
+});
+
+// ── Position recommendation buttons ───────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  if (!interaction.customId.startsWith('rec:')) return;
+
+  const parts  = interaction.customId.split(':');
+  const action = parts[1];
+  const recId  = parts[2];
+  if (!['approve', 'reject'].includes(action) || !recId) return;
+
+  await interaction.deferUpdate().catch(() => null);
+  const userId = interaction.user.id;
+
+  if (action === 'reject') {
+    const { Pool } = require('pg');
+    const p = new Pool({ connectionString: process.env.POSTGRES_URI });
+    try {
+      await p.query(
+        `UPDATE position_recommendations
+         SET status='rejected', resolved_at=NOW(), resolved_by=$1
+         WHERE id=$2 AND status='pending'`,
+        [userId, recId]
+      );
+    } finally {
+      await p.end();
+    }
+    await interaction.editReply({
+      content:    interaction.message.content + '\n\n❌ **REJECTED** — no action taken.',
+      components: [],
+    }).catch(() => null);
+    return;
+  }
+
+  // approve → execute via Python script
+  const { execFile } = require('child_process');
+  const pyScript = path.join(OPENCLAW_DIR, 'src', 'execution', 'execute_recommendation.py');
+
+  const result = await new Promise(resolve => {
+    execFile('python3', [pyScript, recId], {
+      cwd: OPENCLAW_DIR,
+      env: { ...process.env, PYTHONPATH: OPENCLAW_DIR },
+      timeout: 30_000,
+    }, (err, stdout) => {
+      try {
+        const lastLine = (stdout || '').trim().split('\n').pop();
+        resolve(JSON.parse(lastLine));
+      } catch {
+        resolve({ ok: false, error: err?.message || 'parse error' });
+      }
+    });
+  });
+
+  if (result.ok) {
+    const detail = `order_id=${result.order_id || 'n/a'}`;
+    await interaction.editReply({
+      content:    interaction.message.content + `\n\n✅ **APPROVED & EXECUTED** — ${result.action} on ${result.ticker} | ${detail}`,
+      components: [],
+    }).catch(() => null);
+    agentPersonas.post('tradedesk', 'trade-reports',
+      `✅ **Rec Executed** — ${result.action} on **${result.ticker}** | ${detail} | by <@${userId}>`
+    ).catch(() => null);
+  } else {
+    await interaction.editReply({
+      content:    interaction.message.content + `\n\n⚠️ **EXECUTION FAILED** — ${result.error || result.detail}`,
+      components: [],
+    }).catch(() => null);
+    agentPersonas.post('tradedesk', 'trade-reports',
+      `⚠️ **Rec execution failed** — rec_id \`${recId}\` | ${result.error || result.detail}`
+    ).catch(() => null);
   }
 });
 

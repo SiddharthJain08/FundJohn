@@ -1,0 +1,9 @@
+{
+  "strategy_id": "s10_quality_value",
+  "required": [
+    "financials",
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

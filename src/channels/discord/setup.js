@@ -64,11 +64,11 @@ const STRUCTURE = [
     channels: [
       {
         name: 'research-feed', key: 'research-feed', operatorWrite: false,
-        topic: 'Live subagent outputs during diligence runs — research, data-prep, equity-analyst progress.',
+        topic: 'ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot = budget % consumed. Use /research start <topic> to begin.',
       },
       {
         name: 'strategy-memos', key: 'strategy-memos', operatorWrite: false,
-        topic: 'Daily strategy execution memos (DataBot) + diligence verdicts. Auto-posted after each engine run.',
+        topic: 'Daily strategy execution memos + PROCEED / REVIEW / KILL verdicts from diligence runs.',
       },
     ],
   },
@@ -82,6 +82,10 @@ const STRUCTURE = [
       {
         name: 'trade-reports', key: 'trade-reports', operatorWrite: false,
         topic: 'Final trade reports. Use !john /approve or /reject to act on pending trades.',
+      },
+      {
+        name: 'position-recommendations', key: 'position-recommendations', operatorWrite: false,
+        topic: 'TradeDesk position recommendations. Click Approve to execute immediately on Alpaca paper. Click Reject to dismiss.',
       },
     ],
   },
@@ -116,16 +120,17 @@ ${ch('pipeline-feed')} — Phase completions, cycle start/end, errors
 ${ch('data-alerts')} — Progress every 10 tickers (speed, ETA, rows written), sleep/wake notices
 
 **🔬 RESEARCH DESK**
-${ch('research-feed')} — ResearchDesk signal synthesis + live subagent output during diligence runs
-${ch('strategy-memos')} — Daily strategy execution memos (DataBot) + PROCEED / REVIEW / KILL verdicts
+${ch('research-feed')} — ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot shows budget % consumed.
+${ch('strategy-memos')} — Daily strategy execution memos + PROCEED / REVIEW / KILL verdicts from diligence runs
 
 **📈 TRADING DESK**
 ${ch('trade-signals')} — Trade pipeline outputs and risk verdicts
 ${ch('trade-reports')} — Final trade reports. Use /approve or /reject to act.
+${ch('position-recommendations')} — Position recommendations with Approve/Reject buttons
 
 **💬 COMMAND CENTER**
-${ch('general')} — Main command input
-${ch('agent-chat')} — Freeform PTC tasks (!john <anything>)`,
+${ch('general')} — All \`!john /commands\` — type \`!john /help\` for full list
+${ch('agent-chat')} — Freeform chat with BotJohn as PM agent (\`!john <anything>\`)`,
 
     `**⚡ General** *(instant)*
 \`!john /ping\` · \`!john /status\` · \`!john /market\` · \`!john /rate\` · \`!john /budget\` · \`!john /help\`
@@ -138,8 +143,8 @@ ${ch('agent-chat')} — Freeform PTC tasks (!john <anything>)`,
 **📈 Signals & Engine**
 \`!john /signals [date]\` · \`!john /engine-status\` · \`!john /engine-run\` · \`!john /strategy-review\`
 
-**🔬 Research** *(spawns subagents)*
-\`!john /research\` · \`!john /strategist\` · \`!john /research status\` · \`!john /research reports\`
+**🔬 Research** *(operator-controlled research loop)*
+\`!john /research start <topic>\` · \`!john /research pause\` · \`!john /research resume\` · \`!john /research status\`
 \`!john /risk-scan\` · \`!john /diligence AAPL\` → #strategy-memos
 
 **📐 Trading**

@@ -157,6 +157,193 @@ def execute_alpaca_orders(green_opts, run_date=None):
     return results
 
 
+def get_positions(sess):
+    """Return list of open positions from Alpaca paper account."""
+    try:
+        r = sess.get(f"{sess._base}/v2/positions", timeout=10)
+        r.raise_for_status()
+        out = []
+        for p in r.json():
+            out.append({
+                'symbol':            p.get('symbol', ''),
+                'qty':               int(float(p.get('qty', 0))),
+                'avg_entry_price':   float(p.get('avg_entry_price') or 0),
+                'current_price':     float(p.get('current_price') or 0),
+                'unrealized_plpc':   float(p.get('unrealized_plpc') or 0),
+                'side':              p.get('side', 'long'),
+                'market_value':      float(p.get('market_value') or 0),
+            })
+        return out
+    except Exception as exc:
+        logger.warning(f"[Alpaca] get_positions failed: {exc}")
+        return []
+
+
+def get_portfolio_history(sess):
+    """Return daily + weekly P&L data from Alpaca portfolio history endpoint."""
+    result = {
+        'equity_now':     0.0,
+        'equity_1d_ago':  0.0,
+        'equity_1w_ago':  0.0,
+        'daily_pnl':      0.0,
+        'weekly_pnl':     0.0,
+        'daily_pnl_pct':  0.0,
+        'weekly_pnl_pct': 0.0,
+    }
+    equity_now = _fetch_equity(sess)
+    result['equity_now'] = equity_now
+
+    period_map = [('1D', '1d', 'daily'), ('1W', '1w', 'weekly')]
+    for period, ago_key, label in period_map:
+        try:
+            r = sess.get(
+                f"{sess._base}/v2/account/portfolio/history",
+                params={'period': period, 'timeframe': '1D'},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data     = r.json()
+            equities = data.get('equity', [])
+            if equities and len(equities) >= 2:
+                past = float(equities[0] or 0)
+                result[f'equity_{ago_key}_ago'] = past
+                pnl     = equity_now - past
+                pnl_pct = (pnl / past * 100) if past > 0 else 0.0
+                result[f'{label}_pnl']     = pnl
+                result[f'{label}_pnl_pct'] = pnl_pct
+        except Exception as exc:
+            logger.warning(f"[Alpaca] portfolio history ({period}) failed: {exc}")
+
+    return result
+
+
+def execute_recommendation(rec_id, postgres_uri):
+    """
+    Load a position_recommendations row by id, execute the action on Alpaca,
+    and update the DB row with the result.
+    Returns dict: {ok, order_id, action, ticker, detail}
+    """
+    import psycopg2, psycopg2.extras
+
+    conn = psycopg2.connect(postgres_uri)
+    cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute("SELECT * FROM position_recommendations WHERE id=%s", [rec_id])
+    rec = cur.fetchone()
+    if not rec:
+        conn.close()
+        return {'ok': False, 'error': f'rec {rec_id} not found'}
+    if rec['status'] != 'pending':
+        conn.close()
+        return {'ok': False, 'error': f'rec already {rec["status"]}'}
+
+    ticker = rec['ticker']
+    action = rec['action']
+    sess   = _alpaca_session()
+    base   = sess._base
+
+    order_id    = None
+    alpaca_stat = None
+    alpaca_err  = None
+    ok          = False
+    detail      = ''
+
+    try:
+        if action == 'EXIT_EARLY':
+            r = sess.delete(f"{base}/v2/positions/{ticker}", params={'percentage': '100'}, timeout=15)
+            if r.status_code in (200, 207):
+                ok       = True
+                order_id = (r.json() or [{}])[0].get('id') if isinstance(r.json(), list) else r.json().get('id')
+                alpaca_stat = 'filled'
+                detail      = f'position closed via DELETE /v2/positions/{ticker}'
+            elif r.status_code in (403, 404):
+                # Fallback: market sell order
+                positions = get_positions(sess)
+                pos = next((p for p in positions if p['symbol'] == ticker), None)
+                qty = pos['qty'] if pos else 1
+                body = {
+                    'symbol': ticker, 'qty': str(qty), 'side': 'sell',
+                    'type': 'market', 'time_in_force': 'day',
+                }
+                r2 = sess.post(f"{base}/v2/orders", json=body, timeout=15)
+                if r2.status_code in (200, 201):
+                    ok = True
+                    order_id = r2.json().get('id')
+                    alpaca_stat = 'submitted'
+                    detail = f'market sell fallback x{qty}sh'
+                else:
+                    alpaca_err = r2.text[:200]
+                    detail = f'sell fallback failed: {r2.status_code}'
+            else:
+                alpaca_err = r.text[:200]
+                detail = f'DELETE failed: {r.status_code}'
+
+        elif action == 'INCREASE_SIZE':
+            equity = _fetch_equity(sess)
+            entry  = float(rec['entry_price'])
+            stop   = float(rec['stop_loss']) if rec['stop_loss'] else entry * 0.95
+            target = float(rec['profit_target']) if rec['profit_target'] else entry * 1.10
+            notional = equity * MIN_KELLY_FLOOR
+            qty = max(1, int(notional / entry))
+            body = {
+                'symbol': ticker, 'qty': str(qty), 'side': 'buy',
+                'type': 'market', 'time_in_force': 'day',
+                'order_class': 'bracket',
+                'take_profit': {'limit_price': _price_str(target)},
+                'stop_loss':   {'stop_price':  _price_str(stop)},
+            }
+            r = sess.post(f"{base}/v2/orders", json=body, timeout=15)
+            if r.status_code in (200, 201):
+                ok = True
+                order_id = r.json().get('id')
+                alpaca_stat = 'submitted'
+                detail = f'added x{qty}sh notional=${notional:,.0f}'
+            else:
+                alpaca_err = r.text[:200]
+                detail = f'order failed: {r.status_code}'
+
+        elif action == 'REDUCE_SIZE':
+            positions = get_positions(sess)
+            pos = next((p for p in positions if p['symbol'] == ticker), None)
+            qty = max(1, (pos['qty'] // 3)) if pos and pos['qty'] > 0 else 1
+            body = {
+                'symbol': ticker, 'qty': str(qty), 'side': 'sell',
+                'type': 'market', 'time_in_force': 'day',
+            }
+            r = sess.post(f"{base}/v2/orders", json=body, timeout=15)
+            if r.status_code in (200, 201):
+                ok = True
+                order_id = r.json().get('id')
+                alpaca_stat = 'submitted'
+                detail = f'sold x{qty}sh (1/3 reduction)'
+            else:
+                alpaca_err = r.text[:200]
+                detail = f'reduce failed: {r.status_code}'
+
+        else:
+            detail = f'action {action} not executable'
+
+    except Exception as exc:
+        alpaca_err = str(exc)
+        detail = f'exception: {exc}'
+
+    # Update DB
+    try:
+        cur.execute(
+            """UPDATE position_recommendations
+               SET status=%s, resolved_at=NOW(), resolved_by='bot-button',
+                   alpaca_order_id=%s, alpaca_status=%s, alpaca_error=%s
+               WHERE id=%s""",
+            ['approved' if ok else 'pending', order_id, alpaca_stat, alpaca_err, rec_id]
+        )
+        conn.commit()
+    except Exception as dbe:
+        logger.warning(f"[execute_recommendation] DB update failed: {dbe}")
+    finally:
+        conn.close()
+
+    return {'ok': ok, 'order_id': order_id, 'action': action, 'ticker': ticker, 'detail': detail}
+
+
 def build_alpaca_post(alpaca_results, run_date=None):
     if not alpaca_results:
         return ""

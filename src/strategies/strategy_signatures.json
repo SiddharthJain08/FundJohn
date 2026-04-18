@@ -1,0 +1,381 @@
+{
+  "S23_regime_momentum": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S24_52wk_high_proximity": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "52wk",
+      "momentum",
+      "proximity",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S25_dual_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "dual_momentum",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_custom_jt_momentum_12mo": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "earnings",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s09_dual_momentum": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "dual_momentum",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s10_quality_value": {
+    "regime_set_hash": "19c75c513791104b",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "quality",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL"
+    ]
+  },
+  "s12_insider": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "delta",
+      "insider",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s15_iv_rv_arb": {
+    "regime_set_hash": "19c75c513791104b",
+    "direction_hash": "cbbf9f7724c8d435",
+    "formula_tokens": [
+      "atr",
+      "hv",
+      "regime",
+      "rv",
+      "straddle",
+      "strangle"
+    ],
+    "regimes": [
+      "LOW_VOL"
+    ]
+  },
+  "s1_event_driven_new_news": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "fb68b393d8dc6940",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "earnings",
+      "iv_rank",
+      "momentum",
+      "regime",
+      "straddle",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s5_max_pain": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "c65c9aa02b36a104",
+    "formula_tokens": [
+      "iv_rank",
+      "max_pain",
+      "proximity",
+      "regime",
+      "reversion",
+      "rv",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "shv10_triple_gate_fear": {
+    "regime_set_hash": "900af3274024f50d",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "hv",
+      "iv_rank",
+      "regime",
+      "unusual_flow",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL"
+    ]
+  },
+  "shv11_cross_stock_dispersion": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "dispersion",
+      "hv",
+      "iv_rank",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv12_vrp_normalization": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "hv",
+      "iv_rank",
+      "regime",
+      "reversion",
+      "rv",
+      "vrp",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv13_call_put_iv_spread": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "call_put",
+      "hv",
+      "iv_rank",
+      "iv_spread",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv14_otm_skew_factor": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "delta",
+      "hv",
+      "iv_rank",
+      "otm",
+      "regime",
+      "skew",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv15_iv_term_structure": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atr",
+      "backwardation",
+      "contango",
+      "hv",
+      "iv_rank",
+      "iv_term_structure",
+      "regime",
+      "reversion",
+      "rv",
+      "term_structure",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv16_gex_regime": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "gamma",
+      "gex",
+      "hv",
+      "iv_rank",
+      "regime",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv17_earnings_straddle_fade": {
+    "regime_set_hash": "506a1a567867b2d2",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "earnings",
+      "hv",
+      "iv_rank",
+      "regime",
+      "straddle",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv19_iv_surface_tilt": {
+    "regime_set_hash": "506a1a567867b2d2",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "centroid",
+      "delta",
+      "hv",
+      "iv_rank",
+      "iv_surface",
+      "regime",
+      "tilt",
+      "vega",
+      "vrp",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv20_iv_dispersion_reversion": {
+    "regime_set_hash": "506a1a567867b2d2",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "dispersion",
+      "hv",
+      "iv_rank",
+      "regime",
+      "reversion",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv7_iv_crush_fade": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "cbbf9f7724c8d435",
+    "formula_tokens": [
+      "atr",
+      "hv",
+      "iv_crush",
+      "iv_rank",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv8_gamma_theta_carry": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "3295eb13efff7c2a",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "gamma",
+      "hv",
+      "iv_rank",
+      "regime",
+      "theta"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  },
+  "shv9_rv_momentum_div": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "hv",
+      "momentum",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ]
+  }
+}

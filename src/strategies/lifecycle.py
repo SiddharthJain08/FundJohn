@@ -261,7 +261,42 @@ class LifecycleStateMachine:
             "lifecycle[%s]: %s → %s  actor=%s",
             strategy_id, event.from_state, to_state.value, actor,
         )
+        self._persist_lifecycle_event(strategy_id, event, metadata)
         return rec
+
+    def _persist_lifecycle_event(
+        self,
+        strategy_id: str,
+        event: "TransitionEvent",
+        metadata: Optional[dict],
+    ) -> None:
+        """Write to lifecycle_events Postgres table; fail silently if unavailable."""
+        import os
+        postgres_uri = os.environ.get("POSTGRES_URI")
+        if not postgres_uri:
+            return
+        try:
+            import psycopg2
+            import json as _json
+            conn = psycopg2.connect(postgres_uri)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO lifecycle_events
+                           (strategy_id, from_state, to_state, actor, reason, metadata)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        (
+                            strategy_id,
+                            event.from_state,
+                            event.to_state,
+                            event.actor,
+                            event.reason,
+                            _json.dumps(metadata or {}),
+                        ),
+                    )
+            conn.close()
+        except Exception as exc:
+            logger.debug("lifecycle_events insert skipped: %s", exc)
 
     # ── registration ─────────────────────────────────────────────────────────
 

@@ -1,0 +1,9 @@
+{
+  "strategy_id": "S_custom_jt_momentum_12mo",
+  "required": [
+    "earnings",
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

@@ -7,10 +7,11 @@ Agents communicate DIRECTLY — Discord posts are write-only for human visibilit
 
 Pipeline (direct agent-to-agent, no Discord round-trip):
   1. post_memos.py      → run engine → post strategy memo to #strategy-memos (DataBot)
-  2. research_report.py → quantitative analysis → post summary to #research-feed (ResearchDesk)
-  3. trade_agent.py     → Kelly optimization → post signals to #trade-signals (TradeDesk)
+  2. research_report.py → signal enrichment (HV/beta/EV, pure Python, no LLM)
+  3. trade_agent_llm.py → TradeJohn Claude → sizing + signals to #trade-signals (TradeDesk)
+  4. portfolio_report.py → portfolio metrics to #trade-reports (TradeDesk)
 
-Budget check before step 1 only (steps 2+3 are pure Python, no LLM tokens).
+Budget check before steps 1 and 3 (step 3 invokes TradeJohn Claude LLM).
 
 Usage:
   python3 src/execution/pipeline_orchestrator.py [--date YYYY-MM-DD] [--force-resume]
@@ -34,12 +35,14 @@ LOCK_TTL        = 3600   # 1 hour lock TTL (prevents double-run)
 # Ordered pipeline steps: key → script name (without .py)
 STEPS = [
     ('memos',    'post_memos'),
-    ('research', 'research_report'),
-    ('trade',    'trade_agent'),
+    ('research', 'research_report'),   # pure Python: HV/beta/EV signal enrichment
+    ('trade',    'trade_agent_llm'),   # Claude LLM: TradeJohn sizing + signal generation
+    ('report',   'portfolio_report'),
 ]
 
-# Budget check required before these steps (memos triggers engine run; research+trade are pure Python)
-BUDGET_CHECK_BEFORE = {'memos'}
+# Budget check required before these steps
+# memos triggers engine run; trade now invokes TradeJohn Claude (LLM tokens)
+BUDGET_CHECK_BEFORE = {'memos', 'trade'}
 
 # Notify here on pause/resume/error (DataBot → #strategy-memos)
 NOTIFY_WEBHOOK = 'https://discord.com/api/webhooks/1492623936247300186/BFUwcy91xaIzq_GwP_YvON9-N9HhSilx-wDQ6MhISRYoSx9LrNYyXsDQeaSzxfwimEBi'
@@ -184,18 +187,50 @@ def notify(msg):
         log(f'Notify error: {e}')
 
 
+SIGNAL_QUALITY_THRESHOLDS = {
+    'min_avg_ev':      -0.5,   # avg EV must be > -0.5% to allow trade step
+    'min_green_count':  1,     # at least 1 green signal required
+}
+
+def check_signal_quality(run_date):
+    """
+    Read signal_patterns.md from workspace memory to determine if avg EV is
+    too negative to justify running the trade step.
+    Returns (ok: bool, reason: str).
+    """
+    mem_path = ROOT / 'workspaces' / 'default' / 'memory' / 'signal_patterns.md'
+    try:
+        text = mem_path.read_text()
+        # Pattern: "avgEV=-1.89%"
+        import re
+        ev_match    = re.search(r'avgEV=([+-]?\d+\.?\d*)%', text)
+        green_match = re.search(r'EV\+=(\d+)', text)
+        if not ev_match:
+            return True, 'no signal pattern data — allowing trade step'
+        avg_ev    = float(ev_match.group(1))
+        green_cnt = int(green_match.group(1)) if green_match else 0
+        if avg_ev < SIGNAL_QUALITY_THRESHOLDS['min_avg_ev'] and green_cnt < SIGNAL_QUALITY_THRESHOLDS['min_green_count']:
+            return False, f'avg EV={avg_ev:+.2f}% ({green_cnt} green signals) — below quality threshold'
+        return True, f'avg EV={avg_ev:+.2f}%, green={green_cnt}'
+    except Exception as e:
+        log(f'Signal quality check failed ({e}) — allowing trade step')
+        return True, 'check error'
+
+
 def run_step(script, run_date, env):
     """
     Spawn a pipeline script. Returns True on success.
     Scripts are run as subprocesses so they have their own context.
     """
-    path = ROOT / 'src' / 'execution' / f'{script}.py'
-    cmd  = ['python3', str(path), '--date', run_date]
-    log(f'Starting {script}.py ...')
+    path    = ROOT / 'src' / 'execution' / f'{script}.py'
+    cmd     = ['python3', str(path), '--date', run_date]
+    # TradeJohn Claude invocation needs more time than pure-Python steps
+    timeout = 420 if script == 'trade_agent_llm' else 300
+    log(f'Starting {script}.py (timeout={timeout}s)...')
     try:
         result = subprocess.run(
             cmd, cwd=str(ROOT), env=env,
-            capture_output=True, text=True, timeout=300,
+            capture_output=True, text=True, timeout=timeout,
         )
         # Echo output for journal
         for line in (result.stdout + result.stderr).splitlines():
@@ -266,9 +301,10 @@ if __name__ == '__main__':
 
     # Agent status mapping: step_key → (agent_id, busy_task, idle_task)
     STEP_AGENTS = {
-        'memos':    ('databot',      f'Generating signals: {run_date}',      'Steady-state — awaiting next cycle'),
-        'research': ('researchdesk', f'Research: {run_date}',                 None),
-        'trade':    ('tradedesk',    f'Trade optimization: {run_date}',       None),
+        'memos':    ('databot',      f'Generating signals: {run_date}',          'Steady-state — awaiting next cycle'),
+        'research': ('researchdesk', f'Signal enrichment (HV/beta/EV): {run_date}', None),
+        'trade':    ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
+        'report':   ('tradedesk',    f'Portfolio report: {run_date}',            None),
     }
 
     try:
@@ -278,6 +314,19 @@ if __name__ == '__main__':
             if step_key in completed:
                 log(f'Skipping {script} (already done)')
                 continue
+
+            # Signal quality gate before trade step
+            if step_key == 'trade':
+                sq_ok, sq_reason = check_signal_quality(run_date)
+                if not sq_ok:
+                    log(f'Signal quality gate blocked trade step: {sq_reason}')
+                    notify(
+                        f'⚠️ **Trade step skipped — signal quality gate** | {run_date}\n'
+                        f'Reason: {sq_reason}\n'
+                        f'No positions will be opened this cycle. Review strategy parameters or regime alignment.'
+                    )
+                    release_lock(r, run_date)
+                    sys.exit(0)
 
             # Budget check before LLM-adjacent steps
             if step_key in BUDGET_CHECK_BEFORE:

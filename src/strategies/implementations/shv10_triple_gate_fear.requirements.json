@@ -1,0 +1,11 @@
+{
+  "strategy_id": "shv10_triple_gate_fear",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": [
+    "unusual_options_flow"
+  ]
+}

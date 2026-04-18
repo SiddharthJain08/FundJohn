@@ -25,9 +25,12 @@ const MODELS = {
 
 // Subagent model assignments — 4-agent FundJohn system
 const SUBAGENT_MODELS = {
-  botjohn:      MODELS.orchestrator,
-  researchjohn: MODELS.primary,
-  tradejohn:    MODELS.primary,
+  botjohn:       MODELS.orchestrator,
+  researchjohn:  MODELS.primary,
+  tradejohn:     MODELS.primary,
+  strategist:    MODELS.primary,
+  paperhunter:   MODELS.fast,
+  strategycoder: MODELS.primary,
 };
 
 // Flash model alias for quick lookups

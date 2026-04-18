@@ -110,18 +110,39 @@ async function getTaskCost(taskId) {
   return res?.rows?.[0] || null;
 }
 
+async function patchSubagentCache(subagentId, cacheWriteTokens, cacheReadTokens) {
+  await query(
+    `UPDATE subagent_costs
+     SET cache_write_tokens = $1, cache_read_tokens = $2
+     WHERE subagent_id = $3`,
+    [cacheWriteTokens, cacheReadTokens, subagentId]
+  ).catch(() => null);
+}
+
 async function getSpendSummary(days = 7) {
   const res = await query(
     `SELECT
-       task_type,
+       tc.task_type,
        COUNT(*)                  AS runs,
-       SUM(cost_usd)             AS total_cost,
-       AVG(cost_usd)             AS avg_cost,
-       MAX(cost_usd)             AS max_cost
-     FROM task_costs
-     WHERE completed_at >= NOW() - ($1 || ' days')::INTERVAL
-       AND status = 'complete'
-     GROUP BY task_type
+       SUM(tc.cost_usd)          AS total_cost,
+       AVG(tc.cost_usd)          AS avg_cost,
+       MAX(tc.cost_usd)          AS max_cost,
+       ROUND(
+         SUM(sc_agg.cache_read) * 100.0 /
+         NULLIF(SUM(sc_agg.cache_read) + SUM(sc_agg.cache_write), 0),
+         1
+       ) AS cache_hit_rate_pct
+     FROM task_costs tc
+     LEFT JOIN (
+       SELECT task_id,
+              COALESCE(SUM(cache_read_tokens), 0)  AS cache_read,
+              COALESCE(SUM(cache_write_tokens), 0) AS cache_write
+       FROM subagent_costs
+       GROUP BY task_id
+     ) sc_agg ON sc_agg.task_id = tc.task_id
+     WHERE tc.completed_at >= NOW() - ($1 || ' days')::INTERVAL
+       AND tc.status = 'complete'
+     GROUP BY tc.task_type
      ORDER BY total_cost DESC`,
     [days]
   ).catch(() => null);
@@ -143,4 +164,4 @@ async function getTotalSpend(days = 30) {
   return res?.rows?.[0] || { total_usd: 0, total_runs: 0 };
 }
 
-module.exports = { startTask, recordSubagent, completeTask, estimateCost, getTaskCost, getSpendSummary, getTotalSpend };
+module.exports = { startTask, recordSubagent, completeTask, estimateCost, getTaskCost, getSpendSummary, getTotalSpend, patchSubagentCache };

@@ -18,6 +18,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
+
+try:
+    from execution.lint_memo import lint_memo, write_veto_rows
+    from execution.handoff import write_handoff
+    _HANDOFF_AVAILABLE = True
+except ImportError:
+    _HANDOFF_AVAILABLE = False
 
 # ── Webhook URLs (set at startup by bot.js / agent-personas.js) ──────────────
 WEBHOOKS = {
@@ -347,3 +355,58 @@ if __name__ == '__main__':
     wh_post('databot_strategy_memos', memo)
 
     print('[post_memos] Done — pipeline_orchestrator.py will call research_report.py next.')
+
+    # ── SO-6 lint + memos handoff ─────────────────────────────────────────
+    if _HANDOFF_AVAILABLE:
+        by_strat = {}
+        for s in signals:
+            by_strat.setdefault(s['strategy_id'], []).append(s)
+
+        all_memos = {}
+        lint_failures = []
+        conn2 = psycopg2.connect(postgres_uri)
+        now_ts = datetime.utcnow().isoformat() + '+00:00'
+
+        for sid, sigs in by_strat.items():
+            params0 = parse_params(sigs[0]['signal_params'])
+            memo = {
+                'strategy_id':  sid,
+                'run_timestamp': now_ts,
+                'cycle_date':   run_date,
+                'sharpe':       params0.get('sharpe'),
+                'max_drawdown': params0.get('max_drawdown'),
+                'signal_count': len(sigs),
+                'top_signals':  [
+                    {'signal_id': str(i), 'ticker': s['ticker'],
+                     'direction': s['direction'], 'ev': None, 'kelly': None,
+                     'entry': s['entry_price'], 'stop': s['stop_loss'],
+                     'target': s['target_1']}
+                    for i, s in enumerate(sigs)
+                ],
+            }
+            ok, missing = lint_memo(memo)
+            all_memos[sid] = {**memo, 'lint_ok': ok}
+            if not ok:
+                lint_failures.append((sid, missing))
+                try:
+                    write_veto_rows(conn2, run_date, sid, missing)
+                    conn2.commit()
+                except Exception as e:
+                    print(f'[post_memos] veto_log write failed ({sid}): {e}')
+
+        conn2.close()
+
+        write_handoff(run_date, 'memos', {
+            'run_date':   run_date,
+            'strategies': [
+                {'strategy_id': sid,
+                 'sharpe':       m.get('sharpe'),
+                 'max_drawdown': m.get('max_drawdown'),
+                 'signal_count': m.get('signal_count', 0),
+                 'top_signals':  [s['ticker'] for s in m.get('top_signals', [])],
+                 'lint_ok':      m.get('lint_ok', False)}
+                for sid, m in all_memos.items()
+            ],
+            'lint_failures': [[s, missing] for s, missing in lint_failures],
+        })
+        print(f'[post_memos] Memos handoff written — {len(lint_failures)} lint failure(s)')

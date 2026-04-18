@@ -1,0 +1,13 @@
+{
+  "id": "fundjohn",
+  "version": "1.0.0",
+  "description": "FundJohn core skill bundle — strategy lifecycle, sizing, memo schema, veto analysis",
+  "skills": [
+    "paper-to-strategy",
+    "strategy-coder",
+    "backtest-plumb",
+    "position-sizer",
+    "memo-schema",
+    "veto-explainer"
+  ]
+}

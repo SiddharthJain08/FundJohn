@@ -161,6 +161,12 @@ async function notifyEngineSignals(report) {
     await personaPost('tradedesk', 'trade-signals', report).catch(() => {});
 }
 
+async function notifyPositionRecommendation(rec) {
+    const label = rec.action || 'REC';
+    await personaPost('tradedesk', 'position-recommendations',
+        `📋 **${label}** — ${rec.ticker} | ${rec.rationale}`).catch(() => {});
+}
+
 module.exports = {
     init,
     notify,
@@ -171,4 +177,5 @@ module.exports = {
     notifyEngineSignals,
     notifyStrategyMemo,
     notifySignalSynthesis,
+    notifyPositionRecommendation,
 };

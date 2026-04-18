@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv13_call_put_iv_spread",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

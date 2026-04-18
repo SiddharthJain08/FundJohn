@@ -1,0 +1,10 @@
+{
+  "strategy_id": "s5_max_pain",
+  "required": [
+    "earnings",
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

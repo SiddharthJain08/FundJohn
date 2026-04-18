@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv20_iv_dispersion_reversion",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

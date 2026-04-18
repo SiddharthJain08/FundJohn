@@ -1,0 +1,9 @@
+{
+  "strategy_id": "shv11_cross_stock_dispersion",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

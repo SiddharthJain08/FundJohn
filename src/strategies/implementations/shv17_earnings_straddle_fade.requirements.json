@@ -1,0 +1,10 @@
+{
+  "strategy_id": "shv17_earnings_straddle_fade",
+  "required": [
+    "earnings",
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}
