@@ -462,6 +462,18 @@ def load_aux_data(universe: list) -> dict:
         except Exception as e:
             logger.warning(f"Could not load options: {e}")
 
+    # 30-min intraday bars: full DataFrame (date, datetime, ticker, o/h/l/c/v/vwap)
+    # Used by S-TR-04 (Zarattini) and future intraday strategies.
+    bars_30m_path = master_dir / 'prices_30m.parquet'
+    if bars_30m_path.exists():
+        try:
+            bars_30m = pd.read_parquet(bars_30m_path)
+            if not bars_30m.empty:
+                aux['prices_30m'] = bars_30m
+                logger.info(f"30m bars loaded: {len(bars_30m):,} rows, {bars_30m['ticker'].nunique()} tickers")
+        except Exception as e:
+            logger.warning(f"Could not load prices_30m: {e}")
+
     # Macro time series: {series_name: pd.Series(date_index → value)}
     # Provides VIX, VVIX, VIX3M, etc. for regime-aware strategies (S-TR-01 etc.)
     macro_path = master_dir / 'macro.parquet'

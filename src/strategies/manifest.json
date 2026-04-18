@@ -298,6 +298,16 @@
       },
       "history": []
     },
+    "S_tr_04_intraday_spy_momentum": {
+      "state": "paper",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tr_04_intraday_spy_momentum.py",
+        "class": "IntradaySPYMomentum",
+        "description": "Zarattini noise-boundary intraday SPY momentum; S-TR-05 VWAP exit merged as confidence filter (Zarattini & Staley 2023)"
+      },
+      "history": []
+    },
     "S_tr_03_bocpd_change_point": {
       "state": "paper",
       "state_since": "2026-04-18T00:00:00+00:00",

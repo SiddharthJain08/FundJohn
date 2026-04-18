@@ -59,6 +59,25 @@ async function runMarketClosePipeline() {
 
     log('Market close pipeline starting (0 LLM tokens — Kelly optimization only)');
 
+    // 0a. Fetch vol indices (VIX/VVIX) — incremental daily update
+    log('Fetching vol indices (VIX/VVIX)...');
+    try {
+        runPython('src/ingestion/fetch_vol_indices.py');
+        log('Vol indices updated');
+    } catch (e) {
+        log(`WARN: vol indices fetch failed — ${e.message.slice(0, 100)}`);
+    }
+
+    // 0b. Fetch 30-min SPY bars (incremental — only new bars since last run)
+    log('Fetching 30m SPY bars...');
+    try {
+        runPython('src/ingestion/fetch_30m_bars.py');
+        log('30m bars updated');
+    } catch (e) {
+        log(`WARN: 30m bar fetch failed — ${e.message.slice(0, 100)}`);
+        // non-fatal: S-TR-04 will use prior day's bars
+    }
+
     // 1. Market state: HMM, RORO, stress, write regime file
     log('Running market state...');
     try {
