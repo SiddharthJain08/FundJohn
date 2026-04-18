@@ -606,11 +606,37 @@ def write_signal_patterns(analytics, port, run_date):
     )
     _mem_append(mem_dir / 'regime_context.md', regime_entry)
 
+    # Structured JSONL parallel write
+    try:
+        import json as _json, datetime as _dt
+        jsonl_record = _json.dumps({
+            'ts':           _dt.datetime.utcnow().isoformat() + 'Z',
+            'type':         'signal_summary',
+            'date':         run_date,
+            'regime':       regime,
+            'signal_count': len(analytics),
+            'ev_pos':       len(ev_pos),
+            'ev_neg':       len(ev_neg),
+            'avg_ev':       round(avg_ev, 4),
+            'avg_p_t1':     round(avg_p_t1, 4),
+            'high_conv':    len(high_conv),
+        })
+        with open(mem_dir / 'events.jsonl', 'a') as f:
+            f.write(jsonl_record + '\n')
+    except Exception as e:
+        print(f'[research] JSONL write failed: {e}')
+
     print(f'[research] Memory written: signal_patterns.md, regime_context.md ({run_date})')
 
 
 def _mem_append(fpath, text):
+    """Append text to memory file, skipping if an identical line already exists."""
     try:
+        stripped = text.strip()
+        if fpath.exists():
+            existing = fpath.read_text()
+            if stripped and stripped in existing:
+                return  # dedup: already present
         with open(fpath, 'a') as f:
             f.write(text)
     except Exception as e:

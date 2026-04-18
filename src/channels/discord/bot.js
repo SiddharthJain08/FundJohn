@@ -810,8 +810,21 @@ async function handlePtcCommand(cmdText, message, userId) {
             await notify(await orch.listQueue(10));
             break;
           }
+          case 'run-one': {
+            // Populate queue from arXiv if empty, then run until 1 strategy promoted, then auto-pause.
+            const msg = await orch.runOne({ notify: (t) => notify(t), channelNotify });
+            await notify(msg);
+            break;
+          }
+          case 'discover': {
+            // Populate the research queue from arXiv without starting processing.
+            const days = parseInt(args[1]) || 14;
+            await orch.discover({ days, notify: (t) => notify(t), channelNotify });
+            await notify(await orch.getStatus());
+            break;
+          }
           default:
-            await notify('Usage: `/research [submit <url> | start | pause | status | queue]`');
+            await notify('Usage: `/research [submit <url> | start | pause | status | queue | run-one | discover]`');
         }
         break;
       }

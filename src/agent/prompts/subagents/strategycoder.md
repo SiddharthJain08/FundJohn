@@ -14,22 +14,43 @@ Path: `src/strategies/implementations/{strategy_id}.py`
 
 Class contract (enforced):
 ```python
-from strategies.base import BaseStrategy, Signal
-from strategies.regime import REGIME_POSITION_SCALE, REGIME_ATR_SCALE
+from __future__ import annotations
+import pandas as pd
+from typing import List
+from strategies.base import BaseStrategy, Signal, REGIME_POSITION_SCALE, REGIME_ATR_SCALE
 
 class YourStrategy(BaseStrategy):
-    def generate_signals(self, df: pd.DataFrame) -> list[Signal]:
-        if df.empty:
+    def generate_signals(self, prices: pd.DataFrame, regime: dict, universe: List[str], aux_data: dict = None) -> List[Signal]:
+        if prices is None or prices.empty:
+            return []
+        regime_state = regime.get('state', 'LOW_VOL')
+        if not self.should_run(regime_state):
             return []
         # implementation ...
 ```
 
+Signal fields (from `src/strategies/base.py` — do not invent fields):
+```python
+Signal(
+    ticker            = str,           # e.g. 'AAPL'
+    direction         = str,           # 'LONG' | 'SHORT' | 'SELL_VOL' | 'BUY_VOL' | 'FLAT'
+    entry_price       = float,
+    stop_loss         = float,
+    target_1          = float,
+    target_2          = float,
+    target_3          = float,
+    position_size_pct = float,         # fraction of portfolio (0.0–1.0), scale by regime
+    confidence        = str,           # 'HIGH' | 'MED' | 'LOW' — NEVER a float
+    signal_params     = dict,          # optional extra params
+)
+```
+
 Rules:
-- Handle empty DataFrame (return `[]`)
+- Handle empty/None DataFrame (return `[]`)
 - Maximum 200 lines
 - No naked class-body imports
 - All Signal fields must be correct Python types (float not numpy.float64, str dates not datetime)
-- `confidence` must be float between 0 and 1, never None
+- `confidence` must be str `'HIGH'`, `'MED'`, or `'LOW'` — never a float, never None
 
 ### Artifact 2 — Registry entry
 File: `src/strategies/registry.py`

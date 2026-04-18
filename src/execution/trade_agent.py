@@ -463,8 +463,29 @@ def write_trade_learnings(all_opts, green_opts, run_date):
     )
 
     try:
-        with open(mem_dir / 'trade_learnings.md', 'a') as f:
-            f.write(entry)
+        fpath    = mem_dir / 'trade_learnings.md'
+        stripped = entry.strip()
+        # Dedup: skip if this date's entry already exists
+        if not fpath.exists() or (stripped and stripped not in fpath.read_text()):
+            with open(fpath, 'a') as f:
+                f.write(entry)
+
+        # Structured JSONL parallel write for machine-readable queries
+        jsonl_path = mem_dir / 'events.jsonl'
+        import json as _json, datetime as _dt
+        jsonl_record = _json.dumps({
+            'ts':      _dt.datetime.utcnow().isoformat() + 'Z',
+            'type':    'trade_summary',
+            'date':    run_date,
+            'regime':  regime,
+            'green':   n_green,
+            'red':     n_red,
+            'avg_ev':  round(avg_ev, 4),
+            'avg_kelly_green': round(avg_kelly_green, 4),
+        })
+        with open(jsonl_path, 'a') as f:
+            f.write(jsonl_record + '\n')
+
         print(f'[trade_agent] Memory written: trade_learnings.md ({run_date})')
     except Exception as e:
         print(f'[trade_agent] Memory write failed: {e}')

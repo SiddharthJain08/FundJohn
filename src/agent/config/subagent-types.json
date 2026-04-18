@@ -126,6 +126,20 @@
       ],
       "description": "On-demand strategy implementation. Produces implementations/*.py + registry + manifest wiring."
     },
+    "strategist-ideator": {
+      "promptFile": "src/agent/prompts/subagents/strategist-ideator.md",
+      "components": [],
+      "tools": ["postgres", "filesystem"],
+      "iterationLimit": 15,
+      "timeoutSeconds": 300,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "medium",
+      "maxBudgetUsd": 0.30,
+      "modes": ["IDEATE"],
+      "skills": [],
+      "description": "Weekly strategy idea generator. Reads memory files and manifest to propose 3–5 novel research candidates."
+    },
     "datawiring": {
       "promptFile": "src/agent/prompts/subagents/datawiring.md",
       "components": [],

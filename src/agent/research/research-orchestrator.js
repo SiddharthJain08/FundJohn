@@ -17,7 +17,7 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
 const NODE_CLI          = path.join(OPENCLAW_DIR, 'src/agent/run-subagent-cli.js');
@@ -25,6 +25,8 @@ const DEFAULT_WORKSPACE = path.join(OPENCLAW_DIR, 'workspaces/default');
 
 const PAUSE_KEY = 'research:pause_requested';
 const BATCH_SIZE = 5;  // candidates per processQueue call
+
+const STOP_AFTER_KEY = 'research:stop_after_promoted';   // Redis key for one-shot mode
 
 class ResearchOrchestrator {
   constructor() {
@@ -53,17 +55,24 @@ class ResearchOrchestrator {
   /**
    * Start continuous queue processing. Runs until queue empty or paused.
    * Fire-and-forget: returns immediately, loop runs in background.
+   * stopAfterPromoted: if > 0, auto-pauses after that many strategies reach PAPER.
    */
-  async start({ notify, channelNotify } = {}) {
+  async start({ notify, channelNotify, stopAfterPromoted = 0 } = {}) {
     const redis = await this._getRedis();
     await redis.del(PAUSE_KEY);
+
+    if (stopAfterPromoted > 0) {
+      await redis.set(STOP_AFTER_KEY, String(stopAfterPromoted), 'EX', 86_400);
+    } else {
+      await redis.del(STOP_AFTER_KEY);
+    }
 
     const pending = await this._getPendingCount();
     if (pending === 0) {
       return 'Queue is empty — submit papers with `/research submit <url>` first.';
     }
 
-    notify?.(`🔬 **Research started** — ${pending} paper(s) in queue.`);
+    notify?.(`🔬 **Research started** — ${pending} paper(s) in queue.${stopAfterPromoted ? ` Will auto-pause after ${stopAfterPromoted} strategy promoted.` : ''}`);
     channelNotify?.(`🔬 **Research queue processing started** — ${pending} paper(s) queued.`);
 
     // Fire-and-forget loop
@@ -74,6 +83,49 @@ class ResearchOrchestrator {
     });
 
     return `Research loop started — processing ${pending} queued paper(s).`;
+  }
+
+  /**
+   * Discover papers from arXiv and insert into research_candidates queue.
+   * Returns count of new papers added.
+   */
+  async discover({ days = 14, notify, channelNotify } = {}) {
+    notify?.('🔭 Running arXiv discovery...');
+    try {
+      const raw = execSync(
+        `python3 src/ingestion/arxiv_discovery.py --days ${days}`,
+        { cwd: OPENCLAW_DIR, timeout: 60_000 }
+      ).toString();
+      const match = raw.match(/Inserted (\d+) of (\d+)/);
+      const [inserted, found] = match ? [parseInt(match[1]), parseInt(match[2])] : [0, 0];
+      const msg = `🔭 arXiv: found ${found} scored paper(s), inserted ${inserted} new candidate(s).`;
+      notify?.(msg);
+      channelNotify?.(msg);
+      return inserted;
+    } catch (e) {
+      const errMsg = `arXiv discovery failed: ${e.message.slice(0, 200)}`;
+      notify?.(`⚠️ ${errMsg}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Discover papers (if queue empty) then start, auto-pausing after 1 promotion.
+   * This is the "run until one strategy found" one-shot mode.
+   */
+  async runOne({ notify, channelNotify } = {}) {
+    // Populate queue if empty
+    let pending = await this._getPendingCount();
+    if (pending === 0) {
+      notify?.('📭 Queue is empty — discovering papers from arXiv...');
+      const added = await this.discover({ days: 14, notify, channelNotify });
+      if (added === 0) {
+        return '⚠️ No new arXiv papers found and queue is empty. Submit a paper manually with `/research submit <url>`.';
+      }
+      pending = await this._getPendingCount();
+    }
+
+    return this.start({ notify, channelNotify, stopAfterPromoted: 1 });
   }
 
   /**
@@ -316,7 +368,8 @@ class ResearchOrchestrator {
 
   async _codeFromQueue(item, notify, channelNotify) {
     const { candidate_id, strategy_spec } = item;
-    const stratId = strategy_spec?.strategy_id || 'unknown';
+    const stratId  = strategy_spec?.strategy_id || 'unknown';
+    const implPath = path.join(OPENCLAW_DIR, 'src', 'strategies', 'implementations', `${stratId}.py`);
 
     await this._query(
       `UPDATE implementation_queue SET status = 'coding' WHERE candidate_id = $1`,
@@ -330,15 +383,114 @@ class ResearchOrchestrator {
         `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
         [candidate_id]
       );
-      notify?.(`  ✅ ${stratId} implemented.`);
-      channelNotify?.(`✅ **Strategy implemented:** \`${stratId}\` — added to manifest as \`candidate\`, registered as \`pending_approval\`.`);
+      notify?.(`  ✅ ${stratId} implemented — running validation...`);
     } catch (e) {
       await this._query(
         `UPDATE implementation_queue SET status = 'failed' WHERE candidate_id = $1`,
         [candidate_id]
       );
       notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
+      return;
     }
+
+    // ── Phase 1: Contract validation ─────────────────────────────────────────
+    let validResult;
+    try {
+      const raw = execSync(
+        `python3 src/strategies/validate_strategy.py "${implPath}"`,
+        { cwd: OPENCLAW_DIR, timeout: 60_000 }
+      ).toString();
+      validResult = JSON.parse(raw);
+    } catch (e) {
+      validResult = { ok: false, errors: [e.message] };
+    }
+
+    if (!validResult.ok) {
+      const errLog = (validResult.errors || []).join('\n');
+      await this._query(
+        `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
+        [errLog, candidate_id]
+      );
+      notify?.(`  ❌ ${stratId} validation failed: ${errLog.slice(0, 200)}`);
+      channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
+      return;
+    }
+    notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
+
+    // ── Phase 2: Auto-backtest convergence gate ───────────────────────────────
+    let btResult;
+    try {
+      const raw = execSync(
+        `python3 src/strategies/auto_backtest.py "${implPath}"`,
+        { cwd: OPENCLAW_DIR, timeout: 600_000 }
+      ).toString();
+      btResult = JSON.parse(raw);
+    } catch (e) {
+      btResult = { passed: false, error: e.message, windows: [] };
+    }
+
+    if (!btResult.passed) {
+      await this._query(
+        `UPDATE implementation_queue SET status = 'backtest_failed', backtest_result = $1 WHERE candidate_id = $2`,
+        [JSON.stringify(btResult), candidate_id]
+      );
+      const summary = btResult.error
+        ? btResult.error.slice(0, 200)
+        : `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
+      notify?.(`  ❌ ${stratId} backtest failed: ${summary}`);
+      channelNotify?.(`❌ **${stratId}** failed backtest gate — ${summary}.`);
+      return;
+    }
+
+    // ── Phase 3: Auto-promote CANDIDATE → PAPER ───────────────────────────────
+    const reason = `Auto-backtest: Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
+    try {
+      execSync(
+        `python3 -c "
+import sys; sys.path.insert(0, 'src')
+from strategies.lifecycle import LifecycleStateMachine, StrategyState
+lsm = LifecycleStateMachine.from_manifest('src/strategies/manifest.json')
+lsm.transition('${stratId}', StrategyState.PAPER, actor='auto_backtest', reason='${reason.replace(/'/g, '')}')
+lsm.save_manifest('src/strategies/manifest.json')
+"`,
+        { cwd: OPENCLAW_DIR, timeout: 30_000 }
+      );
+    } catch (e) {
+      // Lifecycle transition failure is non-fatal — strategy is still coded
+      notify?.(`  ⚠️ ${stratId} lifecycle promotion failed: ${e.message.slice(0, 200)}`);
+    }
+
+    // Update strategy_registry status to paper
+    await this._query(
+      `UPDATE strategy_registry SET status = 'paper' WHERE id = $1`,
+      [stratId]
+    ).catch((e) => console.error(`[research-orch] registry status update failed: ${e.message}`));
+
+    await this._query(
+      `UPDATE implementation_queue SET status = 'promoted', backtest_result = $1 WHERE candidate_id = $2`,
+      [JSON.stringify(btResult), candidate_id]
+    );
+
+    const summary = `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, ${btResult.trade_count} trades`;
+    notify?.(`  🚀 ${stratId} → PAPER trading (${summary})`);
+    channelNotify?.(`🚀 **${stratId}** auto-promoted to paper trading — ${summary}`);
+
+    // One-shot mode: auto-pause after N promotions
+    try {
+      const r = await this._getRedis();
+      const remaining = parseInt(await r.get(STOP_AFTER_KEY) || '0');
+      if (remaining > 0) {
+        const newVal = remaining - 1;
+        if (newVal <= 0) {
+          await r.del(STOP_AFTER_KEY);
+          await r.set(PAUSE_KEY, '1', 'EX', 86_400);
+          notify?.('⏸ One-shot complete — research auto-paused. Run `/research start` to continue.');
+          channelNotify?.('⏸ **One-shot complete** — 1 strategy promoted. Research auto-paused.');
+        } else {
+          await r.set(STOP_AFTER_KEY, String(newVal), 'EX', 86_400);
+        }
+      }
+    } catch (_) { /* Redis unavailable — loop will continue normally */ }
   }
 
   // ── DataWiringAgent ─────────────────────────────────────────────────────────

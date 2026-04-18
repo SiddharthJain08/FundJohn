@@ -343,6 +343,61 @@ function start(swarm, generateId, notifyDiscord) {
         } catch (e) {
             log(`Universe sync error: ${e.message.slice(0, 200)}`);
         }
+
+        // StrategyIdeator: generate 3-5 novel strategy ideas from memory files
+        log('StrategyIdeator starting — generating ideas from memory...');
+        await swarm.init({
+            type:      'strategist-ideator',
+            mode:      'IDEATE',
+            workspace: WORKSPACE_DIR,
+            threadId:  generateId(),
+            prompt:    'Generate 3–5 novel strategy ideas based on the current memory files. ' +
+                       'Insert each into research_candidates with source=\'ideator\'.',
+        }).catch((e) => log(`StrategyIdeator error: ${e.message}`));
+
+        // arXiv discovery: harvest recent q-fin papers
+        log('arXiv discovery starting...');
+        try {
+            const arxivOut = runPython('src/ingestion/arxiv_discovery.py');
+            log(`arXiv discovery complete: ${arxivOut.slice(0, 200)}`);
+        } catch (e) {
+            log(`arXiv discovery error: ${e.message.slice(0, 200)}`);
+        }
+
+        // Sunday backtest sweep: re-run gate on stale pending/failed strategies
+        log('Sunday backtest sweep starting...');
+        try {
+            const { Pool: SweepPool } = require('pg');
+            const sweepPool = new SweepPool({ connectionString: process.env.POSTGRES_URI });
+            const { rows: stale } = await sweepPool.query(
+                `SELECT iq.candidate_id, iq.strategy_spec
+                 FROM implementation_queue iq
+                 WHERE iq.status IN ('backtest_failed', 'pending_approval', 'done')
+                   AND iq.queued_at < NOW() - INTERVAL '7 days'
+                 LIMIT 10`
+            );
+            await sweepPool.end();
+
+            if (stale.length === 0) {
+                log('Sunday sweep: no stale strategies to re-check.');
+            } else {
+                log(`Sunday sweep: re-checking ${stale.length} stale strategy(ies)...`);
+                const ResearchOrchestrator = require('../agent/research/research-orchestrator');
+                const orch = new ResearchOrchestrator();
+                for (const row of stale) {
+                    const spec = typeof row.strategy_spec === 'string'
+                        ? JSON.parse(row.strategy_spec)
+                        : row.strategy_spec;
+                    await orch._codeFromQueue(
+                        { candidate_id: row.candidate_id, strategy_spec: spec },
+                        (msg) => log(`[sweep] ${msg}`),
+                        null
+                    ).catch((e) => log(`[sweep] error for ${spec?.strategy_id}: ${e.message}`));
+                }
+            }
+        } catch (e) {
+            log(`Sunday sweep error: ${e.message}`);
+        }
     }, { timezone: 'America/New_York' });
 
     // 4:20 PM ET Mon-Fri: run full market-close pipeline (market state + signals cache + signal_runner.py)
