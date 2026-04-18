@@ -24,7 +24,7 @@ const AGENTS = {
   botjohn: {
     displayName: '🦞 BotJohn',
     emoji:       '🦞',
-    model:       'claude-opus-4-6',
+    model:       'claude-sonnet-4-6',
     description: 'Portfolio Manager & Orchestrator',
     channelKeys: ['general', 'botjohn-log'],
   },

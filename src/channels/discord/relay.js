@@ -28,8 +28,13 @@ async function send(message, text, opts = {}) {
   const channel = opts.channelOverride || message.channel;
   const chunks = split(String(text));
 
-  for (const chunk of chunks) {
-    await channel.send({ content: chunk });
+  for (let i = 0; i < chunks.length; i++) {
+    if (i === 0 && !opts.channelOverride && message.reply) {
+      // Reply to the original message — tags the sender automatically
+      await message.reply({ content: chunks[i] });
+    } else {
+      await channel.send({ content: chunks[i] });
+    }
   }
 }
 

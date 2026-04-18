@@ -81,18 +81,28 @@ const client = new Client({
 
 
 // ── Message handler ────────────────────────────────────────────────────────────
+const TRUSTED_BOT_IDS = new Set(
+  (process.env.TRUSTED_BOT_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
+);
+
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;  // agent webhook posts are for human visibility only
+  const isTrustedAgent = message.author.bot && TRUSTED_BOT_IDS.has(message.author.id);
+  if (message.author.bot && !isTrustedAgent) return;
 
   const content = message.content.trim();
-  const userId = message.author.id;
+  const userId  = message.author.id;
+  const participantType = isTrustedAgent ? 'agent' : 'user';
+  const participantName = isTrustedAgent
+    ? (message.author.username || message.author.id)
+    : (message.author.username || message.author.id);
 
   // Track operator activity for veto escalation logic
-  await updateOperatorActivity(userId).catch(() => null);
+  if (!isTrustedAgent) await updateOperatorActivity(userId).catch(() => null);
 
   // Determine if this is a BotJohn command
   const isMention = message.mentions.has(client.user?.id);
   const isPrefix  = content.toLowerCase().startsWith(PREFIX.toLowerCase());
+
   if (!isMention && !isPrefix) return;
 
   // Extract command text (strip prefix or mention)
@@ -185,7 +195,7 @@ client.on('messageCreate', async (message) => {
   }
 
   // Route to PTC mode
-  await handlePtcCommand(cmdText, message, userId);
+  await handlePtcCommand(cmdText, message, userId, { participantType, participantName, isTrustedAgent });
 });
 
 /**
@@ -210,7 +220,8 @@ function classifyRequest(content) {
     return { mode: 'GENERAL', agent: 'botjohn' };
 }
 
-async function handlePtcCommand(cmdText, message, userId) {
+async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
+  const { participantType = 'user', participantName = 'Operator', isTrustedAgent = false } = participantCtx;
   const parts = cmdText.split(/\s+/);
   const cmd   = parts[0].toLowerCase().replace(/^\//, '');
   const args  = parts.slice(1);
@@ -888,11 +899,41 @@ async function handlePtcCommand(cmdText, message, userId) {
 
         // Freeform message → BotJohn PM agent handles it directly.
         const ticker = extractTicker(cmdText);
-        const result = await main.runTask({ task: cmdText, ticker, workspaceId, threadId, notify });
-        // result.output is the agent's plain-text response from --output-format json
+        const result = await main.runTask({
+          task:            cmdText,
+          ticker,
+          workspaceId,
+          threadId,
+          notify,
+          participantId:   userId,
+          participantName,
+          participantType,
+          channelId:       message.channelId,
+        });
         const text = result?.output || result?.result || result?.message;
         if (text && typeof text === 'string' && text.trim()) {
-          await relay.send(message, text.trim());
+          if (isTrustedAgent) {
+            // Full response → #agent-chat
+            const agentChatId = _channelMap['agent-chat'];
+            if (agentChatId) {
+              const agentChatCh = client.channels.cache.get(agentChatId);
+              if (agentChatCh) {
+                const chunks = relay.split ? relay.split(text.trim()) : [text.trim()];
+                for (const chunk of chunks) await agentChatCh.send({ content: chunk });
+              }
+            }
+            // First-line summary → #general
+            const generalId = _channelMap['general'];
+            if (generalId) {
+              const generalCh = client.channels.cache.get(generalId);
+              if (generalCh) {
+                const summary = text.trim().split('\n')[0].slice(0, 380);
+                await generalCh.send(`📡 **[Agent ↔ BotJohn]** ${summary}`);
+              }
+            }
+          } else {
+            await relay.send(message, text.trim());
+          }
         } else {
           await postResult(message, ticker || 'task', result, 'general');
         }

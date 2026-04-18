@@ -13,6 +13,7 @@
     "security:audit": "node -e \"require('./src/security/skill-vetter').vetAllSkills('./src/skills').then(rs=>rs.forEach(r=>console.log(r.approved?'✓':'✗',r.skillName,r.violations.length?'('+r.violations.length+' violations)':''))).catch(console.error)\""
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "discord.js": "^14.0.0",
     "dotenv": "^16.4.0",
     "express": "^4.22.1",

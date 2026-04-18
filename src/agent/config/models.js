@@ -3,8 +3,8 @@
 const MODELS = {
   orchestrator: {
     provider: 'anthropic',
-    model: 'claude-opus-4-6',
-    description: 'BotJohn — orchestrator, portfolio manager, full reasoning depth',
+    model: 'claude-sonnet-4-6',
+    description: 'BotJohn — orchestrator, portfolio manager',
   },
   primary: {
     provider: 'anthropic',

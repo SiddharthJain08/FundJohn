@@ -6,7 +6,8 @@
 const fs   = require('fs');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
-const swarm = require('./subagents/swarm');
+const swarm         = require('./subagents/swarm');
+const botjohnDirect = require('./botjohn-direct');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 
@@ -45,15 +46,14 @@ async function runCycle({ cycleDate, portfolioState, strategyList, threadId, not
  * @param {Function} [opts.notify]   — Discord notify function
  * @returns {Promise<Object>}
  */
-async function runTask({ task, ticker, threadId, notify }) {
-  return swarm.init({
-    type:      'botjohn',
-    ticker:    ticker || 'N/A',
-    workspace: OPENCLAW_DIR,
-    threadId,
-    prompt:    task,
-    notify,
-    mode:      'PM_TASK',
+async function runTask({ task, ticker, threadId, notify,
+                         participantId, participantName, participantType, channelId }) {
+  return botjohnDirect.respond({
+    participantId:   participantId   || 'operator',
+    participantName: participantName || 'Operator',
+    participantType: participantType || 'user',
+    channelId:       channelId       || null,
+    message:         task,
   });
 }
 
