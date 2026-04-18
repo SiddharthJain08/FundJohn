@@ -5,6 +5,8 @@ require('dotenv').config({ path: require('path').join(__dirname, '../../../.env'
 const express = require('express');
 const { getAllSubagentStatuses, getBucketStatus } = require('../../database/redis');
 const { verdictCache, query: dbQuery } = require('../../database/postgres');
+const fs = require('fs');
+const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
 app.use(express.json());
@@ -365,6 +367,18 @@ app.post('/api/events/data-updated', (req, res) => {
   res.json({ ok: true });
 });
 
+// Volatility regime — reads regime_latest.json written by run_market_state.py
+app.get('/api/regime', async (req, res) => {
+  try {
+    const raw = await fs.promises.readFile(REGIME_FILE, 'utf8');
+    res.json({ available: true, ...JSON.parse(raw) });
+  } catch (err) {
+    if (err.code === 'ENOENT' || err instanceof SyntaxError)
+      return res.json({ available: false, state: 'NO_DATA' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // SSE stream
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -391,7 +405,7 @@ function getDashboardHtml() {
 :root{
   --bg:#0d1117;--panel:#161b22;--border:#30363d;--border2:#21262d;
   --text:#e6edf3;--muted:#8b949e;--dim:#484f58;
-  --blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff;
+  --blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff;--orange:#f0883e;
 }
 html,body{height:100%;overflow:hidden}
 body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',monospace;font-size:13px;display:flex;flex-direction:column}
@@ -550,6 +564,40 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .pf-section-body{overflow-x:auto}
 .pf-pnl-pos{color:var(--green)}.pf-pnl-neg{color:var(--red)}
 .dir-long{color:var(--green);font-weight:600}.dir-short{color:var(--red);font-weight:600}
+/* ── Regime Panel ── */
+.regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
+.regime-panel-header{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.regime-panel-header::after{content:'';flex:1;height:1px;background:var(--border2)}
+.regime-top-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.regime-state-badge{font-size:13px;font-weight:700;padding:4px 12px;border-radius:6px;letter-spacing:.04em;border:1px solid transparent}
+.regime-state-LOW_VOL{color:#fff;background:var(--green);border-color:var(--green)}
+.regime-state-TRANSITIONING{color:#000;background:var(--yellow);border-color:var(--yellow)}
+.regime-state-HIGH_VOL{color:#fff;background:var(--orange);border-color:var(--orange)}
+.regime-state-CRISIS{color:#fff;background:var(--red);border-color:var(--red)}
+.regime-state-NO_DATA{color:var(--dim);background:var(--border2);border-color:var(--border)}
+.regime-meta-item{display:flex;flex-direction:column;gap:2px}
+.regime-meta-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.regime-meta-val{font-size:13px;font-weight:600;color:var(--text)}
+.regime-bar-group{flex:1;min-width:160px;max-width:260px}
+.regime-bar-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:3px;display:flex;justify-content:space-between}
+.regime-bar-track{background:var(--border2);border-radius:4px;height:8px;overflow:hidden}
+.regime-bar-fill{height:100%;border-radius:4px;transition:width .4s}
+.regime-roro-track{background:var(--border2);border-radius:4px;height:8px;overflow:hidden;position:relative}
+.regime-roro-center{position:absolute;left:50%;top:0;width:1px;height:100%;background:var(--border)}
+.regime-roro-fill{position:absolute;top:0;height:100%;border-radius:4px;transition:all .4s}
+.regime-bottom-row{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;margin-top:4px}
+.regime-feat-grid{display:flex;gap:12px;flex-wrap:wrap;flex:1}
+.regime-feat{display:flex;flex-direction:column;gap:2px;min-width:90px}
+.regime-feat-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+.regime-feat-val{font-size:12px;font-weight:600;color:var(--text)}
+.regime-prob-section{min-width:180px}
+.regime-prob-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
+.regime-prob-row{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.regime-prob-name{font-size:10px;color:var(--muted);width:80px;flex-shrink:0}
+.regime-prob-track{flex:1;background:var(--border2);border-radius:3px;height:6px;overflow:hidden}
+.regime-prob-bar{height:100%;border-radius:3px;transition:width .4s}
+.regime-prob-pct{font-size:10px;color:var(--muted);width:34px;text-align:right;flex-shrink:0}
+.regime-alert-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
 </style>
 </head>
 <body>
@@ -825,8 +873,93 @@ function showOverview() {
     <div class="ov-label">Market News</div>
     <div id="overview-news" style="padding:4px 0"><div class="empty">Loading news...</div></div>
   </div>\`;
-  ov.innerHTML = (html || '<div class="empty">No market data yet — pipeline runs at 6:00 AM ET</div>') + newsHtml;
+  const regimePlaceholder = \`<div id="regime-panel" class="regime-panel">
+    <div class="regime-panel-header">Volatility Regime</div>
+    <div class="empty" style="padding:10px 0;font-size:11px">Loading regime...</div>
+  </div>\`;
+  ov.innerHTML = regimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
   loadNewsSection('overview-news', null);
+  loadRegime();
+}
+
+// ── Regime Panel ─────────────────────────────────────────────────────────────
+async function loadRegime() {
+  const el = document.getElementById('regime-panel');
+  if (!el) return;
+
+  const d = await fetch('/api/regime').then(r => r.json())
+    .catch(() => ({ available: false, state: 'NO_DATA' }));
+
+  if (!d.available) {
+    el.innerHTML = \`<div class="regime-panel-header">Volatility Regime</div>
+      <div class="empty" style="padding:10px 0;font-size:11px">No regime data — runs at 9:00 AM and 4:20 PM ET on market days</div>\`;
+    return;
+  }
+
+  const stateClass = {LOW_VOL:'regime-state-LOW_VOL',TRANSITIONING:'regime-state-TRANSITIONING',
+    HIGH_VOL:'regime-state-HIGH_VOL',CRISIS:'regime-state-CRISIS'}[d.state]||'regime-state-NO_DATA';
+  const posScale   = d.position_scale != null ? Math.round(d.position_scale*100)+'%' : '—';
+  const conf       = d.confidence     != null ? Math.round(d.confidence*100)+'%'     : '—';
+  const days       = d.days_in_current_state != null ? d.days_in_current_state+'d in state' : '';
+  const alertBadge = d.regime_change_alert
+    ? \`<span class="regime-alert-badge">⚠ REGIME CHANGE ALERT</span>\` : '';
+
+  const stress    = Math.min(100, Math.max(0, d.stress_score ?? 0));
+  const stressClr = stress >= 70 ? 'var(--red)' : stress >= 40 ? 'var(--orange)' : 'var(--green)';
+
+  const roro     = Math.min(50, Math.max(-50, d.roro_score ?? 0));
+  const roroPct  = (Math.abs(roro)/50*50).toFixed(1);
+  const roroLeft = roro < 0 ? \`left:\${50-roroPct}%;width:\${roroPct}%\` : \`left:50%;width:\${roroPct}%\`;
+  const roroClr  = roro >= 0 ? 'var(--green)' : 'var(--red)';
+  const roroLbl  = roro >= 0 ? \`+\${d.roro_score.toFixed(1)} risk-on\` : \`\${d.roro_score.toFixed(1)} risk-off\`;
+
+  const f = d.features || {};
+  const featHtml = [
+    ['VIX',          f.vix           != null ? f.vix.toFixed(2)                                              : '—'],
+    ['VIX 5d Δ',     f.vix_5d_chg    != null ? (f.vix_5d_chg>=0?'+':'')+f.vix_5d_chg.toFixed(2)            : '—'],
+    ['SPX 5d Ret',   f.spx_5d_return != null ? (f.spx_5d_return>=0?'+':'')+(f.spx_5d_return*100).toFixed(2)+'%' : '—'],
+    ['SPX 20d RV',   f.spx_rv_20d    != null ? f.spx_rv_20d.toFixed(2)+'%'                                  : '—'],
+    ['HY/IG Spread', f.hy_ig_spread  != null ? f.hy_ig_spread.toFixed(4)                                    : '—'],
+    ['VIX Term',     f.vix_term_slope!= null ? f.vix_term_slope.toFixed(4)                                  : '—'],
+  ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
+
+  const tp = d.transition_probs_tomorrow || {};
+  const SC = {LOW_VOL:'var(--green)',TRANSITIONING:'var(--yellow)',HIGH_VOL:'var(--orange)',CRISIS:'var(--red)'};
+  const SN = {LOW_VOL:'Low Vol',TRANSITIONING:'Transit.',HIGH_VOL:'High Vol',CRISIS:'Crisis'};
+  const probHtml = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s => {
+    const pct = tp[s]!=null ? Math.round(tp[s]*100) : 0;
+    return \`<div class="regime-prob-row">
+      <div class="regime-prob-name">\${SN[s]}</div>
+      <div class="regime-prob-track"><div class="regime-prob-bar" style="width:\${pct}%;background:\${SC[s]}"></div></div>
+      <div class="regime-prob-pct">\${pct}%</div></div>\`;
+  }).join('');
+
+  el.innerHTML = \`
+    <div class="regime-panel-header">Volatility Regime <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">as of \${d.date||'—'}</span></div>
+    <div class="regime-top-row">
+      <span class="regime-state-badge \${stateClass}">\${d.state}</span>
+      <div class="regime-meta-item"><div class="regime-meta-label">Position Scale</div><div class="regime-meta-val">\${posScale}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${days||'—'}</div></div>
+      <div class="regime-bar-group">
+        <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
+        <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
+      </div>
+      <div class="regime-bar-group">
+        <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
+        <div class="regime-roro-track">
+          <div class="regime-roro-center"></div>
+          <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
+        </div>
+      </div>
+      \${alertBadge}
+    </div>
+    <div class="regime-bottom-row">
+      <div class="regime-feat-grid">\${featHtml}</div>
+      <div class="regime-prob-section">
+        <div class="regime-prob-label">Tomorrow's Probabilities</div>\${probHtml}
+      </div>
+    </div>\`;
 }
 
 // ── Ticker Detail ─────────────────────────────────────────────────────────────

@@ -267,8 +267,27 @@ function start(swarm, generateId, notifyDiscord) {
     // 23:59 ET daily — reset token budget
     cron.schedule('59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
 
-
-
+    // 9:00 AM ET Mon–Fri: fresh regime at market open (run_market_state.py only — no signals/Alpaca)
+    cron.schedule('0 9 * * 1-5', async () => {
+        log('Morning regime refresh starting');
+        try {
+            runPython('scripts/run_market_state.py');
+            log('Morning regime file updated');
+        } catch (e) {
+            log(`ERROR: morning market-state failed — ${e.message.slice(0, 200)}`);
+            return;
+        }
+        try {
+            const http = require('http');
+            const port = parseInt(process.env.DASHBOARD_PORT) || 3000;
+            const req  = http.request({ hostname: 'localhost', port,
+                path: '/api/events/data-updated', method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Content-Length': '0' } });
+            req.on('error', () => {});
+            req.end();
+        } catch (_) {}
+        log('Morning regime refresh complete');
+    }, { timezone: 'America/New_York' });
 
 
     // Sunday 08:00 ET — weekly memory synthesis
