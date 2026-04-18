@@ -278,6 +278,16 @@
       },
       "history": []
     },
+    "S_tr_01_vvix_early_warning": {
+      "state": "paper",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tr_01_vvix_early_warning.py",
+        "class": "VVIXEarlyWarning",
+        "description": "VVIX-conditioned VIX-spike early warning — SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
+      },
+      "history": []
+    },
     "S_tr_02_hurst_regime_flip": {
       "state": "paper",
       "state_since": "2026-04-18T00:00:00+00:00",

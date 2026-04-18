@@ -462,6 +462,26 @@ def load_aux_data(universe: list) -> dict:
         except Exception as e:
             logger.warning(f"Could not load options: {e}")
 
+    # Macro time series: {series_name: pd.Series(date_index → value)}
+    # Provides VIX, VVIX, VIX3M, etc. for regime-aware strategies (S-TR-01 etc.)
+    macro_path = master_dir / 'macro.parquet'
+    if macro_path.exists():
+        try:
+            mac = pd.read_parquet(macro_path)
+            if not mac.empty and {'date', 'series', 'value'}.issubset(mac.columns):
+                mac['date'] = pd.to_datetime(mac['date'])
+                mac_dict: dict[str, pd.Series] = {}
+                for series_name, grp in mac.groupby('series'):
+                    mac_dict[series_name] = (
+                        grp.set_index('date')['value']
+                        .sort_index()
+                        .dropna()
+                    )
+                aux['macro'] = mac_dict
+                logger.info(f"Macro loaded: {list(mac_dict.keys())} series")
+        except Exception as e:
+            logger.warning(f"Could not load macro: {e}")
+
     return aux
 
 
