@@ -51,10 +51,8 @@ async function personaPost(agentId, channelKey, text) {
 // Notification types — routed to appropriate channels/personas
 const notify = {
   // Research flow → ResearchDesk in #research-feed
-  diligenceStarted:   (ticker, n) => personaPost('researchdesk', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning ${n} subagents`),
   subagentComplete:   (type, ticker, duration) => personaPost('researchdesk', 'research-feed', `✅ **${capitalize(type)}** complete for **${ticker}** [${duration}s]`),
   validationFailed:   (ticker, errors) => personaPost('researchdesk', 'research-feed', `⛔ DATA VALIDATION FAILED for **${ticker}**: ${errors}`),
-  diligenceComplete:  (ticker, verdict, score) => personaPost('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** (${score})`),
 
   // Trade flow → TradeDesk in #trade-signals / #trade-reports
   tradePipeline:      (ticker) => personaPost('tradedesk', 'trade-signals', `📐 Trade pipeline: Compute → Analyst → Report | **${ticker}**`),

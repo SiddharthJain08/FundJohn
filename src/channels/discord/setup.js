@@ -64,7 +64,7 @@ const STRUCTURE = [
     channels: [
       {
         name: 'research-feed', key: 'research-feed', operatorWrite: false,
-        topic: 'ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot = budget % consumed. Use /research start <topic> to begin.',
+        topic: 'ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot = budget % consumed. Use /research start to begin.',
       },
       {
         name: 'strategy-memos', key: 'strategy-memos', operatorWrite: false,
@@ -110,7 +110,7 @@ function buildServerMap(channelMap) {
   const ch = (key) => channelMap[key] ? `<#${channelMap[key]}>` : `#${key}`;
   const today = new Date().toISOString().slice(0, 10);
 
-  // Returned as array — two messages to stay under Discord's 2000-char limit
+  // Returned as array — three messages to stay under Discord's 2000-char limit
   return [
     `🦞 **OpenClaw v2 — Server Map**
 *Updated: ${today} | Runs daily at 6:00 AM ET | Sleeps when idle*
@@ -121,7 +121,7 @@ ${ch('data-alerts')} — Progress every 10 tickers (speed, ETA, rows written), s
 
 **🔬 RESEARCH DESK**
 ${ch('research-feed')} — ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot shows budget % consumed.
-${ch('strategy-memos')} — Daily strategy execution memos + PROCEED / REVIEW / KILL verdicts from diligence runs
+${ch('strategy-memos')} — Strategy execution memos + PROCEED / REVIEW / KILL verdicts
 
 **📈 TRADING DESK**
 ${ch('trade-signals')} — Trade pipeline outputs and risk verdicts
@@ -132,44 +132,44 @@ ${ch('position-recommendations')} — Position recommendations with Approve/Reje
 ${ch('general')} — All \`!john /commands\` — type \`!john /help\` for full list
 ${ch('agent-chat')} — Freeform chat with BotJohn as PM agent (\`!john <anything>\`)`,
 
-    `**⚡ General** *(instant)*
+    `**⚡ Flash** *(instant — no subagent)*
 \`!john /ping\` · \`!john /status\` · \`!john /market\` · \`!john /rate\` · \`!john /budget\` · \`!john /help\`
 \`!john /quote AAPL\` · \`!john /profile AAPL\` · \`!john /calendar AAPL\` · \`!john /verdict AAPL\`
-
-**📊 Data Lookups** *(instant — reads DB)*
 \`!john /dashboard\` · \`!john /coverage\` · \`!john /prices AAPL [days]\` · \`!john /chart AAPL\`
-\`!john /tech AAPL\` · \`!john /greeks AAPL\` · \`!john /options AAPL\`
+\`!john /greeks AAPL\` · \`!john /options AAPL\`
+\`!john /spend [days]\` · \`!john /cost {id}\` · \`!john /estimate {type} [AAPL]\`
+\`!john /cycles [n]\` · \`!john /config [key] [value]\`
 
 **📈 Signals & Engine**
 \`!john /signals [date]\` · \`!john /engine-status\` · \`!john /engine-run\` · \`!john /strategy-review\`
 
-**🔬 Research** *(operator-controlled research loop)*
-\`!john /research start <topic>\` · \`!john /research pause\` · \`!john /research resume\` · \`!john /research status\`
-\`!john /risk-scan\` · \`!john /diligence AAPL\` → #strategy-memos
+**🔬 Research** *(queue-driven pipeline)*
+\`!john /research submit <url>\` · \`!john /research start\` · \`!john /research pause\`
+\`!john /research status\` · \`!john /research queue\` · \`!john /research run-one\`
+\`!john /research discover [days]\` · \`!john /risk-scan\`
 
 **📐 Trading**
 \`!john /trade AAPL\` · \`!john /approve {id}\` · \`!john /reject {id}\``,
 
     `**🔧 Strategy Management**
-\`!john /build-strategy\` · \`!john /deploy-strategy\` · \`!john /strategy-report {id}\`
+\`!john /build-strategy {desc}\` *(aliases: /deploy-strategy, /new-strategy, /create-strategy)*
+\`!john /strategy-report {id}\` · \`!john /strategy-versions {id}\`
 \`!john /approve-strategy {id}\` · \`!john /pause-strategy {id}\`
-\`!john /adjust-strategy {id} param=val reason: why\` — versioned param update
-
-**💰 Cost Tracking**
-\`!john /spend [days]\` · \`!john /estimate {taskType} [AAPL]\` · \`!john /cost {id}\`
+\`!john /adjust-strategy {id} PARAM=val reason: why\` — versioned param update
+\`!john /approve-deprecation {id}\`
 
 **📡 Pipeline & Data**
-\`!john /fill\` · \`/fill AAPL NVDA\` · \`/fill --force\`
-\`!john /data add AAPL [years]\` · \`!john /pipeline status\` · \`!john /pipeline pause/resume\`
-\`!john /pipeline cycles [n]\` · \`!john /config [key] [value]\`
+\`!john /fill [AAPL NVDA …]\` · \`!john /fill --force\` · \`!john /fetch AAPL\`
+\`!john /data {description}\` · \`!john /data-status\`
+\`!john /approve-data {id}\` · \`!john /veto-data {id}\`
+\`!john /pipeline status\` · \`!john /pipeline pause\` · \`!john /pipeline resume\`
+\`!john /pipeline cycles [n]\`
 
 **🤖 Agents**
 \`!john /agents\` — status board: BotJohn · DataBot · ResearchDesk · TradeDesk
 
 **🔌 System**
 \`!john /shutdown confirm\` · \`!john /shutdown server confirm\`
-
-**⬆️ GitHub**
 \`!john /git sync\` — commit + push all changes to SiddharthJain08/FundJohn`,
   ];
 }
