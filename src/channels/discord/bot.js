@@ -1162,6 +1162,16 @@ client.once('ready', async () => {
   // Run DB migrations
   await migrate().catch((err) => console.warn('[bot] DB migration skipped:', err.message));
 
+  // Sync parquet coverage into data_columns → data_ledger (used by research pipeline)
+  try {
+    const { execSync } = require('child_process');
+    const syncOut = execSync('python3 src/strategies/sync_data_ledger.py', { cwd: OPENCLAW_DIR, timeout: 30_000 }).toString();
+    const syncResult = JSON.parse(syncOut);
+    console.log(`[bot] data_ledger synced: ${syncResult.synced} columns`);
+  } catch (e) {
+    console.warn('[bot] data_ledger sync skipped:', (e.stdout?.toString() || e.message).slice(0, 120));
+  }
+
   // Setup Discord server channels + refresh #server-map
   const guild = client.guilds.cache.first();
   _discordClient = client;

@@ -17,7 +17,7 @@ All inputs arrive in the **"## Injected Context"** block:
 | `hunters` | Array of PaperHunter result objects — full spec schema or rejection stub |
 | `manifest_strategies` | Array of existing strategy IDs from manifest.json |
 | `strategy_signatures` | Content of strategy_signatures.json (keyed by strategy_id) |
-| `data_ledger_snapshot` | Array of {column_name, current_users, provider} from data_ledger |
+| `data_ledger_snapshot` | Array of {column_name, provider, min_date, max_date, row_count, ticker_count} from data_columns |
 
 ## Classification Process
 
@@ -36,14 +36,26 @@ For each still-passing result, compare `hypothesis_one_liner` against all existi
 Use your judgment: if this strategy is substantially equivalent to an existing one (same core signal, same regime, same direction), block it.
 Reason: `"semantic_duplicate::{existing_strategy_id}"`
 
-### Step 4 — Data Availability
+### Step 4 — Data Availability + Coverage Depth
 For each still-passing result:
-- Check each `data_requirements.required[]` column
-- If `already_in_ledger: false` for any required column:
-  - If the column appears in `data_ledger_snapshot` → treat as available (override)
-  - If the column does NOT appear in `data_ledger_snapshot` → classify as BUILDABLE
-  - Capture the missing columns list for BUILDABLE entries
-- If all required columns are available → READY
+
+**Existence check** — for each `data_requirements.required[]` column:
+- If `already_in_ledger: false`:
+  - If the column appears in `data_ledger_snapshot` with `row_count > 0` → treat as available (override)
+  - Otherwise → classify as BUILDABLE; add column to `missing_columns`
+
+**Coverage depth check** — for each required column that IS available (row_count > 0):
+- Compute `coverage_days` = calendar days between `min_date` and `max_date` in `data_ledger_snapshot`
+- Compare against `min_lookback_required` from the hunter output (integer, days needed)
+- If `coverage_days < min_lookback_required` → classify as BUILDABLE, not READY
+- Add to `missing_columns`: `"{column}_depth_insufficient (available: {coverage_days}d, required: {min_lookback_required}d)"`
+
+**Examples of depth failures:**
+- `options_eod` with 10 days coverage + strategy needs 504 days → BUILDABLE
+- `insider` with row_count=0 → BUILDABLE (existence failure)
+- `earnings` with only future dates (coverage_days=0) → BUILDABLE
+
+If all required columns pass both checks → READY
 
 ### Step 5 — Produce strategy_spec for READY and BUILDABLE entries
 For each READY or BUILDABLE entry, produce a `strategy_spec` using the `fundjohn:paper-to-strategy` skill schema fields:

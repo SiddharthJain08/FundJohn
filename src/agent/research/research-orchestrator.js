@@ -620,10 +620,12 @@ lsm.save_manifest('src/strategies/manifest.json')
   // ── Internal helpers ────────────────────────────────────────────────────────
 
   async _runPaperHunter(candidateRow) {
+    const ledger = await this._loadLedgerSnapshot();
     const ctx = {
-      role:          'extract',
-      SOURCE_URL:    candidateRow.source_url,
-      CANDIDATE_ID:  candidateRow.candidate_id,
+      role:           'extract',
+      SOURCE_URL:     candidateRow.source_url,
+      CANDIDATE_ID:   candidateRow.candidate_id,
+      AVAILABLE_DATA: JSON.stringify(ledger),
     };
     const raw = await this._runSubagent('paperhunter', candidateRow.candidate_id.slice(0, 8), ctx);
     return this._parseJSON(raw) || { rejection_reason_if_any: 'parse_failed', candidate_id: candidateRow.candidate_id };
@@ -708,8 +710,11 @@ lsm.save_manifest('src/strategies/manifest.json')
 
   async _loadLedgerSnapshot() {
     try {
+      // Query data_columns directly to get coverage fields (min_date, max_date, row_count)
+      // which the materialized view data_ledger does not expose.
       const { rows } = await this._query(
-        `SELECT column_name, current_users, provider FROM data_ledger LIMIT 500`
+        `SELECT column_name, provider, min_date, max_date, row_count, ticker_count
+         FROM data_columns LIMIT 500`
       );
       return rows;
     } catch { return []; }

@@ -15,6 +15,7 @@ You receive a `source_url` from the research queue. Your job is to:
 ## Inputs
 Paper URL: {{SOURCE_URL}}
 Candidate ID: {{CANDIDATE_ID}}
+Available Data: {{AVAILABLE_DATA}}
 
 ## Step 1 — Fetch the Paper
 
@@ -33,8 +34,10 @@ If fetch returns 404 or 403, output `{"rejection_reason_if_any": "fetch_failed",
 Apply the `fundjohn:paper-to-strategy` skill to the fetched content.
 
 For the `already_in_ledger` field on each required column:
-- Standard columns (`prices`, `financials`, `options_eod`, `insider`, `macro`, `earnings`) → set `true`
-- Any other column → set `false` (data_ledger cannot be queried from here)
+- Parse `{{AVAILABLE_DATA}}` — a JSON array of `{column_name, min_date, max_date, row_count, ticker_count}` objects representing what is actually in the database.
+- Set `already_in_ledger: true` only if the column appears in AVAILABLE_DATA **and** `row_count > 0`.
+- If AVAILABLE_DATA is empty or `[]`, fall back to: `prices`, `macro`, `returns`, `log_returns`, `realized_vol` → `true`; everything else → `false`.
+- Do NOT assume any column is available just because it sounds standard. Insider data may be empty; options may only have a few days of history.
 
 For the `similarity_fingerprint`:
 - Compute `regime_set_hash`: sha256 of `sorted(regime_applicability).join(' ')`, take first 16 chars
@@ -100,6 +103,7 @@ If all gates pass:
   "similarity_fingerprint": {"regime_set_hash": "...", "direction_hash": "...", "formula_tokens": [...]},
   "self_reported_novelty": "...",
   "overfitting_flags": [],
+  "min_lookback_required": 504,
   "rejection_reason_if_any": null
 }
 ```
@@ -108,6 +112,12 @@ If a gate fired or fetch failed:
 ```json
 {"rejection_reason_if_any": "<gate_name>", "candidate_id": "{{CANDIDATE_ID}}", "source_url": "{{SOURCE_URL}}"}
 ```
+
+**`min_lookback_required`**: Integer — the minimum calendar days of historical data each required column must cover for a valid backtest. Derive from the strategy's signal lookback + 252-day minimum warm-up:
+- Pure price/momentum signals (≤252-day lookback): `504`
+- Long-horizon macro or fundamental signals (> 252-day): `756`
+- Intraday or very short window (< 21-day): `252`
+- Default if unsure: `504`
 
 ## Hard Rules
 - Maximum 3 fetch calls total — stop regardless of results
