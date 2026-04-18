@@ -1,7 +1,7 @@
 # FundJohn — Shared Learnings & Decisions
 
 > **System**: FundJohn / OpenClaw v2.0
-> **Last updated**: 2026-04-16 (HEAD `68a81a1`)
+> **Last updated**: 2026-04-18 (HEAD `beea4cd`)
 > **Companion docs**: [PIPELINE.md](PIPELINE.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [README.md](README.md)
 
 This file records *why* FundJohn is built the way it is. When a future operator asks "should we bring back DataJohn?" or "why can't strategies call the MCP tools directly?", the answer is here. Each entry has a **decision**, a **why**, and **how to apply** — so the next person can judge whether the reasoning still holds.
@@ -239,10 +239,20 @@ If `pipeline_orchestrator.py` crashes hard between acquiring `pipeline:running:{
 
 ## 13. What changed recently (for context)
 
-- **2026-04-16** (`9f326f3`) — **Alpaca paper-trading wired into TradeJohn**. `execute_alpaca_orders()` fires bracket orders (market + TP + SL) sized `kelly_pos × equity` immediately after green signals are identified; `build_alpaca_post()` appends the order receipt to the Discord `#trade-signals` green post. Requires `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` / `ALPACA_BASE_URL` in `.env`. Note: the commit added the call sites but the function bodies live in a follow-up — when you run this, make sure `execute_alpaca_orders` + `build_alpaca_post` are defined somewhere (currently not in `trade_agent.py` itself).
+- **2026-04-18** (`beea4cd`) — **Massive WebSocket integration, dashboard portfolio page, data pipeline cleanup**:
+  - `src/ingestion/massive_ws.py` — `MassiveWSClient` + `MassiveOptionsCapture`. Subscribes `OA.*`, parses OCC symbols, accumulates session vol vs prev-day OI, writes `massive:flow:{underlying}` Redis keys. Runs as `massive-ws.service`.
+  - `src/ingestion/massive_client.py` — options-only S3 client. Removed all stock download code (`download_stock_day_bars` deleted). `probe_access()` now uses `list_available_dates()` to find a real available date (avoids holiday 403s).
+  - `workspaces/default/tools/master_dataset.py` — `refresh_prices_bulk()` switched to yfinance (`yf.download()` with MultiIndex reshape). Polygon/Massive stock calls removed entirely.
+  - `src/pipeline/collector.js` — Phase 2 hardcoded to yfinance only (`usePolygonOHLCV = false`). Phase 3 (options) unchanged, correctly uses Polygon options snapshot REST.
+  - `src/ingestion/pipeline.py` — `fetch_polygon_flow()` checks `massive:flow:{symbol}` Redis cache first (< 2h). `sync_universe_to_db()` simplified to FMP only (Polygon universe sync removed).
+  - `src/channels/api/server.js` — full Portfolio page: Alpaca account row (equity, cash, day P&L, invested), strategy stats row, 90d P&L curve with P&L%/Value$ toggle, Active Positions + Closed Trades tables. SSE `market_update` event wired end-to-end. Position sizing `%` fix (fractions × 100). Scroll architecture: `#portfolio-page` uses `position:absolute;inset:0;overflow-y:auto` in `#view-wrap`; content in `#pf-inner` (flex column, no height constraint).
+  - `src/engine/cron-schedule.js` — WS-aware gate at top of `runMarketClosePipeline()` (skips if `massive_ws:pipeline_fired_today` set); broadcasts `market_update` via HTTP POST to dashboard at the end.
+  - `src/execution/alpaca_trader.py` — `execute_alpaca_orders` and `build_alpaca_post` fully implemented (resolves open question from `9f326f3`).
+  - 27 DB migrations, `core/` signal pipeline with correlation gate (`CORR_THRESHOLD=0.75`) + concentration gate (`MAX_POSITIONS=8`), 7 subagent types in `subagent-types.json`, strategy plugins framework.
+- **2026-04-16** (`9f326f3`) — Alpaca paper trading wired into TradeJohn. Call sites added (bodies added in `beea4cd`).
 - **2026-04-16** (`d9f86fe`) — full pipeline wiring + new strategy integration.
-- **2026-04-16** (`68a81a1`) — wired `pipeline_orchestrator` to cron properly, fixed strategy `generate_signals` signatures across S_HV13-15.
-- **2026-04-15** (`19d55fb`) — removed the strategist subagent cron (never used in v2) and made `post_memos` use dynamic strategy labels instead of hardcoded names.
+- **2026-04-16** (`68a81a1`) — wired `pipeline_orchestrator` to cron, fixed `generate_signals` signatures across S_HV13-15.
+- **2026-04-15** (`19d55fb`) — removed strategist subagent cron (never used in v2), dynamic strategy labels in `post_memos`.
 - **2026-04-15** (`ad2a9f2`, `183dba6`) — promoted S_HV17 to paper after earnings_calendar backfill went live.
 - **2026-04-14** (`95f7691`, `ef8e2cf`) — DataJohn removal. Single biggest architectural change since reinit.
 - **2026-04-14** (`e793742`) — added S_HV13 through S_HV20 (the JFQA/JFE options-literature cohort).
@@ -252,14 +262,84 @@ If `pipeline_orchestrator.py` crashes hard between acquiring `pipeline:running:{
 
 ## 14. Open questions / tech debt
 
-- **Alpaca function bodies** — `9f326f3` added call-sites for `execute_alpaca_orders` and `build_alpaca_post` but the bodies aren't defined in `trade_agent.py`. Wherever they live (or will live), make sure they're imported before this code path runs — else `NameError` the first time a green signal fires.
 - **Paper vs live sizing lever** — currently no sizing discount for paper-state strategies in `trade_agent.py`. If we want one, add an explicit `SIZE_MULT_PAPER` constant and apply pre-cap.
 - **BotJohn approval bypass for Alpaca** — Alpaca paper orders fire automatically after green-signal identification, ahead of any BotJohn review. Fine for paper, must be gated before live-broker routing is wired.
-- **S_HV10 staging** — needs `unusual_flow` data. Either find a provider that exposes this cleanly, or rewrite S_HV10 to use what we have.
+- **S_HV10 staging** — `unusual_flow` Redis key (`massive:flow:{underlying}`) is now written by `MassiveOptionsCapture` during market hours. S_HV10 can be promoted from staging to paper once the WS has been live for a full cycle and the data quality is confirmed.
 - **Backtest harness** — `src/backtesting/` exists but is not integrated with the promotion gate. Sharpe/DD for promotion is currently computed ad-hoc from `signal_performance`.
 - **Dashboard auth** — the web dashboard has read-only auth; write actions (pause pipeline, veto strategy) still go through Discord.
 - **Legacy data** — `015_data_agent.sql` tables are retained but unused. Decision: archive or drop in a future migration.
 - **`orchestrator.js` as manual tool** — should it be formalised as a CLI (`npx diligence <ticker>`) or left as a script?
+- **Massive WS reconnect on holiday** — `MassiveWSClient` reconnects on disconnect with exponential backoff (`RestartSec=10` in systemd). On market holidays there are no `OA.*` events; the connection stays open with no data. `_prev_oi` is not refreshed intraday — it loads from the last available `options_eod.parquet` at service start.
+
+---
+
+## 15. Massive/Polygon is options-only
+
+### Decision
+
+`MASSIVE_SECRET_KEY` / `POLYGON_API_KEY` (same value) is on the "options starter" plan. This plan authorises:
+- Options S3 flat files (`us_options_opra/day_aggs_v1/{Y}/{M}/{date}.csv.gz`)
+- Options WebSocket (`wss://socket.massive.com/options`, `OA.*` feed)
+
+It does **not** authorise:
+- Stock S3 flat files (`us_stocks_sip`) — 403 on every GetObject
+- Stock WebSocket (`wss://socket.massive.com/stocks`) — "Your plan doesn't include websocket access"
+- Polygon stock REST grouped/daily bars for the full universe
+
+### Why this matters
+
+If you try to use Polygon for stock prices, every attempt either returns a 403 or is limited to a tiny universe on the free tier. We switched to yfinance bulk download for stocks:
+
+```python
+# master_dataset.py::refresh_prices_bulk
+raw = yf.download(universe, start=trade_date, end=end_date, auto_adjust=True, progress=False, threads=True)
+if isinstance(raw.columns, pd.MultiIndex):
+    df = raw.stack(level=1, future_stack=True).reset_index()
+    df.columns = [str(c).lower() for c in df.columns]
+    df = df.rename(columns={'level_1': 'ticker', 'date': '_dt'})
+```
+
+### How to apply
+
+- Stock OHLCV: always yfinance. Do not route to Polygon/Massive.
+- Options (chain, IV, OI, flow): always Polygon/Massive. Do not route to Yahoo for options data that Massive has.
+- If the plan is upgraded (stocks tier), update the `probe_access()` check in `massive_client.py` and re-enable `collector.js` Phase 2 to attempt Polygon before yfinance.
+
+---
+
+## 16. Dashboard portfolio page — scroll architecture
+
+### Problem
+
+`overflow-y:auto` on a flex child of `<body>` is unreliable across browsers because:
+1. Some browsers treat `<body>` specially for overflow (can transfer to viewport)
+2. `flex:1` alone doesn't constrain the element height unless `min-height:0` is also set
+3. Even with `min-height:0`, an absolutely-positioned overlay is more reliable than a flex-height-constrained scroll container
+
+### Solution
+
+```css
+/* View wrapper: positions children, gives them a guaranteed height */
+#view-wrap { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+
+/* Market view: fills view-wrap exactly */
+#body { position: absolute; inset: 0; display: flex; overflow: hidden; }
+
+/* Portfolio page: scroll container, separate from flex layout */
+#portfolio-page { display: none; position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; background: var(--bg); }
+
+/* Portfolio content: flex column, free to grow beyond #portfolio-page height */
+#pf-inner { display: flex; flex-direction: column; gap: 16px; padding: 20px 24px; }
+```
+
+The key insight: **the scroll container (`#portfolio-page`) and the flex layout container (`#pf-inner`) are different elements**. `#portfolio-page` has a fixed height (via `position:absolute;inset:0`) and scrolls. `#pf-inner` has no height constraint and grows with content. This pattern works reliably in all browsers.
+
+### How to apply
+
+If you add a new "full-page" view alongside Market and Portfolio:
+1. Add a new `position:absolute;inset:0;overflow-y:auto` div inside `#view-wrap`
+2. Add an inner wrapper div for the flex/block layout
+3. Toggle `display:none`/`display:block` via JS — no need to compute heights
 
 ---
 

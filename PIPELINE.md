@@ -1,7 +1,7 @@
 # FundJohn — Canonical Pipeline Reference
 
 > **System**: FundJohn / OpenClaw v2.0 — autonomous bot-network hedge fund
-> **Last verified**: 2026-04-16 against HEAD `68a81a1`
+> **Last verified**: 2026-04-18 against HEAD `beea4cd`
 > **Companion docs**: [ARCHITECTURE.md](ARCHITECTURE.md) · [LEARNINGS.md](LEARNINGS.md) · [README.md](README.md)
 
 This document is the canonical, file-by-file definition of every pipeline that runs in FundJohn. It supersedes any pipeline description in `SYSTEM_REPORT.md` or inline comments. When anything on the VPS changes, this file is the reference that gets updated first.
@@ -155,33 +155,59 @@ Every strategy inherits `BaseStrategy(ABC)` and implements `generate_signals(pri
 
 Hardcoded — replaced the old DataJohn LLM agent. Target: all collection complete ≤16:20 ET so signals can run.
 
-Primary collector: **`src/ingestion/pipeline.py`** — a 3-layer async ETL.
+### 5.1 Stock OHLCV — yfinance only
 
-- **Layer 1 — Fetch.** `aiohttp` with per-provider semaphore rate-limiting. FMP Starter tier gets `semaphore(5)` (300 req/min budget); a secondary "massive" endpoint gets `semaphore(2)` (60 req/min).
+Stock price data is collected via **yfinance** (`yf.download()`) — not Polygon, not Massive. This is a firm architectural constraint from the Massive/Polygon "options starter" plan, which does not grant stock OHLCV access.
+
+- **`workspaces/default/tools/master_dataset.py::refresh_prices_bulk(trade_date)`** — bulk-downloads the full universe for a single date; reshapes the yfinance MultiIndex DataFrame to long format; upserts to `price_data` via `merge_prices()`.
+- **`src/pipeline/collector.js`** — Node-side coordinator; Phase 2 calls yfinance directly (`fillPricesYFinance()`). No Polygon OHLCV calls anywhere.
+
+### 5.2 Options data — Massive/Polygon (options starter plan)
+
+**Massive = Polygon**: same service, same API key (`MASSIVE_SECRET_KEY` = `POLYGON_API_KEY`). "Options starter" plan provides:
+1. **S3 flat files** (`us_options_opra/day_aggs_v1/{Y}/{M}/{date}.csv.gz`) — full OPRA options EOD chain (~4 MB/day). Fetched by `src/ingestion/massive_client.py::download_options_day_bars(trade_date)`.
+2. **Options WebSocket** (`wss://socket.massive.com/options`, `OA.*` feed) — per-minute options aggregates. Handled by `src/ingestion/massive_ws.py::MassiveOptionsCapture`.
+
+**Do not** use Polygon/Massive for stock prices or stock WebSocket — those endpoints return 403 on this plan.
+
+### 5.3 Live options flow (Massive WebSocket, always-on)
+
+`massive-ws.service` keeps a persistent connection to `wss://socket.massive.com/options` and runs `MassiveOptionsCapture`:
+
+1. At startup: loads `data/master/options_eod.parquet` → builds `_prev_oi` dict (contract → previous-close OI).
+2. On each `OA.*` event: parse OCC symbol (`O:AAPL240117C00150000` → underlying, expiry, type, strike); accumulate session volume into `_session_vol[underlying][expiry][strike][type]`.
+3. After each update: `_update_flow_cache(underlying)` computes `unusual_call_flow = session_call_vol > 0.30 × prev_call_oi` and writes to Redis: `massive:flow:{underlying}` (JSON, 4-hour TTL).
+
+`fetch_polygon_flow()` in `src/ingestion/pipeline.py` checks this Redis key first (uses it if updated within 2 hours) before falling through to REST.
+
+### 5.4 Fundamental / auxiliary data
+
+Primary collector: **`src/ingestion/pipeline.py`** — 3-layer async ETL.
+
+- **Layer 1 — Fetch.** `aiohttp` with per-provider semaphore rate-limiting. FMP Starter: `semaphore(5)` (300 req/min budget).
 - **Layer 2 — Transform.** Normalise raw API responses into `MasterBar` records; compute EMA20, EMA50, RSI(14) from OHLCV history inline.
 - **Layer 3 — Cache.** Write to `data/cache/{symbol}/{date}.json` with a 23-hour TTL.
 
-Scheduler: APScheduler, daily 16:20 America/New_York.
-
 Secondary collectors / sources:
 
-- **`src/ingestion/edgar_client.py`** — SEC EDGAR 10-K / 10-Q / 8-K / Form 4 access. Writes to `insider_transactions` (migration 017). Consumed by `S12_insider`.
-- **Generated MCP modules** at `workspaces/default/tools/*.py` — each strategy's `aux_data` is pulled from here when a needed field isn't in the `data/cache/` artifact. Tier/fallback ordering comes from `src/agent/config/servers.json`; rate-limiting is enforced by `tools/_rate_limiter.py::_acquire_token(_PROVIDER)`.
+- **`src/ingestion/edgar_client.py`** — SEC EDGAR 10-K / 10-Q / 8-K / Form 4. Writes to `insider_transactions` (migration 017). Consumed by `S12_insider`.
+- **`src/ingestion/run_universe_sync.py`** — syncs the full ticker universe from FMP (`/api/v3/stock/list`) into the `universe_config` DB table. Called weekly by cron.
+- **Generated MCP modules** at `workspaces/default/tools/*.py` — each strategy's `aux_data` is pulled from here when a needed field isn't in the `data/cache/` artifact. Rate-limiting via `tools/_rate_limiter.py`.
 - **News + sentiment** — Tavily + Alpha Vantage → `market_news` (migration 009).
-- **Macro / regime features** — VIX term structure, realised-vol, RORO inputs → consumed by `scripts/run_market_state.py`.
+- **Macro / regime features** — VIX term structure, realised-vol, RORO inputs → `scripts/run_market_state.py`.
 
 Provider roster (full table in [ARCHITECTURE.md §6](ARCHITECTURE.md)):
 
-| Provider | Tier | Fallback | Used by |
-|---|---|---|---|
-| FMP | 1 | Yahoo | OHLCV, financials, ratios, earnings calendar |
-| Polygon | 1 | Alpha Vantage | OHLCV, options chain (IV surface, Greeks, OI) |
-| SEC EDGAR | 1 | — | Form 4, 10-K/Q/K |
-| Tavily | 1 | — | News, transcripts |
-| Alpha Vantage | 2 | — | Macro, technical indicators |
-| Yahoo | 2 | — | VIX, options chains, insider tx, short interest |
+| Provider | Used for |
+|---|---|
+| FMP | Financials, ratios, earnings calendar, universe sync |
+| Polygon / Massive | **Options only** — chain (IV surface, Greeks, OI), S3 flat files, live OA.* flow |
+| SEC EDGAR | Form 4, 10-K/Q/K |
+| Tavily | News, transcripts |
+| Alpha Vantage | Macro, technical indicators |
+| Yahoo / yfinance | **All stock OHLCV**, VIX, short interest |
 
-Data dependencies of note: `S_HV8` requires `theta` live in the options chain; `S_HV13–S_HV15` require call/put IV and term-structure fields; `S_HV17` requires `earnings_dte` (wired in commit `183dba6`).
+Data dependencies of note: `S_HV8` requires `theta` live in the options chain; `S_HV13–S_HV15` require call/put IV and term-structure fields; `S_HV17` requires `earnings_dte` (wired in commit `183dba6`); `S_HV10` requires `unusual_flow` from Massive WS Redis cache (currently staging — data flows when WS runs).
 
 ---
 

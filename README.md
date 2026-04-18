@@ -4,6 +4,7 @@
 
 > 📘 **Canonical docs** — [PIPELINE.md](PIPELINE.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [LEARNINGS.md](LEARNINGS.md)
 > All three files are kept in sync with `HEAD` and are the source of truth. `SYSTEM_REPORT.md` is legacy and preserved for history only.
+> **Last verified**: 2026-04-18 against HEAD `beea4cd`
 
 ---
 
@@ -109,13 +110,19 @@ Full rules: `AGENTS.md`. Rationale: [LEARNINGS.md §2](LEARNINGS.md).
 | Provider | Tier | Fallback | Used for |
 |---|---|---|---|
 | **FMP** | 1 | Yahoo | Financials, ratios, peers, earnings, price targets |
-| **Polygon** | 1 | Alpha Vantage | OHLCV, snapshots, options chain |
+| **Polygon / Massive** | 1 | Alpha Vantage | **Options only** — options chain, S3 flat files (us_options_opra), live OA.* WebSocket |
 | **SEC EDGAR** | 1 | — | 10-K / 10-Q / 8-K / Form 4 |
 | **Tavily** | 1 | — | News search, press releases, transcripts |
 | Alpha Vantage | 2 | — | Macro data, technical indicators |
-| Yahoo Finance | 2 | — | VIX, options chains, insider tx, short interest |
+| Yahoo Finance | 2 | — | **Stock OHLCV** (via yfinance bulk download), VIX, short interest |
+
+> **Important**: Polygon and Massive are the same service / same API key (`MASSIVE_SECRET_KEY` = `POLYGON_API_KEY` value). The plan is "options starter" — authorises options S3 flat files and options WebSocket (`OA.*`). **Stock data comes exclusively from yfinance.** Do not use Polygon/Massive for stock prices.
 
 Config: `src/agent/config/servers.json`. Generated Python rate-limited modules: `workspaces/default/tools/*.py`.
+
+### Live options flow (Massive WebSocket)
+
+`src/ingestion/massive_ws.py` runs continuously as `massive-ws.service`, subscribing to `OA.*` on `wss://socket.massive.com/options`. It accumulates per-contract session volume, compares to previous-day OI (loaded from `data/master/options_eod.parquet` at startup), and writes unusual-flow signals to Redis (`massive:flow:{underlying}`, 4-hour TTL). `fetch_polygon_flow()` in `pipeline.py` reads this cache before falling through to the REST API.
 
 ---
 
@@ -125,20 +132,27 @@ Config: `src/agent/config/servers.json`. Generated Python rate-limited modules: 
 fundjohn_repo/
 ├── README.md · PIPELINE.md · ARCHITECTURE.md · LEARNINGS.md
 ├── AGENTS.md · CLAUDE.md · IDENTITY.md · MEMORY.md · USER.md
-├── SYSTEM_REPORT.md            (legacy — preserved for history)
-├── agents/                     agent identity + prompt .md (botjohn, researchjohn, tradejohn)
-├── docker-compose.yml          postgres:16 + redis:7
-├── johnbot.service             systemd unit
-├── scripts/                    ops + legacy (orchestrator.js, run_market_state.py)
+├── SYSTEM_REPORT.md              (legacy — preserved for history)
+├── agents/                       agent identity + prompt .md (botjohn, researchjohn, tradejohn)
+├── core/                         signal_pipeline.py · gates/ (correlation_gate.py)
+├── docker-compose.yml            postgres:16 + redis:7
+├── johnbot.service               systemd unit (Discord bot + Node orchestrator)
+├── /etc/systemd/system/massive-ws.service   systemd unit (Massive WS options flow)
+├── scripts/                      ops + legacy (orchestrator.js, run_market_state.py)
 ├── src/
-│   ├── agent/                  Node orchestration (config, middleware, subagents, tools)
-│   ├── channels/discord/       bot.js · event routing
-│   ├── database/migrations/    21 SQL migrations
-│   ├── engine/                 cron-schedule.js · strategy-version-manager.js
-│   ├── execution/              runner.js · engine.py · pipeline_orchestrator.py · post_memos · research_report · trade_agent
-│   ├── ingestion/              hardcoded data collectors (replaces DataJohn)
-│   └── strategies/             base.py · lifecycle.py · registry.py · manifest.json · implementations/
-└── workspaces/default/         runtime workspace (memory/ · output/ · tools/)
+│   ├── agent/                    Node orchestration (config, middleware, subagents, prompts, plugins)
+│   ├── channels/
+│   │   ├── api/server.js         web dashboard (market overview + portfolio page, SSE)
+│   │   └── discord/              bot.js · event routing · agent-personas
+│   ├── database/migrations/      27 SQL migrations
+│   ├── engine/                   cron-schedule.js
+│   ├── execution/                pipeline_orchestrator.py · post_memos.py · research_report.py
+│   │                             trade_agent.py · alpaca_trader.py · engine.py · runner.js
+│   ├── ingestion/                pipeline.py · massive_client.py · massive_ws.py
+│   │                             edgar_client.py · run_universe_sync.py
+│   ├── pipeline/                 collector.js (Node-side collection coordinator)
+│   └── strategies/               base.py · lifecycle.py · registry.py · manifest.json · implementations/
+└── workspaces/default/           runtime workspace (memory/ · output/ · tools/)
 ```
 
 Full file-by-file map: [ARCHITECTURE.md §12](ARCHITECTURE.md).
@@ -151,9 +165,18 @@ Full file-by-file map: [ARCHITECTURE.md §12](ARCHITECTURE.md).
 |---|---|---|
 | `#strategy-memos` | DataBot | Per-strategy memos from signal runner |
 | `#research-feed` | ResearchJohn | Consolidated research report |
-| `#trade-signals` | TradeJohn | Green/yellow/red ranked signals with Kelly sizing + EV |
-| `#trade-reports` | TradeJohn | Alpaca paper-trading execution log (bracket orders, fills, errors) |
+| `#trade-signals` | TradeJohn | Green signals with Kelly sizing + EV + Alpaca bracket order receipts |
+| `#trade-reports` | TradeJohn | Alpaca paper-trading execution log (fills, errors, performance) |
 | `#ops` | BotJohn + dashboard heartbeat | Pipeline state, budget, alerts |
+
+### Web dashboard
+
+`src/channels/api/server.js` serves a dark-theme monitoring dashboard on `DASHBOARD_PORT` (default 3000):
+
+- **Market page** — live price strip, sidebar ticker list, per-ticker OHLCV chart with range selectors, sector overview cards
+- **Portfolio page** — Alpaca account value row (equity / cash / day P&L / invested), strategy stats row (open positions / win rate / avg P&L), 90-day P&L curve with "P&L %" / "Value $" toggle, Active Positions table (71 rows, position sizing % displayed correctly), Closed Trades table
+- **SSE** — `/events` stream pushes `pipeline` and `market_update` events; dashboard auto-reloads market data on `market_update` (fired by cron after `runMarketClosePipeline` completes)
+- **Refresh button** — manual reload without page navigation
 
 Commands:
 
@@ -207,7 +230,15 @@ Full deployment workflow, rollback, migrations: [ARCHITECTURE.md §13](ARCHITECT
 
 ## What's new / changed recently
 
-- **2026-04-16 (`9f326f3`)** — **Alpaca paper trading wired into TradeJohn**. Green signals auto-submit as bracket orders sized `kelly_pos × equity`; execution summary posted to `#trade-reports`. Note: helper functions `execute_alpaca_orders` / `build_alpaca_post` are referenced but their bodies are not yet defined in the repo — will `NameError` at runtime until the follow-up module lands. See [LEARNINGS.md §13](LEARNINGS.md) and [ARCHITECTURE.md §7.5](ARCHITECTURE.md).
+- **2026-04-18 (`beea4cd`)** — **Massive WebSocket options integration + dashboard portfolio page**:
+  - `src/ingestion/massive_ws.py` — live options flow capture via Massive `OA.*` WebSocket; writes unusual-flow signals to Redis. Runs as `massive-ws.service`.
+  - `src/ingestion/massive_client.py` — S3 flat-file download for options EOD data (us_options_opra). Stock data removed; yfinance handles all stock OHLCV.
+  - `src/channels/api/server.js` — full Portfolio page (Alpaca account, positions, closed trades, P&L curve with toggle). SSE `market_update` event fires after each pipeline run; dashboard auto-refreshes.
+  - `src/engine/cron-schedule.js` — WS-aware gate (skips cron if Massive WS already fired); broadcasts `market_update` after close pipeline.
+  - Position sizing `%` fixed: stored as fractions (0.014 = 1.4%), correctly displayed as percentages.
+  - `src/execution/alpaca_trader.py` — `execute_alpaca_orders` + `build_alpaca_post` fully implemented (resolves the open question from `9f326f3`).
+  - 27 DB migrations, `core/` signal pipeline with correlation + concentration gates, 7 subagent types.
+- **2026-04-16 (`9f326f3`)** — **Alpaca paper trading wired into TradeJohn**. Green signals auto-submit as bracket orders sized `kelly_pos × equity`.
 - **2026-04-16** — `pipeline_orchestrator` wired to cron, signature fixes for S_HV13–15.
 - **2026-04-15** — removed strategist cron, dynamic memo labels, S_HV17 promoted to paper.
 - **2026-04-14** — **DataJohn removed**, replaced by hardcoded data pipeline (biggest architectural change since reinit; see [LEARNINGS.md §3](LEARNINGS.md)).
