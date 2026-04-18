@@ -87,26 +87,41 @@ class ResearchOrchestrator {
 
   /**
    * Discover papers from arXiv and insert into research_candidates queue.
-   * Returns count of new papers added.
+   * Expands the search window (14 → 30 → 60 → 90 days) until 10 new candidates
+   * are inserted or all windows are exhausted.
+   * Returns total count of new papers added.
    */
   async discover({ days = 14, notify, channelNotify } = {}) {
-    notify?.('🔭 Running arXiv discovery...');
-    try {
-      const raw = execSync(
-        `python3 src/ingestion/arxiv_discovery.py --days ${days}`,
-        { cwd: OPENCLAW_DIR, timeout: 60_000 }
-      ).toString();
-      const match = raw.match(/Inserted (\d+) of (\d+)/);
-      const [inserted, found] = match ? [parseInt(match[1]), parseInt(match[2])] : [0, 0];
-      const msg = `🔭 arXiv: found ${found} scored paper(s), inserted ${inserted} new candidate(s).`;
-      notify?.(msg);
-      channelNotify?.(msg);
-      return inserted;
-    } catch (e) {
-      const errMsg = `arXiv discovery failed: ${e.message.slice(0, 200)}`;
-      notify?.(`⚠️ ${errMsg}`);
-      return 0;
+    const TARGET      = 10;
+    const DAY_WINDOWS = [days, 30, 60, 90].filter((d, i, arr) => arr.indexOf(d) === i);
+    let totalInserted = 0;
+
+    notify?.('🔭 Running arXiv discovery (target: 10 new candidates)...');
+
+    for (const window of DAY_WINDOWS) {
+      if (totalInserted >= TARGET) break;
+      try {
+        const raw = execSync(
+          `python3 src/ingestion/arxiv_discovery.py --days ${window}`,
+          { cwd: OPENCLAW_DIR, timeout: 90_000 }
+        ).toString();
+        const match = raw.match(/Inserted (\d+) of (\d+)/);
+        const [inserted, found] = match ? [parseInt(match[1]), parseInt(match[2])] : [0, 0];
+        totalInserted += inserted;
+        notify?.(`🔭 Window ${window}d: found ${found} scored paper(s), inserted ${inserted} (total: ${totalInserted})`);
+        if (totalInserted >= TARGET) break;
+        // Only continue to next window if we haven't hit target yet
+      } catch (e) {
+        notify?.(`⚠️ arXiv discovery failed for ${window}d window: ${e.message.slice(0, 150)}`);
+      }
     }
+
+    const msg = totalInserted >= TARGET
+      ? `🔭 Discovery complete — ${totalInserted} new candidates added to queue.`
+      : `🔭 Discovery done — ${totalInserted} new candidates added (arXiv had fewer than ${TARGET} matching papers in recent history).`;
+    notify?.(msg);
+    channelNotify?.(msg);
+    return totalInserted;
   }
 
   /**

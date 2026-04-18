@@ -24,8 +24,8 @@ sys.path.insert(0, ROOT)
 
 ARXIV_API   = 'http://export.arxiv.org/api/query'
 CATEGORIES  = ['q-fin.ST', 'q-fin.PM', 'q-fin.TR']
-MAX_RESULTS = 50   # papers to fetch before scoring
-TOP_N       = 3    # papers to insert into research_candidates
+MAX_RESULTS = 100  # papers to fetch before scoring
+TOP_N       = 10   # papers to insert into research_candidates
 
 # Keyword heuristic weights
 SCORED_KEYWORDS = {
