@@ -30,8 +30,9 @@ const STOP_AFTER_KEY = 'research:stop_after_promoted';   // Redis key for one-sh
 
 class ResearchOrchestrator {
   constructor() {
-    this._redis = null;
-    this._pool  = null;
+    this._redis       = null;
+    this._pool        = null;
+    this._sessionCost = 0;   // cumulative LLM cost for the current start() session
   }
 
   // ── Public API ──────────────────────────────────────────────────────────────
@@ -58,6 +59,8 @@ class ResearchOrchestrator {
    * stopAfterPromoted: if > 0, auto-pauses after that many strategies reach PAPER.
    */
   async start({ notify, channelNotify, stopAfterPromoted = 0 } = {}) {
+    this._sessionCost = 0;
+
     const redis = await this._getRedis();
     await redis.del(PAUSE_KEY);
 
@@ -238,15 +241,17 @@ class ResearchOrchestrator {
     while (true) {
       const pending = await this._getPendingCount();
       if (pending === 0) {
-        notify?.('✅ Queue empty — research complete.');
-        channelNotify?.('✅ **Research queue exhausted** — all papers processed.');
+        const costSummary = `Session cost: **$${this._sessionCost.toFixed(4)}**`;
+        notify?.(`✅ Queue empty — research complete. ${costSummary}`);
+        channelNotify?.(`✅ **Research queue exhausted** — all papers processed. ${costSummary}`);
         break;
       }
 
       const redis  = await this._getRedis();
       const paused = await redis.get(PAUSE_KEY);
       if (paused === '1') {
-        notify?.('⏸ Research paused.');
+        const costSummary = `Session cost so far: **$${this._sessionCost.toFixed(4)}**`;
+        notify?.(`⏸ Research paused. ${costSummary}`);
         break;
       }
 
@@ -258,6 +263,7 @@ class ResearchOrchestrator {
    * Process one batch of up to BATCH_SIZE pending candidates.
    */
   async processQueue({ notify, channelNotify } = {}) {
+    const costAtBatchStart = this._sessionCost;
     // Claim a batch atomically
     const { rows: batch } = await this._query(
       `UPDATE research_candidates
@@ -374,7 +380,8 @@ class ResearchOrchestrator {
       }
     }
 
-    const summary = `Batch complete — READY: ${(classification.ready||[]).length}, BUILDABLE: ${(classification.buildable||[]).length}, BLOCKED: ${(classification.blocked||[]).length}`;
+    const batchCost = this._sessionCost - costAtBatchStart;
+    const summary = `Batch complete — READY: ${(classification.ready||[]).length}, BUILDABLE: ${(classification.buildable||[]).length}, BLOCKED: ${(classification.blocked||[]).length} | Batch cost: $${batchCost.toFixed(4)}`;
     notify?.(summary);
     channelNotify?.(`📊 **Research batch complete** — ${summary}`);
   }
@@ -392,6 +399,7 @@ class ResearchOrchestrator {
     );
 
     notify?.(`  ⚙️ Coding: ${stratId}...`);
+    const costBeforeCoding = this._sessionCost;
     try {
       await this._codeStrategy(strategy_spec);
       await this._query(
@@ -499,9 +507,11 @@ lsm.save_manifest('src/strategies/manifest.json')
       [JSON.stringify(btResult), candidate_id]
     );
 
+    const coderCost = this._sessionCost - costBeforeCoding;
     const summary = `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, ${btResult.trade_count} trades`;
-    notify?.(`  🚀 ${stratId} → PAPER trading (${summary})`);
-    channelNotify?.(`🚀 **${stratId}** auto-promoted to paper trading — ${summary}`);
+    const costLine = `Creation cost: $${coderCost.toFixed(4)} | Session total: $${this._sessionCost.toFixed(4)}`;
+    notify?.(`  🚀 ${stratId} → PAPER trading (${summary}) | ${costLine}`);
+    channelNotify?.(`🚀 **${stratId}** auto-promoted to paper trading — ${summary}\n💰 ${costLine}`);
 
     // One-shot mode: auto-pause after N promotions
     try {
@@ -751,6 +761,7 @@ lsm.save_manifest('src/strategies/manifest.json')
         }
         try {
           const parsed = JSON.parse(stdout);
+          this._sessionCost += parsed.total_cost_usd ?? 0;
           resolve(parsed.result ?? stdout);
         } catch {
           resolve(stdout);
