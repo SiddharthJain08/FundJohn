@@ -43,6 +43,18 @@ const activeRuns = new Map();
 let _dataAlertsPost = null;
 function getDataAlertsPost() { return _dataAlertsPost; }
 
+// Discord client + guild refs — set at startup, used for on-demand server map refresh
+let _discordClient = null;
+let _discordGuild  = null;
+let _channelMap    = {};
+async function triggerMapRefresh() {
+  try {
+    await refreshServerMap(_discordClient, _discordGuild, _channelMap);
+  } catch (e) {
+    console.warn('[bot] server map refresh failed:', e.message);
+  }
+}
+
 // Research orchestrator singleton — shared between /research command and 30s status monitor
 let _researchOrch = null;
 function getResearchOrch() {
@@ -197,7 +209,7 @@ function classifyRequest(content) {
         return { mode: 'RISK_SCAN', agent: 'strategist' };
 
     // Known slash-commands route to STATUS (handled in switch, no gate needed)
-    if (/^\/(signals|strategies|regime|status|portfolio|engine|approve|activate|deactivate|reject|pause|fetch|fill|data|data-status|agents|chart|pipeline|trade|diligence|run|help|sweep|update-profile|cycles|approve-dataset|approve-strategy|strategy-review|engine-status|engine-run|pause-strategy|adjust-strategy|strategy-versions|research|risk-scan|approve-data|veto-data|approve-deprecation)\b/.test(lower.trimStart()))
+    if (/^\/(signals|strategies|regime|status|portfolio|engine|approve|activate|deactivate|reject|pause|fetch|fill|data|data-status|agents|chart|pipeline|trade|diligence|run|help|sweep|update-profile|cycles|approve-dataset|approve-strategy|strategy-review|engine-status|engine-run|pause-strategy|adjust-strategy|strategy-versions|research|risk-scan|approve-data|veto-data|approve-deprecation|refresh-map)\b/.test(lower.trimStart()))
         return { mode: 'STATUS', agent: null };
 
     // Everything else — freeform message to BotJohn as master PM agent
@@ -847,6 +859,7 @@ async function handlePtcCommand(cmdText, message, userId) {
           await notify(`✅ Data column \`${col}\` approved — DataWiringAgent will wire it.`);
           agentPersonas.post('researchdesk', 'research-feed',
             `🔧 **Column approved:** \`${col}\` — DataWiringAgent wiring now...`).catch(() => {});
+          triggerMapRefresh().catch(() => {});
           // Fire DataWiringAgent asynchronously
           const orch = getResearchOrch();
           orch._wireColumn(rows[0]).catch((e) => {
@@ -875,6 +888,7 @@ async function handlePtcCommand(cmdText, message, userId) {
           await pool.end();
           if (rows.length === 0) { await notify(`⚠️ No pending request found for ID \`${reqId}\``); break; }
           await notify(`🚫 Data column \`${rows[0].column_name}\` vetoed.`);
+          triggerMapRefresh().catch(() => {});
         } catch (e) {
           await notify(`❌ veto-data error: ${e.message}`);
         }
@@ -899,6 +913,7 @@ async function handlePtcCommand(cmdText, message, userId) {
           await notify(`✅ Deprecation of \`${col}\` approved — DataWiringAgent will remove it.`);
           agentPersonas.post('researchdesk', 'research-feed',
             `🗑️ **Column deprecation approved:** \`${col}\` — DataWiringAgent removing...`).catch(() => {});
+          triggerMapRefresh().catch(() => {});
           const orch = getResearchOrch();
           orch._unwireColumn(rows[0]).catch((e) => {
             console.error('[bot] DataWiringAgent (remove) failed:', e.message);
@@ -908,6 +923,13 @@ async function handlePtcCommand(cmdText, message, userId) {
         } catch (e) {
           await notify(`❌ approve-deprecation error: ${e.message}`);
         }
+        break;
+      }
+
+      case 'refresh-map': {
+        await notify('🗺️ Refreshing server map...');
+        await triggerMapRefresh();
+        await notify('✅ Server map refreshed.');
         break;
       }
 
@@ -1142,10 +1164,13 @@ client.once('ready', async () => {
 
   // Setup Discord server channels + refresh #server-map
   const guild = client.guilds.cache.first();
+  _discordClient = client;
+  _discordGuild  = guild;
   let channelMap = {};
   if (guild) {
     try {
       channelMap = await setupServer(client, guild);
+      _channelMap = channelMap;
     } catch (err) {
       console.warn('[bot] Server setup failed:', err.message);
     }

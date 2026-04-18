@@ -106,14 +106,38 @@ const STRUCTURE = [
 
 // ── Server map message ────────────────────────────────────────────────────────
 
-function buildServerMap(channelMap) {
+async function buildServerMap(channelMap) {
   const ch = (key) => channelMap[key] ? `<#${channelMap[key]}>` : `#${key}`;
-  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const time  = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
+
+  // ── Live pending-approval queries ──────────────────────────────────────────
+  let dataReqs = [], deprReqs = [], stratReqs = [];
+  try {
+    const pgUri = process.env.POSTGRES_URI;
+    if (pgUri) {
+      const { Pool } = require('pg');
+      const pool = new Pool({ connectionString: pgUri, max: 2 });
+      const [d, dep, s] = await Promise.all([
+        pool.query(`SELECT request_id, column_name, requested_by_candidate_id FROM data_ingestion_queue  WHERE status='PENDING'  ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
+        pool.query(`SELECT request_id, column_name, recommended_action         FROM data_deprecation_queue WHERE status='PENDING' ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
+        pool.query(`SELECT id, name, tier                                       FROM strategy_registry      WHERE status='pending_approval' ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
+      ]);
+      dataReqs  = d.rows;
+      deprReqs  = dep.rows;
+      stratReqs = s.rows;
+      await pool.end().catch(() => {});
+    }
+  } catch { /* DB unavailable — show static map without pending items */ }
+
+  const pendingList = (rows, fmt) =>
+    rows.length === 0 ? '  *(none pending)*' : rows.map(r => `  • ${fmt(r)}`).join('\n');
 
   // Returned as array — three messages to stay under Discord's 2000-char limit
   return [
     `🦞 **OpenClaw v2 — Server Map**
-*Updated: ${today} | Runs daily at 6:00 AM ET | Sleeps when idle*
+*Updated: ${today} ${time} ET | \`!john /refresh-map\` to force refresh*
 
 **📡 DATA PIPELINE**
 ${ch('pipeline-feed')} — Phase completions, cycle start/end, errors
@@ -154,23 +178,28 @@ ${ch('agent-chat')} — Freeform chat with BotJohn as PM agent (\`!john <anythin
     `**🔧 Strategy Management**
 \`!john /build-strategy {desc}\` *(aliases: /deploy-strategy, /new-strategy, /create-strategy)*
 \`!john /strategy-report {id}\` · \`!john /strategy-versions {id}\`
-\`!john /approve-strategy {id}\` · \`!john /pause-strategy {id}\`
 \`!john /adjust-strategy {id} PARAM=val reason: why\` — versioned param update
-\`!john /approve-deprecation {id}\`
+\`!john /pause-strategy {id}\`
 
 **📡 Pipeline & Data**
 \`!john /fill [AAPL NVDA …]\` · \`!john /fill --force\` · \`!john /fetch AAPL\`
-\`!john /data {description}\` · \`!john /data-status\`
-\`!john /approve-data {id}\` · \`!john /veto-data {id}\`
-\`!john /pipeline status\` · \`!john /pipeline pause\` · \`!john /pipeline resume\`
-\`!john /pipeline cycles [n]\`
+\`!john /data {description}\`
+\`!john /pipeline status\` · \`!john /pipeline pause\` · \`!john /pipeline resume\` · \`!john /pipeline cycles [n]\`
 
-**🤖 Agents**
-\`!john /agents\` — status board: BotJohn · DataBot · ResearchDesk · TradeDesk
+**🤖 Agents** · \`!john /agents\`
+**🔌 System** · \`!john /shutdown confirm\` · \`!john /shutdown server confirm\`
+**⬆️ GitHub** · \`!john /git sync\`
+**🗺️ Map** · \`!john /refresh-map\` — force server map refresh
 
-**🔌 System**
-\`!john /shutdown confirm\` · \`!john /shutdown server confirm\`
-\`!john /git sync\` — commit + push all changes to SiddharthJain08/FundJohn`,
+**🔐 Pending Approvals**
+*Data columns — \`!john /approve-data {id}\` · \`!john /veto-data {id}\`*
+${pendingList(dataReqs, r => `\`${r.request_id.slice(0, 8)}\` — \`${r.column_name}\``)}
+
+*Strategy registry — \`!john /approve-strategy {id}\`*
+${pendingList(stratReqs, r => `\`${r.id}\` — ${r.name} [T${r.tier}]`)}
+
+*Column deprecations — \`!john /approve-deprecation {id}\`*
+${pendingList(deprReqs, r => `\`${r.request_id.slice(0, 8)}\` — \`${r.column_name}\` (${r.recommended_action})`)}`,
   ];
 }
 
@@ -309,7 +338,7 @@ async function refreshServerMap(client, guild, channelMap) {
     const recent = await serverMapCh.messages.fetch({ limit: 10 });
     const botMsgs = recent.filter(m => m.author.id === client.user.id);
     if (botMsgs.size > 0) await serverMapCh.bulkDelete(botMsgs).catch(() => {});
-    const parts = buildServerMap(channelMap);
+    const parts = await buildServerMap(channelMap);
     for (const part of parts) {
       await serverMapCh.send({ content: part });
     }
