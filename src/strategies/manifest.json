@@ -298,6 +298,16 @@
       },
       "history": []
     },
+    "S_tr_06_eod_reversal": {
+      "state": "paper",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tr_06_eod_reversal.py",
+        "class": "EODCrossSectionalReversal",
+        "description": "Cross-sectional EOD return reversal — ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
+      },
+      "history": []
+    },
     "S_tr_04_intraday_spy_momentum": {
       "state": "paper",
       "state_since": "2026-04-18T00:00:00+00:00",
