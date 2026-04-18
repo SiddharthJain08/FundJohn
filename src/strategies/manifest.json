@@ -277,6 +277,26 @@
         "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate"
       },
       "history": []
+    },
+    "S_tr_02_hurst_regime_flip": {
+      "state": "paper",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tr_02_hurst_regime_flip.py",
+        "class": "HurstRegimeFlip",
+        "description": "Hurst R/S regime flip — LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
+      },
+      "history": []
+    },
+    "S_tr_03_bocpd_change_point": {
+      "state": "paper",
+      "state_since": "2026-04-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tr_03_bocpd_change_point.py",
+        "class": "BOCPDChangePoint",
+        "description": "BOCPD change-point detection (Adams & MacKay 2007) — trade post-break direction in TRANSITIONING regime"
+      },
+      "history": []
     }
   },
   "decommissioned": {
