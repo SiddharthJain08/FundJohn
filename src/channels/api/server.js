@@ -646,7 +646,7 @@ async function loadMarket() {
   for (const row of mkt) marketData[row.ticker] = row;
   buildStrip();
   buildSidebar();
-  const onMarket = document.getElementById('portfolio-page').style.display === 'none';
+  const onMarket = document.getElementById('portfolio-page').style.display !== 'block';
   if (onMarket && !currentTicker) showOverview();
 }
 
