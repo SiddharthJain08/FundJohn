@@ -919,7 +919,10 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
               const agentChatCh = client.channels.cache.get(agentChatId);
               if (agentChatCh) {
                 const chunks = relay.split ? relay.split(text.trim()) : [text.trim()];
-                for (const chunk of chunks) await agentChatCh.send({ content: chunk });
+                for (let i = 0; i < chunks.length; i++) {
+                  const content = i === 0 ? `<@${userId}> ${chunks[i]}` : chunks[i];
+                  await agentChatCh.send({ content });
+                }
               }
             }
             // First-line summary → #general
