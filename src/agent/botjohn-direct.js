@@ -39,7 +39,7 @@ function buildPrompt(history, participantName, message, systemCtx) {
   if (history.length > 0) {
     lines.push('\n## Conversation History');
     for (const turn of history) {
-      const speaker = turn.role === 'user' ? 'User' : 'BotJohn';
+      const speaker = turn.role === 'user' ? `[${participantName}]` : 'BotJohn';
       lines.push(`\n**${speaker}:** ${turn.content}`);
     }
   }
