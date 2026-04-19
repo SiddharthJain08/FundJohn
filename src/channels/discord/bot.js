@@ -85,6 +85,13 @@ const TRUSTED_BOT_IDS = new Set(
   (process.env.TRUSTED_BOT_IDS || '').split(',').map(s => s.trim()).filter(Boolean)
 );
 
+// Agent interaction guards
+const AGENT_REPLY_COOLDOWN_MS  = 60_000;  // min 60s between replies to same agent
+const AGENT_LOOP_WINDOW_MS     = 5 * 60_000; // 5-minute sliding window
+const AGENT_LOOP_MAX_REPLIES   = 3;        // max replies before loop alert fires
+const _agentLastReply   = new Map();       // agentId → timestamp of last reply sent
+const _agentReplyWindow = new Map();       // agentId → [timestamps] of recent replies
+
 client.on('messageCreate', async (message) => {
   const isTrustedAgent = message.author.bot && TRUSTED_BOT_IDS.has(message.author.id);
   if (message.author.bot && !isTrustedAgent) return;
@@ -104,6 +111,56 @@ client.on('messageCreate', async (message) => {
   const isPrefix  = content.toLowerCase().startsWith(PREFIX.toLowerCase());
 
   if (!isMention && !isPrefix) return;
+
+  // ── Guard 1: filter agent status/noise messages ───────────────────────────
+  // Chappie and similar bots emit queue-acknowledgment messages that are not
+  // conversational. Responding to these creates a ping-pong loop.
+  if (isTrustedAgent) {
+    const lower = content.toLowerCase();
+    const isStatusNoise = (
+      /⏳\s*got it/i.test(content) ||
+      /standing by/i.test(content) ||
+      /\*thinking\.\.\.\*/i.test(content) ||
+      /— tx [`'`]\w+[`'`]/i.test(content) ||
+      /^acknowledged\.?$/i.test(lower.replace(/<@!?\d+>\s*/g, '').trim()) ||
+      /^received\.?\s*(waiting\.?)?$/i.test(lower.replace(/<@!?\d+>\s*/g, '').trim()) ||
+      /turns=\d+\/\d+.*\$[\d.]+/i.test(content)   // cost/turn telemetry lines
+    );
+    if (isStatusNoise) {
+      console.log(`[bot] Suppressed noise message from ${participantName}: ${content.slice(0, 60)}`);
+      return;
+    }
+  }
+
+  // ── Guard 2: per-agent rate limit (60s cooldown) ──────────────────────────
+  if (isTrustedAgent) {
+    const lastMs = _agentLastReply.get(userId) || 0;
+    const elapsed = Date.now() - lastMs;
+    if (elapsed < AGENT_REPLY_COOLDOWN_MS) {
+      const waitS = Math.ceil((AGENT_REPLY_COOLDOWN_MS - elapsed) / 1000);
+      console.log(`[bot] Rate-limiting ${participantName} — ${waitS}s remaining on cooldown`);
+      return;
+    }
+  }
+
+  // ── Guard 3: loop detection (3 replies in 5 min → pause + alert) ─────────
+  if (isTrustedAgent) {
+    const now = Date.now();
+    const window = _agentReplyWindow.get(userId) || [];
+    const recent = window.filter(t => now - t < AGENT_LOOP_WINDOW_MS);
+    if (recent.length >= AGENT_LOOP_MAX_REPLIES) {
+      console.warn(`[bot] Loop detected with ${participantName} — ${recent.length} replies in ${AGENT_LOOP_WINDOW_MS / 60000}min. Pausing.`);
+      _agentReplyWindow.set(userId, []); // reset window so alert fires once
+      const generalId = _channelMap['general'];
+      if (generalId) {
+        const ch = client.channels.cache.get(generalId);
+        if (ch) await ch.send(
+          `⚠️ **Loop guard triggered** — BotJohn ↔ ${participantName} exchanged ${recent.length} messages in under ${AGENT_LOOP_WINDOW_MS / 60000} minutes. Pausing agent-to-agent replies for this session. Human review required to resume.`
+        ).catch(() => {});
+      }
+      return;
+    }
+  }
 
   // Extract command text (strip prefix or mention)
   let cmdText = content;
@@ -913,6 +970,13 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         const text = result?.output || result?.result || result?.message;
         if (text && typeof text === 'string' && text.trim()) {
           if (isTrustedAgent) {
+            // Record reply for rate-limit and loop-detection guards
+            const now = Date.now();
+            _agentLastReply.set(userId, now);
+            const win = (_agentReplyWindow.get(userId) || []).filter(t => now - t < AGENT_LOOP_WINDOW_MS);
+            win.push(now);
+            _agentReplyWindow.set(userId, win);
+
             // Full response → #agent-chat
             const agentChatId = _channelMap['agent-chat'];
             if (agentChatId) {
