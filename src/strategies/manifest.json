@@ -327,6 +327,86 @@
         "description": "BOCPD change-point detection (Adams & MacKay 2007) — trade post-break direction in TRANSITIONING regime"
       },
       "history": []
+    },
+    "S_price_path_convexity": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_price_path_convexity.py",
+        "class": "PricePathConvexity",
+        "description": "second_derivative(60d price) cross-sectional rank; LONG low-convexity, SHORT high-convexity"
+      },
+      "history": []
+    },
+    "S_robust_minimum_variance_hedge": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_robust_minimum_variance_hedge.py",
+        "class": "RobustMinimumVarianceHedge",
+        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box → SHORT high-vol outliers"
+      },
+      "history": []
+    },
+    "S_skewness_dispersion_macro": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_skewness_dispersion_macro.py",
+        "class": "SkewnessDispersionMacro",
+        "description": "LONG/SHORT based on cross-sectional realized-skewness dispersion z-score, monthly cadence"
+      },
+      "history": []
+    },
+    "S_quantum_rebalance_qaoa": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_quantum_rebalance_qaoa.py",
+        "class": "QuantumRebalanceQAOA",
+        "description": "Ledoit-Wolf shrinkage + hierarchical clustering + entropy-weighted inv-vol rebalance"
+      },
+      "history": []
+    },
+    "S_alpha191_lasso_crossmarket": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_alpha191_lasso_crossmarket.py",
+        "class": "Alpha191LassoCrossMarket",
+        "description": "Alpha191 factor matrix + LASSO selection → LONG top-decile SHORT bottom-decile"
+      },
+      "history": []
+    },
+    "S_barbell_trend_horizon": {
+      "state": "candidate",
+      "state_since": "2026-04-19T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_barbell_trend_horizon.py",
+        "class": "BarbellTrendHorizon",
+        "description": "Multi-horizon momentum barbell with adaptive Bayesian horizon weights: LONG top-decile, SHORT bottom-decile"
+      },
+      "history": []
+    },
+    "S_nonstationarity_adaptive_selection": {
+      "state": "candidate",
+      "state_since": "2026-04-20T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_nonstationarity_adaptive_selection.py",
+        "class": "NonStationarityAdaptiveSelection",
+        "description": "Tournament-select momentum windows validated on rolling nonstationary windows; rank LONG/SHORT"
+      },
+      "history": []
+    },
+    "S_local_global_balance": {
+      "state": "candidate",
+      "state_since": "2026-04-20T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_local_global_balance.py",
+        "class": "LocalGlobalBalance",
+        "description": "rank_by(abs(local_balance_node - global_balance_network)); LONG top_decile in HIGH_VOL"
+      },
+      "history": []
     }
   },
   "decommissioned": {

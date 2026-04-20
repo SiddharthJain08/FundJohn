@@ -49,6 +49,14 @@ _IMPL_MAP = {
     'S_markov_frontier_regimes':      ('strategies.implementations.S_markov_frontier_regimes',      'MarkovFrontierRegimes'),
     'S_regime_specialist_vol':        ('strategies.implementations.S_regime_specialist_vol',        'RegimeSpecialistVol'),
     'S_epistemic_rank_gate':          ('strategies.implementations.S_epistemic_rank_gate',          'EpistemicRankGate'),
+    'S_price_path_convexity':         ('strategies.implementations.S_price_path_convexity',         'PricePathConvexity'),
+    'S_robust_minimum_variance_hedge': ('strategies.implementations.S_robust_minimum_variance_hedge', 'RobustMinimumVarianceHedge'),
+    'S_skewness_dispersion_macro':     ('strategies.implementations.S_skewness_dispersion_macro',     'SkewnessDispersionMacro'),
+    'S_quantum_rebalance_qaoa':        ('strategies.implementations.S_quantum_rebalance_qaoa',        'QuantumRebalanceQAOA'),
+    'S_alpha191_lasso_crossmarket':    ('strategies.implementations.S_alpha191_lasso_crossmarket',    'Alpha191LassoCrossMarket'),
+    'S_barbell_trend_horizon':         ('strategies.implementations.S_barbell_trend_horizon',         'BarbellTrendHorizon'),
+    'S_nonstationarity_adaptive_selection': ('strategies.implementations.S_nonstationarity_adaptive_selection', 'NonStationarityAdaptiveSelection'),
+    'S_local_global_balance':              ('strategies.implementations.S_local_global_balance',              'LocalGlobalBalance'),
 
 }
 

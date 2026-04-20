@@ -57,6 +57,121 @@
       "TRANSITIONING"
     ]
   },
+  "S_epistemic_rank_gate": {
+    "regime_set_hash": "e733c7760e2f0b60",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "dispersion",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "RISK_OFF",
+      "TRANSITIONING"
+    ]
+  },
+  "S_markov_frontier_regimes": {
+    "regime_set_hash": "19c75c513791104b",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "rv",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "LOW_VOL"
+    ]
+  },
+  "S_regime_specialist_vol": {
+    "regime_set_hash": "169a8bbb4e444919",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "atr",
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_tr_01_vvix_early_warning": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "regime",
+      "reversion",
+      "straddle",
+      "strangle",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_tr_02_hurst_regime_flip": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_tr_03_bocpd_change_point": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "gamma",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_tr_04_intraday_spy_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_tr_06_eod_reversal": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "s09_dual_momentum": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
