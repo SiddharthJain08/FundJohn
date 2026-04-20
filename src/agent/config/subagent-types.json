@@ -131,6 +131,20 @@
       "modes": ["WIRING"],
       "skills": [],
       "description": "Writes data ingestion/removal code. Tight tool allowlist: src/ingestion/, src/database/migrations/, signals_cache.py only."
+    },
+    "corpus-curator": {
+      "promptFile": "src/agent/prompts/subagents/corpus-curator.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 5,
+      "timeoutSeconds": 900,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "low",
+      "maxBudgetUsd": 8.0,
+      "modes": ["RESEARCH"],
+      "skills": [],
+      "description": "Opus 4.7 corpus-level paper curator. One invocation judges a batch of up to 100 papers against pipeline gate criteria and emits calibrated confidence scores. Highest token-consumption subagent in the system."
     }
   }
 }

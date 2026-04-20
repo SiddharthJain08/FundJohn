@@ -200,6 +200,24 @@ ${pendingList(stratReqs, r => `\`${r.id}\` — ${r.name} [T${r.tier}]`)}
 
 *Column deprecations — \`!john /approve-deprecation {id}\`*
 ${pendingList(deprReqs, r => `\`${r.request_id.slice(0, 8)}\` — \`${r.column_name}\` (${r.recommended_action})`)}`,
+
+    `**🦉 Opus Corpus Curator** *(Saturday 10:00 ET weekly — Phase 1–5)*
+\`!john /curator run\` — full corpus curation + promote high + spot-check sample
+\`!john /curator dry-run\` — rate on existing corpus, calibration report only
+\`!john /curator status\` — recent runs: input/output, cost, duration
+\`!john /curator sample [N]\` — last N curator decisions with reasoning
+\`!john /curator promote\` — promote latest run's high-bucket to research_candidates
+\`!john /curator re-curate <failure_mode>\` — re-rate papers blocked on that gap (after a provider add)
+\`!john /curator calibration\` — bucket pass-rates + false-positive/negative examples
+
+**📊 Funnel Analytics**
+\`!john /hit-rate [30d]\` — corpus → curator_high → hunter_pass → ready → validated → backtest_pass → promoted
+\`!john /data-demand\` — missing data features ranked by papers blocked, with provider suggestions
+\`!john /data-roi\` — expected paper unlocks per $1k of monthly data spend (ROI-ranked)
+
+_Timer: \`systemctl status openclaw-curator.timer\` — next Sat 14:00 UTC = 10:00 ET_
+_Schema: research_corpus → curator_runs → curated_candidates (gate_predictions JSONB) → paper_gate_decisions → paper_hit_rate_funnel_
+_Views: curator_bucket_calibration, curator_gate_calibration, strategy_type_calibration, missing_data_demand, data_category_unlock_estimate_`,
   ];
 }
 

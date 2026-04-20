@@ -848,6 +848,379 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         break;
       }
 
+      case 'curator': {
+        // Phase 2: Opus corpus curator management.
+        const subcmd = (args[0] || '').toLowerCase();
+        const CorpusCurator = require('../../agent/curators/corpus_curator');
+        const curator = new CorpusCurator();
+        try {
+          switch (subcmd) {
+            case 'status': {
+              const runs = await curator.getStatus();
+              if (!runs.length) { await notify('No curator runs recorded yet.'); break; }
+              const lines = runs.map(r => {
+                const mins = r.finished_at && r.started_at
+                  ? ((new Date(r.finished_at) - new Date(r.started_at)) / 60000).toFixed(1)
+                  : 'running';
+                return `• \`${r.run_id.slice(0, 8)}\` ${r.status} — ${r.input_count}→${r.output_count || 0} papers, $${Number(r.total_cost_usd || 0).toFixed(2)}, ${mins}m (${new Date(r.started_at).toISOString().slice(0, 16)})`;
+              });
+              await notify(`**Recent curator runs:**\n${lines.join('\n')}`);
+              break;
+            }
+            case 'sample': {
+              const n = parseInt(args[1]) || 10;
+              const samples = await curator.sampleRecentDecisions(n);
+              if (!samples.length) { await notify('No curator decisions yet.'); break; }
+              const lines = samples.map(s =>
+                `• [**${s.predicted_bucket}** @ ${Number(s.confidence).toFixed(2)}] ${s.title?.slice(0, 80)}\n  _${s.reasoning?.slice(0, 180)}_`
+              );
+              await notify(`**Sample curator decisions (${samples.length}):**\n${lines.join('\n')}`);
+              break;
+            }
+            case 'dryrun':
+            case 'dry-run': {
+              await notify('🧪 Running curator dry-run against existing corpus — this may take 3–10 min...');
+              const result = await curator.run({ dryRun: true, batchSize: 50, notify: async (t) => notify?.(`🧪 ${t}`) });
+              const report = await curator.calibrationReport(null, result.ratings);
+              await notify([
+                `**Dry-run calibration report**`,
+                `Rated: ${result.outputCount} papers — $${result.costUsd.toFixed(4)} — buckets: high=${result.buckets.high}, med=${result.buckets.med}, low=${result.buckets.low}, reject=${result.buckets.reject}`,
+                `With-truth: ${report.n_rated_with_truth} papers`,
+                `high bucket: ${report.n_high}`,
+                `actual promotions in truth: ${report.n_promoted_in_truth}`,
+                `**precision@high: ${report.precision_at_high?.toFixed(2) ?? 'N/A'}**`,
+                `**recall: ${report.recall_of_promoted?.toFixed(2) ?? 'N/A'}**`,
+                `ship gate (p≥0.7, r≥0.6): ${report.ship_gate_passed ? '✅ PASSED' : '❌ NOT YET'}`,
+              ].join('\n'));
+              break;
+            }
+            case 'run': {
+              await notify('🤖 Curator starting full run — this is the highest-token-consumption process.');
+              const notifyCb = async (t) => notify?.(`🤖 ${t}`);
+              const result = await curator.run({ dryRun: false, batchSize: 100, notify: notifyCb });
+              let promo = null;
+              if (result.runId) {
+                promo = await curator.promoteHighBucket({ runId: result.runId });
+              }
+
+              // Append data-demand recap — which missing columns would unlock the most rejected papers.
+              let demandLines = [];
+              try {
+                const { Pool } = require('pg');
+                const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+                const { rows } = await pool.query(
+                  `SELECT d.data_category, d.blocked_papers, r.suggested_providers, r.est_monthly_cost_usd
+                     FROM missing_data_category_demand d
+                     LEFT JOIN data_provider_recommendations r USING (data_category)
+                    ORDER BY d.blocked_papers DESC LIMIT 5`
+                );
+                await pool.end();
+                if (rows.length) {
+                  demandLines = [
+                    ``,
+                    `📊 **Top data gaps blocking papers this run:**`,
+                    ...rows.map(r => {
+                      const sugg = r.suggested_providers?.slice(0, 2).join(', ') || 'n/a';
+                      const cost = r.est_monthly_cost_usd ? ` ~$${r.est_monthly_cost_usd}/mo` : '';
+                      return `  • ${r.blocked_papers} — ${r.data_category} → ${sugg}${cost}`;
+                    }),
+                    `_Use \`/data-demand\` for the full breakdown._`,
+                  ];
+                }
+              } catch (e) { /* non-fatal — the demand report is a nice-to-have */ }
+
+              await notify([
+                `✅ **Curator run complete**`,
+                `Run: \`${result.runId?.slice(0, 8)}\``,
+                `Rated: **${result.outputCount}** papers — **$${result.costUsd.toFixed(4)}**`,
+                `Buckets: high=${result.buckets.high} | med=${result.buckets.med} | low=${result.buckets.low} | reject=${result.buckets.reject}`,
+                promo ? `Promoted to research_candidates: **${promo.promoted}** (eligible=${promo.eligible}${promo.capped ? ', capped' : ''})` : '',
+                ...demandLines,
+                ``,
+                `Next: \`/research start\` to process the curator-queued papers.`,
+              ].filter(Boolean).join('\n'));
+              break;
+            }
+            case 'promote': {
+              // Promote from the latest completed run, without a new curation pass.
+              const latest = (await curator.getStatus()).find(r => r.status === 'completed');
+              if (!latest) { await notify('No completed curator run to promote from.'); break; }
+              const promo = await curator.promoteHighBucket({ runId: latest.run_id });
+              await notify(`Promoted **${promo.promoted}** to research_candidates from run \`${latest.run_id.slice(0, 8)}\` (eligible=${promo.eligible}).`);
+              break;
+            }
+            case 're-curate':
+            case 'recurate': {
+              // Phase 5a: re-curate papers that previously failed on a specific
+              // data gap. Run after adding a column to data_columns / servers.json.
+              const mode = args.slice(1).join(' ').trim();
+              if (!mode) {
+                await notify('Usage: `/curator re-curate <failure_mode>` — e.g. `/curator re-curate data_unavailable:short_interest`');
+                break;
+              }
+              const dryRun = args.includes('--dry-run');
+              await notify(`🔄 Re-curating papers with failure_mode=\`${mode}\`${dryRun ? ' (dry-run)' : ''}...`);
+              const result = await curator.reCurateByFailureMode({
+                failureMode: mode, dryRun, batchSize: 50,
+                notify: async (t) => notify?.(`🔄 ${t}`),
+              });
+              if (!result.inputCount) {
+                await notify(`No papers had failure_mode=\`${mode}\` in their most recent evaluation.`);
+                break;
+              }
+              const transLines = Object.entries(result.transitions)
+                .sort((a, b) => b[1] - a[1])
+                .map(([k, v]) => `  • ${k}: ${v}`);
+              const flipLines = result.unlocked_to_high.slice(0, 5).map(f =>
+                `  • [${f.prev_bucket}→high @ ${Number(f.new_confidence).toFixed(2)}] ${(f.reasoning || '').slice(0, 160)}`
+              );
+              await notify([
+                `**Re-curation result** (failure_mode=\`${mode}\`)`,
+                `Rated: ${result.inputCount}  —  Cost: $${(result.costUsd || 0).toFixed(4)}`,
+                `Buckets now: high=${result.buckets.high} | med=${result.buckets.med} | low=${result.buckets.low} | reject=${result.buckets.reject}`,
+                ``,
+                `**Transitions:**`,
+                ...transLines,
+                ...(flipLines.length ? ['', `**Newly unlocked to high (${result.unlocked_to_high.length}):**`, ...flipLines] : []),
+              ].join('\n'));
+              break;
+            }
+
+            case 'calibration':
+            case 'calib': {
+              // Phase 3: inspect bucket pass rates + miss examples without running a pass.
+              const { Pool } = require('pg');
+              const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+              try {
+                const { rows: buckets } = await pool.query(
+                  `SELECT predicted_bucket, n_rated, n_with_truth,
+                          n_promoted, n_backtest_pass, promotion_rate, latest_eval
+                     FROM curator_bucket_calibration`
+                );
+                const { rows: fps } = await pool.query(
+                  `SELECT title, confidence, reasoning, hunter_rejected, backtest_failed
+                     FROM curator_false_positives ORDER BY created_at DESC LIMIT 5`
+                );
+                const { rows: fns } = await pool.query(
+                  `SELECT title, confidence, predicted_bucket, reasoning
+                     FROM curator_false_negatives ORDER BY created_at DESC LIMIT 5`
+                );
+                if (!buckets.length) { await notify('No curator evaluations yet — run `/curator dry-run` first.'); break; }
+                const lines = [
+                  `**Curator Calibration**`,
+                  ``,
+                  `__Bucket performance:__`,
+                  '```',
+                  ...buckets.map(b =>
+                    `${b.predicted_bucket.padEnd(7)} rated=${String(b.n_rated).padStart(4)}  ` +
+                    `with_truth=${String(b.n_with_truth).padStart(4)}  ` +
+                    `promoted=${String(b.n_promoted).padStart(3)}  ` +
+                    `backtest=${String(b.n_backtest_pass).padStart(3)}  ` +
+                    `rate=${b.promotion_rate == null ? ' n/a' : Number(b.promotion_rate).toFixed(3)}`
+                  ),
+                  '```',
+                  ``,
+                  `__False positives (curator said high, actually rejected):__ ${fps.length}`,
+                  ...fps.map(f => `  • [${Number(f.confidence).toFixed(2)}] ${f.hunter_rejected ? 'hunter' : f.backtest_failed ? 'backtest' : '?'} — ${(f.title || '').slice(0, 90)}`),
+                  ``,
+                  `__False negatives (curator rejected, actually promoted):__ ${fns.length}`,
+                  ...fns.map(f => `  • [${f.predicted_bucket} ${Number(f.confidence).toFixed(2)}] ${(f.title || '').slice(0, 90)}`),
+                ];
+                await notify(lines.join('\n'));
+              } finally { await pool.end(); }
+              break;
+            }
+            default:
+              await notify('Usage: `/curator [run | dry-run | status | sample [N] | promote | calibration | re-curate <failure_mode>]`');
+          }
+        } catch (e) {
+          await notify(`⚠️ curator error: ${e.message.slice(0, 300)}`);
+          console.error('[bot] curator error:', e);
+        }
+        break;
+      }
+
+      case 'data-roi': {
+        // Phase 5d: provider-purchase ROI dashboard.
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+          const { rows } = await pool.query(
+            `SELECT data_category, blocked_papers, expected_promotion_rate,
+                    expected_unlocks, est_monthly_cost_usd,
+                    expected_unlocks_per_1k_usd, suggested_providers, notes
+               FROM data_category_unlock_estimate
+              WHERE blocked_papers > 0
+              ORDER BY expected_unlocks_per_1k_usd DESC NULLS LAST, blocked_papers DESC
+              LIMIT 15`
+          );
+          await pool.end();
+          if (!rows.length) {
+            await notify('No ROI data yet — need curator evaluations + paper_gate_decisions to estimate unlock rates.');
+            break;
+          }
+          const lines = [
+            `**Data-Provider ROI Dashboard**`,
+            `_expected_unlocks_per_1k_usd = blocked_papers × promotion_rate / monthly_cost × 1000_`,
+            ``,
+            '```',
+            `category                  blocked  est_rate  unlocks  $/mo   /1k_usd  providers`,
+          ];
+          for (const r of rows) {
+            const cat  = String(r.data_category).padEnd(25);
+            const blk  = String(r.blocked_papers).padStart(5);
+            const rate = r.expected_promotion_rate == null ? ' n/a ' : Number(r.expected_promotion_rate).toFixed(4);
+            const unl  = r.expected_unlocks == null ? '   n/a' : Number(r.expected_unlocks).toFixed(2).padStart(6);
+            const cost = r.est_monthly_cost_usd == null ? '  n/a' : `$${r.est_monthly_cost_usd}`.padStart(5);
+            const roi  = r.expected_unlocks_per_1k_usd == null ? '  n/a' : Number(r.expected_unlocks_per_1k_usd).toFixed(3).padStart(6);
+            const prov = ((r.suggested_providers || []).slice(0, 2).join(', ') || '-').slice(0, 40);
+            lines.push(`${cat} ${blk}   ${rate}  ${unl}   ${cost}   ${roi}   ${prov}`);
+          }
+          lines.push('```');
+          lines.push('');
+          lines.push('_Higher `/1k_usd` = more expected paper promotions per $1,000 of monthly data spend. Uses current calibration — values will sharpen as more papers flow through the pipeline._');
+          await notify(lines.join('\n'));
+        } catch (e) {
+          await notify(`⚠️ data-roi query failed: ${e.message.slice(0, 200)}`);
+        }
+        break;
+      }
+
+      case 'data-demand': {
+        // Phase 2b: which missing data features are blocking the most papers.
+        // Informs which data providers to invest in.
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+
+          const cat = await pool.query(
+            `SELECT d.data_category,
+                    d.blocked_papers,
+                    d.distinct_features,
+                    d.features,
+                    r.suggested_providers,
+                    r.est_monthly_cost_usd,
+                    r.notes
+               FROM missing_data_category_demand d
+               LEFT JOIN data_provider_recommendations r USING (data_category)
+              ORDER BY d.blocked_papers DESC
+              LIMIT 10`
+          );
+          const top = await pool.query(
+            `SELECT data_category, feature_name, blocked_papers
+               FROM missing_data_demand
+              ORDER BY blocked_papers DESC
+              LIMIT 15`
+          );
+          await pool.end();
+
+          if (!cat.rows.length) {
+            await notify('No data-demand data yet. Run `/curator run` or `/curator dry-run` first so the curator emits failure modes.');
+            break;
+          }
+
+          const catLines = cat.rows.map(r => {
+            const providers = r.suggested_providers
+              ? ` → _suggest: ${r.suggested_providers.slice(0, 2).join(', ')}${r.est_monthly_cost_usd ? ` (~$${r.est_monthly_cost_usd}/mo)` : ''}_`
+              : '';
+            return `• **${r.blocked_papers}** papers blocked on **${r.data_category}** (${r.distinct_features} feat)${providers}`;
+          });
+          const featLines = top.rows.map(r => `  ${String(r.blocked_papers).padStart(3)} — ${r.data_category} :: ${r.feature_name}`);
+
+          await notify([
+            `**Data-Demand Report**`,
+            ``,
+            `__Top categories by papers blocked:__`,
+            ...catLines,
+            ``,
+            `__Top specific features:__`,
+            '```',
+            ...featLines,
+            '```',
+          ].join('\n'));
+        } catch (e) {
+          await notify(`⚠️ data-demand query failed: ${e.message.slice(0, 200)}`);
+        }
+        break;
+      }
+
+      case 'hit-rate': {
+        // Phase 1 instrumentation output. Shows funnel from corpus ingestion → promoted.
+        const windowArg = args[0] || '30d';
+        const m = /^(\d+)\s*d$/i.exec(windowArg);
+        const days = m ? parseInt(m[1], 10) : 30;
+        try {
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
+          const sinceClause = `NOW() - INTERVAL '${days} days'`;
+
+          const corpus = await pool.query(
+            `SELECT source, COUNT(*)::int AS n
+               FROM research_corpus
+              WHERE ingested_at >= ${sinceClause}
+              GROUP BY source
+              ORDER BY source`
+          );
+          const funnel = await pool.query(
+            `SELECT
+               (COUNT(*) FILTER (WHERE curator_high))::int     AS curator_high,
+               (COUNT(*) FILTER (WHERE hunter_pass))::int      AS hunter_pass,
+               (COUNT(*) FILTER (WHERE classified_ready))::int AS ready,
+               (COUNT(*) FILTER (WHERE validated))::int        AS validated,
+               (COUNT(*) FILTER (WHERE backtest_passed))::int  AS backtest_pass,
+               (COUNT(*) FILTER (WHERE promoted))::int         AS promoted,
+               COUNT(*)::int                                   AS ingested
+             FROM paper_hit_rate_funnel
+             WHERE ingested_at >= ${sinceClause}`
+          );
+          const rejectBy = await pool.query(
+            `SELECT gate_name, reason_code, COUNT(*)::int AS n
+               FROM paper_gate_decisions
+              WHERE outcome = 'reject'
+                AND occurred_at >= ${sinceClause}
+              GROUP BY gate_name, reason_code
+              ORDER BY n DESC
+              LIMIT 10`
+          );
+          await pool.end();
+
+          const f = funnel.rows[0] || {};
+          const ingested = parseInt(f.ingested || 0);
+          const pct = (n) => ingested > 0 ? ` (${(100 * n / ingested).toFixed(1)}%)` : '';
+
+          const sourceLines = corpus.rows.length
+            ? corpus.rows.map(r => `  • ${r.source}: ${r.n}`).join('\n')
+            : '  (no sources yet — run discovery)';
+
+          const rejectLines = rejectBy.rows.length
+            ? rejectBy.rows.map(r =>
+                `  • ${r.gate_name}/${r.reason_code || '—'}: ${r.n}`
+              ).join('\n')
+            : '  (no rejections recorded)';
+
+          await notify([
+            `**Research hit-rate funnel — last ${days}d**`,
+            ``,
+            `Corpus ingested: **${ingested}**`,
+            sourceLines,
+            ``,
+            `Funnel:`,
+            `  curator-high  → ${f.curator_high || 0}${pct(f.curator_high || 0)}`,
+            `  hunter-pass   → ${f.hunter_pass || 0}${pct(f.hunter_pass || 0)}`,
+            `  ready         → ${f.ready || 0}${pct(f.ready || 0)}`,
+            `  validated     → ${f.validated || 0}${pct(f.validated || 0)}`,
+            `  backtest-pass → ${f.backtest_pass || 0}${pct(f.backtest_pass || 0)}`,
+            `  **promoted**  → **${f.promoted || 0}**${pct(f.promoted || 0)}`,
+            ``,
+            `Top rejection reasons:`,
+            rejectLines,
+          ].join('\n'));
+        } catch (e) {
+          await notify(`⚠️ hit-rate query failed: ${e.message.slice(0, 200)}`);
+        }
+        break;
+      }
+
       case 'approve-data': {
         const reqId = args[0];
         if (!reqId) { await notify('Usage: `/approve-data <request_id>`'); break; }

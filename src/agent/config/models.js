@@ -16,6 +16,11 @@ const MODELS = {
     model: 'claude-haiku-4-5-20251001',
     description: 'Fast/cheap model for lightweight tasks.',
   },
+  opus1m: {
+    provider: 'anthropic',
+    model: 'claude-opus-4-7',
+    description: 'Opus 4.7 (1M context) — corpus curation at scale.',
+  },
   failover: {
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
@@ -25,11 +30,12 @@ const MODELS = {
 
 // Subagent model assignments — 4-agent FundJohn system
 const SUBAGENT_MODELS = {
-  botjohn:       MODELS.orchestrator,
-  researchjohn:  MODELS.primary,
-  tradejohn:     MODELS.primary,
-paperhunter:   MODELS.fast,
-  strategycoder: MODELS.primary,
+  botjohn:         MODELS.orchestrator,
+  researchjohn:    MODELS.primary,
+  tradejohn:       MODELS.primary,
+  paperhunter:     MODELS.fast,
+  strategycoder:   MODELS.primary,
+  'corpus-curator': MODELS.opus1m,
 };
 
 // Flash model alias for quick lookups
@@ -38,6 +44,7 @@ const FLASH_MODEL = MODELS.fast;
 // Context window limits per model
 const CONTEXT_LIMITS = {
   'claude-opus-4-6':           200_000,
+  'claude-opus-4-7':           1_000_000,  // 1M context variant
   'claude-sonnet-4-6':         200_000,
   'claude-haiku-4-5-20251001': 200_000,
 };

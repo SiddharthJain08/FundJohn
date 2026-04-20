@@ -280,9 +280,10 @@ Postgres 16 in Docker. 27 migrations at `src/database/migrations/*.sql`.
 | Channel | Posted by | Content |
 |---|---|---|
 | `#strategy-memos` | DataBot | Per-strategy memos (lifecycle state, regime, direction, targets, params) |
-| `#research-feed` | ResearchDesk | Consolidated research report (on-demand) |
+| `#research-feed` | ResearchDesk | Consolidated research report + curator run summaries |
 | `#trade-signals` | TradeDesk | GREEN signals with Kelly sizing + EV + Alpaca bracket order receipts |
 | `#trade-reports` | TradeDesk | Alpaca paper execution log (fills, errors, performance) |
+| `#server-map` | BotJohn | Auto-updated 4-message command reference (refreshed on startup and via `/refresh-map`) |
 | `#ops` | BotJohn + dashboard heartbeat | Pipeline state, budget mode, alerts |
 
 ### Commands
@@ -292,6 +293,20 @@ Postgres 16 in Docker. 27 migrations at `src/database/migrations/*.sql`.
 @FundJohn approve <signal_id>     # route to live broker (operator only; paper bypasses this)
 @FundJohn veto <signal_id>        # reject signal with reason
 @FundJohn report <strategy_id>    # enqueue REPORT invocation for a strategy
+
+# Opus Corpus Curator (Phase 1–5; Saturday 10:00 ET timer)
+!john /curator run                      # full curation pass + promote high + spot-check
+!john /curator dry-run                  # rate existing corpus, no persistence
+!john /curator status                   # last 5 runs (cost, duration, buckets)
+!john /curator sample [N]               # last N decisions with reasoning
+!john /curator calibration              # bucket pass-rates + false positives/negatives
+!john /curator re-curate <failure_mode> # re-rate papers blocked on that data gap
+!john /curator promote                  # promote latest run's high-bucket only
+
+# Funnel analytics
+!john /hit-rate [30d]                   # ingested → curator_high → hunter → ready → backtest → promoted
+!john /data-demand                      # missing data features × papers blocked × provider suggestions
+!john /data-roi                         # expected paper unlocks per $1k of monthly data spend
 ```
 
 ---
@@ -459,6 +474,17 @@ User=root
 Restart=on-failure
 ```
 
+### `openclaw-curator.service` + `.timer`
+Saturday 10:00 America/New_York sweep — broad arXiv fetch, OpenAlex (SSRN + NBER + top-5 finance journals + 11-author watchlist), then Opus 4.7 corpus curation, then promotion of the high-bucket to `research_candidates`. Unit files at `docs/curator.{service,timer}`; installed to `/etc/systemd/system/` and enabled.
+
+```ini
+[Timer]
+OnCalendar=Sat *-*-* 10:00:00 America/New_York
+Persistent=true
+```
+
+Status: `systemctl list-timers openclaw-curator.timer`. Ad-hoc trigger: `systemctl start openclaw-curator.service`. Cost per weekly sweep: ~$10–20 (Opus 4.7 corpus curator + Haiku PaperHunter on promoted subset).
+
 ### `/etc/systemd/system/massive-ws.service`
 Massive WebSocket options flow capture. Runs independently; never pauses for budget mode.
 
@@ -550,6 +576,15 @@ redis-cli get 'pipeline:running:2026-04-18'
 
 ## What's new / changed recently
 
+- **2026-04-20** — **Opus Corpus Curator — Phases 1 through 5 shipped end-to-end**:
+  - **Phase 1 (instrumentation)** — migrations `032_research_corpus` + `033_paper_gate_decisions`; structured per-gate decisions emitted from PaperHunter, ResearchJohn, validate, auto_backtest, and lifecycle. `paper_hit_rate_funnel` view + `/hit-rate` Discord command. Historical backfill (`src/ingestion/backfill_gate_decisions.py`) synthesises `research_corpus` rows for pre-corpus candidates and stitches orphaned decision rows.
+  - **Phase 2a (curator)** — `corpus-curator` subagent (Opus 4.7, 1M context, $8/call budget); prompt at `src/agent/prompts/subagents/corpus-curator.md`. Orchestrator `src/agent/curators/corpus_curator.js` batches 100 papers/call, persists per-batch, promotes confidence ≥ 0.75 to `research_candidates` with a 600/week hard cap. Runs Saturday 10:00 ET via `openclaw-curator.service`/`.timer`.
+  - **Phase 2b (analytics)** — `src/ingestion/openalex_discovery.py` replaces NBER/SSRN scrapers (both 404-protected). 7 venues + 11-author watchlist + citation-graph expansion via `referenced_works`. Migration `034_missing_data_demand` + `/data-demand` command surface which missing data features block the most papers, with `data_provider_recommendations` seed table.
+  - **Phase 3 (calibration loop)** — migration `035_curator_calibration` adds `curator_bucket_calibration`, `curator_false_positives`, `curator_false_negatives` views. `_loadCalibrationFeedback()` injects pass-rates + 5 rotating miss examples into the cached prompt prefix with 60d lookback. Spot-check promotion (weighted random sample of med/low papers) closes the loop so false negatives become detectable.
+  - **Phase 4a–c (source breadth)** — added Journal of Finance, RFS, JFE, JFQA, Quantitative Finance as OpenAlex venues; added `AUTHOR_WATCHLIST` (Fama, French, Jegadeesh, Asness, Cremers, Pedersen, Moskowitz, Koijen, Lettau, Hirshleifer, Hou); `expand_citation_graph()` pulls one-hop references from high-bucket picks.
+  - **Phase 5a–d (closed loop)** — `/curator re-curate <failure_mode>` re-rates blocked papers after a data-provider add, reports bucket transitions. Migration `036_strategy_type_priors` classifies papers into 13 categories with SQL heuristics; per-type rates injected into prompt. Migration `037_gate_predictions` — curator now emits per-gate pass probabilities (paperhunter / researchjohn / convergence); confidence = product. `curator_gate_calibration` shows over-confidence bias per gate. Migration `038_data_roi` + `/data-roi` command rank data providers by expected paper unlocks per $1k of monthly spend.
+  - **Session totals** — 1,544 papers in `research_corpus`, 1,145 curator evaluations, 1,307 structured gate decisions, 3 simulated weekly cycles at $41.74 total curator cost, first false positive recorded (Price-Path Convexity @ 0.80 → failed convergence).
+  - **Infra** — `johnbot.service` restarted; `#server-map` now a 4-message reference (was 3), with Curator + Analytics subsections. `run-subagent-cli.js` now pipes prompts via stdin (avoids E2BIG on batch-of-100 inputs). `research-orchestrator.js` emits structured `paper_gate_decisions` at every gate.
 - **2026-04-18 (`beea4cd`)** — **Massive WebSocket options integration + dashboard portfolio page**:
   - `src/ingestion/massive_ws.py` — live options flow capture via Massive `OA.*` WebSocket; writes unusual-flow signals to Redis (`massive:flow:{underlying}`, 4-hour TTL). Runs as `massive-ws.service`.
   - `src/ingestion/massive_client.py` — S3 flat-file download for options EOD data (`us_options_opra`). All stock OHLCV removed from Massive client; yfinance handles all stock prices.

@@ -79,17 +79,26 @@ const modelConfig = getModelForSubagent(type);
 
 const effort  = def.effortLevel  || 'medium';
 const budget  = String(def.maxBudgetUsd || 0.30);
+const bare    = def.bare === true;
 
-console.error(`[run-subagent-cli] Spawning ${type} | model=${modelConfig.model} effort=${effort} budget=$${budget}`);
+console.error(`[run-subagent-cli] Spawning ${type} | model=${modelConfig.model} effort=${effort} budget=$${budget}${bare ? ' bare' : ''}`);
 
-const child = spawn(CLAUDE_BIN, [
+// Pass the prompt via stdin rather than argv so batches of hundreds of papers
+// (tens to hundreds of KB) don't trip the OS E2BIG argv limit. `--print`
+// without a positional prompt reads from stdin.
+const claudeArgs = [
   '--dangerously-skip-permissions',
-  '-p', prompt,
+  '--print',
   '--output-format', 'json',
   '--model', modelConfig.model,
   '--effort', effort,
   '--max-budget-usd', budget,
-], {
+];
+// Bare mode skips CLAUDE.md auto-discovery, hooks, memory, and skills — used
+// by self-contained subagents (e.g. corpus-curator) to minimise token overhead.
+if (bare) claudeArgs.splice(1, 0, '--bare');
+
+const child = spawn(CLAUDE_BIN, claudeArgs, {
   cwd: OPENCLAW_DIR,
   uid: CLAUDE_UID,
   gid: CLAUDE_GID,
@@ -101,8 +110,12 @@ const child = spawn(CLAUDE_BIN, [
     WORKSPACE: workspace,
     OPENCLAW_DIR,
   },
-  stdio: ['ignore', 'pipe', 'pipe'],
+  stdio: ['pipe', 'pipe', 'pipe'],
 });
+
+// Write the prompt to stdin, then close so the child sees EOF.
+child.stdin.write(prompt);
+child.stdin.end();
 
 child.stdout.pipe(process.stdout);
 child.stderr.pipe(process.stderr);

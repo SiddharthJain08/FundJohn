@@ -18,6 +18,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
+const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
 const NODE_CLI          = path.join(OPENCLAW_DIR, 'src/agent/run-subagent-cli.js');
@@ -291,13 +292,25 @@ class ResearchOrchestrator {
       }))
     );
 
-    // Store hunter results on each candidate row
+    // Store hunter results on each candidate row + emit gate decisions.
     for (const result of hunterResults) {
       if (!result?.candidate_id) continue;
       await this._query(
         `UPDATE research_candidates SET hunter_result_json = $1 WHERE candidate_id = $2`,
         [JSON.stringify(result), result.candidate_id]
       );
+      const paperId   = await paperIdForCandidate(result.candidate_id);
+      const rejection = result.rejection_reason_if_any;
+      await emitGateDecision({
+        paperId,
+        candidateId:  result.candidate_id,
+        strategyId:   result.strategy_id || null,
+        gateName:     'paperhunter',
+        outcome:      rejection ? 'reject' : 'pass',
+        reasonCode:   rejection || null,
+        reasonDetail: rejection ? (result.rejection_detail || null) : null,
+        metadata:     { has_spec: Boolean(result.strategy_id) },
+      });
     }
 
     // Phase 2: Build ResearchJohn context
@@ -336,6 +349,15 @@ class ResearchOrchestrator {
         `UPDATE research_candidates SET status = 'done' WHERE candidate_id = $1`,
         [item.candidate_id]
       );
+      const paperId = await paperIdForCandidate(item.candidate_id);
+      await emitGateDecision({
+        paperId,
+        candidateId: item.candidate_id,
+        strategyId:  item.strategy_spec?.strategy_id || null,
+        gateName:    'researchjohn',
+        outcome:     'pass',
+        reasonCode:  'ready',
+      });
       await this._codeFromQueue(item, notify, channelNotify);
     }
 
@@ -353,6 +375,16 @@ class ResearchOrchestrator {
         `UPDATE research_candidates SET status = 'blocked_buildable' WHERE candidate_id = $1`,
         [item.candidate_id]
       );
+      const paperId = await paperIdForCandidate(item.candidate_id);
+      await emitGateDecision({
+        paperId,
+        candidateId: item.candidate_id,
+        strategyId:  item.strategy_spec?.strategy_id || null,
+        gateName:    'researchjohn',
+        outcome:     'buildable',
+        reasonCode:  'missing_columns',
+        metadata:    { missing_columns: item.missing_columns || [] },
+      });
       const colList = (item.missing_columns || []).join(', ');
       channelNotify?.(`🔧 **BUILDABLE** strategy \`${item.strategy_spec?.strategy_id}\` — needs columns: \`${colList}\`. Awaiting BotJohn approval.`);
     }
@@ -363,6 +395,16 @@ class ResearchOrchestrator {
         `UPDATE research_candidates SET status = 'blocked_rejected' WHERE candidate_id = $1`,
         [item.candidate_id]
       );
+      const paperId = await paperIdForCandidate(item.candidate_id);
+      await emitGateDecision({
+        paperId,
+        candidateId:  item.candidate_id,
+        strategyId:   item.strategy_spec?.strategy_id || null,
+        gateName:     'researchjohn',
+        outcome:      'reject',
+        reasonCode:   item.block_reason || 'blocked',
+        reasonDetail: item.reasoning || null,
+      });
     }
 
     // Mark any remaining 'processing' rows as done (hunters that weren't classified)
@@ -434,16 +476,35 @@ class ResearchOrchestrator {
       }
     }
 
+    const vPaperId = await paperIdForCandidate(candidate_id);
     if (!validResult.ok) {
       const errLog = (validResult.errors || []).join('\n');
       await this._query(
         `UPDATE implementation_queue SET status = 'validation_failed', error_log = $1 WHERE candidate_id = $2`,
         [errLog, candidate_id]
       );
+      await emitGateDecision({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'validate',
+        outcome:      'reject',
+        reasonCode:   'contract_violation',
+        reasonDetail: errLog,
+        metadata:     { errors: validResult.errors || [] },
+      });
       notify?.(`  ❌ ${stratId} validation failed: ${errLog.slice(0, 200)}`);
       channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
       return;
     }
+    await emitGateDecision({
+      paperId:     vPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'validate',
+      outcome:     'pass',
+      metadata:    { signal_count: validResult.signal_count ?? null },
+    });
     notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
 
     // ── Phase 2: Auto-backtest convergence gate ───────────────────────────────
@@ -473,10 +534,44 @@ class ResearchOrchestrator {
       const summary = btResult.error
         ? btResult.error.slice(0, 200)
         : `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
+      // Classify reason for the funnel.
+      let reasonCode = 'windows_insufficient';
+      if (btResult.error) reasonCode = 'backtest_error';
+      else if ((btResult.trade_count ?? 0) < 20) reasonCode = 'trade_count_below_floor';
+      else if ((btResult.sharpe ?? 0) < 0.5) reasonCode = 'sharpe_below_floor';
+      else if ((btResult.max_dd ?? 0) > 0.4) reasonCode = 'dd_above_ceiling';
+      await emitGateDecision({
+        paperId:      vPaperId,
+        candidateId:  candidate_id,
+        strategyId:   stratId,
+        gateName:     'convergence',
+        outcome:      'reject',
+        reasonCode,
+        reasonDetail: summary,
+        metadata: {
+          sharpe:         btResult.sharpe ?? null,
+          max_dd:         btResult.max_dd ?? null,
+          trade_count:    btResult.trade_count ?? null,
+          windows_passed: btResult.windows_passed ?? null,
+        },
+      });
       notify?.(`  ❌ ${stratId} backtest failed: ${summary}`);
       channelNotify?.(`❌ **${stratId}** failed backtest gate — ${summary}.`);
       return;
     }
+    await emitGateDecision({
+      paperId:     vPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'convergence',
+      outcome:     'pass',
+      metadata: {
+        sharpe:         btResult.sharpe ?? null,
+        max_dd:         btResult.max_dd ?? null,
+        trade_count:    btResult.trade_count ?? null,
+        windows_passed: btResult.windows_passed ?? null,
+      },
+    });
 
     // ── Phase 3: Auto-promote CANDIDATE → PAPER ───────────────────────────────
     const reason = `Auto-backtest: Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
@@ -506,6 +601,19 @@ lsm.save_manifest('src/strategies/manifest.json')
       `UPDATE implementation_queue SET status = 'promoted', backtest_result = $1 WHERE candidate_id = $2`,
       [JSON.stringify(btResult), candidate_id]
     );
+    await emitGateDecision({
+      paperId:     vPaperId,
+      candidateId: candidate_id,
+      strategyId:  stratId,
+      gateName:    'promotion',
+      outcome:     'pass',
+      reasonCode:  'auto_backtest_promoted',
+      metadata: {
+        sharpe: btResult.sharpe ?? null,
+        max_dd: btResult.max_dd ?? null,
+        trade_count: btResult.trade_count ?? null,
+      },
+    });
 
     const coderCost = this._sessionCost - costBeforeCoding;
     const summary = `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, ${btResult.trade_count} trades`;

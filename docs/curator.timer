@@ -1,0 +1,13 @@
+[Unit]
+Description=Run OpenClaw Opus Corpus Curator every Saturday at 10:00 America/New_York
+
+[Timer]
+# Saturday 10:00 America/New_York. The timezone suffix is required because this
+# host runs UTC; without it the timer would fire at 10:00 UTC (5-6 AM ET).
+# systemd >= 220 supports timezone suffix on OnCalendar.
+OnCalendar=Sat *-*-* 10:00:00 America/New_York
+Persistent=true
+Unit=openclaw-curator.service
+
+[Install]
+WantedBy=timers.target
