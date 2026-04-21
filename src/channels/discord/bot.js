@@ -1144,6 +1144,17 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         break;
       }
 
+      case 'health': {
+        try {
+          const { buildDigest } = require('../../engine/daily-health-digest');
+          const text = await buildDigest();
+          await notify(text);
+        } catch (e) {
+          await notify(`⚠️ health digest failed: ${e.message.slice(0, 200)}`);
+        }
+        break;
+      }
+
       case 'hit-rate': {
         // Phase 1 instrumentation output. Shows funnel from corpus ingestion → promoted.
         const windowArg = args[0] || '30d';

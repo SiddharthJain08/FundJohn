@@ -402,6 +402,15 @@ function start(swarm, generateId, notifyDiscord) {
     // 4:20 PM ET Mon-Fri: run full market-close pipeline (market state + signals cache + signal_runner.py)
   cron.schedule('20 16 * * 1-5', runMarketClosePipeline, { timezone: 'America/New_York' });
 
+  // 8:15 AM ET Mon-Fri: daily health digest to Discord so regressions surface in one glance
+  try {
+    const digest = require('./daily-health-digest');
+    digest.register(cron, (text) => notifyDiscord(text));
+    log('Daily health digest registered (Mon–Fri 08:15 ET)');
+  } catch (err) {
+    log(`Health digest register failed: ${err.message}`);
+  }
+
   log('Cron schedule registered. Zero-token pipeline active.');
     log('Agents will only activate for DEPLOY, REPORT, and weekly synthesis tasks.');
 }
