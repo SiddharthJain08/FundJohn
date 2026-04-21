@@ -293,6 +293,72 @@ app.get('/api/data/freshness', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Strategies page: manifest + per-strategy stats join.
+// Rows from manifest that have no signals yet land with null stats (just-promoted);
+// strategy_ids in stats that aren't in the manifest (legacy/decommissioned) land with state='orphan'.
+app.get('/api/strategies', async (req, res) => {
+  try {
+    const fs    = require('fs');
+    const path  = require('path');
+    const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
+    const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
+
+    const rows = [];
+    const seen = new Set();
+    for (const [sid, rec] of Object.entries(manifest.strategies || {})) {
+      seen.add(sid);
+      const s = statsById[sid] || {};
+      rows.push({
+        strategy_id:        sid,
+        state:              rec.state || 'unknown',
+        description:        rec.metadata?.description || '',
+        state_since:        rec.state_since || null,
+        open_count:         s.open_count || 0,
+        closed_count:       s.closed_count || 0,
+        total_count:        s.total_count || 0,
+        wins:               s.wins || 0,
+        losses:             s.losses || 0,
+        win_rate:           s.win_rate,
+        avg_realized_pct:   s.avg_realized_pct,
+        avg_unrealized_pct: s.avg_unrealized_pct,
+        best_trade_pct:     s.best_trade_pct,
+        worst_trade_pct:    s.worst_trade_pct,
+        avg_days_held:      s.avg_days_held,
+        last_signal_date:   s.last_signal_date,
+        dominant_regime:    s.dominant_regime,
+      });
+    }
+    // Orphans: strategy_ids with signals but no manifest entry
+    for (const s of statsRows) {
+      if (seen.has(s.strategy_id)) continue;
+      rows.push({
+        strategy_id:        s.strategy_id,
+        state:              'orphan',
+        description:        '',
+        state_since:        null,
+        open_count:         s.open_count || 0,
+        closed_count:       s.closed_count || 0,
+        total_count:        s.total_count || 0,
+        wins:               s.wins || 0,
+        losses:             s.losses || 0,
+        win_rate:           s.win_rate,
+        avg_realized_pct:   s.avg_realized_pct,
+        avg_unrealized_pct: s.avg_unrealized_pct,
+        best_trade_pct:     s.best_trade_pct,
+        worst_trade_pct:    s.worst_trade_pct,
+        avg_days_held:      s.avg_days_held,
+        last_signal_date:   s.last_signal_date,
+        dominant_regime:    s.dominant_regime,
+      });
+    }
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/portfolio/account', async (req, res) => {
   const key    = process.env.ALPACA_API_KEY    || '';
   const secret = process.env.ALPACA_SECRET_KEY || '';
@@ -558,6 +624,25 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 
 /* Portfolio page */
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#strategies-inner{max-width:1400px;margin:0 auto;padding:20px}
+.st-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
+.st-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px}
+.st-tile-value{font-size:22px;font-weight:700}
+.st-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+.st-pill{background:var(--border2);border:1px solid var(--border);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;color:var(--muted);font-family:inherit}
+.st-pill.active{background:var(--blue);border-color:var(--blue);color:#fff}
+.st-pill-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);padding:0 6px 0 2px}
+.state-live{color:#fff;background:var(--green);border-color:var(--green);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-paper{color:#000;background:var(--yellow);border-color:var(--yellow);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-candidate{color:var(--muted);background:var(--border2);border-color:var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-staging{color:#fff;background:var(--orange);border-color:var(--orange);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-orphan{color:var(--dim);background:transparent;border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+th.st-sortable{cursor:pointer;user-select:none}
+th.st-sortable:hover{color:var(--blue)}
+th.st-sortable.st-sorted::after{content:' ▾';color:var(--blue)}
+th.st-sortable.st-sorted-asc::after{content:' ▴';color:var(--blue)}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .pf-stat-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -614,6 +699,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   <h1>🦞 OpenClaw</h1>
   <button class="nav-btn active" id="nav-market" onclick="showMarket()">Market</button>
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
+  <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
   <span id="pipeline-badge">Loading pipeline...</span>
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
@@ -681,6 +767,42 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   </div>
 </div><!-- #pf-inner -->
 </div><!-- #portfolio-page -->
+
+<div id="strategies-page">
+  <div id="strategies-inner">
+    <div class="st-tiles">
+      <div class="st-tile"><div class="st-tile-label">Total Strategies</div><div class="st-tile-value" id="st-total">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Active Signals</div><div class="st-tile-value" id="st-open">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Lifetime Closed</div><div class="st-tile-value" id="st-closed">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Stack Win Rate</div><div class="st-tile-value" id="st-winrate">—</div></div>
+    </div>
+
+    <div class="st-filters">
+      <span class="st-pill-label">State:</span>
+      <button class="st-pill active" data-state="all" onclick="setStateFilter('all')">All</button>
+      <button class="st-pill" data-state="live" onclick="setStateFilter('live')">Live</button>
+      <button class="st-pill" data-state="paper" onclick="setStateFilter('paper')">Paper</button>
+      <button class="st-pill" data-state="candidate" onclick="setStateFilter('candidate')">Candidate</button>
+      <span style="width:16px"></span>
+      <span class="st-pill-label">Regime:</span>
+      <button class="st-pill active" data-regime="all" onclick="setRegimeFilter('all')">All</button>
+      <button class="st-pill" data-regime="LOW_VOL" onclick="setRegimeFilter('LOW_VOL')">Low Vol</button>
+      <button class="st-pill" data-regime="TRANSITIONING" onclick="setRegimeFilter('TRANSITIONING')">Transitioning</button>
+      <button class="st-pill" data-regime="HIGH_VOL" onclick="setRegimeFilter('HIGH_VOL')">High Vol</button>
+      <button class="st-pill" data-regime="CRISIS" onclick="setRegimeFilter('CRISIS')">Crisis</button>
+    </div>
+
+    <div class="pf-section">
+      <div class="pf-section-header">
+        <span>Strategies</span>
+        <span id="st-shown-count" style="color:var(--muted);font-weight:400;font-size:10px"></span>
+      </div>
+      <div class="pf-section-body">
+        <div id="st-table-wrap"><div class="empty">Loading...</div></div>
+      </div>
+    </div>
+  </div>
+</div><!-- #strategies-page -->
 </div><!-- #view-wrap -->
 
 <script>
@@ -701,7 +823,10 @@ async function loadMarket() {
   for (const row of mkt) marketData[row.ticker] = row;
   buildStrip();
   buildSidebar();
-  const onMarket = document.getElementById('portfolio-page').style.display !== 'block';
+  const st = document.getElementById('strategies-page');
+  const onStrategies = st && st.style.display === 'block';
+  const onPortfolio  = document.getElementById('portfolio-page').style.display === 'block';
+  const onMarket     = !onPortfolio && !onStrategies;
   if (onMarket && !currentTicker) showOverview();
 }
 
@@ -729,7 +854,13 @@ async function loadMarket() {
   es.onmessage = e => {
     const d = JSON.parse(e.data);
     if (d.type === 'pipeline') refreshPipeline();
-    if (d.type === 'market_update') { loadMarket(); refreshPipeline(); }
+    if (d.type === 'market_update') {
+      loadMarket();
+      refreshPipeline();
+      const st = document.getElementById('strategies-page');
+      if (st && st.style.display === 'block') loadStrategies();
+      if (document.getElementById('portfolio-page').style.display === 'block') loadPortfolio();
+    }
   };
   es.onerror = () => { document.getElementById('dot').style.background = 'var(--red)'; };
 })();
@@ -1283,20 +1414,39 @@ let pnlMode      = 'pnl';   // 'pnl' | 'value'
 let pnlCurveData = null;    // cached {rows, base_value}
 let valueCurveData = null;  // cached from /api/portfolio/value-curve
 
-function showMarket() {
+function _setNavActive(which) {
+  for (const k of ['market','portfolio','strategies']) {
+    const el = document.getElementById('nav-'+k);
+    if (!el) continue;
+    if (k === which) el.classList.add('active'); else el.classList.remove('active');
+  }
+}
+function _hideAllPages() {
+  document.getElementById('body').style.display = 'none';
   document.getElementById('portfolio-page').style.display = 'none';
+  const st = document.getElementById('strategies-page');
+  if (st) st.style.display = 'none';
+}
+
+function showMarket() {
+  _hideAllPages();
   document.getElementById('body').style.display = 'flex';
-  document.getElementById('nav-market').classList.add('active');
-  document.getElementById('nav-portfolio').classList.remove('active');
+  _setNavActive('market');
   showOverview();
 }
 
 async function showPortfolio() {
-  document.getElementById('body').style.display = 'none';
+  _hideAllPages();
   document.getElementById('portfolio-page').style.display = 'block';
-  document.getElementById('nav-portfolio').classList.add('active');
-  document.getElementById('nav-market').classList.remove('active');
+  _setNavActive('portfolio');
   await loadPortfolio();
+}
+
+async function showStrategies() {
+  _hideAllPages();
+  document.getElementById('strategies-page').style.display = 'block';
+  _setNavActive('strategies');
+  await loadStrategies();
 }
 
 async function loadPortfolio() {
@@ -1437,6 +1587,133 @@ function renderHistory(rows) {
         <td class="num">\${r.days_held ?? '—'}</td>
         <td style="color:var(--muted)">\${r.close_reason || '—'}</td>
         <td style="color:var(--dim)">\${closedAt}</td>
+      </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+
+// ── Strategies page ─────────────────────────────────────────────────────────
+let strategiesData  = [];
+let strategyState   = 'all';
+let strategyRegime  = 'all';
+let strategySortKey = 'avg_realized_pct';
+let strategySortDir = 'desc';
+
+async function loadStrategies() {
+  try {
+    const rows = await fetch('/api/strategies').then(r => r.json()).catch(() => []);
+    strategiesData = Array.isArray(rows) ? rows : [];
+  } catch {
+    strategiesData = [];
+  }
+  renderStrategyTiles();
+  renderStrategyTable();
+}
+
+function renderStrategyTiles() {
+  const rows = strategiesData;
+  const total = rows.length;
+  const open  = rows.reduce((s, r) => s + (r.open_count || 0), 0);
+  const closed = rows.reduce((s, r) => s + (r.closed_count || 0), 0);
+  const totalWins = rows.reduce((s, r) => s + (r.wins || 0), 0);
+  const totalClosed = rows.reduce((s, r) => s + ((r.wins || 0) + (r.losses || 0)), 0);
+  const stackWR = totalClosed > 0 ? Math.round(totalWins / totalClosed * 100) : null;
+  document.getElementById('st-total').textContent   = total;
+  document.getElementById('st-open').textContent    = open;
+  document.getElementById('st-closed').textContent  = closed;
+  document.getElementById('st-winrate').textContent = stackWR != null ? stackWR + '%' : '—';
+}
+
+function setStateFilter(s) {
+  strategyState = s;
+  for (const el of document.querySelectorAll('.st-pill[data-state]')) {
+    el.classList.toggle('active', el.dataset.state === s);
+  }
+  renderStrategyTable();
+}
+function setRegimeFilter(r) {
+  strategyRegime = r;
+  for (const el of document.querySelectorAll('.st-pill[data-regime]')) {
+    el.classList.toggle('active', el.dataset.regime === r);
+  }
+  renderStrategyTable();
+}
+function setStrategySort(key) {
+  if (strategySortKey === key) {
+    strategySortDir = strategySortDir === 'desc' ? 'asc' : 'desc';
+  } else {
+    strategySortKey = key;
+    strategySortDir = 'desc';
+  }
+  renderStrategyTable();
+}
+
+function renderStrategyTable() {
+  let rows = strategiesData.slice();
+  if (strategyState !== 'all')   rows = rows.filter(r => r.state === strategyState);
+  if (strategyRegime !== 'all')  rows = rows.filter(r => r.dominant_regime === strategyRegime);
+
+  const dir = strategySortDir === 'asc' ? 1 : -1;
+  rows.sort((a, b) => {
+    const av = a[strategySortKey], bv = b[strategySortKey];
+    const an = av == null, bn = bv == null;
+    if (an && bn) return 0;
+    if (an) return 1;
+    if (bn) return -1;
+    if (typeof av === 'string') return av.localeCompare(bv) * dir;
+    return (parseFloat(av) - parseFloat(bv)) * dir;
+  });
+
+  document.getElementById('st-shown-count').textContent =
+    rows.length + ' of ' + strategiesData.length;
+
+  const el = document.getElementById('st-table-wrap');
+  if (!rows.length) { el.innerHTML = '<div class="empty">No strategies match filters</div>'; return; }
+
+  const sortedCls = (key) => strategySortKey === key
+    ? (strategySortDir === 'asc' ? 'st-sortable st-sorted-asc' : 'st-sortable st-sorted')
+    : 'st-sortable';
+  const fmtPct  = (v) => v == null ? '—' : (parseFloat(v)*100 > 0 ? '+' : '') + (parseFloat(v)*100).toFixed(2) + '%';
+  const fmtRate = (v) => v == null ? '—' : Math.round(parseFloat(v)*100) + '%';
+  const fmtDate = (v) => v ? new Date(v).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
+
+  el.innerHTML = \`<table class="db-table" style="min-width:1100px">
+    <tr>
+      <th class="\${sortedCls('strategy_id')}" onclick="setStrategySort('strategy_id')">Strategy</th>
+      <th class="\${sortedCls('state')}" onclick="setStrategySort('state')">State</th>
+      <th class="\${sortedCls('dominant_regime')}" onclick="setStrategySort('dominant_regime')">Regime</th>
+      <th class="num \${sortedCls('open_count')}" onclick="setStrategySort('open_count')">Open</th>
+      <th class="num \${sortedCls('closed_count')}" onclick="setStrategySort('closed_count')">Closed</th>
+      <th class="num \${sortedCls('win_rate')}" onclick="setStrategySort('win_rate')">Win %</th>
+      <th class="num \${sortedCls('avg_realized_pct')}" onclick="setStrategySort('avg_realized_pct')">Avg Return</th>
+      <th class="num \${sortedCls('avg_unrealized_pct')}" onclick="setStrategySort('avg_unrealized_pct')">Unreal. Avg</th>
+      <th class="num \${sortedCls('best_trade_pct')}" onclick="setStrategySort('best_trade_pct')">Best</th>
+      <th class="num \${sortedCls('worst_trade_pct')}" onclick="setStrategySort('worst_trade_pct')">Worst</th>
+      <th class="num \${sortedCls('avg_days_held')}" onclick="setStrategySort('avg_days_held')">Avg Days</th>
+      <th class="\${sortedCls('last_signal_date')}" onclick="setStrategySort('last_signal_date')">Last Signal</th>
+    </tr>
+    \${rows.map(r => {
+      const avgR     = r.avg_realized_pct   != null ? parseFloat(r.avg_realized_pct)*100   : null;
+      const avgU     = r.avg_unrealized_pct != null ? parseFloat(r.avg_unrealized_pct)*100 : null;
+      const best     = r.best_trade_pct     != null ? parseFloat(r.best_trade_pct)*100     : null;
+      const worst    = r.worst_trade_pct    != null ? parseFloat(r.worst_trade_pct)*100    : null;
+      const stateCls = 'state-' + (r.state || 'orphan');
+      const regimeLbl = r.dominant_regime || '—';
+      const regimeCls = r.dominant_regime ? ('regime-state-' + r.dominant_regime) : '';
+      const titleAttr = (r.description || '').replace(/"/g, '&quot;');
+      return \`<tr>
+        <td style="font-weight:600" title="\${titleAttr}">\${r.strategy_id}</td>
+        <td><span class="\${stateCls}">\${r.state}</span></td>
+        <td>\${regimeCls ? \`<span class="\${regimeCls}" style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.04em">\${regimeLbl}</span>\` : '<span style="color:var(--dim)">—</span>'}</td>
+        <td class="num">\${r.open_count || 0}</td>
+        <td class="num">\${r.closed_count || 0}</td>
+        <td class="num">\${fmtRate(r.win_rate)}</td>
+        <td class="num \${pnlCls(avgR)}">\${fmtPct(r.avg_realized_pct)}</td>
+        <td class="num \${pnlCls(avgU)}">\${fmtPct(r.avg_unrealized_pct)}</td>
+        <td class="num \${pnlCls(best)}">\${fmtPct(r.best_trade_pct)}</td>
+        <td class="num \${pnlCls(worst)}">\${fmtPct(r.worst_trade_pct)}</td>
+        <td class="num" style="color:var(--muted)">\${r.avg_days_held != null ? parseFloat(r.avg_days_held).toFixed(1) : '—'}</td>
+        <td style="color:var(--dim)">\${fmtDate(r.last_signal_date)}</td>
       </tr>\`;
     }).join('')}
   </table>\`;
