@@ -201,10 +201,14 @@ def check_signal_quality(run_date):
     mem_path = ROOT / 'workspaces' / 'default' / 'memory' / 'signal_patterns.md'
     try:
         text = mem_path.read_text()
-        # Pattern: "avgEV=-1.89%"
         import re
-        ev_match    = re.search(r'avgEV=([+-]?\d+\.?\d*)%', text)
-        green_match = re.search(r'EV\+=(\d+)', text)
+        # Read the LAST entry (most recent run), not the first.
+        entry_lines = [ln for ln in text.splitlines() if 'avgEV=' in ln]
+        if not entry_lines:
+            return True, 'no signal pattern data — allowing trade step'
+        last = entry_lines[-1]
+        ev_match    = re.search(r'avgEV=([+-]?\d+\.?\d*)%', last)
+        green_match = re.search(r'EV\+=(\d+)', last)
         if not ev_match:
             return True, 'no signal pattern data — allowing trade step'
         avg_ev    = float(ev_match.group(1))

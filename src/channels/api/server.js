@@ -562,7 +562,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .pf-section{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
 .pf-section-header{padding:11px 16px;border-bottom:1px solid var(--border2);font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;justify-content:space-between}
 .pf-section-body{overflow-x:auto}
-.pf-pnl-pos{color:var(--green)}.pf-pnl-neg{color:var(--red)}
+.pf-pnl-pos{color:var(--green)}.pf-pnl-neg{color:var(--red)}.pf-pnl-flat{color:var(--muted)}
 .dir-long{color:var(--green);font-weight:600}.dir-short{color:var(--red);font-weight:600}
 /* ── Regime Panel ── */
 .regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
@@ -737,11 +737,17 @@ function fmtPrice(ticker, price) {
   if (n < 1)    return '$' + n.toFixed(4);
   return '$' + n.toFixed(2);
 }
+function pnlCls(n, posCls='pf-pnl-pos', negCls='pf-pnl-neg', flatCls='pf-pnl-flat') {
+  if (n == null || isNaN(n)) return '';
+  if (Math.abs(n) < 0.005) return flatCls;
+  return n > 0 ? posCls : negCls;
+}
 function fmtChg(chg) {
   if (chg == null) return {text:'—',cls:'neutral'};
   const n = parseFloat(chg);
-  const sign = n >= 0 ? '+' : '';
-  return {text: sign + n.toFixed(2) + '%', cls: n >= 0 ? 'positive' : 'negative'};
+  const sign = n > 0 ? '+' : '';
+  const cls = Math.abs(n) < 0.005 ? 'neutral' : (n > 0 ? 'positive' : 'negative');
+  return {text: sign + n.toFixed(2) + '%', cls};
 }
 function fmtNum(n, decimals=2) {
   if (n == null) return '—';
@@ -1344,7 +1350,7 @@ function renderAccountRow(a) {
   const dayEl  = document.getElementById('pf-daypnl');
   const daySub = document.getElementById('pf-daypnl-sub');
   dayEl.textContent  = fmt(dayPnl);
-  dayEl.className    = 'pf-stat-value ' + (dayPnl == null ? '' : dayPnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg');
+  dayEl.className    = 'pf-stat-value ' + pnlCls(dayPnl);
   daySub.textContent = fmtPct(dayPct);
 
   document.getElementById('pf-invested').textContent     = fmt(invested);
@@ -1353,7 +1359,7 @@ function renderAccountRow(a) {
 }
 
 function renderPortfolioSummary(s) {
-  const pnl = s.avg_realized != null ? parseFloat(s.avg_realized) : null;
+  const pnl = s.avg_realized != null ? parseFloat(s.avg_realized) * 100 : null;
   const wr  = s.win_rate != null ? s.win_rate + '%' : '—';
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
@@ -1362,11 +1368,13 @@ function renderPortfolioSummary(s) {
     ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
   if (pnl != null) {
     const el = document.getElementById('pf-avgpnl');
-    el.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
-    el.className = 'pf-stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
+    el.textContent = (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%';
+    el.className = 'pf-stat-value ' + pnlCls(pnl, 'positive', 'negative', 'neutral');
+    const best = s.best_trade != null ? parseFloat(s.best_trade) * 100 : null;
+    const worst = s.worst_trade != null ? parseFloat(s.worst_trade) * 100 : null;
     document.getElementById('pf-pnl-sub').textContent =
-      'Best: ' + (s.best_trade != null ? (s.best_trade > 0 ? '+' : '') + parseFloat(s.best_trade).toFixed(2) + '%' : '—') +
-      '  Worst: ' + (s.worst_trade != null ? parseFloat(s.worst_trade).toFixed(2) + '%' : '—');
+      'Best: ' + (best != null ? (best > 0 ? '+' : '') + best.toFixed(2) + '%' : '—') +
+      '  Worst: ' + (worst != null ? worst.toFixed(2) + '%' : '—');
   } else {
     document.getElementById('pf-avgpnl').textContent = '—';
     document.getElementById('pf-pnl-sub').textContent = 'No closed trades';
@@ -1380,9 +1388,9 @@ function renderPositions(rows) {
   el.innerHTML = \`<table class="db-table" style="min-width:700px">
     <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Current</th><th class="num">P&amp;L %</th><th class="num">Size %</th><th class="num">Days</th><th>Stop</th><th>Status</th></tr>
     \${rows.map(r => {
-      const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) : null;
-      const pnlTxt = pnl != null ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
-      const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+      const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) * 100 : null;
+      const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
+      const pnlClsName = pnlCls(pnl);
       const dir = (r.direction || '').toUpperCase();
       return \`<tr>
         <td>\${r.strategy_id || '—'}</td>
@@ -1390,7 +1398,7 @@ function renderPositions(rows) {
         <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
         <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
         <td class="num">\${r.current_price != null ? '$' + parseFloat(r.current_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls}">\${pnlTxt}</td>
+        <td class="num \${pnlClsName}">\${pnlTxt}</td>
         <td class="num">\${r.position_size_pct != null ? (parseFloat(r.position_size_pct) * 100).toFixed(1) + '%' : '—'}</td>
         <td class="num">\${r.days_held ?? '—'}</td>
         <td class="num">\${r.stop_loss != null ? '$' + parseFloat(r.stop_loss).toFixed(2) : '—'}</td>
@@ -1407,9 +1415,9 @@ function renderHistory(rows) {
   el.innerHTML = \`<table class="db-table" style="min-width:680px">
     <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Close</th><th class="num">P&amp;L %</th><th class="num">Days</th><th>Reason</th><th>Closed</th></tr>
     \${rows.map(r => {
-      const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) : null;
-      const pnlTxt = pnl != null ? (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
-      const pnlCls = pnl == null ? '' : pnl >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+      const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) * 100 : null;
+      const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
+      const pnlClsName = pnlCls(pnl);
       const dir = (r.direction || '').toUpperCase();
       const closedAt = r.closed_at ? new Date(r.closed_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
       return \`<tr>
@@ -1418,7 +1426,7 @@ function renderHistory(rows) {
         <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
         <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
         <td class="num">\${r.closed_price != null ? '$' + parseFloat(r.closed_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls}">\${pnlTxt}</td>
+        <td class="num \${pnlClsName}">\${pnlTxt}</td>
         <td class="num">\${r.days_held ?? '—'}</td>
         <td style="color:var(--muted)">\${r.close_reason || '—'}</td>
         <td style="color:var(--dim)">\${closedAt}</td>
