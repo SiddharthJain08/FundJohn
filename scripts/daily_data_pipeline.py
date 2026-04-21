@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 """
+DEPRECATED 2026-04-21 — superseded by src/pipeline/collector.js
+(johnbot.service). Do not wire this into new cron entries; the crontab
+entry has been commented out. Script is retained only in case the
+collector regresses and we need a short-term fallback. Plan to remove
+entirely after a week of stable collector operation.
+
 daily_data_pipeline.py — Complete self-healing daily data pipeline.
 
 Ensures all master parquets are fully populated on every run:
