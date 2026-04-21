@@ -66,6 +66,47 @@ def load_portfolio_state():
     return {}
 
 
+def _emit_sized_handoff(run_date, raw_stdout):
+    """Parse TradeJohn's stdout → write output/handoffs/<run_date>_sized.json.
+
+    run-subagent-cli prints one JSON envelope per line; the last envelope with
+    subtype='success' contains TradeJohn's markdown in `.result`. Inside that
+    markdown we expect a fenced ```tradejohn_orders block (see tradejohn.md).
+    """
+    import re
+    from execution.handoff import write_handoff as _write_handoff
+    markdown = None
+    for line in reversed(raw_stdout.splitlines()):
+        line = line.strip()
+        if not line.startswith('{'):
+            continue
+        try:
+            env = json.loads(line)
+        except ValueError:
+            continue
+        if env.get('subtype') == 'success' and isinstance(env.get('result'), str):
+            markdown = env['result']
+            break
+    if not markdown:
+        print('[trade_agent_llm] No TradeJohn markdown found — sized handoff skipped')
+        return
+    m = re.search(r'```tradejohn_orders\s*(\{.*?\})\s*```', markdown, re.DOTALL)
+    if not m:
+        print('[trade_agent_llm] No tradejohn_orders JSON block — sized handoff skipped')
+        return
+    try:
+        payload = json.loads(m.group(1))
+    except ValueError as e:
+        print(f'[trade_agent_llm] tradejohn_orders block not valid JSON: {e}')
+        return
+    payload.setdefault('cycle_date', run_date)
+    payload['source']        = 'trade_agent_llm'
+    payload['generated_at']  = date.today().isoformat()
+    _write_handoff(run_date, 'sized', payload)
+    print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
+          f'{len(payload.get("vetoed", []))} vetoed.')
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -132,13 +173,26 @@ if __name__ == '__main__':
              '--context-file', ctx_file],
             cwd=str(ROOT),
             env=env,
+            capture_output=True,
+            text=True,
             timeout=420,
         )
+        # Stream output to parent regardless so systemd journal still sees it
+        sys.stdout.write(result.stdout or '')
+        sys.stderr.write(result.stderr or '')
         if result.returncode != 0:
             print(f'[trade_agent_llm] TradeJohn exited {result.returncode} — see output above')
             sys.exit(1)
 
         print('[trade_agent_llm] TradeJohn complete.')
+
+        # Extract TradeJohn's markdown from the claude-bin JSON envelope, then
+        # pull out the fenced ```tradejohn_orders block and write the sized
+        # handoff that alpaca_executor.py will read.
+        try:
+            _emit_sized_handoff(run_date, result.stdout or '')
+        except Exception as exc:
+            print(f'[trade_agent_llm] sized-handoff emit failed: {exc}')
 
     except subprocess.TimeoutExpired:
         print('[trade_agent_llm] TradeJohn timed out after 420s')

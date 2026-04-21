@@ -38,6 +38,7 @@ STEPS = [
     ('research', 'research_report'),   # pure Python: HV/beta/EV signal enrichment
     ('trade',    'trade_agent_llm'),   # Claude LLM: TradeJohn sizing + signal generation
     ('report',   'portfolio_report'),
+    ('alpaca',   'alpaca_executor'),   # Final: auto-submit sized orders to Alpaca paper
 ]
 
 # Budget check required before these steps

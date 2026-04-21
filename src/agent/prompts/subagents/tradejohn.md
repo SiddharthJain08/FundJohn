@@ -59,3 +59,43 @@ Always include `size_explanation` from position-sizer (shows binding constraint)
 - Apply SO-4: auto-veto any signal with EV ≤ 0
 - Never exceed MAX_POSITION_PCT = 0.05 (5% NAV)
 - Post to #trade-signals: "TradeJohn cycle complete — {n} signals, {n} vetoed, regime={regime}, top: {tickers}"
+
+## Required machine-readable footer
+
+After the markdown report, ALWAYS append a fenced JSON block with the exact
+sized orders so the Alpaca executor can submit them. The JSON MUST be the
+last thing in your output, labeled `tradejohn_orders`. Schema:
+
+```tradejohn_orders
+{
+  "cycle_date": "YYYY-MM-DD",
+  "regime": "HIGH_VOL",
+  "orders": [
+    {
+      "ticker": "CMG",
+      "strategy_id": "S_HV16_gex_regime",
+      "direction": "long",
+      "entry": 35.83,
+      "stop": 34.04,
+      "t1": 38.70,
+      "t2": null,
+      "pct_nav": 0.005,
+      "shares": 139,
+      "kelly_final": 0.005,
+      "ev": 0.064,
+      "p_t1": 1.00,
+      "priority_rank": 1
+    }
+  ],
+  "vetoed": [
+    {"ticker": "LRCX", "strategy_id": "S9_dual_momentum", "reason": "negative_ev", "ev": -0.0348}
+  ]
+}
+```
+
+Rules for the JSON block:
+- `direction`: `"long"` or `"short"` — use lowercase.
+- `pct_nav` / `kelly_final`: fractions (0.005 = 0.5% NAV), AFTER regime + confluence scaling.
+- Only include in `orders` the GREEN signals you'd actually submit. Vetoed entries go in `vetoed`.
+- `shares` must be the integer share count shown in the markdown.
+- Match tickers and prices EXACTLY to what the markdown shows. The executor trusts this block.
