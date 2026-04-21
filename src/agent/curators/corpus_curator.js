@@ -605,7 +605,23 @@ class CorpusCurator {
       gateCalibration = rows;
     } catch { /* view may not exist yet */ }
 
-    return { buckets, falsePositives, falseNegatives, strategyTypes, gateCalibration };
+    // R4: weekly trend snapshots — lets the model see whether its
+    // calibration is improving or drifting over time, not just where it
+    // stands right now.
+    let trend = [];
+    try {
+      const { rows } = await this._query(
+        `SELECT dimension, key, snapshot_date, promotion_rate,
+                actual_pass_rate, over_confidence_bias, n_rated
+           FROM curator_priors_trend
+          WHERE dimension = 'bucket' AND key = 'high'
+             OR dimension = 'gate'
+          ORDER BY dimension, key, snapshot_date DESC`
+      );
+      trend = rows;
+    } catch { /* snapshot table may be empty on first run */ }
+
+    return { buckets, falsePositives, falseNegatives, strategyTypes, gateCalibration, trend };
   }
 
   /**
@@ -697,6 +713,39 @@ class CorpusCurator {
       }
       parts.push('');
       parts.push('If bias is strongly positive for a gate, lower your pass_prob for that gate on similar papers. Negative bias means you are being too pessimistic.');
+    }
+
+    // R4: week-over-week trend lines. Gives the curator a sense of whether
+    // its calibration is improving over time, not just where it stands now.
+    if (cal.trend?.length) {
+      const bucketTrend = cal.trend.filter(t => t.dimension === 'bucket' && t.key === 'high');
+      const gateTrend   = cal.trend.filter(t => t.dimension === 'gate');
+      if (bucketTrend.length > 1) {
+        parts.push('');
+        parts.push('High-bucket promotion_rate over time (oldest→newest):');
+        const series = bucketTrend.slice().reverse().map(t =>
+          `${t.snapshot_date.toISOString().slice(5,10)}=${t.promotion_rate != null ? Number(t.promotion_rate).toFixed(2) : 'n/a'}`
+        );
+        parts.push('  ' + series.join('  '));
+      }
+      if (gateTrend.length > 0) {
+        const byGate = {};
+        for (const t of gateTrend) {
+          byGate[t.key] = byGate[t.key] || [];
+          byGate[t.key].push(t);
+        }
+        const multi = Object.entries(byGate).filter(([, v]) => v.length > 1);
+        if (multi.length) {
+          parts.push('');
+          parts.push('Per-gate over-confidence bias over time (oldest→newest; 0 = calibrated, + = overconfident):');
+          for (const [g, series] of multi) {
+            const line = series.slice().reverse().map(t =>
+              `${t.snapshot_date.toISOString().slice(5,10)}=${t.over_confidence_bias != null ? Number(t.over_confidence_bias).toFixed(2) : 'n/a'}`
+            ).join('  ');
+            parts.push(`  ${g.padEnd(13)} ${line}`);
+          }
+        }
+      }
     }
 
     return parts.join('\n');

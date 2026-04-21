@@ -411,6 +411,17 @@ function start(swarm, generateId, notifyDiscord) {
     log(`Health digest register failed: ${err.message}`);
   }
 
+  // 3:05 AM ET daily: snapshot curator priors → time series for trend-aware calibration
+  cron.schedule('5 3 * * *', async () => {
+    try {
+      const { snapshotAll } = require('../agent/curators/snapshot_priors');
+      const result = await snapshotAll();
+      log(`Curator priors snapshot: ${result.total} rows`);
+    } catch (err) {
+      log(`Curator priors snapshot failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   log('Cron schedule registered. Zero-token pipeline active.');
     log('Agents will only activate for DEPLOY, REPORT, and weekly synthesis tasks.');
 }
