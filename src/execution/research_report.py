@@ -595,6 +595,21 @@ def write_signal_patterns(analytics, port, run_date):
     )
     _mem_append(mem_dir / 'signal_patterns.md', pattern_entry)
 
+    # Structured mirror into daily_signal_summary (migration 040). The memo file
+    # remains the narrative log; the gate reads from this table (authoritative).
+    _write_daily_signal_summary(
+        run_date=run_date,
+        regime=regime,
+        analytics=analytics,
+        ev_pos=ev_pos,
+        ev_neg=ev_neg,
+        avg_ev=avg_ev,
+        avg_p_t1=avg_p_t1,
+        high_conv=high_conv,
+        overbought=overbought,
+        port=port,
+    )
+
     # ── regime_context.md ─────────────────────────────────────────────────────
     strat_summary = ', '.join(f"{k.split('_')[0]}:{v*100:.1f}%" for k, v in port['strat_exp'].items())
     sector_top    = sorted(port['sector_exp'].items(), key=lambda x: -x[1])[:3]
@@ -627,6 +642,36 @@ def write_signal_patterns(analytics, port, run_date):
         print(f'[research] JSONL write failed: {e}')
 
     print(f'[research] Memory written: signal_patterns.md, regime_context.md ({run_date})')
+
+
+def _write_daily_signal_summary(*, run_date, regime, analytics, ev_pos, ev_neg,
+                                 avg_ev, avg_p_t1, high_conv, overbought, port):
+    """Insert one row per pipeline cycle into daily_signal_summary."""
+    try:
+        uri = os.environ.get('POSTGRES_URI', '')
+        if not uri:
+            return
+        conn = psycopg2.connect(uri)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO daily_signal_summary
+                      (run_date, regime, n_signals, ev_pos, ev_neg,
+                       avg_ev, avg_p_t1, high_conv_count,
+                       port_beta, port_sharpe, worst_dd, overbought)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    run_date, regime, len(analytics), len(ev_pos), len(ev_neg),
+                    round(avg_ev, 6), round(avg_p_t1, 6), len(high_conv),
+                    round(port['port_beta'], 4), round(port['port_sharpe'], 4),
+                    round(port['worst_dd'], 6), list(set(overbought)) or None,
+                ))
+            conn.commit()
+            print(f'[research] daily_signal_summary row inserted ({run_date})')
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f'[research] daily_signal_summary write failed: {e}')
 
 
 def _mem_append(fpath, text):

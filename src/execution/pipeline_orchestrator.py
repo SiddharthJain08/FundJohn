@@ -194,15 +194,45 @@ SIGNAL_QUALITY_THRESHOLDS = {
 
 def check_signal_quality(run_date):
     """
-    Read signal_patterns.md from workspace memory to determine if avg EV is
-    too negative to justify running the trade step.
+    Decide whether the trade step should run. Source-of-truth is the
+    daily_signal_summary table (migration 040). Fall back to parsing
+    signal_patterns.md only if the table read fails — covers first-run
+    state before the writer lands in production.
+
     Returns (ok: bool, reason: str).
     """
+    # Primary: structured DB row
+    try:
+        import psycopg2
+        uri = os.environ.get('POSTGRES_URI', '')
+        if uri:
+            conn = psycopg2.connect(uri)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT avg_ev, ev_pos, n_signals, run_date
+                        FROM daily_signal_summary
+                        ORDER BY run_date DESC, created_at DESC
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+            finally:
+                conn.close()
+            if row:
+                avg_ev_frac, ev_pos, n_signals, row_date = row
+                avg_ev_pct = float(avg_ev_frac) * 100 if avg_ev_frac is not None else 0.0
+                green_cnt  = int(ev_pos or 0)
+                if avg_ev_pct < SIGNAL_QUALITY_THRESHOLDS['min_avg_ev'] and green_cnt < SIGNAL_QUALITY_THRESHOLDS['min_green_count']:
+                    return False, f'avg EV={avg_ev_pct:+.2f}% ({green_cnt} green, {n_signals} signals, {row_date}) — below quality threshold'
+                return True, f'avg EV={avg_ev_pct:+.2f}%, green={green_cnt}, {n_signals} signals ({row_date})'
+    except Exception as e:
+        log(f'Signal quality DB read failed ({e}) — falling back to memo file')
+
+    # Fallback: parse signal_patterns.md (legacy path; will be removed after one full cycle)
     mem_path = ROOT / 'workspaces' / 'default' / 'memory' / 'signal_patterns.md'
     try:
         text = mem_path.read_text()
         import re
-        # Read the LAST entry (most recent run), not the first.
         entry_lines = [ln for ln in text.splitlines() if 'avgEV=' in ln]
         if not entry_lines:
             return True, 'no signal pattern data — allowing trade step'
@@ -214,8 +244,8 @@ def check_signal_quality(run_date):
         avg_ev    = float(ev_match.group(1))
         green_cnt = int(green_match.group(1)) if green_match else 0
         if avg_ev < SIGNAL_QUALITY_THRESHOLDS['min_avg_ev'] and green_cnt < SIGNAL_QUALITY_THRESHOLDS['min_green_count']:
-            return False, f'avg EV={avg_ev:+.2f}% ({green_cnt} green signals) — below quality threshold'
-        return True, f'avg EV={avg_ev:+.2f}%, green={green_cnt}'
+            return False, f'avg EV={avg_ev:+.2f}% ({green_cnt} green signals) — below quality threshold (memo fallback)'
+        return True, f'avg EV={avg_ev:+.2f}%, green={green_cnt} (memo fallback)'
     except Exception as e:
         log(f'Signal quality check failed ({e}) — allowing trade step')
         return True, 'check error'
