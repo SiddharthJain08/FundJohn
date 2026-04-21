@@ -634,8 +634,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .st-pill{background:var(--border2);border:1px solid var(--border);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;color:var(--muted);font-family:inherit}
 .st-pill.active{background:var(--blue);border-color:var(--blue);color:#fff}
 .st-pill-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);padding:0 6px 0 2px}
-.state-live{color:#fff;background:var(--green);border-color:var(--green);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.state-paper{color:#000;background:var(--yellow);border-color:var(--yellow);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-live,.state-paper,.state-active{color:#fff;background:var(--green);border-color:var(--green);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-candidate{color:var(--muted);background:var(--border2);border-color:var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-staging{color:#fff;background:var(--orange);border-color:var(--orange);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-orphan{color:var(--dim);background:transparent;border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
@@ -780,9 +779,9 @@ th.st-sortable.st-sorted-asc::after{content:' ▴';color:var(--blue)}
     <div class="st-filters">
       <span class="st-pill-label">State:</span>
       <button class="st-pill active" data-state="all" onclick="setStateFilter('all')">All</button>
-      <button class="st-pill" data-state="live" onclick="setStateFilter('live')">Live</button>
-      <button class="st-pill" data-state="paper" onclick="setStateFilter('paper')">Paper</button>
+      <button class="st-pill" data-state="active" onclick="setStateFilter('active')">Active</button>
       <button class="st-pill" data-state="candidate" onclick="setStateFilter('candidate')">Candidate</button>
+      <button class="st-pill" data-state="staging" onclick="setStateFilter('staging')">Staging</button>
       <span style="width:16px"></span>
       <span class="st-pill-label">Regime:</span>
       <button class="st-pill active" data-regime="all" onclick="setRegimeFilter('all')">All</button>
@@ -1648,9 +1647,16 @@ function setStrategySort(key) {
   renderStrategyTable();
 }
 
+// Display: we paper-trade the fund as a whole, so every strategy in manifest
+// state "live" or "paper" is operationally running. Collapse both to "active"
+// for the user-facing badge and filter.
+function _displayState(s) {
+  return (s === 'live' || s === 'paper') ? 'active' : (s || 'orphan');
+}
+
 function renderStrategyTable() {
   let rows = strategiesData.slice();
-  if (strategyState !== 'all')   rows = rows.filter(r => r.state === strategyState);
+  if (strategyState !== 'all')   rows = rows.filter(r => _displayState(r.state) === strategyState);
   if (strategyRegime !== 'all')  rows = rows.filter(r => r.dominant_regime === strategyRegime);
 
   const dir = strategySortDir === 'asc' ? 1 : -1;
@@ -1697,13 +1703,15 @@ function renderStrategyTable() {
       const avgU     = r.avg_unrealized_pct != null ? parseFloat(r.avg_unrealized_pct)*100 : null;
       const best     = r.best_trade_pct     != null ? parseFloat(r.best_trade_pct)*100     : null;
       const worst    = r.worst_trade_pct    != null ? parseFloat(r.worst_trade_pct)*100    : null;
-      const stateCls = 'state-' + (r.state || 'orphan');
+      const dispState = _displayState(r.state);
+      const stateCls  = 'state-' + dispState;
+      const stateLbl  = dispState === 'active' ? 'LIVE' : dispState.toUpperCase();
       const regimeLbl = r.dominant_regime || '—';
       const regimeCls = r.dominant_regime ? ('regime-state-' + r.dominant_regime) : '';
       const titleAttr = (r.description || '').replace(/"/g, '&quot;');
       return \`<tr>
         <td style="font-weight:600" title="\${titleAttr}">\${r.strategy_id}</td>
-        <td><span class="\${stateCls}">\${r.state}</span></td>
+        <td><span class="\${stateCls}">\${stateLbl}</span></td>
         <td>\${regimeCls ? \`<span class="\${regimeCls}" style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.04em">\${regimeLbl}</span>\` : '<span style="color:var(--dim)">—</span>'}</td>
         <td class="num">\${r.open_count || 0}</td>
         <td class="num">\${r.closed_count || 0}</td>
