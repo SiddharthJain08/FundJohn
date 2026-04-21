@@ -323,6 +323,29 @@ def compute_signal_analytics(sig, px, spy_returns):
     }
 
 
+def _kelly_fraction(a):
+    """
+    Binary-outcome Kelly fraction for a signal. Treats a win as 80% capture
+    of t1_pct (matches the EV computation above) and a loss as full risk_pct.
+    Returns None on degenerate inputs; bounded to [-1, 1]. Agent applies its
+    own fractional-Kelly scaling (typically /2 or /4).
+    """
+    try:
+        p = float(a.get('p_t1') or 0.0)
+        t1_pct   = float(a.get('t1_pct') or 0.0)
+        risk_pct = float(a.get('risk_pct') or 0.0)
+        if p <= 0.0 or risk_pct <= 0.0 or t1_pct <= 0.0:
+            return None
+        gain = 0.80 * t1_pct
+        b    = gain / risk_pct
+        if b <= 0.0:
+            return None
+        f = (p * b - (1.0 - p)) / b
+        return round(max(-1.0, min(1.0, f)), 4)
+    except (TypeError, ValueError):
+        return None
+
+
 # ── Portfolio analytics ────────────────────────────────────────────────────────
 
 def compute_portfolio_analytics(analytics, px, spy_returns):
@@ -654,6 +677,13 @@ def _write_daily_signal_summary(*, run_date, regime, analytics, ev_pos, ev_neg,
         conn = psycopg2.connect(uri)
         try:
             with conn.cursor() as cur:
+                def _f(v):
+                    # Coerce numpy/NaN values to native-Python scalars for psycopg2.
+                    try:
+                        fv = float(v)
+                        return None if math.isnan(fv) else round(fv, 6)
+                    except (TypeError, ValueError):
+                        return None
                 cur.execute("""
                     INSERT INTO daily_signal_summary
                       (run_date, regime, n_signals, ev_pos, ev_neg,
@@ -662,9 +692,10 @@ def _write_daily_signal_summary(*, run_date, regime, analytics, ev_pos, ev_neg,
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
                     run_date, regime, len(analytics), len(ev_pos), len(ev_neg),
-                    round(avg_ev, 6), round(avg_p_t1, 6), len(high_conv),
-                    round(port['port_beta'], 4), round(port['port_sharpe'], 4),
-                    round(port['worst_dd'], 6), list(set(overbought)) or None,
+                    _f(avg_ev), _f(avg_p_t1), len(high_conv),
+                    _f(port['port_beta']), _f(port['port_sharpe']),
+                    _f(port['worst_dd']),
+                    [str(x) for x in set(overbought)] or None,
                 ))
             conn.commit()
             print(f'[research] daily_signal_summary row inserted ({run_date})')
@@ -760,13 +791,22 @@ if __name__ == '__main__':
                 'port_ev_ann':         port['port_ev_ann'],
             },
             'signals': [
-                {'ticker':      a['ticker'],
-                 'strategy_id': a['strategy'],
-                 'ev':          a['ev'],
-                 'kelly':       None,
-                 'hv21':        a['hv21'],
-                 'beta':        a['beta'] if not math.isnan(a['beta']) else None,
-                 'p_t1':        a['p_t1'],
+                {'ticker':        a['ticker'],
+                 'strategy_id':   a['strategy'],
+                 'entry':         a['entry'],
+                 'stop':          a['stop'],
+                 't1':            a['t1'],
+                 't2':            a['t2'],
+                 'size_pct':      a['size_pct'],
+                 'risk_pct':      a['risk_pct'],
+                 't1_pct':        a['t1_pct'],
+                 'rr1':           a['rr1'],
+                 'rr2':           a['rr2'],
+                 'ev':            a['ev'],
+                 'kelly':         _kelly_fraction(a),
+                 'hv21':          a['hv21'],
+                 'beta':          a['beta'] if not math.isnan(a['beta']) else None,
+                 'p_t1':          a['p_t1'],
                  'exp_exit_date': a['exp_exit_date']}
                 for a in analytics
             ],
