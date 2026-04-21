@@ -58,7 +58,12 @@ _IMPL_MAP = {
     'S_nonstationarity_adaptive_selection': ('strategies.implementations.S_nonstationarity_adaptive_selection', 'NonStationarityAdaptiveSelection'),
     'S_local_global_balance':              ('strategies.implementations.S_local_global_balance',              'LocalGlobalBalance'),
     'S_sparse_basis_pursuit_sdf':          ('strategies.implementations.S_sparse_basis_pursuit_sdf',          'SparseBasisPursuitSDF'),
-
+    # Transitioning-regime specialists (Phases 1–4)
+    'S_tr_01_vvix_early_warning':          ('strategies.implementations.S_tr_01_vvix_early_warning',          'VVIXEarlyWarning'),
+    'S_tr_02_hurst_regime_flip':           ('strategies.implementations.S_tr_02_hurst_regime_flip',           'HurstRegimeFlip'),
+    'S_tr_03_bocpd_change_point':          ('strategies.implementations.S_tr_03_bocpd_change_point',          'BOCPDChangePoint'),
+    'S_tr_04_intraday_spy_momentum':       ('strategies.implementations.S_tr_04_intraday_spy_momentum',       'IntradaySPYMomentum'),
+    'S_tr_06_eod_reversal':                ('strategies.implementations.S_tr_06_eod_reversal',                'EODCrossSectionalReversal'),
 }
 
 
