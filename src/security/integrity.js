@@ -130,6 +130,8 @@ function verifyManifest() {
     console.log(`[integrity] All ${Object.keys(manifest.hashes).length} files verified OK`);
   } else {
     console.error(`[SECURITY_ALERT] integrity: ${failures.length} file(s) failed verification`);
+    console.error(`[integrity] If you edited these files intentionally, regenerate the manifest:`);
+    console.error(`[integrity]   ./scripts/regen-integrity-manifest.sh`);
   }
   return { valid, failures, generatedAt: manifest.generatedAt };
 }
