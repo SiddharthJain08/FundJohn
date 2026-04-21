@@ -19,12 +19,13 @@ import json
 import argparse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-from urllib.request import urlopen
 from urllib.parse import urlencode
-from urllib.error import URLError
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _http_retry import fetch_with_retry  # local import to avoid src.ingestion package __init__
 
 ARXIV_API  = 'http://export.arxiv.org/api/query'
 # Expanded set vs. pre-curator version (was ST/PM/TR only).
@@ -57,11 +58,8 @@ def _arxiv_search(category: str, days: int, max_results: int) -> list[dict]:
     })
     url = f'{ARXIV_API}?{params}'
 
-    try:
-        with urlopen(url, timeout=30) as resp:
-            xml_data = resp.read()
-    except URLError as e:
-        print(f'[arxiv] fetch error for {category}: {e}', file=sys.stderr)
+    xml_data = fetch_with_retry(url, label=f'arxiv:{category}')
+    if xml_data is None:
         return []
 
     ns = {'atom': 'http://www.w3.org/2005/Atom'}

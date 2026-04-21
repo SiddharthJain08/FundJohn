@@ -25,11 +25,13 @@ import argparse
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
+from urllib.request import Request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _http_retry import fetch_with_retry  # local import to avoid src.ingestion package __init__
 
 OPENALEX_BASE = 'https://api.openalex.org/works'
 
@@ -92,11 +94,13 @@ def _request(url: str) -> dict:
         'User-Agent': f'openclaw-research/1.0 ({_email_for_ua()})',
         'Accept':     'application/json',
     })
+    body = fetch_with_retry(req, label='openalex')
+    if body is None:
+        return {}
     try:
-        with urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read())
-    except (URLError, HTTPError) as e:
-        print(f'[openalex] fetch error for {url[:140]}: {e}', file=sys.stderr)
+        return json.loads(body)
+    except json.JSONDecodeError as e:
+        print(f'[openalex] JSON decode error: {e}', file=sys.stderr)
         return {}
 
 

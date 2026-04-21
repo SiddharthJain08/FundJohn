@@ -407,6 +407,16 @@
         "description": "rank_by(abs(local_balance_node - global_balance_network)); LONG top_decile in HIGH_VOL"
       },
       "history": []
+    },
+    "S_sparse_basis_pursuit_sdf": {
+      "state": "candidate",
+      "state_since": "2026-04-21T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_sparse_basis_pursuit_sdf.py",
+        "class": "SparseBasisPursuitSDF",
+        "description": "Sparse SDF estimation: rank-composite of price factors selects ~32 nonzero positions (approx L1 basis pursuit), monthly rebalance"
+      },
+      "history": []
     }
   },
   "decommissioned": {

@@ -57,6 +57,7 @@ _IMPL_MAP = {
     'S_barbell_trend_horizon':         ('strategies.implementations.S_barbell_trend_horizon',         'BarbellTrendHorizon'),
     'S_nonstationarity_adaptive_selection': ('strategies.implementations.S_nonstationarity_adaptive_selection', 'NonStationarityAdaptiveSelection'),
     'S_local_global_balance':              ('strategies.implementations.S_local_global_balance',              'LocalGlobalBalance'),
+    'S_sparse_basis_pursuit_sdf':          ('strategies.implementations.S_sparse_basis_pursuit_sdf',          'SparseBasisPursuitSDF'),
 
 }
 
