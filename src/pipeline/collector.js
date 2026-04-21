@@ -1261,6 +1261,9 @@ async function start() {
   // Integrity check on boot — log + SSE alert on mismatch, never blocks pipeline
   await runIntegrityCheck();
 
+  // Data freshness contract — surface stale datasets loudly on boot
+  await runFreshnessCheckOnBoot();
+
   // Interrupted run detection — surface for operator review, never auto-resume
   try {
     const ps = require('../database/pipeline-state');
@@ -1564,6 +1567,21 @@ function scheduleDailyCollection(fn) {
     }, delay);
   }
   schedule();
+}
+
+async function runFreshnessCheckOnBoot() {
+  try {
+    const { runFreshnessCheck } = require('./freshness');
+    const result = await runFreshnessCheck();
+    if (!result.skipped && result.alerts.length > 0) {
+      try {
+        const { broadcast: sseB } = require('../channels/api/server');
+        sseB({ type: 'data-staleness', alerts: result.alerts, ts: new Date().toISOString() });
+      } catch {}
+    }
+  } catch (err) {
+    console.warn('[freshness] Check skipped:', err.message);
+  }
 }
 
 // ── Boot integrity check ───────────────────────────────────────────────────────

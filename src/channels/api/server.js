@@ -286,6 +286,13 @@ app.get('/api/portfolio/pnl-curve', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.get('/api/data/freshness', async (req, res) => {
+  try {
+    const { getDataFreshness } = require('../../pipeline/freshness');
+    res.json(await getDataFreshness());
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/portfolio/account', async (req, res) => {
   const key    = process.env.ALPACA_API_KEY    || '';
   const secret = process.env.ALPACA_SECRET_KEY || '';
