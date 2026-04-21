@@ -305,14 +305,22 @@ app.get('/api/strategies', async (req, res) => {
     const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
     const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
 
+    // is_stale: manifest-active but hasn't actually produced a signal in N days.
+    // A strategy is honestly LIVE only if the pipeline is firing it.
+    const STALE_DAYS = 7;
+    const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
+
     const rows = [];
     const seen = new Set();
     for (const [sid, rec] of Object.entries(manifest.strategies || {})) {
       seen.add(sid);
       const s = statsById[sid] || {};
+      const lastTs = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
+      const isStale = !lastTs || lastTs < staleCutoff;
       rows.push({
         strategy_id:        sid,
         state:              rec.state || 'unknown',
+        is_stale:           isStale,
         description:        rec.metadata?.description || '',
         state_since:        rec.state_since || null,
         open_count:         s.open_count || 0,
@@ -336,6 +344,7 @@ app.get('/api/strategies', async (req, res) => {
       rows.push({
         strategy_id:        s.strategy_id,
         state:              'orphan',
+        is_stale:           false,
         description:        '',
         state_since:        null,
         open_count:         s.open_count || 0,
@@ -635,6 +644,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .st-pill.active{background:var(--blue);border-color:var(--blue);color:#fff}
 .st-pill-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);padding:0 6px 0 2px}
 .state-live,.state-paper,.state-active{color:#fff;background:var(--green);border-color:var(--green);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.state-stale{color:#000;background:var(--yellow);border-color:var(--yellow);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-candidate{color:var(--muted);background:var(--border2);border-color:var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-staging{color:#fff;background:var(--orange);border-color:var(--orange);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .state-orphan{color:var(--dim);background:transparent;border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
@@ -771,15 +781,16 @@ th.st-sortable.st-sorted-asc::after{content:' ▴';color:var(--blue)}
   <div id="strategies-inner">
     <div class="st-tiles">
       <div class="st-tile"><div class="st-tile-label">Total Strategies</div><div class="st-tile-value" id="st-total">—</div></div>
-      <div class="st-tile"><div class="st-tile-label">Active Signals</div><div class="st-tile-value" id="st-open">—</div></div>
-      <div class="st-tile"><div class="st-tile-label">Lifetime Closed</div><div class="st-tile-value" id="st-closed">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Live / Stale</div><div class="st-tile-value" id="st-live-stale">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Open Positions</div><div class="st-tile-value" id="st-open">—</div></div>
       <div class="st-tile"><div class="st-tile-label">Stack Win Rate</div><div class="st-tile-value" id="st-winrate">—</div></div>
     </div>
 
     <div class="st-filters">
       <span class="st-pill-label">State:</span>
       <button class="st-pill active" data-state="all" onclick="setStateFilter('all')">All</button>
-      <button class="st-pill" data-state="active" onclick="setStateFilter('active')">Active</button>
+      <button class="st-pill" data-state="active" onclick="setStateFilter('active')">Live</button>
+      <button class="st-pill" data-state="stale" onclick="setStateFilter('stale')">Stale</button>
       <button class="st-pill" data-state="candidate" onclick="setStateFilter('candidate')">Candidate</button>
       <button class="st-pill" data-state="staging" onclick="setStateFilter('staging')">Staging</button>
       <span style="width:16px"></span>
@@ -1613,14 +1624,15 @@ function renderStrategyTiles() {
   const rows = strategiesData;
   const total = rows.length;
   const open  = rows.reduce((s, r) => s + (r.open_count || 0), 0);
-  const closed = rows.reduce((s, r) => s + (r.closed_count || 0), 0);
   const totalWins = rows.reduce((s, r) => s + (r.wins || 0), 0);
   const totalClosed = rows.reduce((s, r) => s + ((r.wins || 0) + (r.losses || 0)), 0);
   const stackWR = totalClosed > 0 ? Math.round(totalWins / totalClosed * 100) : null;
-  document.getElementById('st-total').textContent   = total;
-  document.getElementById('st-open').textContent    = open;
-  document.getElementById('st-closed').textContent  = closed;
-  document.getElementById('st-winrate').textContent = stackWR != null ? stackWR + '%' : '—';
+  const live    = rows.filter(r => _displayState(r) === 'active').length;
+  const stale   = rows.filter(r => _displayState(r) === 'stale').length;
+  document.getElementById('st-total').textContent      = total;
+  document.getElementById('st-live-stale').textContent = live + ' / ' + stale;
+  document.getElementById('st-open').textContent       = open;
+  document.getElementById('st-winrate').textContent    = stackWR != null ? stackWR + '%' : '—';
 }
 
 function setStateFilter(s) {
@@ -1647,16 +1659,19 @@ function setStrategySort(key) {
   renderStrategyTable();
 }
 
-// Display: we paper-trade the fund as a whole, so every strategy in manifest
-// state "live" or "paper" is operationally running. Collapse both to "active"
-// for the user-facing badge and filter.
-function _displayState(s) {
-  return (s === 'live' || s === 'paper') ? 'active' : (s || 'orphan');
+// Display: we paper-trade the fund as a whole, so manifest state "live" and
+// "paper" both collapse to a single "active" concept. But "active" means the
+// pipeline is ACTUALLY firing the strategy — if a live/paper strategy has
+// been silent >7d it renders as "stale" so the dashboard reflects reality.
+function _displayState(row) {
+  const raw = row.state;
+  if (raw === 'live' || raw === 'paper') return row.is_stale ? 'stale' : 'active';
+  return raw || 'orphan';
 }
 
 function renderStrategyTable() {
   let rows = strategiesData.slice();
-  if (strategyState !== 'all')   rows = rows.filter(r => _displayState(r.state) === strategyState);
+  if (strategyState !== 'all')   rows = rows.filter(r => _displayState(r) === strategyState);
   if (strategyRegime !== 'all')  rows = rows.filter(r => r.dominant_regime === strategyRegime);
 
   const dir = strategySortDir === 'asc' ? 1 : -1;
@@ -1703,7 +1718,7 @@ function renderStrategyTable() {
       const avgU     = r.avg_unrealized_pct != null ? parseFloat(r.avg_unrealized_pct)*100 : null;
       const best     = r.best_trade_pct     != null ? parseFloat(r.best_trade_pct)*100     : null;
       const worst    = r.worst_trade_pct    != null ? parseFloat(r.worst_trade_pct)*100    : null;
-      const dispState = _displayState(r.state);
+      const dispState = _displayState(r);
       const stateCls  = 'state-' + dispState;
       const stateLbl  = dispState === 'active' ? 'LIVE' : dispState.toUpperCase();
       const regimeLbl = r.dominant_regime || '—';

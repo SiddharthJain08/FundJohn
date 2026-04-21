@@ -187,6 +187,23 @@ def notify(msg):
         log(f'Notify error: {e}')
 
 
+def broadcast_dashboard_refresh(run_date):
+    """POST to the dashboard's internal SSE broadcast so every open browser
+    tab auto-refreshes once the pipeline finishes. Contract: fires market_update
+    after all steps complete and all DB writes have committed."""
+    import http.client
+    port = int(os.environ.get('DASHBOARD_PORT') or 3000)
+    body = json.dumps({'type': 'market_update', 'source': 'pipeline_orchestrator', 'run_date': run_date}).encode()
+    conn = http.client.HTTPConnection('localhost', port, timeout=5)
+    try:
+        conn.request('POST', '/api/events/data-updated',
+                     body=body, headers={'Content-Type': 'application/json'})
+        resp = conn.getresponse()
+        resp.read()
+    finally:
+        conn.close()
+
+
 SIGNAL_QUALITY_THRESHOLDS = {
     'min_avg_ev':      -0.5,   # avg EV must be > -0.5% to allow trade step
     'min_green_count':  1,     # at least 1 green signal required
@@ -405,6 +422,14 @@ if __name__ == '__main__':
         # All steps done
         clear_checkpoint(r)
         log(f'Pipeline complete for {run_date} — all {len(STEPS)} steps done.')
+
+        # Final action: nudge the dashboard to re-render against the fresh DB
+        # state. Non-blocking; failure here never fails the pipeline.
+        try:
+            broadcast_dashboard_refresh(run_date)
+            log('Dashboard broadcast fired — UI will auto-refresh.')
+        except Exception as e:
+            log(f'Dashboard broadcast failed ({e}) — pipeline still OK.')
 
     finally:
         release_lock(r, run_date)
