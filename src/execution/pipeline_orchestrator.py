@@ -276,8 +276,10 @@ def run_step(script, run_date, env):
     """
     path    = ROOT / 'src' / 'execution' / f'{script}.py'
     cmd     = ['python3', str(path), '--date', run_date]
-    # TradeJohn Claude invocation needs more time than pure-Python steps
-    timeout = 420 if script == 'trade_agent_llm' else 300
+    # TradeJohn Claude invocation needs more time than pure-Python steps.
+    # 720s covers large signal batches (77+) where the per-signal markdown
+    # + tradejohn_orders JSON block output grows linearly.
+    timeout = 720 if script == 'trade_agent_llm' else 300
     log(f'Starting {script}.py (timeout={timeout}s)...')
     try:
         result = subprocess.run(

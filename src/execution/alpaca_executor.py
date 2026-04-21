@@ -95,7 +95,7 @@ def check_signal_quality(conn):
 def already_executed(conn, run_date, strategy_id, ticker):
     cur = conn.cursor()
     cur.execute("""
-        SELECT 1 FROM position_recommendations
+        SELECT 1 FROM alpaca_submissions
         WHERE run_date = %s AND strategy_id = %s AND ticker = %s
           AND alpaca_order_id IS NOT NULL
         LIMIT 1
@@ -105,22 +105,34 @@ def already_executed(conn, run_date, strategy_id, ticker):
     return hit
 
 
-def record_submission(conn, run_date, order, alpaca_resp):
-    """Persist a row in position_recommendations tying the sized order to its
-    Alpaca order_id. Uses INSERT … ON CONFLICT so re-runs stay idempotent."""
+def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid):
+    """Persist a row in alpaca_submissions tying the sized order to its
+    Alpaca order_id. UNIQUE (run_date, strategy_id, ticker) makes re-runs
+    idempotent."""
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO position_recommendations (
-          run_date, ticker, strategy_id, action, rationale,
-          entry_price, stop_loss, profit_target,
-          status, alpaca_order_id, alpaca_status, created_at
-        ) VALUES (%s,%s,%s,'OPEN',%s,%s,%s,%s,'submitted',%s,%s,NOW())
+        INSERT INTO alpaca_submissions (
+          run_date, ticker, strategy_id, direction, qty,
+          entry_price, stop_price, target_price, pct_nav, notional_usd,
+          time_in_force, order_class, client_order_id,
+          alpaca_order_id, alpaca_status, submitted_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+        ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
+          alpaca_order_id = EXCLUDED.alpaca_order_id,
+          alpaca_status   = EXCLUDED.alpaca_status,
+          submitted_at    = EXCLUDED.submitted_at
     """, (
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
-        f"auto-executed by alpaca_executor ({order.get('label') or ''})",
-        order.get('entry'), order.get('stop'),
+        (order.get('direction') or 'long').lower(),
+        alpaca_resp.get('qty') or 0,
+        alpaca_resp.get('entry') or order.get('entry'),
+        order.get('stop'),
         order.get('t1') or order.get('target'),
-        alpaca_resp.get('order_id'), alpaca_resp.get('status'),
+        order.get('pct_nav'),
+        alpaca_resp.get('notional'),
+        tif, order_class, coid,
+        alpaca_resp.get('order_id'),
+        alpaca_resp.get('status'),
     ))
     conn.commit()
     cur.close()
@@ -150,6 +162,7 @@ def execute_single(sess, equity, order, run_date):
     # Note: Alpaca rejects bracket orders with order_class='bracket' + TIF='opg';
     # for off-hours we submit a plain market opg entry and skip auto-brackets.
     tif = 'day' if in_market_hours() else 'opg'
+    order_class = 'bracket' if tif == 'day' else 'simple'
     body = {
         'symbol':          ticker,
         'qty':             str(qty),
@@ -171,7 +184,21 @@ def execute_single(sess, equity, order, run_date):
             log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
             return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                     'side': side, 'qty': qty, 'notional': notional,
-                    'entry': entry, 'stop': stop, 'target': target}
+                    'entry': entry, 'stop': stop, 'target': target,
+                    'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+        # Duplicate client_order_id → recover the existing order so DB stays in sync.
+        if r.status_code == 422 and 'client_order_id' in (r.text or '').lower():
+            try:
+                g = sess.get(f'{sess._base}/v2/orders:by_client_order_id', params={'client_order_id': coid}, timeout=10)
+                if g.status_code == 200:
+                    oid = g.json().get('id', '?')
+                    log(f'RECOVERED {ticker} (duplicate client_order_id) → existing order={oid}')
+                    return {'ticker': ticker, 'status': 'recovered', 'order_id': oid,
+                            'side': side, 'qty': qty, 'notional': notional,
+                            'entry': entry, 'stop': stop, 'target': target,
+                            'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+            except Exception:
+                pass
         log(f'HTTP {r.status_code} {ticker}: {r.text[:200]}')
         return {'ticker': ticker, 'status': 'error', 'http': r.status_code, 'body': r.text[:200]}
     except Exception as exc:
@@ -245,8 +272,11 @@ def main():
             continue
 
         result = execute_single(sess, equity, order, run_date)
-        if result.get('status') == 'submitted':
-            record_submission(conn, run_date, order, result)
+        if result.get('status') in ('submitted', 'recovered'):
+            record_submission(conn, run_date, order, result,
+                              result.get('tif') or 'day',
+                              result.get('order_class') or 'simple',
+                              result.get('client_order_id') or '')
             submitted.append(result)
             new_notional_total += result.get('notional') or 0.0
         else:

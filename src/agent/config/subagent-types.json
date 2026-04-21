@@ -63,7 +63,7 @@
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 0.3,
+      "maxBudgetUsd": 0.7,
       "modes": [
         "PM_TASK"
       ],
