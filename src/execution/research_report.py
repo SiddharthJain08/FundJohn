@@ -421,7 +421,7 @@ def build_full_report(analytics, port, run_date):
 
     for a in analytics:
         strat_lbl = STRATEGY_LABELS.get(a['strategy'], a['strategy'])
-        hp        = HOLDING_PERIOD[a['strategy']]
+        hp        = HOLDING_PERIOD.get(a['strategy'], {'min': 1, 'target': 5, 'max': 21})
 
         lines += [
             f'**{a["ticker"]}** — {strat_lbl}',
