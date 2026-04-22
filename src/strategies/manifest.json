@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T05:23:56.127700+00:00",
+  "updated_at": "2026-04-22T05:35:22.404243+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -692,13 +692,6 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
-    },
-    "S_custom_momentum_trend_v1": {
-      "archived_at": "2026-04-17T00:00:00+00:00",
-      "original_file": "implementations/S_custom_momentum_trend_v1.py",
-      "canonical_file": "implementations/decommissioned/S_custom_momentum_trend_v1.py",
-      "replaced_by": null,
-      "reason": "Audit F3: orphaned file with no registry entry or HOLDING_PERIOD entry. Momentum-trend hybrid superseded by S23/S24/S25 variants. Archived after deprecation review."
     }
   }
 }
