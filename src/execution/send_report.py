@@ -1,170 +1,140 @@
 #!/usr/bin/env python3
 """
-Send daily execution engine report to Discord #trade-signals via bot token REST API.
+send_report.py — daily post-trade Discord report (Phase 2).
+
+Reads the sized handoff written by trade_agent_llm.py (and acted on by
+alpaca_executor.py) and posts two concise messages:
+
+  • #trade-signals  — greenlist table (tickers that cleared the Kelly/EV
+                      gate and went to Alpaca).
+  • #trade-reports  — veto digest (tickers that didn't clear, with reasons).
+
+Replaces the legacy per-strategy memo avalanche with one line per side.
+No LLM, no markdown explosion — the dashboard is the source of truth for
+drill-downs; Discord just mirrors the gist.
+
+Usage:
+    python3 src/execution/send_report.py --date YYYY-MM-DD
 """
+from __future__ import annotations
 
-import os, sys, json, requests, psycopg2, psycopg2.extras
+import argparse
+import os
+import sys
 from datetime import date
+from pathlib import Path
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
+import requests
 
-# ── Config ──────────────────────────────────────────────────────────────────
-BOT_TOKEN = os.environ.get('DATABOT_TOKEN', '')  # has channel send permissions
-POSTGRES_URI = os.environ.get('POSTGRES_URI', '')
-TARGET_CHANNEL_NAME = 'trade-signals'
-REPORT_DATE = os.environ.get('REPORT_DATE', str(date.today()))
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'src'))
 
+from execution.handoff import read_handoff  # noqa: E402
+
+BOT_TOKEN = os.environ.get('DATABOT_TOKEN', '')
 HEADERS = {
     'Authorization': f'Bot {BOT_TOKEN}',
-    'Content-Type': 'application/json',
+    'Content-Type':  'application/json',
 }
 
-# ── Find channel ─────────────────────────────────────────────────────────────
-def find_channel_id(name):
-    """Find Discord channel ID by name across all guilds the bot is in."""
-    r = requests.get('https://discord.com/api/v10/users/@me/guilds', headers=HEADERS, timeout=10)
+
+def _find_channel_id(name: str) -> str | None:
+    r = requests.get('https://discord.com/api/v10/users/@me/guilds',
+                     headers=HEADERS, timeout=10)
     if not r.ok:
-        print(f'[send_report] Failed to list guilds: {r.status_code} {r.text}')
+        print(f'[send_report] guild list failed: {r.status_code}')
         return None
-    guilds = r.json()
-    for guild in guilds:
-        gid = guild['id']
-        rc = requests.get(f'https://discord.com/api/v10/guilds/{gid}/channels', headers=HEADERS, timeout=10)
+    for g in r.json():
+        rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
+                          headers=HEADERS, timeout=10)
         if not rc.ok:
             continue
         for ch in rc.json():
-            if ch.get('name') == name and ch.get('type') == 0:  # 0 = text channel
+            if ch.get('name') == name and ch.get('type') == 0:
                 return ch['id']
     return None
 
 
-# ── Post message ─────────────────────────────────────────────────────────────
-def post(channel_id, text):
-    """Post text to a channel, chunking at 1990 chars."""
-    chunks = []
-    while text:
-        at = len(text) if len(text) <= 1990 else (text.rfind('\n', 0, 1990) or 1990)
-        chunks.append(text[:at])
-        text = text[at:].lstrip('\n')
-    for chunk in chunks:
-        r = requests.post(
-            f'https://discord.com/api/v10/channels/{channel_id}/messages',
-            headers=HEADERS,
-            json={'content': chunk},
-            timeout=10,
-        )
+def _post(channel_id: str, text: str) -> bool:
+    remaining = text
+    while remaining:
+        chunk = remaining[:1900]
+        remaining = remaining[1900:]
+        r = requests.post(f'https://discord.com/api/v10/channels/{channel_id}/messages',
+                          headers=HEADERS, json={'content': chunk}, timeout=10)
         if not r.ok:
-            print(f'[send_report] Post failed: {r.status_code} {r.text}')
-        else:
-            print(f'[send_report] Posted chunk ({len(chunk)} chars) → {r.status_code}')
+            print(f'[send_report] post failed ({channel_id}): {r.status_code} {r.text[:200]}')
+            return False
+    return True
 
 
-# ── Build report ─────────────────────────────────────────────────────────────
-def build_report(signals, regime='HIGH_VOL', vix=24.5):
-    dm = [s for s in signals if s['strategy_id'] == 'S9_dual_momentum']
-    jt = [s for s in signals if s['strategy_id'] == 'S_custom_jt_momentum_12mo']
-
-    def fmt_row(s, show_rank=False):
-        params = s['signal_params'] if isinstance(s['signal_params'], dict) else json.loads(s['signal_params'] or '{}')
-        mom = params.get('lookback_ret', params.get('momentum_12mo', 0))
-        rank = params.get('momentum_rank', None)
-        size_pct = s['position_size_pct'] * 100
-        risk_pct = ((s['entry_price'] - s['stop_loss']) / s['entry_price']) * 100
-        rr = (s['target_1'] - s['entry_price']) / (s['entry_price'] - s['stop_loss'])
-        row = (
-            f"{s['ticker']:<5} "
-            f"entry ${s['entry_price']:.2f} "
-            f"stop ${s['stop_loss']:.2f} ({risk_pct:.1f}%) "
-            f"T1 ${s['target_1']:.2f} "
-            f"R:R {rr:.1f}x "
-            f"size {size_pct:.2f}% "
-            f"12mo {mom:+.1%}"
+def _fmt_greenlist(run_date: str, sized: dict) -> str:
+    orders = sized.get('orders') or []
+    regime = sized.get('regime') or '?'
+    if not orders:
+        return (f'✅ **{run_date}** — no actionable signals today '
+                f'(regime={regime}). All signals failed the Kelly/EV gate.')
+    lines = [f'🟢 **Greenlist — {run_date}** (regime={regime}, {len(orders)} orders)', '']
+    header = f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Entry":>9} {"Size%":>6} {"EV%":>7} {"p(T1)":>7}'
+    lines.append('```')
+    lines.append(header)
+    lines.append('-' * len(header))
+    for o in orders:
+        ev = o.get('ev')
+        p  = o.get('p_t1')
+        lines.append(
+            f"{(o.get('ticker') or '?'):<8} "
+            f"{(o.get('strategy_id') or '?')[:28]:<28} "
+            f"{(o.get('direction') or 'long')[:5]:<5} "
+            f"{o.get('entry', 0) or 0:>9.2f} "
+            f"{(o.get('pct_nav') or 0)*100:>6.2f} "
+            f"{(ev*100) if ev is not None else 0:>+7.2f} "
+            f"{(p*100) if p is not None else 0:>7.1f}"
         )
-        if show_rank and rank is not None:
-            row += f" rank {rank:.0%}"
-        return row
-
-    lines = [
-        f"📊 **OpenClaw Daily Execution Report — {REPORT_DATE}**",
-        f"Regime: **{regime}** (VIX ≈ {vix}) | Universe: 453 tickers × 3,652 days",
-        "",
-        "─────────────────────────────────",
-        f"**Strategies run: 5 | Signals: {len(signals)} | Confluence: 0**",
-        "",
-        "| Strategy | Signals | Status |",
-        "|---|---|---|",
-        f"| S9 Dual Momentum | {len(dm)} | ✅ Active |",
-        f"| JT 12mo Momentum | {len(jt)} | ✅ Active |",
-        "| S10 Quality/Value | 0 | ⏸ Regime-gated (LOW_VOL) |",
-        "| S12 Insider Cluster | 0 | ⏸ No Form 4 data yet |",
-        "| S15 IV/RV Arb | 0 | ⏸ Conditions not met |",
-        "",
-        "─────────────────────────────────",
-        "**S9 — Antonacci Dual Momentum** (SPY beats T-bill: YES)",
-        "```",
-    ]
-    for s in dm:
-        lines.append(fmt_row(s))
-    lines += [
-        "```",
-        "",
-        "**JT — 12-Month Cross-Sectional Momentum** (skip 1mo, top 5)",
-        "```",
-    ]
-    for s in jt:
-        lines.append(fmt_row(s, show_rank=True))
-    lines += [
-        "```",
-        "",
-        "─────────────────────────────────",
-        "**Position Sizing** (HIGH_VOL scale=0.35)",
-        f"• Dual Momentum: 1.40%/pos (0.20/5 × 0.35)",
-        f"• JT Momentum:   1.05%/pos (0.15/5 × 0.35)",
-        f"• Total gross exposure: ~12.25%",
-        "",
-        "**Data coverage:**",
-        "• Prices: 100% (through 2026-04-09)",
-        "• Options Greeks: 85.7% filled (Black-Scholes computed)",
-        "• Insider: 0% (Form 4 collection pending first run)",
-        "• Financials: 85.5% (387/453 tickers)",
-    ]
+    lines.append('```')
     return '\n'.join(lines)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
-if __name__ == '__main__':
+def _fmt_veto_digest(run_date: str, sized: dict) -> str:
+    vetoed = sized.get('vetoed') or []
+    if not vetoed:
+        return f'🔕 **{run_date}** — no vetoed signals.'
+    by_reason: dict[str, list[dict]] = {}
+    for v in vetoed:
+        by_reason.setdefault(v.get('reason') or 'unknown', []).append(v)
+    lines = [f'🟥 **Veto digest — {run_date}** ({len(vetoed)} vetoed)', '']
+    for reason, items in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
+        sample = ', '.join(f"{(i.get('ticker') or '?')}" for i in items[:10])
+        more = f' … +{len(items) - 10} more' if len(items) > 10 else ''
+        lines.append(f'• `{reason}` — {len(items)}: {sample}{more}')
+    return '\n'.join(lines)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--date', default=str(date.today()))
+    args = ap.parse_args()
+    run_date = args.date
+
+    sized = read_handoff(run_date, 'sized') or {}
     if not BOT_TOKEN:
-        print('[send_report] No BOT_TOKEN — exiting')
-        sys.exit(1)
+        print('[send_report] DATABOT_TOKEN missing — printing to stdout only')
+        print(_fmt_greenlist(run_date, sized))
+        print('\n--- VETO DIGEST ---\n')
+        print(_fmt_veto_digest(run_date, sized))
+        return 0
 
-    # Fetch signals from DB
-    conn = psycopg2.connect(POSTGRES_URI)
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cur.execute("""
-        SELECT strategy_id, ticker, direction, entry_price, stop_loss,
-               target_1, target_2, position_size_pct, signal_params
-        FROM execution_signals
-        WHERE signal_date = %s
-        ORDER BY strategy_id, ticker
-    """, (REPORT_DATE,))
-    signals = [dict(r) for r in cur.fetchall()]
-    conn.close()
+    ch_signals = _find_channel_id('trade-signals')
+    ch_reports = _find_channel_id('trade-reports')
+    if not ch_signals or not ch_reports:
+        print(f'[send_report] channel lookup: trade-signals={ch_signals} trade-reports={ch_reports}')
+        return 1
 
-    print(f'[send_report] {len(signals)} signals for {REPORT_DATE}')
+    ok1 = _post(ch_signals, _fmt_greenlist(run_date, sized))
+    ok2 = _post(ch_reports, _fmt_veto_digest(run_date, sized))
+    return 0 if (ok1 and ok2) else 1
 
-    report = build_report(signals)
-    print('\n' + report + '\n')
 
-    # Find channel and post
-    channel_id = find_channel_id(TARGET_CHANNEL_NAME)
-    if not channel_id:
-        print(f'[send_report] Could not find #{TARGET_CHANNEL_NAME} — trying #general fallback')
-        channel_id = find_channel_id('general')
-    if not channel_id:
-        print('[send_report] No channel found — report printed above only')
-        sys.exit(0)
-
-    print(f'[send_report] Posting to channel {channel_id} (#{TARGET_CHANNEL_NAME})')
-    post(channel_id, report)
-    print('[send_report] Done.')
+if __name__ == '__main__':
+    sys.exit(main())

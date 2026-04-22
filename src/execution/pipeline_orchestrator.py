@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-pipeline_orchestrator.py — Full post-collection signal pipeline.
+pipeline_orchestrator.py — 10am daily cycle (Phase 2).
 
 Runs after every data collection cycle (spawned by collector.js).
 Agents communicate DIRECTLY — Discord posts are write-only for human visibility only.
 
 Pipeline (direct agent-to-agent, no Discord round-trip):
-  1. post_memos.py      → run engine → post strategy memo to #strategy-memos (DataBot)
-  2. research_report.py → signal enrichment (HV/beta/EV, pure Python, no LLM)
-  3. trade_agent_llm.py → TradeJohn Claude → sizing + signals to #trade-signals (TradeDesk)
-  4. portfolio_report.py → portfolio metrics to #trade-reports (TradeDesk)
+  1. queue_drain.py        → backfill approved columns, prune deprecated ones
+  2. run_collector_once.js → one collector cycle (prices/options/fundamentals/news)
+  3. engine.py             → run strategies → execution_signals (zero-LLM)
+  4. trade_handoff_builder → HV/beta/momentum/EV per signal → structured JSON
+  5. trade_agent_llm.py    → TradeJohn Claude → sized orders handoff
+  6. alpaca_executor.py    → Alpaca paper bracket orders
+  7. send_report.py        → greenlist → #trade-signals, veto digest → #trade-reports
 
 Budget check before steps 1 and 3 (step 3 invokes TradeJohn Claude LLM).
 
@@ -36,16 +39,18 @@ COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
 # Ordered pipeline steps: key → script name (without .py)
 STEPS = [
-    ('memos',    'post_memos'),
-    ('research', 'research_report'),   # pure Python: HV/beta/EV signal enrichment
-    ('trade',    'trade_agent_llm'),   # Claude LLM: TradeJohn sizing + signal generation
-    ('report',   'portfolio_report'),
-    ('alpaca',   'alpaca_executor'),   # Final: auto-submit sized orders to Alpaca paper
+    ('queue_drain', 'queue_drain'),           # src/pipeline/queue_drain.py — backfill + deprecate
+    ('collect',     'run_collector_once'),    # Node wrapper: one cycle of collector.js (parquet-primary)
+    ('signals',     'engine'),                # zero-LLM strategy executor → execution_signals
+    ('handoff',     'trade_handoff_builder'), # deterministic features → handoff:{date}:structured
+    ('trade',       'trade_agent_llm'),       # Claude LLM: TradeJohn sizing + signal generation
+    ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
+    ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
 ]
 
-# Budget check required before these steps
-# memos triggers engine run; trade now invokes TradeJohn Claude (LLM tokens)
-BUDGET_CHECK_BEFORE = {'memos', 'trade'}
+# Budget check required before LLM-adjacent steps. `trade` is the only Claude
+# call in the 10am cycle now — all other steps are deterministic / zero-token.
+BUDGET_CHECK_BEFORE = {'trade'}
 
 # Notify here on pause/resume/error (DataBot → #strategy-memos)
 NOTIFY_WEBHOOK = 'https://discord.com/api/webhooks/1492623936247300186/BFUwcy91xaIzq_GwP_YvON9-N9HhSilx-wDQ6MhISRYoSx9LrNYyXsDQeaSzxfwimEBi'
@@ -287,18 +292,37 @@ def check_signal_quality(run_date):
         return True, 'check error'
 
 
+def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
+    """Map step script-name → (argv, timeout_seconds).
+
+    The 10am cycle mixes Python (execution engine, handoff builder, trade
+    agent, alpaca executor, report emitter, queue drain) with Node (the
+    collector wrapper). The dispatcher keeps scripts in the module that
+    owns them instead of forcing everything into src/execution/.
+    """
+    py_exec = ROOT / 'src' / 'execution' / f'{script}'
+    py_pipe = ROOT / 'src' / 'pipeline'  / f'{script}'
+    js_pipe = ROOT / 'src' / 'pipeline'  / f'{script}.js'
+
+    if py_pipe.exists():
+        return (['python3', str(py_pipe), '--date', run_date], 600)
+    if js_pipe.exists():
+        # Collector: historically the longest step; allow up to 25 min for a
+        # cold-cache cycle against the full universe. The collector reads
+        # today's date itself and ignores any --date arg we might pass.
+        return (['node', str(js_pipe)], 1500)
+    # default: src/execution/<script>.py
+    timeout = 720 if script == 'trade_agent_llm' else 300
+    return (['python3', str(py_exec), '--date', run_date], timeout)
+
+
 def run_step(script, run_date, env):
     """
     Spawn a pipeline script. Returns True on success.
     Scripts are run as subprocesses so they have their own context.
     """
-    path    = ROOT / 'src' / 'execution' / f'{script}.py'
-    cmd     = ['python3', str(path), '--date', run_date]
-    # TradeJohn Claude invocation needs more time than pure-Python steps.
-    # 720s covers large signal batches (77+) where the per-signal markdown
-    # + tradejohn_orders JSON block output grows linearly.
-    timeout = 720 if script == 'trade_agent_llm' else 300
-    log(f'Starting {script}.py (timeout={timeout}s)...')
+    cmd, timeout = _resolve_script(script, run_date)
+    log(f'Starting {script} timeout={timeout}s (cmd: {" ".join(cmd)})...')
     try:
         result = subprocess.run(
             cmd, cwd=str(ROOT), env=env,
@@ -309,15 +333,15 @@ def run_step(script, run_date, env):
             if line.strip():
                 print(f'  [{script}] {line}', flush=True)
         if result.returncode != 0:
-            log(f'{script}.py exited {result.returncode}')
+            log(f'{script} exited {result.returncode}')
             return False
-        log(f'{script}.py done.')
+        log(f'{script} done.')
         return True
     except subprocess.TimeoutExpired:
-        log(f'{script}.py timed out after 300s')
+        log(f'{script} timed out after 300s')
         return False
     except Exception as e:
-        log(f'{script}.py error: {e}')
+        log(f'{script} error: {e}')
         return False
 
 
@@ -379,12 +403,16 @@ if __name__ == '__main__':
 
     log(f'Pipeline starting for {run_date} | steps: {[k for k, _ in STEPS]}')
 
-    # Agent status mapping: step_key → (agent_id, busy_task, idle_task)
+    # Agent status mapping: step_key → (agent_id, busy_task, idle_task).
+    # Covers the 10am cycle step list.
     STEP_AGENTS = {
-        'memos':    ('databot',      f'Generating signals: {run_date}',          'Steady-state — awaiting next cycle'),
-        'research': ('researchdesk', f'Signal enrichment (HV/beta/EV): {run_date}', None),
-        'trade':    ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
-        'report':   ('tradedesk',    f'Portfolio report: {run_date}',            None),
+        'queue_drain': ('databot',      f'Draining data queue: {run_date}',         None),
+        'collect':     ('databot',      f'Collecting data: {run_date}',             None),
+        'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
+        'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
+        'trade':       ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
+        'alpaca':      ('tradedesk',    f'Submitting Alpaca orders: {run_date}',    None),
+        'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 
     try:

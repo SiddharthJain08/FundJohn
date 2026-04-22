@@ -120,26 +120,41 @@ if __name__ == '__main__':
 
     print(f'[trade_agent_llm] Building TradeJohn context for {run_date}...')
 
-    # 1. Read enriched research handoff; fall back to memos handoff
-    handoff = read_handoff(run_date, 'research')
+    # 1. Read the structured handoff (Phase 2 format). Falls back to the old
+    #    research handoff while the new cycle is being rolled out, then to
+    #    the memos handoff as a last resort. The structured handoff is
+    #    dramatically smaller than the old markdown research report, which
+    #    prevents TradeJohn from blowing its per-agent budget on large signal
+    #    batches (root cause of the 2026-04-22 catch-up failure).
+    handoff = read_handoff(run_date, 'structured')
+    handoff_stage = 'structured'
     if not handoff:
-        print('[trade_agent_llm] Research handoff absent — trying memos handoff')
+        handoff = read_handoff(run_date, 'research')
+        handoff_stage = 'research' if handoff else None
+    if not handoff:
         handoff = read_handoff(run_date, 'memos')
+        handoff_stage = 'memos' if handoff else None
 
     if not handoff:
         print('[trade_agent_llm] No handoff available — cannot run TradeJohn')
         sys.exit(1)
 
-    print(f'[trade_agent_llm] Handoff loaded: regime={handoff.get("regime","?")} '
+    regime_str = handoff.get('regime')
+    if isinstance(regime_str, dict):
+        regime_str = regime_str.get('state', '?')
+    print(f'[trade_agent_llm] Handoff loaded ({handoff_stage}): regime={regime_str} '
           f'signals={len(handoff.get("signals", handoff.get("strategies", [])))}')
 
-    # 2. Build veto histogram
-    veto_histogram = build_veto_histogram(postgres_uri)
+    # 2. Build veto histogram — structured handoff already has it but older
+    #    stages don't; skip the DB call when it's embedded.
+    veto_histogram = handoff.get('veto_history_30d') or build_veto_histogram(postgres_uri)
 
-    # 3. Load portfolio state
-    portfolio_state = load_portfolio_state()
+    # 3. Load portfolio state — structured handoff has it embedded.
+    portfolio_state = handoff.get('portfolio') or load_portfolio_state()
 
-    # 4. Assemble context dict
+    # 4. Assemble context dict. For the structured stage we pass the handoff
+    #    directly (it's already the right shape); for legacy stages we keep
+    #    the old wrapper.
     ctx = {
         'cycle_date':      run_date,
         'handoff':         handoff,

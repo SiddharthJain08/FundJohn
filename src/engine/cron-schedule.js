@@ -44,105 +44,12 @@ function log(msg) {
 }
 
 
-// ── 17:30 ET — Signal Pipeline (after 17:00 data collection) ─────────────────
-
-async function runMarketClosePipeline() {
-    // Skip if Massive WS already fired this (publishes pipeline:market_close at close)
-    try {
-        const r = redisClient();
-        const wsTriggered = await r.get('massive_ws:pipeline_fired_today');
-        if (wsTriggered) {
-            log('Market close pipeline already fired by Massive WS — skipping cron duplicate');
-            return;
-        }
-    } catch (_e) { /* Redis unavailable — proceed with cron */ }
-
-    log('Market close pipeline starting (0 LLM tokens — Kelly optimization only)');
-
-    // 0a. Fetch vol indices (VIX/VVIX) — incremental daily update
-    log('Fetching vol indices (VIX/VVIX)...');
-    try {
-        runPython('src/ingestion/fetch_vol_indices.py');
-        log('Vol indices updated');
-    } catch (e) {
-        log(`WARN: vol indices fetch failed — ${e.message.slice(0, 100)}`);
-    }
-
-    // 0b. Fetch 30-min SPY bars (incremental — only new bars since last run)
-    log('Fetching 30m SPY bars...');
-    try {
-        runPython('src/ingestion/fetch_30m_bars.py');
-        log('30m bars updated');
-    } catch (e) {
-        log(`WARN: 30m bar fetch failed — ${e.message.slice(0, 100)}`);
-        // non-fatal: S-TR-04 will use prior day's bars
-    }
-
-    // 1. Market state: HMM, RORO, stress, write regime file
-    log('Running market state...');
-    try {
-        runPython('scripts/run_market_state.py');
-        log('Regime file updated');
-    } catch (e) {
-        log(`ERROR: market-state failed — ${e.message.slice(0, 200)}`);
-        return;
-    }
-
-    // 2. Build signals cache from master dataset
-    log('Building signals cache...');
-    try {
-        runPython(`${WORKSPACE_DIR}/tools/signals_cache.py`, '--build');
-        log('Signals cache ready');
-    } catch (e) {
-        log(`ERROR: cache build failed — ${e.message.slice(0, 200)}`);
-        return;
-    }
-
-    // 3. Run all hardcoded strategies (zero LLM tokens)
-    log('Executing strategy signal runner...');
-    try {
-        const output = runPython(`${WORKSPACE_DIR}/tools/signal_runner.py`);
-        log(`Signal runner complete: ${output.slice(0, 200)}`);
-    } catch (e) {
-        log(`ERROR: signal runner failed — ${e.message.slice(0, 200)}`);
-        return;
-    }
-
-    // 4. Run execution engine → write signals to DB → post memos to Discord
-    log('Running post_memos (engine + Discord memos)...');
-    try {
-        const memosOut = runPython('src/execution/post_memos.py');
-        log(`post_memos complete: ${memosOut.slice(0, 200)}`);
-    } catch (e) {
-        log(`ERROR: post_memos failed — ${e.message.slice(0, 200)}`);
-        // Non-fatal: continue to trade_agent so Alpaca execution isn't blocked
-    }
-
-    // 5. Kelly optimization + submit GREEN signals to Alpaca paper trading
-    // Green = kelly_net > 0.5% (MIN_KELLY). Red signals are vetoed and logged.
-    log('Running trade_agent (Kelly optimization + Alpaca paper orders)...');
-    try {
-        const tradeOut = runPython('src/execution/trade_agent.py');
-        log(`trade_agent complete: ${tradeOut.slice(0, 200)}`);
-    } catch (e) {
-        log(`ERROR: trade_agent failed — ${e.message.slice(0, 200)}`);
-    }
-
-    // 6. Check report triggers
-    await checkReportTriggers();
-
-    log('Market close pipeline complete (post_memos + green-only Alpaca orders submitted)');
-
-    // Notify dashboard clients that fresh data is available
-    try {
-        const http = require('http');
-        const port = parseInt(process.env.DASHBOARD_PORT) || 3000;
-        const req  = http.request({ hostname: 'localhost', port, path: '/api/events/data-updated', method: 'POST',
-                                    headers: { 'Content-Type': 'application/json', 'Content-Length': '0' } });
-        req.on('error', () => {});
-        req.end();
-    } catch (_) {}
-}
+// runMarketClosePipeline() — DELETED 2026-04-22 with Phase 2 of the pipeline
+// restructure. It called post_memos.py → research_report.py → trade_agent.py
+// on a separate 20:16 UTC cron path (never actually scheduled post-2026-04-21),
+// duplicating the logic of pipeline_orchestrator.py. The 10:00 AM ET cron
+// below is the canonical trigger; post_memos.py and research_report.py were
+// removed from disk in the same commit.
 
 
 // ── Report Trigger Check ──────────────────────────────────────────────────────
@@ -283,6 +190,28 @@ function start(swarm, generateId, notifyDiscord) {
 
     // 23:59 ET daily — reset token budget
     cron.schedule('59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
+
+    // 10:00 AM ET Mon–Fri — the new daily cycle (Phase 2 of the pipeline
+    // restructure). Spawns pipeline_orchestrator.py which runs queue_drain →
+    // collect → signals → handoff → trade → alpaca → report.
+    // Orchestrator is idempotent; duplicate triggers return immediately.
+    cron.schedule('0 10 * * 1-5', () => {
+        log('10am cycle: spawning pipeline_orchestrator.py');
+        try {
+            const { spawn } = require('child_process');
+            const today = new Date().toISOString().slice(0, 10);
+            const child = spawn(PYTHON, ['scripts/run_pipeline.py', '--date', today], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: 'ignore',
+            });
+            child.unref();
+            log(`10am cycle: orchestrator spawned (pid ${child.pid}) for ${today}`);
+        } catch (e) {
+            log(`10am cycle spawn error: ${e.message}`);
+        }
+    }, { timezone: 'America/New_York' });
 
     // 9:00 AM ET Mon–Fri: fresh regime at market open (run_market_state.py only — no signals/Alpaca)
     cron.schedule('0 9 * * 1-5', async () => {

@@ -1278,14 +1278,13 @@ async function start() {
 
   notify('🚀 Data pipeline started — S&P 100 universe');
 
-  // Immediate first run
-  await runDailyCollection();
-
-  // Schedule daily collection — also enters sleep after each run and wakes 5min before next
-  scheduleDailyCollection(async () => {
-    exitSleepMode();
-    await runDailyCollection();
-  });
+  // Phase 2 of the pipeline restructure (2026-04-22): the 10:00 AM ET
+  // cron in cron-schedule.js is now the single daily trigger. The
+  // collector no longer schedules its own cycle — it only runs when the
+  // orchestrator spawns run_collector_once.js, or manually via the
+  // /collector command. We keep the 5-minute snapshot loop below for
+  // live price refresh.
+  // (Legacy: used to call runDailyCollection() immediately + scheduleDailyCollection().)
 
   // Snapshots every 5 min — only during market hours and when not sleeping
   setInterval(async () => {
@@ -1591,4 +1590,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection };
