@@ -591,11 +591,26 @@ lsm.save_manifest('src/strategies/manifest.json')
       notify?.(`  ⚠️ ${stratId} lifecycle promotion failed: ${e.message.slice(0, 200)}`);
     }
 
-    // Update strategy_registry status to paper
+    // Update strategy_registry: status + measured backtest metrics.
+    // btResult.max_dd is a fraction (e.g. 0.058 = 5.8%); registry stores it as a percent number.
+    // btResult.total_return_pct is already a percent (added by auto_backtest.py), nullable for older builds.
+    // Filter: 0-trade runs produce garbage sharpe (-3.15M) from auto_backtest's
+    // near-zero-std path; reject those outright rather than pollute the DB.
+    const btTrades = Number.isFinite(btResult.trade_count) ? btResult.trade_count : 0;
+    const btSharpeRaw = (btResult.sharpe != null && isFinite(btResult.sharpe)) ? btResult.sharpe : null;
+    const validBt = btTrades > 0 && btSharpeRaw !== null && Math.abs(btSharpeRaw) <= 100;
+    const btSharpe = validBt ? btSharpeRaw : null;
+    const btDdPct  = (validBt && btResult.max_dd != null && isFinite(btResult.max_dd)) ? Math.round(btResult.max_dd * 100 * 100) / 100 : null;
+    const btRetPct = (validBt && btResult.total_return_pct != null && isFinite(btResult.total_return_pct)) ? btResult.total_return_pct : null;
     await this._query(
-      `UPDATE strategy_registry SET status = 'paper' WHERE id = $1`,
-      [stratId]
-    ).catch((e) => console.error(`[research-orch] registry status update failed: ${e.message}`));
+      `UPDATE strategy_registry
+          SET status              = 'paper',
+              backtest_sharpe     = COALESCE($2, backtest_sharpe),
+              backtest_max_dd_pct = COALESCE($3, backtest_max_dd_pct),
+              backtest_return_pct = COALESCE($4, backtest_return_pct)
+        WHERE id = $1`,
+      [stratId, btSharpe, btDdPct, btRetPct]
+    ).catch((e) => console.error(`[research-orch] registry update failed: ${e.message}`));
 
     await this._query(
       `UPDATE implementation_queue SET status = 'promoted', backtest_result = $1 WHERE candidate_id = $2`,

@@ -38,11 +38,19 @@ RISK_FREE_DAILY = 0.05 / TRADING_DAYS
 
 # ── Walk-forward windows (train_end, oos_start, oos_end) ──────────────────────
 # Strategy receives prices up to current date; OOS period determines scoring.
+# Windows are tuned to match actual data availability:
+#   prices.parquet covers 2016+;
+#   options_aggregates covers 2024-04-22 → 2026-04-20 (Massive Starter plan).
+# To give options-dependent strategies 3 non-overlapping OOS windows inside
+# that ~2-year coverage, we use 8-month OOS slices (each ≥ REBALANCE_FREQ × 8).
+# Price-only strategies still see the full training runway (2016+).
 CONVERGENCE_WINDOWS = [
-    ('2016-04-10', '2017-01-01', '2019-12-31'),   # window A
-    ('2019-01-01', '2020-01-01', '2022-12-31'),   # window B
-    ('2022-01-01', '2023-01-01', '2025-12-31'),   # window C
+    ('2022-01-01', '2024-06-01', '2024-12-31'),   # window A — options coverage + iv_rank warmup
+    ('2022-01-01', '2025-01-01', '2025-08-31'),   # window B
+    ('2022-01-01', '2025-09-01', '2026-04-15'),   # window C
 ]
+# With REBALANCE_FREQ=21 trading days and 8-month OOS, we get ~8 rebalance
+# opportunities per window — MIN_TRADES=20 stays achievable with active strategies.
 
 REBALANCE_FREQ   = 21   # trading-day step between signal generation calls
 MAX_HOLD_DAYS    = 21   # max days in any position
@@ -61,7 +69,7 @@ def _load_prices() -> pd.DataFrame:
     return wide
 
 
-def _dummy_regime(state='LOW_VOL') -> dict:
+def _dummy_regime(state='TRANSITIONING') -> dict:
     return {
         'state': state,
         'state_probabilities': {state: 1.0, 'LOW_VOL': 1.0 if state == 'LOW_VOL' else 0.0,
@@ -103,7 +111,15 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     trade_count  = 0
 
     instance = strategy_cls()
-    regime   = _dummy_regime()
+    # Use the strategy's first active regime so HV strategies (which gate on
+    # active_in_regimes) don't trivially exit. Price-only strategies default
+    # to TRANSITIONING which is in every strategy's active list.
+    regime_state = 'TRANSITIONING'
+    active = getattr(instance, 'active_in_regimes', None)
+    if active and isinstance(active, (list, tuple)) and active:
+        # Prefer TRANSITIONING if the strategy allows it; else first.
+        regime_state = 'TRANSITIONING' if 'TRANSITIONING' in active else active[0]
+    regime = _dummy_regime(regime_state)
 
     # Step through OOS at rebalance frequency
     step_indices = list(range(0, len(oos_dates), REBALANCE_FREQ))
@@ -154,7 +170,20 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
             prices_to_date = prices.loc[train_start_dt:current_date]
             if len(prices_to_date) < getattr(instance, 'min_lookback', 20) + 5:
                 continue
-            signals = instance.generate_signals(prices_to_date, regime, universe)
+            # Load options aux_data panel for this date (enables HV-series strategies).
+            # Empty panel for pre-backfill dates is fine — strategies fall back to defaults.
+            try:
+                from strategies.aux_data_loader import load_aux_data
+                aux_data = load_aux_data(current_date)
+            except Exception:
+                aux_data = {'options': {}}
+            signals = instance.generate_signals(prices_to_date, regime, universe, aux_data=aux_data)
+        except TypeError:
+            # Older strategies may not accept aux_data kwarg — try without it.
+            try:
+                signals = instance.generate_signals(prices_to_date, regime, universe)
+            except Exception:
+                continue
         except Exception:
             continue
 
@@ -220,13 +249,24 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
 
     # ── Compute metrics ────────────────────────────────────────────────────────
     if len(equity_curve) < 5:
-        return {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few equity points'}
+        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few equity points'}
 
     eq = pd.Series(equity_curve).sort_index()
     daily_ret = eq.pct_change().dropna()
 
     if len(daily_ret) < 2:
-        return {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few returns'}
+        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few returns'}
+
+    # If the strategy fired no trades, the equity curve is flat at INITIAL_CAPITAL
+    # and daily_ret ≈ 0 with std → 0; the sharpe formula then blows up to ~-3M
+    # driven entirely by (0 - RISK_FREE_DAILY) / 1e-9. That's noise, not signal.
+    # Return 0.0 so downstream writers can recognize "no-op window" cleanly.
+    if trade_count == 0 or daily_ret.std() < 1e-8:
+        return {
+            'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0,
+            'trade_count': trade_count, 'passed': False,
+            'note': 'no trades / flat equity',
+        }
 
     excess = daily_ret - RISK_FREE_DAILY
     sharpe  = float(excess.mean() / (excess.std() + 1e-9) * np.sqrt(TRADING_DAYS))
@@ -235,6 +275,11 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     dd       = (eq - roll_max) / (roll_max + 1e-9)
     max_dd   = float(abs(dd.min()))
 
+    # Total return over the OOS window (end/start - 1), reported as a percent.
+    start_val = float(eq.iloc[0])
+    end_val   = float(eq.iloc[-1])
+    total_return_pct = ((end_val / start_val) - 1.0) * 100.0 if start_val > 0 else 0.0
+
     passed = (
         sharpe  >= MIN_SHARPE and
         max_dd  <= MAX_DRAWDOWN and
@@ -242,10 +287,11 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     )
 
     return {
-        'sharpe':      round(sharpe, 4),
-        'max_dd':      round(max_dd, 4),
-        'trade_count': trade_count,
-        'passed':      passed,
+        'sharpe':           round(sharpe, 4),
+        'max_dd':           round(max_dd, 4),
+        'total_return_pct': round(total_return_pct, 2),
+        'trade_count':      trade_count,
+        'passed':           passed,
     }
 
 
@@ -319,17 +365,19 @@ def run_backtest(filepath: str) -> dict:
     overall_passed = windows_passed >= 2
 
     # Aggregate metrics (average across windows)
-    sharpes  = [w['sharpe']      for w in window_results]
-    max_dds  = [w['max_dd']      for w in window_results]
-    trades   = [w['trade_count'] for w in window_results]
+    sharpes  = [w['sharpe']             for w in window_results]
+    max_dds  = [w['max_dd']             for w in window_results]
+    returns  = [w.get('total_return_pct', 0.0) for w in window_results]
+    trades   = [w['trade_count']        for w in window_results]
 
     return {
-        'passed':      overall_passed,
-        'windows_passed': windows_passed,
-        'sharpe':      round(float(np.mean(sharpes)), 4),
-        'max_dd':      round(float(np.mean(max_dds)),  4),
-        'trade_count': int(np.sum(trades)),
-        'windows':     window_results,
+        'passed':           overall_passed,
+        'windows_passed':   windows_passed,
+        'sharpe':           round(float(np.mean(sharpes)), 4),
+        'max_dd':           round(float(np.mean(max_dds)),  4),
+        'total_return_pct': round(float(np.mean(returns)),  2),
+        'trade_count':      int(np.sum(trades)),
+        'windows':          window_results,
         'error':       None,
     }
 

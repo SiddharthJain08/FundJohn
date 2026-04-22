@@ -18,11 +18,11 @@ class CallPutIVSpread(BaseStrategy):
     id            = 'S_HV13_call_put_iv_spread'
     name          = 'Call-Put IV Spread'
     version       = '2.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL']
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
 
     def generate_signals(self, prices, regime, universe, aux_data) -> list[Signal]:
-        prices       = prices.get('prices', {})
-        regime       = prices.get('regime', {})
+        prices       = ({c: prices[c].dropna() for c in prices.columns} if hasattr(prices, 'columns') else prices.get('prices', {}))
+        regime       = regime or {}
         regime_state = regime.get('state', 'LOW_VOL')
 
         if not self.should_run(regime_state):
@@ -50,7 +50,7 @@ class CallPutIVSpread(BaseStrategy):
             ts = prices.get(ticker, [])
             if len(ts) < 5:
                 continue
-            current_price = float(ts[-1])
+            current_price = float(ts.iloc[-1])
             if current_price <= 0:
                 continue
 

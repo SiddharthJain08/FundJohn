@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-16T00:00:00+00:00",
+  "updated_at": "2026-04-22T01:43:00.206Z",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -8,19 +8,36 @@
       "metadata": {
         "canonical_file": "s5_max_pain.py",
         "class": "MaxPainGravity",
-        "description": "Max-pain gravity \u2014 options-derived price attractor signal"
+        "description": "Max-pain gravity — options-derived price attractor signal"
       },
       "history": []
     },
     "S9_dual_momentum": {
       "state": "live",
-      "state_since": "2025-01-01T00:00:00+00:00",
+      "state_since": "2026-04-22T01:43:00.206Z",
       "metadata": {
         "canonical_file": "s09_dual_momentum.py",
         "class": "DualMomentum",
         "description": "Dual-momentum cross-asset rotation"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "live",
+          "to_state": "monitoring",
+          "timestamp": "2026-04-22T01:43:00.151Z",
+          "actor": "manual:dashboard",
+          "reason": "dashboard roundtrip test",
+          "metadata": {}
+        },
+        {
+          "from_state": "monitoring",
+          "to_state": "live",
+          "timestamp": "2026-04-22T01:43:00.206Z",
+          "actor": "manual:dashboard",
+          "reason": "dashboard roundtrip revert",
+          "metadata": {}
+        }
+      ]
     },
     "S10_quality_value": {
       "state": "live",
@@ -38,7 +55,7 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal — SEC Form 4 aggregation"
       },
       "history": []
     },
@@ -48,7 +65,7 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility"
+        "description": "IV/RV spread arbitrage — implied vs realised volatility"
       },
       "history": []
     },
@@ -58,7 +75,7 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation"
+        "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
       },
       "history": []
     },
@@ -68,7 +85,7 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching"
+        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
       },
       "history": []
     },
@@ -88,7 +105,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 \u2014 successor candidate to S9"
+        "description": "Dual-momentum v2 — successor candidate to S9"
       },
       "history": []
     },
@@ -339,8 +356,8 @@
       "history": []
     },
     "S_robust_minimum_variance_hedge": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "paper",
+      "state_since": "2026-04-21T19:55:00+00:00",
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
@@ -417,6 +434,16 @@
         "description": "Sparse SDF estimation: rank-composite of price factors selects ~32 nonzero positions (approx L1 basis pursuit), monthly rebalance"
       },
       "history": []
+    },
+    "S21_iv_hv_spread": {
+      "state": "live",
+      "state_since": "2026-04-21T19:13:07.806254+00:00",
+      "metadata": {
+        "canonical_file": "S21_iv_hv_spread.py",
+        "class": "IVHVSpread",
+        "description": "IV/HV Spread Vol Arb — sell expensive IV, buy cheap IV vs realized vol"
+      },
+      "history": []
     }
   },
   "decommissioned": {
@@ -425,35 +452,35 @@
       "original_file": "implementations/decommissioned/dual_momentum.py",
       "replaced_by": "S9_dual_momentum",
       "canonical_file": "s09_dual_momentum.py",
-      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
     },
     "quality_value_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/quality_value.py",
       "replaced_by": "S10_quality_value",
       "canonical_file": "s10_quality_value.py",
-      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
     },
     "insider_cluster_buy_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/insider_cluster_buy.py",
       "replaced_by": "S12_insider",
       "canonical_file": "s12_insider.py",
-      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
     },
     "iv_rv_arb_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/iv_rv_arb.py",
       "replaced_by": "S15_iv_rv_arb",
       "canonical_file": "s15_iv_rv_arb.py",
-      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
     },
     "max_pain_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/max_pain.py",
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
-      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
     },
     "S_custom_momentum_trend_v1": {
       "archived_at": "2026-04-17T00:00:00+00:00",

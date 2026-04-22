@@ -5,6 +5,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '../../../.env'
 const express = require('express');
 const { getAllSubagentStatuses, getBucketStatus } = require('../../database/redis');
 const { verdictCache, query: dbQuery } = require('../../database/postgres');
+const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
@@ -44,91 +45,113 @@ app.get('/api/db/universe', async (req, res) => {
 });
 
 // Market overview — latest price + change for all instruments
+// Market overview — parquet-primary. Latest+prev close per ticker joined with
+// universe_config (DB, still authoritative for name/category metadata).
 app.get('/api/db/market-overview', async (req, res) => {
   try {
-    const result = await dbQuery(`
-      WITH latest AS (
-        SELECT DISTINCT ON (ticker) ticker, date, open, high, low, close, volume
-        FROM price_data ORDER BY ticker, date DESC
-      ), prev AS (
-        SELECT DISTINCT ON (p.ticker) p.ticker, p.close AS prev_close
-        FROM price_data p
-        JOIN latest l ON l.ticker = p.ticker AND p.date < l.date
-        ORDER BY p.ticker, p.date DESC
-      )
-      SELECT l.ticker, l.date, l.close, l.open, l.high, l.low, l.volume,
-             pr.prev_close,
-             CASE WHEN pr.prev_close > 0
-               THEN ROUND(((l.close - pr.prev_close) / pr.prev_close * 100)::numeric, 2)
-             END AS change_pct,
-             u.name, u.category
-      FROM latest l
-      LEFT JOIN prev pr ON pr.ticker = l.ticker
-      JOIN universe_config u ON u.ticker = l.ticker
-      WHERE u.active = true
-      ORDER BY u.category, l.ticker
-    `);
-    res.json(result.rows);
+    const [priceRows, uniRes] = await Promise.all([
+      readParquet('market_overview', {}),
+      dbQuery(`SELECT ticker, name, category FROM universe_config WHERE active = true`),
+    ]);
+    const uni = new Map(uniRes.rows.map(r => [r.ticker, r]));
+    const out = [];
+    for (const p of (priceRows || [])) {
+      const u = uni.get(p.ticker);
+      if (!u) continue;   // DB-view behavior: INNER JOIN on universe_config
+      out.push({
+        ticker:     p.ticker,
+        date:       p.date,
+        close:      p.close,
+        open:       p.open,
+        high:       p.high,
+        low:        p.low,
+        volume:     p.volume,
+        prev_close: p.prev_close,
+        change_pct: p.change_pct != null ? Math.round(p.change_pct * 100) / 100 : null,
+        name:       u.name,
+        category:   u.category,
+      });
+    }
+    out.sort((a, b) => (a.category || '').localeCompare(b.category || '') || a.ticker.localeCompare(b.ticker));
+    res.json(out);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Price history from DB — no external calls
+// Price history — parquet-primary.
 app.get('/api/db/prices/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
   try {
-    let result;
     if (req.query.limit) {
-      // ?limit=N  → last N trading days (row count, chronological order)
       const n = Math.min(parseInt(req.query.limit) || 5, 3650);
-      result = await dbQuery(
-        `SELECT date, open, high, low, close, volume FROM price_data
-         WHERE ticker=$1 ORDER BY date DESC LIMIT $2`,
-        [ticker, n]
-      );
-      result = { rows: result.rows.reverse() }; // back to chronological
-    } else {
-      // ?days=N → calendar day window
-      const days = Math.min(parseInt(req.query.days) || 365, 3650);
-      result = await dbQuery(
-        `SELECT date, open, high, low, close, volume FROM price_data
-         WHERE ticker=$1 AND date >= CURRENT_DATE - ($2 * INTERVAL '1 day')
-         ORDER BY date ASC`,
-        [ticker, days]
-      );
+      const rows = await readParquet('prices', { ticker, limit: n });
+      // Returned DESC — reverse to chronological to match legacy SQL shape.
+      const out = (rows || []).reverse().map(r => ({
+        date: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume,
+      }));
+      return res.json(out);
     }
-    res.json(result.rows);
+    const days = Math.min(parseInt(req.query.days) || 365, 3650);
+    const rows = await readParquet('prices', { ticker, days });
+    // Sort chronological (reader returns DESC by default).
+    const out = (rows || [])
+      .map(r => ({ date: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }))
+      .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    res.json(out);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Options contracts from DB (top by open interest)
+// Options contracts — parquet-primary.
 app.get('/api/db/options/:ticker', async (req, res) => {
-  const ticker   = req.params.ticker.toUpperCase();
-  const limit    = Math.min(parseInt(req.query.limit) || 30, 100);
-  const type     = req.query.type; // 'call' or 'put'
+  const ticker = req.params.ticker.toUpperCase();
+  const limit  = Math.min(parseInt(req.query.limit) || 30, 100);
+  const type   = req.query.type; // 'call' or 'put'
   try {
-    const result = await dbQuery(
-      `SELECT expiry, strike, contract_type, delta, gamma, theta, vega, iv,
-              open_interest, volume, last_price, bid, ask
-       FROM options_data WHERE ticker=$1
-         ${type ? `AND contract_type = '${type === 'call' ? 'call' : 'put'}'` : ''}
-       ORDER BY snapshot_date DESC, open_interest DESC NULLS LAST LIMIT $2`,
-      [ticker, limit]
-    );
-    res.json(result.rows);
+    const rows = await readParquet('options', {
+      ticker, limit,
+      type: type === 'call' ? 'call' : (type === 'put' ? 'put' : null),
+    });
+    // Map parquet columns to legacy SQL shape: option_type→contract_type, market_price→last_price,
+    // implied_volatility→iv.
+    const out = (rows || []).map(r => ({
+      expiry:        r.expiry,
+      strike:        r.strike,
+      contract_type: r.option_type,
+      delta:         r.delta,
+      gamma:         r.gamma,
+      theta:         r.theta,
+      vega:          r.vega,
+      iv:            r.implied_volatility,
+      open_interest: r.open_interest,
+      volume:        r.volume,
+      last_price:    r.market_price,
+      bid:           r.bid,
+      ask:           r.ask,
+    }));
+    res.json(out);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Fundamentals from DB (last 4 quarters)
+// Fundamentals — parquet-primary. Returns last 4 quarterly rows.
 app.get('/api/db/fundamentals/:ticker', async (req, res) => {
   const ticker = req.params.ticker.toUpperCase();
   try {
-    const result = await dbQuery(
-      `SELECT period, period_end, revenue, gross_profit, ebitda, net_income, eps,
-              gross_margin, operating_margin, net_margin, revenue_growth_yoy, source
-       FROM fundamentals WHERE ticker=$1 ORDER BY period_end DESC LIMIT 4`,
-      [ticker]
-    );
-    res.json(result.rows);
+    const rows = await readParquet('fundamentals', { ticker, limit: 4 });
+    // Map parquet shape back to legacy field names.
+    const out = (rows || []).map(r => ({
+      period:             r.period,
+      period_end:         r.date,
+      revenue:            r.revenue,
+      gross_profit:       r.gross_profit,
+      ebitda:             r.ebitda,
+      net_income:         r.net_income,
+      eps:                r.eps,
+      gross_margin:       r.gross_margin,
+      operating_margin:   r.operating_margin,
+      net_margin:         r.net_margin,
+      revenue_growth_yoy: r.revenue_growth,
+      source:             'fmp',
+    }));
+    res.json(out);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -305,8 +328,24 @@ app.get('/api/strategies', async (req, res) => {
     const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
     const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
 
-    // is_stale: manifest-active but hasn't actually produced a signal in N days.
-    // A strategy is honestly LIVE only if the pipeline is firing it.
+    // Load regime_conditions + backtest/live metrics from strategy_registry DB
+    const srRows = (await dbQuery(`
+      SELECT id, regime_conditions,
+             backtest_sharpe, backtest_return_pct, backtest_max_dd_pct,
+             live_days, live_sharpe, live_return_pct
+      FROM strategy_registry
+    `)).rows;
+    const srById = Object.fromEntries(srRows.map(r => [r.id, r]));
+
+    // Current regime state from latest.json (authoritative)
+    let currentRegime = 'TRANSITIONING';
+    try {
+      const latestPath = path.join(__dirname, '../../../.agents/market-state/latest.json');
+      const latestJson = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      currentRegime = latestJson.state || 'TRANSITIONING';
+    } catch (_) {}
+
+    // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
     const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
 
@@ -314,13 +353,20 @@ app.get('/api/strategies', async (req, res) => {
     const seen = new Set();
     for (const [sid, rec] of Object.entries(manifest.strategies || {})) {
       seen.add(sid);
-      const s = statsById[sid] || {};
-      const lastTs = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
-      const isStale = !lastTs || lastTs < staleCutoff;
+      const s   = statsById[sid] || {};
+      const sr  = srById[sid]    || {};
+      const rc  = sr.regime_conditions || {};
+      const activeRegimes = rc.active_in_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL'];
+      const regimeActive  = activeRegimes.includes(currentRegime);
+      const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
+      const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
       rows.push({
         strategy_id:        sid,
         state:              rec.state || 'unknown',
         is_stale:           isStale,
+        regime_active:      regimeActive,
+        active_in_regimes:  activeRegimes,
+        current_regime:     currentRegime,
         description:        rec.metadata?.description || '',
         state_since:        rec.state_since || null,
         open_count:         s.open_count || 0,
@@ -336,15 +382,25 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
+        backtest_sharpe:     sr.backtest_sharpe     ?? null,
+        backtest_return_pct: sr.backtest_return_pct ?? null,
+        backtest_max_dd_pct: sr.backtest_max_dd_pct ?? null,
+        live_days:           sr.live_days           ?? null,
+        live_sharpe:         sr.live_sharpe         ?? null,
+        live_return_pct:     sr.live_return_pct     ?? null,
       });
     }
     // Orphans: strategy_ids with signals but no manifest entry
     for (const s of statsRows) {
       if (seen.has(s.strategy_id)) continue;
+      const sr = srById[s.strategy_id] || {};
       rows.push({
         strategy_id:        s.strategy_id,
         state:              'orphan',
         is_stale:           false,
+        regime_active:      true,
+        active_in_regimes:  [],
+        current_regime:     currentRegime,
         description:        '',
         state_since:        null,
         open_count:         s.open_count || 0,
@@ -360,12 +416,141 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
+        backtest_sharpe:     sr.backtest_sharpe     ?? null,
+        backtest_return_pct: sr.backtest_return_pct ?? null,
+        backtest_max_dd_pct: sr.backtest_max_dd_pct ?? null,
+        live_days:           sr.live_days           ?? null,
+        live_sharpe:         sr.live_sharpe         ?? null,
+        live_return_pct:     sr.live_return_pct     ?? null,
       });
     }
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Strategy lifecycle transition (manual dashboard actions).
+// Body: { to_state, force?, reason?, actor? }
+const STRATEGY_VALID_TRANSITIONS = new Map([
+  ['candidate:paper',       'begin backtesting'],
+  ['candidate:archived',    'abandon before implementation'],
+  ['paper:live',            'promote to live after passing backtest guards'],
+  ['paper:candidate',       'regress — failed backtest'],
+  ['paper:archived',        'archive without going live'],
+  // `staging` is treated as awaiting-approval alongside paper in the dashboard.
+  ['staging:live',          'promote staging to live after passing backtest guards'],
+  ['staging:candidate',     'regress staging — failed backtest'],
+  ['staging:paper',         'move staging to paper backtesting'],
+  ['staging:archived',      'archive staging without going live'],
+  ['live:monitoring',       'escalate to monitoring'],
+  ['live:deprecated',       'demote from live'],
+  ['monitoring:live',       'restore confidence, back to live'],
+  ['monitoring:deprecated', 'demote from monitoring'],
+  ['deprecated:archived',   'archive after review period'],
+]);
+const PAPER_TO_LIVE_MIN_SHARPE = 0.5;
+const PAPER_TO_LIVE_MAX_DD_PCT = 20;   // DB stores as percent (e.g. 15.0 = 15%)
+
+app.post('/api/strategies/:id/transition', async (req, res) => {
+  const fs   = require('fs');
+  const path = require('path');
+  const sid     = req.params.id;
+  const toState = req.body && req.body.to_state;
+  const force   = req.body && req.body.force === true;
+  const reason  = (req.body && req.body.reason) || '';
+  const actor   = (req.body && req.body.actor)  || 'manual:dashboard';
+
+  if (!sid || !toState) {
+    return res.status(400).json({ error: 'sid and to_state are required' });
+  }
+
+  const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
+  let manifest;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  } catch (e) {
+    return res.status(500).json({ error: 'Cannot read manifest: ' + e.message });
+  }
+
+  const rec = (manifest.strategies || {})[sid];
+  if (!rec) return res.status(404).json({ error: `Strategy ${sid} not found in manifest` });
+
+  const fromState = rec.state;
+  const tKey = `${fromState}:${toState}`;
+  if (!STRATEGY_VALID_TRANSITIONS.has(tKey)) {
+    const validDests = [...STRATEGY_VALID_TRANSITIONS.keys()]
+      .filter(k => k.startsWith(fromState + ':'))
+      .map(k => k.split(':')[1]);
+    return res.status(422).json({
+      error: `No valid path from '${fromState}' to '${toState}'`,
+      valid_destinations: validDests,
+    });
+  }
+
+  // Guard: paper/staging → live requires Sharpe/DD thresholds unless force=true.
+  const failedGates = [];
+  if ((tKey === 'paper:live' || tKey === 'staging:live') && !force) {
+    let sr = {};
+    try {
+      const srRes = await dbQuery(
+        `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
+        [sid]
+      );
+      sr = srRes.rows[0] || {};
+    } catch (_) {}
+    const sharpe = parseFloat(sr.backtest_sharpe);
+    const maxDd  = parseFloat(sr.backtest_max_dd_pct);
+    if (!isNaN(sharpe) && sharpe < PAPER_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
+    if (!isNaN(maxDd)  && maxDd  > PAPER_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
+    if (failedGates.length > 0) {
+      return res.status(422).json({
+        error: `paper→live blocked: ${failedGates.join(', ')} gate(s) failed`,
+        failed_gates: failedGates,
+        allow_override: true,
+      });
+    }
+  }
+
+  // Atomic manifest write: .tmp → rename.
+  const now = new Date().toISOString();
+  const event = {
+    from_state: fromState,
+    to_state:   toState,
+    timestamp:  now,
+    actor,
+    reason:     reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
+    metadata:   force ? { override: true, failed_gates: failedGates } : {},
+  };
+  rec.state       = toState;
+  rec.state_since = now;
+  rec.history     = rec.history || [];
+  rec.history.push(event);
+  manifest.updated_at = now;
+
+  const tmpPath = manifestPath + '.tmp';
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2));
+    fs.renameSync(tmpPath, manifestPath);
+  } catch (e) {
+    return res.status(500).json({ error: 'Manifest write failed: ' + e.message });
+  }
+
+  // Audit trail (non-fatal if DB unavailable).
+  try {
+    await dbQuery(
+      `INSERT INTO lifecycle_events (strategy_id, from_state, to_state, actor, reason, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [sid, fromState, toState, actor, event.reason, JSON.stringify(event.metadata)]
+    );
+  } catch (e) {
+    console.warn('lifecycle_events insert failed (non-fatal):', e.message);
+  }
+
+  // Broadcast SSE so the dashboard refreshes even without polling.
+  try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: now }); } catch (_) {}
+
+  res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now });
 });
 
 app.get('/api/portfolio/account', async (req, res) => {
@@ -634,24 +819,32 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 /* Portfolio page */
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
-#strategies-inner{max-width:1400px;margin:0 auto;padding:20px}
-.st-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+#strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+.st-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:4px}
 .st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
 .st-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px}
 .st-tile-value{font-size:22px;font-weight:700}
-.st-filters{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
-.st-pill{background:var(--border2);border:1px solid var(--border);border-radius:4px;padding:3px 10px;font-size:11px;cursor:pointer;color:var(--muted);font-family:inherit}
-.st-pill.active{background:var(--blue);border-color:var(--blue);color:#fff}
-.st-pill-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);padding:0 6px 0 2px}
-.state-live,.state-paper,.state-active{color:#fff;background:var(--green);border-color:var(--green);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.state-stale{color:#000;background:var(--yellow);border-color:var(--yellow);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.state-candidate{color:var(--muted);background:var(--border2);border-color:var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.state-staging{color:#fff;background:var(--orange);border-color:var(--orange);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.state-orphan{color:var(--dim);background:transparent;border:1px solid var(--border);padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-th.st-sortable{cursor:pointer;user-select:none}
-th.st-sortable:hover{color:var(--blue)}
-th.st-sortable.st-sorted::after{content:' ▾';color:var(--blue)}
-th.st-sortable.st-sorted-asc::after{content:' ▴';color:var(--blue)}
+.st-tile-sub{font-size:10px;color:var(--muted);margin-top:3px}
+.st-sub-label{color:var(--muted);font-weight:400;font-size:10px}
+/* Sub-status badges (Active Stack) */
+.sg-status{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:nowrap}
+.sg-status-live   {color:#fff;background:var(--green)}
+.sg-status-stale  {color:#000;background:var(--yellow)}
+.sg-status-waiting{color:var(--muted);background:transparent;border:1px dashed var(--border)}
+/* Lifecycle badges (Inactive Stack + Candidates) */
+.st-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.st-badge-paper      {color:var(--muted);background:var(--border2);border:1px solid var(--border)}
+.st-badge-candidate  {color:var(--muted);background:var(--border2);border:1px solid var(--border)}
+.st-badge-deprecated {color:var(--dim);background:transparent;border:1px solid var(--border)}
+.st-badge-archived   {color:var(--dim);background:transparent;border:1px solid var(--border)}
+.st-badge-orphan     {color:var(--dim);background:transparent;border:1px dashed var(--border)}
+/* Action buttons */
+.st-action-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit;padding:2px 8px;border-radius:4px;margin-right:4px}
+.st-action-btn:hover{color:var(--text);border-color:var(--blue)}
+.st-unstack-btn:hover{border-color:var(--red);color:var(--red)}
+.st-approve-btn:hover{border-color:var(--green);color:var(--green)}
+.st-reject-btn:hover {border-color:var(--yellow);color:var(--yellow)}
+.st-gate-fail{color:var(--red)}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .pf-stat-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -780,36 +973,37 @@ th.st-sortable.st-sorted-asc::after{content:' ▴';color:var(--blue)}
 <div id="strategies-page">
   <div id="strategies-inner">
     <div class="st-tiles">
-      <div class="st-tile"><div class="st-tile-label">Total Strategies</div><div class="st-tile-value" id="st-total">—</div></div>
-      <div class="st-tile"><div class="st-tile-label">Live / Stale</div><div class="st-tile-value" id="st-live-stale">—</div></div>
-      <div class="st-tile"><div class="st-tile-label">Open Positions</div><div class="st-tile-value" id="st-open">—</div></div>
-      <div class="st-tile"><div class="st-tile-label">Stack Win Rate</div><div class="st-tile-value" id="st-winrate">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Total</div><div class="st-tile-value" id="st-total">—</div></div>
+      <div class="st-tile"><div class="st-tile-label">Active Stack</div><div class="st-tile-value" id="st-active-tile">—</div><div class="st-tile-sub" id="st-active-sub">— live / — stale / — waiting</div></div>
+      <div class="st-tile"><div class="st-tile-label">Inactive Stack</div><div class="st-tile-value" id="st-inactive-tile">—</div><div class="st-tile-sub">decommissioned</div></div>
+      <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">awaiting approval</div></div>
     </div>
 
-    <div class="st-filters">
-      <span class="st-pill-label">State:</span>
-      <button class="st-pill active" data-state="all" onclick="setStateFilter('all')">All</button>
-      <button class="st-pill" data-state="active" onclick="setStateFilter('active')">Live</button>
-      <button class="st-pill" data-state="stale" onclick="setStateFilter('stale')">Stale</button>
-      <button class="st-pill" data-state="candidate" onclick="setStateFilter('candidate')">Candidate</button>
-      <button class="st-pill" data-state="staging" onclick="setStateFilter('staging')">Staging</button>
-      <span style="width:16px"></span>
-      <span class="st-pill-label">Regime:</span>
-      <button class="st-pill active" data-regime="all" onclick="setRegimeFilter('all')">All</button>
-      <button class="st-pill" data-regime="LOW_VOL" onclick="setRegimeFilter('LOW_VOL')">Low Vol</button>
-      <button class="st-pill" data-regime="TRANSITIONING" onclick="setRegimeFilter('TRANSITIONING')">Transitioning</button>
-      <button class="st-pill" data-regime="HIGH_VOL" onclick="setRegimeFilter('HIGH_VOL')">High Vol</button>
-      <button class="st-pill" data-regime="CRISIS" onclick="setRegimeFilter('CRISIS')">Crisis</button>
-    </div>
-
+    <!-- Section 1: Active Stack (live + stale + waiting) -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>Strategies</span>
-        <span id="st-shown-count" style="color:var(--muted);font-weight:400;font-size:10px"></span>
+        <span>Active Stack <span class="st-sub-label">(live / stale / waiting on regime)</span></span>
+        <span id="st-active-count" class="st-sub-label"></span>
       </div>
-      <div class="pf-section-body">
-        <div id="st-table-wrap"><div class="empty">Loading...</div></div>
+      <div class="pf-section-body"><div id="st-active-wrap"><div class="empty">Loading...</div></div></div>
+    </div>
+
+    <!-- Section 2: Inactive Stack (deprecated / archived / orphan) -->
+    <div class="pf-section">
+      <div class="pf-section-header">
+        <span>Inactive Stack <span class="st-sub-label">(decommissioned — historical metrics from prior live period)</span></span>
+        <span id="st-inactive-count" class="st-sub-label"></span>
       </div>
+      <div class="pf-section-body"><div id="st-inactive-wrap"><div class="empty">Loading...</div></div></div>
+    </div>
+
+    <!-- Section 3: Research Candidates (paper / candidate) -->
+    <div class="pf-section">
+      <div class="pf-section-header">
+        <span>Research Candidates <span class="st-sub-label">(passed research + coder + backtest — awaiting approval)</span></span>
+        <span id="st-candidate-count" class="st-sub-label"></span>
+      </div>
+      <div class="pf-section-body"><div id="st-candidate-wrap"><div class="empty">Loading...</div></div></div>
     </div>
   </div>
 </div><!-- #strategies-page -->
@@ -870,6 +1064,10 @@ async function loadMarket() {
       const st = document.getElementById('strategies-page');
       if (st && st.style.display === 'block') loadStrategies();
       if (document.getElementById('portfolio-page').style.display === 'block') loadPortfolio();
+    }
+    if (d.type === 'strategy_transition') {
+      const st = document.getElementById('strategies-page');
+      if (st && st.style.display === 'block') loadStrategies();
     }
   };
   es.onerror = () => { document.getElementById('dot').style.background = 'var(--red)'; };
@@ -1603,11 +1801,14 @@ function renderHistory(rows) {
 }
 
 // ── Strategies page ─────────────────────────────────────────────────────────
-let strategiesData  = [];
-let strategyState   = 'all';
-let strategyRegime  = 'all';
-let strategySortKey = 'avg_realized_pct';
-let strategySortDir = 'desc';
+// 3-section layout:
+//   Active Stack        = state ∈ {live, monitoring}; sub-status Live/Stale/Waiting
+//                           Live    — regime_active + last_signal ≤ 7d
+//                           Stale   — regime_active + no signal > 7d
+//                           Waiting — !regime_active (regime conditions not met)
+//   Inactive Stack      = state ∈ {deprecated, archived, orphan} — historical metrics
+//   Research Candidates = state ∈ {paper, candidate} — backtest metrics, Approve/Reject
+let strategiesData = [];
 
 async function loadStrategies() {
   try {
@@ -1616,130 +1817,214 @@ async function loadStrategies() {
   } catch {
     strategiesData = [];
   }
-  renderStrategyTiles();
-  renderStrategyTable();
+  _renderStrategyPage();
 }
 
-function renderStrategyTiles() {
+function _inActiveStack(r) { return r.state === 'live' || r.state === 'monitoring'; }
+function _inInactive(r)    { return r.state === 'deprecated' || r.state === 'archived' || r.state === 'orphan'; }
+function _inCandidate(r)   { return r.state === 'paper' || r.state === 'candidate' || r.state === 'staging'; }
+
+// Sub-status for Active Stack rows: 'live' | 'stale' | 'waiting'
+function _activeSub(r) {
+  if (!r.regime_active) return 'waiting';
+  if (r.is_stale)       return 'stale';
+  return 'live';
+}
+
+function _renderStrategyPage() {
   const rows = strategiesData;
-  const total = rows.length;
-  const open  = rows.reduce((s, r) => s + (r.open_count || 0), 0);
-  const totalWins = rows.reduce((s, r) => s + (r.wins || 0), 0);
-  const totalClosed = rows.reduce((s, r) => s + ((r.wins || 0) + (r.losses || 0)), 0);
-  const stackWR = totalClosed > 0 ? Math.round(totalWins / totalClosed * 100) : null;
-  const live    = rows.filter(r => _displayState(r) === 'active').length;
-  const stale   = rows.filter(r => _displayState(r) === 'stale').length;
-  document.getElementById('st-total').textContent      = total;
-  document.getElementById('st-live-stale').textContent = live + ' / ' + stale;
-  document.getElementById('st-open').textContent       = open;
-  document.getElementById('st-winrate').textContent    = stackWR != null ? stackWR + '%' : '—';
+  const active    = rows.filter(_inActiveStack);
+  const inactive  = rows.filter(_inInactive);
+  const candidate = rows.filter(_inCandidate);
+
+  const live    = active.filter(r => _activeSub(r) === 'live').length;
+  const stale   = active.filter(r => _activeSub(r) === 'stale').length;
+  const waiting = active.filter(r => _activeSub(r) === 'waiting').length;
+
+  document.getElementById('st-total').textContent         = rows.length;
+  document.getElementById('st-active-tile').textContent   = active.length;
+  document.getElementById('st-active-sub').textContent    = live + ' live / ' + stale + ' stale / ' + waiting + ' waiting';
+  document.getElementById('st-inactive-tile').textContent = inactive.length;
+  document.getElementById('st-candidate-tile').textContent= candidate.length;
+  document.getElementById('st-active-count').textContent  = active.length + ' strategies';
+  document.getElementById('st-inactive-count').textContent= inactive.length + ' strategies';
+  document.getElementById('st-candidate-count').textContent = candidate.length + ' strategies';
+
+  _renderActiveStack(active);
+  _renderInactiveStack(inactive);
+  _renderCandidates(candidate);
 }
 
-function setStateFilter(s) {
-  strategyState = s;
-  for (const el of document.querySelectorAll('.st-pill[data-state]')) {
-    el.classList.toggle('active', el.dataset.state === s);
+function _regimesCell(r) {
+  const regs = r.active_in_regimes || [];
+  if (!regs.length) return '<span style="color:var(--dim)">—</span>';
+  return regs.map(rg => \`<span class="regime-state-\${rg}" style="padding:2px 6px;border-radius:4px;font-size:9px;font-weight:600;margin-right:3px;letter-spacing:.04em">\${rg}</span>\`).join('');
+}
+
+function _fmtPct(v) {
+  if (v == null) return '—';
+  const n = parseFloat(v) * 100;
+  return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+}
+function _fmtRate(v) { return v == null ? '—' : Math.round(parseFloat(v) * 100) + '%'; }
+function _fmtDate(v) { return v ? new Date(v).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—'; }
+function _fmtNum(v, d) {
+  if (v == null || isNaN(parseFloat(v))) return '—';
+  return parseFloat(v).toFixed(d == null ? 2 : d);
+}
+function _escStr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+// ── Section 1: Active Stack ────────────────────────────────────────────────
+const _SUB_ORDER = { live: 0, stale: 1, waiting: 2 };
+function _renderActiveStack(rows) {
+  const el = document.getElementById('st-active-wrap');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
+    return;
   }
-  renderStrategyTable();
-}
-function setRegimeFilter(r) {
-  strategyRegime = r;
-  for (const el of document.querySelectorAll('.st-pill[data-regime]')) {
-    el.classList.toggle('active', el.dataset.regime === r);
-  }
-  renderStrategyTable();
-}
-function setStrategySort(key) {
-  if (strategySortKey === key) {
-    strategySortDir = strategySortDir === 'desc' ? 'asc' : 'desc';
-  } else {
-    strategySortKey = key;
-    strategySortDir = 'desc';
-  }
-  renderStrategyTable();
-}
-
-// Display: we paper-trade the fund as a whole, so manifest state "live" and
-// "paper" both collapse to a single "active" concept. But "active" means the
-// pipeline is ACTUALLY firing the strategy — if a live/paper strategy has
-// been silent >7d it renders as "stale" so the dashboard reflects reality.
-function _displayState(row) {
-  const raw = row.state;
-  if (raw === 'live' || raw === 'paper') return row.is_stale ? 'stale' : 'active';
-  return raw || 'orphan';
-}
-
-function renderStrategyTable() {
-  let rows = strategiesData.slice();
-  if (strategyState !== 'all')   rows = rows.filter(r => _displayState(r) === strategyState);
-  if (strategyRegime !== 'all')  rows = rows.filter(r => r.dominant_regime === strategyRegime);
-
-  const dir = strategySortDir === 'asc' ? 1 : -1;
-  rows.sort((a, b) => {
-    const av = a[strategySortKey], bv = b[strategySortKey];
-    const an = av == null, bn = bv == null;
-    if (an && bn) return 0;
-    if (an) return 1;
-    if (bn) return -1;
-    if (typeof av === 'string') return av.localeCompare(bv) * dir;
-    return (parseFloat(av) - parseFloat(bv)) * dir;
+  const sorted = rows.slice().sort((a, b) => {
+    const d = (_SUB_ORDER[_activeSub(a)] ?? 9) - (_SUB_ORDER[_activeSub(b)] ?? 9);
+    if (d !== 0) return d;
+    return String(a.strategy_id).localeCompare(String(b.strategy_id));
   });
-
-  document.getElementById('st-shown-count').textContent =
-    rows.length + ' of ' + strategiesData.length;
-
-  const el = document.getElementById('st-table-wrap');
-  if (!rows.length) { el.innerHTML = '<div class="empty">No strategies match filters</div>'; return; }
-
-  const sortedCls = (key) => strategySortKey === key
-    ? (strategySortDir === 'asc' ? 'st-sortable st-sorted-asc' : 'st-sortable st-sorted')
-    : 'st-sortable';
-  const fmtPct  = (v) => v == null ? '—' : (parseFloat(v)*100 > 0 ? '+' : '') + (parseFloat(v)*100).toFixed(2) + '%';
-  const fmtRate = (v) => v == null ? '—' : Math.round(parseFloat(v)*100) + '%';
-  const fmtDate = (v) => v ? new Date(v).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
-
-  el.innerHTML = \`<table class="db-table" style="min-width:1100px">
+  el.innerHTML = \`<table class="db-table" style="min-width:1050px">
     <tr>
-      <th class="\${sortedCls('strategy_id')}" onclick="setStrategySort('strategy_id')">Strategy</th>
-      <th class="\${sortedCls('state')}" onclick="setStrategySort('state')">State</th>
-      <th class="\${sortedCls('dominant_regime')}" onclick="setStrategySort('dominant_regime')">Regime</th>
-      <th class="num \${sortedCls('open_count')}" onclick="setStrategySort('open_count')">Open</th>
-      <th class="num \${sortedCls('closed_count')}" onclick="setStrategySort('closed_count')">Closed</th>
-      <th class="num \${sortedCls('win_rate')}" onclick="setStrategySort('win_rate')">Win %</th>
-      <th class="num \${sortedCls('avg_realized_pct')}" onclick="setStrategySort('avg_realized_pct')">Avg Return</th>
-      <th class="num \${sortedCls('avg_unrealized_pct')}" onclick="setStrategySort('avg_unrealized_pct')">Unreal. Avg</th>
-      <th class="num \${sortedCls('best_trade_pct')}" onclick="setStrategySort('best_trade_pct')">Best</th>
-      <th class="num \${sortedCls('worst_trade_pct')}" onclick="setStrategySort('worst_trade_pct')">Worst</th>
-      <th class="num \${sortedCls('avg_days_held')}" onclick="setStrategySort('avg_days_held')">Avg Days</th>
-      <th class="\${sortedCls('last_signal_date')}" onclick="setStrategySort('last_signal_date')">Last Signal</th>
+      <th>Strategy</th><th>Status</th><th>Regimes</th>
+      <th class="num">Open</th><th class="num">Closed</th><th class="num">Win %</th>
+      <th class="num">Avg Return</th><th>Last Signal</th><th>Actions</th>
     </tr>
-    \${rows.map(r => {
-      const avgR     = r.avg_realized_pct   != null ? parseFloat(r.avg_realized_pct)*100   : null;
-      const avgU     = r.avg_unrealized_pct != null ? parseFloat(r.avg_unrealized_pct)*100 : null;
-      const best     = r.best_trade_pct     != null ? parseFloat(r.best_trade_pct)*100     : null;
-      const worst    = r.worst_trade_pct    != null ? parseFloat(r.worst_trade_pct)*100    : null;
-      const dispState = _displayState(r);
-      const stateCls  = 'state-' + dispState;
-      const stateLbl  = dispState === 'active' ? 'LIVE' : dispState.toUpperCase();
-      const regimeLbl = r.dominant_regime || '—';
-      const regimeCls = r.dominant_regime ? ('regime-state-' + r.dominant_regime) : '';
-      const titleAttr = (r.description || '').replace(/"/g, '&quot;');
+    \${sorted.map(r => {
+      const sub = _activeSub(r);
+      const subLabel = sub.toUpperCase();
+      const title = sub === 'waiting'
+        ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
+        : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
+      const avgR = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) * 100 : null;
       return \`<tr>
-        <td style="font-weight:600" title="\${titleAttr}">\${r.strategy_id}</td>
-        <td><span class="\${stateCls}">\${stateLbl}</span></td>
-        <td>\${regimeCls ? \`<span class="\${regimeCls}" style="padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.04em">\${regimeLbl}</span>\` : '<span style="color:var(--dim)">—</span>'}</td>
+        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
+        <td>\${_regimesCell(r)}</td>
         <td class="num">\${r.open_count || 0}</td>
         <td class="num">\${r.closed_count || 0}</td>
-        <td class="num">\${fmtRate(r.win_rate)}</td>
-        <td class="num \${pnlCls(avgR)}">\${fmtPct(r.avg_realized_pct)}</td>
-        <td class="num \${pnlCls(avgU)}">\${fmtPct(r.avg_unrealized_pct)}</td>
-        <td class="num \${pnlCls(best)}">\${fmtPct(r.best_trade_pct)}</td>
-        <td class="num \${pnlCls(worst)}">\${fmtPct(r.worst_trade_pct)}</td>
-        <td class="num" style="color:var(--muted)">\${r.avg_days_held != null ? parseFloat(r.avg_days_held).toFixed(1) : '—'}</td>
-        <td style="color:var(--dim)">\${fmtDate(r.last_signal_date)}</td>
+        <td class="num">\${_fmtRate(r.win_rate)}</td>
+        <td class="num \${pnlCls(avgR)}">\${_fmtPct(r.avg_realized_pct)}</td>
+        <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
+        <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
       </tr>\`;
     }).join('')}
   </table>\`;
+}
+
+// ── Section 2: Inactive Stack ──────────────────────────────────────────────
+function _renderInactiveStack(rows) {
+  const el = document.getElementById('st-inactive-wrap');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No decommissioned strategies.</div>';
+    return;
+  }
+  const sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  el.innerHTML = \`<table class="db-table" style="min-width:900px">
+    <tr>
+      <th>Strategy</th><th>Status</th><th>Regimes</th>
+      <th class="num">Live Days</th><th class="num">Live Sharpe</th><th class="num">Live Return</th>
+      <th>Last Signal</th>
+    </tr>
+    \${sorted.map(r => {
+      const liveRet = r.live_return_pct != null ? parseFloat(r.live_return_pct) : null;
+      return \`<tr>
+        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
+        <td>\${_regimesCell(r)}</td>
+        <td class="num" style="color:var(--muted)">\${r.live_days != null ? r.live_days : '—'}</td>
+        <td class="num">\${_fmtNum(r.live_sharpe)}</td>
+        <td class="num \${pnlCls(liveRet)}">\${liveRet != null ? (liveRet >= 0 ? '+' : '') + liveRet.toFixed(2) + '%' : '—'}</td>
+        <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
+      </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+
+// ── Section 3: Research Candidates ─────────────────────────────────────────
+// Gate warning when backtest Sharpe < 0.5 or Max DD > 20%.
+function _renderCandidates(rows) {
+  const el = document.getElementById('st-candidate-wrap');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">No candidates awaiting approval.</div>';
+    return;
+  }
+  const sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  el.innerHTML = \`<table class="db-table" style="min-width:1000px">
+    <tr>
+      <th>Strategy</th><th>Status</th><th>Regimes</th>
+      <th class="num">BT Sharpe</th><th class="num">BT Return</th><th class="num">BT Max DD</th>
+      <th class="num">Backtest Trades</th>
+      <th>Actions</th>
+    </tr>
+    \${sorted.map(r => {
+      const sharpe = r.backtest_sharpe;
+      const maxDd  = r.backtest_max_dd_pct;
+      const ret    = r.backtest_return_pct;
+      const trades = r.total_count;
+      const sharpeFail = sharpe != null && parseFloat(sharpe) < 0.5;
+      const ddFail     = maxDd  != null && Math.abs(parseFloat(maxDd)) > 20;
+      const gateWarn   = sharpeFail || ddFail;
+      const approveLbl = gateWarn ? '⚠ Approve' : 'Approve';
+      const approveTitle = gateWarn
+        ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
+        : 'Promote to Active Stack';
+      return \`<tr>
+        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
+        <td>\${_regimesCell(r)}</td>
+        <td class="num\${sharpeFail ? ' st-gate-fail' : ''}">\${_fmtNum(sharpe)}</td>
+        <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
+        <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
+        <td class="num" style="color:var(--muted)">\${trades != null ? trades : '—'}</td>
+        <td>
+          <button class="st-action-btn st-approve-btn" title="\${_escStr(approveTitle)}" onclick="stApprove('\${r.strategy_id}', \${gateWarn})">\${approveLbl}</button>
+          <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>
+        </td>
+      </tr>\`;
+    }).join('')}
+  </table>\`;
+}
+
+// ── Action handlers ────────────────────────────────────────────────────────
+async function _stTransition(sid, toState, force, reason) {
+  try {
+    const resp = await fetch('/api/strategies/' + encodeURIComponent(sid) + '/transition', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ to_state: toState, force: !!force, reason: reason || '', actor: 'manual:dashboard' }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert('Transition failed: ' + (data.error || resp.statusText)); return false; }
+    await loadStrategies();
+    return true;
+  } catch (e) {
+    alert('Network error: ' + e.message);
+    return false;
+  }
+}
+
+async function stUnstack(sid) {
+  if (!confirm('Unstack ' + sid + '? It will move to Inactive Stack (live/monitoring → deprecated).')) return;
+  await _stTransition(sid, 'deprecated', false, 'Manual unstack via dashboard');
+}
+
+async function stApprove(sid, gateWarn) {
+  if (gateWarn) {
+    if (!confirm('"' + sid + '" has metrics below gates (Sharpe < 0.5 or |Max DD| > 20%). Approve with override? This will be logged.')) return;
+    await _stTransition(sid, 'live', true, 'Manual approve via dashboard (override)');
+  } else {
+    if (!confirm('Approve ' + sid + ' into the Active Stack?')) return;
+    await _stTransition(sid, 'live', false, 'Manual approve via dashboard');
+  }
+}
+
+async function stReject(sid) {
+  if (!confirm('Reject ' + sid + '? It will move back to candidate for further research.')) return;
+  await _stTransition(sid, 'candidate', false, 'Manual reject via dashboard');
 }
 
 function _buildChart(labels, values, yFmt, tooltipFmt, color) {

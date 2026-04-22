@@ -11,7 +11,7 @@ from ..base import BaseStrategy, Signal
 class IVDispersionReversion(BaseStrategy):
     id = "S_HV20_iv_dispersion_reversion"
     version = "1.0.0"
-    regime_filter = ["HIGH_VOL", "NEUTRAL"]
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
     Z_SELL_THRESH: float = 1.5
     Z_BUY_THRESH: float = -1.5
     VRP_SELL_MIN: float = 0.03
@@ -19,7 +19,9 @@ class IVDispersionReversion(BaseStrategy):
     TOP_N: int = 10
 
     def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
-        rank_data = [(t, float(o["iv_rank"]), o) for t, o in aux_data.items() if o.get("iv_rank") is not None]
+        rank_data = [(t, float(o["iv_rank"]), o)
+                     for t, o in (aux_data or {}).get("options", {}).items()
+                     if o.get("iv_rank") is not None]
         if len(rank_data) < self.MIN_UNIVERSE:
             return []
         ranks = [r[1] for r in rank_data]

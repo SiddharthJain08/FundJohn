@@ -128,7 +128,12 @@ def validate(filepath: str) -> dict:
     # ── 5. Empty DataFrame guard ──────────────────────────────────────────────
     try:
         instance = cls()
-        result = instance.generate_signals(pd.DataFrame(), {}, [], None)
+        # Pass empty-but-shaped aux_data so options strategies don't crash on
+        # `aux_data.get(...)`. Strategies must still return [] for empty inputs.
+        try:
+            result = instance.generate_signals(pd.DataFrame(), {}, [], aux_data={'options': {}})
+        except TypeError:
+            result = instance.generate_signals(pd.DataFrame(), {}, [])
         if result is None:
             errors.append('generate_signals(empty) returned None — must return []')
         elif not isinstance(result, list):
@@ -148,7 +153,13 @@ def validate(filepath: str) -> dict:
 
     try:
         instance = cls()
-        signals = instance.generate_signals(prices, regime, universe)
+        # Pass an empty aux_data panel so options strategies that require it
+        # in their signature (aux_data, not aux_data=None) still validate.
+        # Strategies that don't accept aux_data are called the old way via fallback.
+        try:
+            signals = instance.generate_signals(prices, regime, universe, aux_data={'options': {}})
+        except TypeError:
+            signals = instance.generate_signals(prices, regime, universe)
     except Exception as e:
         return {'ok': False, 'errors': [f'generate_signals raised on synthetic data: {e}', traceback.format_exc()], 'signal_count': 0}
 
