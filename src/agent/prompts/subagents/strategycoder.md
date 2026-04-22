@@ -47,26 +47,12 @@ Signal(
 )
 ```
 
-### `required_columns` — declare your data dependencies
+### Data dependency declaration
 
-Every new strategy MUST declare the data columns it reads, at class level:
-
-```python
-class YourStrategy(BaseStrategy):
-    required_columns = [
-        {"key": "prices",        "provider": "yfinance",  "lookback_days": 1825},
-        {"key": "financials",    "provider": "fmp",       "lookback_days": 1825},
-        {"key": "unusual_flow",  "provider": "polygon",   "lookback_days": 365 },
-    ]
-```
-
-Consumed by the dashboard approval flow (`staging_approver.js` + queue_drain):
-when an operator approves a staging strategy, each declared column is
-enqueued into `data_ingestion_queue` with the declared `lookback_days`
-as the backfill window. Columns must exist in
-`data/master/schema_registry.json` — if any required column has no
-provider support, the Approve button disables and the strategy stays
-in staging. Do **not** declare a column your strategy never reads.
+Data dependencies go in **Artifact 4 — requirements.json** (defined below).
+Do not add a `required_columns` Python class attribute; the JSON is the
+single source of truth read by `staging_approver.js` and
+`src/strategies/lifecycle.py::_enqueue_orphan_columns` at unstack time.
 
 Rules:
 - Handle empty/None DataFrame (return `[]`)
@@ -117,6 +103,38 @@ Add to the `"strategies"` object (inside it, before the closing `}`):
 New strategies always start as `state: candidate`. A Postgres `strategy_registry` row with
 `status='pending_approval'` is inserted automatically by the orchestrator after you succeed —
 you do NOT need to generate any SQL.
+
+### Artifact 4 — Data requirements JSON
+
+File: `src/strategies/implementations/<same_basename_as_.py>.requirements.json`
+
+Lists every data-type the strategy reads. The dashboard approval flow
+(`src/agent/approvals/staging_approver.js`) checks each entry against
+`data/master/schema_registry.json` — if any type is unsupported by current
+providers, the Approve button is disabled and the strategy stays in
+staging. The same file drives the unstack-removal flow in
+`src/strategies/lifecycle.py::_enqueue_orphan_columns`.
+
+```json
+{
+  "strategy_id": "S_XX_your_strategy_id",
+  "required": ["prices", "options_eod", "macro"],
+  "optional": []
+}
+```
+
+**Rules:**
+- `prices` is implicit but must still be listed — it makes the unstack
+  orphan check correct.
+- Use the canonical type names present in `schema_registry.json`:
+  `prices`, `financials`, `options_eod`, `insider`, `macro`, `earnings`,
+  `unusual_options_flow`, `news`.
+- Only list types the strategy actually reads (via `aux_data['<type>']`
+  or `aux_data.get('<type>')`). Do **not** over-declare to be safe —
+  it triggers unnecessary backfills on approval.
+- `optional` is for graceful-degradation lookups; missing a required
+  type fails approval, missing an optional type just downgrades the
+  signal quality.
 
 ## Mental Dry-Run Requirement
 Before finalizing, mentally verify: `generate_signals(pd.DataFrame())` returns `[]` without raising. If it would raise, fix it first.

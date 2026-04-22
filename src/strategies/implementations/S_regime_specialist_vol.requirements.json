@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_regime_specialist_vol",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_alpha191_lasso_crossmarket",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

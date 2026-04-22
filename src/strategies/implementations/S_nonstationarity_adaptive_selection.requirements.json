@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_nonstationarity_adaptive_selection",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

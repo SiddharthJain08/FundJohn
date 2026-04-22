@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_markov_frontier_regimes",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

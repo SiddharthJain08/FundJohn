@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_tr_04_intraday_spy_momentum",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

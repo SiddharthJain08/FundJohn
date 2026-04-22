@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_tr_03_bocpd_change_point",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

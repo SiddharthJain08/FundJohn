@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_barbell_trend_horizon",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

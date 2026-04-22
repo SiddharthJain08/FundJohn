@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S21_iv_hv_spread",
+  "required": [
+    "options_eod",
+    "prices"
+  ],
+  "optional": []
+}

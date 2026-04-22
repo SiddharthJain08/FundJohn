@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_tr_06_eod_reversal",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

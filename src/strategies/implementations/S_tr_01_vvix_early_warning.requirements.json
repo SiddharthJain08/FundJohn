@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S_tr_01_vvix_early_warning",
+  "required": [
+    "macro",
+    "prices"
+  ],
+  "optional": []
+}

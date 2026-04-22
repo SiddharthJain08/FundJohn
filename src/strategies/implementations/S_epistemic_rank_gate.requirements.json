@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_epistemic_rank_gate",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}
