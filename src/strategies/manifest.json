@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T05:10:54.244Z",
+  "updated_at": "2026-04-22T05:18:07.798201+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -8,7 +8,7 @@
       "metadata": {
         "canonical_file": "s5_max_pain.py",
         "class": "MaxPainGravity",
-        "description": "Max-pain gravity — options-derived price attractor signal"
+        "description": "Max-pain gravity \u2014 options-derived price attractor signal"
       },
       "history": []
     },
@@ -71,7 +71,7 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal — SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
       },
       "history": []
     },
@@ -81,7 +81,7 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage — implied vs realised volatility"
+        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility"
       },
       "history": []
     },
@@ -91,7 +91,7 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
+        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation"
       },
       "history": []
     },
@@ -101,7 +101,7 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
+        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching"
       },
       "history": [
         {
@@ -134,14 +134,26 @@
       ]
     },
     "S25_dual_momentum_v2": {
-      "state": "paper",
-      "state_since": "2026-01-01T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 — successor candidate to S9"
+        "description": "Dual-momentum v2 \u2014 successor candidate to S9"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_HV7_iv_crush_fade": {
       "state": "paper",
@@ -154,24 +166,48 @@
       "history": []
     },
     "S_HV8_gamma_theta_carry": {
-      "state": "paper",
-      "state_since": "2026-04-16",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "shv8_gamma_theta_carry.py",
         "class": "GammaThetaCarry",
         "description": "Gamma-Theta Carry  BUY_VOL when gamma/|theta| >= 1.5 ATM (theta now live in chain)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_HV9_rv_momentum_div": {
-      "state": "paper",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "shv9_rv_momentum_div.py",
         "class": "RVMomentumDivergence",
         "description": "RV Momentum Divergence  price/RV divergence signals (Bollerslev 2009)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_HV10_triple_gate_fear": {
       "state": "staging",
@@ -234,14 +270,26 @@
       "history": []
     },
     "S_HV16_gex_regime": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "shv16_gex_regime.py",
         "class": "GEXRegime",
         "description": "Dealer gamma exposure regime classifier (Bollen & Whaley 2004 JF)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_HV17_earnings_straddle_fade": {
       "state": "paper",
@@ -254,14 +302,26 @@
       "history": []
     },
     "S_HV19_iv_surface_tilt": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "shv19_iv_surface_tilt.py",
         "class": "IVSurfaceTilt",
         "description": "Vega*OI-weighted IV surface centroid tilt signal (Carr & Wu 2009 JFE)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_HV20_iv_dispersion_reversion": {
       "state": "paper",
@@ -302,8 +362,8 @@
       ]
     },
     "S_regime_specialist_vol": {
-      "state": "paper",
-      "state_since": "2026-04-18T08:30:28.841439+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_regime_specialist_vol.py",
         "class": "RegimeSpecialistVol",
@@ -316,6 +376,17 @@
           "at": "2026-04-18T08:30:28.841439+00:00",
           "actor": "system",
           "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
         }
       ]
     },
@@ -335,29 +406,53 @@
       "metadata": {
         "canonical_file": "S_tr_01_vvix_early_warning.py",
         "class": "VVIXEarlyWarning",
-        "description": "VVIX-conditioned VIX-spike early warning — SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
+        "description": "VVIX-conditioned VIX-spike early warning \u2014 SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
       },
       "history": []
     },
     "S_tr_02_hurst_regime_flip": {
-      "state": "paper",
-      "state_since": "2026-04-18T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_tr_02_hurst_regime_flip.py",
         "class": "HurstRegimeFlip",
-        "description": "Hurst R/S regime flip — LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
+        "description": "Hurst R/S regime flip \u2014 LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_tr_06_eod_reversal": {
-      "state": "paper",
-      "state_since": "2026-04-18T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_tr_06_eod_reversal.py",
         "class": "EODCrossSectionalReversal",
-        "description": "Cross-sectional EOD return reversal — ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
+        "description": "Cross-sectional EOD return reversal \u2014 ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_tr_04_intraday_spy_momentum": {
       "state": "paper",
@@ -370,34 +465,78 @@
       "history": []
     },
     "S_tr_03_bocpd_change_point": {
-      "state": "paper",
-      "state_since": "2026-04-18T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_tr_03_bocpd_change_point.py",
         "class": "BOCPDChangePoint",
-        "description": "BOCPD change-point detection (Adams & MacKay 2007) — trade post-break direction in TRANSITIONING regime"
+        "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_price_path_convexity": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_price_path_convexity.py",
         "class": "PricePathConvexity",
         "description": "second_derivative(60d price) cross-sectional rank; LONG low-convexity, SHORT high-convexity"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was already firing this strategy, promoting through paper",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_robust_minimum_variance_hedge": {
-      "state": "paper",
-      "state_since": "2026-04-21T19:55:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:18:07.798201+00:00",
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
-        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box → SHORT high-vol outliers"
+        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:18:07.798201+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
+          "metadata": {
+            "option": "A",
+            "preserve_execution": true
+          }
+        }
+      ]
     },
     "S_skewness_dispersion_macro": {
       "state": "candidate",
@@ -425,7 +564,7 @@
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
-        "description": "Alpha191 factor matrix + LASSO selection → LONG top-decile SHORT bottom-decile"
+        "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile"
       },
       "history": []
     },
@@ -475,7 +614,7 @@
       "metadata": {
         "canonical_file": "S21_iv_hv_spread.py",
         "class": "IVHVSpread",
-        "description": "IV/HV Spread Vol Arb — sell expensive IV, buy cheap IV vs realized vol"
+        "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol"
       },
       "history": []
     }
@@ -486,35 +625,35 @@
       "original_file": "implementations/decommissioned/dual_momentum.py",
       "replaced_by": "S9_dual_momentum",
       "canonical_file": "s09_dual_momentum.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "quality_value_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/quality_value.py",
       "replaced_by": "S10_quality_value",
       "canonical_file": "s10_quality_value.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "insider_cluster_buy_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/insider_cluster_buy.py",
       "replaced_by": "S12_insider",
       "canonical_file": "s12_insider.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "iv_rv_arb_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/iv_rv_arb.py",
       "replaced_by": "S15_iv_rv_arb",
       "canonical_file": "s15_iv_rv_arb.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "max_pain_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/max_pain.py",
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "S_custom_momentum_trend_v1": {
       "archived_at": "2026-04-17T00:00:00+00:00",
