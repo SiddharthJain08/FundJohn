@@ -55,6 +55,23 @@ Rules:
 - **Always add a `print(f'[debug] signals={len(signals)}', file=sys.stderr)` line before the return** so the backtest harness can diagnose zero-signal runs.
 - Strategies must generate signals across all regime periods in the backtest (2017–2025). Avoid strategies that only trigger in very specific market conditions with less than 20 trades per 3-year window.
 
+### Canonical regime tags — `active_in_regimes`
+
+The HMM classifier only ever emits **one of four** states. Pick from this exact set — any other tag will be rejected at validation and the strategy will fail to promote.
+
+| Tag | Meaning | Stress band | Position scale |
+|---|---|---|---|
+| `LOW_VOL` | Calm expansion — VIX low, term structure in contango | 0–30 | 1.00× |
+| `TRANSITIONING` | Regime shift or model uncertainty — mixed signals | 30–60 | 0.55× |
+| `HIGH_VOL` | Sustained elevated fear — VIX 20–30, skew stretched | 60–80 | 0.35× |
+| `CRISIS` | Tail event / forced deleveraging — VIX > 35 | 80–100 | 0.15× |
+
+Do **not** use `NEUTRAL`, `RISK_OFF`, `RISK_ON`, or any other label. Pick the 1–4 canonical tags the strategy's thesis actually works in. Typical picks:
+- Trend/momentum → `['LOW_VOL', 'TRANSITIONING']`
+- Mean-reversion / vol-premium harvesting → `['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']`
+- Volatility / tail / crisis-alpha → `['TRANSITIONING', 'HIGH_VOL', 'CRISIS']`
+- All-weather / robust → all four
+
 ### Artifact 2 — Registry entry
 File: `src/strategies/registry.py`
 Add to `_IMPL_MAP`: `"strategy_id": YourStrategyClass`

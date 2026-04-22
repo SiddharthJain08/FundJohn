@@ -29,6 +29,34 @@ const BATCH_SIZE = 5;  // candidates per processQueue call
 
 const STOP_AFTER_KEY = 'research:stop_after_promoted';   // Redis key for one-shot mode
 
+// Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
+// Node event loop keeps serving HTTP traffic while this runs, so the Cancel
+// button / other dashboard actions remain responsive during long backtests.
+// If opts.onChild is provided, it's invoked synchronously with the spawned
+// ChildProcess so the caller can SIGTERM it later (used by Cancel).
+function _spawnPython(args, opts = {}) {
+  const { cwd, timeoutMs = 600_000, onChild } = opts;
+  return new Promise((resolve) => {
+    const child = spawn('python3', args, { cwd, env: process.env });
+    if (typeof onChild === 'function') { try { onChild(child); } catch (_) {} }
+    let stdout = '', stderr = '';
+    const killTimer = setTimeout(() => {
+      try { child.kill('SIGTERM'); } catch (_) {}
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 5_000);
+    }, timeoutMs);
+    child.stdout.on('data', b => { stdout += b.toString(); });
+    child.stderr.on('data', b => { stderr += b.toString(); });
+    child.on('exit', (code, signal) => {
+      clearTimeout(killTimer);
+      resolve({ stdout, stderr, code, signal });
+    });
+    child.on('error', (err) => {
+      clearTimeout(killTimer);
+      resolve({ stdout, stderr: stderr + '\n' + err.message, code: -1, signal: null });
+    });
+  });
+}
+
 class ResearchOrchestrator {
   constructor() {
     this._redis       = null;
@@ -430,10 +458,11 @@ class ResearchOrchestrator {
 
   // ── Coding sub-phase ────────────────────────────────────────────────────────
 
-  async _codeFromQueue(item, notify, channelNotify) {
+  async _codeFromQueue(item, notify, channelNotify, opts = {}) {
     const { candidate_id, strategy_spec } = item;
     const stratId  = strategy_spec?.strategy_id || 'unknown';
     const implPath = path.join(OPENCLAW_DIR, 'src', 'strategies', 'implementations', `${stratId}.py`);
+    const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
 
     await this._query(
       `UPDATE implementation_queue SET status = 'coding' WHERE candidate_id = $1`,
@@ -441,6 +470,7 @@ class ResearchOrchestrator {
     );
 
     notify?.(`  ⚙️ Coding: ${stratId}...`);
+    onPhase('strategycoder', 20);
     const costBeforeCoding = this._sessionCost;
     try {
       await this._codeStrategy(strategy_spec);
@@ -455,24 +485,24 @@ class ResearchOrchestrator {
         [candidate_id]
       );
       notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
-      return;
+      return { promoted: false, reasonCode: 'coding_failed', error: e.message };
     }
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
-    // validate_strategy.py exits 0 on valid, 1 on invalid — capture stdout on throw.
+    // validate_strategy.py exits 0 on valid, 1 on invalid. Use async spawn so
+    // we don't block the Node event loop (previously execSync held the loop
+    // hostage for up to 10 min during backtests, making the whole API
+    // unresponsive).
+    onPhase('validate', 40);
     let validResult;
-    try {
-      const raw = execSync(
-        `python3 src/strategies/validate_strategy.py "${implPath}"`,
-        { cwd: OPENCLAW_DIR, timeout: 60_000 }
-      ).toString();
-      validResult = JSON.parse(raw);
-    } catch (e) {
-      const stdout = e.stdout?.toString?.() || '';
+    {
+      const { stdout, code } = await _spawnPython(
+        ['src/strategies/validate_strategy.py', implPath],
+        { cwd: OPENCLAW_DIR, timeoutMs: 60_000, onChild: opts.onChild });
       try {
         validResult = JSON.parse(stdout);
       } catch (_) {
-        validResult = { ok: false, errors: [e.message.slice(0, 300)] };
+        validResult = { ok: false, errors: [`validate_strategy.py exit=${code}; stdout: ${stdout.slice(0, 300)}`] };
       }
     }
 
@@ -495,7 +525,7 @@ class ResearchOrchestrator {
       });
       notify?.(`  ❌ ${stratId} validation failed: ${errLog.slice(0, 200)}`);
       channelNotify?.(`❌ **${stratId}** failed contract validation — see implementation_queue for errors.`);
-      return;
+      return { promoted: false, reasonCode: 'contract_violation', error: errLog };
     }
     await emitGateDecision({
       paperId:     vPaperId,
@@ -506,58 +536,57 @@ class ResearchOrchestrator {
       metadata:    { signal_count: validResult.signal_count ?? null },
     });
     notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
+    onPhase('backtest', 60);
 
     // ── Phase 2: Auto-backtest convergence gate ───────────────────────────────
-    // Note: auto_backtest.py exits 0 on pass, 1 on fail — execSync throws on
-    // non-zero exit. Parse stdout from the error object to retain JSON metrics.
+    // auto_backtest.py exits 0 on pass, 1 on fail. JSON is on stdout in both
+    // cases. Heartbeat emits progress every 5s during the long run so the
+    // dashboard chip visibly ticks instead of appearing stuck.
     let btResult;
-    try {
-      const raw = execSync(
-        `python3 src/strategies/auto_backtest.py "${implPath}"`,
-        { cwd: OPENCLAW_DIR, timeout: 600_000 }
-      ).toString();
-      btResult = JSON.parse(raw);
-    } catch (e) {
-      const stdout = e.stdout?.toString?.() || '';
+    {
+      let hb = 60;
+      const heartbeat = setInterval(() => {
+        hb = Math.min(hb + 2, 85);
+        try { onPhase('backtest', hb); } catch (_) {}
+      }, 5_000);
       try {
-        btResult = JSON.parse(stdout);
-      } catch (_) {
-        btResult = { passed: false, error: e.message.slice(0, 300), windows: [] };
+        const { stdout, code } = await _spawnPython(
+          ['src/strategies/auto_backtest.py', implPath],
+          { cwd: OPENCLAW_DIR, timeoutMs: 600_000, onChild: opts.onChild });
+        try {
+          btResult = JSON.parse(stdout);
+        } catch (_) {
+          btResult = { error: `auto_backtest.py exit=${code}; stdout: ${stdout.slice(0, 300)}`, windows: [] };
+        }
+      } finally {
+        clearInterval(heartbeat);
       }
     }
 
-    if (!btResult.passed) {
+    // The only candidate→paper block is "code couldn't execute at all" —
+    // signalled by auto_backtest.py setting `error` on contract violation,
+    // import error, no strategy class, or missing prices. Metric-based
+    // gating is gone: weak Sharpe / high DD / zero trades all still promote,
+    // and the human judges from the persisted metrics in the dashboard.
+    if (btResult.error) {
       await this._query(
         `UPDATE implementation_queue SET status = 'backtest_failed', backtest_result = $1 WHERE candidate_id = $2`,
         [JSON.stringify(btResult), candidate_id]
       );
-      const summary = btResult.error
-        ? btResult.error.slice(0, 200)
-        : `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
-      // Classify reason for the funnel.
-      let reasonCode = 'windows_insufficient';
-      if (btResult.error) reasonCode = 'backtest_error';
-      else if ((btResult.trade_count ?? 0) < 20) reasonCode = 'trade_count_below_floor';
-      else if ((btResult.sharpe ?? 0) < 0.5) reasonCode = 'sharpe_below_floor';
-      else if ((btResult.max_dd ?? 0) > 0.4) reasonCode = 'dd_above_ceiling';
+      const summary = String(btResult.error).slice(0, 300);
       await emitGateDecision({
         paperId:      vPaperId,
         candidateId:  candidate_id,
         strategyId:   stratId,
         gateName:     'convergence',
         outcome:      'reject',
-        reasonCode,
+        reasonCode:   'backtest_error',
         reasonDetail: summary,
-        metadata: {
-          sharpe:         btResult.sharpe ?? null,
-          max_dd:         btResult.max_dd ?? null,
-          trade_count:    btResult.trade_count ?? null,
-          windows_passed: btResult.windows_passed ?? null,
-        },
+        metadata:     { error: summary },
       });
-      notify?.(`  ❌ ${stratId} backtest failed: ${summary}`);
-      channelNotify?.(`❌ **${stratId}** failed backtest gate — ${summary}.`);
-      return;
+      notify?.(`  ❌ ${stratId} couldn't execute: ${summary}`);
+      channelNotify?.(`❌ **${stratId}** couldn't execute — ${summary}.`);
+      return { promoted: false, reasonCode: 'backtest_error', error: summary, backtest_result: btResult };
     }
     await emitGateDecision({
       paperId:     vPaperId,
@@ -566,29 +595,25 @@ class ResearchOrchestrator {
       gateName:    'convergence',
       outcome:     'pass',
       metadata: {
-        sharpe:         btResult.sharpe ?? null,
-        max_dd:         btResult.max_dd ?? null,
-        trade_count:    btResult.trade_count ?? null,
-        windows_passed: btResult.windows_passed ?? null,
+        sharpe:      btResult.sharpe      ?? null,
+        max_dd:      btResult.max_dd      ?? null,
+        trade_count: btResult.trade_count ?? null,
       },
     });
 
     // ── Phase 3: Auto-promote CANDIDATE → PAPER ───────────────────────────────
+    onPhase('promoting', 90);
     const reason = `Auto-backtest: Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
-    try {
-      execSync(
-        `python3 -c "
-import sys; sys.path.insert(0, 'src')
-from strategies.lifecycle import LifecycleStateMachine, StrategyState
-lsm = LifecycleStateMachine.from_manifest('src/strategies/manifest.json')
-lsm.transition('${stratId}', StrategyState.PAPER, actor='auto_backtest', reason='${reason.replace(/'/g, '')}')
-lsm.save_manifest('src/strategies/manifest.json')
-"`,
-        { cwd: OPENCLAW_DIR, timeout: 30_000 }
-      );
-    } catch (e) {
-      // Lifecycle transition failure is non-fatal — strategy is still coded
-      notify?.(`  ⚠️ ${stratId} lifecycle promotion failed: ${e.message.slice(0, 200)}`);
+    const lifecyclePy = [
+      `import sys; sys.path.insert(0, 'src')`,
+      `from strategies.lifecycle import LifecycleStateMachine, StrategyState`,
+      `lsm = LifecycleStateMachine.from_manifest('src/strategies/manifest.json')`,
+      `lsm.transition('${stratId}', StrategyState.PAPER, actor='auto_backtest', reason=${JSON.stringify(reason)})`,
+      `lsm.save_manifest('src/strategies/manifest.json')`,
+    ].join('\n');
+    const lc = await _spawnPython(['-c', lifecyclePy], { cwd: OPENCLAW_DIR, timeoutMs: 30_000 });
+    if (lc.code !== 0) {
+      notify?.(`  ⚠️ ${stratId} lifecycle promotion failed (exit=${lc.code}): ${(lc.stderr || lc.stdout).slice(0, 200)}`);
     }
 
     // Update strategy_registry: status + measured backtest metrics.
@@ -652,6 +677,8 @@ lsm.save_manifest('src/strategies/manifest.json')
         }
       }
     } catch (_) { /* Redis unavailable — loop will continue normally */ }
+
+    return { promoted: true, backtest_result: btResult, reasonCode: 'auto_backtest_promoted' };
   }
 
   // ── DataWiringAgent ─────────────────────────────────────────────────────────

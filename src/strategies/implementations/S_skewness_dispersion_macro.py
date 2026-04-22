@@ -22,7 +22,7 @@ class SkewnessDispersionMacro(BaseStrategy):
     name        = 'SkewnessDispersionMacro'
     description = 'LONG/SHORT based on cross-sectional realized-skewness dispersion z-score'
     tier        = 2
-    active_in_regimes = ['NEUTRAL', 'TRANSITIONING']
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING']
 
     LOOKBACK    = 252
     MIN_STOCKS  = 30   # require at least this many stocks with enough history

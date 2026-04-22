@@ -112,6 +112,24 @@ def validate(filepath: str) -> dict:
 
     cls = strategy_classes[0]
 
+    # ── 4a. Regime-tag check ──────────────────────────────────────────────────
+    # The HMM classifier only emits LOW_VOL/TRANSITIONING/HIGH_VOL/CRISIS; any
+    # other tag in active_in_regimes either needs to be a known synonym
+    # (auto-normalized by BaseStrategy.__init_subclass__) or is a typo that
+    # would make the strategy silently inert. Reject typos at the gate.
+    from strategies.base import CANONICAL_REGIMES, REGIME_SYNONYMS
+    # Inspect the author's original declaration (preserved by BaseStrategy)
+    # rather than the runtime-normalized list, so typos like 'BOGUS_REGIME'
+    # can't sneak through just because __init_subclass__ silently dropped them.
+    _raw_tags = getattr(cls, '_raw_active_in_regimes', None) or getattr(cls, 'active_in_regimes', None) or []
+    _unknown = [t for t in _raw_tags if t not in CANONICAL_REGIMES and t not in REGIME_SYNONYMS]
+    if _unknown:
+        errors.append(
+            f'active_in_regimes contains unknown regime tag(s) {_unknown}. '
+            f'Canonical set: {list(CANONICAL_REGIMES)}. '
+            f'Known synonyms (auto-expanded at runtime): {list(REGIME_SYNONYMS.keys())}.'
+        )
+
     # ── 4. Signature check ────────────────────────────────────────────────────
     try:
         sig = inspect.signature(cls.generate_signals)

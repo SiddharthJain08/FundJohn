@@ -26,6 +26,10 @@ module.exports.broadcast = broadcast;
 // Wire SSE broadcast into the pipeline collector so all data collection events push live updates
 require("../../pipeline/collector").setBroadcast(broadcast);
 
+// Async approval-job orchestration (staging/candidate/paper Approve button).
+const approvals = require('../../agent/approvals');
+approvals.init({ broadcast });
+
 // ── DB-backed API routes ────────────────────────────────────────────────────────
 
 // Full universe grouped by category
@@ -478,6 +482,24 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
 
   const fromState = rec.state;
   const tKey = `${fromState}:${toState}`;
+
+  // Dashboard callers can't directly promote candidate/staging — they must use
+  // POST /api/strategies/:id/approve, which runs the data-import or
+  // strategycoder pipeline and then calls this endpoint as a system actor
+  // (actor starts with 'system:') to finalize the transition. We honour that
+  // bypass here so the approval workers can flip state.
+  const isSystemActor = typeof actor === 'string' && actor.startsWith('system:');
+  if (!isSystemActor) {
+    if (fromState === 'staging' || fromState === 'candidate') {
+      const forwardTargets = new Set(['paper', 'live', 'monitoring']);
+      if (forwardTargets.has(toState)) {
+        return res.status(409).json({
+          error: `Use POST /api/strategies/${sid}/approve — ${fromState} strategies can't be promoted directly.`,
+        });
+      }
+    }
+  }
+
   if (!STRATEGY_VALID_TRANSITIONS.has(tKey)) {
     const validDests = [...STRATEGY_VALID_TRANSITIONS.keys()]
       .filter(k => k.startsWith(fromState + ':'))
@@ -594,6 +616,79 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: now }); } catch (_) {}
 
   res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now });
+});
+
+// ── Approval dispatcher ──────────────────────────────────────────────────────
+// POST /api/strategies/:id/approve — state-aware entry point for the
+// Approve button. Staging/candidate rows kick off async workers; paper rows
+// run the synchronous paper→live gate via the existing /transition endpoint.
+app.post('/api/strategies/:id/approve', async (req, res) => {
+  const path = require('path');
+  const fs   = require('fs');
+  const sid   = req.params.id;
+  const force = !!(req.body && req.body.force);
+  const actor = (req.body && req.body.actor) || 'manual:dashboard';
+
+  try {
+    const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const rec = manifest.strategies[sid];
+    if (!rec) return res.status(404).json({ error: `Strategy ${sid} not found in manifest` });
+
+    const existing = await approvals.hasActiveJob(sid);
+    if (existing) return res.status(409).json({ error: 'job already running', job_id: existing.job_id });
+
+    if (rec.state === 'staging') {
+      const { status, body } = await approvals.approveStaging(sid, rec, actor);
+      return res.status(status).json(body);
+    }
+    if (rec.state === 'candidate') {
+      const { status, body } = await approvals.approveCandidate(sid, rec, actor);
+      return res.status(status).json(body);
+    }
+    if (rec.state === 'paper') {
+      // Paper rows keep using the synchronous /transition endpoint directly
+      // from the frontend (it runs the Sharpe / max-DD gate). Tell the caller.
+      return res.status(409).json({
+        error: 'paper strategies use POST /api/strategies/:id/transition with to_state=live',
+        redirect: 'transition',
+      });
+    }
+    return res.status(422).json({ error: `approve not applicable from state='${rec.state}'` });
+  } catch (e) {
+    console.error('[/approve]', e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/approvals/active', async (req, res) => {
+  try { res.json(await approvals.listActive()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Persisted failure banners — latest failed/cancelled job per strategy that
+// the user hasn't dismissed. Dashboard hydrates from here on load so red
+// banners survive page refresh and johnbot restart.
+app.get('/api/approvals/recent-failures', async (req, res) => {
+  try { res.json(await approvals.listRecentFailures(30)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/approvals/:jobId/dismiss', async (req, res) => {
+  try {
+    const row = await approvals.dismissFailure(req.params.jobId);
+    if (!row) return res.status(404).json({ error: 'job not found' });
+    res.json({ ok: true, job_id: row.job_id, strategy_id: row.strategy_id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/strategies/:id/approve/cancel', async (req, res) => {
+  try {
+    const { status, body } = await approvals.cancelJob(req.params.id);
+    res.status(status).json(body);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/portfolio/account', async (req, res) => {
@@ -886,6 +981,39 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .st-action-btn:hover{color:var(--text);border-color:var(--blue)}
 .st-unstack-btn:hover{border-color:var(--red);color:var(--red)}
 .st-approve-btn:hover{border-color:var(--green);color:var(--green)}
+/* Approve button variants — consistent sizing, clear state communication */
+.st-approve-async{border-style:solid;color:var(--blue);border-color:rgba(88,166,255,0.45)}
+.st-approve-async:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
+.st-approve-retry{border-color:var(--red);color:var(--red)}
+.st-approve-retry:hover{background:rgba(248,81,73,0.10);border-color:var(--red)}
+.st-action-btn{transition:all .12s ease;white-space:nowrap}
+.st-action-btn:active{transform:translateY(1px)}
+.st-action-btn:disabled{opacity:0.5;cursor:not-allowed}
+
+/* In-flight job chip: progress-bar fill + label overlay */
+.st-job-wrap{display:inline-flex;align-items:center;gap:6px}
+.st-job-chip{position:relative;display:inline-block;padding:3px 10px;min-width:230px;border:1px solid var(--blue);border-radius:4px;background:rgba(88,166,255,0.05);font-size:10px;font-weight:600;letter-spacing:.04em;overflow:hidden;color:var(--blue)}
+.st-job-fill{position:absolute;left:0;top:0;bottom:0;background:rgba(88,166,255,0.22);transition:width .6s ease;z-index:0}
+.st-job-text{position:relative;z-index:1}
+.st-cancel-btn{border-color:var(--border2)}
+.st-cancel-btn:hover{border-color:var(--red);color:var(--red);background:rgba(248,81,73,0.08)}
+
+/* Inline failure banner on a candidate row — wraps vertically, never widens the column */
+.st-fail-banner{display:flex;align-items:flex-start;gap:6px;padding:3px 7px;margin:0 0 4px 0;border:1px solid var(--red);border-radius:4px;background:rgba(248,81,73,0.08);color:var(--red);font-size:10px;font-weight:500;width:200px;max-width:200px;line-height:1.35}
+.st-fail-ico{flex:0 0 auto;line-height:1.35}
+.st-fail-msg{flex:1 1 auto;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
+.st-fail-dismiss{flex:0 0 auto;padding:0 6px;border-color:transparent;color:var(--red);align-self:flex-start}
+.st-fail-dismiss:hover{background:rgba(248,81,73,0.15)}
+
+/* Toast notifications */
+#toast-host{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;z-index:9999;pointer-events:none}
+.toast{pointer-events:auto;padding:10px 14px;border-radius:6px;border:1px solid var(--border);background:var(--panel);color:var(--text);font-size:12px;line-height:1.4;max-width:420px;box-shadow:0 4px 12px rgba(0,0,0,0.35);cursor:pointer;opacity:0;transform:translateX(20px);transition:opacity .3s ease,transform .3s ease}
+.toast-in{opacity:1;transform:translateX(0)}
+.toast-out{opacity:0;transform:translateX(20px)}
+.toast-ok{border-color:var(--green)}
+.toast-error{border-color:var(--red)}
+.toast-warn{border-color:var(--yellow)}
+.toast-info{border-color:var(--blue)}
 .st-reject-btn:hover {border-color:var(--yellow);color:var(--yellow)}
 .st-gate-fail{color:var(--red)}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
@@ -1096,9 +1224,26 @@ async function loadMarket() {
   setInterval(refreshPipeline, 60000);
   setInterval(loadMarket, 300000);
 
-  // SSE
-  const es = new EventSource('/events');
-  es.onmessage = e => {
+  // SSE with auto-reconnect. EventSource has a built-in retry but it won't
+  // resubscribe cleanly after the process behind /events restarts; we
+  // re-open the connection after a short backoff and re-hydrate state.
+  let es = null;
+  function _openSSE() {
+    es = new EventSource('/events');
+    es.onmessage = _handleSSE;
+    es.onerror = () => {
+      document.getElementById('dot').style.background = 'var(--red)';
+      try { es.close(); } catch (_) {}
+      setTimeout(_openSSE, 3_000);
+    };
+    es.onopen = () => {
+      document.getElementById('dot').style.background = 'var(--green)';
+      // re-hydrate chips after a reconnect
+      const st = document.getElementById('strategies-page');
+      if (st && st.style.display === 'block') loadStrategies();
+    };
+  }
+  function _handleSSE(e) {
     const d = JSON.parse(e.data);
     if (d.type === 'pipeline') refreshPipeline();
     if (d.type === 'market_update') {
@@ -1112,8 +1257,59 @@ async function loadMarket() {
       const st = document.getElementById('strategies-page');
       if (st && st.style.display === 'block') loadStrategies();
     }
-  };
-  es.onerror = () => { document.getElementById('dot').style.background = 'var(--red)'; };
+    if (d.type === 'approval_job') {
+      const sid = d.strategy_id;
+      if (!sid) return;
+      if (d.status === 'running') {
+        _stActiveJobs[sid] = {
+          job_id: d.job_id, phase: d.phase, progress: d.progress || 0,
+          strategy_id: sid, payload: d.payload || {},
+        };
+      } else {
+        // succeeded / failed / cancelled → drop chip + refresh row
+        delete _stActiveJobs[sid];
+        if (d.status === 'failed') {
+          const reason = _stFailReason(d.result);
+          _stLastFailures[sid] = { job_id: d.job_id, reason };
+          toast('❌ ' + sid + ' — ' + reason, 'error', 8_000);
+        } else if (d.status === 'succeeded') {
+          delete _stLastFailures[sid];
+          toast('✅ ' + sid + ' approved successfully', 'ok', 4_000);
+        } else if (d.status === 'cancelled') {
+          toast('⚠️ ' + sid + ' — approval cancelled', 'warn', 3_000);
+        }
+      }
+      const st = document.getElementById('strategies-page');
+      if (st && st.style.display === 'block') _stRenderJobChips();
+      if (d.status !== 'running') loadStrategies();
+    }
+  }
+  _openSSE();
+
+  // Polling safety net: while any approval chip is showing, poll
+  // /api/approvals/active every 3s so stale chips clear even if SSE misses
+  // a 'finished' event (network blip / reconnect race).
+  setInterval(async () => {
+    if (Object.keys(_stActiveJobs).length === 0) return;
+    try {
+      const active = await fetch('/api/approvals/active').then(r => r.json());
+      const alive = new Set((active || []).map(j => j.strategy_id));
+      let changed = false;
+      for (const sid of Object.keys(_stActiveJobs)) {
+        if (!alive.has(sid)) { delete _stActiveJobs[sid]; changed = true; }
+      }
+      for (const j of active) {
+        const cur = _stActiveJobs[j.strategy_id];
+        if (!cur || cur.progress !== j.progress || cur.phase !== j.phase) {
+          _stActiveJobs[j.strategy_id] = j; changed = true;
+        }
+      }
+      if (changed) {
+        const st = document.getElementById('strategies-page');
+        if (st && st.style.display === 'block') _stRenderJobChips();
+      }
+    } catch (_) {}
+  }, 3_000);
 })();
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -1852,15 +2048,80 @@ function renderHistory(rows) {
 //   Inactive Stack      = state ∈ {deprecated, archived, orphan} — historical metrics
 //   Research Candidates = state ∈ {paper, candidate} — backtest metrics, Approve/Reject
 let strategiesData = [];
+let _stActiveJobs = {};   // strategy_id → {job_id, phase, progress, payload}
+let _stLastFailures = {}; // strategy_id → {job_id, reason}  (persisted server-side; survives reload + restart)
 
 async function loadStrategies() {
   try {
-    const rows = await fetch('/api/strategies').then(r => r.json()).catch(() => []);
+    const [rows, jobs, failures] = await Promise.all([
+      fetch('/api/strategies').then(r => r.json()).catch(() => []),
+      fetch('/api/approvals/active').then(r => r.json()).catch(() => []),
+      fetch('/api/approvals/recent-failures').then(r => r.json()).catch(() => []),
+    ]);
     strategiesData = Array.isArray(rows) ? rows : [];
+    _stActiveJobs = {};
+    for (const j of (Array.isArray(jobs) ? jobs : [])) {
+      _stActiveJobs[j.strategy_id] = j;
+    }
+    // Don't clobber in-flight session failures captured since last reload —
+    // just fill in anything the server remembers that we didn't.
+    for (const f of (Array.isArray(failures) ? failures : [])) {
+      if (!_stActiveJobs[f.strategy_id]) {
+        _stLastFailures[f.strategy_id] = { job_id: f.job_id, reason: _stFailReason(f.result || {}) };
+      }
+    }
   } catch {
     strategiesData = [];
+    _stActiveJobs = {};
   }
   _renderStrategyPage();
+}
+
+const _ST_PHASE_META = {
+  data_pipeline_setup: { icon: '📡', label: 'setting up data collection' },
+  awaiting_snapshot:   { icon: '⏳', label: 'awaiting first snapshot'     },
+  strategycoder:       { icon: '🔨', label: 'strategycoder building'      },
+  validate:            { icon: '🧪', label: 'validating contract'         },
+  backtest:            { icon: '📈', label: 'running 3-window backtest'   },
+  promoting:           { icon: '🚀', label: 'promoting to paper'          },
+};
+function _stJobChipHTML(sid) {
+  const j = _stActiveJobs[sid];
+  if (!j) return '';
+  const meta = _ST_PHASE_META[j.phase] || { icon: '⏳', label: j.phase || 'running' };
+  const pct = typeof j.progress === 'number' ? j.progress : 0;
+  const missing = j.payload && j.payload.missing_sources;
+  const missingHint = Array.isArray(missing) && missing.length
+    ? ' (' + missing.length + ' src)' : '';
+  return (
+    '<div class="st-job-wrap" title="job ' + j.job_id + ' — ' + meta.label + '">' +
+      '<div class="st-job-chip">' +
+        '<span class="st-job-fill" style="width:' + pct + '%"></span>' +
+        '<span class="st-job-text">' + meta.icon + ' ' + meta.label + ' · ' + pct + '%' + missingHint + '</span>' +
+      '</div>' +
+      '<button class="st-action-btn st-cancel-btn" onclick="stCancelApproval(\\'' + sid + '\\')" title="Cancel this approval job">Cancel</button>' +
+    '</div>'
+  );
+}
+
+function _stFailureBannerHTML(sid) {
+  const fail = _stLastFailures[sid];
+  if (!fail) return '';
+  const reason = fail.reason || fail;   // legacy string payload during in-flight sessions
+  const safe = String(reason).replace(/[<&>]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'})[c]);
+  return (
+    '<div class="st-fail-banner" title="' + _escStr(String(reason)) + '">' +
+      '<span class="st-fail-ico">❌</span>' +
+      '<span class="st-fail-msg">' + safe + '</span>' +
+      '<button class="st-action-btn st-fail-dismiss" onclick="stDismissFailure(\\'' + sid + '\\')" title="Clear this failure badge">✕</button>' +
+    '</div>'
+  );
+}
+
+function _stRenderJobChips() {
+  // Re-render the candidates section so chips update in place.
+  const rows = strategiesData.filter(_inCandidate);
+  _renderCandidates(rows);
 }
 
 function _inActiveStack(r) { return r.state === 'live' || r.state === 'monitoring'; }
@@ -2011,10 +2272,42 @@ function _renderCandidates(rows) {
       const sharpeFail = sharpe != null && parseFloat(sharpe) < 0.5;
       const ddFail     = maxDd  != null && Math.abs(parseFloat(maxDd)) > 20;
       const gateWarn   = sharpeFail || ddFail;
-      const approveLbl = gateWarn ? '⚠ Approve' : 'Approve';
-      const approveTitle = gateWarn
-        ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
-        : 'Promote to Active Stack';
+      // Per-state approve button emoticon + label + click handler.
+      //   staging   → 📡 starts data-pipeline setup (auto-promote to candidate)
+      //   candidate → 🔨 invokes StrategyCoder + backtest (auto-promote to paper)
+      //   paper     → ✅ promotes to live (synchronous gate check; ⚠ on failing metrics)
+      //   last failure? → ❌ Retry  (with tooltip containing the reason)
+      const lastFail = _stLastFailures[r.strategy_id];
+      const approveLbl = lastFail
+        ? '❌ Retry'
+        : (r.state === 'staging'   ? '📡 Approve'
+        :  r.state === 'candidate' ? '🔨 Approve'
+        :  gateWarn                ? '⚠ Approve'
+                                   : '✅ Approve');
+      const approveTitle = lastFail
+        ? ('Last run failed: ' + (lastFail.reason || lastFail) + '. Click to retry.')
+        : (r.state === 'staging'
+            ? 'Register missing data sources for daily collection; auto-promotes to CANDIDATE once the first complete snapshot lands.'
+            : r.state === 'candidate'
+              ? 'Invoke StrategyCoder to implement + run the 3-window convergence backtest; auto-promotes to PAPER on pass.'
+              : (gateWarn
+                  ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
+                  : 'Promote to Active Stack'));
+      const approveCls = lastFail
+        ? 'st-action-btn st-approve-btn st-approve-retry'
+        : ((r.state === 'staging' || r.state === 'candidate')
+            ? 'st-action-btn st-approve-btn st-approve-async'
+            : 'st-action-btn st-approve-btn');
+      const approveOnClick = (r.state === 'staging' || r.state === 'candidate')
+        ? \`stApproveGated('\${r.strategy_id}', '\${r.state}')\`
+        : \`stApprove('\${r.strategy_id}', \${gateWarn})\`;
+      const jobChip = _stJobChipHTML(r.strategy_id);
+      const failBanner = _stFailureBannerHTML(r.strategy_id);
+      const actionsCell = jobChip
+        ? jobChip
+        : (failBanner +
+           \`<button class="\${approveCls}" title="\${_escStr(approveTitle)}" onclick="\${approveOnClick}">\${approveLbl}</button>
+            <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>\`);
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
@@ -2023,16 +2316,34 @@ function _renderCandidates(rows) {
         <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
         <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
         <td class="num" style="color:var(--muted)">\${trades != null ? trades : '—'}</td>
-        <td>
-          <button class="st-action-btn st-approve-btn" title="\${_escStr(approveTitle)}" onclick="stApprove('\${r.strategy_id}', \${gateWarn})">\${approveLbl}</button>
-          <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>
-        </td>
+        <td>\${actionsCell}</td>
       </tr>\`;
     }).join('')}
   </table>\`;
 }
 
 // ── Action handlers ────────────────────────────────────────────────────────
+
+// Non-blocking toast notification. types: 'ok' | 'error' | 'warn' | 'info'.
+function toast(msg, type = 'info', ttlMs = 4_000) {
+  let host = document.getElementById('toast-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'toast-host';
+    document.body.appendChild(host);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  el.onclick = () => el.remove();
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('toast-in'));
+  setTimeout(() => {
+    el.classList.add('toast-out');
+    setTimeout(() => el.remove(), 350);
+  }, ttlMs);
+}
+
 async function _stTransition(sid, toState, force, reason) {
   try {
     const resp = await fetch('/api/strategies/' + encodeURIComponent(sid) + '/transition', {
@@ -2041,11 +2352,12 @@ async function _stTransition(sid, toState, force, reason) {
       body: JSON.stringify({ to_state: toState, force: !!force, reason: reason || '', actor: 'manual:dashboard' }),
     });
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) { alert('Transition failed: ' + (data.error || resp.statusText)); return false; }
+    if (!resp.ok) { toast('Transition failed: ' + (data.error || resp.statusText), 'error', 6_000); return false; }
+    toast(sid + ' → ' + toState, 'ok', 3_000);
     await loadStrategies();
     return true;
   } catch (e) {
-    alert('Network error: ' + e.message);
+    toast('Network error: ' + e.message, 'error', 6_000);
     return false;
   }
 }
@@ -2068,6 +2380,91 @@ async function stApprove(sid, gateWarn) {
 async function stReject(sid) {
   if (!confirm('Reject ' + sid + '? It will move back to candidate for further research.')) return;
   await _stTransition(sid, 'candidate', false, 'Manual reject via dashboard');
+}
+
+async function stApproveGated(sid, state) {
+  const label = state === 'staging'
+    ? 'This will register missing data sources for daily collection and auto-promote ' + sid +
+      ' to CANDIDATE once the first complete snapshot lands. Continue?'
+    : 'This will invoke StrategyCoder to implement ' + sid +
+      ' and run the convergence backtest (5–15 min). On pass, it promotes to PAPER. Continue?';
+  if (!confirm(label)) return;
+  // Dismiss any persisted failure banner server-side before retrying; if the
+  // retry also fails, a fresh banner row will replace it.
+  const prev = _stLastFailures[sid];
+  if (prev && prev.job_id) {
+    fetch('/api/approvals/' + encodeURIComponent(prev.job_id) + '/dismiss', {method:'POST'}).catch(() => {});
+  }
+  delete _stLastFailures[sid];
+  try {
+    const resp = await fetch('/api/strategies/' + encodeURIComponent(sid) + '/approve', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ actor: 'manual:dashboard' }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { toast('Approve failed: ' + (data.error || resp.statusText), 'error', 6_000); return; }
+    _stActiveJobs[sid] = { job_id: data.job_id, phase: data.phase, progress: 0, strategy_id: sid };
+    toast('🚀 Approval started for ' + sid, 'info', 3_000);
+    await loadStrategies();
+  } catch (e) { toast('Network error: ' + e.message, 'error', 6_000); }
+}
+
+async function stDismissFailure(sid) {
+  const fail = _stLastFailures[sid];
+  delete _stLastFailures[sid];
+  const rows = strategiesData.filter(_inCandidate);
+  _renderCandidates(rows);
+  // Persist the dismissal server-side so it also survives the next reload.
+  if (fail && fail.job_id) {
+    try {
+      await fetch('/api/approvals/' + encodeURIComponent(fail.job_id) + '/dismiss', {method:'POST'});
+    } catch (_) { /* banner is gone locally; retry on next click if it comes back */ }
+  }
+}
+
+// Human-readable reason for a failed approval_job result payload. The
+// candidate→paper path only fails now when the strategy can't execute
+// (contract_violation / coding_failed / backtest_error / import error).
+// Metric-based failures no longer happen — they promote and show up in the
+// dashboard for manual judgment.
+function _stFailReason(result) {
+  if (!result) return 'unknown failure';
+
+  // Staging-side fast fails (unsupported data source, missing spec).
+  if (result.hint)    return result.hint;
+  if (result.error === 'unsupported_source' && Array.isArray(result.unsupported)) {
+    return 'Missing data source(s): ' + result.unsupported.join(', ') +
+           ' — add a collector module to data/master/schema_registry.json before approving.';
+  }
+  if (result.error === 'missing_strategy_spec') {
+    return 'No research_candidates or strategy_hypotheses row for this strategy — seed one first.';
+  }
+
+  // Execution errors from candidate_approver → _codeFromQueue. Prefer the
+  // raw error string; fall back to reasonCode mapping if error is missing.
+  const rc = result.reasonCode;
+  const err = result.error || (result.backtest && result.backtest.error);
+  if (err && typeof err === 'string' && err.length) {
+    if (rc === 'contract_violation')   return 'Contract validation failed — ' + err;
+    if (rc === 'coding_failed')        return 'StrategyCoder build failed — ' + err;
+    if (rc === 'backtest_error')       return "Couldn't execute — " + err;
+    return err;
+  }
+  if (rc) return 'Failed: ' + rc;
+  return 'unknown failure';
+}
+
+async function stCancelApproval(sid) {
+  if (!confirm('Cancel the in-flight approval job for ' + sid + '? Any data_ingestion_queue rows this job inserted will be rolled back.')) return;
+  try {
+    const resp = await fetch('/api/strategies/' + encodeURIComponent(sid) + '/approve/cancel', {method:'POST'});
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { toast('Cancel failed: ' + (data.error || resp.statusText), 'error', 6_000); return; }
+    delete _stActiveJobs[sid];
+    toast((data.child_killed ? '🛑 Killed subprocess for ' : '⚠️ Cancelled ') + sid, 'warn', 3_000);
+    await loadStrategies();
+  } catch (e) { toast('Network error: ' + e.message, 'error', 6_000); }
 }
 
 function _buildChart(labels, values, yFmt, tooltipFmt, color) {

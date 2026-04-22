@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T05:35:22.404243+00:00",
+  "updated_at": "2026-04-22T20:49:23.361406+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -156,14 +156,23 @@
       ]
     },
     "S_HV7_iv_crush_fade": {
-      "state": "paper",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:22:48.098Z",
       "metadata": {
         "canonical_file": "shv7_iv_crush_fade.py",
         "class": "IVCrushFade",
         "description": "IV Crush Fade  sell vol after peak iv_rank declines (Stein 1989)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:22:48.098Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV8_gamma_theta_carry": {
       "state": "live",
@@ -211,23 +220,49 @@
     },
     "S_HV10_triple_gate_fear": {
       "state": "staging",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state_since": "2026-04-22T17:31:05.162573+00:00",
       "metadata": {
         "canonical_file": "shv10_triple_gate_fear.py",
         "class": "TripleGateFear",
         "description": "Triple-Gate Fear  STAGING: awaiting unusual_flow data (Whaley 2000)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "staging",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:23:07.050Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "staging",
+          "timestamp": "2026-04-22T17:31:05.162573+00:00",
+          "actor": "manual:dashboard",
+          "reason": "Revert: staging shouldn't have been directly approvable \u2014 awaiting data import gate",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV11_cross_stock_dispersion": {
-      "state": "paper",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:10:21.031Z",
       "metadata": {
         "canonical_file": "shv11_cross_stock_dispersion.py",
         "class": "CrossStockDispersion",
         "description": "Cross-Stock Dispersion  decorrelated high-IV stocks (Drechsler 2011)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:10:21.031Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV12_vrp_normalization": {
       "state": "paper",
@@ -240,34 +275,61 @@
       "history": []
     },
     "S_HV13_call_put_iv_spread": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:21:29.639Z",
       "metadata": {
         "canonical_file": "shv13_call_put_iv_spread.py",
         "class": "CallPutIVSpread",
         "description": "ATM call IV - put IV spread signal (Cremers & Weinbaum 2010 JFQA)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:21:29.639Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV14_otm_skew_factor": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:22:00.478Z",
       "metadata": {
         "canonical_file": "shv14_otm_skew_factor.py",
         "class": "OTMSkewFactor",
         "description": "OTM put skew vs ATM call IV (Xing, Zhang & Zhao 2010 JFQA)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:22:00.478Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV15_iv_term_structure": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:22:24.876Z",
       "metadata": {
         "canonical_file": "shv15_iv_term_structure.py",
         "class": "IVTermStructure",
         "description": "IV term structure backwardation/contango signal"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:22:24.876Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV16_gex_regime": {
       "state": "live",
@@ -292,14 +354,23 @@
       ]
     },
     "S_HV17_earnings_straddle_fade": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:10:35.189Z",
       "metadata": {
         "canonical_file": "shv17_earnings_straddle_fade.py",
         "class": "EarningsStraddleFade",
         "description": "SELL_VOL implied > 1.20x realized near earnings (Muravyev & Pearson 2020 JFE). staging: needs earnings_dte in engine.py"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:10:35.189Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV19_iv_surface_tilt": {
       "state": "live",
@@ -324,14 +395,23 @@
       ]
     },
     "S_HV20_iv_dispersion_reversion": {
-      "state": "paper",
-      "state_since": "2026-04-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:22:30.758Z",
       "metadata": {
         "canonical_file": "shv20_iv_dispersion_reversion.py",
         "class": "IVDispersionReversion",
         "description": "Cross-section iv_rank z-score mean reversion (Driessen et al 2009 JoF; Goyal & Saretto 2009 JFE)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:22:30.758Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S1_event_driven_new_news": {
       "state": "candidate",
@@ -344,8 +424,8 @@
       "history": []
     },
     "S_markov_frontier_regimes": {
-      "state": "paper",
-      "state_since": "2026-04-18T08:30:28.841439+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T17:22:38.541Z",
       "metadata": {
         "canonical_file": "S_markov_frontier_regimes.py",
         "class": "MarkovFrontierRegimes",
@@ -353,11 +433,20 @@
       },
       "history": [
         {
-          "from": "candidate",
-          "to": "paper",
-          "at": "2026-04-18T08:30:28.841439+00:00",
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-18T08:30:28.841439+00:00",
           "actor": "system",
-          "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
+          "reason": "Auto-promoted: passed convergence gate (2/3 windows)",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T17:22:38.541Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -371,11 +460,12 @@
       },
       "history": [
         {
-          "from": "candidate",
-          "to": "paper",
-          "at": "2026-04-18T08:30:28.841439+00:00",
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-18T08:30:28.841439+00:00",
           "actor": "system",
-          "reason": "Auto-promoted: passed convergence gate (2/3 windows)"
+          "reason": "Auto-promoted: passed convergence gate (2/3 windows)",
+          "metadata": {}
         },
         {
           "from_state": "paper",
@@ -391,14 +481,31 @@
       ]
     },
     "S_epistemic_rank_gate": {
-      "state": "candidate",
-      "state_since": "2026-04-18T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:11:46.200Z",
       "metadata": {
         "canonical_file": "S_epistemic_rank_gate.py",
         "class": "EpistemicRankGate",
         "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T19:45:20.227613+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.50, DD 0.2%, trades 314",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:11:46.200Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_tr_01_vvix_early_warning": {
       "state": "paper",
@@ -559,54 +666,134 @@
       "history": []
     },
     "S_alpha191_lasso_crossmarket": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T18:16:00.848Z",
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
         "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T18:11:32.477300+00:00",
+          "actor": "system:reconcile-2026-04-22",
+          "reason": "Registry was already paper (backtest passed 2.01 sharpe, 208 trades); manifest didn't flip because lifecycle.py choked on unknown STAGING state",
+          "metadata": {
+            "bt_sharpe": 2.0125,
+            "bt_trades": 208
+          }
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T18:16:00.848Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_barbell_trend_horizon": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:11:40.523Z",
       "metadata": {
         "canonical_file": "S_barbell_trend_horizon.py",
         "class": "BarbellTrendHorizon",
         "description": "Multi-horizon momentum barbell with adaptive Bayesian horizon weights: LONG top-decile, SHORT bottom-decile"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T19:34:03.213610+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 3.91, DD 1.5%, trades 370",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:11:40.523Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_nonstationarity_adaptive_selection": {
-      "state": "candidate",
-      "state_since": "2026-04-20T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:14:43.863Z",
       "metadata": {
         "canonical_file": "S_nonstationarity_adaptive_selection.py",
         "class": "NonStationarityAdaptiveSelection",
         "description": "Tournament-select momentum windows validated on rolling nonstationary windows; rank LONG/SHORT"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T20:14:06.973357+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.97, DD 0.7%, trades 130",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:14:43.863Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_local_global_balance": {
-      "state": "candidate",
-      "state_since": "2026-04-20T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T20:14:47.137Z",
       "metadata": {
         "canonical_file": "S_local_global_balance.py",
         "class": "LocalGlobalBalance",
         "description": "rank_by(abs(local_balance_node - global_balance_network)); LONG top_decile in HIGH_VOL"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T20:12:53.840946+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T20:14:47.137Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_sparse_basis_pursuit_sdf": {
-      "state": "candidate",
-      "state_since": "2026-04-21T00:00:00+00:00",
+      "state": "paper",
+      "state_since": "2026-04-22T20:49:23.326176+00:00",
       "metadata": {
         "canonical_file": "S_sparse_basis_pursuit_sdf.py",
         "class": "SparseBasisPursuitSDF",
         "description": "Sparse SDF estimation: rank-composite of price factors selects ~32 nonzero positions (approx L1 basis pursuit), monthly rebalance"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-22T20:49:23.326176+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.51, DD 3.9%, trades 370",
+          "metadata": {}
+        }
+      ]
     },
     "S21_iv_hv_spread": {
       "state": "live",

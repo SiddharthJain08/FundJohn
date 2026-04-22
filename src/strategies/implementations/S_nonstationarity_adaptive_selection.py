@@ -15,7 +15,7 @@ class NonStationarityAdaptiveSelection(BaseStrategy):
     name        = 'NonStationarityAdaptiveSelection'
     description = 'Tournament-select momentum windows validated on rolling nonstationary windows; rank LONG/SHORT'
     tier        = 2
-    active_in_regimes = ['RISK_OFF', 'TRANSITIONING', 'HIGH_VOL']
+    active_in_regimes = ['TRANSITIONING', 'HIGH_VOL', 'CRISIS']
 
     WINDOWS     = [21, 42, 63]
     EVAL_WINDOW = 21   # held-out period for IC validation

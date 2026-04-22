@@ -26,7 +26,7 @@ class QuantumRebalanceQAOA(BaseStrategy):
     name        = 'QuantumRebalanceQAOA'
     description = 'Ledoit-Wolf shrinkage + hierarchical clustering + entropy-weighted inv-vol rebalance'
     tier        = 2
-    active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'NEUTRAL']
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING']
     min_lookback = 252
 
     N_ASSETS    = 10    # decorrelated assets to select

@@ -38,6 +38,20 @@ REGIME_POSITION_SCALE = {
     'CRISIS':        0.15,
 }
 
+# Canonical regime vocabulary — the HMM classifier only ever emits these four.
+# Strategies that declare any other tag in `active_in_regimes` will never fire
+# because `should_run()` does exact-string membership. See docs below.
+CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+
+# Soft synonyms StrategyCoder sometimes emits from recent paper vocabularies.
+# At class-definition time we expand synonyms into canonical tags so legacy
+# strategies keep working. New strategies should use canonical directly.
+REGIME_SYNONYMS = {
+    'NEUTRAL':  ('LOW_VOL', 'TRANSITIONING'),   # calm-to-mildly-uncertain band
+    'RISK_OFF': ('HIGH_VOL', 'CRISIS'),         # elevated-stress band
+    'RISK_ON':  ('LOW_VOL', 'TRANSITIONING'),   # mirror of RISK_OFF
+}
+
 # Tighten ATR-based stops in high-vol regimes to preserve R:R geometry.
 # Without this, 2× ATR stops balloon to 6-9% in TRANSITIONING/HIGH_VOL while
 # targets remain fixed at 5-20%, collapsing R:R to <1x and making EV negative.
@@ -68,6 +82,36 @@ class BaseStrategy(ABC):
         super().__init_subclass__(**kwargs)
         if cls.active_in_regimes is None:
             cls.active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
+        # Preserve the author's original declaration so validate_strategy can
+        # inspect it and reject bad tags at the candidate→paper gate.
+        cls._raw_active_in_regimes = list(cls.active_in_regimes)
+        # Normalize non-canonical tags at runtime so legacy/imported strategies
+        # don't silently become inert. Synonyms expand; unknown tags are
+        # dropped with a warning (they'd never match a HMM-emitted state
+        # anyway; silently keeping them hid real bugs).
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for tag in cls.active_in_regimes:
+            if tag in CANONICAL_REGIMES:
+                if tag not in seen:
+                    normalized.append(tag); seen.add(tag)
+            elif tag in REGIME_SYNONYMS:
+                import warnings
+                warnings.warn(
+                    f"{cls.__name__}: regime tag '{tag}' is a synonym — expanding to {REGIME_SYNONYMS[tag]}. "
+                    f"Use canonical tags {CANONICAL_REGIMES} directly to avoid this warning.",
+                    stacklevel=3,
+                )
+                for exp in REGIME_SYNONYMS[tag]:
+                    if exp not in seen:
+                        normalized.append(exp); seen.add(exp)
+            else:
+                import warnings
+                warnings.warn(
+                    f"{cls.__name__}: unknown regime tag '{tag}' dropped — not in {CANONICAL_REGIMES}.",
+                    stacklevel=3,
+                )
+        cls.active_in_regimes = normalized or ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
     def __init__(self, parameters: dict = None):
         self.parameters = parameters or self.default_parameters()

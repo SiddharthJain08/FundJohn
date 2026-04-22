@@ -4,14 +4,17 @@ auto_backtest.py — Portfolio-level walk-forward backtest for generated strateg
 Usage:
     python3 src/strategies/auto_backtest.py src/strategies/implementations/S_xx_foo.py
 
-Exit code 0 = passed gate. Exit code 1 = failed gate.
-Prints JSON: {"passed": bool, "sharpe": float, "max_dd": float, "trade_count": int,
-              "windows": [...], "error": null | str}
+Exit code 0 = backtest ran (metrics printed). Exit code 1 = strategy couldn't
+execute at all (contract violation, import error, no strategy class, no prices).
 
-Gate criteria (all must pass in ≥ 2 of 3 convergence windows):
-    Sharpe >= 0.5
-    Max drawdown <= 40%
-    Trade count >= 20
+This script is a *pure metrics reporter* — it does NOT gate candidate→paper.
+The only candidate→paper blocker is code that literally can't execute; that's
+captured via the `error` field below (non-null when blocking). The human
+judges strategy quality from the persisted sharpe / max_dd / trade_count in
+the dashboard, not from any threshold applied here.
+
+Prints JSON: {sharpe, max_dd, total_return_pct, trade_count, windows, error}
+Per-window entries: {window, sharpe, max_dd, trade_count, note?, error?}.
 """
 
 import sys
@@ -29,10 +32,6 @@ sys.path.insert(0, SRC_DIR)
 
 from strategies.validate_strategy import validate
 
-# ── Gate thresholds ────────────────────────────────────────────────────────────
-MIN_SHARPE      = 0.50
-MAX_DRAWDOWN    = 0.40   # absolute value
-MIN_TRADES      = 20
 TRADING_DAYS    = 252
 RISK_FREE_DAILY = 0.05 / TRADING_DAYS
 
@@ -102,7 +101,7 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     # OOS trading days
     oos_dates = prices.loc[oos_start_dt:oos_end_dt].index
     if len(oos_dates) == 0:
-        return {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': 0, 'passed': False, 'note': 'no OOS dates'}
+        return {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': 0, 'note': 'no OOS dates'}
 
     # Portfolio state
     cash         = INITIAL_CAPITAL
@@ -249,13 +248,13 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
 
     # ── Compute metrics ────────────────────────────────────────────────────────
     if len(equity_curve) < 5:
-        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few equity points'}
+        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'note': 'too few equity points'}
 
     eq = pd.Series(equity_curve).sort_index()
     daily_ret = eq.pct_change().dropna()
 
     if len(daily_ret) < 2:
-        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'passed': False, 'note': 'too few returns'}
+        return {'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0, 'trade_count': trade_count, 'note': 'too few returns'}
 
     # If the strategy fired no trades, the equity curve is flat at INITIAL_CAPITAL
     # and daily_ret ≈ 0 with std → 0; the sharpe formula then blows up to ~-3M
@@ -264,7 +263,7 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     if trade_count == 0 or daily_ret.std() < 1e-8:
         return {
             'sharpe': 0.0, 'max_dd': 0.0, 'total_return_pct': 0.0,
-            'trade_count': trade_count, 'passed': False,
+            'trade_count': trade_count,
             'note': 'no trades / flat equity',
         }
 
@@ -280,18 +279,11 @@ def _run_window(strategy_cls, prices: pd.DataFrame, train_start: str, oos_start:
     end_val   = float(eq.iloc[-1])
     total_return_pct = ((end_val / start_val) - 1.0) * 100.0 if start_val > 0 else 0.0
 
-    passed = (
-        sharpe  >= MIN_SHARPE and
-        max_dd  <= MAX_DRAWDOWN and
-        trade_count >= MIN_TRADES
-    )
-
     return {
         'sharpe':           round(sharpe, 4),
         'max_dd':           round(max_dd, 4),
         'total_return_pct': round(total_return_pct, 2),
         'trade_count':      trade_count,
-        'passed':           passed,
     }
 
 
@@ -300,7 +292,7 @@ def run_backtest(filepath: str) -> dict:
     # Step 1: validate contract first
     val = validate(filepath)
     if not val['ok']:
-        return {'passed': False, 'error': f"Contract validation failed: {'; '.join(val['errors'])}", 'windows': []}
+        return {'error': f"Contract validation failed: {'; '.join(val['errors'])}", 'windows': []}
 
     # Step 2: load strategy class
     import importlib
@@ -329,7 +321,7 @@ def run_backtest(filepath: str) -> dict:
         try:
             module = importlib.import_module(module_name)
         except Exception as e:
-            return {'passed': False, 'error': f'Import error: {e}', 'windows': []}
+            return {'error': f'Import error: {e}', 'windows': []}
     else:
         import importlib.util
         spec = importlib.util.spec_from_file_location('_bt_strat', abs_path)
@@ -337,18 +329,18 @@ def run_backtest(filepath: str) -> dict:
         try:
             spec.loader.exec_module(module)
         except Exception as e:
-            return {'passed': False, 'error': f'Import error: {e}', 'windows': []}
+            return {'error': f'Import error: {e}', 'windows': []}
 
     classes = [obj for _, obj in _inspect.getmembers(module, _inspect.isclass) if _is_strategy_class(obj)]
     if not classes:
-        return {'passed': False, 'error': 'No strategy class found', 'windows': []}
+        return {'error': 'No strategy class found', 'windows': []}
     strategy_cls = classes[0]
 
     # Step 3: load prices once
     try:
         prices = _load_prices()
     except Exception as e:
-        return {'passed': False, 'error': f'Failed to load prices: {e}', 'windows': []}
+        return {'error': f'Failed to load prices: {e}', 'windows': []}
 
     # Step 4: run 3 convergence windows
     window_results = []
@@ -356,29 +348,24 @@ def run_backtest(filepath: str) -> dict:
         try:
             res = _run_window(strategy_cls, prices, train_start, oos_start, oos_end)
         except Exception as e:
-            res = {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': 0, 'passed': False,
+            res = {'sharpe': 0.0, 'max_dd': 0.0, 'trade_count': 0,
                    'error': traceback.format_exc()}
         res['window'] = f'{oos_start}–{oos_end}'
         window_results.append(res)
 
-    windows_passed = sum(1 for w in window_results if w.get('passed'))
-    overall_passed = windows_passed >= 2
-
-    # Aggregate metrics (average across windows)
-    sharpes  = [w['sharpe']             for w in window_results]
-    max_dds  = [w['max_dd']             for w in window_results]
-    returns  = [w.get('total_return_pct', 0.0) for w in window_results]
-    trades   = [w['trade_count']        for w in window_results]
+    # Pure metrics reporter — no gate logic here. Aggregate across windows.
+    sharpes = [w['sharpe']                     for w in window_results]
+    max_dds = [w['max_dd']                     for w in window_results]
+    returns = [w.get('total_return_pct', 0.0)  for w in window_results]
+    trades  = [w['trade_count']                for w in window_results]
 
     return {
-        'passed':           overall_passed,
-        'windows_passed':   windows_passed,
         'sharpe':           round(float(np.mean(sharpes)), 4),
         'max_dd':           round(float(np.mean(max_dds)),  4),
         'total_return_pct': round(float(np.mean(returns)),  2),
         'trade_count':      int(np.sum(trades)),
         'windows':          window_results,
-        'error':       None,
+        'error':            None,
     }
 
 
@@ -389,4 +376,6 @@ if __name__ == '__main__':
 
     result = run_backtest(sys.argv[1])
     print(json.dumps(result, indent=2))
-    sys.exit(0 if result['passed'] else 1)
+    # Exit 0 if metrics were produced. Exit 1 only when the strategy couldn't
+    # execute at all (error field set by one of the hard-fail return paths).
+    sys.exit(1 if result.get('error') else 0)

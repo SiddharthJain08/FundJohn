@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 class StrategyState(str, Enum):
     """All lifecycle states a strategy can occupy."""
+    STAGING    = "staging"     # awaiting data-pipeline setup before it can be a candidate
     CANDIDATE  = "candidate"   # proposed — no implementation required yet
     PAPER      = "paper"       # implemented — undergoing backtesting / paper trading
     LIVE       = "live"        # active in production execution
@@ -49,6 +50,9 @@ class StrategyState(str, Enum):
 
 # Keyed (from_state, to_state) → human description of the move.
 VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
+    (StrategyState.STAGING,    StrategyState.CANDIDATE):   "data pipeline setup complete",
+    (StrategyState.STAGING,    StrategyState.ARCHIVED):    "abandon before data is available",
+    (StrategyState.CANDIDATE,  StrategyState.STAGING):     "regress — needs additional data sources",
     (StrategyState.CANDIDATE,  StrategyState.PAPER):       "begin backtesting",
     (StrategyState.CANDIDATE,  StrategyState.ARCHIVED):    "abandon before implementation",
     (StrategyState.PAPER,      StrategyState.LIVE):        "promote to live after passing backtest guards",
