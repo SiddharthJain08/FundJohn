@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T05:06:48.664Z",
+  "updated_at": "2026-04-22T05:10:54.244Z",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -14,7 +14,7 @@
     },
     "S9_dual_momentum": {
       "state": "live",
-      "state_since": "2026-04-22T01:43:00.206Z",
+      "state_since": "2026-04-22T05:10:54.244Z",
       "metadata": {
         "canonical_file": "s09_dual_momentum.py",
         "class": "DualMomentum",
@@ -35,6 +35,22 @@
           "timestamp": "2026-04-22T01:43:00.206Z",
           "actor": "manual:dashboard",
           "reason": "dashboard roundtrip revert",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "monitoring",
+          "timestamp": "2026-04-22T05:10:54.124Z",
+          "actor": "manual:dashboard",
+          "reason": "sync-test",
+          "metadata": {}
+        },
+        {
+          "from_state": "monitoring",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:10:54.244Z",
+          "actor": "manual:dashboard",
+          "reason": "sync-test revert",
           "metadata": {}
         }
       ]

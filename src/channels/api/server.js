@@ -547,6 +547,49 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     console.warn('lifecycle_events insert failed (non-fatal):', e.message);
   }
 
+  // ── Sync strategy_registry.status ───────────────────────────────────────
+  // The daily execution pipeline reads strategy_registry.status='approved'
+  // as the gate for which strategies actually fire. Without this sync the
+  // manifest state and real-world execution drift apart:
+  //   * Approving a paper strategy via the dashboard wouldn't turn it on
+  //     unless someone also runs the /approve Discord command.
+  //   * Unstacking a live strategy wouldn't stop it from firing.
+  // Map lifecycle state → registry status the pipeline honors:
+  //   live, monitoring         → 'approved' (runs daily)
+  //   paper, candidate, staging→ 'pending_approval'
+  //   deprecated, archived     → 'deprecated'
+  const REGISTRY_STATUS_FOR = {
+    live:       'approved',
+    monitoring: 'approved',
+    paper:      'pending_approval',
+    candidate:  'pending_approval',
+    staging:    'pending_approval',
+    deprecated: 'deprecated',
+    archived:   'deprecated',
+  };
+  const targetStatus = REGISTRY_STATUS_FOR[toState];
+  if (targetStatus) {
+    try {
+      if (targetStatus === 'approved') {
+        await dbQuery(
+          `UPDATE strategy_registry
+              SET status      = $2,
+                  approved_by = COALESCE(approved_by, $3),
+                  approved_at = COALESCE(approved_at, NOW())
+            WHERE id = $1`,
+          [sid, targetStatus, actor],
+        );
+      } else {
+        await dbQuery(
+          `UPDATE strategy_registry SET status = $2 WHERE id = $1`,
+          [sid, targetStatus],
+        );
+      }
+    } catch (e) {
+      console.warn('strategy_registry status sync failed (non-fatal):', e.message);
+    }
+  }
+
   // Broadcast SSE so the dashboard refreshes even without polling.
   try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: now }); } catch (_) {}
 
