@@ -67,7 +67,7 @@ def load_signals(uri: str, run_date: str) -> list[dict]:
         """
         SELECT strategy_id, ticker, direction, entry_price, stop_loss,
                target_1, target_2, target_3, position_size_pct,
-               signal_params, regime_state, confidence
+               signal_params, regime_state
           FROM execution_signals
          WHERE signal_date = %s
          ORDER BY strategy_id, ticker
@@ -86,6 +86,9 @@ def load_signals(uri: str, run_date: str) -> list[dict]:
                 d['signal_params'] = json.loads(d['signal_params']) if d['signal_params'] else {}
             except ValueError:
                 d['signal_params'] = {}
+        # Confidence lives in signal_params, not in its own column. Default MED.
+        params = d.get('signal_params') or {}
+        d['confidence'] = (params.get('confidence') if isinstance(params, dict) else None) or 'MED'
         rows.append(d)
     conn.close()
     return rows
@@ -196,11 +199,17 @@ def load_mastermind_rec(uri: str) -> dict | None:
 
 # ── Per-signal features ─────────────────────────────────────────────────────
 
-def _safe(x):
+def _safe(x, ndigits: int | None = 4):
+    """Return JSON-safe numeric: drop NaN/Inf; round floats to keep the
+    handoff compact (400KB → ~100KB with ndigits=4, dramatically reducing
+    TradeJohn prompt tokens)."""
     if x is None:
         return None
-    if isinstance(x, float) and (math.isnan(x) or math.isinf(x)):
-        return None
+    if isinstance(x, float):
+        if math.isnan(x) or math.isinf(x):
+            return None
+        if ndigits is not None:
+            return round(x, ndigits)
     return x
 
 
