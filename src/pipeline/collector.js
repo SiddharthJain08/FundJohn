@@ -1473,17 +1473,10 @@ async function runDailyCollection() {
   const fmtN = (n) => Number(n || 0).toLocaleString();
   notify(`✅ Daily collection complete — ${cycleMins}m | errors: ${_stats.errors}`);
 
-  // Incrementally sync master Parquets — only new rows since last sync appended
-  try {
-    const { execSync: _execSync } = require('child_process');
-    const _syncOut = _execSync(
-      `python3 ${require('path').join(__dirname, '../../scripts/sync_master_parquets.py')}`,
-      { env: { ...process.env }, timeout: 300_000, stdio: 'pipe' }
-    ).toString().trim();
-    notify(`📦 Parquets synced — ${_syncOut.split('\n').find(l => l.includes('Sync complete')) || 'done'}`);
-  } catch (_syncErr) {
-    console.warn('[collector] Parquet sync failed:', _syncErr.message.slice(0, 100));
-  }
+  // Legacy DB→parquet sync step removed 2026-04-22: parquet-primary collector
+  // already writes directly to master parquets in each phase (Phase 2 prices,
+  // Phase 3 options, Phase 4 fundamentals, insider, macro). The referenced
+  // scripts/sync_master_parquets.py was deleted in the 2026-04-21 migration.
 
   if (_alertPost) {
     const r = cycleRow;

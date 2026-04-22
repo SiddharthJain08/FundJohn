@@ -129,17 +129,9 @@ async function executeTask(taskId, alertPost) {
     }
   }
 
-  // Incrementally sync master Parquets — only new rows appended
-  try {
-    const { execSync } = require('child_process');
-    const syncOut = execSync(
-      `python3 ${path.join(__dirname, '../../scripts/sync_master_parquets.py')}`,
-      { env: { ...process.env }, timeout: 300_000, stdio: 'pipe' }
-    ).toString().trim();
-    if (alertPost) alertPost(`✅ Master Parquets synced:\n\`\`\`\n${syncOut}\n\`\`\``);
-  } catch (err) {
-    if (alertPost) alertPost(`⚠️ Parquet sync failed — ${err.message.slice(0, 100)}`);
-  }
+  // Legacy sync_master_parquets.py removed 2026-04-22: collector + data-task
+  // phases now write directly to master parquets in the parquet-primary
+  // architecture. No post-sync step required.
 
   // Mark complete
   const finalStatus = unavailable.length > 0 && collected.length === 0 ? 'failed'

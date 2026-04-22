@@ -2539,8 +2539,27 @@ async function refreshPipeline() {
 }
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+const httpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[dashboard] OpenClaw dashboard → http://0.0.0.0:${PORT}`);
 });
 
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[dashboard] Port ${PORT} already in use — stale process still holds the socket. Exiting cleanly so systemd can retry.`);
+    process.exit(1);
+  }
+  console.error('[dashboard] http server error:', err);
+});
+
+function shutdown(reason) {
+  console.log(`[dashboard] shutdown(${reason}) — closing http server on :${PORT}`);
+  return new Promise((resolve) => {
+    const done = () => resolve();
+    const t = setTimeout(done, 3000);
+    httpServer.close(() => { clearTimeout(t); done(); });
+  });
+}
+
 module.exports.app = app;
+module.exports.httpServer = httpServer;
+module.exports.shutdown = shutdown;

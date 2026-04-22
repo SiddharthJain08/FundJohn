@@ -1798,4 +1798,22 @@ client.on('interactionCreate', async (interaction) => {
 client.on('error', (err) => console.error('[bot] Discord error:', err));
 process.on('unhandledRejection', (err) => console.error('[bot] Unhandled rejection:', err));
 
+let _shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  console.log(`[bot] ${signal} received — graceful shutdown starting`);
+  try {
+    const apiServer = require('../api/server');
+    if (apiServer && typeof apiServer.shutdown === 'function') {
+      await apiServer.shutdown(signal);
+    }
+  } catch (e) { console.error('[bot] api/server shutdown failed:', e.message); }
+  try { await client.destroy(); } catch (e) { console.error('[bot] discord destroy failed:', e.message); }
+  console.log('[bot] graceful shutdown complete');
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 client.login(BOT_TOKEN);
