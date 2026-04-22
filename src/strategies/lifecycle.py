@@ -266,6 +266,19 @@ class LifecycleStateMachine:
             strategy_id, event.from_state, to_state.value, actor,
         )
         self._persist_lifecycle_event(strategy_id, event, metadata)
+
+        # Unstack → queue orphaned data columns for removal. Only fires on
+        # transitions INTO deprecated/archived (per user spec: removal is
+        # symmetric to approval, and only activates upon unstack).
+        if to_state in (StrategyState.DEPRECATED, StrategyState.ARCHIVED):
+            try:
+                self._enqueue_orphan_columns(strategy_id, actor)
+            except Exception as exc:
+                logger.warning(
+                    "unstack-deprecation queueing skipped for %s: %s",
+                    strategy_id, exc,
+                )
+
         return rec
 
     def _persist_lifecycle_event(
@@ -301,6 +314,85 @@ class LifecycleStateMachine:
             conn.close()
         except Exception as exc:
             logger.debug("lifecycle_events insert skipped: %s", exc)
+
+    # ── unstack helper ───────────────────────────────────────────────────────
+
+    def _enqueue_orphan_columns(self, strategy_id: str, actor: str) -> None:
+        """When ``strategy_id`` is unstacked (deprecated/archived), scan its
+        requirements.json; for every column no remaining live/paper/monitoring
+        strategy still depends on, insert an auto-APPROVED row into
+        ``data_deprecation_queue`` so the daily queue drainer removes it.
+
+        No-op if the strategy has no requirements.json or no Postgres reach.
+        """
+        import os, json as _json
+        from pathlib import Path
+
+        postgres_uri = os.environ.get("POSTGRES_URI")
+        if not postgres_uri:
+            return
+
+        root = Path(__file__).resolve().parents[2]
+        req_dir = root / "src" / "strategies" / "implementations"
+
+        def _read_reqs(sid: str) -> set[str]:
+            rec = self._records.get(sid)
+            canonical = None
+            if rec and rec.metadata:
+                canonical = rec.metadata.get("canonical_file")
+            base = (canonical or f"{sid.lower()}.py").replace(".py", "")
+            p = req_dir / f"{base}.requirements.json"
+            if not p.exists():
+                return set()
+            j = _json.loads(p.read_text())
+            return set(j.get("required", [])) | set(j.get("optional", []))
+
+        unstack_cols = _read_reqs(strategy_id)
+        if not unstack_cols:
+            return
+
+        # Columns still referenced by any live/paper/monitoring peer
+        still_needed: set[str] = set()
+        keep_states = (
+            StrategyState.LIVE,
+            StrategyState.PAPER,
+            StrategyState.MONITORING,
+        )
+        for sid, rec in self._records.items():
+            if sid == strategy_id:
+                continue
+            if rec.state in keep_states:
+                still_needed |= _read_reqs(sid)
+
+        orphans = sorted(unstack_cols - still_needed)
+        if not orphans:
+            logger.info(
+                "lifecycle[%s]: no orphan columns on unstack — %d cols retained by peers",
+                strategy_id, len(unstack_cols),
+            )
+            return
+
+        import psycopg2
+        conn = psycopg2.connect(postgres_uri)
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    for col in orphans:
+                        cur.execute(
+                            """INSERT INTO data_deprecation_queue
+                                 (column_name, last_used_by, recommended_action,
+                                  status, approved_by, approved_at)
+                               VALUES (%s, %s, 'remove', 'APPROVED', %s, NOW())
+                               ON CONFLICT DO NOTHING""",
+                            (col, strategy_id, f"unstack:{actor}"),
+                        )
+        finally:
+            conn.close()
+
+        logger.info(
+            "lifecycle[%s]: queued %d orphan column(s) for removal: %s",
+            strategy_id, len(orphans), ", ".join(orphans),
+        )
 
     # ── registration ─────────────────────────────────────────────────────────
 
