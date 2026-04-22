@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MastermindJohn (corpus mode) every Saturday at 10:00 America/New_York
+
+[Timer]
+OnCalendar=Sat *-*-* 10:00:00 America/New_York
+Persistent=true
+Unit=openclaw-mastermind-corpus.service
+
+[Install]
+WantedBy=timers.target

@@ -1,5 +1,5 @@
 [Unit]
-Description=OpenClaw Opus Corpus Curator — weekly research paper curation
+Description=MastermindJohn — weekly corpus curation (Saturday)
 After=network.target postgresql.service
 PartOf=johnbot.service
 
@@ -13,9 +13,8 @@ WorkingDirectory=/root/openclaw
 ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/arxiv_discovery.py --days 90 --max-per-cat 80 --no-legacy
 # Step 1b: SSRN + NBER + practitioner venues via OpenAlex
 ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/openalex_discovery.py --days 90 --limit-per-venue 200 --min-citations 0
-# Step 2: run Opus curator on all un-curated papers + promote high bucket
-ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_curator.js --full --batch-size 100 --max-promote 600
-# Each step aborts on failure. Logs route to journald.
+# Step 2: run MastermindJohn (corpus mode) + promote high bucket
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode corpus --full --batch-size 100 --max-promote 600
 StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=3600

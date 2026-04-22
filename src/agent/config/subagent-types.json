@@ -132,8 +132,22 @@
       "skills": [],
       "description": "Writes data ingestion/removal code. Tight tool allowlist: src/ingestion/, src/database/migrations/, signals_cache.py only."
     },
+    "mastermind": {
+      "promptFile": "src/agent/prompts/subagents/mastermind.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 5,
+      "timeoutSeconds": 1200,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "low",
+      "maxBudgetUsd": 8.0,
+      "modes": ["RESEARCH", "STRATEGY_STACK"],
+      "skills": [],
+      "description": "MastermindJohn — Opus 4.7 (1M ctx). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
+    },
     "corpus-curator": {
-      "promptFile": "src/agent/prompts/subagents/corpus-curator.md",
+      "promptFile": "src/agent/prompts/subagents/mastermind.md",
       "components": [],
       "tools": [],
       "iterationLimit": 5,
@@ -144,7 +158,7 @@
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH"],
       "skills": [],
-      "description": "Opus 4.7 corpus-level paper curator. One invocation judges a batch of up to 100 papers against pipeline gate criteria and emits calibrated confidence scores. Highest token-consumption subagent in the system."
+      "description": "DEPRECATED alias for mastermind. Kept so existing call sites don't break; points at the same prompt. Remove once no references remain."
     }
   }
 }

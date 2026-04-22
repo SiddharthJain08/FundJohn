@@ -10,7 +10,10 @@ Autonomous quant PM system + hardcoded data pipeline:
 - **TradeJohn** (claude-sonnet-4-6): Signal generation and position sizing
 - **PaperHunter** (claude-haiku-4-5): Per-paper extraction + 4 rejection gates
 - **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation
-- **CorpusCurator** (claude-opus-4-7, 1M ctx): Weekly corpus-level paper curator — rates the full `research_corpus` in batched calls and promotes high-confidence picks to `research_candidates`. Runs Saturday 10:00 ET via `openclaw-curator.service`/`.timer`.
+- **MastermindJohn** (claude-opus-4-7, 1M ctx): Opus orchestrator with two modes.
+  - `mode=corpus` (Sat 10:00 ET via `openclaw-mastermind-corpus.service`/`.timer`) — rates the full `research_corpus` in batched calls and promotes high-confidence picks to `research_candidates`.
+  - `mode=strategy-stack` (Fri 20:00 ET via `openclaw-mastermind-weekly.service`/`.timer`) — analyses the live+monitoring strategy stack over each strategy's lifetime; posts a memo to `#strategy-memos` and structured sizing deltas to `#position-recommendations`. Latest row in `mastermind_weekly_reports` feeds TradeJohn's Monday handoff via `trade_handoff_builder.py`.
+  - Was `CorpusCurator` prior to 2026-04-22 Phase 3; legacy `corpus-curator` subagent type still resolves to the same prompt for backward compat.
 
 ## Context Retention
 Retain all context and memory of:
@@ -42,13 +45,14 @@ The cycle and paper-hunt flows run through LangGraph.js:
 - `src/strategies/implementations/` — strategy Python files
 - `src/agent/main.js` — agent orchestrator entry point
 - `src/agent/prompts/subagents/` — agent prompt files
-- `src/agent/curators/corpus_curator.js` — Opus Corpus Curator orchestrator (Phase 1–5)
-- `src/agent/curators/run_curator.js` — CLI entry for the Saturday timer
+- `src/agent/curators/mastermind.js` — MastermindJohn corpus-mode orchestrator
+- `src/agent/curators/strategy_stack.js` — MastermindJohn strategy-stack mode (weekly)
+- `src/agent/curators/run_mastermind.js` — CLI entry (`--mode {corpus|strategy-stack}`)
 - `src/agent/research/gate-decisions.js` — structured `paper_gate_decisions` emitter
 - `src/ingestion/arxiv_discovery.py` — broad arXiv q-fin harvest into `research_corpus`
 - `src/ingestion/openalex_discovery.py` — SSRN/NBER/JFE/RFS/JF/JFQA/QF + author watchlist + citation graph
 - `src/database/migrations/032..038_*.sql` — corpus + calibration + ROI schema
-- `docs/curator.service` · `docs/curator.timer` — systemd units (installed at `/etc/systemd/system/`)
+- `docs/mastermind-corpus.{service,timer}` · `docs/mastermind-weekly.{service,timer}` — systemd units (installed at `/etc/systemd/system/openclaw-mastermind-corpus.*` and `openclaw-mastermind-weekly.*`)
 - `agents/` — agent identity and soul files
 - `data/` — master parquet datasets
 - `johnbot/` — Discord bot

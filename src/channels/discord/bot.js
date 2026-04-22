@@ -851,8 +851,8 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
       case 'curator': {
         // Phase 2: Opus corpus curator management.
         const subcmd = (args[0] || '').toLowerCase();
-        const CorpusCurator = require('../../agent/curators/corpus_curator');
-        const curator = new CorpusCurator();
+        const MastermindCurator = require('../../agent/curators/mastermind');
+        const curator = new MastermindCurator();
         try {
           switch (subcmd) {
             case 'status': {

@@ -35,6 +35,7 @@ const SUBAGENT_MODELS = {
   tradejohn:       MODELS.primary,
   paperhunter:     MODELS.fast,
   strategycoder:   MODELS.primary,
+  'mastermind':     MODELS.opus1m,
   'corpus-curator': MODELS.opus1m,
 };
 
