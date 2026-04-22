@@ -1,0 +1,69 @@
+---
+title: "Subagents"
+description: "How subagents are spawned, tracked, and recovered."
+---
+
+Subagents are ephemeral Claude processes spawned by `swarm.init()`. Each one gets a Redis status key, a lifecycle record, and optionally a Postgres checkpoint.
+
+## Spawn
+
+<CodeGroup>
+```javascript swarm.init signature
+const { init } = require('./subagents/swarm');
+
+await init({
+  type:      'researchjohn',          // key in subagent-types.json
+  ticker:    '2026-04-22',
+  workspace: '/root/openclaw',
+  threadId:  'thread-123',            // Discord or graph thread
+  notify:    (msg) => console.log(msg),
+  mode:      'PM_TASK',
+  prompt:    'CYCLE_DATE=...\nMEMO_DIR=...',
+});
+// → { subagentId, output, duration }
+```
+
+```json subagent-types.json entry
+{
+  "researchjohn": {
+    "promptFile": "prompts/subagents/researchjohn.md",
+    "model": "claude-sonnet-4-6",
+    "maxTokens": 8192,
+    "timeoutSeconds": 900,
+    "maxBudgetUsd": 2.00
+  }
+}
+```
+</CodeGroup>
+
+## Lifecycle tracking
+
+Each spawn writes a Redis key and a `lifecycle` record:
+
+| Store | Key | Contents | TTL |
+|-------|-----|----------|-----|
+| Redis | `subagent:${subagentId}` | `{ id, type, ticker, status, startedAt, threadId }` | 3600s |
+| Redis | `steering:${threadId}` | List of operator steering messages | persistent |
+| Postgres | `checkpoints` | `{ id, thread_id, subagent_type, ticker, state, status }` | persistent |
+
+Statuses progress `running → completed` or `running → failed`. The dashboard reads `subagent:*` for the live swarm view.
+
+## Steering
+
+An operator can push a mid-run message to a subagent by writing to its steering list:
+
+```javascript Steering a running subagent
+const { pushSteering } = require('./database/redis');
+await pushSteering(threadId, 'Also check TSLA earnings release.');
+```
+
+Middleware drains `steering:${threadId}` before every LLM call and prepends the messages to the next request.
+
+## Resume from checkpoint
+
+```javascript
+const { resume } = require('./agent/subagents/swarm');
+await resume(checkpointId, 'Optional additional context to inject.');
+```
+
+This reads the row from Postgres `checkpoints`, reconstructs prompt state, and respawns the subagent. Distinct from LangGraph checkpoints (which live in the `langgraph` schema and cover graph-level state).

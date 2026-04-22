@@ -1,0 +1,66 @@
+---
+title: "Smoke tests"
+description: "Regression harness for the LangGraph flows."
+---
+
+Two smoke tests cover the LangGraph integration. Both monkey-patch heavy dependencies so they run in well under a second.
+
+## Cycle smoke
+
+`test/graph-smoke.js` exercises three scenarios.
+
+<Steps>
+  <Step title="Phase 1 — interrupt">
+    Invokes `runCycleGraph()` with stubbed `runDailyClose` and `swarm.init`. Asserts the run returns with `status === 'awaiting_approval'` and `next === ['botjohn']`.
+  </Step>
+  <Step title="Phase 2 — approved resume">
+    Calls `resumeCycle({ threadId, approval: 'approved' })`. Asserts status `ok` and a `botResult` with a `subagentId`.
+  </Step>
+  <Step title="Phase 3 — veto">
+    Starts a second cycle, resumes with `approval: 'vetoed'`. Asserts status `vetoed` and `botResult.vetoed === true`.
+  </Step>
+</Steps>
+
+```bash
+cd /root/openclaw
+node test/graph-smoke.js
+```
+
+Expected output ends with:
+
+```text
+[smoke] OK
+```
+
+## PaperHunter smoke
+
+`test/paperhunter-smoke.js` builds 10 stub candidates, each with a 150 ms delay, and asserts:
+
+- All 10 results return.
+- Wall-time is less than 90% of the serial minimum (1500 ms).
+- Exactly 5 are accepted (even indexes) and 5 rejected (odd).
+
+```bash
+node test/paperhunter-smoke.js
+```
+
+Expected tail:
+
+```text
+[paperhunter-smoke] N=10 elapsed=~190ms serialMin=1500ms
+[paperhunter-smoke] OK accepted=5 rejected=5 parallel
+```
+
+## Adding a new smoke test
+
+Follow the same pattern the existing tests use:
+
+1. Use `Module._load` monkey-patch to replace heavy dependencies with stubs before requiring the graph.
+2. Assert on the return shape and on the trace bus (`traceBus.listRuns()` / `traceBus.recentEvents()`).
+3. Exit `0` on pass, `1` on fail with a clear `FAIL` message.
+
+Run all smoke tests after every deploy:
+
+```bash
+for t in test/*-smoke.js; do node "$t" || exit 1; done
+```

@@ -11,7 +11,7 @@ class VRPNormalization(BaseStrategy):
     id            = 'S_HV12_vrp_normalization'
     name          = 'VRP Normalization'
     version       = '1.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING', 'LOW_VOL']
 
     def default_parameters(self) -> dict:
         return {

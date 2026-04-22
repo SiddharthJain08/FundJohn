@@ -10,7 +10,7 @@ from ..base import BaseStrategy, Signal
 class IVSurfaceTilt(BaseStrategy):
     id = "S_HV19_iv_surface_tilt"
     version = "1.0.0"
-    regime_filter = ["HIGH_VOL", "NEUTRAL"]
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
     CENTROID_CALL_THRESH: float = 0.55
     CENTROID_PUT_THRESH: float = 0.45
     SURFACE_PREMIUM_MIN: float = 0.03

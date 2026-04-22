@@ -1,0 +1,52 @@
+---
+title: "FundJohn"
+description: "Operator documentation for the FundJohn quantitative hedge fund system built on OpenClaw."
+---
+
+FundJohn is an autonomous quantitative portfolio-management system. A Discord-resident orchestrator (BotJohn) coordinates a swarm of Claude subagents, a hardcoded Python data pipeline, and a LangGraph-wrapped decision flow with operator-in-the-loop approvals.
+
+## What you get
+
+<CardGroup cols={2}>
+  <Card title="Autonomous cycles" icon="circle-play">
+    Daily `datajohn → researchjohn → tradejohn → botjohn` cycle wrapped as a LangGraph with durable Postgres checkpoints.
+  </Card>
+  <Card title="Human-in-the-loop" icon="hand">
+    Every cycle pauses before `botjohn` for operator approve or veto. Trades only execute after explicit authorization.
+  </Card>
+  <Card title="Parallel research" icon="layer-group">
+    PaperHunter fans out over candidate papers with LangGraph `Send` — roughly 8× faster than the previous serial loop.
+  </Card>
+  <Card title="Self-hosted dashboard" icon="gauge">
+    Control room on `127.0.0.1:7870` shows services, subagents, analyses, trades, workspaces, and live graph traces.
+  </Card>
+</CardGroup>
+
+## System at a glance
+
+<Steps>
+  <Step title="Discord message arrives">
+    `johnbot.service` routes incoming messages to `src/agent/flash.js` or `src/agent/main.js`.
+  </Step>
+  <Step title="Cycle graph runs">
+    `main.runCycle()` invokes the LangGraph in `src/agent/graph.js`. Each node emits events to the in-memory trace bus.
+  </Step>
+  <Step title="Pause before BotJohn">
+    The graph interrupts before the `botjohn` node. The dashboard surfaces the pending run and waits for a decision.
+  </Step>
+  <Step title="Operator decides">
+    Approve or veto via the dashboard. `POST /api/runs/:threadId/resume` calls `resumeCycle({ threadId, approval })`.
+  </Step>
+  <Step title="Trades recorded">
+    Approved trades land in the `trades` table; the cycle digest posts to `#ops`.
+  </Step>
+</Steps>
+
+## Where to next
+
+<CardGroup cols={2}>
+  <Card title="Architecture overview" href="/architecture/overview" icon="sitemap" />
+  <Card title="Dashboard guide" href="/dashboard/overview" icon="window-maximize" />
+  <Card title="Operations quickstart" href="/operations/quickstart" icon="terminal" />
+  <Card title="API reference" href="/reference/dashboard-api" icon="code" />
+</CardGroup>

@@ -199,6 +199,32 @@ def load_aux_data(universe: list) -> dict:
     opts_path = master_dir / 'options_eod.parquet'
     if opts_path.exists():
         try:
+            # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)
+            # Used for rv_20 and vrp fields consumed by S_HV9, S_HV11, S_HV12, S_HV14, S_HV20.
+            _hv20_by_ticker = {}
+            _hv20_history_by_ticker = {}
+            try:
+                _px_path = master_dir / 'prices.parquet'
+                if _px_path.exists():
+                    _px = pd.read_parquet(_px_path, columns=['ticker', 'date', 'close'])
+                    _px['date'] = pd.to_datetime(_px['date'])
+                    _px = _px.sort_values(['ticker', 'date'])
+                    for _t, _g in _px.groupby('ticker'):
+                        if _t not in universe or len(_g) < 22:
+                            continue
+                        _rets = _g['close'].pct_change()
+                        # Current HV20 (annualized, fraction)
+                        _hv20_now = float(_rets.iloc[-20:].std() * (252 ** 0.5))
+                        if _hv20_now > 0:
+                            _hv20_by_ticker[_t] = round(_hv20_now, 4)
+                        # Last 8 trading days of HV20 history (rolling)
+                        _hv_roll = _rets.rolling(20).std() * (252 ** 0.5)
+                        _hist = [round(float(v), 4) for v in _hv_roll.dropna().tail(8).tolist()]
+                        _hv20_history_by_ticker[_t] = _hist
+                    logger.info(f"HV20 pre-computed: {len(_hv20_by_ticker)} tickers")
+            except Exception as _e:
+                logger.warning(f"HV20 pre-compute failed: {_e}")
+
             opts = pd.read_parquet(opts_path)
             today = pd.Timestamp.today().normalize()
 
@@ -316,12 +342,9 @@ def load_aux_data(universe: list) -> dict:
                     atm_opts2 = atm_src2[atm_src2['delta'].abs().between(0.40, 0.60)]
                     if not atm_opts2.empty:
                         theta_atm = round(float(atm_opts2['theta'].mean()), 6)
-                # rv_20: current HV20; vrp: implied vol premium over realized vol
-                rv_20 = None
-                if 'hv20' in grp.columns:
-                    latest_hv = grp[grp['date'] == grp['date'].max()]['hv20'].dropna() if 'date' in grp.columns else grp['hv20'].dropna()
-                    if not latest_hv.empty:
-                        rv_20 = round(float(latest_hv.mean()), 4)
+                # rv_20: current HV20 (computed from master prices above);
+                # vrp: implied vol premium over realized vol.
+                rv_20 = _hv20_by_ticker.get(ticker)
                 vrp = round(iv30 - rv_20, 4) if (iv30 is not None and rv_20 is not None) else None
 
                 # History arrays (last 8 trading days)
@@ -339,12 +362,13 @@ def load_aux_data(universe: list) -> dict:
                             c_dv = float(day[day['option_type'].str.upper()=='CALL']['volume'].fillna(0).sum())
                             p_dv = float(day[day['option_type'].str.upper()=='PUT']['volume'].fillna(0).sum())
                             pc_ratio_history.append(round(p_dv/c_dv,4) if c_dv>0 else None)
-                        if 'hv20' in day.columns:
-                            hv_d = day['hv20'].dropna()
-                            if not hv_d.empty: hv20_history.append(round(float(hv_d.mean()),4))
-                        if 'implied_volatility' in day.columns and 'hv20' in day.columns:
-                            hv_d2 = day['hv20'].dropna()
-                            if not hv_d2.empty: vrp_history.append(round(float(day['implied_volatility'].mean())-float(hv_d2.mean()),4))
+                # hv20_history: from pre-computed price-based HV20 (options_eod has no hv20 col).
+                hv20_history = _hv20_history_by_ticker.get(ticker, [])
+                # vrp_history: zip IV30 history with HV20 history where both exist.
+                if 'date' in grp.columns and hv20_history:
+                    _iv_by_date = grp.groupby('date')['implied_volatility'].mean().dropna().sort_index()
+                    _last_iv = [round(float(v), 4) for v in _iv_by_date.tail(len(hv20_history)).tolist()]
+                    vrp_history = [round(iv - hv, 4) for iv, hv in zip(_last_iv, hv20_history) if iv is not None and hv is not None]
                 # 
 
 
@@ -429,18 +453,19 @@ def load_aux_data(universe: list) -> dict:
                     'expiry_date':             nearest_expiry.date().isoformat(),
                     'pc_ratio':               pc_ratio,
                     'gamma_atm':              gamma_atm,
-                'theta_atm':             theta_atm,
-                'iv_spread':           iv_spread,
-                'skew_20d':            skew_20d,
-                'ts_ratio':            ts_ratio,
-                'near_iv':             near_iv_ts,
-                'far_iv':              far_iv_ts,
-                'gex':                 gex,
-                'iv_centroid_delta':   iv_centroid_delta,
-                'surface_premium':     surface_premium,
+                    'theta_atm':              theta_atm,
+                    'iv_spread':              iv_spread,
+                    'skew_20d':               skew_20d,
+                    'ts_ratio':               ts_ratio,
+                    'near_iv':                near_iv_ts,
+                    'far_iv':                 far_iv_ts,
+                    'gex':                    gex,
+                    'iv_centroid_delta':      iv_centroid_delta,
+                    'surface_premium':        surface_premium,
+                    'earnings_dte':           earnings_dte,
                     'rv_20':                  rv_20,
                     'vrp':                    vrp,
-                    'iv_rank_history':         iv_rank_history,
+                    'iv_rank_history':        iv_rank_history,
                     'pc_ratio_history':       pc_ratio_history,
                     'vrp_history':            vrp_history,
                     'hv20_history':           hv20_history,

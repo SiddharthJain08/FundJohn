@@ -1,0 +1,64 @@
+---
+title: "Deployment"
+description: "Change flow from local edit to live VPS."
+---
+
+Changes flow `local edit → git commit → push → VPS git pull → systemctl restart`.
+
+## Standard flow
+
+```bash
+# 1. Local
+git add -p
+git commit -m "Describe the change"
+git push origin main
+
+# 2. On the VPS
+cd /root/openclaw
+git pull --ff-only
+sudo systemctl restart johnbot fundjohn-dashboard
+```
+
+## Large files
+
+When a file is too large to send through chat, base64 it locally and decode on the VPS:
+
+```bash
+# Local
+base64 -w 0 big-file.json > big-file.b64
+
+# VPS
+base64 -d big-file.b64 > big-file.json
+git add big-file.json && git commit -m "Add big-file" && git push
+```
+
+## Verifying a deploy
+
+Run the smoke tests:
+
+```bash
+cd /root/openclaw
+node test/graph-smoke.js
+node test/paperhunter-smoke.js
+```
+
+Both should exit `0` and report `OK`.
+
+## Rolling back
+
+```bash
+cd /root/openclaw
+git log --oneline -n 10
+git reset --hard <previous-sha>
+sudo systemctl restart johnbot fundjohn-dashboard
+```
+
+<Warning>
+`git reset --hard` destroys local uncommitted changes on the VPS. Check `git status` first.
+</Warning>
+
+## Schema changes
+
+Postgres migrations live in `src/database/migrations/` and are applied idempotently on startup. Add a new numbered file (`039_*.sql`) rather than editing existing ones. Migrations are `CREATE TABLE IF NOT EXISTS` or `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` style so they replay cleanly.
+
+LangGraph's own schema is managed by `PostgresSaver.setup()` in the `langgraph` schema. You do not need to write migrations for it.

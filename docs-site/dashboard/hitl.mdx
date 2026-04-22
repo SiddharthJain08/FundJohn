@@ -1,0 +1,54 @@
+---
+title: "Human-in-the-loop approvals"
+description: "How operators approve or veto a cycle."
+---
+
+Every cycle graph pauses before the `botjohn` node. An operator must approve or veto before the run can complete.
+
+## Why interrupt before botjohn
+
+BotJohn is the step that posts approvals into the `trades` table and sends the cycle digest to `#ops`. Putting the human gate in front of it means:
+
+- Questionable cycles can be stopped without post-hoc reversal.
+- The operator sees TradeJohn's signals in context before any sizing decision lands.
+- The underlying subagent does not burn tokens on a cycle you plan to veto anyway.
+
+## Flow
+
+<Steps>
+  <Step title="Run triggers">
+    Cycle graph starts. `datajohn → researchjohn → tradejohn` complete.
+  </Step>
+  <Step title="Pause">
+    If `signalCount > 0`, LangGraph interrupts before `botjohn`. Otherwise the run ends cleanly.
+  </Step>
+  <Step title="Dashboard shows pending">
+    The Pending Human Approval card appears with Approve and Veto buttons.
+  </Step>
+  <Step title="Operator decides">
+    Clicking a button sends `POST /api/runs/:threadId/resume` with `{ "approval": "approved" | "vetoed" }`.
+  </Step>
+  <Step title="Graph resumes">
+    `resumeCycle()` writes the approval into state and calls `compiled.invoke(null, config)`. BotJohn runs, or short-circuits with a recorded veto.
+  </Step>
+</Steps>
+
+## Manual approval (CLI)
+
+If the dashboard is unreachable, resume from the terminal:
+
+```bash
+node bin/run-graph.js cycle:resume '{"threadId":"thread-123","approval":"approved"}'
+```
+
+Or with `curl` over the SSH tunnel:
+
+```bash
+curl -s -X POST http://127.0.0.1:7870/api/runs/thread-123/resume \
+  -H 'Content-Type: application/json' \
+  -d '{"approval":"approved"}'
+```
+
+## Veto semantics
+
+A veto records `{ vetoed: true, by: 'operator', at: <ts> }` as `botResult` and completes the graph. No subagent is spawned. No trades enter the `trades` table. The cycle still appears in `/api/runs` with status `vetoed` for audit purposes.

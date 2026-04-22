@@ -2,22 +2,25 @@
 """
 fetch_vol_indices.py
 
-Fetches VIX and VVIX daily close prices from yfinance and upserts into
-the macro_data Postgres table. Called by the daily data pipeline and
+Fetches VIX/VVIX/VIX3M daily close prices from yfinance and appends to the
+macro.parquet file (parquet-primary storage). Called by the collector and
 on bot startup to backfill history.
 
 Output: JSON with counts to stdout.
 """
 
-import os
-import sys
 import json
-import psycopg2
+import sys
+from datetime import date, timedelta
+from pathlib import Path
+
 import pandas as pd
 import yfinance as yf
-from datetime import date, timedelta
 
-POSTGRES_URI = os.environ['POSTGRES_URI']
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT))
+
+from src.data import parquet_store as ps
 
 # Symbols to fetch: (yfinance_ticker, series_name)
 VOL_INDICES = [
@@ -30,10 +33,13 @@ VOL_INDICES = [
 BACKFILL_DAYS = 365 * 5  # 5 years
 
 
-def _get_existing_max(cur, series: str) -> str | None:
-    cur.execute("SELECT MAX(date)::text FROM macro_data WHERE series = %s", [series])
-    row = cur.fetchone()
-    return row[0] if row and row[0] else None
+def _existing_max(series: str) -> str | None:
+    """Latest date already in macro.parquet for this series."""
+    df = ps.read_filtered(ps.MACRO_PATH, where=f"series='{series}'", cols=['date'],
+                          order_by='date DESC', limit=1)
+    if df.empty:
+        return None
+    return pd.to_datetime(df.iloc[0]['date']).date().isoformat()
 
 
 def _fetch_series(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -51,16 +57,13 @@ def _fetch_series(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 
 def main() -> dict:
-    conn = psycopg2.connect(POSTGRES_URI)
-    conn.autocommit = False
-    cur = conn.cursor()
-
     today = date.today().isoformat()
     results = {}
 
+    all_rows = []
     for yf_ticker, series_name in VOL_INDICES:
         try:
-            max_date = _get_existing_max(cur, series_name)
+            max_date = _existing_max(series_name)
             if max_date:
                 start = (date.fromisoformat(max_date) + timedelta(days=1)).isoformat()
             else:
@@ -75,24 +78,24 @@ def main() -> dict:
                 results[series_name] = 0
                 continue
 
-            rows = [(row['date'], series_name, float(row['value']), 'yfinance')
-                    for _, row in df.iterrows()]
-
-            cur.executemany(
-                """INSERT INTO macro_data (date, series, value, source)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (date, series) DO UPDATE SET value=EXCLUDED.value, source=EXCLUDED.source""",
-                rows
-            )
-            results[series_name] = len(rows)
-            print(f'  {series_name}: +{len(rows)} rows ({start} → {today})', file=sys.stderr)
+            for _, row in df.iterrows():
+                all_rows.append({
+                    'date':   row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
+                    'series': series_name,
+                    'value':  float(row['value']),
+                    'source': 'yfinance',
+                })
+            results[series_name] = len(df)
+            print(f'  {series_name}: +{len(df)} rows ({start} → {today})', file=sys.stderr)
 
         except Exception as e:
             print(f'  {series_name}: ERROR — {e}', file=sys.stderr)
             results[series_name] = -1
 
-    conn.commit()
-    conn.close()
+    if all_rows:
+        total = ps.write_macro(all_rows)
+        print(f'  macro.parquet total rows after write: {total}', file=sys.stderr)
+
     return results
 
 

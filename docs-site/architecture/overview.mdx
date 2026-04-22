@@ -1,0 +1,92 @@
+---
+title: "System overview"
+description: "Components, processes, and data flow for FundJohn."
+---
+
+FundJohn has three long-running processes, two databases, and a filesystem-backed workspace.
+
+## Processes
+
+| Process | Unit | Purpose |
+|---------|------|---------|
+| BotJohn | `johnbot.service` | Discord bridge + agent orchestrator. Runs `src/channels/discord/bot.js`. |
+| FundJohn Dashboard | `fundjohn-dashboard.service` | HTTP control room on `127.0.0.1:7870`. |
+| Corpus Curator | `openclaw-curator.service` + `.timer` | Weekly (Saturday 10:00 ET) corpus-level paper curation with Opus 1M. |
+
+## Data stores
+
+| Store | Connection | Purpose |
+|-------|------------|---------|
+| Postgres | `POSTGRES_URI` (default `postgresql://openclaw:password@localhost:5432/openclaw`) | `analyses`, `verdict_cache`, `trades`, `checkpoints`, strategy registry, and LangGraph checkpoints in the `langgraph` schema. |
+| Redis | `REDIS_URL` (default `redis://localhost:6379`) | Steering queues, rate-limit buckets, live subagent status, cache. |
+| Filesystem | `/root/openclaw/workspaces/<name>/` | Memory files, strategy implementations, data, results. |
+
+## Agents
+
+<CardGroup cols={2}>
+  <Card title="BotJohn" icon="user-tie">
+    Portfolio manager. Opus 4.6. Reviews trade signals against standing orders, approves or vetoes, posts cycle digests.
+  </Card>
+  <Card title="ResearchJohn" icon="microscope">
+    Strategy memo synthesizer. Sonnet 4.6. Reads memos from `memo_dir`, produces a research report.
+  </Card>
+  <Card title="TradeJohn" icon="chart-line">
+    Signal generator. Sonnet 4.6. Consumes the research report + portfolio state, produces ranked trade signals.
+  </Card>
+  <Card title="PaperHunter" icon="file-magnifying-glass">
+    Per-paper extractor. Haiku 4.5. Runs behind four rejection gates; fan-out graph parallelizes across candidates.
+  </Card>
+  <Card title="StrategyCoder" icon="code">
+    On-demand strategy implementer. Sonnet 4.6. Writes Python into `strategies/implementations/`.
+  </Card>
+  <Card title="CorpusCurator" icon="books">
+    Weekly corpus-level picker. Opus 4.7 with 1M context. Promotes high-confidence picks to `research_candidates`.
+  </Card>
+</CardGroup>
+
+## End-to-end flow
+
+```mermaid
+flowchart LR
+  Discord[Discord] --> BotJohn[johnbot.service]
+  BotJohn --> Graph[LangGraph: runCycleGraph]
+  Graph --> DataJohn[datajohn: Python engine]
+  DataJohn --> Memos[(memo_dir)]
+  Memos --> ResearchJohn
+  ResearchJohn --> Report[(report.md)]
+  Report --> TradeJohn
+  TradeJohn --> Signals[(signals.md)]
+  Signals -- signalCount > 0 --> HITL{HITL approval}
+  Signals -- signalCount == 0 --> End[END]
+  HITL -- approved --> BotNode[botjohn]
+  HITL -- vetoed --> VetoRecord[record veto]
+  BotNode --> Trades[(trades table)]
+  Graph -. events .-> TraceBus
+  TraceBus --> Dashboard[fundjohn-dashboard :7870]
+```
+
+## Source layout
+
+```text
+/root/openclaw/
+├── src/
+│   ├── agent/
+│   │   ├── main.js                 # runCycle / runTask entry
+│   │   ├── flash.js                # fast command dispatcher
+│   │   ├── graph.js                # cycle StateGraph + HITL
+│   │   ├── graphs/
+│   │   │   ├── index.js            # graph registry
+│   │   │   └── paperhunter.js      # parallel fan-out
+│   │   ├── traceBus.js             # in-memory event ring buffer
+│   │   └── subagents/swarm.js      # subagent spawner
+│   ├── channels/
+│   │   ├── discord/bot.js
+│   │   └── dashboard/server.js     # :7870 HTTP/SSE
+│   ├── database/{postgres,redis}.js
+│   └── execution/runner.js         # datajohn / Python engine
+├── bin/run-graph.js                # CLI runner
+├── test/
+│   ├── graph-smoke.js
+│   └── paperhunter-smoke.js
+└── workspaces/default/             # memory, data, results
+```

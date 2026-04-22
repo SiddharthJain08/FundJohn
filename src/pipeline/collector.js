@@ -260,56 +260,16 @@ async function rateLimitedCall(fn) {
   return result;
 }
 
-// ── Phase 1: Snapshot — derive from stored price_data (Massive is options-only) ─
+// ── Phase 1: Snapshot — retired (parquet-primary architecture) ──────────────
+// Previously derived a 5-min rolling cache in the `snapshots` DB table from
+// price_data. Parquet-primary makes the cache redundant: dashboard consumers
+// now derive latest-per-ticker on-demand from prices.parquet via
+// readParquet('latest_snapshots'), which is microseconds on a 12MB file.
 
 async function runSnapshots() {
   const tickers = await getActiveTickers();
-  const start = Date.now();
-  notify(`📡 Snapshot: ${tickers.length} tickers`);
-
-  // Populate snapshots from the most recent price_data rows (no extra API calls)
-  try {
-    const { query: dbQuery } = require('../database/postgres');
-    const result = await dbQuery(`
-      WITH latest AS (
-        SELECT DISTINCT ON (ticker) ticker, date, open, high, low, close, volume, vwap
-        FROM price_data ORDER BY ticker, date DESC
-      ), prev AS (
-        SELECT DISTINCT ON (ticker) ticker, close AS prev_close
-        FROM price_data p
-        WHERE date < (SELECT MAX(date) FROM price_data p2 WHERE p2.ticker = p.ticker)
-        ORDER BY ticker, date DESC
-      )
-      SELECT l.ticker, l.close, l.high, l.low, l.volume, l.vwap,
-             pr.prev_close,
-             CASE WHEN pr.prev_close > 0 THEN ROUND(((l.close - pr.prev_close) / pr.prev_close * 100)::numeric, 2) END AS change_pct
-      FROM latest l LEFT JOIN prev pr ON pr.ticker = l.ticker
-    `);
-
-    let written = 0;
-    for (const row of result.rows) {
-      await store.upsertSnapshot(row.ticker, {
-        price:      row.close,
-        change_pct: row.change_pct,
-        volume:     row.volume,
-        vwap:       row.vwap,
-        day_high:   row.high,
-        day_low:    row.low,
-        prev_close: row.prev_close,
-        market_cap: null,
-        source:     'price_data',
-      });
-      written++;
-    }
-
-    _stats.snapshots += written;
-    await store.logRun(null, 'snapshot', 'success', written, null, Date.now() - start, 0);
-    notify(`✅ Snapshot: ${written} tickers (from stored prices)`);
-  } catch (err2) {
-    _stats.errors++;
-    await store.logRun(null, 'snapshot', 'error', 0, err2.message, Date.now() - start, 0);
-    notify(`⚠️ Snapshot fallback error: ${err2.message}`);
-  }
+  notify(`📡 Snapshot (parquet-primary): ${tickers.length} tickers — no-op (latest derived on read)`);
+  await store.logRun(null, 'snapshot', 'success', tickers.length, null, 0, 0);
 }
 
 // ── Phase 2: Historical prices — gap-aware, never re-fetches known data ────────
@@ -360,6 +320,16 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
     if (totalWritten > 0) {
       await store.logRun(ticker, 'prices', 'success', totalWritten, null, Date.now() - start, gaps.length);
     }
+  }
+
+  // Flush buffered rows to prices.parquet in one atomic write.
+  try {
+    const flushed = await store.flushPrices();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Prices flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Prices flush FAILED: ${err.message}`);
   }
 
   const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
@@ -609,6 +579,14 @@ print(json.dumps(results))
     }
 
     const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
+    try {
+      const flushed = await store.flushOptions();
+      if (flushed && flushed.flushed) {
+        console.log(`[collector] Options flush: ${flushed.flushed} rows → options_eod.parquet (total ${flushed.total_after})`);
+      }
+    } catch (err) {
+      console.error(`[collector] Options flush FAILED: ${err.message}`);
+    }
     notify(`✅ Options (YFinance) complete — ${totalWritten.toLocaleString()} contracts | ${alreadySkipped} skipped (already covered) in ${elapsed}s`);
     if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${totalWritten.toLocaleString()} option contracts stored via Yahoo Finance (IV, strike, bid/ask, OI)`);
   } catch (err) {
@@ -775,6 +753,15 @@ async function runFundamentals(tickers = null) {
       await runFundamentalsYFinance(stillNeeded, today);
       return;
     }
+  }
+
+  try {
+    const flushed = await store.flushFundamentals();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Fundamentals flush: ${flushed.flushed} rows → financials.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Fundamentals flush FAILED: ${err.message}`);
   }
 
   const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
@@ -974,6 +961,14 @@ print(json.dumps(results))
       totalWritten += written;
       tickProgress('🌐 Market Prices', needed.indexOf(ticker) + 1, needed.length, ticker, written);
     }
+    try {
+      const flushed = await store.flushPrices();
+      if (flushed && flushed.flushed) {
+        console.log(`[collector] Market prices flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
+      }
+    } catch (err) {
+      console.error(`[collector] Market prices flush FAILED: ${err.message}`);
+    }
     notify(`✅ Market prices complete — ${totalWritten.toLocaleString()} rows for ${needed.length} instruments (${skipped} already current)`);
     if (_alertPost) _alertPost(`✅ **Market Prices** — ${totalWritten.toLocaleString()} rows | ${skipped} skipped | ${needed.length} fetched`);
   } catch (err) {
@@ -1019,7 +1014,7 @@ async function runInsiderTransactions(tickers = null) {
     const start = Date.now();
     let data = null;
     try {
-      const url = `https://financialmodelingprep.com/stable/insider-trading?symbol=${ticker}&limit=50&apikey=${FMP_KEY}`;
+      const url = `https://financialmodelingprep.com/stable/insider-trading/search?symbol=${ticker}&limit=50&apikey=${FMP_KEY}`;
       data = await httpGet(url);
       trackApiCall('fmp');
       await sleep(FMP_INTERVAL);
@@ -1046,31 +1041,23 @@ async function runInsiderTransactions(tickers = null) {
 
     let rowsInserted = 0;
     for (const txn of data) {
-      try {
-        await dbQuery(`
-          INSERT INTO insider_transactions
-            (ticker, filing_date, transaction_date, insider_name, role,
-             transaction_type, shares, price_per_share, total_value,
-             shares_owned_after, source)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'fmp')
-          ON CONFLICT (ticker, filing_date, insider_name, transaction_type, shares)
-          DO NOTHING
-        `, [
-          ticker,
-          txn.filingDate   || today,
-          txn.transactionDate || null,
-          txn.reportingName  || txn.insiderName || null,
-          txn.typeOfOwner    || txn.role        || null,
-          txn.transactionType || null,
-          txn.securitiesTransacted != null ? parseFloat(txn.securitiesTransacted) : null,
-          txn.price != null ? parseFloat(txn.price) : null,
-          txn.securitiesTransacted != null && txn.price != null
-            ? parseFloat(txn.securitiesTransacted) * parseFloat(txn.price)
-            : null,
-          txn.securitiesOwned != null ? parseFloat(txn.securitiesOwned) : null,
-        ]);
-        rowsInserted++;
-      } catch { /* duplicate or constraint — skip */ }
+      const shares      = txn.securitiesTransacted != null ? parseFloat(txn.securitiesTransacted) : null;
+      const price       = txn.price != null ? parseFloat(txn.price) : null;
+      const sharesAfter = txn.securitiesOwned != null ? parseFloat(txn.securitiesOwned) : null;
+      await store.bufferInsider({
+        ticker,
+        filing_date:        txn.filingDate || today,
+        date:               txn.filingDate || today,
+        transaction_date:   txn.transactionDate || null,
+        insider_name:       txn.reportingName || txn.insiderName || null,
+        role:               txn.typeOfOwner || txn.role || null,
+        transaction_type:   txn.transactionType || null,
+        shares,
+        price_per_share:    price,
+        net_value:          (shares != null && price != null) ? shares * price : null,
+        shares_owned_after: sharesAfter,
+      });
+      rowsInserted++;
     }
 
     inserted += rowsInserted;
@@ -1078,6 +1065,15 @@ async function runInsiderTransactions(tickers = null) {
     await store.logRun(ticker, 'insider', 'success', rowsInserted, null, Date.now() - start, 1);
   }
 
+  // Flush buffered rows to insider.parquet in one atomic write.
+  try {
+    const flushed = await store.flushInsider();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Insider flush: ${flushed.flushed} rows → insider.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Insider flush FAILED: ${err.message}`);
+  }
   notify(`📋 Insider: ${inserted} new transactions | ${skipped} tickers skipped (fresh)`);
 }
 
@@ -1507,21 +1503,25 @@ async function runDailyCollection() {
     _alertPost(lines.join('\n'));
   }
 
-  // ── Trigger automated analysis pipeline (non-blocking) ─────────────────────
-  // Spawns pipeline_orchestrator.py: engine → strategy memos → research → trade signals
-  // Runs detached so collector sleep is not blocked. Budget-aware with checkpoint/resume.
+  // ── Post-collection: spawn orchestrator ────────────────────────────────────
+  // In the parquet-primary architecture each collector phase already writes
+  // directly to master parquets (prices/options/fundamentals/insider/macro),
+  // so the legacy DB→parquet sync step is gone. The orchestrator is idempotent
+  // per day via the Redis key pipeline:completed:{date} so repeat triggers
+  // (external cron, boot-time catch-up) exit cleanly.
   (() => {
-    const { spawn: _spawn }  = require('child_process');
-    const _orchestratorPath  = require('path').join(__dirname, '..', 'execution', 'pipeline_orchestrator.py');
-    const _runDate           = new Date().toISOString().slice(0, 10);
+    const { spawn: _spawn } = require('child_process');
+    const _rootDir          = require('path').resolve(__dirname, '..', '..');
+    const _orchestratorPath = require('path').join(__dirname, '..', 'execution', 'pipeline_orchestrator.py');
+    const _runDate          = new Date().toISOString().slice(0, 10);
 
     const _proc = _spawn('python3', [_orchestratorPath, '--date', _runDate], {
-      cwd:      require('path').resolve(__dirname, '..', '..'),
-      env:      { ...process.env, PYTHONPATH: require('path').resolve(__dirname, '..', '..') },
+      cwd:      _rootDir,
+      env:      { ...process.env, PYTHONPATH: _rootDir },
       detached: true,
       stdio:    'ignore',
     });
-    _proc.unref();  // don't wait for it
+    _proc.unref();
     console.log(`[collector] Pipeline orchestrator spawned (pid ${_proc.pid}) for ${_runDate}`);
   })();
 

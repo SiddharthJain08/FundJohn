@@ -25,6 +25,17 @@ At every step maintain a complete understanding of:
 - Current portfolio state
 - Any pending lifecycle transitions
 
+## LangGraph Orchestration (added 2026-04-22)
+The cycle and paper-hunt flows run through LangGraph.js:
+- `src/agent/graph.js` — daily cycle StateGraph (datajohn → researchjohn → tradejohn → HITL → botjohn); PostgresSaver checkpointer in `langgraph` schema; `interruptBefore: ['botjohn']` for operator approval; conditional edge skips botjohn if tradejohn produced zero signals.
+- `src/agent/graphs/paperhunter.js` — Send-based parallel fan-out for paper extraction.
+- `src/agent/graphs/index.js` — graph registry. Add new flows here.
+- `src/agent/traceBus.js` — in-memory event ring buffer fanning out to dashboard SSE.
+- `bin/run-graph.js` — CLI runner: `node bin/run-graph.js list | cycle '<json>' | cycle:resume '<json>' | cycle:state <threadId>`.
+- Dashboard: `src/channels/dashboard/server.js` on 127.0.0.1:7870 (systemd: `fundjohn-dashboard.service`). SSH-tunnel to view. Surfaces bots, subagents, analyses, verdicts, trades, checkpoints, workspaces, graph runs + live traces, HITL approve/veto buttons.
+- Smoke tests: `node test/graph-smoke.js` (cycle HITL + veto), `node test/paperhunter-smoke.js` (fan-out parallelism).
+- Set `LANGSMITH_API_KEY` in `.env` to auto-enable LangSmith tracing (project=`fundjohn`).
+
 ## Key Paths (VPS: /root/openclaw/)
 - `src/strategies/lifecycle.py` — strategy state machine
 - `src/strategies/manifest.json` — strategy registry

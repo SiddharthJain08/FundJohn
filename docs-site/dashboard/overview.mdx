@@ -1,0 +1,62 @@
+---
+title: "Dashboard overview"
+description: "Self-hosted control room on 127.0.0.1:7870."
+---
+
+The dashboard runs as `fundjohn-dashboard.service` and binds to `127.0.0.1:7870`. It is intentionally not reachable from the public internet.
+
+## Access
+
+SSH-tunnel from your workstation:
+
+```bash
+ssh -L 7870:127.0.0.1:7870 user@69.62.68.201
+```
+
+Then open `http://127.0.0.1:7870/` in a browser.
+
+<Warning>
+Do not re-bind the dashboard to `0.0.0.0` without adding authentication. The HITL approve/veto button can affect portfolio state. A public, unauthenticated endpoint with that button is a trade-execution surface.
+</Warning>
+
+## Panels
+
+| Panel | Source | Refresh |
+|-------|--------|---------|
+| Bot Registry | `systemctl show` on known units | 10 s poll |
+| Active Subagents | Redis `subagent:*` | 10 s poll |
+| LangGraph Pipeline | Trace bus | SSE stream + 10 s poll |
+| Graph Runs | Trace bus `listRuns()` | 10 s poll |
+| Pending HITL | Filtered runs with status `awaiting_approval` | 10 s poll |
+| Recent Trades | Postgres `trades` | 10 s poll |
+| Verdict Cache | Postgres `verdict_cache` | 10 s poll |
+| Analyses | Postgres `analyses` | 10 s poll |
+| Workspaces | Filesystem `workspaces/*` | 10 s poll |
+| Registered Graphs | `src/agent/graphs/index.js` | 10 s poll |
+
+## Live trace stream
+
+`GET /api/stream` is a Server-Sent Events endpoint that delivers three event types:
+
+<CodeGroup>
+```text trace event
+event: trace
+data: {"runId":"run-...","node":"tradejohn","status":"ok","ts":...,"signalCount":2}
+```
+
+```text run event
+event: run
+data: {"runId":"run-...","status":"awaiting_approval","startedAt":...}
+```
+
+```text ping event
+event: ping
+data: 1776825552458
+```
+</CodeGroup>
+
+The frontend consumes `trace` to prepend rows to the pipeline panel and `run` to refresh the runs table. Ping keeps the connection alive through intermediate proxies.
+
+## Health
+
+`GET /api/health` returns `{ ok, ts, postgres, redis }`. Both databases are pinged on each call. Non-OK responses flip the header indicator red.

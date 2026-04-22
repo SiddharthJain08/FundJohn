@@ -1,0 +1,102 @@
+---
+title: "Dashboard API"
+description: "HTTP endpoints exposed by fundjohn-dashboard on :7870."
+---
+
+All endpoints are rooted at `http://127.0.0.1:7870`. Responses are JSON unless noted.
+
+## Health
+
+<ParamField path="GET /api/health" />
+
+Returns pings for both databases.
+
+```json Response
+{ "ok": true, "ts": 1776825552458, "postgres": "ok", "redis": "ok" }
+```
+
+## System
+
+<ParamField path="GET /api/bots" />
+
+`systemctl show` for a known list of units. Returns `{ units: [{ unit, active, sub, since, memory }] }`.
+
+<ParamField path="GET /api/subagents" />
+
+All live Redis `subagent:*` keys decoded. Returns `{ subagents: [{ id, type, ticker, status, startedAt, threadId }] }`.
+
+<ParamField path="GET /api/redis-keys" />
+
+Count of keys per pattern (`subagent:*`, `steering:*`, `rate_limit:*`, etc.) for a quick sanity check.
+
+## Database
+
+<ParamField path="GET /api/analyses" />
+
+Last 100 rows from `analyses`.
+
+<ParamField path="GET /api/verdicts" />
+
+Last 100 rows from `verdict_cache`, ordered by `analysis_date`.
+
+<ParamField path="GET /api/trades" />
+
+Last 100 rows from `trades`.
+
+<ParamField path="GET /api/checkpoints" />
+
+Last 50 rows from the OpenClaw `checkpoints` table. (LangGraph's own checkpoints live in the `langgraph` schema and are not surfaced here.)
+
+## Workspaces
+
+<ParamField path="GET /api/workspaces" />
+
+Lists workspaces on disk with subdirectories and `memory/` filenames.
+
+<ParamField path="GET /api/workspaces/:name/memory/:file" />
+
+Returns a memory file as `text/plain`, truncated to 200 kB. Both `name` and `file` must match `^[A-Za-z0-9_.-]+$` or the request is rejected. Path traversal is blocked via `path.resolve` + `startsWith`.
+
+## LangGraph
+
+<ParamField path="GET /api/graphs" />
+
+Registered graphs with name, description, nodes, and features.
+
+<ParamField path="GET /api/runs" />
+
+All tracked runs (most recent 100).
+
+<ParamField path="GET /api/runs/:id" />
+
+Full event log for a single run.
+
+<ParamField path="GET /api/runs/:threadId/state" />
+
+Raw LangGraph state snapshot including `next` (pending nodes) and checkpoint metadata.
+
+<ParamField path="POST /api/runs/:threadId/resume" />
+
+Resume a paused run.
+
+```json Request body
+{ "approval": "approved" }
+```
+
+or
+
+```json Request body
+{ "approval": "vetoed" }
+```
+
+Returns `{ ok, status, runId }`. 400 if `approval` is missing or invalid. 500 if the thread is not paused.
+
+## Streaming
+
+<ParamField path="GET /api/traces" />
+
+Last 500 events from the trace bus.
+
+<ParamField path="GET /api/stream" />
+
+Server-Sent Events. Emits `trace`, `run`, and `ping` events. See the [dashboard overview](/dashboard/overview#live-trace-stream) for payload shapes.

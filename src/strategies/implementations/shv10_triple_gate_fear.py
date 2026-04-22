@@ -8,7 +8,7 @@ class TripleGateFear(BaseStrategy):
     id            = 'S_HV10_triple_gate_fear'
     name          = 'Triple-Gate Fear'
     version       = '1.0.0'
-    regime_filter = ['HIGH_VOL']
+    active_in_regimes = ['HIGH_VOL']
 
     def default_parameters(self) -> dict:
         return {

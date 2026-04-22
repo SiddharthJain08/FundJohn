@@ -1,0 +1,87 @@
+---
+title: "Graph registry"
+description: "Registering a new LangGraph flow for CLI and dashboard support."
+---
+
+`src/agent/graphs/index.js` is the single registration point. Adding an entry exposes the graph via the CLI runner and the dashboard's Registered Graphs panel.
+
+## Registering a graph
+
+```javascript src/agent/graphs/index.js
+const myGraph = require('./my-graph');
+
+const graphs = {
+  // ... existing entries
+  myflow: {
+    name: 'myflow',
+    description: 'What the flow does in one sentence.',
+    run:    async (input) => myGraph.runMyFlow(input),
+    resume: async (input) => myGraph.resumeMyFlow(input), // optional
+    state:  async (threadId) => myGraph.getState(threadId), // optional
+    nodes:    ['step1', 'step2'],
+    features: ['parallel-fanout'], // free-form labels
+  },
+};
+```
+
+## Required contract
+
+| Field | Required | Purpose |
+|-------|----------|---------|
+| `name` | yes | URL and CLI identifier. Must be unique. |
+| `description` | yes | One-line summary shown in the dashboard. |
+| `run(input)` | yes | Invokes the graph. Should return a serializable object. |
+| `resume(input)` | no | Only if the graph uses `interruptBefore` or `interrupt()`. |
+| `state(threadId)` | no | Only if you want dashboard users to inspect snapshots. |
+| `nodes` | no | Display-only list for the dashboard. |
+| `features` | no | Display-only labels. |
+
+## Trace bus integration
+
+If you want the dashboard's live trace panel to show your graph, emit events from each node:
+
+```javascript
+const traceBus = require('../traceBus');
+
+async function myNode(state, config) {
+  traceBus.push({
+    runId: state.runId,
+    node:  'myNode',
+    status:'start',
+    ts:    Date.now(),
+  });
+  // ... do work ...
+  traceBus.push({ runId: state.runId, node: 'myNode', status: 'ok', ts: Date.now() });
+  return { /* state update */ };
+}
+```
+
+And wrap invocations in `startRun` / `endRun`:
+
+```javascript
+const runId = `myflow-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+traceBus.startRun(runId, { type: 'myflow' });
+try {
+  const out = await compiled.invoke(initialState);
+  traceBus.endRun(runId, 'ok');
+  return out;
+} catch (err) {
+  traceBus.endRun(runId, 'error', String(err.message || err));
+  throw err;
+}
+```
+
+## Checkpointing
+
+For durable resume across restarts, use `PostgresSaver` with an isolated schema:
+
+```javascript
+const { PostgresSaver } = require('@langchain/langgraph-checkpoint-postgres');
+
+const saver = PostgresSaver.fromConnString(process.env.POSTGRES_URI, {
+  schema: 'langgraph', // shared with the cycle graph; separate tables internally
+});
+await saver.setup();
+```
+
+Ephemeral graphs (like PaperHunter) can skip the checkpointer entirely. Only add it when a run might span a process restart.

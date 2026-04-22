@@ -1,0 +1,84 @@
+---
+title: "Services"
+description: "Systemd units and what they do."
+---
+
+FundJohn uses three systemd units.
+
+## johnbot.service
+
+Discord bridge + agent orchestrator.
+
+```ini /etc/systemd/system/johnbot.service
+[Unit]
+Description=BotJohn v2 — OpenClaw Hedge Fund Discord Bot
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/channels/discord/bot.js
+EnvironmentFile=-/root/openclaw/.env
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="CLAUDE_BIN=/usr/local/bin/claude-bin"
+Restart=on-failure
+RestartSec=10
+```
+
+## fundjohn-dashboard.service
+
+Self-hosted control room. Bound to `127.0.0.1` by default.
+
+```ini /etc/systemd/system/fundjohn-dashboard.service
+[Unit]
+Description=FundJohn self-hosted dashboard (:7870)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/channels/dashboard/server.js
+EnvironmentFile=-/root/openclaw/.env
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="FUNDJOHN_DASHBOARD_PORT=7870"
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## openclaw-curator.timer
+
+Weekly Opus corpus curation. Fires Saturdays at 10:00 ET.
+
+```bash Inspecting the timer
+systemctl list-timers openclaw-curator.timer --all
+systemctl cat openclaw-curator.timer
+```
+
+## Common commands
+
+```bash
+# Restart after a code change
+sudo systemctl restart johnbot fundjohn-dashboard
+
+# Tail logs
+journalctl -u johnbot -f
+journalctl -u fundjohn-dashboard -f
+
+# Inspect last run of the curator
+journalctl -u openclaw-curator --since '1 week ago'
+```
+
+## Health gates
+
+| Symptom | Check | Fix |
+|---------|-------|-----|
+| Dashboard health `postgres: error` | `sudo systemctl status postgresql` | Restart Postgres. |
+| Dashboard health `redis: error` | `sudo systemctl status redis-server` | Restart Redis. |
+| No subagents appearing | `redis-cli keys 'subagent:*'` | Inspect `johnbot` logs for spawn errors. |
+| Cycle stuck `awaiting_approval` | Dashboard HITL panel | Approve or veto; or `cycle:resume` via CLI. |

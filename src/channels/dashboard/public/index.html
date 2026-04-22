@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>FundJohn — Control Room</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --panel2: #1a2027; --border: #232a33;
+    --fg: #d6dde4; --muted: #7c8794; --accent: #6fd1a7; --warn: #f2c057; --err: #f27878; --ok: #6fd1a7;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 ui-sans-serif, -apple-system, system-ui, Segoe UI, Roboto, sans-serif; background: var(--bg); color: var(--fg); }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+  header h1 { margin: 0; font-size: 16px; letter-spacing: 0.5px; }
+  header .sub { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-left: 12px; }
+  header .live { color: var(--ok); font-family: var(--mono); font-size: 11px; }
+  header .live.down { color: var(--err); }
+  main { display: grid; gap: 14px; grid-template-columns: repeat(12, 1fr); padding: 14px; }
+  section.card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; min-height: 160px; }
+  section.card header { position: static; background: var(--panel2); padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; display: flex; justify-content: space-between; }
+  section.card header h2 { margin: 0; font-size: 13px; font-weight: 600; }
+  section.card header .count { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .body { padding: 8px 12px; overflow: auto; max-height: 340px; }
+  .span-4 { grid-column: span 4; }
+  .span-6 { grid-column: span 6; }
+  .span-8 { grid-column: span 8; }
+  .span-12 { grid-column: span 12; }
+  @media (max-width: 1100px) { .span-4, .span-6, .span-8 { grid-column: span 12; } }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+  th { color: var(--muted); font-weight: 500; position: sticky; top: 0; background: var(--panel); }
+  .pill { display: inline-block; padding: 1px 6px; border-radius: 10px; font-size: 11px; font-family: var(--mono); }
+  .pill.ok { background: rgba(111, 209, 167, 0.15); color: var(--ok); }
+  .pill.warn { background: rgba(242, 192, 87, 0.15); color: var(--warn); }
+  .pill.err { background: rgba(242, 120, 120, 0.15); color: var(--err); }
+  .pill.muted { background: rgba(124, 135, 148, 0.15); color: var(--muted); }
+  .traces { font-family: var(--mono); font-size: 12px; line-height: 1.6; }
+  .traces .row { padding: 2px 0; border-bottom: 1px dashed rgba(255,255,255,0.04); display: flex; gap: 8px; }
+  .traces .ts { color: var(--muted); min-width: 80px; }
+  .traces .node { min-width: 110px; color: var(--accent); }
+  .traces .status.ok { color: var(--ok); }
+  .traces .status.error { color: var(--err); }
+  .traces .status.start { color: var(--warn); }
+  footer { padding: 12px 20px; color: var(--muted); font-family: var(--mono); font-size: 11px; border-top: 1px solid var(--border); }
+  .muted { color: var(--muted); }
+  button.refresh { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; font-family: var(--mono); font-size: 11px; padding: 2px 8px; cursor: pointer; }
+  button.refresh:hover { color: var(--fg); border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>FundJohn <span class="sub">Control Room</span></h1>
+  </div>
+  <div>
+    <span id="health" class="live">● health: ...</span>
+    <span id="livecount" class="live">events: 0</span>
+  </div>
+</header>
+
+<main>
+  <section class="card span-6">
+    <header><h2>Bot Registry</h2><span class="count" id="bots-count"></span></header>
+    <div class="body" id="bots"></div>
+  </section>
+
+  <section class="card span-6">
+    <header><h2>Active Subagents (Redis)</h2><span class="count" id="sub-count"></span></header>
+    <div class="body" id="subagents"></div>
+  </section>
+
+  <section class="card span-8">
+    <header><h2>LangGraph Pipeline — Live Trace</h2><span class="count" id="traces-count">events: 0</span></header>
+    <div class="body traces" id="traces"></div>
+  </section>
+
+  <section class="card span-4">
+    <header><h2>Graph Runs</h2><span class="count" id="runs-count"></span></header>
+    <div class="body" id="runs"></div>
+  </section>
+
+  <section class="card span-12" id="hitl-card" style="display:none">
+    <header><h2 style="color:var(--warn)">⚠ Pending Human Approval (HITL)</h2><span class="count" id="hitl-count"></span></header>
+    <div class="body" id="hitl"></div>
+  </section>
+
+  <section class="card span-6">
+    <header><h2>Recent Trades</h2><span class="count" id="trades-count"></span></header>
+    <div class="body" id="trades"></div>
+  </section>
+
+  <section class="card span-6">
+    <header><h2>Verdict Cache</h2><span class="count" id="verdicts-count"></span></header>
+    <div class="body" id="verdicts"></div>
+  </section>
+
+  <section class="card span-6">
+    <header><h2>Analyses</h2><span class="count" id="analyses-count"></span></header>
+    <div class="body" id="analyses"></div>
+  </section>
+
+  <section class="card span-6">
+    <header><h2>Workspaces</h2><span class="count" id="ws-count"></span></header>
+    <div class="body" id="workspaces"></div>
+  </section>
+
+  <section class="card span-12">
+    <header><h2>Registered Graphs</h2><span class="count" id="graphs-count"></span></header>
+    <div class="body" id="graphs"></div>
+  </section>
+</main>
+
+<footer>
+  <span>FundJohn Dashboard · :7870 · <a href="/api/health" style="color:var(--muted)">/api/health</a> · <a href="/api/traces" style="color:var(--muted)">/api/traces</a></span>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+function pill(text, cls='muted') { return `<span class="pill ${cls}">${esc(text)}</span>`; }
+
+function table(cols, rows) {
+  if (!rows || !rows.length) return '<div class="muted">— empty —</div>';
+  const head = '<tr>' + cols.map(c => `<th>${esc(c.label || c.key)}</th>`).join('') + '</tr>';
+  const body = rows.map(r => '<tr>' + cols.map(c => {
+    const raw = c.get ? c.get(r) : r[c.key];
+    return `<td title="${esc(raw)}">${c.html ? raw : esc(raw)}</td>`;
+  }).join('') + '</tr>').join('');
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+async function fetchJSON(url) {
+  try { const r = await fetch(url); return await r.json(); }
+  catch (e) { return { error: e.message }; }
+}
+
+async function refreshBots() {
+  const { units = [] } = await fetchJSON('/api/bots');
+  $('bots-count').textContent = `${units.length} units`;
+  $('bots').innerHTML = table([
+    { key: 'unit', label: 'unit' },
+    { key: 'active', label: 'state', html: true, get: r => {
+        const cls = r.active === 'active' ? 'ok' : (r.active === 'inactive' ? 'muted' : 'err');
+        return pill(r.active + (r.sub ? '/' + r.sub : ''), cls);
+      }},
+    { key: 'memory', label: 'mem' },
+    { key: 'since', label: 'since' },
+  ], units);
+}
+
+async function refreshSubagents() {
+  const { subagents = [] } = await fetchJSON('/api/subagents');
+  $('sub-count').textContent = `${subagents.length} tracked`;
+  $('subagents').innerHTML = table([
+    { key: 'type', label: 'type' },
+    { key: 'ticker', label: 'ticker' },
+    { key: 'status', html: true, get: r => pill(r.status, r.status === 'running' ? 'warn' : r.status === 'completed' ? 'ok' : 'muted') },
+    { key: 'startedAt', label: 'started', get: r => r.startedAt ? new Date(r.startedAt).toLocaleTimeString() : '' },
+    { key: 'id' },
+  ], subagents);
+}
+
+async function refreshTrades() {
+  const { trades = [] } = await fetchJSON('/api/trades');
+  $('trades-count').textContent = `${trades.length}`;
+  $('trades').innerHTML = table([
+    { key: 'ticker' },
+    { key: 'direction' },
+    { key: 'status', html: true, get: r => pill(r.status, r.status === 'executed' ? 'ok' : r.status === 'blocked' ? 'err' : 'warn') },
+    { key: 'ev_pct', label: 'EV%' },
+    { key: 'position_size_pct', label: 'size%' },
+    { key: 'created_at', label: 'created', get: r => r.created_at ? new Date(r.created_at).toLocaleString() : '' },
+  ], trades);
+}
+
+async function refreshVerdicts() {
+  const { verdicts = [] } = await fetchJSON('/api/verdicts');
+  $('verdicts-count').textContent = `${verdicts.length}`;
+  $('verdicts').innerHTML = table([
+    { key: 'ticker' },
+    { key: 'analysis_type', label: 'type' },
+    { key: 'verdict', html: true, get: r => pill(r.verdict, r.verdict === 'PROCEED' ? 'ok' : r.verdict === 'KILL' ? 'err' : 'warn') },
+    { key: 'score' },
+    { key: 'ev_pct', label: 'EV%' },
+    { key: 'analysis_date', label: 'date' },
+  ], verdicts);
+}
+
+async function refreshAnalyses() {
+  const { analyses = [] } = await fetchJSON('/api/analyses');
+  $('analyses-count').textContent = `${analyses.length}`;
+  $('analyses').innerHTML = table([
+    { key: 'ticker' },
+    { key: 'analysis_type', label: 'type' },
+    { key: 'verdict' },
+    { key: 'workspace_id', label: 'ws' },
+    { key: 'created_at', label: 'created', get: r => r.created_at ? new Date(r.created_at).toLocaleString() : '' },
+  ], analyses);
+}
+
+async function refreshWorkspaces() {
+  const { workspaces = [] } = await fetchJSON('/api/workspaces');
+  $('ws-count').textContent = `${workspaces.length}`;
+  $('workspaces').innerHTML = workspaces.map(w => `
+    <div style="margin-bottom:8px">
+      <div><b>${esc(w.name)}</b> <span class="muted">${esc(w.path)}</span></div>
+      <div class="muted" style="font-family:var(--mono);font-size:11px;margin-top:2px">
+        subdirs: ${w.subdirs.map(s => esc(s)).join(' · ') || '—'}
+      </div>
+      ${w.memoryFiles ? `<div class="muted" style="font-family:var(--mono);font-size:11px">memory/: ${w.memoryFiles.map(f => esc(f)).join(' · ')}</div>` : ''}
+    </div>
+  `).join('') || '<div class="muted">— none —</div>';
+}
+
+async function refreshRuns() {
+  const { runs = [] } = await fetchJSON('/api/runs');
+  $('runs-count').textContent = `${runs.length}`;
+  $('runs').innerHTML = table([
+    { key: 'status', html: true, get: r => pill(r.status, r.status === 'ok' ? 'ok' : r.status === 'error' ? 'err' : r.status === 'awaiting_approval' ? 'warn' : 'muted') },
+    { key: 'lastNode', label: 'node' },
+    { key: 'startedAt', label: 'started', get: r => new Date(r.startedAt).toLocaleTimeString() },
+    { key: 'runId', label: 'run', get: r => r.runId.slice(-10) },
+  ], runs);
+
+  // HITL: surface runs that are awaiting approval with action buttons
+  const pending = runs.filter(r => r.status === 'awaiting_approval');
+  const card = $('hitl-card');
+  $('hitl-count').textContent = `${pending.length} pending`;
+  if (!pending.length) { card.style.display = 'none'; return; }
+  card.style.display = '';
+  $('hitl').innerHTML = pending.map(r => {
+    const threadId = r.meta?.threadId || r.runId;
+    return `<div style="padding:8px 0;border-bottom:1px solid var(--border)">
+      <div><b>${esc(r.meta?.cycleDate || r.runId)}</b> <span class="muted">thread=${esc(threadId)}</span></div>
+      <div class="muted" style="font-family:var(--mono);font-size:11px;margin:4px 0">next node: <b>${esc((r.events.find(e=>e.node==='hitl')?.next||[]).join(','))||'botjohn'}</b> · started ${new Date(r.startedAt).toLocaleTimeString()}</div>
+      <button class="refresh" data-thread="${esc(threadId)}" data-action="approved">✓ Approve</button>
+      <button class="refresh" data-thread="${esc(threadId)}" data-action="vetoed" style="margin-left:6px;color:var(--err);border-color:rgba(242,120,120,0.3)">✗ Veto</button>
+    </div>`;
+  }).join('');
+  for (const btn of $('hitl').querySelectorAll('button[data-thread]')) {
+    btn.addEventListener('click', async () => {
+      const threadId = btn.dataset.thread;
+      const approval = btn.dataset.action;
+      if (!confirm(`${approval.toUpperCase()} cycle on thread ${threadId}?`)) return;
+      btn.disabled = true; btn.textContent = '...';
+      const r = await fetch(`/api/runs/${encodeURIComponent(threadId)}/resume`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approval }),
+      });
+      const data = await r.json();
+      if (!r.ok) { alert('Error: ' + (data.error || r.statusText)); btn.disabled = false; return; }
+      await Promise.all([refreshRuns(), refreshTraces()]);
+    });
+  }
+}
+
+async function refreshTraces() {
+  const { events = [] } = await fetchJSON('/api/traces');
+  $('traces-count').textContent = `events: ${events.length}`;
+  $('traces').innerHTML = events.slice(-150).reverse().map(renderTrace).join('') || '<div class="muted">— idle —</div>';
+}
+
+function renderTrace(ev) {
+  const t = new Date(ev.ts).toLocaleTimeString();
+  const extras = [];
+  if (ev.error) extras.push(`err=${esc(ev.error)}`);
+  if (ev.subagentId) extras.push(`sid=${esc(ev.subagentId)}`);
+  if (ev.duration) extras.push(`${(ev.duration/1000).toFixed(1)}s`);
+  return `<div class="row">
+    <span class="ts">${t}</span>
+    <span class="node">${esc(ev.node)}</span>
+    <span class="status ${esc(ev.status)}">${esc(ev.status)}</span>
+    <span class="muted">${extras.join(' ')}</span>
+  </div>`;
+}
+
+async function refreshHealth() {
+  const h = await fetchJSON('/api/health');
+  const el = $('health');
+  el.textContent = `● pg:${h.postgres?.startsWith('ok') ? 'ok' : 'err'} redis:${h.redis?.startsWith('ok') ? 'ok' : 'err'}`;
+  el.className = 'live' + (h.ok ? '' : ' down');
+}
+
+let liveCount = 0;
+function startSSE() {
+  const es = new EventSource('/api/stream');
+  es.addEventListener('trace', (e) => {
+    liveCount++;
+    $('livecount').textContent = `events: ${liveCount}`;
+    const ev = JSON.parse(e.data);
+    const el = $('traces');
+    const html = renderTrace(ev);
+    el.insertAdjacentHTML('afterbegin', html);
+    if (el.children.length > 200) el.removeChild(el.lastChild);
+  });
+  es.addEventListener('run', () => refreshRuns());
+  es.onerror = () => { setTimeout(startSSE, 3000); es.close(); };
+}
+
+async function refreshGraphs() {
+  const { graphs = [], langsmith } = await fetchJSON('/api/graphs');
+  $('graphs-count').textContent = `${graphs.length} · langsmith:${langsmith ? 'on' : 'off'}`;
+  $('graphs').innerHTML = graphs.map(g => `
+    <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div><b>${esc(g.name)}</b> <span class="muted">${esc(g.description)}</span></div>
+      <div class="muted" style="font-family:var(--mono);font-size:11px;margin-top:2px">
+        nodes: ${g.nodes.map(n => esc(n)).join(' · ')}<br/>
+        features: ${(g.features || []).map(f => pill(f, 'ok')).join(' ')}
+      </div>
+    </div>
+  `).join('') || '<div class="muted">— none —</div>';
+}
+
+async function refreshAll() {
+  await Promise.all([
+    refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
+    refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
+    refreshGraphs(), refreshHealth(),
+  ]);
+}
+
+refreshAll();
+setInterval(refreshAll, 10_000);
+startSSE();
+</script>
+</body>
+</html>

@@ -77,11 +77,21 @@ class JTMomentum12Mo(BaseStrategy):
         if len(prices_u) < lookback + skip:
             return []
 
-        price_start = prices_u.iloc[-(lookback + skip)]
-        price_end   = prices_u.iloc[-skip]
-
-        mom = (price_end / price_start - 1).dropna()
-        mom = mom[mom >= min_mom]  # minimum positive momentum required
+        # The wide pivot index spans all calendar dates (crypto is 24/7), so
+        # stock tickers are NaN on weekends/holidays. Compute momentum per-ticker
+        # on each column's own trading days to avoid all-NaN rows at iloc[-N].
+        mom = {}
+        for t in prices_u.columns:
+            s = prices_u[t].dropna()
+            if len(s) < lookback + skip:
+                continue
+            try:
+                m = float(s.iloc[-skip]) / float(s.iloc[-(lookback + skip)]) - 1
+            except (ZeroDivisionError, ValueError):
+                continue
+            if m >= min_mom:
+                mom[t] = m
+        mom = pd.Series(mom)
 
         if len(mom) < 3:
             return []

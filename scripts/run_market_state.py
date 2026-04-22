@@ -370,6 +370,54 @@ log_row = f"{TODAY},{effective_state},{stress_score},{round(roro_score,1)},{conf
 with open(MODEL_DIR / 'regime_log.csv', 'a') as f:
     f.write(log_row)
 
+# ── Step 8: Sync regime to PostgreSQL ────────────────────────────────────────
+
+print('[market-state] Step 8 — Syncing regime to PostgreSQL...')
+
+import psycopg2 as _psycopg2
+import psycopg2.extras as _psycopg2_extras
+
+_db_uri = os.environ.get('POSTGRES_URI')
+if _db_uri:
+    try:
+        _vix_pct = round(float(np.mean(features['vix'].values <= today_features['vix']) * 100), 1)
+        _regime_data = {
+            'state_raw':                 current_state,
+            'state_probabilities':       current_probs,
+            'confidence':                round(confidence, 4),
+            'transition_probs_tomorrow': trans_named,
+            'stress_score':              stress_score,
+            'roro_score':                round(roro_score, 1),
+            'days_in_current_state':     days_in_state,
+            'prior_state':               prior_state,
+            'position_scale':            position_scale,
+            'refit_performed':           REFIT_PERFORMED,
+        }
+        _conn = _psycopg2.connect(_db_uri, cursor_factory=_psycopg2_extras.DictCursor)
+        _cur  = _conn.cursor()
+        # Upsert the most-recent regime row so engine.py's "ORDER BY updated_at DESC LIMIT 1"
+        # always sees fresh state. Target the latest id to avoid multi-row overwrites.
+        _cur.execute("SELECT id FROM market_regime ORDER BY updated_at DESC LIMIT 1")
+        _existing = _cur.fetchone()
+        if _existing:
+            _cur.execute(
+                "UPDATE market_regime SET state=%s, vix_level=%s, vix_percentile=%s, regime_data=%s, updated_at=NOW() WHERE id=%s",
+                (effective_state, round(today_features['vix'], 2), _vix_pct, json.dumps(_regime_data), _existing['id'])
+            )
+        else:
+            _cur.execute(
+                "INSERT INTO market_regime (state, vix_level, vix_percentile, regime_data) VALUES (%s, %s, %s, %s)",
+                (effective_state, round(today_features['vix'], 2), _vix_pct, json.dumps(_regime_data))
+            )
+        _conn.commit()
+        _cur.close()
+        _conn.close()
+        print(f'  DB updated: market_regime → {effective_state} (VIX={today_features["vix"]:.2f}, pct={_vix_pct:.1f}%)')
+    except Exception as e:
+        print(f'  [WARN] DB write failed: {e}')
+else:
+    print('  [WARN] POSTGRES_URI not set — skipping DB sync')
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 print(f"""

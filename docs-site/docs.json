@@ -1,0 +1,74 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "FundJohn",
+  "description": "Operator documentation for the FundJohn / OpenClaw quantitative hedge fund system.",
+  "colors": {
+    "primary": "#6fd1a7",
+    "light": "#8fe0bb",
+    "dark": "#2b8b68"
+  },
+  "favicon": "/images/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Getting started",
+            "pages": [
+              "introduction",
+              "operations/quickstart"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/subagents",
+              "architecture/langgraph-flows",
+              "architecture/data-pipeline"
+            ]
+          },
+          {
+            "group": "Dashboard",
+            "pages": [
+              "dashboard/overview",
+              "dashboard/hitl"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/services",
+              "operations/deployment",
+              "operations/configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "API",
+            "pages": [
+              "reference/dashboard-api",
+              "reference/graph-registry",
+              "reference/cli"
+            ]
+          },
+          {
+            "group": "Testing",
+            "pages": [
+              "reference/smoke-tests"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "footer": {
+    "socials": {}
+  }
+}

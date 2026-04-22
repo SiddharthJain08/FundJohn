@@ -1,0 +1,53 @@
+---
+title: "Configuration"
+description: "Environment variables and subagent-types.json."
+---
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `POSTGRES_URI` | `postgresql://openclaw:password@localhost:5432/openclaw` | Main database connection. |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection. |
+| `OPENCLAW_DIR` | `/root/openclaw` | Workspace root; also used by spawned subagents. |
+| `CLAUDE_BIN` | `/usr/local/bin/claude-bin` | Path to Claude Code CLI used to spawn subagents. |
+| `DISCORD_BOT_TOKEN` | — | Required by `johnbot.service`. |
+| `ANTHROPIC_API_KEY` | — | Required by subagent spawns. |
+| `FUNDJOHN_DASHBOARD_PORT` | `7870` | Dashboard listen port. |
+| `FUNDJOHN_DASHBOARD_BIND` | `127.0.0.1` | Dashboard bind address. |
+| `LANGSMITH_API_KEY` | — | If set, LangSmith tracing is auto-enabled for project `fundjohn`. |
+| `LANGCHAIN_PROJECT` | `fundjohn` | LangSmith project name override. |
+
+<Warning>
+Do not set `FUNDJOHN_DASHBOARD_BIND=0.0.0.0` without adding authentication in front. See the dashboard overview for why.
+</Warning>
+
+## Subagent configuration
+
+`src/agent/config/subagent-types.json` controls every subagent type:
+
+```json subagent-types.json (excerpt)
+{
+  "researchjohn": {
+    "promptFile": "prompts/subagents/researchjohn.md",
+    "model": "claude-sonnet-4-6",
+    "maxTokens": 8192,
+    "timeoutSeconds": 900,
+    "maxBudgetUsd": 2.00
+  }
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `promptFile` | Path (under `src/agent/`) to the system prompt Markdown. |
+| `model` | Claude model ID. |
+| `maxTokens` | Output cap. |
+| `timeoutSeconds` | Per-spawn wall-time budget. |
+| `maxBudgetUsd` | Per-spawn cost cap; exceed and the spawn aborts. |
+
+Adding a new subagent type requires (a) a new entry here, (b) a prompt file, and (c) an `init({ type: '<new>' })` call somewhere in the code path or a graph node wrapping it.
+
+## Rate limits
+
+`src/database/redis.js` initializes per-provider token buckets from `preferences.rate_limits`. Polygon and Massive are hard-coded to unlimited; others respect `per_minute` budgets. A 429 response from any provider stamps `ratelimit:${provider}:reset_at` and backs off until the window clears.

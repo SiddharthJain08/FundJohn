@@ -1,0 +1,77 @@
+---
+title: "Quickstart"
+description: "Bring FundJohn up on a fresh VPS."
+---
+
+<Info>
+This is an operator quickstart, not a bootstrap-from-nothing. Postgres, Redis, Node 18+, and `claude-bin` are assumed installed.
+</Info>
+
+## 1. Clone and install
+
+```bash
+cd /root
+git clone <openclaw-repo-url> openclaw
+cd openclaw
+npm install
+```
+
+## 2. Configure `.env`
+
+```bash .env
+POSTGRES_URI=postgresql://openclaw:password@localhost:5432/openclaw
+REDIS_URL=redis://localhost:6379
+DISCORD_BOT_TOKEN=...
+ANTHROPIC_API_KEY=...
+
+# Optional LangSmith tracing
+# LANGSMITH_API_KEY=...
+```
+
+## 3. Run migrations
+
+```bash
+node -e "require('./src/database/postgres').migrate()"
+```
+
+## 4. Start services
+
+```bash
+sudo cp johnbot.service /etc/systemd/system/johnbot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now johnbot
+sudo systemctl enable --now fundjohn-dashboard
+```
+
+## 5. Verify
+
+```bash
+systemctl is-active johnbot fundjohn-dashboard
+curl -s http://127.0.0.1:7870/api/health
+```
+
+Both should return `active` and `{"ok":true,...}` respectively.
+
+## 6. Open the dashboard
+
+From your workstation:
+
+```bash
+ssh -L 7870:127.0.0.1:7870 user@<vps-host>
+```
+
+Then open `http://127.0.0.1:7870/`.
+
+## 7. Kick off a cycle
+
+```bash
+node bin/run-graph.js cycle '{
+  "cycleDate": "2026-04-22",
+  "memoDir":   "/root/openclaw/output/memos",
+  "reportPath":"/root/openclaw/output/reports/2026-04-22.md",
+  "portfolioState": {"nav": 100000},
+  "threadId":  "cli-2026-04-22"
+}'
+```
+
+The run pauses before `botjohn`. Approve or veto from the dashboard.

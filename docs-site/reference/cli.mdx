@@ -1,0 +1,94 @@
+---
+title: "CLI runner"
+description: "bin/run-graph.js — invoke any registered graph from the terminal."
+---
+
+`bin/run-graph.js` is a thin wrapper around the graph registry.
+
+## List graphs
+
+```bash
+node bin/run-graph.js list
+```
+
+```json Example output
+[
+  {
+    "name": "cycle",
+    "description": "Daily cycle: datajohn → researchjohn → tradejohn → (HITL) → botjohn",
+    "nodes": ["datajohn", "researchjohn", "tradejohn", "botjohn"],
+    "features": ["postgres-checkpoint", "hitl-interrupt", "conditional-routing"]
+  },
+  {
+    "name": "paperhunter",
+    "description": "Parallel fan-out over paper candidates (Send)",
+    "nodes": ["dispatch", "extract_one", "reduce"],
+    "features": ["parallel-fanout"]
+  }
+]
+```
+
+## Run a graph
+
+```bash
+node bin/run-graph.js <name> '<json-input>'
+```
+
+### Cycle
+
+```bash
+node bin/run-graph.js cycle '{
+  "cycleDate": "2026-04-22",
+  "memoDir":   "/root/openclaw/output/memos",
+  "reportPath":"/root/openclaw/output/reports/2026-04-22.md",
+  "portfolioState": {"nav": 100000},
+  "threadId":  "cli-2026-04-22"
+}'
+```
+
+Returns immediately when the run pauses for approval. Inspect or resume from the dashboard or the commands below.
+
+### PaperHunter
+
+PaperHunter requires a non-serializable `extract` function, so it is generally invoked from code rather than the CLI. Use the research orchestrator's path:
+
+```javascript From your own entry script
+const { runPaperHunt } = require('./src/agent/graphs/paperhunter');
+const orch = require('./src/agent/research/research-orchestrator');
+const { results } = await runPaperHunt({
+  candidates: await orch.getPendingCandidates(),
+  extract:    (c) => orch._runPaperHunter(c),
+});
+```
+
+## Resume a paused run
+
+```bash
+node bin/run-graph.js cycle:resume '{
+  "threadId": "cli-2026-04-22",
+  "approval": "approved"
+}'
+```
+
+`approval` must be `approved` or `vetoed`. Any other value rejects with an error.
+
+## Inspect state
+
+```bash
+node bin/run-graph.js cycle:state <threadId>
+```
+
+Returns the raw LangGraph state snapshot: current values, pending nodes (`next`), checkpoint metadata, and any recorded writes.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. |
+| `1` | Unknown graph, invalid input JSON, or graph threw. |
+
+Stdout is the JSON-stringified return value. Stderr carries errors. Pipe-safely:
+
+```bash
+node bin/run-graph.js list | jq '.[].name'
+```

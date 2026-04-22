@@ -288,50 +288,9 @@ async function parallel(configs) {
  * @param {Function} [opts.notify]       — Discord notify function
  */
 async function runCycle({ cycleDate, portfolioState, strategyList, memoDir, reportPath, threadId, notify }) {
-  const workspace   = process.env.OPENCLAW_DIR || '/root/openclaw';
-  const signalsPath = path.join(workspace, 'output', 'signals', `${cycleDate}_signals.md`);
-
-    if (notify) notify(`📊 Cycle ${cycleDate} — DataPipeline → ResearchJohn → TradeJohn`);
-
-  // Step 1: Hardcoded data pipeline — strategy execution + memos (no LLM agent)
-  if (notify) notify('📈 Running hardcoded data pipeline...');
-  const runner = require('../../execution/runner');
-  const dataResult = await runner.runDailyClose('default', memoDir);
-
-  // Step 2: ResearchJohn — synthesize memos into research report
-  const researchResult = await init({
-    type:      'researchjohn',
-    ticker:    cycleDate,
-    workspace,
-    threadId,
-    notify,
-    mode:      'PM_TASK',
-    prompt:    `CYCLE_DATE=${cycleDate}\nMEMO_DIR=${memoDir}`,
-  });
-
-  // Step 3: TradeJohn — generate trade signals from research report
-  const tradeResult = await init({
-    type:      'tradejohn',
-    ticker:    cycleDate,
-    workspace,
-    threadId,
-    notify,
-    mode:      'PM_TASK',
-    prompt:    `CYCLE_DATE=${cycleDate}\nREPORT_PATH=${reportPath}\nPORTFOLIO_STATE=${JSON.stringify(portfolioState || {})}`,
-  });
-
-  // Step 4: BotJohn — review signals, approve/veto, post cycle digest to #ops
-  const botResult = await init({
-    type:      'botjohn',
-    ticker:    cycleDate,
-    workspace,
-    threadId,
-    notify,
-    mode:      'PM_TASK',
-    prompt:    `Cycle review for ${cycleDate}. Read AGENTS.md standing orders. Review trade signals at ${signalsPath}. Approve signals with EV > 0 within 3% NAV limit per SO-4. Auto-veto negative EV. Escalate any strategy with max_drawdown > 20% per SO-5. Post cycle digest to #ops.`,
-  });
-
-  return { cycleDate, dataResult, researchResult, tradeResult, botResult };
+  if (notify) notify(`📊 Cycle ${cycleDate} — DataPipeline → ResearchJohn → TradeJohn (LangGraph)`);
+  const { runCycleGraph } = require('../graph');
+  return runCycleGraph({ cycleDate, portfolioState, strategyList, memoDir, reportPath, threadId, notify });
 }
 
 /**

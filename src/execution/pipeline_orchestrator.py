@@ -31,6 +31,8 @@ PAUSE_ON_RED    = True   # pause if budget:mode == RED (USD spend too high)
 CHECKPOINT_KEY  = 'pipeline:resume_checkpoint'
 LOCK_KEY        = 'pipeline:running'
 LOCK_TTL        = 3600   # 1 hour lock TTL (prevents double-run)
+COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
+COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
 # Ordered pipeline steps: key → script name (without .py)
 STEPS = [
@@ -122,6 +124,22 @@ def write_checkpoint(r, completed, run_date, reason):
 
 def clear_checkpoint(r):
     r.delete(CHECKPOINT_KEY)
+
+
+def is_completed_today(r, run_date):
+    """Return True if the pipeline already finished all 5 steps for run_date."""
+    try:
+        return bool(r.get(f'{COMPLETED_KEY}:{run_date}'))
+    except Exception:
+        return False
+
+
+def mark_completed(r, run_date):
+    """Set the once-per-day sentinel so repeat triggers exit early."""
+    try:
+        r.set(f'{COMPLETED_KEY}:{run_date}', '1', ex=COMPLETED_TTL)
+    except Exception as e:
+        log(f'mark_completed failed: {e}')
 
 
 # ── Budget check ──────────────────────────────────────────────────────────────
@@ -323,6 +341,14 @@ if __name__ == '__main__':
 
     r = get_redis()
 
+    # ── Idempotency: skip if pipeline already finished today ──────────────────
+    # Set by mark_completed() at the end of a successful run. Covers both the
+    # external 21:30 UTC cron and collector auto-spawn chains — whichever wins
+    # the race completes all 5 steps, and subsequent triggers exit cleanly.
+    if not args.force_resume and is_completed_today(r, run_date):
+        log(f'Pipeline already completed for {run_date} — skipping (use --force-resume to re-run)')
+        sys.exit(0)
+
     # ── Checkpoint / resume ───────────────────────────────────────────────────
     checkpoint  = read_checkpoint(r)
     completed   = set()
@@ -424,6 +450,7 @@ if __name__ == '__main__':
 
         # All steps done
         clear_checkpoint(r)
+        mark_completed(r, run_date)
         log(f'Pipeline complete for {run_date} — all {len(STEPS)} steps done.')
 
         # Final action: nudge the dashboard to re-render against the fresh DB

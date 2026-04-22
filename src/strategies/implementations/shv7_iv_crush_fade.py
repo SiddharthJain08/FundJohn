@@ -10,7 +10,7 @@ class IVCrushFade(BaseStrategy):
     id            = 'S_HV7_iv_crush_fade'
     name          = 'IV Crush Fade'
     version       = '1.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL']
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
 
     def default_parameters(self) -> dict:
         return {

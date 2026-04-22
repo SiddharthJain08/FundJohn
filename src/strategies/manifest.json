@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T01:43:00.206Z",
+  "updated_at": "2026-04-22T05:06:48.664Z",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -80,24 +80,42 @@
       "history": []
     },
     "S23_regime_momentum": {
-      "state": "paper",
-      "state_since": "2026-01-01T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:06:48.664Z",
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
         "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:06:48.664Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S24_52wk_high_proximity": {
-      "state": "paper",
-      "state_since": "2026-01-01T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-22T05:06:19.982Z",
       "metadata": {
         "canonical_file": "S24_52wk_high_proximity.py",
         "class": "FiftyTwoWeekHighProximityStrategy",
         "description": "52-week high proximity breakout signal"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-22T05:06:19.982Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S25_dual_momentum_v2": {
       "state": "paper",

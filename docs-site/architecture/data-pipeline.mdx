@@ -1,0 +1,43 @@
+---
+title: "Data pipeline"
+description: "Hardcoded strategy execution and memo dispatch."
+---
+
+The `datajohn` node in the cycle graph is not an LLM. It is a hardcoded Python pipeline invoked via `src/execution/runner.js`.
+
+## Entry point
+
+```javascript src/execution/runner.js
+async function runDailyClose(workspaceId, memoDir) {
+  // Spawns python3 src/strategies/engine.py with workspace context
+  // Writes per-strategy memos into memoDir
+  // Records result in Redis: engine:last_run:${workspaceId}
+}
+```
+
+## Data tiers
+
+| Tier | Sources | Use |
+|------|---------|-----|
+| Tier 1 | FMP, AlphaVantage, EDGAR | Point-in-time fundamentals, filings, ownership. |
+| Tier 2 | Yahoo Finance | Price series, dividends, corporate actions. |
+
+## Strategy lifecycle
+
+Strategies live in `src/strategies/manifest.json` with one of these states:
+
+| State | Meaning |
+|-------|---------|
+| `live` | Generates signals counted by TradeJohn. |
+| `paper` | Generates signals but does not size positions. |
+| `deprecated` | Skipped by the engine; kept for historical reference. |
+
+Implementations live in `src/strategies/implementations/`. The state machine that promotes, demotes, and reaps strategies is `src/strategies/lifecycle.py`.
+
+## Memo dispatch
+
+Each strategy writes one Markdown memo per cycle into `memoDir`. ResearchJohn then reads every memo and produces one synthesized research report. The engine emits the `signals_generated` count to Redis under `engine:last_run:${workspaceId}` so TradeJohn can see pipeline health without re-reading files.
+
+## Column reaper
+
+Unused columns in the master parquet are flagged for deprecation. `src/agent/research/research-orchestrator.js` tracks ledger usage and removes orphans on a schedule. This keeps the dataset from growing without bound as strategies evolve.

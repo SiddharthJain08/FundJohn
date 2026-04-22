@@ -11,7 +11,7 @@ from ..base import BaseStrategy, Signal
 class GEXRegime(BaseStrategy):
     id = "S_HV16_gex_regime"
     version = "1.0.0"
-    regime_filter = ["HIGH_VOL", "NEUTRAL", "LOW_VOL"]
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING', 'LOW_VOL']
     GEX_NEGATIVE_THRESH: float = -500.0
     GEX_POSITIVE_THRESH: float = 500.0
     VRP_MIN_SELL: float = 0.03

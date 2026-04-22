@@ -12,7 +12,7 @@ from ..base import BaseStrategy, Signal
 class EarningsStraddleFade(BaseStrategy):
     id = "S_HV17_earnings_straddle_fade"
     version = "1.0.0"
-    regime_filter = ["HIGH_VOL", "NEUTRAL"]
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
     IMPLIED_MOVE_RATIO_MIN: float = 1.20
     IV_RANK_MIN: float = 65.0
     LOOKBACK_DAYS: int = 504

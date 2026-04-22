@@ -1,6 +1,38 @@
 'use strict';
 
-const { query } = require('../database/postgres');
+const { query }    = require('../database/postgres');
+const parquetStore = require('../data/parquet_store');
+
+// ── Per-phase write buffers ──────────────────────────────────────────────────
+// Market-data writes are batched in memory and flushed in a single parquet
+// write per phase to avoid N read-rewrite cycles on a 350K-row file.
+const _buffers = {
+  prices:       [],
+  options:      [],
+  fundamentals: [],
+  insider:      [],
+  macro:        [],
+};
+
+async function _flush(name, writer) {
+  const rows = _buffers[name];
+  if (!rows.length) return 0;
+  _buffers[name] = [];
+  try {
+    const after = await writer(rows);
+    return { flushed: rows.length, total_after: after };
+  } catch (err) {
+    // On failure, put rows back so a retry can flush them.
+    _buffers[name] = rows.concat(_buffers[name]);
+    throw err;
+  }
+}
+
+async function flushPrices()       { return _flush('prices',       parquetStore.writePrices); }
+async function flushOptions()      { return _flush('options',      parquetStore.writeOptions); }
+async function flushFundamentals() { return _flush('fundamentals', parquetStore.writeFundamentals); }
+async function flushInsider()      { return _flush('insider',      parquetStore.writeInsider); }
+async function flushMacro()        { return _flush('macro',        parquetStore.writeMacro); }
 
 // ── Pipeline Config ───────────────────────────────────────────────────────────
 
@@ -87,122 +119,117 @@ async function upsertUniverse(records) {
   }
 }
 
-// ── Price Data ────────────────────────────────────────────────────────────────
+// ── Price Data (parquet-primary) ─────────────────────────────────────────────
+// upsertPrices/upsertOptions/upsertFundamentals buffer rows in memory; the
+// collector flushes each phase's buffer via flushPrices/flushOptions/etc.
+// Dedup semantics match the replaced DB ON CONFLICT: (ticker,date) replace.
+
+function _priceRow(ticker, b, source) {
+  const date = b.date || (b.t ? new Date(b.t).toISOString().slice(0, 10) : null);
+  if (!date) return null;
+  return {
+    ticker,
+    date,
+    open:         b.o  ?? b.open        ?? null,
+    high:         b.h  ?? b.high        ?? null,
+    low:          b.l  ?? b.low         ?? null,
+    close:        b.c  ?? b.close       ?? null,
+    volume:       b.v  ?? b.volume      ?? null,
+    vwap:         b.vw ?? b.vwap        ?? null,
+    transactions: b.n  ?? b.transactions ?? null,
+    source,
+  };
+}
 
 async function upsertPrices(ticker, bars, source = 'polygon') {
-  if (!bars.length) return 0;
+  if (!bars?.length) return 0;
   let written = 0;
   for (const b of bars) {
-    // Support both daily (date string) and sub-daily (unix ms timestamp b.t)
-    const date = b.date || (b.t ? new Date(b.t).toISOString().slice(0, 10) : null);
-    if (!date) continue;
-    // datetime: use explicit timestamp if available, else midnight UTC for daily bars
-    const datetime = b.datetime || (b.t ? new Date(b.t).toISOString() : `${date}T00:00:00.000Z`);
-    await query(
-      `INSERT INTO price_data (ticker, date, datetime, open, high, low, close, volume, vwap, transactions, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       ON CONFLICT (ticker, datetime) DO UPDATE SET
-         open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, close=EXCLUDED.close,
-         volume=EXCLUDED.volume, vwap=EXCLUDED.vwap, date=EXCLUDED.date`,
-      [ticker, date, datetime,
-       b.o ?? b.open, b.h ?? b.high, b.l ?? b.low, b.c ?? b.close,
-       b.v ?? b.volume, b.vw ?? b.vwap, b.n ?? b.transactions, source]
-    ).catch(() => null);
-    written++;
+    const row = _priceRow(ticker, b, source);
+    if (row) {
+      _buffers.prices.push(row);
+      written++;
+    }
   }
   return written;
 }
 
-async function getLatestPrice(ticker) {
-  const res = await query(
-    `SELECT * FROM price_data WHERE ticker=$1 ORDER BY date DESC LIMIT 1`, [ticker]
-  );
-  return res.rows[0] || null;
+// ── Options / Greeks (parquet-primary) ───────────────────────────────────────
+
+function _optionRow(ticker, c, snapshotDate) {
+  const greeks = c.greeks || {};
+  const expiry       = c.details?.expiration_date ?? c.expiry_date    ?? null;
+  const strike       = c.details?.strike_price    ?? c.strike_price   ?? null;
+  const contractType = c.details?.contract_type   ?? c.contract_type  ?? null;
+  if (!expiry || !strike || !contractType) return null;
+  return {
+    ticker,
+    date:              snapshotDate,
+    expiry,
+    strike,
+    option_type:       String(contractType).toLowerCase(),
+    market_price:      c.day?.last_price ?? null,
+    implied_volatility: c.implied_volatility ?? null,
+    delta:             greeks.delta ?? null,
+    gamma:             greeks.gamma ?? null,
+    theta:             greeks.theta ?? null,
+    vega:              greeks.vega  ?? null,
+    rho:               greeks.rho   ?? null,
+    open_interest:     c.open_interest ?? null,
+    volume:            c.day?.volume   ?? null,
+    bid:               c.last_quote?.bid ?? c.bid ?? null,
+    ask:               c.last_quote?.ask ?? c.ask ?? null,
+  };
 }
-
-async function getPriceHistory(ticker, days = 252) {
-  const res = await query(
-    `SELECT * FROM price_data WHERE ticker=$1 ORDER BY date DESC LIMIT $2`, [ticker, days]
-  );
-  return res.rows.reverse();
-}
-
-// ── Snapshots ─────────────────────────────────────────────────────────────────
-
-async function upsertSnapshot(ticker, snap) {
-  const ts = new Date(Math.floor(Date.now() / 60000) * 60000); // round to minute
-  await query(
-    `INSERT INTO snapshots (ticker, snapshot_at, price, change_pct, volume, vwap, day_high, day_low, prev_close, market_cap, source)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-     ON CONFLICT (ticker, snapshot_at) DO UPDATE SET price=EXCLUDED.price, change_pct=EXCLUDED.change_pct`,
-    [ticker, ts, snap.price, snap.change_pct, snap.volume, snap.vwap,
-     snap.day_high, snap.day_low, snap.prev_close, snap.market_cap, snap.source || 'polygon']
-  ).catch(() => null);
-}
-
-async function getLatestSnapshots(tickers) {
-  const res = await query(
-    `SELECT DISTINCT ON (ticker) ticker, price, change_pct, volume, snapshot_at
-     FROM snapshots WHERE ticker = ANY($1)
-     ORDER BY ticker, snapshot_at DESC`,
-    [tickers]
-  );
-  return res.rows;
-}
-
-// ── Options / Greeks ──────────────────────────────────────────────────────────
 
 async function upsertOptions(ticker, contracts, snapshotDate) {
-  if (!contracts.length) return 0;
+  if (!contracts?.length) return 0;
   let written = 0;
   for (const c of contracts) {
-    const greeks = c.greeks || {};
-    // Support both Polygon nested format (c.details.*) and flat format (c.expiry_date etc.)
-    const expiry       = c.details?.expiration_date ?? c.expiry_date ?? null;
-    const strike       = c.details?.strike_price    ?? c.strike_price ?? null;
-    const contractType = c.details?.contract_type   ?? c.contract_type ?? null;
-    const bid          = c.last_quote?.bid ?? c.bid ?? null;
-    const ask          = c.last_quote?.ask ?? c.ask ?? null;
-    if (!expiry || !strike || !contractType) continue;
-    await query(
-      `INSERT INTO options_data
-         (ticker, snapshot_date, expiry, strike, contract_type, delta, gamma, theta, vega, rho, iv, open_interest, volume, last_price, bid, ask)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-       ON CONFLICT (ticker, snapshot_date, expiry, strike, contract_type) DO UPDATE SET
-         delta=EXCLUDED.delta, gamma=EXCLUDED.gamma, theta=EXCLUDED.theta,
-         vega=EXCLUDED.vega, rho=EXCLUDED.rho, iv=EXCLUDED.iv, open_interest=EXCLUDED.open_interest,
-         volume=EXCLUDED.volume, last_price=EXCLUDED.last_price, bid=EXCLUDED.bid, ask=EXCLUDED.ask`,
-      [ticker, snapshotDate, expiry, strike, contractType,
-       greeks.delta ?? null, greeks.gamma ?? null, greeks.theta ?? null, greeks.vega ?? null, greeks.rho ?? null,
-       c.implied_volatility ?? null, c.open_interest ?? null, c.day?.volume ?? null,
-       c.day?.last_price ?? null, bid, ask]
-    ).catch(() => null);
-    written++;
+    const row = _optionRow(ticker, c, snapshotDate);
+    if (row) {
+      _buffers.options.push(row);
+      written++;
+    }
   }
   return written;
 }
 
-// ── Fundamentals ──────────────────────────────────────────────────────────────
+// ── Fundamentals (parquet-primary, includes ev_revenue/ev_ebitda) ───────────
 
 async function upsertFundamentals(ticker, records) {
+  if (!records?.length) return 0;
   for (const r of records) {
-    await query(
-      `INSERT INTO fundamentals
-         (ticker, period, period_end, revenue, gross_profit, ebitda, net_income, eps,
-          gross_margin, operating_margin, net_margin, revenue_growth_yoy, pe_ratio, market_cap,
-          roe, roic, debt_equity_ratio, p_fcf_ratio, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
-       ON CONFLICT (ticker, period) DO UPDATE SET
-         revenue=EXCLUDED.revenue, gross_profit=EXCLUDED.gross_profit, ebitda=EXCLUDED.ebitda,
-         roe=EXCLUDED.roe, roic=EXCLUDED.roic,
-         debt_equity_ratio=EXCLUDED.debt_equity_ratio, p_fcf_ratio=EXCLUDED.p_fcf_ratio`,
-      [ticker, r.period, r.period_end, r.revenue, r.gross_profit, r.ebitda,
-       r.net_income, r.eps, r.gross_margin, r.operating_margin, r.net_margin,
-       r.revenue_growth_yoy, r.pe_ratio, r.market_cap,
-       r.roe ?? null, r.roic ?? null, r.debt_equity_ratio ?? null, r.p_fcf_ratio ?? null,
-       r.source || 'fmp']
-    ).catch(() => null);
+    _buffers.fundamentals.push({
+      ticker,
+      period:             r.period,
+      date:               r.period_end,
+      revenue:            r.revenue           ?? null,
+      gross_profit:       r.gross_profit      ?? null,
+      ebitda:             r.ebitda            ?? null,
+      net_income:         r.net_income        ?? null,
+      eps:                r.eps               ?? null,
+      gross_margin:       r.gross_margin      ?? null,
+      operating_margin:   r.operating_margin  ?? null,
+      net_margin:         r.net_margin        ?? null,
+      revenue_growth:     r.revenue_growth_yoy ?? null,
+      ev_revenue:         r.ev_revenue        ?? null,
+      ev_ebitda:          r.ev_ebitda         ?? null,
+      pe_ratio:           r.pe_ratio          ?? null,
+      market_cap:         r.market_cap        ?? null,
+      roe:                r.roe               ?? null,
+      roic:               r.roic              ?? null,
+      debt_equity_ratio:  r.debt_equity_ratio ?? null,
+      p_fcf_ratio:        r.p_fcf_ratio       ?? null,
+    });
   }
+  return records.length;
+}
+
+// ── Insider (parquet-primary, ON CONFLICT DO NOTHING semantics) ─────────────
+
+async function bufferInsider(row) {
+  _buffers.insider.push(row);
 }
 
 // ── Coverage Registry ─────────────────────────────────────────────────────────
@@ -291,12 +318,12 @@ async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDa
   // ── Prices: needs update if coverage is absent or date_to < yesterday ────────
   const priceRes = await query(
     `SELECT u.ticker,
-            CASE WHEN c.date_to >= $3::date THEN 'covered' ELSE 'needed' END AS status
+            CASE WHEN c.date_to >= $2::date THEN 'covered' ELSE 'needed' END AS status
      FROM   unnest($1::text[]) AS u(ticker)
      LEFT JOIN data_coverage c ON c.ticker = u.ticker AND c.data_type = 'prices'
      ORDER BY u.ticker`,
-    [priceTickers, fromDate, yesterday]
-  ).catch(() => null);
+    [priceTickers, yesterday]
+  ).catch(err => { console.error('[getGapSummary:prices] SQL error:', err.message); return null; });
 
   // ── Options: needs update if no coverage record for today ────────────────────
   const optRes = await query(
@@ -400,21 +427,10 @@ async function getTodayApiStats() {
 }
 
 async function getDataFreshness(tickers) {
-  const res = await query(`
-    SELECT
-      u.ticker,
-      MAX(p.date) AS latest_price,
-      MAX(s.snapshot_at) AS latest_snapshot,
-      MAX(o.snapshot_date) AS latest_options
-    FROM universe u
-    LEFT JOIN price_data p ON p.ticker = u.ticker
-    LEFT JOIN snapshots s ON s.ticker = u.ticker
-    LEFT JOIN options_data o ON o.ticker = u.ticker
-    WHERE u.ticker = ANY($1)
-    GROUP BY u.ticker
-    ORDER BY u.ticker
-  `, [tickers]);
-  return res.rows;
+  // Parquet-primary: read per-ticker max(date) from prices + options parquets.
+  // The snapshot cache table is retired; we report latest_snapshot == latest_price.
+  const rows = await parquetStore.readParquet('freshness_per_ticker', { tickers });
+  return rows || [];
 }
 
 // ── Collection cycle tracking ─────────────────────────────────────────────────
@@ -551,9 +567,10 @@ async function getNews({ ticker, tickers, q, limit = 30, since } = {}) {
 module.exports = {
   getConfig, setConfig, getAllConfig,
   getUniverseTickers, getActiveUniverse, addToUniverse,
-  upsertUniverse, upsertPrices, getLatestPrice, getPriceHistory,
-  upsertSnapshot, getLatestSnapshots,
-  upsertOptions, upsertFundamentals,
+  upsertUniverse,
+  upsertPrices, upsertOptions, upsertFundamentals,
+  bufferInsider,
+  flushPrices, flushOptions, flushFundamentals, flushInsider, flushMacro,
   getGaps, updateCoverage, getAllCoverage, getGapSummary,
   logRun, getCoverageStats, getTodayApiStats, getDataFreshness,
   startCycle, completeCycle, getCycleHistory,

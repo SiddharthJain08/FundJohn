@@ -9,7 +9,7 @@ class RVMomentumDivergence(BaseStrategy):
     id            = 'S_HV9_rv_momentum_div'
     name          = 'RV Momentum Divergence'
     version       = '1.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING', 'LOW_VOL']
 
     def default_parameters(self) -> dict:
         return {

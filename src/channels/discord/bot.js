@@ -1467,16 +1467,13 @@ function startTyping(channel) {
 }
 
 async function generateChart(ticker) {
-  const { query: dbQuery } = require('../../database/postgres');
-  const res = await dbQuery(
-    `SELECT date, close, volume FROM price_data WHERE ticker=$1 ORDER BY date ASC LIMIT 365`,
-    [ticker]
-  ).catch(() => null);
-  if (!res || res.rows.length < 5) return null;
+  const { readParquet } = require('../../data/parquet_store');
+  const rows = await readParquet('chart', { ticker, limit: 365 }).catch(() => null);
+  if (!rows || rows.length < 5) return null;
 
-  const dates  = JSON.stringify(res.rows.map(r => r.date.toISOString().slice(0, 10)));
-  const closes = JSON.stringify(res.rows.map(r => Number(r.close)));
-  const vols   = JSON.stringify(res.rows.map(r => Number(r.volume)));
+  const dates  = JSON.stringify(rows.map(r => String(r.date).slice(0, 10)));
+  const closes = JSON.stringify(rows.map(r => Number(r.close)));
+  const vols   = JSON.stringify(rows.map(r => Number(r.volume)));
   const outPath = `/tmp/${ticker}_chart_${Date.now()}.png`;
 
   const script = `

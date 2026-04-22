@@ -15,7 +15,7 @@ class CrossStockDispersion(BaseStrategy):
     id            = 'S_HV11_cross_stock_dispersion'
     name          = 'Cross-Stock Dispersion'
     version       = '1.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL']
+    active_in_regimes = ['HIGH_VOL', 'TRANSITIONING']
 
     def default_parameters(self) -> dict:
         return {

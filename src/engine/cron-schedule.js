@@ -399,8 +399,12 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
-    // 4:20 PM ET Mon-Fri: run full market-close pipeline (market state + signals cache + signal_runner.py)
-  cron.schedule('20 16 * * 1-5', runMarketClosePipeline, { timezone: 'America/New_York' });
+    // DEPRECATED 2026-04-21: runMarketClosePipeline bypassed pipeline_orchestrator,
+    // used the older Kelly-only trade_agent.py, and duplicated work done by the
+    // collector's end-of-cycle chain (collect → sync_master_parquets → orchestrator).
+    // The collector at 16:30 ET is now the single daily trigger. The function is
+    // retained below for reference only and is NOT scheduled.
+    //   cron.schedule('20 16 * * 1-5', runMarketClosePipeline, { timezone: 'America/New_York' });
 
   // 8:15 AM ET Mon-Fri: daily health digest to Discord so regressions surface in one glance
   try {

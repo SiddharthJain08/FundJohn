@@ -64,6 +64,7 @@ _IMPL_MAP = {
     'S_tr_03_bocpd_change_point':          ('strategies.implementations.S_tr_03_bocpd_change_point',          'BOCPDChangePoint'),
     'S_tr_04_intraday_spy_momentum':       ('strategies.implementations.S_tr_04_intraday_spy_momentum',       'IntradaySPYMomentum'),
     'S_tr_06_eod_reversal':                ('strategies.implementations.S_tr_06_eod_reversal',                'EODCrossSectionalReversal'),
+    'S21_iv_hv_spread':                   ('strategies.implementations.S21_iv_hv_spread',                    'IVHVSpread'),
 }
 
 
