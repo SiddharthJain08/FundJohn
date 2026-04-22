@@ -5,9 +5,8 @@ This project contains all system optimizations for FundJohn, a bot-network quant
 ## System Overview
 Autonomous quant PM system + hardcoded data pipeline:
 - **BotJohn** (claude-opus-4-6): Orchestrator and portfolio manager
-- **DataPipeline** (hardcoded, src/execution/runner.js): Strategy execution, data collection, memo dispatch
-- **ResearchJohn** (claude-sonnet-4-6): Strategy memo synthesis and research reporting
-- **TradeJohn** (claude-sonnet-4-6): Signal generation and position sizing
+- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 7-step 10am daily cycle — queue_drain → collect → signals → handoff → trade → alpaca → report.
+- **TradeJohn** (claude-sonnet-4-6): Signal selection + Kelly sizing. Reads the structured handoff from `trade_handoff_builder.py`; emits sized bracket orders. Single LLM step in the cycle.
 - **PaperHunter** (claude-haiku-4-5): Per-paper extraction + 4 rejection gates
 - **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation
 - **MastermindJohn** (claude-opus-4-7, 1M ctx): Opus orchestrator with two modes.

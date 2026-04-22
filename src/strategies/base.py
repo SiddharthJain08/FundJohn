@@ -29,6 +29,13 @@ class Signal:
     position_size_pct: float
     confidence:        str          # HIGH | MED | LOW
     signal_params:     dict = field(default_factory=dict)
+    # Phase 5 (2026-04-22): per-signal deterministic features that used to be
+    # computed by research_report.py — HV, beta, momentum, EV/p_t1, any
+    # strategy-specific context TradeJohn consumes. Strategies can populate
+    # this directly if they want to carry strategy-specific features through
+    # to the handoff; trade_handoff_builder.py otherwise fills it with the
+    # standard feature set. Default empty keeps old strategies compatible.
+    features:          dict = field(default_factory=dict)
 
 
 REGIME_POSITION_SCALE = {

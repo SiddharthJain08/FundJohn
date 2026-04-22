@@ -42,8 +42,31 @@ Signal(
     position_size_pct = float,         # fraction of portfolio (0.0–1.0), scale by regime
     confidence        = str,           # 'HIGH' | 'MED' | 'LOW' — NEVER a float
     signal_params     = dict,          # optional extra params
+    features          = dict,          # optional — trade_handoff_builder fills in HV, beta, etc.
+                                       # populate only strategy-specific features (e.g. IV-RV ratio)
 )
 ```
+
+### `required_columns` — declare your data dependencies
+
+Every new strategy MUST declare the data columns it reads, at class level:
+
+```python
+class YourStrategy(BaseStrategy):
+    required_columns = [
+        {"key": "prices",        "provider": "yfinance",  "lookback_days": 1825},
+        {"key": "financials",    "provider": "fmp",       "lookback_days": 1825},
+        {"key": "unusual_flow",  "provider": "polygon",   "lookback_days": 365 },
+    ]
+```
+
+Consumed by the dashboard approval flow (`staging_approver.js` + queue_drain):
+when an operator approves a staging strategy, each declared column is
+enqueued into `data_ingestion_queue` with the declared `lookback_days`
+as the backfill window. Columns must exist in
+`data/master/schema_registry.json` — if any required column has no
+provider support, the Approve button disables and the strategy stays
+in staging. Do **not** declare a column your strategy never reads.
 
 Rules:
 - Handle empty/None DataFrame (return `[]`)

@@ -1,343 +1,276 @@
 # FundJohn — Canonical Pipeline Reference
 
-> **System**: FundJohn / OpenClaw v2.0 — autonomous bot-network hedge fund
-> **Last verified**: 2026-04-18 against HEAD `beea4cd`
-> **Companion docs**: [ARCHITECTURE.md](ARCHITECTURE.md) · [LEARNINGS.md](LEARNINGS.md) · [README.md](README.md)
+> **System**: FundJohn / OpenClaw v2.1 — autonomous bot-network hedge fund
+> **Last verified**: 2026-04-22 against the Phase 2–4 restructure
+> **Companion docs**: [ARCHITECTURE.md](ARCHITECTURE.md) · [CLAUDE.md](CLAUDE.md) · [README.md](README.md)
 
-This document is the canonical, file-by-file definition of every pipeline that runs in FundJohn. It supersedes any pipeline description in `SYSTEM_REPORT.md` or inline comments. When anything on the VPS changes, this file is the reference that gets updated first.
+This document supersedes any pipeline description in `SYSTEM_REPORT.md` or
+inline comments. When the VPS changes, update this file first.
 
 ---
 
 ## 1. Daily Cycle (America/New_York)
 
-FundJohn runs on a fixed intraday schedule. All timestamps are ET.
+A single 10:00 AM ET cron drives the full cycle. All LLM work lives inside
+one step (trade) so the budget envelope is predictable.
 
 | Time | Component | Triggered by | Tokens | Output |
 |---|---|---|---|---|
-| Continuous | Market-hours data polling | `src/ingestion/*` + DataPipeline | 0 | Postgres rows |
-| **16:20** | **Signal pipeline (zero-LLM)** | `cron.schedule('20 16 * * 1-5')` in `src/engine/cron-schedule.js` → `runMarketClosePipeline()` | 0 | `regime.json`, `signals_cache.parquet`, `signals` table |
-| 16:20 (chained) | Strategy memo publisher | `src/execution/runner.js::runDailyClose()` spawned by pipeline orchestrator | 0 | `output/memos/*_{date}.md`, Discord `#strategy-memos` |
-| ~16:30 | Research pipeline | Discord `#strategy-memos` post → `bot.js::handleBotMessage()` → `runResearchPipeline()` → `src/execution/research_report.py` | LLM | `output/reports/{date}_research.md`, Discord `#research-feed` |
-| ~16:45 | Trade pipeline | `#research-feed` post → `runTradePipeline()` → `src/execution/trade_agent.py` | LLM | `output/signals/{date}_signals.md`, Discord `#trade-signals` + Alpaca paper bracket orders |
-| **23:59** | Token-budget reset | `cron.schedule('59 23 * * *')` → `resetTokenBudgets()` | 0 | Redis key cleanup |
-| **Sun 08:00** | Weekly memory synthesis | `cron.schedule('0 8 * * 0')` → `swarm.init({type:'strategist', mode:'REPORT'})` | LLM | `agent.md`, `memory/*.md` consolidated |
+| Continuous | Market-hours snapshot polling | `src/pipeline/collector.js` 5-min interval | 0 | `prices.parquet` live tick |
+| **09:00** | Morning regime refresh | `cron.schedule('0 9 * * 1-5')` → `scripts/run_market_state.py` | 0 | `workspaces/default/regime.json` |
+| **10:00** | **Daily orchestrator** | `cron.schedule('0 10 * * 1-5')` → `scripts/run_pipeline.py` → `pipeline_orchestrator.py` | LLM (trade only) | See §2 |
+| **20:00 Fri** | MastermindJohn strategy-stack memo | `openclaw-mastermind-weekly.timer` → `run_mastermind.js --mode strategy-stack` | Opus 4.7 | `#strategy-memos` + `#position-recommendations` + `mastermind_weekly_reports` |
+| **23:59** | Token-budget reset | `cron.schedule('59 23 * * *')` | 0 | Redis key cleanup |
+| **Sat 10:00** | MastermindJohn corpus curation | `openclaw-mastermind-corpus.timer` → `run_mastermind.js --mode corpus` | Opus 4.7 | `curated_candidates` + `research_candidates` |
+| **Sun 08:00** | Weekly memory synthesis + reaper | `cron.schedule('0 8 * * 0')` | LLM | `agent.md`, `memory/*.md`, `data_deprecation_queue` |
 
-**Authoritative source**: `src/engine/cron-schedule.js` (lines 51–88 market close, 129–144 budget reset, 237–255 memory synthesis, 258 cron wiring).
-
-The signal pipeline (`post_memos → research_report → trade_agent`) is **not cron-triggered**. It is event-driven through Discord channel posts; the 16:20 cron only runs the zero-LLM pre-work (regime, cache, signal_runner) and then `runner.js::runDailyClose()` posts the first memo, which starts the chain.
+Authoritative cron definitions: `src/engine/cron-schedule.js`.
 
 ---
 
-## 2. The Three Sub-Pipelines
+## 2. The 10:00 AM orchestrator
 
-`src/execution/pipeline_orchestrator.py` is the Python supervisor that coordinates the LLM-bearing half of the cycle. It is invoked from `runner.js` after the zero-token signal stage, or re-invoked by `checkPipelineResume()` when the token budget recovers.
+`src/execution/pipeline_orchestrator.py` runs seven steps in order. All
+state is in Redis + Postgres; mid-cycle aborts resume from checkpoint.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────┐
 │                     pipeline_orchestrator.py                          │
 │                                                                       │
-│   Redis lock:  pipeline:running:{YYYY-MM-DD}          (soft fence)    │
-│   Checkpoint:  pipeline:resume_checkpoint             (step + date)   │
-│   Budget gate: Redis key budget:mode ∈ {GREEN,YELLOW,RED}             │
+│   Redis lock:       pipeline:running:{YYYY-MM-DD}                     │
+│   Idempotency:      pipeline:completed:{YYYY-MM-DD}                   │
+│   Checkpoint:       pipeline:resume_checkpoint                        │
+│   Budget gate:      Redis key budget:mode — checked BEFORE `trade`    │
 │                                                                       │
 │   steps = [                                                           │
-│      ("post_memos",      src/execution/post_memos.py),                │
-│      ("research_report", src/execution/research_report.py),           │
-│      ("trade_agent",     src/execution/trade_agent.py),               │
+│     ('queue_drain', src/pipeline/queue_drain.py),        # 0 LLM      │
+│     ('collect',     src/pipeline/run_collector_once.js), # 0 LLM      │
+│     ('signals',     src/execution/engine.py),            # 0 LLM      │
+│     ('handoff',     src/execution/trade_handoff_builder.py), # 0 LLM  │
+│     ('trade',       src/execution/trade_agent_llm.py),   # TradeJohn  │
+│     ('alpaca',      src/execution/alpaca_executor.py),   # 0 LLM      │
+│     ('report',      src/execution/send_report.py),       # 0 LLM      │
 │   ]                                                                   │
 │                                                                       │
-│   Budget gate is checked BEFORE post_memos only.                      │
-│   Research + trade run once memos exist (SO-3 research gate).         │
+│   After all 7 steps: broadcast_dashboard_refresh() → SSE fan-out.     │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.1 `post_memos.py`
+Per-step pipeline-feed post (▶️ start → ✅/❌ end in Ns) to
+`#pipeline-feed` for operator visibility — non-blocking.
 
-Reads the per-strategy raw signals emitted by `signal_runner.py`, consults the lifecycle manifest, and writes one markdown memo per active strategy to `output/memos/{strategy_id}_{cycle_date}.md`. Each memo carries: lifecycle state (live / paper / staging), regime gating, signal direction + confidence, targets/stops, and the parameters under which the signal fired. The first memo posted to Discord `#strategy-memos` is what wakes ResearchDesk.
+### 2.1 `queue_drain`
 
-### 2.2 `research_report.py`
+`src/pipeline/queue_drain.py` drains two tables:
 
-Reads every memo in `output/memos/*_{cycle_date}.md`, plus today's regime file and recent portfolio state, then produces `output/reports/{cycle_date}_research.md` with six mandated sections: (1) executive summary, (2) regime assessment, (3) per-strategy performance table, (4) convergence / divergence analysis, (5) warnings, (6) recommendation. Emits to `#research-feed`.
+- **`data_ingestion_queue`** (column additions approved in the dashboard):
+  `status='APPROVED'` AND `backfill_status IN ('pending','failed')` →
+  dispatch to `src/pipeline/backfillers/{provider}.py` over the declared
+  `backfill_from`/`backfill_to` window → `backfill_status='complete'`
+  on success. Provider is resolved by `provider_preferred` → `data_columns`
+  ledger → `schema_registry.json` datasets.
+- **`data_deprecation_queue`** (unstack-triggered removals):
+  `status='APPROVED'` AND `deletion_applied_at IS NULL` → remove from
+  `schema_registry.json` + `data_columns` so the next `collect` step
+  skips the column. Historical parquet data preserved.
 
-### 2.3 `trade_agent.py` — Kelly optimizer + Alpaca paper execution
+Progress posts to `#data-alerts`.
 
-Reads today's execution signals from Postgres, runs Kelly-criterion optimization across each signal's available exit targets (T1, T2, T3), picks the best (target, Kelly) pair per signal, and posts only **GREEN** signals (`kelly_net > MIN_KELLY`) to `#trade-signals` via TradeDesk. If nothing clears the bar, a "no actionable signals" post with per-signal diagnostics goes out instead.
+### 2.2 `collect`
 
-Key constants (top of `trade_agent.py`):
+`src/pipeline/run_collector_once.js` invokes `collector.runDailyCollection()`
+— one synchronous cycle against the configured universe. Writes directly
+to master parquets (`prices.parquet`, `options_eod.parquet`,
+`fundamentals.parquet`, `insider.parquet`, `macro.parquet`). Skips
+already-current datasets via the freshness scan.
 
-| Constant | Value | Meaning |
+### 2.3 `signals`
+
+`src/execution/engine.py` runs the zero-LLM signal executor:
+- Load regime + approved strategies (`src/strategies/registry.py`).
+- Load signals_cache (workspace parquet). Run each strategy's
+  `generate_signals(prices, regime, universe, aux_data)`.
+- Persist signals to `execution_signals`.
+- Detect confluence (≥2 strategies agreeing on same ticker/direction).
+- Update P&L on open signals; fire report triggers on 30+ unreported
+  completed trades.
+
+### 2.4 `handoff`
+
+`src/execution/trade_handoff_builder.py` — deterministic feature builder.
+Reads `execution_signals` for `run_date`, computes per-signal HV21/63/252,
+beta-to-SPY, momentum at 1m/3m/6m/12m, RSI14, and GBM two-barrier
+EV/p(T1) (overflow-guarded). Writes `handoff:{run_date}:structured`:
+
+```jsonc
+{
+  "cycle_date": "...",
+  "regime":   { "state": "...", "stress": ..., "scale": ... },
+  "portfolio":{ /* from output/portfolio.json */ },
+  "signals":  [ /* one per row with features */ ],
+  "veto_history_30d": { /* per-strategy counts */ },
+  "mastermind_rec": { /* last Friday's sizing recommendation */ }
+}
+```
+
+Size-bounded (~290 KB for 576 signals) — stays well under TradeJohn's
+200K context.
+
+### 2.5 `trade`
+
+`src/execution/trade_agent_llm.py` invokes TradeJohn (Claude
+`sonnet-4-6`, $0.70 per-call budget, 15 iteration cap) via
+`src/agent/run-subagent-cli.js`. TradeJohn reads the structured handoff,
+runs Kelly sizing, and emits a markdown memo with a fenced
+` ```tradejohn_orders ` JSON block. The block is parsed and written to
+`handoff:{run_date}:sized`.
+
+Budget gate runs BEFORE this step. If `budget:mode == RED` or token
+budget is exhausted, the orchestrator pauses here and `checkPipelineResume()`
+picks up 30-minutely once budget recovers.
+
+### 2.6 `alpaca`
+
+`src/execution/alpaca_executor.py` reads the sized handoff, submits
+bracket orders (market + take-profit + stop-loss) to Alpaca Paper via
+their REST API. Size caps: 5% NAV per order, 25% NAV new notional
+per day. Idempotent via `alpaca_submissions (run_date, strategy_id,
+ticker)` unique constraint.
+
+Time-in-force is `day` during RTH (09:30–16:00 ET), `opg` otherwise.
+
+### 2.7 `report`
+
+`src/execution/send_report.py` posts two concise messages:
+- **`#trade-signals`** — greenlist table (ticker, strategy, dir, entry,
+  size%, EV%, p(T1)).
+- **`#trade-reports`** — veto digest grouped by reason with sample tickers.
+
+---
+
+## 3. Weekly MastermindJohn (Opus 4.7, 1M context)
+
+Two modes under `src/agent/curators/run_mastermind.js`:
+
+### 3.1 `--mode strategy-stack` (Fri 20:00 ET)
+
+Timer: `openclaw-mastermind-weekly.timer`. Flow:
+
+1. Read `live + monitoring` strategies from `src/strategies/manifest.json`.
+2. Load per-strategy rows from `strategy_stats` (view, migration 042),
+   `daily_signal_summary` (migration 040), `alpaca_submissions`
+   (migration 043), `position_recommendations` (migration 022), and
+   `veto_log`.
+3. One Opus 4.7 call (subagent type `mastermind`) synthesizes a
+   comprehensive-but-concise memo with per-strategy notes, cross-strategy
+   correlation, and a fenced ` ```sizing_recommendations ` JSON block.
+4. Post memo to `#strategy-memos`, sizing JSON to
+   `#position-recommendations`.
+5. Persist to `mastermind_weekly_reports` (migration 047).
+
+`trade_handoff_builder.py::load_mastermind_rec()` reads the latest row
+each daily cycle so TradeJohn sees the week's sizing guidance.
+
+### 3.2 `--mode corpus` (Sat 10:00 ET)
+
+Timer: `openclaw-mastermind-corpus.timer`. Legacy CorpusCurator flow —
+arXiv + OpenAlex discovery, then a full pass over `research_corpus`
+with batch size 100. Promotes confidence ≥ 0.75 to
+`research_candidates`, hard cap 600 promotions per run.
+
+---
+
+## 4. Data-column queue (user-driven)
+
+The operator approves a staging strategy on the dashboard. The approval
+worker (`src/agent/approvals/staging_approver.js`) reads the strategy's
+`required_columns` manifest, validates every column against
+`schema_registry.json`, and inserts `data_ingestion_queue` rows with
+`backfill_from`/`backfill_to` set from each column's `lookback_days`.
+
+On the next 10:00 AM cycle, `queue_drain` backfills historical data for
+the new columns, then the `collect` step picks them up in its normal
+coverage scan. All subsequent daily cycles include the new column.
+
+When an active strategy is unstacked (transitioned to `deprecated` or
+`archived`), `src/strategies/lifecycle.py::_enqueue_orphan_columns()`
+inserts auto-`APPROVED` rows into `data_deprecation_queue` for columns
+no remaining `live|paper|monitoring` strategy consumes. Next
+`queue_drain` removes them from the live collection set.
+
+Symmetry: only unstacking triggers removal; approvals trigger additions.
+
+---
+
+## 5. Discord channel map
+
+| Channel | Publisher | Content |
 |---|---|---|
-| `MAX_POSITION_PCT` | `0.05` | Hard cap per signal (5% of equity) |
-| `MIN_KELLY` | `0.005` | Minimum net Kelly to be called actionable |
-| `HALF_KELLY` | `0.50` | Safety fraction applied to raw Kelly |
-| `CAPTURE_RATIO` | `0.80` | Slippage haircut on reward (80% of target captured) |
+| `#pipeline-feed` | pipeline_orchestrator.py | ▶️/✅/❌ phase boundaries |
+| `#data-alerts` | freshness.js, queue_drain.py, collector.js | Staleness alerts, backfill progress, API errors |
+| `#trade-signals` | send_report.py | Daily greenlist (one post) |
+| `#trade-reports` | send_report.py | Daily veto digest |
+| `#strategy-memos` | strategy_stack.js (Fri only) | Weekly stack memo |
+| `#position-recommendations` | strategy_stack.js (Fri only) | Sizing deltas JSON |
+| `#botjohn-log` | bot.js | System events |
+| `#research-feed` | (manual / ad-hoc) | Legacy — kept for ad-hoc research subagent runs |
 
-Optimization math (`kelly_optimize`):
-
-1. `p_hit_upper(entry, stop, target, mu_daily, sigma_daily)` — GBM two-barrier probability that target is hit before stop, parameterised on SPY-relative drift/vol.
-2. For each (T1, T2, T3), compute `R = reward / risk`, `kelly_raw = (p·R - (1-p)) / R`.
-3. Apply `kelly_net = kelly_raw * HALF_KELLY`; then `kelly_pos = clip(kelly_net, 0, MAX_POSITION_PCT)`.
-4. Best pair per signal = max by `kelly_net`.
-
-**Alpaca paper-trading (added 2026-04-16, commit `9f326f3`)**: immediately after green signals are identified, `execute_alpaca_orders(green, run_date)` submits **bracket orders** (market + take-profit + stop-loss) sized `kelly_pos × equity` to Alpaca. `build_alpaca_post()` appends a condensed order summary to the `#trade-signals` green post. Credentials are read from `.env` at runtime: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` (point at the Alpaca paper endpoint for paper mode). Orders fire before BotJohn approval — this is **paper** trading by design; promoting to live will add a gate here.
-
-Operator override: BotJohn remains the authority for any *real-money* routing (SO-1..SO-6). The Alpaca execution path is the paper-mode shortcut.
+Per-strategy memos (`post_memos.py` path) were removed in Phase 2 and no
+longer post anywhere.
 
 ---
 
-## 3. Zero-LLM Signal Stage (16:20 ET)
+## 6. Invariants
 
-This is the hot path. Every market close it runs in three steps, all pure Python, no API calls beyond what's already cached:
-
-### Step 1: Market state (`scripts/run_market_state.py`)
-
-Runs the HMM regime classifier and writes `workspaces/default/regime.json`. The regime is one of `LOW_VOL`, `TRANSITIONING`, `HIGH_VOL`, `CRISIS`. Position scaling multipliers live in `src/strategies/base.py::REGIME_POSITION_SCALE` — `1.00 / 0.55 / 0.35 / 0.15` respectively.
-
-### Step 2: Signals cache (`workspaces/default/tools/signals_cache.py --build`)
-
-Rolls up the master dataset into a compact parquet/feather file that every strategy reads. This avoids each strategy re-hitting Postgres for the same OHLCV / options / financials. The cache is rebuilt daily; strategies only read it.
-
-### Step 3: Strategy signal runner (`workspaces/default/tools/signal_runner.py`)
-
-Walks every approved strategy returned by `src/strategies/registry.py::get_approved_strategies()`. For each:
-
-1. Check `should_run(regime_state)` on the strategy instance. Only runs if the current regime is in `active_in_regimes`.
-2. Call `generate_signals(prices, regime, universe, aux_data)`.
-3. Persist any returned `Signal` objects to Postgres.
-4. Log to `signal_performance` with `reported=false` so report triggers can notice.
-
-The runner emits **zero LLM tokens** by construction — it only runs the hardcoded Python strategies listed in `_IMPL_MAP` (registry.py) that are in the `approved` state in the DB row.
+1. **All LLM work happens inside `trade`.** Every other step is
+   deterministic. If a new step needs LLM, it must be explicitly
+   budget-gated.
+2. **Strategies never import from `agent/` or `channels/`.** Must be
+   runnable in a Python REPL with only a DataFrame + regime dict.
+3. **`generate_signals` is deterministic.** Any RNG must be seeded.
+4. **`manifest.json` is the lifecycle truth** for live/paper/monitoring/
+   deprecated/archived. `strategy_registry.status` uses older labels —
+   don't confuse the two.
+5. **`pipeline:resume_checkpoint` takes precedence over `budget:mode ==
+   RED`.** Resume only when mode ≠ RED.
+6. **`_IMPL_MAP` aliases are historical.** Never rename a strategy id —
+   `signals` rows reference them. Only add new ids.
+7. **Column removal is unstack-driven only.** Never auto-enqueue
+   `data_deprecation_queue` from other code paths; the reaper's weekly
+   pass is the only other acceptable source (for truly orphaned
+   columns no strategy ever used).
 
 ---
 
-## 4. Strategy Registry and Lifecycle
+## 7. Critical file map
 
-### 4.1 Registry wiring (`src/strategies/registry.py`)
-
-`_IMPL_MAP` maps a strategy DB id to `(python_module_path, class_name)`. The IDs fall into three groups:
-
-| Group | Example IDs | Implementation folder |
-|---|---|---|
-| Canonical live | `S5_max_pain`, `S9_dual_momentum`, `S10_quality_value`, `S12_insider`, `S15_iv_rv_arb`, `S_custom_jt_momentum_12mo` | `src/strategies/implementations/s*_*.py` |
-| HV paper (vol-first) | `S_HV7` … `S_HV20` (13 of them — no S_HV18) | `src/strategies/implementations/shv*.py` |
-| Alt-form aliases | `max_pain`, `dual_momentum`, `quality_value`, `insider_cluster_buy`, `iv_rv_arb`, `jt_momentum_12mo` | Same modules as canonical live — aliases kept to avoid invalidating historical `signals` rows |
-
-`load_strategy_class(sid)` imports the module lazily and returns the class or `None`. `get_approved_strategies(db_rows)` instantiates only those with `status == 'approved'`, overrides `instance.id` with the DB id, and returns the list. Failed imports are logged but never raise.
-
-### 4.2 Lifecycle state machine (`src/strategies/lifecycle.py`)
-
-`LifecycleStateMachine` enforces strategy promotion. States: `candidate → paper → live → monitoring → deprecated → archived`. Valid transitions live in `VALID_TRANSITIONS`. Promotion gate from `paper → live` requires metadata `sharpe ≥ 0.5` and `max_drawdown ≤ 0.20`; any other transition only needs to exist in the table. History is appended to each strategy record, so every promotion has an audit trail with actor, reason, and timestamp.
-
-### 4.3 Manifest as source of truth (`src/strategies/manifest.json`)
-
-Mirrors the DB lifecycle state for disaster recovery and for humans. Current distribution (as of 2026-04-16):
-
-- **live**: S5_max_pain, S9_dual_momentum, S10_quality_value, S12_insider, S15_iv_rv_arb, S_custom_jt_momentum_12mo
-- **paper**: S23_regime_momentum, S24_52wk_high_proximity, S25_dual_momentum_v2, S_HV7/8/9/11/12/13/14/15/16/17/19/20
-- **staging**: S_HV10_triple_gate_fear (blocked on unusual_flow data)
-- **deprecated**: S_custom_momentum_trend_v1
-- **decommissioned** (archived): `dual_momentum_original`, `quality_value_original`, `insider_cluster_buy_original`, `iv_rv_arb_original`, `max_pain_original` — five files moved to `implementations/decommissioned/` during R3 canonicalisation on 2026-04-13
-
-### 4.4 Base class contract (`src/strategies/base.py`)
-
-Every strategy inherits `BaseStrategy(ABC)` and implements `generate_signals(prices, regime, universe, aux_data=None) -> List[Signal]`. Rules enforced by convention (and CI):
-
-1. `generate_signals` is pure Python — no API/LLM calls, no network I/O.
-2. Data comes in as pre-loaded DataFrames from the signals cache.
-3. Deterministic: same inputs → same outputs (any randomness must be explicitly seeded).
-4. Missing data → return `[]`, never raise.
-
-`compute_stops_and_targets()` is a shared ATR-based stop/target helper available to every subclass.
-
----
-
-## 5. Data Collection Pipeline (continuous, pre-16:20)
-
-Hardcoded — replaced the old DataJohn LLM agent. Target: all collection complete ≤16:20 ET so signals can run.
-
-### 5.1 Stock OHLCV — yfinance only
-
-Stock price data is collected via **yfinance** (`yf.download()`) — not Polygon, not Massive. This is a firm architectural constraint from the Massive/Polygon "options starter" plan, which does not grant stock OHLCV access.
-
-- **`workspaces/default/tools/master_dataset.py::refresh_prices_bulk(trade_date)`** — bulk-downloads the full universe for a single date; reshapes the yfinance MultiIndex DataFrame to long format; upserts to `price_data` via `merge_prices()`.
-- **`src/pipeline/collector.js`** — Node-side coordinator; Phase 2 calls yfinance directly (`fillPricesYFinance()`). No Polygon OHLCV calls anywhere.
-
-### 5.2 Options data — Massive/Polygon (options starter plan)
-
-**Massive = Polygon**: same service, same API key (`MASSIVE_SECRET_KEY` = `POLYGON_API_KEY`). "Options starter" plan provides:
-1. **S3 flat files** (`us_options_opra/day_aggs_v1/{Y}/{M}/{date}.csv.gz`) — full OPRA options EOD chain (~4 MB/day). Fetched by `src/ingestion/massive_client.py::download_options_day_bars(trade_date)`.
-2. **Options WebSocket** (`wss://socket.massive.com/options`, `OA.*` feed) — per-minute options aggregates. Handled by `src/ingestion/massive_ws.py::MassiveOptionsCapture`.
-
-**Do not** use Polygon/Massive for stock prices or stock WebSocket — those endpoints return 403 on this plan.
-
-### 5.3 Live options flow (Massive WebSocket, always-on)
-
-`massive-ws.service` keeps a persistent connection to `wss://socket.massive.com/options` and runs `MassiveOptionsCapture`:
-
-1. At startup: loads `data/master/options_eod.parquet` → builds `_prev_oi` dict (contract → previous-close OI).
-2. On each `OA.*` event: parse OCC symbol (`O:AAPL240117C00150000` → underlying, expiry, type, strike); accumulate session volume into `_session_vol[underlying][expiry][strike][type]`.
-3. After each update: `_update_flow_cache(underlying)` computes `unusual_call_flow = session_call_vol > 0.30 × prev_call_oi` and writes to Redis: `massive:flow:{underlying}` (JSON, 4-hour TTL).
-
-`fetch_polygon_flow()` in `src/ingestion/pipeline.py` checks this Redis key first (uses it if updated within 2 hours) before falling through to REST.
-
-### 5.4 Fundamental / auxiliary data
-
-Primary collector: **`src/ingestion/pipeline.py`** — 3-layer async ETL.
-
-- **Layer 1 — Fetch.** `aiohttp` with per-provider semaphore rate-limiting. FMP Starter: `semaphore(5)` (300 req/min budget).
-- **Layer 2 — Transform.** Normalise raw API responses into `MasterBar` records; compute EMA20, EMA50, RSI(14) from OHLCV history inline.
-- **Layer 3 — Cache.** Write to `data/cache/{symbol}/{date}.json` with a 23-hour TTL.
-
-Secondary collectors / sources:
-
-- **`src/ingestion/edgar_client.py`** — SEC EDGAR 10-K / 10-Q / 8-K / Form 4. Writes to `insider_transactions` (migration 017). Consumed by `S12_insider`.
-- **`src/ingestion/run_universe_sync.py`** — syncs the full ticker universe from FMP (`/api/v3/stock/list`) into the `universe_config` DB table. Called weekly by cron.
-- **Generated MCP modules** at `workspaces/default/tools/*.py` — each strategy's `aux_data` is pulled from here when a needed field isn't in the `data/cache/` artifact. Rate-limiting via `tools/_rate_limiter.py`.
-- **News + sentiment** — Tavily + Alpha Vantage → `market_news` (migration 009).
-- **Macro / regime features** — VIX term structure, realised-vol, RORO inputs → `scripts/run_market_state.py`.
-
-Provider roster (full table in [ARCHITECTURE.md §6](ARCHITECTURE.md)):
-
-| Provider | Used for |
+| File | Role |
 |---|---|
-| FMP | Financials, ratios, earnings calendar, universe sync |
-| Polygon / Massive | **Options only** — chain (IV surface, Greeks, OI), S3 flat files, live OA.* flow |
-| SEC EDGAR | Form 4, 10-K/Q/K |
-| Tavily | News, transcripts |
-| Alpha Vantage | Macro, technical indicators |
-| Yahoo / yfinance | **All stock OHLCV**, VIX, short interest |
-
-Data dependencies of note: `S_HV8` requires `theta` live in the options chain; `S_HV13–S_HV15` require call/put IV and term-structure fields; `S_HV17` requires `earnings_dte` (wired in commit `183dba6`); `S_HV10` requires `unusual_flow` from Massive WS Redis cache (currently staging — data flows when WS runs).
-
----
-
-## 6. Discord Event Flow
-
-```
- DataBot (runner.js)                ResearchDesk                  TradeDesk
- ─────────────────                  ────────────                  ────────
-  #strategy-memos  ────post───▶     listens ──▶  research_report.py
-                                                      │
-                                                      ▼
-                                    #research-feed  ────post───▶  listens
-                                                                       │
-                                                                       ▼
-                                                                 trade_agent.py
-                                                                   (Kelly opt.)
-                                                                       │
-                                                   ┌───────────────────┼─────────────────────┐
-                                                   ▼                                         ▼
-                                             #trade-signals                         Alpaca (paper)
-                                             #trade-reports                         bracket orders
-                                                   │
-                                                   ▼
-                                             BotJohn review
-                                             (SO-1..SO-6 gates)
-                                                   │
-                                                   ▼
-                                           live broker route (future)
-```
-
-Routing lives in `src/channels/discord/bot.js::handleBotMessage()`. Each channel handler is idempotent; reposting a memo does not re-enter the pipeline if `pipeline:running:{date}` is still held.
+| `src/engine/cron-schedule.js` | 10:00 AM cron + token-reset + weekly maintenance |
+| `src/execution/pipeline_orchestrator.py` | 7-step supervisor, checkpointing, Discord phase posts |
+| `src/execution/engine.py` | Signal execution, confluence detection, P&L updates |
+| `src/execution/trade_handoff_builder.py` | Features → structured handoff (replaces research_report) |
+| `src/execution/trade_agent_llm.py` | TradeJohn invocation + sized handoff writer |
+| `src/execution/alpaca_executor.py` | Bracket-order submission |
+| `src/execution/send_report.py` | Daily Discord greenlist + veto digest |
+| `src/execution/handoff.py` | Redis+filesystem handoff primitives |
+| `src/pipeline/collector.js` | Master parquet collector (universe coverage) |
+| `src/pipeline/run_collector_once.js` | CLI wrapper — one collection cycle |
+| `src/pipeline/queue_drain.py` | Column backfill + deprecation drainer |
+| `src/pipeline/backfillers/*.py` | Per-provider history loaders |
+| `src/pipeline/freshness.js` | Staleness detector → `#data-alerts` |
+| `src/strategies/base.py` | `BaseStrategy` + `Signal` (with `features` field) |
+| `src/strategies/registry.py` | `_IMPL_MAP` + approved-strategy loader |
+| `src/strategies/lifecycle.py` | State machine + unstack-triggered column queue |
+| `src/strategies/manifest.json` | Canonical lifecycle states |
+| `src/agent/curators/mastermind.js` | MastermindJohn corpus mode |
+| `src/agent/curators/strategy_stack.js` | MastermindJohn strategy-stack mode |
+| `src/agent/curators/run_mastermind.js` | CLI (`--mode {corpus,strategy-stack}`) |
+| `src/agent/prompts/subagents/mastermind.md` | Opus prompt (shared across modes) |
+| `docs/mastermind-corpus.{service,timer}` | Sat 10:00 ET systemd |
+| `docs/mastermind-weekly.{service,timer}` | Fri 20:00 ET systemd |
 
 ---
 
-## 7. Checkpointing & Resume
-
-`pipeline_orchestrator.py` uses two Redis keys:
-
-- **`pipeline:running:{YYYY-MM-DD}`** — soft lock; TTL set to the remaining intraday budget. While held, `checkPipelineResume()` is a no-op. Released when all three steps complete, or cleared at 23:59 by the budget reset.
-- **`pipeline:resume_checkpoint`** — JSON `{ run_date, next_step }`. Written after every successful step. If the orchestrator aborts mid-pipeline (budget RED, crash, or manual stop) this is the resume point.
-
-`src/engine/cron-schedule.js::checkPipelineResume()` runs every 30 minutes during off-hours. It re-spawns the orchestrator with `--force-resume` only if: (a) checkpoint exists, (b) lock is not held, (c) `budget:mode ≠ 'RED'`. Under RED the pipeline holds at its checkpoint until spend drops below the RED threshold (or the month rolls over).
-
----
-
-## 8. Budget Governance (dollar-based)
-
-Managed by **`src/budget/enforcer.js`** + `config/budget.json` + Redis. Modes are computed from *dollar* spend, not token count. Defaults (overridable via `config/budget.json`):
-
-```
-monthly_budget_usd:     400
-daily_burn_yellow_usd:   20
-daily_burn_red_usd:      35
-monthly_pct_yellow:      75   (% of monthly budget)
-monthly_pct_red:         90
-```
-
-Mode rules (evaluated by `checkBudget()`):
-
-| Mode | Trigger (any) | Effect |
-|---|---|---|
-| GREEN | else | All phases run |
-| YELLOW | daily ≥ $20 or month ≥ 75% of $400 | Skip Phase 6 (news); reduce Phase 5 (fundamentals) to weekly (Sundays only) |
-| RED | daily ≥ $35 or month ≥ 90% of $400 | Price collection only; all PTC (plan-then-commit) ops require manual trigger |
-
-Redis keys (TTL 1 h, refreshed each cycle):
-
-- `budget:mode` — current mode string
-- `budget:daily_usd` — today's spend
-- `budget:monthly_usd` — 30-day trailing spend
-
-`pipeline_orchestrator.py` reads `budget:mode` before `post_memos` and before `checkPipelineResume()` re-spawns a paused orchestrator. `swarm.init()` reads it before spawning any subagent. `bot.js` reads it before replying to `@FundJohn`.
-
-Per-agent $ caps and iteration limits (independent of the mode gate) are in `src/agent/config/subagent-types.json` — e.g. BotJohn `maxBudgetUsd: 1.00` at 40 iterations; Research/Trade `maxBudgetUsd: 0.30` at 15 iterations each.
-
----
-
-## 9. Report Triggers (post-cycle)
-
-After the zero-LLM stage, `cron-schedule.js::checkReportTriggers()` queries:
-
-```sql
-SELECT strategy_id,
-       COUNT(*) FILTER (WHERE pnl_pct IS NOT NULL)                        AS completed,
-       COUNT(*) FILTER (WHERE pnl_pct IS NOT NULL AND NOT reported)       AS unreported
-FROM   signal_performance
-WHERE  workspace_id = $1
-GROUP  BY strategy_id
-HAVING COUNT(*) FILTER (WHERE pnl_pct IS NOT NULL AND NOT reported) >= 30;
-```
-
-Any strategy with 30+ unreported completed trades is queued at `queue:report:{workspace_id}`. The queue is consumed by `processReportQueue()`, which spawns a `report-builder` subagent in `STRATEGY_PERFORMANCE` mode.
-
----
-
-## 10. File Map — Pipeline Surface
-
-| File | Language | Role |
-|---|---|---|
-| `src/engine/cron-schedule.js` | Node | Cron jobs + report-trigger + resume poller |
-| `src/execution/runner.js` | Node | `runDailyClose()` — spawns engine.py, posts memos |
-| `src/execution/engine.py` | Python | Master execution engine — signal orchestration |
-| `src/execution/pipeline_orchestrator.py` | Python | Sequences memos → research → trade with checkpointing |
-| `src/execution/post_memos.py` | Python | Per-strategy memo writer |
-| `src/execution/research_report.py` | Python | Aggregated research doc |
-| `src/execution/trade_agent.py` | Python | Confluence scoring + sizing → signal doc |
-| `src/execution/send_report.py` | Python | Pushes strategy performance reports |
-| `src/strategies/registry.py` | Python | `_IMPL_MAP` + `get_approved_strategies()` |
-| `src/strategies/lifecycle.py` | Python | `LifecycleStateMachine` + manifest I/O |
-| `src/strategies/manifest.json` | JSON | Lifecycle source-of-truth mirror |
-| `src/strategies/base.py` | Python | `BaseStrategy` ABC + `Signal` dataclass + regime scales |
-| `src/strategies/implementations/*.py` | Python | 24 strategy implementations |
-| `scripts/run_market_state.py` | Python | HMM regime classifier |
-| `workspaces/default/tools/signals_cache.py` | Python | Dataset rollup cache builder |
-| `workspaces/default/tools/signal_runner.py` | Python | Zero-LLM strategy executor |
-| `src/channels/discord/bot.js` | Node | Discord event router → research/trade pipelines |
-
----
-
-## 11. Invariants Worth Not Breaking
-
-These are rules that, if violated, break the pipeline in non-obvious ways:
-
-1. **Data collection must complete before 16:20 ET.** If a provider is degraded, let the collector fail loudly rather than feed stale data to `signals_cache`.
-2. **Strategies never import from `agent/` or `channels/`.** A strategy must be runnable standalone in a Python REPL with only a DataFrame. This is what keeps the signal stage at zero tokens.
-3. **`generate_signals` is deterministic.** Any RNG must be seeded. Non-determinism here leaks into backtests and breaks promotion.
-4. **Manifest and DB must agree.** `manifest.json` is the recovery artifact; the `strategy_registry` Postgres table is operational truth. Both are updated by `lifecycle.save_manifest()` after every transition.
-5. **`pipeline:resume_checkpoint` takes precedence over `budget:mode == RED`.** Once written, resume only happens when mode is not RED — do not add a branch that ignores this.
-6. **Aliases in `_IMPL_MAP` are historical.** Do not remove `max_pain`, `dual_momentum`, etc. — existing `signals` rows reference them. Only add new IDs, never rename.
-
----
-
-*This document is the canonical pipeline description. If an operator finds it disagrees with what's running on the VPS, this file is wrong and should be corrected before the code is touched.*
+*If this file disagrees with what's running on the VPS, this file is wrong
+and should be corrected before the code is touched.*
