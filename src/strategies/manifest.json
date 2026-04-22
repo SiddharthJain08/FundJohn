@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T05:18:07.798201+00:00",
+  "updated_at": "2026-04-22T05:23:56.127700+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -617,6 +617,44 @@
         "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol"
       },
       "history": []
+    },
+    "S22_quality_momentum": {
+      "state": "candidate",
+      "state_since": "2026-04-22T05:23:56.127700+00:00",
+      "metadata": {
+        "canonical_file": "S22_quality_momentum.py",
+        "class": "S22QualityMomentum",
+        "description": "Quality-Filtered Momentum \u2014 top-N JT momentum gated by gross-margin quality screen"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "candidate",
+          "timestamp": "2026-04-22T05:23:56.127700+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Wired in from strategy_registry (pending_approval, no prior manifest entry)",
+          "metadata": {}
+        }
+      ]
+    },
+    "S25_dual_momentum": {
+      "state": "candidate",
+      "state_since": "2026-04-22T05:23:56.127700+00:00",
+      "metadata": {
+        "canonical_file": "S25_dual_momentum.py",
+        "class": "DualMomentum",
+        "description": "Dual Momentum (12-1mo skip, Top 7) \u2014 cross-asset momentum rotation"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "candidate",
+          "timestamp": "2026-04-22T05:23:56.127700+00:00",
+          "actor": "reconcile:2026-04-22",
+          "reason": "Wired in from strategy_registry (pending_approval, no prior manifest entry)",
+          "metadata": {}
+        }
+      ]
     }
   },
   "decommissioned": {
