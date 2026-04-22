@@ -301,7 +301,17 @@ def compute_features(sig: dict, px: pd.DataFrame, spy_returns: pd.Series, run_da
     exp_exit_date = (datetime.strptime(run_date, '%Y-%m-%d').date()
                      + timedelta(days=int(exp_exit_days * 7 / 5))).isoformat()
 
-    return {
+    # Strategy-populated features live in signal_params.features (engine.py
+    # folds Signal.features there). Merge over computed features so the
+    # strategy's values win on key collisions — the strategy knows its own
+    # domain (e.g. IV-RV ratio) better than our general-purpose computation.
+    strategy_features = {}
+    if isinstance(params, dict):
+        raw = params.get('features')
+        if isinstance(raw, dict):
+            strategy_features = {k: _safe(v) for k, v in raw.items() if _safe(v) is not None}
+
+    out = {
         'ticker':     ticker,
         'strategy_id':strat,
         'direction':  sig.get('direction') or 'long',
@@ -329,6 +339,9 @@ def compute_features(sig: dict, px: pd.DataFrame, spy_returns: pd.Series, run_da
         'exp_exit_days': exp_exit_days,
         'exp_exit_date': exp_exit_date,
     }
+    if strategy_features:
+        out['strategy_features'] = strategy_features
+    return out
 
 
 # ── Main ───────────────────────────────────────────────────────────────────

@@ -52,8 +52,15 @@ STEPS = [
 # call in the 10am cycle now — all other steps are deterministic / zero-token.
 BUDGET_CHECK_BEFORE = {'trade'}
 
-# Notify here on pause/resume/error (DataBot → #strategy-memos)
-NOTIFY_WEBHOOK = 'https://discord.com/api/webhooks/1492623936247300186/BFUwcy91xaIzq_GwP_YvON9-N9HhSilx-wDQ6MhISRYoSx9LrNYyXsDQeaSzxfwimEBi'
+# Operator-facing notifications (pause, resume, step failure). Phase 4
+# rewiring: strategy-memos is now MastermindJohn-weekly-only, so alerts
+# that used to post there are redirected into #pipeline-feed via the
+# DATABOT_TOKEN path below. The legacy webhook is kept as a last-ditch
+# fallback if the bot token path is unavailable.
+NOTIFY_WEBHOOK = os.environ.get(
+    'ORCHESTRATOR_NOTIFY_WEBHOOK',
+    'https://discord.com/api/webhooks/1492623936247300186/BFUwcy91xaIzq_GwP_YvON9-N9HhSilx-wDQ6MhISRYoSx9LrNYyXsDQeaSzxfwimEBi',
+)
 
 
 # ── Agent status (replicates agentPersonas.setStatus from Node.js) ───────────
@@ -203,12 +210,20 @@ def log(msg):
 
 
 def notify(msg):
+    """Operator alert. Prefers posting to #pipeline-feed via the bot token
+    (same path as phase boundaries) so all orchestrator output lands in
+    one operator-visible channel. Falls back to the legacy webhook if
+    the bot lookup fails — belt-and-braces, never silent."""
+    try:
+        pipeline_feed(msg)
+    except Exception as e:
+        log(f'pipeline_feed notify fallback: {e}')
     try:
         r = requests.post(NOTIFY_WEBHOOK, json={'content': msg}, timeout=10)
         if not r.ok:
-            log(f'Notify failed: {r.status_code}')
+            log(f'Notify webhook failed: {r.status_code}')
     except Exception as e:
-        log(f'Notify error: {e}')
+        log(f'Notify webhook error: {e}')
 
 
 # ── Pipeline-feed channel posts (Phase 4) ────────────────────────────────────

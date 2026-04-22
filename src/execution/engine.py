@@ -557,6 +557,13 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                         return v.item()   # numpy scalar → Python scalar
                     return v
                 params_clean = {k: _to_native(v) for k, v in (sig.signal_params or {}).items()}
+                # Signal.features (added Phase 5) — fold into signal_params under
+                # a reserved 'features' key so trade_handoff_builder can pull them
+                # out when computing the structured handoff. Strategies that don't
+                # set features leave this absent.
+                feats = getattr(sig, 'features', None)
+                if feats:
+                    params_clean['features'] = {k: _to_native(v) for k, v in feats.items()}
 
                 cur.execute("SAVEPOINT sp_signal")
                 cur.execute("""

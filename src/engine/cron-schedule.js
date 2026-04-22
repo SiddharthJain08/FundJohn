@@ -44,14 +44,6 @@ function log(msg) {
 }
 
 
-// runMarketClosePipeline() — DELETED 2026-04-22 with Phase 2 of the pipeline
-// restructure. It called post_memos.py → research_report.py → trade_agent.py
-// on a separate 20:16 UTC cron path (never actually scheduled post-2026-04-21),
-// duplicating the logic of pipeline_orchestrator.py. The 10:00 AM ET cron
-// below is the canonical trigger; post_memos.py and research_report.py were
-// removed from disk in the same commit.
-
-
 // ── Report Trigger Check ──────────────────────────────────────────────────────
 
 async function checkReportTriggers() {
@@ -327,13 +319,6 @@ function start(swarm, generateId, notifyDiscord) {
             log(`Sunday sweep error: ${e.message}`);
         }
     }, { timezone: 'America/New_York' });
-
-    // DEPRECATED 2026-04-21: runMarketClosePipeline bypassed pipeline_orchestrator,
-    // used the older Kelly-only trade_agent.py, and duplicated work done by the
-    // collector's end-of-cycle chain (collect → sync_master_parquets → orchestrator).
-    // The collector at 16:30 ET is now the single daily trigger. The function is
-    // retained below for reference only and is NOT scheduled.
-    //   cron.schedule('20 16 * * 1-5', runMarketClosePipeline, { timezone: 'America/New_York' });
 
   // 8:15 AM ET Mon-Fri: daily health digest to Discord so regressions surface in one glance
   try {

@@ -289,6 +289,48 @@ def main():
         for s in skipped[:10]:
             log(f'  SKIP {s["ticker"]}: {s["reason"]}')
 
+    # Soft-fail on partial: when orders were requested but we couldn't submit
+    # all of them, surface it to the operator explicitly. We still return 0
+    # so the pipeline's `report` step runs and posts the full picture to
+    # Discord — partial is an observability concern, not a pipeline abort.
+    if submitted and skipped:
+        _alert_partial(run_date, len(submitted), len(orders), skipped)
+
+
+def _alert_partial(run_date, n_ok, n_total, skipped):
+    """One line to #trade-reports when some orders didn't make it in.
+    Uses the DataBot REST API (same pattern as send_report.py)."""
+    import requests as _rq
+    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN', '')
+    if not token:
+        return
+    headers = {'Authorization': f'Bot {token}'}
+    try:
+        r = _rq.get('https://discord.com/api/v10/users/@me/guilds', headers=headers, timeout=5)
+        if not r.ok:
+            return
+        cid = None
+        for g in r.json():
+            rc = _rq.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels", headers=headers, timeout=5)
+            if not rc.ok:
+                continue
+            for ch in rc.json():
+                if ch.get('name') == 'trade-reports' and ch.get('type') == 0:
+                    cid = ch['id']
+                    break
+            if cid:
+                break
+        if not cid:
+            return
+        reasons = ', '.join(f"{s['ticker']}({(s['reason'] or 'unknown')[:40]})" for s in skipped[:8])
+        msg = (f'⚠️ **Alpaca partial submit — {run_date}** — {n_ok}/{n_total} orders in; '
+               f'{n_total - n_ok} skipped: {reasons}{" …" if len(skipped) > 8 else ""}')
+        _rq.post(f'https://discord.com/api/v10/channels/{cid}/messages',
+                 headers={**headers, 'Content-Type': 'application/json'},
+                 json={'content': msg[:1900]}, timeout=5)
+    except Exception as e:
+        log(f'partial-submit alert failed: {e}')
+
 
 if __name__ == '__main__':
     main()
