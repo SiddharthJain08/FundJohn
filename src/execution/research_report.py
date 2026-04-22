@@ -245,7 +245,10 @@ def compute_signal_analytics(sig, px, spy_returns):
     elif sig_d > 0:
         # Reflection principle approximation
         lam = 2 * mu_adj / (sig_d ** 2)
-        p_t1 = (1 - math.exp(lam * a)) / (math.exp(lam * b) - math.exp(lam * a))
+        try:
+            p_t1 = (1 - math.exp(lam * a)) / (math.exp(lam * b) - math.exp(lam * a))
+        except (OverflowError, ZeroDivisionError):
+            p_t1 = 1.0 if mu_adj > 0 else 0.0
         p_t1 = max(0.0, min(1.0, p_t1))
     else:
         p_t1 = 0.5
