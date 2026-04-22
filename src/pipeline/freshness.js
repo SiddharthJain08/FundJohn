@@ -103,11 +103,22 @@ async function runFreshnessCheck({ warnThreshold = 'stale' } = {}) {
     console.log(`[freshness] All ${report.length} datasets current`);
   } else {
     console.error(`[DATA_ALERT] freshness: ${alerts.length} dataset(s) stale`);
+    const lines = [];
     for (const a of alerts) {
       const md  = typeof a.maxDate === 'string' ? a.maxDate.slice(0, 10) : (a.maxDate ? String(a.maxDate).slice(0, 10) : 'NULL');
       const exp = typeof a.expectedDate === 'string' ? a.expectedDate.slice(0, 10) : String(a.expectedDate || '').slice(0, 10);
-      console.error(`  ${a.dataset.padEnd(14)} max=${md} expected=${exp} Δ=${a.deltaDays}d [${a.status}]`);
+      const line = `${a.dataset.padEnd(14)} max=${md} expected=${exp} Δ=${a.deltaDays}d [${a.status}]`;
+      console.error(`  ${line}`);
+      lines.push(`\`${line}\``);
     }
+
+    // Phase 4: surface staleness in #data-alerts via DataBot. Lazy-require
+    // agent-personas to avoid circular imports at boot.
+    try {
+      const { post: _post } = require('../channels/discord/agent-personas');
+      const body = [`⚠️ **Freshness alert — ${alerts.length} dataset(s) stale**`, ...lines].join('\n');
+      Promise.resolve(_post('databot', 'data-alerts', body)).catch(() => {});
+    } catch (_) { /* personas not ready */ }
   }
   return { rows: report, alerts, skipped: false };
 }

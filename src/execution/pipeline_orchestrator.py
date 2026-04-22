@@ -211,6 +211,60 @@ def notify(msg):
         log(f'Notify error: {e}')
 
 
+# ── Pipeline-feed channel posts (Phase 4) ────────────────────────────────────
+# Concise phase-boundary pings for operator visibility without per-signal noise.
+# Uses the DataBot REST API (same pattern as send_report.py). Channel ID is
+# discovered once per process and cached.
+
+_PIPELINE_FEED_CID: str | None = None
+
+def _pipeline_feed_channel_id():
+    global _PIPELINE_FEED_CID
+    if _PIPELINE_FEED_CID is not None:
+        return _PIPELINE_FEED_CID
+    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
+    if not token:
+        _PIPELINE_FEED_CID = ''
+        return ''
+    try:
+        headers = {'Authorization': f'Bot {token}'}
+        r = requests.get('https://discord.com/api/v10/users/@me/guilds', headers=headers, timeout=5)
+        if not r.ok:
+            _PIPELINE_FEED_CID = ''
+            return ''
+        for g in r.json():
+            rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
+                              headers=headers, timeout=5)
+            if not rc.ok:
+                continue
+            for ch in rc.json():
+                if ch.get('name') == 'pipeline-feed' and ch.get('type') == 0:
+                    _PIPELINE_FEED_CID = ch['id']
+                    return _PIPELINE_FEED_CID
+    except Exception as e:
+        log(f'pipeline-feed lookup failed: {e}')
+    _PIPELINE_FEED_CID = ''
+    return ''
+
+
+def pipeline_feed(msg):
+    """Post a concise one-liner to #pipeline-feed. Non-blocking; failures
+    never fail the pipeline — they just get logged."""
+    cid = _pipeline_feed_channel_id()
+    if not cid:
+        return
+    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
+    try:
+        requests.post(
+            f'https://discord.com/api/v10/channels/{cid}/messages',
+            headers={'Authorization': f'Bot {token}', 'Content-Type': 'application/json'},
+            json={'content': msg[:1900]},
+            timeout=5,
+        )
+    except Exception as e:
+        log(f'pipeline_feed post failed: {e}')
+
+
 def broadcast_dashboard_refresh(run_date):
     """POST to the dashboard's internal SSE broadcast so every open browser
     tab auto-refreshes once the pipeline finishes. Contract: fires market_update
@@ -455,8 +509,17 @@ if __name__ == '__main__':
             if agent_info:
                 set_agent_status(r, agent_info[0], 'busy', agent_info[1])
 
+            # #pipeline-feed: phase boundary START
+            _t0 = time.time()
+            pipeline_feed(f'▶️ `{step_key}` starting ({run_date})')
+
             # Run the step
             ok = run_step(script, run_date, env)
+
+            # #pipeline-feed: phase boundary END
+            dt = int(time.time() - _t0)
+            icon = '✅' if ok else '❌'
+            pipeline_feed(f'{icon} `{step_key}` {"done" if ok else "FAILED"} in {dt}s ({run_date})')
 
             # Update agent status → idle
             if agent_info:
@@ -480,6 +543,7 @@ if __name__ == '__main__':
         clear_checkpoint(r)
         mark_completed(r, run_date)
         log(f'Pipeline complete for {run_date} — all {len(STEPS)} steps done.')
+        pipeline_feed(f'🏁 **Cycle complete** — {run_date} · {len(STEPS)}/{len(STEPS)} steps ok')
 
         # Final action: nudge the dashboard to re-render against the fresh DB
         # state. Non-blocking; failure here never fails the pipeline.

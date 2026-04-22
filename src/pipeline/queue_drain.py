@@ -58,6 +58,58 @@ def log(msg: str) -> None:
     print(f'[{ts}] [queue_drain] {msg}', flush=True)
 
 
+# ── Discord #data-alerts (Phase 4) ─────────────────────────────────────────
+# Concise progress for the operator. Uses DATABOT_TOKEN REST call, cached
+# channel ID per process. No-op if the token is unset.
+
+_DATA_ALERTS_CID: str | None = None
+
+def _data_alerts_channel_id() -> str:
+    global _DATA_ALERTS_CID
+    if _DATA_ALERTS_CID is not None:
+        return _DATA_ALERTS_CID
+    import requests as _rq
+    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN', '')
+    if not token:
+        _DATA_ALERTS_CID = ''
+        return ''
+    try:
+        hdr = {'Authorization': f'Bot {token}'}
+        r = _rq.get('https://discord.com/api/v10/users/@me/guilds', headers=hdr, timeout=5)
+        if not r.ok:
+            _DATA_ALERTS_CID = ''
+            return ''
+        for g in r.json():
+            rc = _rq.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels", headers=hdr, timeout=5)
+            if not rc.ok:
+                continue
+            for ch in rc.json():
+                if ch.get('name') == 'data-alerts' and ch.get('type') == 0:
+                    _DATA_ALERTS_CID = ch['id']
+                    return _DATA_ALERTS_CID
+    except Exception as e:
+        print(f'[queue_drain] data-alerts lookup failed: {e}')
+    _DATA_ALERTS_CID = ''
+    return ''
+
+
+def data_alert(msg: str) -> None:
+    cid = _data_alerts_channel_id()
+    if not cid:
+        return
+    import requests as _rq
+    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN', '')
+    try:
+        _rq.post(
+            f'https://discord.com/api/v10/channels/{cid}/messages',
+            headers={'Authorization': f'Bot {token}', 'Content-Type': 'application/json'},
+            json={'content': msg[:1900]},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f'[queue_drain] data-alert post failed: {e}')
+
+
 def load_registry() -> dict:
     if not SCHEMA_REGISTRY_PATH.exists():
         return {}
@@ -143,6 +195,7 @@ def drain_ingestion(conn, dry_run: bool) -> dict:
 
         try:
             log(f'[RUN] {col} via {provider} — window {frm}→{to}')
+            data_alert(f'📥 Backfilling `{col}` via `{provider}` ({frm}→{to})')
             cur.execute(
                 """UPDATE data_ingestion_queue
                      SET backfill_status='running', backfill_started_at=NOW()
@@ -171,9 +224,11 @@ def drain_ingestion(conn, dry_run: bool) -> dict:
             conn.commit()
             summary['succeeded'] += 1
             log(f'[OK]  {col}: {rows_written:,} rows')
+            data_alert(f'✅ `{col}` backfilled — {rows_written:,} rows')
         except Exception as e:
             tb = traceback.format_exc(limit=3)
             log(f'[FAIL] {col}: {e}')
+            data_alert(f'❌ `{col}` backfill FAILED — `{type(e).__name__}: {str(e)[:200]}`')
             cur.execute(
                 """UPDATE data_ingestion_queue
                      SET backfill_status='failed',

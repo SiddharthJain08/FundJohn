@@ -1,25 +1,38 @@
 'use strict';
 
 /**
- * corpus_curator.js — Opus 4.7 corpus-level paper curator.
+ * mastermind.js — MastermindJohn (Opus 4.7, 1M context).
  *
- * Phase 2 of the Opus Curator rollout. Surveys `research_corpus` in batches and
- * emits calibrated pass/reject predictions into `curated_candidates`. Runs
- * weekly on Saturday 10:00 EST via systemd timer (see docs/curator-timer.md).
+ * Runs in two modes; each has its own systemd timer:
+ *   mode=corpus          (Sat 10:00 ET) — surveys research_corpus in batches,
+ *                        emits calibrated pass/reject predictions into
+ *                        curated_candidates, promotes high-bucket papers.
+ *   mode=strategy-stack  (Fri 20:00 ET) — reads strategy_stats,
+ *                        signal_performance, alpaca_submissions,
+ *                        position_recommendations, veto_log; writes a memo
+ *                        to #strategy-memos and sizing recs to
+ *                        #position-recommendations; persisted in
+ *                        mastermind_weekly_reports (migration 047).
  *
- * Design points (from plan):
+ * This file owns the corpus mode; strategy-stack lives in
+ * ./strategy_stack.js so the two flows stay independently testable.
+ *
+ * Design points (corpus mode):
  *   - Batch size: start at 100 papers/batch. Retune from actual token usage.
  *   - Threshold: confidence ≥ 0.75 → 'high' bucket → queued into research_candidates.
  *   - Hard cap: 600 high-bucket promotions per run. Alerts if hit.
  *   - Dry-run: runs against a supplied paper-id list, skips DB writes, emits a
  *     calibration report (precision/recall vs. paper_gate_decisions history).
  *
- * Public API:
- *   const c = new CorpusCurator();
+ * Public API (corpus mode):
+ *   const c = new MastermindCurator();
  *   await c.run({ dryRun: false, batchSize: 100, paperIds: null });
  *   await c.promoteHighBucket({ runId, maxToPromote: 600 });
- *   await c.calibrationReport(runId);    // compare bucket predictions to actual outcomes
- *   await c.getStatus();                 // recent runs, costs
+ *   await c.calibrationReport(runId);
+ *   await c.getStatus();
+ *
+ * Was previously corpus_curator.js / class CorpusCurator. Renamed in
+ * Phase 3 of the 10am-cycle pipeline restructure.
  */
 
 const fs   = require('fs');
@@ -42,7 +55,7 @@ const HARD_PROMOTE_CAP        = 600;
 const DEFAULT_SPOT_CHECK_MAX  = 10;   // per run
 const SPOT_CHECK_WEIGHTS      = { med: 3, low: 1, reject: 0 };   // sampling weights
 
-class CorpusCurator {
+class MastermindCurator {
   constructor() {
     this._pool = null;
   }
@@ -638,7 +651,7 @@ class CorpusCurator {
       PAPER_BATCH:          JSON.stringify(papers.map(this._paperForPrompt), null, 2),
       BATCH_INFO:           JSON.stringify({ index: batchInfo.batchIdx, total: batchInfo.total, size: papers.length }),
     };
-    const raw = await this._spawnSubagent('corpus-curator', `batch-${batchInfo.batchIdx}`, ctx);
+    const raw = await this._spawnSubagent('mastermind', `batch-${batchInfo.batchIdx}`, ctx);
     const parsed = this._parseBatchResponse(raw, papers);
     return parsed;
   }
@@ -936,4 +949,4 @@ class CorpusCurator {
   }
 }
 
-module.exports = CorpusCurator;
+module.exports = MastermindCurator;
