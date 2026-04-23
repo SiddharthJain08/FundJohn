@@ -37,3 +37,4 @@ src/agent/config/skill-allowlist.json
 *.tmp
 *.swp
 .DS_Store
+.incoming/

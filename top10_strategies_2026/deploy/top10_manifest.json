@@ -1,0 +1,199 @@
+{
+  "cohort": "top10_2026",
+  "generated": "2026-04-23",
+  "version": "2.0.0",
+  "description": "Top-10 FundJohn strategy cohort — five vol / IV-structure strategies, three regime-change detectors, two intraday strategies. Selected 2026-04 after the HV + TR deep-research passes.",
+  "strategies": [
+    {
+      "id": "S_HV13_call_put_iv_spread",
+      "class": "CallPutIVSpread",
+      "file": "shv13_call_put_iv_spread.py",
+      "module": "strategies.implementations.shv13_call_put_iv_spread",
+      "archetype": "equity_cross_sectional",
+      "holding_horizon_days": 7,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Cremers & Weinbaum (2010) JFQA 45(2)",
+      "data_dependencies": [
+        "opts_map[ticker].iv_spread_atm_oi_weighted",
+        "opts_map[ticker].iv_rank",
+        "opts_map[ticker].last_price",
+        "opts_map[ticker].rv20"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "cross_sectional_equity", "put_call_parity"]
+    },
+    {
+      "id": "S_HV14_otm_skew_factor",
+      "class": "OTMSkewFactor",
+      "file": "shv14_otm_skew_factor.py",
+      "module": "strategies.implementations.shv14_otm_skew_factor",
+      "archetype": "equity_cross_sectional",
+      "holding_horizon_days": 10,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Xing, Zhang & Zhao (2010) JFQA 45(3)",
+      "data_dependencies": [
+        "opts_map[ticker].smirk_otmput_atmcall",
+        "opts_map[ticker].iv_rank",
+        "opts_map[ticker].last_price"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "cross_sectional_equity", "skew"]
+    },
+    {
+      "id": "S_HV15_iv_term_structure",
+      "class": "IVTermStructureSlope",
+      "file": "shv15_iv_term_structure.py",
+      "module": "strategies.implementations.shv15_iv_term_structure",
+      "archetype": "options_vol_single_name",
+      "holding_horizon_days": 7,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL"],
+      "academic_ref": "Johnson (2017) JFE 123(2)",
+      "data_dependencies": [
+        "opts_map[ticker].iv_30d",
+        "opts_map[ticker].iv_90d",
+        "opts_map[ticker].ts_ratio",
+        "opts_map[ticker].iv_rank",
+        "market_data.vix_close"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "options_vol", "term_structure"]
+    },
+    {
+      "id": "S_HV17_earnings_straddle_fade",
+      "class": "EarningsStraddleFade",
+      "file": "shv17_earnings_straddle_fade.py",
+      "module": "strategies.implementations.shv17_earnings_straddle_fade",
+      "archetype": "options_vol_single_name",
+      "holding_horizon_days": 1,
+      "targets_regimes": ["NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Gao et al. (2018) on implied-vs-realised move ratios",
+      "data_dependencies": [
+        "opts_map[ticker].atm_iv_30d",
+        "opts_map[ticker].earnings_implied_move",
+        "opts_map[ticker].hist_post_earnings_move",
+        "opts_map[ticker].atm_bid_ask_spread_pct",
+        "opts_map[ticker].next_earnings_date"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "options_vol", "event_driven"]
+    },
+    {
+      "id": "S_HV20_iv_dispersion_reversion",
+      "class": "IVDispersionReversion",
+      "file": "shv20_iv_dispersion_reversion.py",
+      "module": "strategies.implementations.shv20_iv_dispersion_reversion",
+      "archetype": "options_vol_portfolio",
+      "holding_horizon_days": 10,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL"],
+      "academic_ref": "Driessen, Maenhout & Vilkov (2009) JF 64(3)",
+      "data_dependencies": [
+        "market_data.spx_iv_30d",
+        "opts_map[ticker].iv_30d  (all names in basket)",
+        "market_data.spx_close"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "options_vol", "dispersion"]
+    },
+    {
+      "id": "S_TR01_vvix_early_warning",
+      "class": "VVIXEarlyWarning",
+      "file": "str01_vvix_early_warning.py",
+      "module": "strategies.implementations.str01_vvix_early_warning",
+      "archetype": "regime_classifier",
+      "holding_horizon_days": 10,
+      "targets_regimes": ["LOW_VOL", "NEUTRAL"],
+      "academic_ref": "Thrasher (2017) RISK magazine note on VVIX percentiles",
+      "data_dependencies": [
+        "market_data.vvix_close",
+        "market_data.vvix_history",
+        "market_data.vix_close"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "regime_change", "vol_of_vol"]
+    },
+    {
+      "id": "S_TR02_hurst_regime_flip",
+      "class": "HurstRegimeFlip",
+      "file": "str02_hurst_regime_flip.py",
+      "module": "strategies.implementations.str02_hurst_regime_flip",
+      "archetype": "regime_classifier",
+      "holding_horizon_days": 20,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Vogl (2022) Physica A 595",
+      "data_dependencies": [
+        "market_data.spy_close_history (>= 120 sessions)"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "regime_change", "hurst"]
+    },
+    {
+      "id": "S_TR03_bocpd",
+      "class": "BOCPDDetector",
+      "file": "str03_bocpd.py",
+      "module": "strategies.implementations.str03_bocpd",
+      "archetype": "regime_classifier",
+      "holding_horizon_days": 10,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Adams & MacKay (2007) Bayesian online changepoint",
+      "data_dependencies": [
+        "market_data.spy_close_history (>= 200 sessions)"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "regime_change", "bayesian"]
+    },
+    {
+      "id": "S_TR04_zarattini_intraday_spy",
+      "class": "ZarattiniIntradaySPY",
+      "file": "str04_zarattini_intraday_spy.py",
+      "module": "strategies.implementations.str04_zarattini_intraday_spy",
+      "archetype": "intraday_single_asset",
+      "holding_horizon_days": 1,
+      "targets_regimes": ["NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Zarattini, Pagani & Aziz (2024) SSRN 4824172",
+      "data_dependencies": [
+        "market_data.spy_30m_bars",
+        "market_data.spy_prev_close",
+        "market_data.spy_10d_volume_avg",
+        "market_data.vix_close"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "intraday", "spy"]
+    },
+    {
+      "id": "S_TR06_baltussen_eod_reversal",
+      "class": "BaltussenEODReversal",
+      "file": "str06_baltussen_eod_reversal.py",
+      "module": "strategies.implementations.str06_baltussen_eod_reversal",
+      "archetype": "intraday_cross_sectional",
+      "holding_horizon_days": 1,
+      "targets_regimes": ["HIGH_VOL", "NEUTRAL", "LOW_VOL"],
+      "academic_ref": "Baltussen, Da & Soebhag (2024) SSRN 4734733",
+      "data_dependencies": [
+        "market_data.intraday_30m_bars (all liquid universe)",
+        "opts_map[ticker].avg_dollar_volume_30d"
+      ],
+      "phase": "shadow",
+      "tags": ["top10_2026", "intraday", "cross_sectional"]
+    }
+  ],
+  "promotion_criteria": {
+    "shadow_to_paper": {
+      "min_shadow_days": 20,
+      "min_signals": 30,
+      "zero_crash_sessions": 20,
+      "notes": "Strategy must emit signals without errors for 20 consecutive sessions and produce at least 30 signals with acceptable latency."
+    },
+    "paper_to_live": {
+      "min_paper_days": 60,
+      "min_paper_sharpe": 0.7,
+      "max_paper_drawdown_pct": 8.0,
+      "min_paper_trades": 40,
+      "notes": "Paper performance must clear Sharpe > 0.7, DD <= 8%, at least 40 trades — below these it stays in paper."
+    },
+    "live_to_paused": {
+      "live_drawdown_pct_trigger": 12.0,
+      "live_drawdown_period_days": 90,
+      "notes": "Auto-pause on 12% live drawdown in any 90-day window."
+    }
+  }
+}
