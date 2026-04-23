@@ -13,6 +13,11 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
 
+// Ensure any transitive require of src/channels/api/server.js inside the
+// collector's broadcast helpers does NOT try to listen on :3000 (johnbot
+// already owns that socket). We only need the broadcast exports here.
+process.env.OPENCLAW_NO_HTTP_LISTEN = '1';
+
 const collector = require('./collector');
 
 async function main() {

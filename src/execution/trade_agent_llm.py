@@ -190,7 +190,7 @@ if __name__ == '__main__':
             env=env,
             capture_output=True,
             text=True,
-            timeout=420,
+            timeout=900,
         )
         # Stream output to parent regardless so systemd journal still sees it
         sys.stdout.write(result.stdout or '')
@@ -210,7 +210,7 @@ if __name__ == '__main__':
             print(f'[trade_agent_llm] sized-handoff emit failed: {exc}')
 
     except subprocess.TimeoutExpired:
-        print('[trade_agent_llm] TradeJohn timed out after 420s')
+        print('[trade_agent_llm] TradeJohn timed out after 900s')
         sys.exit(1)
     except Exception as e:
         print(f'[trade_agent_llm] Error: {e}')

@@ -39,20 +39,43 @@ HEADERS = {
 }
 
 
-def _find_channel_id(name: str) -> str | None:
-    r = requests.get('https://discord.com/api/v10/users/@me/guilds',
-                     headers=HEADERS, timeout=10)
-    if not r.ok:
-        print(f'[send_report] guild list failed: {r.status_code}')
-        return None
-    for g in r.json():
-        rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
-                          headers=HEADERS, timeout=10)
-        if not rc.ok:
+_GUILDS_CACHE: list | None = None
+
+def _get_guilds() -> list:
+    global _GUILDS_CACHE
+    if _GUILDS_CACHE is not None:
+        return _GUILDS_CACHE
+    for attempt in range(5):
+        r = requests.get('https://discord.com/api/v10/users/@me/guilds',
+                         headers=HEADERS, timeout=10)
+        if r.ok:
+            _GUILDS_CACHE = r.json()
+            return _GUILDS_CACHE
+        if r.status_code == 429:
+            wait = float(r.headers.get('Retry-After') or r.json().get('retry_after', 2))
+            import time; time.sleep(min(wait + 0.5, 10))
             continue
-        for ch in rc.json():
-            if ch.get('name') == name and ch.get('type') == 0:
-                return ch['id']
+        print(f'[send_report] guild list failed: {r.status_code}')
+        break
+    _GUILDS_CACHE = []
+    return _GUILDS_CACHE
+
+
+def _find_channel_id(name: str) -> str | None:
+    for g in _get_guilds():
+        for attempt in range(3):
+            rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
+                              headers=HEADERS, timeout=10)
+            if rc.ok:
+                for ch in rc.json():
+                    if ch.get('name') == name and ch.get('type') == 0:
+                        return ch['id']
+                break
+            if rc.status_code == 429:
+                wait = float(rc.headers.get('Retry-After') or 2)
+                import time; time.sleep(min(wait + 0.5, 10))
+                continue
+            break
     return None
 
 
@@ -127,13 +150,17 @@ def main() -> int:
 
     ch_signals = _find_channel_id('trade-signals')
     ch_reports = _find_channel_id('trade-reports')
-    if not ch_signals or not ch_reports:
-        print(f'[send_report] channel lookup: trade-signals={ch_signals} trade-reports={ch_reports}')
-        return 1
+    print(f'[send_report] channel lookup: trade-signals={ch_signals} trade-reports={ch_reports}')
 
-    ok1 = _post(ch_signals, _fmt_greenlist(run_date, sized))
-    ok2 = _post(ch_reports, _fmt_veto_digest(run_date, sized))
-    return 0 if (ok1 and ok2) else 1
+    ok1 = _post(ch_signals, _fmt_greenlist(run_date, sized)) if ch_signals else False
+    ok2 = _post(ch_reports, _fmt_veto_digest(run_date, sized)) if ch_reports else False
+    if not ok1:
+        print('[send_report] greenlist post skipped/failed')
+    if not ok2:
+        print('[send_report] veto-digest post skipped/failed')
+    # Non-fatal: pipeline completes even if Discord is throttled. The data
+    # is already written to the sized handoff file; operator can re-post.
+    return 0
 
 
 if __name__ == '__main__':

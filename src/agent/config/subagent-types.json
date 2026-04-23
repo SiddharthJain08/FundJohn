@@ -59,7 +59,7 @@
       "components": [],
       "tools": [],
       "iterationLimit": 15,
-      "timeoutSeconds": 600,
+      "timeoutSeconds": 900,
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",

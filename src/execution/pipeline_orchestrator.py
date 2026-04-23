@@ -57,10 +57,20 @@ BUDGET_CHECK_BEFORE = {'trade'}
 # that used to post there are redirected into #pipeline-feed via the
 # DATABOT_TOKEN path below. The legacy webhook is kept as a last-ditch
 # fallback if the bot token path is unavailable.
-NOTIFY_WEBHOOK = os.environ.get(
-    'ORCHESTRATOR_NOTIFY_WEBHOOK',
-    'https://discord.com/api/webhooks/1492623936247300186/BFUwcy91xaIzq_GwP_YvON9-N9HhSilx-wDQ6MhISRYoSx9LrNYyXsDQeaSzxfwimEBi',
-)
+NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
+
+# Step → failure-alert channel. Data-pipeline step failures surface in
+# #data-alerts; trade-pipeline step failures surface in #trade-reports.
+# Phase boundaries (▶️/✅/❌) continue to go to #pipeline-feed for every step.
+STEP_FAILURE_CHANNEL = {
+    'queue_drain': 'data-alerts',
+    'collect':     'data-alerts',
+    'signals':     'data-alerts',
+    'handoff':     'trade-reports',
+    'trade':       'trade-reports',
+    'alpaca':      'trade-reports',
+    'report':      'trade-reports',
+}
 
 
 # ── Agent status (replicates agentPersonas.setStatus from Node.js) ───────────
@@ -209,21 +219,19 @@ def log(msg):
     print(f'[{ts}] [orchestrator] {msg}', flush=True)
 
 
-def notify(msg):
-    """Operator alert. Prefers posting to #pipeline-feed via the bot token
-    (same path as phase boundaries) so all orchestrator output lands in
-    one operator-visible channel. Falls back to the legacy webhook if
-    the bot lookup fails — belt-and-braces, never silent."""
-    try:
-        pipeline_feed(msg)
-    except Exception as e:
-        log(f'pipeline_feed notify fallback: {e}')
-    try:
-        r = requests.post(NOTIFY_WEBHOOK, json={'content': msg}, timeout=10)
-        if not r.ok:
-            log(f'Notify webhook failed: {r.status_code}')
-    except Exception as e:
-        log(f'Notify webhook error: {e}')
+def notify(msg, channel='pipeline-feed'):
+    """Operator alert. Posts to the named Discord channel via the DataBot
+    token. `channel` can be 'pipeline-feed', 'data-alerts', 'trade-reports'.
+    Only falls back to ORCHESTRATOR_NOTIFY_WEBHOOK if set and bot posting
+    fails — no hardcoded legacy webhook."""
+    ok = post_channel(channel, msg)
+    if not ok and NOTIFY_WEBHOOK:
+        try:
+            r = requests.post(NOTIFY_WEBHOOK, json={'content': msg}, timeout=10)
+            if not r.ok:
+                log(f'Notify webhook failed: {r.status_code}')
+        except Exception as e:
+            log(f'Notify webhook error: {e}')
 
 
 # ── Pipeline-feed channel posts (Phase 4) ────────────────────────────────────
@@ -231,21 +239,22 @@ def notify(msg):
 # Uses the DataBot REST API (same pattern as send_report.py). Channel ID is
 # discovered once per process and cached.
 
-_PIPELINE_FEED_CID: str | None = None
+_CHANNEL_CID_CACHE: dict[str, str] = {}
 
-def _pipeline_feed_channel_id():
-    global _PIPELINE_FEED_CID
-    if _PIPELINE_FEED_CID is not None:
-        return _PIPELINE_FEED_CID
+def _channel_id(channel_name: str) -> str:
+    """Resolve a Discord channel name → ID via the DataBot token. Cached
+    per-process. Returns '' when lookup fails; callers treat that as 'skip'."""
+    if channel_name in _CHANNEL_CID_CACHE:
+        return _CHANNEL_CID_CACHE[channel_name]
     token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
     if not token:
-        _PIPELINE_FEED_CID = ''
+        _CHANNEL_CID_CACHE[channel_name] = ''
         return ''
     try:
         headers = {'Authorization': f'Bot {token}'}
         r = requests.get('https://discord.com/api/v10/users/@me/guilds', headers=headers, timeout=5)
         if not r.ok:
-            _PIPELINE_FEED_CID = ''
+            _CHANNEL_CID_CACHE[channel_name] = ''
             return ''
         for g in r.json():
             rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
@@ -253,31 +262,39 @@ def _pipeline_feed_channel_id():
             if not rc.ok:
                 continue
             for ch in rc.json():
-                if ch.get('name') == 'pipeline-feed' and ch.get('type') == 0:
-                    _PIPELINE_FEED_CID = ch['id']
-                    return _PIPELINE_FEED_CID
+                if ch.get('name') == channel_name and ch.get('type') == 0:
+                    _CHANNEL_CID_CACHE[channel_name] = ch['id']
+                    return ch['id']
     except Exception as e:
-        log(f'pipeline-feed lookup failed: {e}')
-    _PIPELINE_FEED_CID = ''
+        log(f'channel lookup failed ({channel_name}): {e}')
+    _CHANNEL_CID_CACHE[channel_name] = ''
     return ''
 
 
-def pipeline_feed(msg):
-    """Post a concise one-liner to #pipeline-feed. Non-blocking; failures
-    never fail the pipeline — they just get logged."""
-    cid = _pipeline_feed_channel_id()
+def post_channel(channel_name: str, msg: str) -> bool:
+    """Post a message to a Discord channel by name via DataBot. Returns
+    True on successful HTTP post, False otherwise. Non-blocking semantics:
+    failures never raise, they just log and return False."""
+    cid = _channel_id(channel_name)
     if not cid:
-        return
+        return False
     token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
     try:
-        requests.post(
+        r = requests.post(
             f'https://discord.com/api/v10/channels/{cid}/messages',
             headers={'Authorization': f'Bot {token}', 'Content-Type': 'application/json'},
             json={'content': msg[:1900]},
             timeout=5,
         )
+        return bool(r.ok)
     except Exception as e:
-        log(f'pipeline_feed post failed: {e}')
+        log(f'channel post failed ({channel_name}): {e}')
+        return False
+
+
+def pipeline_feed(msg):
+    """Post a concise one-liner to #pipeline-feed. Non-blocking."""
+    post_channel('pipeline-feed', msg)
 
 
 def broadcast_dashboard_refresh(run_date):
@@ -369,46 +386,63 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
     collector wrapper). The dispatcher keeps scripts in the module that
     owns them instead of forcing everything into src/execution/.
     """
-    py_exec = ROOT / 'src' / 'execution' / f'{script}'
-    py_pipe = ROOT / 'src' / 'pipeline'  / f'{script}'
+    py_exec = ROOT / 'src' / 'execution' / f'{script}.py'
+    py_pipe = ROOT / 'src' / 'pipeline'  / f'{script}.py'
     js_pipe = ROOT / 'src' / 'pipeline'  / f'{script}.js'
 
     if py_pipe.exists():
         return (['python3', str(py_pipe), '--date', run_date], 600)
     if js_pipe.exists():
-        # Collector: historically the longest step; allow up to 25 min for a
-        # cold-cache cycle against the full universe. The collector reads
-        # today's date itself and ignores any --date arg we might pass.
-        return (['node', str(js_pipe)], 1500)
+        # Collector: the longest step. A warm-cache cycle is minutes; a cold
+        # cycle with wide fundamentals/options gaps can run 30+ min due to
+        # upstream rate limits (FMP, yfinance, polygon). 45 min cap leaves
+        # ample room before handing off to the LLM trade step.
+        return (['node', str(js_pipe)], 2700)
     # default: src/execution/<script>.py
-    timeout = 720 if script == 'trade_agent_llm' else 300
+    timeout = 1000 if script == 'trade_agent_llm' else 300
     return (['python3', str(py_exec), '--date', run_date], timeout)
 
 
 def run_step(script, run_date, env):
     """
     Spawn a pipeline script. Returns True on success.
-    Scripts are run as subprocesses so they have their own context.
+    Stdout+stderr are streamed line-by-line to the orchestrator log so long
+    steps (the collector in particular) give live progress instead of going
+    dark for 25 minutes. On timeout we SIGTERM the child and the partial
+    output already in the log gives us the diagnostic trail.
     """
+    import threading
     cmd, timeout = _resolve_script(script, run_date)
     log(f'Starting {script} timeout={timeout}s (cmd: {" ".join(cmd)})...')
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             cmd, cwd=str(ROOT), env=env,
-            capture_output=True, text=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
         )
-        # Echo output for journal
-        for line in (result.stdout + result.stderr).splitlines():
-            if line.strip():
-                print(f'  [{script}] {line}', flush=True)
-        if result.returncode != 0:
-            log(f'{script} exited {result.returncode}')
+        def _pump():
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    print(f'  [{script}] {line}', flush=True)
+        t = threading.Thread(target=_pump, daemon=True)
+        t.start()
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            log(f'{script} timed out after {timeout}s — SIGTERM')
+            proc.terminate()
+            try: proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill(); proc.wait()
+            t.join(timeout=5)
+            return False
+        t.join(timeout=5)
+        if rc != 0:
+            log(f'{script} exited {rc}')
             return False
         log(f'{script} done.')
         return True
-    except subprocess.TimeoutExpired:
-        log(f'{script} timed out after 300s')
-        return False
     except Exception as e:
         log(f'{script} error: {e}')
         return False
@@ -430,7 +464,13 @@ if __name__ == '__main__':
         log('POSTGRES_URI not set — aborting')
         sys.exit(1)
 
-    env = {**os.environ, 'PYTHONPATH': str(ROOT)}
+    # engine.py, alpaca_executor.py etc import `strategies.xxx` / `database.xxx`
+    # as top-level packages — those live under src/, so PYTHONPATH needs both
+    # ROOT (for `src.xxx` imports) and ROOT/src (for bare-package imports).
+    _pp_parts = [str(ROOT), str(ROOT / 'src')]
+    if os.environ.get('PYTHONPATH'):
+        _pp_parts.append(os.environ['PYTHONPATH'])
+    env = {**os.environ, 'PYTHONPATH': os.pathsep.join(_pp_parts)}
 
     r = get_redis()
 
@@ -546,10 +586,12 @@ if __name__ == '__main__':
                 write_checkpoint(r, completed, run_date, 'in_progress')
             else:
                 log(f'Step {script} failed — aborting pipeline')
+                fail_channel = STEP_FAILURE_CHANNEL.get(step_key, 'pipeline-feed')
                 notify(
                     f'❌ **Pipeline step failed: {script}** | {run_date}\n'
                     f'Completed: {sorted(completed) or "none"}\n'
-                    f'Check systemd journal: `journalctl -u johnbot.service -n 50`'
+                    f'Log: `logs/pipeline_orchestrator_{run_date}.log`',
+                    channel=fail_channel,
                 )
                 release_lock(r, run_date)
                 sys.exit(1)

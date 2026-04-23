@@ -191,15 +191,21 @@ function start(swarm, generateId, notifyDiscord) {
         log('10am cycle: spawning pipeline_orchestrator.py');
         try {
             const { spawn } = require('child_process');
+            const fs = require('fs');
+            const path = require('path');
             const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `pipeline_orchestrator_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
             const child = spawn(PYTHON, ['scripts/run_pipeline.py', '--date', today], {
                 cwd: ROOT,
                 env: { ...process.env },
                 detached: true,
-                stdio: 'ignore',
+                stdio: ['ignore', logFd, logFd],
             });
             child.unref();
-            log(`10am cycle: orchestrator spawned (pid ${child.pid}) for ${today}`);
+            log(`10am cycle: orchestrator spawned (pid ${child.pid}) for ${today} → ${logPath}`);
         } catch (e) {
             log(`10am cycle spawn error: ${e.message}`);
         }

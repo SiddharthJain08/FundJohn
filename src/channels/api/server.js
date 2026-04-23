@@ -2538,25 +2538,32 @@ async function refreshPipeline() {
 </html>`;
 }
 
-// Start server
-const httpServer = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[dashboard] OpenClaw dashboard → http://0.0.0.0:${PORT}`);
-});
+// Start server — unless the caller only wants the broadcast/app exports
+// (e.g. run_collector_once.js or the orchestrator invoking this module
+// transitively). Skipping the listen here lets helper processes reuse
+// the SSE/broadcast helpers without colliding with johnbot on :3000.
+const httpServer = process.env.OPENCLAW_NO_HTTP_LISTEN === '1'
+  ? null
+  : app.listen(PORT, '0.0.0.0', () => {
+      console.log(`[dashboard] OpenClaw dashboard → http://0.0.0.0:${PORT}`);
+    });
 
-httpServer.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`[dashboard] Port ${PORT} already in use — stale process still holds the socket. Exiting cleanly so systemd can retry.`);
-    process.exit(1);
-  }
-  console.error('[dashboard] http server error:', err);
-});
+if (httpServer) {
+  httpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[dashboard] Port ${PORT} already in use — stale process still holds the socket. Exiting cleanly so systemd can retry.`);
+      process.exit(1);
+    }
+    console.error('[dashboard] http server error:', err);
+  });
+}
 
 function shutdown(reason) {
   console.log(`[dashboard] shutdown(${reason}) — closing http server on :${PORT}`);
   return new Promise((resolve) => {
     const done = () => resolve();
     const t = setTimeout(done, 3000);
-    httpServer.close(() => { clearTimeout(t); done(); });
+    if (httpServer) httpServer.close(() => { clearTimeout(t); done(); }); else done();
   });
 }
 
