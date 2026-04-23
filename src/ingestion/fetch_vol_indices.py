@@ -79,8 +79,15 @@ def main() -> dict:
                 continue
 
             for _, row in df.iterrows():
+                # macro.parquet schema has date as DATE, not VARCHAR — keep
+                # it as a date object so pyarrow doesn't try to coerce a
+                # mixed string/date column on append.
+                d = row['date']
+                if isinstance(d, str):
+                    from datetime import date as _date
+                    d = _date.fromisoformat(d)
                 all_rows.append({
-                    'date':   row['date'].isoformat() if hasattr(row['date'], 'isoformat') else str(row['date']),
+                    'date':   d,
                     'series': series_name,
                     'value':  float(row['value']),
                     'source': 'yfinance',
