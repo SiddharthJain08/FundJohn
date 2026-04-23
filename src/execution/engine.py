@@ -552,9 +552,17 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
         for sig in signals:
             try:
                 # Serialize signal_params — convert numpy scalars to native Python
+                # and sanitize NaN/Infinity so Postgres JSON accepts the row.
+                import math as _math
                 def _to_native(v):
                     if hasattr(v, 'item'):
-                        return v.item()   # numpy scalar → Python scalar
+                        v = v.item()   # numpy scalar → Python scalar
+                    if isinstance(v, float) and not _math.isfinite(v):
+                        return None    # Postgres rejects NaN/Inf in jsonb
+                    if isinstance(v, dict):
+                        return {k: _to_native(vv) for k, vv in v.items()}
+                    if isinstance(v, (list, tuple)):
+                        return [_to_native(vv) for vv in v]
                     return v
                 params_clean = {k: _to_native(v) for k, v in (sig.signal_params or {}).items()}
                 # Signal.features (added Phase 5) — fold into signal_params under

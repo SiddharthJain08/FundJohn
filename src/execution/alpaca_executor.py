@@ -138,9 +138,29 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
     cur.close()
 
 
+def _normalize_alpaca_symbol(raw: str) -> str | None:
+    """Map engine/handoff ticker → Alpaca-accepted symbol.
+    Returns None for symbols Alpaca paper doesn't support (futures, indices,
+    FX pairs, crypto not on Alpaca's list) — caller must skip those."""
+    if not raw:
+        return None
+    t = raw.strip().upper()
+    # Yahoo class-share convention uses a dash; Alpaca wants a dot.
+    if '.' not in t and '-' in t and t.count('-') == 1 and len(t.split('-')[1]) <= 2 and not t.endswith('-USD'):
+        t = t.replace('-', '.')
+    # Known non-equity symbols Alpaca paper rejects — skip cleanly.
+    if t.startswith('^'):                       return None   # indices (^VIX, ^GSPC, ^DJI, …)
+    if '=' in t:                                return None   # futures/FX (NG=F, GC=F, AUDUSD=X, …)
+    if t.endswith('-USD'):                      return None   # crypto tickers not in Alpaca universe
+    return t
+
+
 def execute_single(sess, equity, order, run_date):
     """Submit one bracket order. Returns result dict."""
-    ticker  = order['ticker']
+    raw_ticker = order['ticker']
+    ticker = _normalize_alpaca_symbol(raw_ticker)
+    if ticker is None:
+        return {'ticker': raw_ticker, 'status': 'SKIP', 'reason': f'unsupported on Alpaca paper ({raw_ticker})'}
     pct_nav = float(order.get('pct_nav') or 0.0)
     entry   = order.get('entry')
     stop    = order.get('stop')

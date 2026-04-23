@@ -19,14 +19,19 @@ class IVDispersionReversion(BaseStrategy):
     TOP_N: int = 10
 
     def generate_signals(self, prices, regime, universe, aux_data) -> List[Signal]:
+        import math
         rank_data = [(t, float(o["iv_rank"]), o)
                      for t, o in (aux_data or {}).get("options", {}).items()
-                     if o.get("iv_rank") is not None]
+                     if o.get("iv_rank") is not None
+                     and math.isfinite(float(o["iv_rank"]))]
         if len(rank_data) < self.MIN_UNIVERSE:
             return []
         ranks = [r[1] for r in rank_data]
         mean_r = statistics.mean(ranks)
-        std_r = statistics.stdev(ranks)
+        # Py 3.13's statistics.stdev uses Fraction internally and chokes on
+        # floats that can't be represented exactly — use a manual population
+        # stdev to avoid 'float' object has no attribute 'numerator' errors.
+        std_r = math.sqrt(sum((x - mean_r) ** 2 for x in ranks) / max(len(ranks) - 1, 1))
         if std_r < 1e-6:
             return []
         candidates = []
