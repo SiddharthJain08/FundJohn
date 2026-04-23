@@ -1324,6 +1324,64 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         break;
       }
 
+      case 'optimizer': {
+        const optimizer = require('../../agent/optimizers/optimizer_john');
+        const sub = (args[0] || 'list').toLowerCase();
+        switch (sub) {
+          case 'list': {
+            const q = optimizer.listQueue();
+            if (!q.length) { await notify('📋 Optimizer queue is empty.'); break; }
+            const lines = q.map((p) => `• \`${p.file}\``);
+            await notify(`**Optimizer queue (${q.length} patch${q.length === 1 ? '' : 'es'}):**\n${lines.join('\n')}\n\nApply: \`!john /optimizer apply <id>\` · Discard: \`!john /optimizer discard <id>\` · Show: \`!john /optimizer show <id>\``);
+            break;
+          }
+          case 'show': {
+            const id = args[1];
+            if (!id) { await notify('Usage: `!john /optimizer show <id>`'); break; }
+            const q = optimizer.listQueue();
+            const match = q.find((p) => p.file === id || p.file.includes(id));
+            if (!match) { await notify(`No patch matching ${id}`); break; }
+            const body = require('fs').readFileSync(match.fullPath, 'utf8');
+            const truncated = body.slice(0, 1800);
+            await notify(`**${match.file}**\n\`\`\`diff\n${truncated}\n\`\`\`${body.length > 1800 ? '\n_(truncated — see file on VPS for full diff)_' : ''}`);
+            break;
+          }
+          case 'apply': {
+            const id = args[1];
+            if (!id) { await notify('Usage: `!john /optimizer apply <id>`'); break; }
+            const res = optimizer.applyPatch(id);
+            if (res.ok) await notify(`✅ Applied \`${res.file}\`. Restart johnbot if config/prompts changed.`);
+            else        await notify(`❌ Apply failed: ${res.error}`);
+            break;
+          }
+          case 'discard': {
+            const id = args[1];
+            if (!id) { await notify('Usage: `!john /optimizer discard <id>`'); break; }
+            const res = optimizer.discardPatch(id);
+            if (res.ok) await notify(`🗑️ Discarded \`${res.file}\`.`);
+            else        await notify(`❌ Discard failed: ${res.error}`);
+            break;
+          }
+          case 'run': {
+            await notify('🛠️ Running optimizer-john ad-hoc (Opus 4.7, ~2–3 min)...');
+            const res = await optimizer.run({ notify: (m) => notify(`_[optimizer]_ ${m.slice(0, 150)}`) })
+              .catch((e) => ({ error: e.message }));
+            if (res.error) await notify(`❌ Optimizer run failed: ${res.error}`);
+            else await notify(`✅ Optimizer run complete. Queued: ${res.patchesQueued?.length || 0}, rejected: ${res.patchesRejected?.length || 0}, cost $${(res.cost || 0).toFixed(2)}.`);
+            break;
+          }
+          case 'dry-run': {
+            await notify('🛠️ Dry-run — assembling telemetry, skipping Opus call...');
+            const res = await optimizer.run({ dryRun: true });
+            await notify(`Telemetry ready. Agents: ${res.ctx?.subagent_costs_7d?.length || 0}, prompts: ${Object.keys(res.ctx?.recent_prompts || {}).length}, strategies: ${res.ctx?.ev_calibration_summary?.length || 0}.`);
+            break;
+          }
+          default:
+            await notify('Usage: `!john /optimizer {list | show <id> | apply <id> | discard <id> | run | dry-run}`');
+        }
+        break;
+      }
+
       default: {
         // Try relay commands first (research, signals, engine-*, strategy-*, etc.)
         const wsCtx = await workspaceManager.getOrCreate(workspaceId);
