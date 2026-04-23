@@ -170,6 +170,156 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
         return {}
 
 
+def load_ev_calibration(uri: str, window_days: int = 30) -> dict:
+    """Per-strategy rolling calibration stats from signal_pnl (closed trades).
+
+    Returns one entry per strategy that has ≥ 1 closed trade in the window.
+    Uses observables only (no predicted EV reconstruction). Downstream
+    TradeJohn consumes this via `fundjohn:ev-calibrator`.
+    """
+    if not uri:
+        return {}
+    half = max(1, window_days // 2)
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            WITH closed AS (
+              SELECT strategy_id,
+                     realized_pnl_pct::float AS pnl,
+                     closed_at
+                FROM signal_pnl
+               WHERE status = 'closed'
+                 AND realized_pnl_pct IS NOT NULL
+                 AND closed_at >= (CURRENT_DATE - (%s || ' days')::interval)
+            ),
+            recent AS (
+              SELECT strategy_id, AVG(pnl) AS avg_pnl
+                FROM closed
+               WHERE closed_at >= (CURRENT_DATE - (%s || ' days')::interval)
+               GROUP BY strategy_id
+            ),
+            prior AS (
+              SELECT strategy_id, AVG(pnl) AS avg_pnl
+                FROM closed
+               WHERE closed_at <  (CURRENT_DATE - (%s || ' days')::interval)
+               GROUP BY strategy_id
+            ),
+            overall AS (
+              SELECT strategy_id,
+                     COUNT(*)                                   AS n_closed,
+                     AVG(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)   AS hit_rate,
+                     AVG(pnl)                                   AS avg_pnl,
+                     STDDEV_SAMP(pnl)                           AS std_pnl
+                FROM closed
+               GROUP BY strategy_id
+            )
+            SELECT o.strategy_id,
+                   o.n_closed,
+                   o.hit_rate,
+                   o.avg_pnl,
+                   o.std_pnl,
+                   r.avg_pnl AS recent_pnl_avg,
+                   p.avg_pnl AS prior_pnl_avg
+              FROM overall o
+              LEFT JOIN recent r USING (strategy_id)
+              LEFT JOIN prior  p USING (strategy_id)
+             ORDER BY o.strategy_id
+            """,
+            (window_days, half, half),
+        )
+        out: dict[str, dict] = {}
+        today_iso = date.today().isoformat()
+        for row in cur.fetchall():
+            avg  = float(row['avg_pnl'] or 0.0)
+            std  = float(row['std_pnl'] or 0.0)
+            rec  = row['recent_pnl_avg']
+            pri  = row['prior_pnl_avg']
+            recent_avg = float(rec) if rec is not None else None
+            prior_avg  = float(pri) if pri is not None else None
+            drift = None
+            if recent_avg is not None and prior_avg is not None:
+                drift = recent_avg - prior_avg
+            sharpe_proxy = (avg / std) if std > 0 else None
+            out[row['strategy_id']] = {
+                'n_closed':            int(row['n_closed'] or 0),
+                'hit_rate':            _safe(float(row['hit_rate'] or 0.0)),
+                'realized_pnl_avg':    _safe(avg),
+                'realized_pnl_stdev':  _safe(std),
+                'sharpe_proxy':        _safe(sharpe_proxy),
+                'recent_pnl_avg':      _safe(recent_avg),
+                'prior_pnl_avg':       _safe(prior_avg),
+                'drift_score':         _safe(drift),
+                'window_days':         window_days,
+                'last_updated':        today_iso,
+            }
+        conn.close()
+        return out
+    except Exception as e:
+        print(f'[handoff] ev_calibration unavailable: {e}')
+        return {}
+
+
+def load_open_positions(uri: str) -> list[dict]:
+    """Currently open positions from execution_signals (status='open')."""
+    if not uri:
+        return []
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT strategy_id, ticker, direction, position_size_pct
+              FROM execution_signals
+             WHERE status = 'open' AND ticker IS NOT NULL
+            """
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        for r in rows:
+            v = r.get('position_size_pct')
+            r['position_size_pct'] = float(v) if v is not None else None
+        return rows
+    except Exception as e:
+        print(f'[handoff] open positions unavailable: {e}')
+        return []
+
+
+def compute_correlation_matrix(
+    tickers: list[str],
+    px: pd.DataFrame,
+    window_days: int = 60,
+    cap: int = 30,
+) -> dict | None:
+    """Pairwise correlation of daily returns over the last `window_days`.
+
+    Capped at `cap` tickers (largest coverage first) to bound handoff size
+    — a 30×30 matrix of 2-decimal floats is ~4 KB, versus 30 KB for 60×60.
+    """
+    tickers = [t for t in dict.fromkeys(tickers) if t in px.columns]
+    if len(tickers) < 2:
+        return None
+    # Prefer tickers with full coverage in the window
+    window = px.tail(window_days + 1)
+    coverage = window[tickers].notna().sum().sort_values(ascending=False)
+    tickers = coverage.head(cap).index.tolist()
+    if len(tickers) < 2:
+        return None
+    rets = window[tickers].pct_change().dropna(how='all')
+    if len(rets) < 10:
+        return None
+    corr = rets.corr().fillna(0.0)
+    # Round aggressively — matrix is for eyeballing, not linear algebra.
+    return {
+        'as_of':        str(px.index[-1].date()) if hasattr(px.index[-1], 'date') else None,
+        'window_days':  window_days,
+        'tickers':      tickers,
+        'matrix':       [[round(float(corr.iat[i, j]), 2) for j in range(len(tickers))]
+                         for i in range(len(tickers))],
+    }
+
+
 def load_mastermind_rec(uri: str) -> dict | None:
     """Latest strategy-stack recommendation from MastermindJohn weekly."""
     if not uri:
@@ -351,43 +501,75 @@ def build(run_date: str) -> dict:
     signals = load_signals(uri, run_date) if uri else []
     print(f'[handoff] {len(signals)} signal(s) for {run_date}')
 
-    regime     = load_regime(uri)
-    portfolio  = load_portfolio_state()
-    veto       = load_veto_history(uri)
-    mm_rec     = load_mastermind_rec(uri)
+    regime        = load_regime(uri)
+    portfolio     = load_portfolio_state()
+    veto          = load_veto_history(uri)
+    mm_rec        = load_mastermind_rec(uri)
+    ev_calib      = load_ev_calibration(uri)
+    open_pos      = load_open_positions(uri)
 
     enriched: list[dict] = []
-    if signals:
+    px = pd.DataFrame()
+    spy = pd.Series(dtype='float64')
+    if signals or open_pos:
         try:
             px = load_prices()
-            spy = None
             if 'SPY' in px.columns:
                 spy = px['SPY'].pct_change().dropna()
         except Exception as e:
             print(f'[handoff] price load failed: {e}')
-            px = pd.DataFrame()
-            spy = pd.Series(dtype='float64')
 
         for sig in signals:
             try:
-                feat = compute_features(sig, px, spy if spy is not None else pd.Series(dtype='float64'), run_date)
+                feat = compute_features(sig, px, spy, run_date)
                 if feat:
                     enriched.append(feat)
             except Exception as e:
                 print(f'[handoff] {sig.get("ticker")}/{sig.get("strategy_id")}: {e}')
 
+    # Correlation matrix over current open positions + today's enriched
+    # ticker set. Deterministic, ≤30 tickers, compact (~4 KB).
+    corr_tickers: list[str] = []
+    strategy_map: dict[str, str] = {}
+    for p in open_pos:
+        t = p.get('ticker')
+        if t and t not in strategy_map:
+            strategy_map[t] = p.get('strategy_id') or ''
+            corr_tickers.append(t)
+    for s in enriched:
+        t = s.get('ticker')
+        if t and t not in strategy_map:
+            strategy_map[t] = s.get('strategy_id') or ''
+            corr_tickers.append(t)
+    correlation_matrix = None
+    if not px.empty and corr_tickers:
+        try:
+            correlation_matrix = compute_correlation_matrix(corr_tickers, px)
+            if correlation_matrix is not None:
+                # Keep strategy_map aligned to the (possibly filtered) ticker list
+                kept = set(correlation_matrix['tickers'])
+                correlation_matrix['strategy_map'] = {
+                    t: strategy_map[t] for t in kept if t in strategy_map
+                }
+        except Exception as e:
+            print(f'[handoff] correlation_matrix failed: {e}')
+
     payload = {
-        'cycle_date':      run_date,
-        'generated_at':    datetime.now(timezone.utc).isoformat(),
-        'regime':          regime,
-        'portfolio':       portfolio,
-        'signals':         enriched,
-        'veto_history_30d':veto,
-        'mastermind_rec':  mm_rec,
+        'cycle_date':         run_date,
+        'generated_at':       datetime.now(timezone.utc).isoformat(),
+        'regime':             regime,
+        'portfolio':          portfolio,
+        'signals':            enriched,
+        'veto_history_30d':   veto,
+        'mastermind_rec':     mm_rec,
+        'ev_calibration':     ev_calib,
+        'correlation_matrix': correlation_matrix,
         'stats': {
-            'total_signals':       len(signals),
-            'features_computed':   len(enriched),
-            'skipped_missing_data':len(signals) - len(enriched),
+            'total_signals':         len(signals),
+            'features_computed':     len(enriched),
+            'skipped_missing_data':  len(signals) - len(enriched),
+            'ev_calib_strategies':   len(ev_calib),
+            'correlation_tickers':   len(correlation_matrix['tickers']) if correlation_matrix else 0,
         },
     }
     write_handoff(run_date, 'structured', payload)
