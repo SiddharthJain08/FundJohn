@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:portfolio-correlation",
+  "description": "Read the pre-computed pairwise return correlation matrix from the handoff, flag clusters > 0.7 that would fail the concentration gate, and recommend rebalances — used by MastermindJohn strategy-stack mode",
+  "triggers": ["/portfolio-correlation", "/correl"],
+  "agents": ["mastermind", "botjohn"]
+}

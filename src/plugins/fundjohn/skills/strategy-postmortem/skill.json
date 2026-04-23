@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:strategy-postmortem",
+  "description": "Formalized per-strategy performance note used by MastermindJohn in the Friday strategy-stack memo — keeps formatting and evidence requirements consistent week over week",
+  "triggers": ["/strategy-postmortem", "/postmortem"],
+  "agents": ["mastermind"]
+}

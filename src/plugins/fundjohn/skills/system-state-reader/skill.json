@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:system-state-reader",
+  "description": "Read-only wrappers that return a canonical snapshot of pipeline state, budget, regime, and recent veto digest — used by BotJohn for `@FundJohn status` and ad-hoc diagnostics",
+  "triggers": ["/system-state", "/state", "/status-reader"],
+  "agents": ["botjohn"]
+}

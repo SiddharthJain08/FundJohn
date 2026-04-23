@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:ev-calibrator",
+  "description": "Cross-reference per-strategy predicted EV vs realized P&L from the rolling 30-day window before sizing; surface drift to keep TradeJohn calibrated",
+  "triggers": ["/ev-calibrator", "/calibrate"],
+  "agents": ["tradejohn"]
+}
