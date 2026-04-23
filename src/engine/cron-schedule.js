@@ -270,16 +270,8 @@ function start(swarm, generateId, notifyDiscord) {
             log(`Universe sync error: ${e.message.slice(0, 200)}`);
         }
 
-        // StrategyIdeator: generate 3-5 novel strategy ideas from memory files
-        log('StrategyIdeator starting — generating ideas from memory...');
-        await swarm.init({
-            type:      'strategist-ideator',
-            mode:      'IDEATE',
-            workspace: WORKSPACE_DIR,
-            threadId:  generateId(),
-            prompt:    'Generate 3–5 novel strategy ideas based on the current memory files. ' +
-                       'Insert each into research_candidates with source=\'ideator\'.',
-        }).catch((e) => log(`StrategyIdeator error: ${e.message}`));
+        // NOTE (2026-04-23): strategist-ideator subagent deleted as an artifact.
+        // arXiv discovery + Saturday Mastermind corpus mode now fully own idea intake.
 
         // arXiv discovery: harvest recent q-fin papers
         log('arXiv discovery starting...');
@@ -343,6 +335,21 @@ function start(swarm, generateId, notifyDiscord) {
       log(`Curator priors snapshot: ${result.total} rows`);
     } catch (err) {
       log(`Curator priors snapshot failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Sunday 09:00 ET — optimizer-john weekly self-tune-up (after the
+  // 08:00 maintenance block so universe_sync + data_ledger refresh +
+  // strategy_signatures have completed). Writes patch proposals to
+  // workspaces/default/optimizer/queue/ and posts a memo to #ops.
+  // Patches NEVER auto-apply — operator runs !john /optimizer apply.
+  cron.schedule('0 9 * * 0', async () => {
+    try {
+      const optimizer = require('../agent/optimizers/optimizer_john');
+      const res = await optimizer.run({ notify: (m) => log(`[optimizer] ${m}`) });
+      log(`optimizer-john: ${res.patchesQueued?.length || 0} queued, ${res.patchesRejected?.length || 0} rejected, cost $${(res.cost || 0).toFixed(2)}`);
+    } catch (err) {
+      log(`optimizer-john failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

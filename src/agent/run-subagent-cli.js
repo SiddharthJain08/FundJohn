@@ -95,7 +95,8 @@ const claudeArgs = [
   '--max-budget-usd', budget,
 ];
 // Bare mode skips CLAUDE.md auto-discovery, hooks, memory, and skills — used
-// by self-contained subagents (e.g. corpus-curator) to minimise token overhead.
+// by self-contained subagents (e.g. mastermind in corpus mode) to minimise
+// token overhead.
 if (bare) claudeArgs.splice(1, 0, '--bare');
 
 const child = spawn(CLAUDE_BIN, claudeArgs, {

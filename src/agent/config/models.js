@@ -28,15 +28,16 @@ const MODELS = {
   },
 };
 
-// Subagent model assignments — 4-agent FundJohn system
+// Subagent model assignments — FundJohn agent roster (post 2026-04-23 cleanup)
 const SUBAGENT_MODELS = {
   botjohn:         MODELS.orchestrator,
   researchjohn:    MODELS.primary,
   tradejohn:       MODELS.primary,
   paperhunter:     MODELS.fast,
   strategycoder:   MODELS.primary,
-  'mastermind':     MODELS.opus1m,
-  'corpus-curator': MODELS.opus1m,
+  datawiring:      MODELS.primary,
+  mastermind:      MODELS.opus1m,
+  'optimizer-john': MODELS.opus1m,
 };
 
 // Flash model alias for quick lookups

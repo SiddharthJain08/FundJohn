@@ -12,7 +12,7 @@ Autonomous quant PM system + hardcoded data pipeline:
 - **MastermindJohn** (claude-opus-4-7, 1M ctx): Opus orchestrator with two modes.
   - `mode=corpus` (Sat 10:00 ET via `openclaw-mastermind-corpus.service`/`.timer`) — rates the full `research_corpus` in batched calls and promotes high-confidence picks to `research_candidates`.
   - `mode=strategy-stack` (Fri 20:00 ET via `openclaw-mastermind-weekly.service`/`.timer`) — analyses the live+monitoring strategy stack over each strategy's lifetime; posts a memo to `#strategy-memos` and structured sizing deltas to `#position-recommendations`. Latest row in `mastermind_weekly_reports` feeds TradeJohn's Monday handoff via `trade_handoff_builder.py`.
-  - Was `CorpusCurator` prior to 2026-04-22 Phase 3; legacy `corpus-curator` subagent type still resolves to the same prompt for backward compat.
+  - Was `CorpusCurator` prior to 2026-04-22 Phase 3. The deprecated `corpus-curator` subagent alias was removed on 2026-04-23 — use `type: 'mastermind'` everywhere.
 
 ## Context Retention
 Retain all context and memory of:

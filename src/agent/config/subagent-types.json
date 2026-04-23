@@ -31,7 +31,7 @@
       ],
       "skills": [
         "fundjohn:veto-explainer",
-        "fundjohn:paper-to-strategy"
+        "fundjohn:system-state-reader"
       ],
       "description": "Orchestrator and portfolio manager. Approves/vetoes trade signals. Interfaces with operator via Discord."
     },
@@ -68,7 +68,8 @@
         "PM_TASK"
       ],
       "skills": [
-        "fundjohn:position-sizer"
+        "fundjohn:position-sizer",
+        "fundjohn:ev-calibrator"
       ],
       "description": "Signal generation and position sizing. Reads research report, outputs ranked trade signals with EV, sizing, entry/stop/target."
     },
@@ -104,20 +105,6 @@
       ],
       "description": "On-demand strategy implementation. Produces implementations/*.py + registry + manifest wiring."
     },
-    "strategist-ideator": {
-      "promptFile": "src/agent/prompts/subagents/strategist-ideator.md",
-      "components": [],
-      "tools": ["postgres", "filesystem"],
-      "iterationLimit": 15,
-      "timeoutSeconds": 300,
-      "parallel": false,
-      "vetoAuthority": false,
-      "effortLevel": "medium",
-      "maxBudgetUsd": 0.30,
-      "modes": ["IDEATE"],
-      "skills": [],
-      "description": "Weekly strategy idea generator. Reads memory files and manifest to propose 3–5 novel research candidates."
-    },
     "datawiring": {
       "promptFile": "src/agent/prompts/subagents/datawiring.md",
       "components": [],
@@ -132,6 +119,20 @@
       "skills": [],
       "description": "Writes data ingestion/removal code. Tight tool allowlist: src/ingestion/, src/database/migrations/, signals_cache.py only."
     },
+    "optimizer-john": {
+      "promptFile": "src/agent/prompts/subagents/optimizer-john.md",
+      "components": [],
+      "tools": [],
+      "iterationLimit": 10,
+      "timeoutSeconds": 1200,
+      "parallel": false,
+      "vetoAuthority": false,
+      "effortLevel": "medium",
+      "maxBudgetUsd": 4.0,
+      "modes": ["OPTIMIZE"],
+      "skills": [],
+      "description": "Opus 4.7 (1M ctx) weekly self-optimizer. Reads agent telemetry + calibration and emits a tune-up memo plus (optionally) a set of patch-file proposals to workspaces/default/optimizer/queue/ for operator review. Cannot write to src/strategies/, subagent-types.json, config/budget.json, or migrations."
+    },
     "mastermind": {
       "promptFile": "src/agent/prompts/subagents/mastermind.md",
       "components": [],
@@ -143,22 +144,11 @@
       "effortLevel": "low",
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH", "STRATEGY_STACK"],
-      "skills": [],
+      "skills": [
+        "fundjohn:strategy-postmortem",
+        "fundjohn:portfolio-correlation"
+      ],
       "description": "MastermindJohn — Opus 4.7 (1M ctx). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
-    },
-    "corpus-curator": {
-      "promptFile": "src/agent/prompts/subagents/mastermind.md",
-      "components": [],
-      "tools": [],
-      "iterationLimit": 5,
-      "timeoutSeconds": 900,
-      "parallel": false,
-      "vetoAuthority": false,
-      "effortLevel": "low",
-      "maxBudgetUsd": 8.0,
-      "modes": ["RESEARCH"],
-      "skills": [],
-      "description": "DEPRECATED alias for mastermind. Kept so existing call sites don't break; points at the same prompt. Remove once no references remain."
     }
   }
 }
