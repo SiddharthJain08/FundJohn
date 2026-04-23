@@ -1,0 +1,7 @@
+{
+  "strategy_id": "str02_hurst_regime_flip",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

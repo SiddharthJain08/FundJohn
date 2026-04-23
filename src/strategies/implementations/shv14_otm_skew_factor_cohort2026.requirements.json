@@ -1,0 +1,10 @@
+{
+  "strategy_id": "shv14_otm_skew_factor_cohort2026",
+  "required": [
+    "options_eod",
+    "prices"
+  ],
+  "optional": [
+    "iv_history"
+  ]
+}

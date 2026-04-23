@@ -1,0 +1,9 @@
+{
+  "strategy_id": "str01_vvix_early_warning",
+  "required": [
+    "macro"
+  ],
+  "optional": [
+    "vol_indices"
+  ]
+}

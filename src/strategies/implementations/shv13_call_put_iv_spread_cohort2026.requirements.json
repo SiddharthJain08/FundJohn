@@ -1,0 +1,10 @@
+{
+  "strategy_id": "shv13_call_put_iv_spread_cohort2026",
+  "required": [
+    "options_eod",
+    "prices"
+  ],
+  "optional": [
+    "iv_history"
+  ]
+}

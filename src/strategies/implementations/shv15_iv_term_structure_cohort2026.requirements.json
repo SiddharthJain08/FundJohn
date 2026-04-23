@@ -1,0 +1,12 @@
+{
+  "strategy_id": "shv15_iv_term_structure_cohort2026",
+  "required": [
+    "macro",
+    "options_eod",
+    "prices"
+  ],
+  "optional": [
+    "iv_history",
+    "vol_indices"
+  ]
+}

@@ -95,6 +95,10 @@ def validate(filepath: str) -> dict:
     def _is_strategy_class(obj):
         if not inspect.isclass(obj) or obj.__name__ == 'BaseStrategy':
             return False
+        # Skip abstract adapter classes (e.g. CohortBaseStrategy) so the
+        # validator picks the concrete ported strategy, not the shim.
+        if getattr(obj, '__abstractmethods__', None):
+            return False
         # Accept if: proper issubclass (canonical import) OR any base class is named BaseStrategy
         try:
             if issubclass(obj, BaseStrategy):

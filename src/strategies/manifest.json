@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-22T20:49:23.361406+00:00",
+  "updated_at": "2026-04-23T18:26:37.540793+00:00",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -656,14 +656,23 @@
       "history": []
     },
     "S_quantum_rebalance_qaoa": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "paper",
+      "state_since": "2026-04-23T17:38:21.270788+00:00",
       "metadata": {
         "canonical_file": "S_quantum_rebalance_qaoa.py",
         "class": "QuantumRebalanceQAOA",
         "description": "Ledoit-Wolf shrinkage + hierarchical clustering + entropy-weighted inv-vol rebalance"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-23T17:38:21.270788+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ]
     },
     "S_alpha191_lasso_crossmarket": {
       "state": "live",
@@ -839,6 +848,522 @@
           "timestamp": "2026-04-22T05:23:56.127700+00:00",
           "actor": "reconcile:2026-04-22",
           "reason": "Wired in from strategy_registry (pending_approval, no prior manifest entry)",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_HV13_call_put_iv_spread_cohort2026": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "shv13_call_put_iv_spread_cohort2026.py",
+        "class": "CallPutIVSpread",
+        "description": "Call-Put IV Spread (put-call parity deviation, Cremers & Weinbaum 2010)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "equity_cross_sectional",
+        "horizon_days": 7,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Cremers & Weinbaum (2010) JFQA 45(2)",
+        "data_dependencies": [
+          "opts_map[ticker].iv_spread_atm_oi_weighted",
+          "opts_map[ticker].iv_rank",
+          "opts_map[ticker].last_price",
+          "opts_map[ticker].rv20"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_HV14_otm_skew_factor_cohort2026": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "shv14_otm_skew_factor_cohort2026.py",
+        "class": "OTMSkewFactor",
+        "description": "OTM put-skew factor (Xing-Zhang-Zhao 2010)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "equity_cross_sectional",
+        "horizon_days": 10,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Xing, Zhang & Zhao (2010) JFQA 45(3)",
+        "data_dependencies": [
+          "opts_map[ticker].smirk_otmput_atmcall",
+          "opts_map[ticker].iv_rank",
+          "opts_map[ticker].last_price"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_HV15_iv_term_structure_cohort2026": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "shv15_iv_term_structure_cohort2026.py",
+        "class": "IVTermStructureSlope",
+        "description": "IV term-structure inversion / slope trade (Johnson 2017)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "options_vol_single_name",
+        "horizon_days": 7,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL"
+        ],
+        "academic_ref": "Johnson (2017) JFE 123(2)",
+        "data_dependencies": [
+          "opts_map[ticker].iv_30d",
+          "opts_map[ticker].iv_90d",
+          "opts_map[ticker].ts_ratio",
+          "opts_map[ticker].iv_rank",
+          "market_data.vix_close"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_HV17_earnings_straddle_fade_cohort2026": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "shv17_earnings_straddle_fade_cohort2026.py",
+        "class": "EarningsStraddleFade",
+        "description": "Earnings straddle fade / implied-move sell (Gao et al. 2018)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "options_vol_single_name",
+        "horizon_days": 1,
+        "targets_regimes": [
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Gao et al. (2018) implied-vs-realised move ratios",
+        "data_dependencies": [
+          "opts_map[ticker].atm_iv_30d",
+          "opts_map[ticker].earnings_implied_move",
+          "opts_map[ticker].hist_post_earnings_move",
+          "opts_map[ticker].atm_bid_ask_spread_pct",
+          "opts_map[ticker].next_earnings_date"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_HV20_iv_dispersion_reversion_cohort2026": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "shv20_iv_dispersion_reversion_cohort2026.py",
+        "class": "IVDispersionReversion",
+        "description": "IV dispersion / index-component mean reversion (Driessen-Maenhout-Vilkov 2009)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "options_vol_portfolio",
+        "horizon_days": 10,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL"
+        ],
+        "academic_ref": "Driessen, Maenhout & Vilkov (2009) JF 64(3)",
+        "data_dependencies": [
+          "market_data.spx_iv_30d",
+          "opts_map[ticker].iv_30d",
+          "market_data.spx_close"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_TR01_vvix_early_warning": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "str01_vvix_early_warning.py",
+        "class": "VVIXEarlyWarning",
+        "description": "VVIX percentile early-warning regime classifier (Thrasher 2017)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "regime_classifier",
+        "horizon_days": 10,
+        "targets_regimes": [
+          "LOW_VOL",
+          "NEUTRAL"
+        ],
+        "academic_ref": "Thrasher (2017) SSRN 3010912",
+        "data_dependencies": [
+          "market_data.vvix_close",
+          "market_data.vvix_history",
+          "market_data.vix_close"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_TR02_hurst_regime_flip": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "str02_hurst_regime_flip.py",
+        "class": "HurstRegimeFlip",
+        "description": "Hurst exponent regime flip on SPY 60-day rolling H (Vogl 2022)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "regime_classifier",
+        "horizon_days": 20,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Vogl (2022) Physica A 595",
+        "data_dependencies": [
+          "market_data.spy_close_history (>=120)"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_TR03_bocpd": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "str03_bocpd.py",
+        "class": "BOCPDDetector",
+        "description": "Bayesian online change-point detection on SPY returns (Adams-MacKay 2007)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "regime_classifier",
+        "horizon_days": 10,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Adams & MacKay (2007) BOCPD",
+        "data_dependencies": [
+          "market_data.spy_close_history (>=200)"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_TR04_zarattini_intraday_spy": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "str04_zarattini_intraday_spy.py",
+        "class": "ZarattiniIntradaySPY",
+        "description": "Zarattini intraday SPY NOPE-gated long (Zarattini et al. 2024)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "intraday_single_asset",
+        "horizon_days": 1,
+        "targets_regimes": [
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Zarattini, Pagani & Aziz (2024) SSRN 4824172",
+        "data_dependencies": [
+          "market_data.spy_30m_bars",
+          "market_data.spy_prev_close",
+          "market_data.spy_10d_volume_avg",
+          "market_data.vix_close"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_TR06_baltussen_eod_reversal": {
+      "state": "staging",
+      "state_since": "2026-04-23T18:26:37.540793+00:00",
+      "metadata": {
+        "canonical_file": "str06_baltussen_eod_reversal.py",
+        "class": "BaltussenEODReversal",
+        "description": "Baltussen ROD3 end-of-day reversal cross-section (Baltussen-Da-Soebhag 2024)",
+        "cohort": "top10_cohort_2026_04",
+        "phase_label": "shadow",
+        "source": "top10_cohort_2026_04",
+        "archetype": "intraday_cross_sectional",
+        "horizon_days": 1,
+        "targets_regimes": [
+          "HIGH_VOL",
+          "NEUTRAL",
+          "LOW_VOL"
+        ],
+        "academic_ref": "Baltussen, Da & Soebhag (2024) SSRN 4734733",
+        "data_dependencies": [
+          "market_data.intraday_30m_bars",
+          "opts_map[ticker].avg_dollar_volume_30d"
+        ],
+        "promotion_criteria": {
+          "shadow_to_paper": {
+            "min_shadow_days": 20,
+            "min_signals": 30,
+            "zero_crash_sessions": 20
+          },
+          "paper_to_live": {
+            "min_paper_days": 60,
+            "min_paper_sharpe": 0.7,
+            "max_paper_drawdown_pct": 8.0,
+            "min_paper_trades": 40
+          },
+          "live_to_paused": {
+            "live_drawdown_pct_trigger": 12.0,
+            "live_drawdown_period_days": 90
+          }
+        }
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-23T18:26:37.540793+00:00",
+          "actor": "cohort-onboarding:top10_cohort_2026_04",
+          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
           "metadata": {}
         }
       ]

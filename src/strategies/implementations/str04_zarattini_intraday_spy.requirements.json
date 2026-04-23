@@ -1,0 +1,11 @@
+{
+  "strategy_id": "str04_zarattini_intraday_spy",
+  "required": [
+    "macro",
+    "prices",
+    "prices_30m"
+  ],
+  "optional": [
+    "vol_indices"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "strategy_id": "str03_bocpd",
+  "required": [
+    "prices"
+  ],
+  "optional": []
+}

@@ -1,0 +1,11 @@
+{
+  "strategy_id": "shv17_earnings_straddle_fade_cohort2026",
+  "required": [
+    "earnings",
+    "options_eod",
+    "prices"
+  ],
+  "optional": [
+    "earnings_calendar"
+  ]
+}

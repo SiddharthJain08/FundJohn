@@ -65,6 +65,17 @@ _IMPL_MAP = {
     'S_tr_06_eod_reversal':                ('strategies.implementations.S_tr_06_eod_reversal',                'EODCrossSectionalReversal'),
     'S21_iv_hv_spread':                   ('strategies.implementations.S21_iv_hv_spread',                    'IVHVSpread'),
     'S_sparse_basis_pursuit_sdf':         ('strategies.implementations.S_sparse_basis_pursuit_sdf',          'SparseBasisPursuitSdf'),
+    # ── Top-10 cohort (2026-04) — shimmering-skipping-engelbart plan-ID ──
+    'S_HV13_call_put_iv_spread_cohort2026':   ('strategies.implementations.shv13_call_put_iv_spread_cohort2026',   'CallPutIVSpread'),
+    'S_HV14_otm_skew_factor_cohort2026':      ('strategies.implementations.shv14_otm_skew_factor_cohort2026',      'OTMSkewFactor'),
+    'S_HV15_iv_term_structure_cohort2026':    ('strategies.implementations.shv15_iv_term_structure_cohort2026',    'IVTermStructureSlope'),
+    'S_HV17_earnings_straddle_fade_cohort2026': ('strategies.implementations.shv17_earnings_straddle_fade_cohort2026', 'EarningsStraddleFade'),
+    'S_HV20_iv_dispersion_reversion_cohort2026': ('strategies.implementations.shv20_iv_dispersion_reversion_cohort2026', 'IVDispersionReversion'),
+    'S_TR01_vvix_early_warning':              ('strategies.implementations.str01_vvix_early_warning',              'VVIXEarlyWarning'),
+    'S_TR02_hurst_regime_flip':               ('strategies.implementations.str02_hurst_regime_flip',               'HurstRegimeFlip'),
+    'S_TR03_bocpd':                           ('strategies.implementations.str03_bocpd',                           'BOCPDDetector'),
+    'S_TR04_zarattini_intraday_spy':          ('strategies.implementations.str04_zarattini_intraday_spy',          'ZarattiniIntradaySPY'),
+    'S_TR06_baltussen_eod_reversal':          ('strategies.implementations.str06_baltussen_eod_reversal',          'BaltussenEODReversal'),
 }
 
 
