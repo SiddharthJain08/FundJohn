@@ -9,8 +9,8 @@ Usage:
     python3 src/execution/trade_agent_llm.py [--date YYYY-MM-DD]
 """
 
-import os, sys, json, subprocess, tempfile, psycopg2, psycopg2.extras
-from datetime import date, timedelta
+import os, sys, json, subprocess, tempfile
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,35 +22,9 @@ from execution.handoff import read_handoff
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def build_veto_histogram(postgres_uri, days=30):
-    """
-    Returns {strategy_id: {veto_reason: count}} for the last N days.
-    Returns {} on any error (non-critical).
-    """
-    if not postgres_uri:
-        return {}
-    try:
-        cutoff = (date.today() - timedelta(days=days)).isoformat()
-        conn   = psycopg2.connect(postgres_uri)
-        cur    = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            '''SELECT strategy_id, veto_reason, COUNT(*) AS cnt
-               FROM veto_log
-               WHERE run_date >= %s AND strategy_id IS NOT NULL
-               GROUP BY strategy_id, veto_reason
-               ORDER BY strategy_id, cnt DESC''',
-            (cutoff,)
-        )
-        hist = {}
-        for row in cur.fetchall():
-            sid    = row['strategy_id']
-            reason = row['veto_reason']
-            hist.setdefault(sid, {})[reason] = int(row['cnt'])
-        conn.close()
-        return hist
-    except Exception as e:
-        print(f'[trade_agent_llm] veto_histogram unavailable: {e}')
-        return {}
+# The 30-day veto histogram was moved to MastermindJohn's weekly runs
+# (comprehensive-review + position-recs) where multi-week patterns drive
+# strategy memos + sizing deltas. TradeJohn no longer receives it.
 
 
 def load_portfolio_state():
@@ -167,20 +141,33 @@ if __name__ == '__main__':
     print(f'[trade_agent_llm] Handoff loaded ({handoff_stage}): regime={regime_str} '
           f'signals={len(handoff.get("signals", handoff.get("strategies", [])))}')
 
-    # 2. Build veto histogram — structured handoff already has it but older
-    #    stages don't; skip the DB call when it's embedded.
-    veto_histogram = handoff.get('veto_history_30d') or build_veto_histogram(postgres_uri)
-
-    # 3. Load portfolio state — structured handoff has it embedded.
+    # 2. Load portfolio state — structured handoff has it embedded.
     portfolio_state = handoff.get('portfolio') or load_portfolio_state()
 
-    # 4. Assemble context dict. For the structured stage we pass the handoff
-    #    directly (it's already the right shape); for legacy stages we keep
-    #    the old wrapper.
+    # 3. Assemble TradeJohn's context by whitelisting fields. TradeJohn is a
+    #    daily per-signal Kelly-sizing agent; multi-day aggregates
+    #    (veto_history_30d, full yesterdays_*) belong to MastermindJohn's
+    #    weekly runs, not here. The per-signal `d1` attachments + the
+    #    `d1_strategy_stats` rollup give TradeJohn exactly what Rules A–F
+    #    need to fire without shipping the full outlier arrays.
+    if handoff_stage == 'structured':
+        tradejohn_handoff = {
+            'cycle_date':        handoff.get('cycle_date') or run_date,
+            'generated_at':      handoff.get('generated_at'),
+            'regime':            handoff.get('regime'),
+            'portfolio':         handoff.get('portfolio'),
+            'signals':           handoff.get('signals') or [],
+            'sigma_gate':        handoff.get('sigma_gate'),
+            'd1_strategy_stats': handoff.get('d1_strategy_stats') or {},
+            'mastermind_rec':    handoff.get('mastermind_rec'),
+        }
+    else:
+        # Legacy research / memos stages — pass as-is for backwards compat.
+        tradejohn_handoff = handoff
+
     ctx = {
         'cycle_date':      run_date,
-        'handoff':         handoff,
-        'veto_histogram':  veto_histogram,
+        'handoff':         tradejohn_handoff,
         'portfolio_state': portfolio_state,
     }
 

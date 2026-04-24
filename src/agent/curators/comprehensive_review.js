@@ -60,8 +60,11 @@ async function _fetchStrategies(strategyIds) {
 }
 
 async function _buildTradePack(strategyId) {
-  // Full lifetime execution + pnl rows for this strategy.
-  const [sigRes, pnlRes] = await Promise.all([
+  // Full lifetime execution + pnl rows + 30-day veto histogram for this
+  // strategy. Veto histogram migrated here from TradeJohn's daily handoff
+  // (2026-04-27): multi-week veto patterns drive Mastermind's weekly
+  // strategy memo + sizing deltas, not daily TradeJohn sizing.
+  const [sigRes, pnlRes, vetoRes] = await Promise.all([
     _query(
       `SELECT id::text, signal_date, ticker, direction, entry_price, stop_loss,
               target_1, target_2, target_3, position_size_pct, regime_state,
@@ -81,8 +84,20 @@ async function _buildTradePack(strategyId) {
         LIMIT 1500`,
       [strategyId]
     ),
+    _query(
+      `SELECT veto_reason, COUNT(*)::int AS n
+         FROM veto_log
+        WHERE strategy_id = $1
+          AND run_date >= NOW()::date - INTERVAL '30 days'
+        GROUP BY veto_reason
+        ORDER BY n DESC`,
+      [strategyId]
+    ).catch(() => ({ rows: [] })),
   ]);
-  return { signals: sigRes.rows, pnl: pnlRes.rows };
+  const vetoHistogram = Object.fromEntries(
+    vetoRes.rows.map(r => [r.veto_reason, r.n])
+  );
+  return { signals: sigRes.rows, pnl: pnlRes.rows, vetoHistogram };
 }
 
 function _counterfactuals(pnl) {
@@ -193,6 +208,10 @@ Memo content must:
   * summarise lifetime P&L with concrete numbers from the data provided
   * identify the single most costly parameter choice and quantify the
     counterfactual improvement (use the counterfactuals block)
+  * reference the 30-day veto histogram when it concentrates on a
+    single reason code — that reason is a tuning signal (e.g. many
+    negative_kelly vetoes → p_t1 calibration is mismatched to R:R;
+    many prefilter_negative_ev → EV computation itself is suspect)
   * recommend specific parameter tuning — reference the
     wider_stop / shorter_hold / larger_size counterfactuals by name
   * end with a 3-bullet "next-week actions" list
@@ -224,6 +243,9 @@ ${JSON.stringify(tradePack.signals.slice(0, 120), null, 2)}
 
 Recent signal_pnl rows (up to 1500):
 ${JSON.stringify(tradePack.pnl.slice(0, 400), null, 2)}
+
+30-day veto histogram (veto_reason → count) for this strategy:
+${JSON.stringify(tradePack.vetoHistogram || {}, null, 2)}
 
 Now write the memo and the JSON block, separated by '---'.`;
 }

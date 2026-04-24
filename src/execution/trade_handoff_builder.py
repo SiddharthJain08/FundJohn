@@ -599,17 +599,76 @@ def build(run_date: str) -> dict:
     print(f'[handoff] prefilter: {len(green)} green / {len(prefiltered)} filtered '
           f'(min_ev={MIN_EV_GBM}, min_p_t1={MIN_P_T1})')
 
+    # ── Attach per-signal d-1 outlier context + per-strategy aggregates ────────
+    # TradeJohn operates on today's green signals; he only needs the d-1
+    # information that's actionable for this (ticker, strategy_id). Full
+    # arrays stay in the structured handoff for Discord, but each green
+    # signal also gets a compact `d1` field when it matched yesterday's
+    # over/under/rejected lists. Strategy-wide rollups (for Rules B/D/F)
+    # go into d1_strategy_stats instead of shipping the arrays twice.
+    over_idx     = {(r.get('ticker'), r.get('strategy_id')): r for r in y_overperf}
+    under_idx    = {(r.get('ticker'), r.get('strategy_id')): r for r in y_underperf}
+    rejected_idx = {(r.get('ticker'), r.get('strategy_id')): r for r in y_vetoed}
+
+    d1_matches = 0
+    for sig in green:
+        key = (sig.get('ticker'), sig.get('strategy_id'))
+        if key in rejected_idx:
+            r = rejected_idx[key]
+            sig['d1'] = {
+                'kind':   'rejected',
+                'reason': r.get('reason'),
+                'ev':     _safe(r.get('ev')),
+                'p_t1':   _safe(r.get('p_t1')),
+            }
+            d1_matches += 1
+        elif key in over_idx:
+            r = over_idx[key]
+            sig['d1'] = {
+                'kind':        'over',
+                'sigma_delta': _safe(r.get('sigma_delta'), ndigits=2),
+                'delta':       _safe(r.get('delta')),
+                'status':      r.get('status'),
+                'days_held':   r.get('days_held'),
+            }
+            d1_matches += 1
+        elif key in under_idx:
+            r = under_idx[key]
+            sig['d1'] = {
+                'kind':        'under',
+                'sigma_delta': _safe(r.get('sigma_delta'), ndigits=2),
+                'delta':       _safe(r.get('delta')),
+                'status':      r.get('status'),
+                'days_held':   r.get('days_held'),
+            }
+            d1_matches += 1
+
+    d1_strategy_stats: dict[str, dict[str, int]] = {}
+    def _bump(strat, bucket):
+        s = d1_strategy_stats.setdefault(
+            strat, {'overperf': 0, 'underperf': 0, 'rejected': 0})
+        s[bucket] += 1
+    for r in y_overperf:
+        if r.get('strategy_id'): _bump(r['strategy_id'], 'overperf')
+    for r in y_underperf:
+        if r.get('strategy_id'): _bump(r['strategy_id'], 'underperf')
+    for r in y_vetoed:
+        if r.get('strategy_id'): _bump(r['strategy_id'], 'rejected')
+    print(f'[handoff] d1 attachment: {d1_matches}/{len(green)} green signals '
+          f'matched d-1; {len(d1_strategy_stats)} strategies in d1_strategy_stats')
+
     payload = {
         'cycle_date':      run_date,
         'generated_at':    datetime.now(timezone.utc).isoformat(),
         'regime':          regime,
         'portfolio':       portfolio,
-        'signals':         green,
+        'signals':         green,   # now d1-enriched where applicable
         'prefiltered':     prefiltered,
         'veto_history_30d':veto,
         'yesterdays_vetoed':          y_vetoed,
         'yesterdays_overperformance': y_overperf,
         'yesterdays_underperformance':y_underperf,
+        'd1_strategy_stats':          d1_strategy_stats,
         'sigma_gate':      sigma_gate,
         'mastermind_rec':  mm_rec,
         'stats': {
@@ -618,6 +677,7 @@ def build(run_date: str) -> dict:
             'green_signals':       len(green),
             'prefiltered':         len(prefiltered),
             'skipped_missing_data':len(signals) - len(enriched),
+            'd1_matches':          d1_matches,
         },
     }
     write_handoff(run_date, 'structured', payload)

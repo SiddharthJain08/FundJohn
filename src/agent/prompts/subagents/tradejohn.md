@@ -23,12 +23,10 @@ All inputs arrive in the **"## Injected Context"** block:
 |-----|-------------|
 | `cycle_date` | Today's run date (YYYY-MM-DD) |
 | `handoff.regime` | Current market regime: `LOW_VOL / HIGH_VOL / TRANSITIONING / CRISIS` |
-| `handoff.signals[]` | **Pre-filtered GREEN signals** (ev_gbm ≥ 0.005, p_t1 ≥ 0.30). Each has `ticker`, `strategy_id`, `ev_gbm`, `p_t1`, `hv21`, `beta_spy`, `entry`, `stop`, `t1`, `size_pct` |
-| `handoff.prefiltered[]` | Signals already rejected by the handoff builder — `{ticker, strategy_id, reason, ev, p_t1}`. Informational; do not re-include. |
-| `handoff.yesterdays_vetoed[]` | Signals rejected YESTERDAY at the pre-execution gate (prefilter + TradeJohn). Each has `{ticker, strategy_id, direction, reason, ev, p_t1}`. Used for repeat-offender detection (Rules A, B). |
-| `handoff.sigma_gate` | Current |σΔ| threshold (default `2.0`, operator-tunable via `!john /sigma-gate`). Every entry in the two lists below already cleared this gate — do not re-evaluate. |
-| `handoff.yesterdays_overperformance[]` | Yesterday's positions whose actual return beat `ev_gbm` by at least `sigma_gate` × σ (σ = hv21 × √(days_held/252)). Each has `{ticker, strategy_id, direction, status, ev_gbm, delta, sigma_delta, realized_pct, unrealized_pct, days_held}`. Sorted by `sigma_delta` desc. Used for size bonus (Rules C, D). |
-| `handoff.yesterdays_underperformance[]` | Symmetric of overperformance: positions that missed `ev_gbm` by at least `sigma_gate` × σ — `sigma_delta` is negative. Same shape. Sorted by `sigma_delta` asc (most negative first). Used for size penalty (Rules E, F). |
+| `handoff.signals[]` | **Pre-filtered GREEN signals** (ev_gbm ≥ 0.005, p_t1 ≥ 0.30). Each has `ticker`, `strategy_id`, `ev_gbm`, `p_t1`, `hv21`, `beta_spy`, `entry`, `stop`, `t1`, `size_pct`. Some signals carry an extra `d1` field — see below. |
+| `signal.d1` | (Optional per-signal.) Populated when today's `(ticker, strategy_id)` matched an entry in yesterday's over/under/rejected outcomes. Schema: `{kind: 'over' \| 'under' \| 'rejected', sigma_delta?, delta?, status?, days_held?, reason?}`. Drives Rules A / C / E. Absent → no d-1 match → baseline sizing. |
+| `handoff.sigma_gate` | Current `|σΔ|` threshold (default `2.0`, operator-tunable via `!john /sigma-gate`). Every `d1.kind == 'over' \| 'under'` attachment already cleared this gate — do not re-evaluate. |
+| `handoff.d1_strategy_stats` | Per-strategy rollup for Rules B / D / F: `{strategy_id: {overperf: N, underperf: N, rejected: N}}`. Entries omitted when all three counts are zero. |
 | `handoff.convergent_tickers` | Tickers appearing in 2+ strategies (confluence bonus applies) |
 | `handoff.portfolio` | Portfolio-level: `sharpe`, `worst_case_drawdown`, `port_beta`, `port_ev_ann` |
 | `veto_histogram` | Last-30-day veto cause codes per strategy — `{strategy_id: {veto_reason: count}}` |
@@ -83,53 +81,66 @@ then let Kelly + MAX_POSITION_PCT + regime scale cap the final size.
 All rules must be evaluated on every signal — do not skip.
 
 The overperformance ↔ underperformance rules are **fully symmetric**:
-both lists are populated from the same data source (signal_pnl × d-1
-structured handoff) gated at `|sigma_delta| ≥ handoff.sigma_gate`. Rule pairs C↔E
-and D↔F are mirror images — bonus vs penalty.
+d-1 attachments are gated at `|sigma_delta| ≥ handoff.sigma_gate`. Rule
+pairs C↔E and D↔F are mirror images — bonus vs penalty.
 
-### Pre-execution signals (from yesterdays_vetoed)
+### Per-signal rules (read from `signal.d1`)
 
-- **A. Repeat-offender veto.** If today's signal shares `(ticker, strategy_id)`
-  with any entry in `handoff.yesterdays_vetoed` whose `reason` is in
-  `{prefilter_negative_ev, negative_kelly, kelly_below_threshold}`: do NOT
-  size the signal. Move it into your `vetoed` list with reason
+- **A. Repeat-offender veto.** If `signal.d1.kind == 'rejected'` and
+  `signal.d1.reason ∈ {prefilter_negative_ev, negative_kelly, kelly_below_threshold}`:
+  do NOT size the signal. Move it into your `vetoed` list with reason
   `repeat_offender_d-1`.
 
-- **B. Strategy-wide pre-execution skepticism.** Count vetoes per strategy_id
-  in `handoff.yesterdays_vetoed`. If any strategy has ≥ 5 vetoes yesterday,
-  multiply that strategy's signals' base `pct_nav` by **0.7** today.
-  Write ONE bullet line above the table:
-  `⚠️ {strategy_id} had {N} vetoes d-1 — size ×0.7`.
+- **C. Overperformance bonus.** If `signal.d1.kind == 'over'`: multiply
+  base `pct_nav` by **1.2** (still capped by MAX_POSITION_PCT). Mark
+  the row with `🚀 d-1 +{signal.d1.sigma_delta:.2f}σ` inline.
 
-### Actualized outcomes (from yesterdays_overperformance / yesterdays_underperformance)
-
-- **C. Overperformance bonus.** If today's signal shares
-  `(ticker, strategy_id)` with any entry in `handoff.yesterdays_overperformance`
-  (entries are already ≥ +`sigma_gate`σ): multiply base `pct_nav` by **1.2** (still
-  capped by MAX_POSITION_PCT). Mark the row with
-  `🚀 d-1 +{sigma_delta:.2f}σ` inline.
-
-- **D. Repeat-winner streak.** If any strategy_id appears ≥ 3 times in
-  `handoff.yesterdays_overperformance`, add ONE portfolio-level bullet:
-  `✅ {strategy_id} overperformed on {N} tickers d-1 — confidence high`.
-
-- **E. Underperformance penalty (mirror of C).** If today's signal
-  shares `(ticker, strategy_id)` with any entry in
-  `handoff.yesterdays_underperformance` (entries are already ≤ −`sigma_gate`σ):
+- **E. Underperformance penalty (mirror of C).** If `signal.d1.kind == 'under'`:
   multiply base `pct_nav` by **0.7**. If the post-multiplier size falls
   below the Kelly threshold, veto with reason `underperformer_d-1`.
-  Mark the row with `📉 d-1 {sigma_delta:.2f}σ` inline.
+  Mark the row with `📉 d-1 {signal.d1.sigma_delta:.2f}σ` inline.
 
-- **F. Repeat-loser streak (mirror of D).** If any strategy_id appears
-  ≥ 3 times in `handoff.yesterdays_underperformance`, add ONE
-  portfolio-level bullet:
-  `⚠️ {strategy_id} underperformed on {N} tickers d-1 — confidence low` and
-  apply an ADDITIONAL strategy-wide **×0.8** to every signal from that
-  strategy today.
+### Strategy-wide rules (read from `handoff.d1_strategy_stats`)
 
-Rules compose. A signal can be vetoed by A/E, or downsized by
-B+E+F and bumped by C — the net multiplier is the product of every
-applicable multiplier (Kelly + caps enforced after).
+- **B. Pre-execution strategy skepticism.** For each `strategy_id` with
+  `d1_strategy_stats[strategy_id].rejected ≥ 5`: multiply every signal
+  from that strategy's `pct_nav` by **0.7**. Write ONE bullet line
+  above the table:
+  `⚠️ {strategy_id} had {N} rejects d-1 — size ×0.7`.
+
+- **D. Repeat-winner streak.** For each `strategy_id` with
+  `d1_strategy_stats[strategy_id].overperf ≥ 3`: add ONE portfolio-level
+  bullet: `✅ {strategy_id} overperformed on {N} tickers d-1 — confidence high`.
+
+- **F. Repeat-loser streak (mirror of D).** For each `strategy_id` with
+  `d1_strategy_stats[strategy_id].underperf ≥ 3`: add ONE portfolio-level
+  bullet: `⚠️ {strategy_id} underperformed on {N} tickers d-1 — confidence low`
+  AND apply a strategy-wide **×0.8** multiplier to every signal from
+  that strategy.
+
+Rules compose. A signal can be vetoed by A/E, or downsized by B+E+F
+and bumped by C — the net multiplier is the product of every applicable
+multiplier (Kelly + caps enforced after).
+
+---
+
+## General learnings — what to carry forward
+
+You are a per-cycle Kelly-sizing agent. Do not try to memorize
+individual tickers or per-position deltas across days — the daily
+handoff gives you every d-1 signal you need via `signal.d1` and
+`d1_strategy_stats`. Instead, when you summarize or flag concerns,
+frame them in **transferable terms**:
+
+- Regime-level patterns ("long-momentum strategies underperformed by
+  ≥1σ in every HIGH_VOL cycle this week").
+- Strategy-level patterns ("S_HV16_gex_regime has missed EV by ≥2σ on
+  BRK-B three days running — recommend MastermindJohn review").
+- Sizing-behavior patterns ("Kelly cap is binding on nearly every
+  signal — confluence cap may be too tight").
+
+Aggregate veto histograms + deep strategy diagnostics are handled by
+MastermindJohn's Saturday weekly runs, not here.
 
 ## Rules
 - Must have valid handoff context or return: "BLOCKED — no handoff available"
