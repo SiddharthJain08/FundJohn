@@ -102,6 +102,41 @@ def _emit_sized_handoff(run_date, raw_stdout):
     print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
           f'{len(payload.get("vetoed", []))} vetoed.')
 
+    # Append one row per vetoed entry to veto_log so MastermindJohn's
+    # 30-day histogram (comprehensive_review._buildTradePack) stays
+    # populated. Zero-token: pure SQL INSERT, no LLM. Captures both
+    # TradeJohn's judgement vetoes AND the prefilter folds above.
+    _write_veto_log_rows(run_date, payload.get('vetoed') or [])
+
+
+def _write_veto_log_rows(run_date: str, vetoed: list[dict]) -> None:
+    if not vetoed:
+        return
+    postgres_uri = os.environ.get('POSTGRES_URI', '')
+    if not postgres_uri:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(postgres_uri)
+        cur  = conn.cursor()
+        for v in vetoed:
+            reason = v.get('reason') or 'unknown'
+            ticker = v.get('ticker')
+            strat  = v.get('strategy_id')
+            ev     = v.get('ev')
+            kelly  = v.get('kelly_final') or v.get('kelly')
+            cur.execute(
+                '''INSERT INTO veto_log
+                     (run_date, strategy_id, ticker, veto_reason, ev, kelly)
+                   VALUES (%s, %s, %s, %s, %s, %s)''',
+                (run_date, strat, ticker, reason, ev, kelly),
+            )
+        conn.commit()
+        conn.close()
+        print(f'[trade_agent_llm] veto_log — {len(vetoed)} row(s) appended')
+    except Exception as e:
+        print(f'[trade_agent_llm] veto_log write failed: {e}')
+
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 

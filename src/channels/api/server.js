@@ -349,6 +349,21 @@ app.get('/api/strategies', async (req, res) => {
       currentRegime = latestJson.state || 'TRANSITIONING';
     } catch (_) {}
 
+    // Latest d-1 per-strategy rollup (overperf / underperf / rejected counts)
+    // from today's structured handoff. Stamped by trade_handoff_builder.
+    // Displayed as "# O/U/R" in the Active Stack table.
+    let d1StrategyStats = {};
+    try {
+      const handoffDir = path.join(__dirname, '../../../output/handoffs');
+      const files = fs.readdirSync(handoffDir)
+        .filter(n => /^\d{4}-\d{2}-\d{2}_structured\.json$/.test(n))
+        .sort();
+      if (files.length) {
+        const latest = JSON.parse(fs.readFileSync(path.join(handoffDir, files[files.length - 1]), 'utf8'));
+        d1StrategyStats = latest.d1_strategy_stats || {};
+      }
+    } catch (_) {}
+
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
     const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
@@ -364,6 +379,7 @@ app.get('/api/strategies', async (req, res) => {
       const regimeActive  = activeRegimes.includes(currentRegime);
       const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
       const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
+      const d1 = d1StrategyStats[sid] || null;
       rows.push({
         strategy_id:        sid,
         state:              rec.state || 'unknown',
@@ -392,12 +408,16 @@ app.get('/api/strategies', async (req, res) => {
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
+        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
+        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
+        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
       });
     }
     // Orphans: strategy_ids with signals but no manifest entry
     for (const s of statsRows) {
       if (seen.has(s.strategy_id)) continue;
       const sr = srById[s.strategy_id] || {};
+      const d1 = d1StrategyStats[s.strategy_id] || null;
       rows.push({
         strategy_id:        s.strategy_id,
         state:              'orphan',
@@ -426,6 +446,9 @@ app.get('/api/strategies', async (req, res) => {
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
+        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
+        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
+        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
       });
     }
     res.json(rows);
@@ -3159,11 +3182,13 @@ function _renderActiveStack(rows) {
     if (d !== 0) return d;
     return String(a.strategy_id).localeCompare(String(b.strategy_id));
   });
-  el.innerHTML = \`<table class="db-table" style="min-width:1050px">
+  el.innerHTML = \`<table class="db-table" style="min-width:1100px">
     <tr>
       <th>Strategy</th><th>Status</th><th>Regimes</th>
       <th class="num">Open</th><th class="num">Closed</th><th class="num">Win %</th>
-      <th class="num">Avg Return</th><th>Last Signal</th><th>Actions</th>
+      <th class="num">Avg Return</th>
+      <th class="num" title="d-1 counts: Overperformers / Underperformers / Rejected from today's handoff">#&nbsp;O/U/R</th>
+      <th>Last Signal</th><th>Actions</th>
     </tr>
     \${sorted.map(r => {
       const sub = _activeSub(r);
@@ -3172,6 +3197,11 @@ function _renderActiveStack(rows) {
         ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
         : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
       const avgR = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) * 100 : null;
+      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, x = r.d1_rejected || 0;
+      const ourEmpty = o === 0 && u === 0 && x === 0;
+      const ourCell = ourEmpty
+        ? '<span style="color:var(--dim)">—</span>'
+        : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${x}</span>\`;
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
@@ -3180,6 +3210,7 @@ function _renderActiveStack(rows) {
         <td class="num">\${r.closed_count || 0}</td>
         <td class="num">\${_fmtRate(r.win_rate)}</td>
         <td class="num \${pnlCls(avgR)}">\${_fmtPct(r.avg_realized_pct)}</td>
+        <td class="num" title="Over / Under / Rejected in d-1 handoff">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
       </tr>\`;
