@@ -1326,7 +1326,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
     <div class="pf-stat-card"><div class="pf-stat-label">Open Positions</div><div class="pf-stat-value" id="pf-open">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Closed Trades</div><div class="pf-stat-value" id="pf-closed">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Win Rate</div><div class="pf-stat-value" id="pf-winrate">—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
-    <div class="pf-stat-card"><div class="pf-stat-label" title="Average realized P&L per closed trade, annualized over its average holding period: (1+r)^(252/d) - 1">Avg Annualized Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label" title="Portfolio equity-curve annualization: (1 + period_return)^(252 / trading_days) - 1. Projects the account's actual performance since inception out to a full year.">Avg Annualized Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
   </div>
   <div class="pf-chart-wrap">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -3104,11 +3104,14 @@ async function loadPortfolio() {
     fetch('/api/portfolio/value-curve?period=1A').then(r=>r.json()).catch(()=>({})),
   ]);
   renderAccountRow(account);
-  renderPortfolioSummary(summary);
+  // Store valCurve first — renderPortfolioSummary needs it to compute
+  // the portfolio-level Avg Annualized Realized P&L from the equity
+  // curve (base_value → latest equity), not per-trade averages.
+  valueCurveData = valCurve;
+  renderPortfolioSummary(summary, valCurve);
   renderPositions(positions);
   renderHistory(history);
   pnlCurveData   = curve;
-  valueCurveData = valCurve;
   renderChartForMode();
 }
 
@@ -3176,35 +3179,43 @@ function renderAccountRow(a) {
     ? 'short ' + fmt(a.short_market_value) : '';
 }
 
-function renderPortfolioSummary(s) {
-  const avgR    = s.avg_realized  != null ? parseFloat(s.avg_realized)  : null; // fraction
-  const avgDays = s.avg_days_held != null ? parseFloat(s.avg_days_held) : null;
-  const aarPct  = _annualizePct(avgR, avgDays); // display %, null when unknown
+function renderPortfolioSummary(s, valCurve) {
   const wr  = s.win_rate != null ? s.win_rate + '%' : '—';
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
   document.getElementById('pf-winrate').textContent = wr;
   document.getElementById('pf-winrate-sub').textContent = s.closed_count
     ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
+
+  // Avg Annualized Realized P&L — portfolio-level, from the Alpaca
+  // equity curve. The answer to "if the portfolio keeps performing
+  // exactly like it has, what annualized return does that project?"
+  // is based on (latest_equity / base_value), not per-trade averages
+  // (which assume 100% sequential reinvestment — not how the fund runs).
+  const rows      = (valCurve && valCurve.rows) || [];
+  const baseValue = valCurve && valCurve.base_value != null ? parseFloat(valCurve.base_value) : null;
+  const latestEq  = rows.length ? parseFloat(rows[rows.length - 1].equity) : null;
+  const firstEq   = rows.length ? parseFloat(rows[0].equity) : null;
+  // Anchor to base_value when Alpaca gave us one — that's the true account
+  // starting equity. Fall back to the first observed equity when it didn't.
+  const anchor    = (baseValue != null && baseValue > 0) ? baseValue : firstEq;
+  const periodRet = (anchor && latestEq != null) ? (latestEq - anchor) / anchor : null;
+  const nDays     = rows.length;  // trading days observed
+  const aarPct    = _annualizePct(periodRet, nDays);
+  const el        = document.getElementById('pf-avgpnl');
+  const subEl     = document.getElementById('pf-pnl-sub');
   if (aarPct != null) {
-    const el = document.getElementById('pf-avgpnl');
     el.textContent = (aarPct > 0 ? '+' : '') + aarPct.toFixed(2) + '%';
-    el.className = 'pf-stat-value ' + pnlCls(aarPct, 'positive', 'negative', 'neutral');
-    // Sub-line keeps the per-trade best/worst (un-annualized, raw returns)
-    // + the per-trade average + hold days so users can sanity-check the AAR.
-    const best   = s.best_trade   != null ? parseFloat(s.best_trade)  * 100 : null;
-    const worst  = s.worst_trade  != null ? parseFloat(s.worst_trade) * 100 : null;
-    const rawAvg = avgR != null ? avgR * 100 : null;
-    const rawTxt = rawAvg != null ? ((rawAvg > 0 ? '+' : '') + rawAvg.toFixed(2) + '%') : '—';
-    const bestTxt  = best  != null ? (best  > 0 ? '+' : '') + best.toFixed(2) + '%' : '—';
-    const worstTxt = worst != null ? worst.toFixed(2) + '%' : '—';
-    const daysTxt  = avgDays != null ? ' over ' + avgDays.toFixed(1) + 'd avg hold' : '';
-    document.getElementById('pf-pnl-sub').textContent =
-      'Per-trade avg ' + rawTxt + daysTxt +
-      '  ·  Best: ' + bestTxt + '  Worst: ' + worstTxt;
+    el.className   = 'pf-stat-value ' + pnlCls(aarPct, 'positive', 'negative', 'neutral');
+    // Sub-line: the raw period return + window size + current equity, so
+    // users can see the underlying numbers feeding the projection.
+    const periodTxt = ((periodRet * 100) >= 0 ? '+' : '') + (periodRet * 100).toFixed(2) + '%';
+    const equityTxt = '$' + latestEq.toLocaleString('en-US', {maximumFractionDigits: 0});
+    subEl.textContent = periodTxt + ' over ' + nDays + (nDays === 1 ? ' day' : ' days')
+                      + '  ·  Equity: ' + equityTxt;
   } else {
-    document.getElementById('pf-avgpnl').textContent = '—';
-    document.getElementById('pf-pnl-sub').textContent = 'No closed trades';
+    el.textContent = '—';
+    subEl.textContent = rows.length ? 'Insufficient equity history' : 'No portfolio history yet';
   }
 }
 
@@ -3444,15 +3455,19 @@ function _renderActiveStack(rows) {
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
   const enriched = rows.map(r => {
-    const avgR    = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
-    const avgDays = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
+    // Strategy equity-curve annualization: use live_return_pct (the
+    // strategy's ACTUAL cumulative return since going live) over
+    // live_days. Answers "if the strategy keeps performing like it
+    // already has, what annualized return does that project?" — the
+    // same methodology as the portfolio headline. Per-trade avg × 252/d
+    // was rejected as misleading (it assumes 100% sequential reinvestment
+    // which isn't how strategies compose into the portfolio).
+    const liveRet  = r.live_return_pct != null ? parseFloat(r.live_return_pct) / 100 : null;
+    const liveDays = r.live_days       != null ? parseFloat(r.live_days)             : null;
     return Object.assign({}, r, {
       d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
       _active_rank: _activeRankFor(r),
-      // Compound-annualized avg realized return per strategy, for the
-      // AAR % column. Null when the strategy has no closed trades yet
-      // or the avg holding window is undefined.
-      _aar_pct: _annualizePct(avgR, avgDays),
+      _aar_pct:     _annualizePct(liveRet, liveDays),
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -3477,7 +3492,7 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
       <th class="num" data-sort-key="win_rate" data-sort-type="num">Win %</th>
-      <th class="num" data-sort-key="_aar_pct" data-sort-type="num" title="Avg realized return per trade, annualized over the strategy's average holding period: (1+r)^(252/d) - 1">AAR&nbsp;%</th>
+      <th class="num" data-sort-key="_aar_pct" data-sort-type="num" title="Strategy equity-curve annualization: (1 + live_return)^(252 / live_days) - 1. Projects the strategy's actual performance since going live out to a full year.">AAR&nbsp;%</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
@@ -3501,7 +3516,7 @@ function _renderActiveStack(rows) {
         <td class="num">\${r.open_count || 0}</td>
         <td class="num">\${r.closed_count || 0}</td>
         <td class="num">\${_fmtRate(r.win_rate)}</td>
-        <td class="num \${pnlCls(aar)}" title="Per-trade avg \${_fmtPct(r.avg_realized_pct)} over \${r.avg_days_held != null ? (parseFloat(r.avg_days_held).toFixed(1) + 'd') : '—'} avg hold">\${aar != null ? ((aar >= 0 ? '+' : '') + aar.toFixed(2) + '%') : '—'}</td>
+        <td class="num \${pnlCls(aar)}" title="Live return \${r.live_return_pct != null ? ((parseFloat(r.live_return_pct) >= 0 ? '+' : '') + parseFloat(r.live_return_pct).toFixed(2) + '%') : '—'} over \${r.live_days != null ? r.live_days + (r.live_days === 1 ? ' day' : ' days') : '—'} live">\${aar != null ? ((aar >= 0 ? '+' : '') + aar.toFixed(2) + '%') : '—'}</td>
         <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
