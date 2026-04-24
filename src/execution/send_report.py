@@ -115,22 +115,34 @@ def _fmt_greenlist(run_date: str, sized: dict) -> str:
     return '\n'.join(lines)
 
 
-# Shared table layout for veto + overperformance digests. Both digests use
-# the same 9-column schema so operators can scan the two side-by-side with
-# identical column positions. Cells that don't apply to a given digest are
-# rendered as an em-dash.
+# Shared 9-column schema for under-/over-performance digests. Both come
+# from the SAME data source (signal_pnl × yesterday's structured handoff)
+# and carry the same fields — only the sign of sigma_delta differs. The
+# schema is operator-facing: identical column positions so the two
+# messages can be scanned side-by-side without remapping.
 _DIGEST_HEADER = (
-    f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Classification":<28} '
-    f'{"EV%":>8} {"Actual%":>8} {"Delta%":>8} {"p(T1)%":>7} {"Days":>5}'
+    f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Status":<18} '
+    f'{"EV%":>7} {"Actual%":>8} {"Delta%":>7} {"σΔ":>6} {"Days":>5}'
 )
 _DIGEST_ROWS_MAX = 25
 
 
-def _fmt_pct(v, sign: bool = True) -> str:
+def _fmt_pct(v) -> str:
+    if v is None:
+        return f'{"—":>7}'
+    return f'{v*100:>+7.2f}'
+
+
+def _fmt_pct8(v) -> str:
     if v is None:
         return f'{"—":>8}'
-    fmt = f'{v*100:>+8.2f}' if sign else f'{v*100:>8.2f}'
-    return fmt
+    return f'{v*100:>+8.2f}'
+
+
+def _fmt_sigma(v) -> str:
+    if v is None:
+        return f'{"—":>6}'
+    return f'{v:>+6.2f}'
 
 
 def _fmt_int(v) -> str:
@@ -139,85 +151,46 @@ def _fmt_int(v) -> str:
     return f'{int(v):>5}'
 
 
-def _fmt_pt1(v) -> str:
-    if v is None:
-        return f'{"—":>7}'
-    return f'{v*100:>7.1f}'
-
-
-def _fmt_row(ticker, strategy, direction, classification, ev, actual, delta, p_t1, days) -> str:
+def _fmt_outlier_row(r: dict) -> str:
+    cls = r.get('status') or '—'
+    if r.get('close_reason'):
+        cls = f'{cls}/{r["close_reason"]}'
+    actual = r.get('realized_pct') if r.get('realized_pct') is not None else r.get('unrealized_pct')
     return (
-        f'{(ticker or "?"):<8} '
-        f'{(strategy or "?")[:28]:<28} '
-        f'{(direction or "—")[:5]:<5} '
-        f'{(classification or "—")[:28]:<28} '
-        f'{_fmt_pct(ev)} '
-        f'{_fmt_pct(actual)} '
-        f'{_fmt_pct(delta)} '
-        f'{_fmt_pt1(p_t1)} '
-        f'{_fmt_int(days)}'
+        f'{(r.get("ticker") or "?"):<8} '
+        f'{(r.get("strategy_id") or "?")[:28]:<28} '
+        f'{(r.get("direction") or "—")[:5]:<5} '
+        f'{cls[:18]:<18} '
+        f'{_fmt_pct(r.get("ev_gbm"))} '
+        f'{_fmt_pct8(actual)} '
+        f'{_fmt_pct(r.get("delta"))} '
+        f'{_fmt_sigma(r.get("sigma_delta"))} '
+        f'{_fmt_int(r.get("days_held"))}'
     )
 
 
-def _fmt_overperformance_digest(run_date: str, overperf: list[dict]) -> str:
-    """Yesterday's positions that beat their computed ev_gbm. Same 9-column
-    schema as the veto digest — columns are in identical positions."""
-    if not overperf:
-        return f'📉 **{run_date}** — no overperformers from yesterday to report.'
-    lines = [f'🚀 **Overperformance digest — d-1** ({len(overperf)} beat EV)', '']
-    lines.append('```')
-    lines.append(_DIGEST_HEADER)
-    lines.append('-' * len(_DIGEST_HEADER))
-    for o in overperf[:_DIGEST_ROWS_MAX]:
-        actual = o.get('realized_pct') if o.get('realized_pct') is not None else o.get('unrealized_pct')
-        # classification: "closed/target_1" if closed, else "open"
-        cls = o.get('status') or '—'
-        if o.get('close_reason'):
-            cls = f'{cls}/{o["close_reason"]}'
-        lines.append(_fmt_row(
-            o.get('ticker'), o.get('strategy_id'), o.get('direction'),
-            cls,
-            o.get('ev_gbm'), actual, o.get('delta'),
-            None,                      # p(T1) — not tracked post-entry
-            o.get('days_held'),
-        ))
-    lines.append('```')
-    if len(overperf) > _DIGEST_ROWS_MAX:
-        lines.append(f'_+{len(overperf) - _DIGEST_ROWS_MAX} more — see structured handoff_')
-    return '\n'.join(lines)
+def _fmt_outlier_digest(run_date: str, rows: list[dict], kind: str) -> str:
+    """Render a d-1 over- or under-performance digest. `kind` selects the
+    heading and empty-state copy; the table body is symmetric either way.
 
-
-def _fmt_veto_digest(run_date: str, sized: dict) -> str:
-    """Today's vetoed signals. Same 9-column schema as the overperformance
-    digest — `Classification` holds the veto reason; `Actual%`, `Delta%`,
-    and `Days` are always — since vetoes never become positions."""
-    vetoed = sized.get('vetoed') or []
-    if not vetoed:
-        return f'🔕 **{run_date}** — no vetoed signals.'
-    # Sort by abs(ev) desc — biggest-EV losers first (including prefilter
-    # drops with the most-negative EV so operators see the worst at the top).
-    ordered = sorted(
-        vetoed,
-        key=lambda v: -abs(float(v.get('ev') or 0)),
-    )
-    lines = [f'🟥 **Veto digest — {run_date}** ({len(vetoed)} vetoed)', '']
-    lines.append('```')
-    lines.append(_DIGEST_HEADER)
-    lines.append('-' * len(_DIGEST_HEADER))
-    for v in ordered[:_DIGEST_ROWS_MAX]:
-        lines.append(_fmt_row(
-            v.get('ticker'), v.get('strategy_id'), v.get('direction'),
-            v.get('reason'),
-            v.get('ev'),
-            None,                      # Actual% — veto never entered
-            None,                      # Delta% — no realized outcome
-            v.get('p_t1'),
-            None,                      # Days — veto never held
-        ))
-    lines.append('```')
-    if len(vetoed) > _DIGEST_ROWS_MAX:
-        lines.append(f'_+{len(vetoed) - _DIGEST_ROWS_MAX} more — see sized handoff_')
-    return '\n'.join(lines)
+    Gated by |σΔ| ≥ 1.0 in the handoff builder, so every row printed here
+    represents an outcome that was at least one standard deviation from
+    what the model expected over the position's actual holding window."""
+    if kind == 'over':
+        header = f'🚀 **Overperformance digest — d-1** ({len(rows)} beat EV by ≥1σ)'
+        empty  = f'📉 **{run_date}** — no d-1 positions beat expected return by ≥1σ.'
+    else:
+        header = f'🟥 **Underperformance digest — d-1** ({len(rows)} missed EV by ≥1σ)'
+        empty  = f'🟢 **{run_date}** — no d-1 positions missed expected return by ≥1σ.'
+    if not rows:
+        return empty
+    out = [header, '', '```', _DIGEST_HEADER, '-' * len(_DIGEST_HEADER)]
+    for r in rows[:_DIGEST_ROWS_MAX]:
+        out.append(_fmt_outlier_row(r))
+    out.append('```')
+    if len(rows) > _DIGEST_ROWS_MAX:
+        out.append(f'_+{len(rows) - _DIGEST_ROWS_MAX} more — see structured handoff_')
+    return '\n'.join(out)
 
 
 def main() -> int:
@@ -237,35 +210,34 @@ def main() -> int:
     print(f'[send_report] webhook lookup: trade-signals={"ok" if wh_signals else "missing"} '
           f'trade-reports={"ok" if wh_reports else "missing"}')
 
+    # Yesterday's performance outliers — same source (signal_pnl × d-1
+    # structured handoff), symmetric 1σ gate, rendered with identical
+    # table layouts so operators can scan the two messages side-by-side.
+    overperf: list = []
+    underperf: list = []
+    try:
+        structured = read_handoff(run_date, 'structured') or {}
+        overperf  = structured.get('yesterdays_overperformance')  or []
+        underperf = structured.get('yesterdays_underperformance') or []
+    except Exception as e:
+        print(f'[send_report] outlier load skipped: {e}')
+
     if not wh_signals and not wh_reports:
         print('[send_report] no webhooks available — printing to stdout only')
         print(_fmt_greenlist(run_date, sized))
-        print('\n--- VETO DIGEST ---\n')
-        print(_fmt_veto_digest(run_date, sized))
+        print('\n--- UNDERPERFORMANCE d-1 ---\n'); print(_fmt_outlier_digest(run_date, underperf, 'under'))
+        print('\n--- OVERPERFORMANCE  d-1 ---\n'); print(_fmt_outlier_digest(run_date, overperf,  'over'))
         return 0
 
-    ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized)) if wh_signals else False
-    ok2 = _post_webhook(wh_reports, _fmt_veto_digest(run_date, sized)) if wh_reports else False
+    ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized))           if wh_signals else False
+    ok2 = _post_webhook(wh_reports, _fmt_outlier_digest(run_date, underperf, 'under')) if wh_reports else False
+    ok3 = _post_webhook(wh_reports, _fmt_outlier_digest(run_date, overperf,  'over'))  if wh_reports else False
 
-    # Overperformance digest — read yesterday's overperformers from today's
-    # structured handoff (the handoff builder populated this by
-    # cross-referencing signal_pnl with yesterday's EVs).
-    overperf = []
-    try:
-        structured = read_handoff(run_date, 'structured') or {}
-        overperf = structured.get('yesterdays_overperformance') or []
-    except Exception as e:
-        print(f'[send_report] overperformance load skipped: {e}')
-    ok3 = _post_webhook(wh_reports, _fmt_overperformance_digest(run_date, overperf)) if wh_reports else False
-
-    if not ok1:
-        print('[send_report] greenlist post skipped/failed')
-    if not ok2:
-        print('[send_report] veto-digest post skipped/failed')
-    if not ok3:
-        print('[send_report] overperformance-digest post skipped/failed')
-    # Non-fatal: pipeline completes even if Discord is throttled. The data
-    # is already written to the sized handoff file; operator can re-post.
+    if not ok1: print('[send_report] greenlist post skipped/failed')
+    if not ok2: print('[send_report] underperformance-digest post skipped/failed')
+    if not ok3: print('[send_report] overperformance-digest post skipped/failed')
+    # Non-fatal: pipeline completes even if Discord is throttled. Data is
+    # persisted in the sized / structured handoffs; operator can re-post.
     return 0
 
 

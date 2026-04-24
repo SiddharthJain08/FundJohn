@@ -207,25 +207,44 @@ def load_yesterdays_vetoed(run_date: str) -> list[dict]:
     return sized.get('vetoed') or []
 
 
-def load_yesterdays_overperformance(uri: str, run_date: str) -> list[dict]:
-    """Cross-reference yesterday's structured handoff (for original ev_gbm
-    per signal) against signal_pnl (for realized / unrealized outcomes).
-    Returns signals whose outcome exceeded the model's ev_gbm by a
-    material margin: either closed at target_1 or still-open with
-    unrealized_pnl_pct > ev_gbm × 1.5. Sorted by delta desc, capped at
-    50 to keep the handoff compact."""
+def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[dict], list[dict]]:
+    """Cross-reference yesterday's structured handoff (for each signal's
+    original ev_gbm + hv21) against signal_pnl (for realized or unrealized
+    outcomes). Per signal we compute:
+
+        sigma_holding = hv21 × sqrt(days_held / 252)   # GBM vol over the
+                                                       # actual holding period
+        delta         = actual_return - ev_gbm
+        sigma_delta   = delta / sigma_holding          # standardized surprise
+
+    Outliers are signals where |sigma_delta| ≥ 1.0 — i.e. the outcome
+    was at least one standard deviation away from what the model
+    expected over the position's holding window. This replaces the
+    earlier hard `delta > 0.02` / `unreal > ev × 1.5` heuristic.
+
+    Returns (overperformers, underperformers). Each list sorted by
+    |sigma_delta| desc and capped at 50 rows."""
+    import math as _math
     if not uri:
-        return []
+        return [], []
     yesterday = _previous_trading_day(run_date)
     y_struct = read_handoff(yesterday, 'structured') or {}
-    ev_lookup = {}
+
+    # Index yesterday's enriched signals by (ticker, strategy_id) so we
+    # can recover ev_gbm + hv21 (the σ source) for each signal_pnl row.
+    ev_lookup: dict[tuple, dict] = {}
     for s in (y_struct.get('signals') or []) + (y_struct.get('prefiltered') or []):
         ev = s.get('ev_gbm')
         if ev is None:
             continue
-        ev_lookup[(s.get('ticker'), s.get('strategy_id'))] = (float(ev), s.get('entry'))
+        ev_lookup[(s.get('ticker'), s.get('strategy_id'))] = {
+            'ev_gbm': float(ev),
+            'hv21':   float(s.get('hv21') or 0.0),
+            'entry':  s.get('entry'),
+        }
     if not ev_lookup:
-        return []
+        return [], []
+
     try:
         conn = psycopg2.connect(uri)
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -244,41 +263,63 @@ def load_yesterdays_overperformance(uri: str, run_date: str) -> list[dict]:
         rows = cur.fetchall()
         conn.close()
     except Exception as e:
-        print(f'[handoff] overperformance query failed: {e}')
-        return []
-    out = []
+        print(f'[handoff] performance-outlier query failed: {e}')
+        return [], []
+
+    overperformers: list[dict] = []
+    underperformers: list[dict] = []
+    SIGMA_GATE = 1.0
+    SIGMA_FLOOR = 0.005   # protect against near-zero hv → huge sigma_delta
+
     for row in rows:
         key = (row['ticker'], row['strategy_id'])
-        ev_entry = ev_lookup.get(key)
-        if ev_entry is None:
+        y_entry = ev_lookup.get(key)
+        if y_entry is None:
             continue
-        ev_gbm, yest_entry = ev_entry
+        ev_gbm = y_entry['ev_gbm']
+        hv21   = y_entry['hv21']
         realized = float(row['realized_pnl_pct']) if row['realized_pnl_pct'] is not None else None
         unreal   = float(row['unrealized_pnl_pct']) if row['unrealized_pnl_pct'] is not None else None
         actual   = realized if realized is not None else unreal
-        if actual is None or ev_gbm is None:
+        if actual is None:
             continue
+
+        days_held = max(int(row['days_held'] or 1), 1)
+        # GBM σ over the holding period. Clamp the vol to avoid the
+        # degenerate case where a bad hv21 fetch → σ_holding ≈ 0 and
+        # every signal trips the gate.
+        sigma_holding = max(hv21 * _math.sqrt(days_held / TRADING_DAYS_PER_YEAR), SIGMA_FLOOR)
         delta = actual - ev_gbm
-        is_target_hit = row['close_reason'] == 'target_1'
-        is_midflight_overperf = (unreal is not None and ev_gbm > 0 and unreal > ev_gbm * 1.5)
-        if not (is_target_hit or is_midflight_overperf):
+        sigma_delta = delta / sigma_holding if sigma_holding > 0 else 0.0
+
+        if abs(sigma_delta) < SIGMA_GATE:
             continue
-        out.append({
+
+        record = {
             'ticker':         row['ticker'],
             'strategy_id':    row['strategy_id'],
             'direction':      row['direction'],
             'status':         row['status'],
             'close_reason':   row['close_reason'],
-            'entry':          _safe(yest_entry),
+            'entry':          _safe(y_entry.get('entry')),
             'exit':           _safe(float(row['close_price'])) if row['close_price'] is not None else None,
             'realized_pct':   _safe(realized),
             'unrealized_pct': _safe(unreal),
             'ev_gbm':         _safe(ev_gbm),
+            'hv21':           _safe(hv21),
+            'sigma_holding':  _safe(sigma_holding),
             'delta':          _safe(delta),
-            'days_held':      int(row['days_held'] or 0),
-        })
-    out.sort(key=lambda r: (r.get('delta') or 0), reverse=True)
-    return out[:50]
+            'sigma_delta':    _safe(sigma_delta, ndigits=2),
+            'days_held':      days_held,
+        }
+        if sigma_delta >= SIGMA_GATE:
+            overperformers.append(record)
+        elif sigma_delta <= -SIGMA_GATE:
+            underperformers.append(record)
+
+    overperformers.sort(key=lambda r: (r.get('sigma_delta') or 0), reverse=True)
+    underperformers.sort(key=lambda r: (r.get('sigma_delta') or 0))   # most negative first
+    return overperformers[:50], underperformers[:50]
 
 
 def load_mastermind_rec(uri: str) -> dict | None:
@@ -477,8 +518,9 @@ def build(run_date: str) -> dict:
     veto       = load_veto_history(uri)
     mm_rec     = load_mastermind_rec(uri)
     y_vetoed   = load_yesterdays_vetoed(run_date)
-    y_overperf = load_yesterdays_overperformance(uri, run_date)
-    print(f'[handoff] d-1 context: {len(y_vetoed)} vetoed / {len(y_overperf)} overperformers')
+    y_overperf, y_underperf = load_yesterdays_performance_outliers(uri, run_date)
+    print(f'[handoff] d-1 context: {len(y_vetoed)} vetoed / '
+          f'{len(y_overperf)} overperformers / {len(y_underperf)} underperformers (|σΔ|≥1)')
 
     enriched: list[dict] = []
     if signals:
@@ -540,8 +582,9 @@ def build(run_date: str) -> dict:
         'signals':         green,
         'prefiltered':     prefiltered,
         'veto_history_30d':veto,
-        'yesterdays_vetoed':         y_vetoed,
-        'yesterdays_overperformance':y_overperf,
+        'yesterdays_vetoed':          y_vetoed,
+        'yesterdays_overperformance': y_overperf,
+        'yesterdays_underperformance':y_underperf,
         'mastermind_rec':  mm_rec,
         'stats': {
             'total_signals':       len(signals),
