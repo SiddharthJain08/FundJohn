@@ -301,9 +301,12 @@ app.get('/api/portfolio/summary', async (req, res) => {
 app.get('/api/portfolio/pnl-curve', async (req, res) => {
   const days = Math.min(parseInt(req.query.days) || 90, 365);
   try {
+    // unrealized_pnl_pct is stored as a fraction (0.05 = 5%). Round to 4
+    // decimals so the client's ×100 multiplication lands at 2 decimal-
+    // places of percent without pre-rounding artifacts.
     const result = await dbQuery(`
       SELECT pnl_date,
-             ROUND(AVG(unrealized_pnl_pct)::numeric, 2) AS avg_unrealized,
+             ROUND(AVG(unrealized_pnl_pct)::numeric, 4) AS avg_unrealized,
              COUNT(*) AS open_count
       FROM signal_pnl
       WHERE pnl_date >= CURRENT_DATE - ($1 * INTERVAL '1 day')
@@ -2974,7 +2977,7 @@ async function loadPortfolio() {
     fetch('/api/portfolio/history').then(r=>r.json()).catch(()=>[]),
     fetch('/api/portfolio/pnl-curve?days=90').then(r=>r.json()).catch(()=>[]),
     fetch('/api/portfolio/account').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/portfolio/value-curve?period=1M').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/portfolio/value-curve?period=1A').then(r=>r.json()).catch(()=>({})),
   ]);
   renderAccountRow(account);
   renderPortfolioSummary(summary);
@@ -2994,9 +2997,25 @@ function setPnlMode(mode) {
 
 function renderChartForMode() {
   if (pnlMode === 'value') {
-    const rows = valueCurveData?.rows || [];
-    const title = 'Portfolio Value — 1 Month';
-    document.getElementById('pf-chart-title').textContent = title;
+    const rows  = valueCurveData?.rows || [];
+    // Alpaca returns up to 1 year of daily points; /api/portfolio/value-curve
+    // already filters out the pre-account zero-equity entries. So the chart
+    // shows the account's actual lifetime and expands on its own as more
+    // days accumulate (no empty "pre-history" left padding).
+    const days  = rows.length;
+    const rangeLbl = days >= 230
+      ? '1 Year'
+      : days >= 105
+        ? '6 Months'
+        : days >= 42
+          ? '3 Months'
+          : days >= 15
+            ? '1 Month'
+            : days > 0
+              ? (days + (days === 1 ? ' Day' : ' Days'))
+              : '';
+    document.getElementById('pf-chart-title').textContent =
+      'Portfolio Value' + (rangeLbl ? ' — ' + rangeLbl : '');
     renderValueChart(rows);
   } else {
     document.getElementById('pf-chart-title').textContent = 'Portfolio P&L Curve (90d)';
@@ -3648,8 +3667,11 @@ function renderPnlChart(rows) {
     if (wrap) wrap.getContext('2d').clearRect(0, 0, wrap.width, wrap.height);
     return;
   }
+  // signal_pnl.unrealized_pnl_pct is stored as a fraction (0.05 = 5%).
+  // The chart formatter appends "%" directly, so multiply by 100 for
+  // correct display — otherwise a 5% avg renders as "0.1%".
   const labels = rows.map(r => String(r.pnl_date).slice(0,10));
-  const values = rows.map(r => parseFloat(r.avg_unrealized) || 0);
+  const values = rows.map(r => (parseFloat(r.avg_unrealized) || 0) * 100);
   const last   = values[values.length - 1];
   _buildChart(labels, values,
     v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%',
