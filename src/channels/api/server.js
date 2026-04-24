@@ -1680,6 +1680,87 @@ function _applySort(tableId, rows, defaultKey, defaultType) {
   if (!s || !s.key) return rows;
   return _sortRows(rows, s.key, s.dir, s.type || 'str');
 }
+
+// ── Collapse-to-top-N (shared) ─────────────────────────────────────────────
+// Each table can toggle between a top-10 preview and the full list. State
+// persists across re-renders in _collapseState. Default = collapsed.
+const _collapseState = {}; // { tableId: false means expanded; otherwise collapsed }
+const COLLAPSE_N = 10;
+
+function _collapseRows(tableId, rows) {
+  const collapsed = _collapseState[tableId] !== false; // default true
+  if (rows.length <= COLLAPSE_N) return { shown: rows, footer: '' };
+  const shown = collapsed ? rows.slice(0, COLLAPSE_N) : rows;
+  const label = collapsed
+    ? \`+\${rows.length - COLLAPSE_N} more · <span style="color:var(--blue);cursor:pointer">Show all</span>\`
+    : \`Showing \${rows.length} · <span style="color:var(--blue);cursor:pointer">Collapse</span>\`;
+  const footer = \`<div id="\${tableId}-collapse" style="padding:6px 8px;font-size:10px;color:var(--dim);text-align:center;cursor:pointer;border-top:1px solid var(--border2)">\${label}</div>\`;
+  return { shown, footer };
+}
+
+function _bindCollapse(tableId, renderFn) {
+  const btn = document.getElementById(\`\${tableId}-collapse\`);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    _collapseState[tableId] = _collapseState[tableId] === false; // toggle
+    renderFn(_tableDataCache[tableId] || []);
+  });
+}
+
+// Rank helpers for the "Status" column sort on Strategies tables.
+// Active Stack:   Waiting → Stale → Live   (Live = most-active = highest)
+// Candidates:     Staging → Candidate → Paper  (Paper = most-advanced)
+const _ACTIVE_RANK    = { waiting: 0, stale: 1, live: 2 };
+const _CANDIDATE_RANK = { staging: 0, candidate: 1, paper: 2 };
+function _activeRankFor(row) {
+  return _ACTIVE_RANK[_activeSub(row)] ?? -1;
+}
+function _candidateRankFor(row) {
+  return _CANDIDATE_RANK[String(row.state || '').toLowerCase()] ?? -1;
+}
+
+// ── Bar chart builder (daily P&L) ──────────────────────────────────────────
+// Positive bars green, negative red, flat (|v| < 0.005) grey. Neat styling
+// matched to the existing line-chart axis / tooltip treatment.
+function _buildBarChart(labels, values, yFmt, tooltipFmt) {
+  const wrap = document.getElementById('pnlChart');
+  if (!wrap) return;
+  if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
+  const COL_POS  = '#3fb950';
+  const COL_NEG  = '#f85149';
+  const COL_FLAT = '#6e7681';
+  const barCol = values.map(v => Math.abs(v) < 0.005 ? COL_FLAT : (v >= 0 ? COL_POS : COL_NEG));
+  pnlChart = new Chart(wrap.getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{
+      data: values,
+      backgroundColor: barCol,
+      borderColor:     barCol,
+      borderWidth:     0,
+      borderRadius:    2,
+      barPercentage:   0.85,
+      categoryPercentage: 0.9,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false },
+        tooltip: { backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#8b949e', bodyColor:'#e6edf3',
+          callbacks: { label: ctx => tooltipFmt(ctx.parsed.y) }
+        }
+      },
+      scales: {
+        x: { ticks: { color:'#484f58', maxTicksLimit:8, font:{size:10}, maxRotation:0, autoSkip:true },
+             grid: { display:false } },
+        y: { position:'right', ticks: { color:'#484f58', font:{size:10}, callback: yFmt },
+             grid: { color:'#21262d' },
+             beginAtZero: true,
+           },
+      }
+    }
+  });
+}
 function fmtChg(chg) {
   if (chg == null) return {text:'—',cls:'neutral'};
   const n = parseFloat(chg);
@@ -3080,6 +3161,7 @@ function renderPositions(rows) {
   document.getElementById('pf-pos-count').textContent = rows.length ? rows.length + ' open' : '';
   if (!rows.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
   const sorted = _applySort('pf-positions', rows);
+  const { shown, footer } = _collapseRows('pf-positions', sorted);
   el.innerHTML = \`<table class="db-table" style="min-width:700px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
@@ -3093,7 +3175,7 @@ function renderPositions(rows) {
       <th class="num" data-sort-key="stop_loss" data-sort-type="num">Stop</th>
       <th data-sort-key="status" data-sort-type="str">Status</th>
     </tr>
-    \${sorted.map(r => {
+    \${shown.map(r => {
       const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) * 100 : null;
       const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
       const pnlClsName = pnlCls(pnl);
@@ -3111,8 +3193,9 @@ function renderPositions(rows) {
         <td>\${r.status || '—'}</td>
       </tr>\`;
     }).join('')}
-  </table>\`;
+  </table>\${footer}\`;
   _bindSortable('pf-positions', renderPositions);
+  _bindCollapse('pf-positions', renderPositions);
 }
 
 function renderHistory(rows) {
@@ -3120,6 +3203,7 @@ function renderHistory(rows) {
   document.getElementById('pf-hist-count').textContent = rows.length ? rows.length + ' trades' : '';
   if (!rows.length) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
   const sorted = _applySort('pf-history', rows);
+  const { shown, footer } = _collapseRows('pf-history', sorted);
   el.innerHTML = \`<table class="db-table" style="min-width:680px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
@@ -3132,7 +3216,7 @@ function renderHistory(rows) {
       <th data-sort-key="close_reason" data-sort-type="str">Reason</th>
       <th data-sort-key="closed_at" data-sort-type="date">Closed</th>
     </tr>
-    \${sorted.map(r => {
+    \${shown.map(r => {
       const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) * 100 : null;
       const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
       const pnlClsName = pnlCls(pnl);
@@ -3150,8 +3234,9 @@ function renderHistory(rows) {
         <td style="color:var(--dim)">\${closedAt}</td>
       </tr>\`;
     }).join('')}
-  </table>\`;
+  </table>\${footer}\`;
   _bindSortable('pf-history', renderHistory);
+  _bindCollapse('pf-history', renderHistory);
 }
 
 // ── Strategies page ─────────────────────────────────────────────────────────
@@ -3301,9 +3386,14 @@ function _renderActiveStack(rows) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
   }
-  // Compute derived columns the user sorts on: d1_total = O+U+R.
+  // Compute derived columns for sorting.
+  //   d1_total         = O+U+R (click count on # O/U/R)
+  //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
+  //                       surfaces most-activated strategies last;
+  //                       descending surfaces LIVE rows first.
   const enriched = rows.map(r => Object.assign({}, r, {
-    d1_total: (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+    d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+    _active_rank: _activeRankFor(r),
   }));
   // Default sort: status sub-group then strategy_id. Operator clicks override.
   let sorted;
@@ -3318,10 +3408,11 @@ function _renderActiveStack(rows) {
       return String(a.strategy_id).localeCompare(String(b.strategy_id));
     });
   }
+  const { shown, footer } = _collapseRows('st-active-wrap', sorted);
   el.innerHTML = \`<table class="db-table" style="min-width:1100px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="state" data-sort-type="str">Status</th>
+      <th data-sort-key="_active_rank" data-sort-type="num" title="Sort: Waiting → Stale → Live (ascending)">Status</th>
       <th>Regimes</th>
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
@@ -3331,7 +3422,7 @@ function _renderActiveStack(rows) {
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
     </tr>
-    \${sorted.map(r => {
+    \${shown.map(r => {
       const sub = _activeSub(r);
       const subLabel = sub.toUpperCase();
       const title = sub === 'waiting'
@@ -3356,8 +3447,9 @@ function _renderActiveStack(rows) {
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
       </tr>\`;
     }).join('')}
-  </table>\`;
+  </table>\${footer}\`;
   _bindSortable('st-active-wrap', _renderActiveStack);
+  _bindCollapse('st-active-wrap', _renderActiveStack);
 }
 
 // ── Section 2: Inactive Stack ──────────────────────────────────────────────
@@ -3375,6 +3467,7 @@ function _renderInactiveStack(rows) {
     _tableDataCache['st-inactive-wrap'] = rows;
     sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
   }
+  const { shown, footer } = _collapseRows('st-inactive-wrap', sorted);
   el.innerHTML = \`<table class="db-table" style="min-width:900px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
@@ -3385,7 +3478,7 @@ function _renderInactiveStack(rows) {
       <th class="num" data-sort-key="live_return_pct" data-sort-type="num">Live Return</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
     </tr>
-    \${sorted.map(r => {
+    \${shown.map(r => {
       const liveRet = r.live_return_pct != null ? parseFloat(r.live_return_pct) : null;
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
@@ -3397,8 +3490,9 @@ function _renderInactiveStack(rows) {
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
     }).join('')}
-  </table>\`;
+  </table>\${footer}\`;
   _bindSortable('st-inactive-wrap', _renderInactiveStack);
+  _bindCollapse('st-inactive-wrap', _renderInactiveStack);
 }
 
 // ── Section 3: Research Candidates ─────────────────────────────────────────
@@ -3409,18 +3503,23 @@ function _renderCandidates(rows) {
     el.innerHTML = '<div class="empty">No candidates awaiting approval.</div>';
     return;
   }
+  // Derived rank for the Status column: Staging < Candidate < Paper.
+  const enriched = rows.map(r => Object.assign({}, r, {
+    _state_rank: _candidateRankFor(r),
+  }));
   let sorted;
   const s = _sortState['st-candidate-wrap'];
   if (s && s.key) {
-    sorted = _applySort('st-candidate-wrap', rows);
+    sorted = _applySort('st-candidate-wrap', enriched);
   } else {
-    _tableDataCache['st-candidate-wrap'] = rows;
-    sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+    _tableDataCache['st-candidate-wrap'] = enriched;
+    sorted = enriched.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
   }
+  const { shown, footer } = _collapseRows('st-candidate-wrap', sorted);
   el.innerHTML = \`<table class="db-table" style="min-width:1000px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="state" data-sort-type="str">Status</th>
+      <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
       <th>Regimes</th>
       <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
       <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
@@ -3428,7 +3527,7 @@ function _renderCandidates(rows) {
       <th class="num" data-sort-key="total_count" data-sort-type="num">Backtest Trades</th>
       <th>Actions</th>
     </tr>
-    \${sorted.map(r => {
+    \${shown.map(r => {
       const sharpe = r.backtest_sharpe;
       const maxDd  = r.backtest_max_dd_pct;
       const ret    = r.backtest_return_pct;
@@ -3483,8 +3582,9 @@ function _renderCandidates(rows) {
         <td>\${actionsCell}</td>
       </tr>\`;
     }).join('')}
-  </table>\`;
+  </table>\${footer}\`;
   _bindSortable('st-candidate-wrap', _renderCandidates);
+  _bindCollapse('st-candidate-wrap', _renderCandidates);
 }
 
 // ── Action handlers ────────────────────────────────────────────────────────
@@ -3667,16 +3767,15 @@ function renderPnlChart(rows) {
     if (wrap) wrap.getContext('2d').clearRect(0, 0, wrap.width, wrap.height);
     return;
   }
-  // signal_pnl.unrealized_pnl_pct is stored as a fraction (0.05 = 5%).
-  // The chart formatter appends "%" directly, so multiply by 100 for
-  // correct display — otherwise a 5% avg renders as "0.1%".
+  // signal_pnl.unrealized_pnl_pct is stored as a fraction (0.05 = 5%) —
+  // multiply by 100 so the chart formatter's "%" suffix lands on the
+  // correct number. Rendered as a bar chart: green for positive days,
+  // red for negative, grey for flat (|v| < 0.005%).
   const labels = rows.map(r => String(r.pnl_date).slice(0,10));
   const values = rows.map(r => (parseFloat(r.avg_unrealized) || 0) * 100);
-  const last   = values[values.length - 1];
-  _buildChart(labels, values,
+  _buildBarChart(labels, values,
     v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%',
-    v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%',
-    last >= 0 ? '#3fb950' : '#f85149');
+    v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%');
 }
 
 function renderValueChart(rows) {
