@@ -1,0 +1,127 @@
+{
+  "momentum_12_1": {
+    "formula_tokens": ["momentum", "lookback", "12m", "skip_1m", "decile", "long_short"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "momentum_6_1": {
+    "formula_tokens": ["momentum", "lookback", "6m", "skip_1m", "decile", "long_short"],
+    "regimes": ["TRENDING", "ANY"],
+    "source": "canon"
+  },
+  "momentum_3_1": {
+    "formula_tokens": ["momentum", "lookback", "3m", "skip_1m", "decile", "long_short"],
+    "regimes": ["TRENDING", "ANY"],
+    "source": "canon"
+  },
+  "momentum_risk_adjusted": {
+    "formula_tokens": ["momentum", "lookback", "12m", "rv", "decile", "long_short"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "momentum_industry_neutral": {
+    "formula_tokens": ["momentum", "lookback", "12m", "industry_neutral", "decile"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "low_volatility_us": {
+    "formula_tokens": ["volatility", "rv", "60d", "decile", "low_vol"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "size_smb": {
+    "formula_tokens": ["size", "market_cap", "decile", "long_short"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "value_hml": {
+    "formula_tokens": ["value", "book_to_market", "decile", "long_short", "fundamentals"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "value_ep": {
+    "formula_tokens": ["value", "earnings_yield", "decile", "long_short", "fundamentals"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "quality_qmj": {
+    "formula_tokens": ["quality", "profitability", "growth", "safety", "decile", "fundamentals"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "quality_gross_profitability": {
+    "formula_tokens": ["quality", "gross_profitability", "decile", "fundamentals"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "carry_fx_g10": {
+    "formula_tokens": ["carry", "fx", "g10", "interest_rate_differential", "long_short"],
+    "regimes": ["CALM"],
+    "source": "canon"
+  },
+  "mean_reversion_short": {
+    "formula_tokens": ["mean_reversion", "lookback", "5d", "decile", "long_short", "weekly"],
+    "regimes": ["MEAN_REVERTING"],
+    "source": "canon"
+  },
+  "mean_reversion_weekly": {
+    "formula_tokens": ["mean_reversion", "lookback", "20d", "decile", "long_short", "monthly"],
+    "regimes": ["MEAN_REVERTING"],
+    "source": "canon"
+  },
+  "pairs_cointegration": {
+    "formula_tokens": ["pairs", "cointegration", "spread", "zscore", "mean_reversion"],
+    "regimes": ["RANGE_BOUND"],
+    "source": "canon"
+  },
+  "earnings_drift_pead": {
+    "formula_tokens": ["earnings", "pead", "post_announcement", "drift", "event"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "earnings_reversal": {
+    "formula_tokens": ["earnings", "reversal", "post_announcement", "event"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "trend_12m_crossover": {
+    "formula_tokens": ["trend", "sma", "252d", "crossover", "long_only"],
+    "regimes": ["TRENDING"],
+    "source": "canon"
+  },
+  "trend_200d_crossover": {
+    "formula_tokens": ["trend", "sma", "200d", "crossover", "long_only"],
+    "regimes": ["TRENDING"],
+    "source": "canon"
+  },
+  "vol_risk_premium_short_straddle": {
+    "formula_tokens": ["volatility", "vrp", "short_straddle", "options", "weekly"],
+    "regimes": ["CALM", "LOW_VOL"],
+    "source": "canon"
+  },
+  "beta_anomaly_betting_against_beta": {
+    "formula_tokens": ["beta", "bab", "decile", "long_short"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "accruals_anomaly": {
+    "formula_tokens": ["accruals", "fundamentals", "decile", "long_short", "quarterly"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "asset_growth_anomaly": {
+    "formula_tokens": ["asset_growth", "fundamentals", "decile", "long_short", "annual"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "short_interest_squeeze": {
+    "formula_tokens": ["short_interest", "squeeze", "weekly", "long_only"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  },
+  "idiosyncratic_vol": {
+    "formula_tokens": ["volatility", "idiosyncratic", "residual", "decile"],
+    "regimes": ["ANY"],
+    "source": "canon"
+  }
+}

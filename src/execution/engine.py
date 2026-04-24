@@ -19,6 +19,7 @@ import sys
 import json
 import logging
 import traceback
+import decimal
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -675,12 +676,17 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
         current = float(ts.iloc[-1])
         days_held = (run_date - sig_date).days if isinstance(sig_date, date) else 0
 
-        # Compute unrealized P&L
-        if direction == 'LONG':
+        # Compute unrealized P&L; guard against zero/NaN entries.
+        import math as _math
+        if not entry or not _math.isfinite(entry):
+            unrealized_pct = 0.0
+        elif direction == 'LONG':
             unrealized_pct = (current - entry) / entry
         elif direction == 'SHORT':
             unrealized_pct = (entry - current) / entry
         else:  # SELL_VOL, BUY_VOL, FLAT — mark as neutral
+            unrealized_pct = 0.0
+        if not _math.isfinite(unrealized_pct):
             unrealized_pct = 0.0
 
         # Determine if signal should close
@@ -764,15 +770,26 @@ def fire_report_triggers(cur, prices: pd.DataFrame, run_date: date) -> int:
         trigger_type   = None
         trigger_reason = None
 
+        # Coerce Decimal/None/NaN from the DB into a plain float once; the
+        # raw Decimal('NaN') that occasionally comes back from NUMERIC
+        # columns can't be compared against a Python float and raises
+        # decimal.InvalidOperation.
+        try:
+            _pnl_pct = float(row['unrealized_pnl_pct']) if row['unrealized_pnl_pct'] is not None else 0.0
+        except (TypeError, ValueError, decimal.InvalidOperation):
+            _pnl_pct = 0.0
+        if _pnl_pct != _pnl_pct:   # NaN check
+            _pnl_pct = 0.0
+
         if row['close_reason'] == 'stop_loss':
             trigger_type   = 'STOP_HIT'
-            trigger_reason = f"{row['ticker']} {row['direction']} stopped out at {row['unrealized_pnl_pct']:.1%}"
+            trigger_reason = f"{row['ticker']} {row['direction']} stopped out at {_pnl_pct:.1%}"
         elif row['close_reason'] == 'target_1':
             trigger_type   = 'TARGET_HIT'
-            trigger_reason = f"{row['ticker']} {row['direction']} hit T1 at {row['unrealized_pnl_pct']:.1%}"
-        elif (row['unrealized_pnl_pct'] or 0) < DRAWDOWN_REPORT_PCT:
+            trigger_reason = f"{row['ticker']} {row['direction']} hit T1 at {_pnl_pct:.1%}"
+        elif _pnl_pct < DRAWDOWN_REPORT_PCT:
             trigger_type   = 'DRAWDOWN'
-            trigger_reason = f"{row['ticker']} {row['direction']} drawdown {row['unrealized_pnl_pct']:.1%}"
+            trigger_reason = f"{row['ticker']} {row['direction']} drawdown {_pnl_pct:.1%}"
         elif (row['days_held'] or 0) >= DAYS_HELD_REPORT:
             trigger_type   = 'AGED'
             trigger_reason = f"{row['ticker']} {row['direction']} held {row['days_held']} days — review"

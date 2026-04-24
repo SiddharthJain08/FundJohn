@@ -1,0 +1,20 @@
+[Unit]
+Description=MastermindJohn — comprehensive strategy review (Saturday 18:00 ET)
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode comprehensive-review
+StandardOutput=journal
+StandardError=journal
+# Long timeout — one Opus call per live/approved strategy, a handful of
+# seconds to ~minute each. Cap at 1 hour for safety.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

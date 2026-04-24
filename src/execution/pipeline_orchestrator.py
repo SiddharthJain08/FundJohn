@@ -46,6 +46,7 @@ STEPS = [
     ('trade',       'trade_agent_llm'),       # Claude LLM: TradeJohn sizing + signal generation
     ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
     ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
+    ('health',      'daily_health_digest'),   # End-of-cycle: build + post daily health digest to #pipeline-feed
 ]
 
 # Budget check required before LLM-adjacent steps. `trade` is the only Claude
@@ -70,6 +71,7 @@ STEP_FAILURE_CHANNEL = {
     'trade':       'trade-reports',
     'alpaca':      'trade-reports',
     'report':      'trade-reports',
+    'health':      'pipeline-feed',
 }
 
 
@@ -239,57 +241,69 @@ def notify(msg, channel='pipeline-feed'):
 # Uses the DataBot REST API (same pattern as send_report.py). Channel ID is
 # discovered once per process and cached.
 
-_CHANNEL_CID_CACHE: dict[str, str] = {}
+_CHANNEL_WEBHOOK_CACHE: dict[str, str] | None = None
 
-def _channel_id(channel_name: str) -> str:
-    """Resolve a Discord channel name → ID via the DataBot token. Cached
-    per-process. Returns '' when lookup fails; callers treat that as 'skip'."""
-    if channel_name in _CHANNEL_CID_CACHE:
-        return _CHANNEL_CID_CACHE[channel_name]
-    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
-    if not token:
-        _CHANNEL_CID_CACHE[channel_name] = ''
-        return ''
+
+def _load_channel_webhooks() -> dict[str, str]:
+    """Scan agent_registry.webhook_urls and build {channel_name: webhook_url}.
+    Posting via webhook URL bypasses Discord bot role permissions — the
+    DataBot / TradeDesk bot accounts can't POST to messages endpoints on
+    these channels (403 Missing Permissions) but the persisted webhooks do."""
+    global _CHANNEL_WEBHOOK_CACHE
+    if _CHANNEL_WEBHOOK_CACHE is not None:
+        return _CHANNEL_WEBHOOK_CACHE
+    out: dict[str, str] = {}
     try:
-        headers = {'Authorization': f'Bot {token}'}
-        r = requests.get('https://discord.com/api/v10/users/@me/guilds', headers=headers, timeout=5)
-        if not r.ok:
-            _CHANNEL_CID_CACHE[channel_name] = ''
-            return ''
-        for g in r.json():
-            rc = requests.get(f"https://discord.com/api/v10/guilds/{g['id']}/channels",
-                              headers=headers, timeout=5)
-            if not rc.ok:
-                continue
-            for ch in rc.json():
-                if ch.get('name') == channel_name and ch.get('type') == 0:
-                    _CHANNEL_CID_CACHE[channel_name] = ch['id']
-                    return ch['id']
+        import psycopg2
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        cur = conn.cursor()
+        cur.execute("SELECT id, webhook_urls FROM agent_registry WHERE webhook_urls IS NOT NULL")
+        for agent_id, hooks in cur.fetchall():
+            for ch_name, url in (hooks or {}).items():
+                # First seen wins; databot owns data-alerts/pipeline-feed,
+                # tradedesk owns trade-*, etc. — the table is already
+                # de-duplicated via agent_registry so conflicts are rare.
+                out.setdefault(ch_name, url)
+        conn.close()
     except Exception as e:
-        log(f'channel lookup failed ({channel_name}): {e}')
-    _CHANNEL_CID_CACHE[channel_name] = ''
-    return ''
+        log(f'webhook cache load failed: {e}')
+    _CHANNEL_WEBHOOK_CACHE = out
+    return out
 
 
 def post_channel(channel_name: str, msg: str) -> bool:
-    """Post a message to a Discord channel by name via DataBot. Returns
-    True on successful HTTP post, False otherwise. Non-blocking semantics:
-    failures never raise, they just log and return False."""
-    cid = _channel_id(channel_name)
-    if not cid:
+    """Post to a Discord channel via the persona's persisted webhook URL.
+    Non-blocking: failures never raise, they log and return False.
+    Splits at 1900 chars if the message is longer."""
+    hooks = _load_channel_webhooks()
+    url = hooks.get(channel_name)
+    if not url:
+        log(f'no webhook for #{channel_name} — skipping')
         return False
-    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN')
-    try:
-        r = requests.post(
-            f'https://discord.com/api/v10/channels/{cid}/messages',
-            headers={'Authorization': f'Bot {token}', 'Content-Type': 'application/json'},
-            json={'content': msg[:1900]},
-            timeout=5,
-        )
-        return bool(r.ok)
-    except Exception as e:
-        log(f'channel post failed ({channel_name}): {e}')
-        return False
+    remaining = msg
+    while remaining:
+        chunk = remaining[:1900]
+        remaining = remaining[1900:]
+        for _attempt in range(3):
+            try:
+                r = requests.post(url, json={'content': chunk}, timeout=10)
+            except Exception as e:
+                log(f'webhook post exception ({channel_name}): {e}')
+                return False
+            if r.ok:
+                break
+            if r.status_code == 429:
+                try:
+                    wait = float(r.headers.get('Retry-After') or r.json().get('retry_after') or 2)
+                except Exception:
+                    wait = 2.0
+                time.sleep(min(wait + 0.5, 10))
+                continue
+            log(f'webhook post failed ({channel_name}): {r.status_code}')
+            return False
+        else:
+            return False
+    return True
 
 
 def pipeline_feed(msg):
@@ -394,10 +408,12 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         return (['python3', str(py_pipe), '--date', run_date], 600)
     if js_pipe.exists():
         # Collector: the longest step. A warm-cache cycle is minutes; a cold
-        # cycle with wide fundamentals/options gaps can run 30+ min due to
-        # upstream rate limits (FMP, yfinance, polygon). 45 min cap leaves
-        # ample room before handing off to the LLM trade step.
-        return (['node', str(js_pipe)], 2700)
+        # cycle with wide fundamentals/options gaps can exceed 45 min when
+        # upstream (yfinance, FMP, polygon) is throttling. 60 min cap leaves
+        # headroom before handing off to the LLM trade step.
+        # The health-digest step at the end is ~5s, so the total budget for
+        # a cold fire is ~62 min from 10am ET (≈ 11:02 ET completion).
+        return (['node', str(js_pipe)], 3600)
     # default: src/execution/<script>.py
     timeout = 1000 if script == 'trade_agent_llm' else 300
     return (['python3', str(py_exec), '--date', run_date], timeout)

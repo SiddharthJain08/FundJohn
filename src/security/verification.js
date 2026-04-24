@@ -5,8 +5,7 @@
  * Prevents silent failures — every agent must prove it did useful work.
  */
 
-const fs   = require('fs');
-const path = require('path');
+const fs = require('fs');
 
 const CONTRACTS = {
   research: (output) => {
@@ -19,72 +18,13 @@ const CONTRACTS = {
     return null;
   },
 
-  'data-prep': (output, context) => {
-    const text = typeof output === 'string' ? output : JSON.stringify(output);
-    // Must report rows processed
-    const rowsMatch = text.match(/rows?[_\s]*(?:processed|written|inserted|stored)[^\d]*(\d+)/i)
-                   || text.match(/(\d+)\s*rows?\s*(processed|written|inserted)/i);
-    if (!rowsMatch) return 'No rowsProcessed count found in data-prep output';
-    const count = parseInt(rowsMatch[1]);
-    if (count === 0) return 'rowsProcessed = 0 — no data was written';
-    return null;
-  },
-
-  'equity-analyst': (output) => {
-    const text = typeof output === 'string' ? output : JSON.stringify(output);
-    const hasVerdict  = /\b(PASS|FAIL|REVIEW|PROCEED|KILL|BLOCKED|REDUCED)\b/.test(text);
-    const hasRationale = text.length > 100;
-    if (!hasVerdict)   return 'No verdict (PASS/FAIL/REVIEW/PROCEED/KILL) found in analyst output';
-    if (!hasRationale) return 'Rationale too short (<100 chars) — insufficient analysis';
-    return null;
-  },
-
-  compute: (output) => {
-    const text = typeof output === 'string' ? output : JSON.stringify(output);
-    // Must contain at least one finite numeric result
-    const numericFields = [
-      'positionSize', 'position_size', 'riskScore', 'risk_score',
-      'dcfValue', 'dcf_value', 'kellyFraction', 'kelly_fraction',
-      'targetPrice', 'target_price', 'ev_ntm', 'evNtm',
-    ];
-    const hasNumeric = numericFields.some(f => {
-      const re = new RegExp(`["']?${f}["']?\\s*[=:]\\s*([\\d.]+)`, 'i');
-      const m = text.match(re);
-      return m && isFinite(parseFloat(m[1]));
-    });
-    // Also accept any pattern like "X: 12.3" or "X = 4.56"
-    const hasAnyNumber = /:\s*\d+\.?\d*\b/.test(text) && !/:\s*0\b/.test(text.replace(/\d/g, '0'));
-    if (!hasNumeric && !hasAnyNumber) return 'No finite numeric result found in compute output';
-    return null;
-  },
-
-  'report-builder': (output, context) => {
-    // Check the output file on disk
-    if (context && context.reportPath) {
-      if (!fs.existsSync(context.reportPath)) {
-        return `Report file not found: ${context.reportPath}`;
-      }
-      const stat = fs.statSync(context.reportPath);
-      if (stat.size < 500) return `Report file too small (${stat.size} bytes < 500)`;
-      const content = fs.readFileSync(context.reportPath, 'utf8');
-      const headers = (content.match(/^#{1,2} /gm) || []).length;
-      if (headers < 3) return `Report has only ${headers} section header(s) — need at least 3`;
-      return null;
-    }
-    // Fallback: check output text itself
-    const text = typeof output === 'string' ? output : JSON.stringify(output);
-    if (text.length < 500) return 'Report output too short (<500 chars)';
-    const headers = (text.match(/^#{1,2} /gm) || []).length;
-    if (headers < 3) return `Report has only ${headers} section header(s) — need at least 3`;
-    return null;
-  },
 };
 
 const UNVERIFIED_BANNER = `\n\n---\n⚠️ **UNVERIFIED**: One or more pipeline stages did not pass output verification. Review raw outputs before acting on this report.\n---\n`;
 
 /**
  * Verify a subagent's output against its contract.
- * @param {string} agentName  One of: research, data-prep, equity-analyst, compute, report-builder
+ * @param {string} agentName  Subagent type (e.g. 'research'). Agents without a contract pass-through as skipped.
  * @param {*}      output     The agent's output (string or object)
  * @param {Object} context    Optional — { ticker, reportPath, skill }
  * @returns {{ verified: boolean, agentName, failure: string|null }}

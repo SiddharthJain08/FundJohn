@@ -326,14 +326,10 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
-  // 8:15 AM ET Mon-Fri: daily health digest to Discord so regressions surface in one glance
-  try {
-    const digest = require('./daily-health-digest');
-    digest.register(cron, (text) => notifyDiscord(text));
-    log('Daily health digest registered (Mon–Fri 08:15 ET)');
-  } catch (err) {
-    log(`Health digest register failed: ${err.message}`);
-  }
+  // Daily health digest moved into the 10am pipeline as the final `health`
+  // step (see pipeline_orchestrator.py STEPS). Posts to #pipeline-feed via
+  // DataBot webhook so the digest lands right after each cycle's trade
+  // execution instead of the morning before.
 
   // 3:05 AM ET daily: snapshot curator priors → time series for trend-aware calibration
   cron.schedule('5 3 * * *', async () => {

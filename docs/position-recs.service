@@ -1,0 +1,19 @@
+[Unit]
+Description=MastermindJohn — per-strategy sizing recs (Saturday 19:00 ET)
+After=network.target postgresql.service openclaw-strategy-review.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode position-recs
+StandardOutput=journal
+StandardError=journal
+# Deterministic (no Opus) — seconds, not minutes.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -304,29 +304,50 @@ class ResearchOrchestrator {
          LIMIT $1
          FOR UPDATE SKIP LOCKED
        )
-       RETURNING candidate_id, source_url`,
+       RETURNING candidate_id, source_url, kind, hunter_result_json`,
       [BATCH_SIZE]
     );
 
     if (batch.length === 0) return;
 
-    notify?.(`🔍 **Batch started** — extracting ${batch.length} paper(s)...`);
+    const paperRows    = batch.filter(r => r.kind !== 'internal');
+    const internalRows = batch.filter(r => r.kind === 'internal');
 
-    // Phase 1: Run PaperHunter per candidate (parallel)
-    const hunterResults = await Promise.all(
-      batch.map(row => this._runPaperHunter(row).catch(e => {
+    if (internalRows.length > 0) {
+      notify?.(`🧩 **${internalRows.length} internal draft(s)** — skipping PaperHunter (MasterMindJohn pre-filled spec).`);
+    }
+    if (paperRows.length > 0) {
+      notify?.(`🔍 **Batch started** — extracting ${paperRows.length} paper(s)...`);
+    }
+
+    // Phase 1: Run PaperHunter per paper candidate; pass through internal drafts.
+    const paperResults = await Promise.all(
+      paperRows.map(row => this._runPaperHunter(row).catch(e => {
         console.error(`[research-orch] PaperHunter failed for ${row.candidate_id}:`, e.message);
         return { rejection_reason_if_any: 'fetch_failed', candidate_id: row.candidate_id, source_url: row.source_url };
       }))
     );
+    const internalResults = internalRows.map(row => {
+      const spec = row.hunter_result_json && typeof row.hunter_result_json === 'object' ? row.hunter_result_json : {};
+      return {
+        ...spec,
+        candidate_id: row.candidate_id,
+        source_url:   row.source_url,
+        _bypass:      'kind_internal',
+      };
+    });
+    const hunterResults = [...paperResults, ...internalResults];
 
     // Store hunter results on each candidate row + emit gate decisions.
     for (const result of hunterResults) {
       if (!result?.candidate_id) continue;
-      await this._query(
-        `UPDATE research_candidates SET hunter_result_json = $1 WHERE candidate_id = $2`,
-        [JSON.stringify(result), result.candidate_id]
-      );
+      const isBypass = result._bypass === 'kind_internal';
+      if (!isBypass) {
+        await this._query(
+          `UPDATE research_candidates SET hunter_result_json = $1 WHERE candidate_id = $2`,
+          [JSON.stringify(result), result.candidate_id]
+        );
+      }
       const paperId   = await paperIdForCandidate(result.candidate_id);
       const rejection = result.rejection_reason_if_any;
       await emitGateDecision({
@@ -335,9 +356,9 @@ class ResearchOrchestrator {
         strategyId:   result.strategy_id || null,
         gateName:     'paperhunter',
         outcome:      rejection ? 'reject' : 'pass',
-        reasonCode:   rejection || null,
+        reasonCode:   rejection || (isBypass ? 'kind_internal_bypass' : null),
         reasonDetail: rejection ? (result.rejection_detail || null) : null,
-        metadata:     { has_spec: Boolean(result.strategy_id) },
+        metadata:     { has_spec: Boolean(result.strategy_id), bypass: isBypass || undefined },
       });
     }
 

@@ -794,6 +794,9 @@ app.get('/events', (req, res) => {
   req.on('close', () => sseClients.delete(res));
 });
 
+// ── Research page ──────────────────────────────────────────────────────────────
+app.use('/api/research', require('./routes_research'));
+
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
 
@@ -957,6 +960,164 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 /* Portfolio page */
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
+#research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:grid;grid-template-columns:1.4fr 1fr;grid-template-rows:minmax(0,1fr) auto;gap:10px;overflow:hidden}
+.rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+.rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.rs-card header h3{font-size:11px;font-weight:700;color:var(--text);letter-spacing:.04em}
+.rs-card .rs-body{flex:1;overflow:auto;padding:8px 12px;min-height:0}
+.rs-chat{grid-row:1 / span 2;display:flex;flex-direction:column}
+.rs-right-col{display:flex;flex-direction:column;gap:10px;min-height:0}
+.rs-queue{flex:0 0 40%;min-height:140px}
+.rs-papers{flex:1;min-height:0}
+.rs-runs{grid-column:1 / -1;max-height:90px}
+/* Chat */
+.chat-sessions-bar{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.session-pill{display:inline-block;padding:2px 8px;border-radius:10px;background:var(--border2);border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit}
+.session-pill.active{color:var(--blue);border-color:var(--blue)}
+.chat-scroll{flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:8px;min-height:0;background:var(--bg)}
+.chat-msg{max-width:80%;padding:7px 11px;border-radius:8px;font-size:12px;white-space:pre-wrap;word-wrap:break-word;line-height:1.5;font-family:'SF Pro Text','Inter',system-ui,sans-serif}
+.chat-msg.user{align-self:flex-end;background:rgba(88,166,255,0.12);border:1px solid rgba(88,166,255,0.3);color:var(--text)}
+.chat-msg.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--border);color:var(--text)}
+.chat-msg.tool{align-self:flex-start;background:rgba(188,140,255,0.08);border:1px dashed var(--border);color:var(--muted);font-family:'SF Mono',monospace;font-size:10px;max-width:92%}
+.chat-msg.tool .tname{color:var(--purple)}
+.chat-msg.err{align-self:flex-start;background:rgba(248,81,73,0.12);border:1px solid rgba(248,81,73,0.35);color:var(--red);font-family:'SF Mono',monospace;font-size:11px}
+.chat-meta{font-size:9px;color:var(--dim);font-family:'SF Mono',monospace;text-align:right;padding:0 14px}
+.chat-input-row{display:flex;gap:6px;padding:8px 10px;border-top:1px solid var(--border2);background:var(--panel)}
+.chat-input-row textarea{flex:1;resize:none;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 10px;font:inherit;font-size:12px;min-height:36px;max-height:120px;outline:none}
+.chat-input-row textarea:focus{border-color:var(--blue)}
+.chat-input-row button{background:var(--blue);color:#fff;border:0;border-radius:6px;font-weight:600;font-size:12px;padding:0 14px;cursor:pointer;font-family:inherit}
+.chat-input-row button:disabled{opacity:.4;cursor:not-allowed}
+/* Queue + papers */
+.rs-row{padding:5px 0;border-bottom:1px solid var(--border2);font-size:11px}
+.rs-row:last-child{border-bottom:none}
+.rs-row .rs-title{font-weight:500;color:var(--text);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.rs-row .rs-meta{color:var(--muted);font-size:9px;font-family:'SF Mono',monospace;margin-top:2px}
+.rs-pill{display:inline-block;padding:0 6px;border-radius:8px;font-size:9px;font-family:'SF Mono',monospace;margin-right:4px}
+.rs-pill.ok{background:rgba(63,185,80,0.15);color:var(--green)}
+.rs-pill.warn{background:rgba(210,153,34,0.15);color:var(--yellow)}
+.rs-pill.err{background:rgba(248,81,73,0.15);color:var(--red)}
+.rs-pill.muted{background:var(--border2);color:var(--muted)}
+.rs-filter{display:flex;gap:6px;align-items:center}
+.rs-filter select,.rs-filter input{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font:inherit;font-size:10px;font-family:'SF Mono',monospace;outline:none}
+.rs-filter select:focus,.rs-filter input:focus{border-color:var(--blue)}
+/* Staging approve/reject */
+.stage-row{display:grid;grid-template-columns:1fr auto;gap:10px;padding:6px 0;border-bottom:1px solid var(--border2)}
+.stage-actions{display:flex;gap:4px;flex-shrink:0}
+.stage-btn{background:var(--border2);border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;font-family:inherit}
+.stage-btn.ok{color:var(--green);border-color:rgba(63,185,80,0.35)}
+.stage-btn.err{color:var(--red);border-color:rgba(248,81,73,0.35)}
+.stage-btn:disabled{opacity:.4;cursor:not-allowed}
+/* Iteration-2 Research polish */
+.rs-campaigns{flex:0 0 auto;max-height:200px}
+.chat-header-strip{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+.chat-session-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text);font-weight:600;letter-spacing:.02em;text-transform:none}
+.chat-session-cost{color:var(--muted);font-size:10px;font-family:'SF Mono',monospace;flex-shrink:0;white-space:nowrap}
+.chat-session-btns{display:flex;gap:4px;flex-shrink:0}
+.chat-btn-slim{background:var(--border2);border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;font-family:inherit;letter-spacing:0;text-transform:none}
+.chat-btn-slim:hover{color:var(--text);border-color:var(--blue)}
+.chat-msg.tool{cursor:pointer;transition:background .15s ease}
+.chat-msg.tool:hover{background:rgba(188,140,255,0.12)}
+.chat-msg.tool .chat-tool-summary{display:flex;align-items:center;gap:6px;font-size:10px}
+.chat-msg.tool .chat-tool-body{display:none;margin-top:6px;padding-top:6px;border-top:1px dashed var(--border2);white-space:pre-wrap;font-size:10px;max-height:280px;overflow-y:auto;color:var(--text)}
+.chat-msg.tool.expanded .chat-tool-body{display:block}
+.chat-msg.tool .chat-tool-badge{color:var(--purple);font-weight:600}
+.chat-msg.tool.result{background:rgba(63,185,80,0.05);border-left:2px solid var(--purple);border-color:var(--border2) var(--border2) var(--border2) var(--purple)}
+.chat-md{line-height:1.55}
+.chat-md p{margin:0 0 6px 0}
+.chat-md p:last-child{margin-bottom:0}
+.chat-md strong{color:var(--text);font-weight:700}
+.chat-md em{color:var(--text);font-style:italic}
+.chat-md code{background:var(--bg);padding:1px 5px;border-radius:3px;font-family:'SF Mono',monospace;font-size:11px;color:var(--yellow)}
+.chat-md pre{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;margin:6px 0;overflow-x:auto;font-family:'SF Mono',monospace;font-size:11px;line-height:1.4}
+.chat-md pre code{background:none;padding:0;color:var(--text)}
+.chat-md ul,.chat-md ol{margin:4px 0 6px 18px;padding:0}
+.chat-md li{margin:2px 0}
+.chat-md a{color:var(--blue);text-decoration:none}
+.chat-md a:hover{text-decoration:underline}
+.chat-md h1,.chat-md h2,.chat-md h3{font-size:12px;font-weight:700;color:var(--text);margin:8px 0 4px 0;letter-spacing:0;text-transform:none}
+.chat-md blockquote{border-left:3px solid var(--border);padding-left:8px;margin:6px 0;color:var(--muted);font-style:italic}
+/* Campaigns card */
+.camp-row{padding:6px 0;border-bottom:1px solid var(--border2);cursor:pointer;transition:background .12s ease}
+.camp-row:last-child{border-bottom:none}
+.camp-row:hover{background:rgba(88,166,255,0.05)}
+.camp-head{display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:11px}
+.camp-name{font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.camp-meta{color:var(--muted);font-size:9px;font-family:'SF Mono',monospace;margin-top:2px;display:flex;gap:10px;flex-wrap:wrap}
+.camp-progress-bar{height:3px;background:var(--border2);border-radius:2px;margin-top:4px;overflow:hidden}
+.camp-progress-fill{height:100%;background:var(--blue);transition:width .3s ease}
+.camp-pill.planning{background:var(--border2);color:var(--muted)}
+.camp-pill.awaiting_ack{background:rgba(210,153,34,0.18);color:var(--yellow)}
+.camp-pill.running{background:rgba(88,166,255,0.15);color:var(--blue)}
+.camp-pill.completed{background:rgba(63,185,80,0.15);color:var(--green)}
+.camp-pill.cancelled,.camp-pill.failed{background:rgba(248,81,73,0.12);color:var(--red)}
+.camp-detail{padding:6px 0 0 0;font-size:10px;color:var(--muted);font-family:'SF Mono',monospace}
+.camp-detail .detail-item{padding:2px 0}
+.camp-cancel-btn{margin-top:6px;background:transparent;border:1px solid var(--border);color:var(--muted);padding:3px 8px;border-radius:3px;font-size:10px;cursor:pointer;font-family:inherit}
+.camp-cancel-btn:hover{color:var(--red);border-color:var(--red)}
+.camp-dag{margin-top:8px;border:1px solid var(--border2);border-radius:4px;overflow:hidden;background:var(--bg)}
+.camp-dag table{width:100%;border-collapse:collapse;font-family:'SF Mono',monospace;font-size:10px}
+.camp-dag thead th{background:#0d1117;color:var(--muted);font-weight:600;padding:5px 8px;text-align:left;border-bottom:1px solid var(--border2);letter-spacing:.04em}
+.camp-dag tbody td{padding:4px 8px;border-bottom:1px solid var(--border2);color:var(--text);white-space:nowrap}
+.camp-dag tbody tr:last-child td{border-bottom:none}
+.camp-dag tbody tr:hover{background:rgba(88,166,255,0.04)}
+.dag-slug{font-weight:600;color:var(--text)}
+.dag-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.dag-dot.on{background:var(--green)}
+.dag-dot.off{background:var(--border);border:1px solid var(--border2)}
+.dag-dot.partial{background:var(--yellow)}
+.dag-dot.neg{background:var(--red)}
+.dag-dot.blue{background:var(--blue)}
+.dag-cell{display:flex;align-items:center;gap:3px}
+.dag-cell-label{color:var(--muted);font-size:9px}
+/* Quick-backtest badge on staging rows */
+.qbt-badge{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:3px;font-size:9px;font-family:'SF Mono',monospace;background:var(--border2);border:1px solid var(--border);color:var(--muted);margin-right:4px}
+.qbt-badge.ok{background:rgba(63,185,80,0.10);border-color:rgba(63,185,80,0.35);color:var(--green)}
+.qbt-badge.neg{background:rgba(248,81,73,0.10);border-color:rgba(248,81,73,0.35);color:var(--red)}
+.qbt-badge.pending{background:rgba(210,153,34,0.08);border-color:rgba(210,153,34,0.3);color:var(--yellow)}
+.qbt-badge.deferred{background:rgba(188,140,255,0.08);border-color:rgba(188,140,255,0.3);color:var(--purple)}
+.qbt-metrics{display:flex;gap:3px;flex-wrap:wrap}
+/* Staging expanded */
+.stage-row{cursor:pointer}
+.stage-row.expanded{background:rgba(88,166,255,0.04)}
+.stage-expanded-body{grid-column:1 / -1;padding:8px 12px 4px 0;border-top:1px dashed var(--border2);margin-top:5px;font-size:10px;color:var(--muted);font-family:'SF Mono',monospace;line-height:1.5}
+.stage-expanded-body pre{background:var(--bg);border:1px solid var(--border2);border-radius:3px;padding:6px 8px;overflow-x:auto;color:var(--text);font-size:10px;margin:4px 0}
+.stage-expanded-body .stage-ask-btn{background:transparent;border:1px solid var(--blue);color:var(--blue);padding:3px 9px;border-radius:3px;font-size:10px;cursor:pointer;font-family:inherit;margin-top:6px}
+.stage-expanded-body .stage-ask-btn:hover{background:rgba(88,166,255,0.12)}
+/* Sessions drawer */
+.sessions-drawer{position:fixed;right:-400px;top:0;bottom:0;width:360px;background:var(--panel);border-left:1px solid var(--border);box-shadow:-4px 0 16px rgba(0,0,0,0.5);z-index:9998;transition:right .22s ease;display:flex;flex-direction:column}
+.sessions-drawer.open{right:0}
+.sessions-drawer header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.sessions-drawer header h3{font-size:12px;font-weight:700;color:var(--text);letter-spacing:.04em;text-transform:uppercase}
+.sessions-drawer-body{flex:1;overflow-y:auto;padding:4px 0}
+.session-item{padding:8px 14px;border-bottom:1px solid var(--border2);cursor:pointer;transition:background .12s ease}
+.session-item:hover{background:rgba(88,166,255,0.05)}
+.session-item.active{background:rgba(88,166,255,0.10);border-left:2px solid var(--blue)}
+.session-item .si-title{font-size:11px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-item .si-meta{font-size:9px;color:var(--muted);font-family:'SF Mono',monospace;margin-top:2px;display:flex;gap:8px}
+.sessions-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:9997;opacity:0;pointer-events:none;transition:opacity .22s ease}
+.sessions-backdrop.open{opacity:1;pointer-events:auto}
+/* Paper modal */
+.paper-modal{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:none;align-items:center;justify-content:center;padding:40px}
+.paper-modal.open{display:flex}
+.paper-modal .pm-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;max-width:900px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
+.pm-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.pm-head h2{font-size:14px;font-weight:700;color:var(--text);line-height:1.4;letter-spacing:0;text-transform:none}
+.pm-close{background:transparent;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;padding:3px 10px;border-radius:3px;font-family:inherit;flex-shrink:0}
+.pm-close:hover{color:var(--red);border-color:var(--red)}
+.pm-body{flex:1;overflow-y:auto;padding:16px 20px;font-size:12px;line-height:1.55;color:var(--text)}
+.pm-section{margin-bottom:14px}
+.pm-section h4{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:700;margin-bottom:4px}
+.pm-section .pm-abstract{color:var(--text);line-height:1.55;font-size:11px}
+.pm-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-family:'SF Mono',monospace;font-size:10px;color:var(--muted)}
+.pm-meta span strong{color:var(--text);font-weight:600}
+.pm-gates{font-family:'SF Mono',monospace;font-size:10px}
+.pm-gate-row{padding:4px 0;border-bottom:1px dashed var(--border2);display:grid;grid-template-columns:120px 70px 1fr;gap:8px}
+.pm-gate-row:last-child{border-bottom:none}
+.pm-gate-outcome.pass{color:var(--green)}
+.pm-gate-outcome.reject{color:var(--red)}
+.pm-gate-outcome.buildable,.pm-gate-outcome.error{color:var(--yellow)}
+.pm-json{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;font-family:'SF Mono',monospace;font-size:10px;max-height:260px;overflow:auto;color:var(--text);white-space:pre-wrap}
 #strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
 .st-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:4px}
 .st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -1073,6 +1234,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   <button class="nav-btn active" id="nav-market" onclick="showMarket()">Market</button>
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
   <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
+  <button class="nav-btn" id="nav-research" onclick="showResearch()">Research</button>
   <span id="pipeline-badge">Loading pipeline...</span>
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
@@ -1178,6 +1340,91 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
     </div>
   </div>
 </div><!-- #strategies-page -->
+
+<div id="research-page">
+  <div id="research-inner">
+    <section class="rs-card rs-chat">
+      <header>
+        <div class="chat-header-strip">
+          <span class="chat-session-name" id="chat-session-name">MasterMindJohn — Chat</span>
+          <span class="chat-session-cost" id="chat-session-cost"></span>
+        </div>
+        <div class="chat-session-btns">
+          <button class="chat-btn-slim" id="btn-sessions-drawer" title="Session history">history</button>
+          <button class="chat-btn-slim" id="btn-new-session" title="New session">+ new</button>
+        </div>
+      </header>
+      <div class="chat-scroll" id="chat-scroll">
+        <div style="color:var(--muted);padding:14px;font-size:11px">Start a new session or pick one from history. MasterMindJohn has the dashboard snapshot loaded.</div>
+      </div>
+      <div class="chat-input-row">
+        <textarea id="chat-input" placeholder="Ask MasterMindJohn… (Enter sends · Shift+Enter newline)"></textarea>
+        <button id="chat-send">Send</button>
+      </div>
+    </section>
+
+    <div class="rs-right-col">
+      <section class="rs-card rs-campaigns">
+        <header><h3>Active Campaigns</h3><span id="camp-count" style="color:var(--muted);font-size:10px"></span></header>
+        <div class="rs-body" id="camp-body"><div style="color:var(--muted);font-size:11px">Loading…</div></div>
+      </section>
+
+      <section class="rs-card rs-queue">
+        <header><h3>Research Candidates</h3><span id="queue-count" style="color:var(--muted);font-size:10px"></span></header>
+        <div class="rs-body" id="queue-body"><div style="color:var(--muted);font-size:11px">Loading…</div></div>
+      </section>
+
+      <section class="rs-card rs-papers">
+        <header>
+          <h3>Papers + Findings</h3>
+          <div class="rs-filter">
+            <select id="papers-status">
+              <option value="">all</option>
+              <option value="done">done</option>
+              <option value="pending">pending</option>
+              <option value="blocked_rejected">rejected</option>
+              <option value="blocked_buildable">buildable</option>
+              <option value="blocked_unclassified">unclassified</option>
+            </select>
+            <input id="papers-q" placeholder="search…"/>
+            <span id="papers-count" style="color:var(--muted);font-size:10px"></span>
+          </div>
+        </header>
+        <div class="rs-body" id="papers-body"><div style="color:var(--muted);font-size:11px">Loading…</div></div>
+      </section>
+
+      <section class="rs-card" style="flex:0 0 auto;max-height:220px">
+        <header><h3>Strategy Staging</h3><span id="staging-count" style="color:var(--muted);font-size:10px"></span></header>
+        <div class="rs-body" id="staging-body"><div style="color:var(--muted);font-size:11px">Loading…</div></div>
+      </section>
+    </div>
+
+    <section class="rs-card rs-runs">
+      <header><h3>Weekly MasterMind Runs</h3><span id="runs-hist-count" style="color:var(--muted);font-size:10px"></span></header>
+      <div class="rs-body" id="runs-hist-body" style="padding:6px 12px"><div style="color:var(--muted);font-size:10px">Loading…</div></div>
+    </section>
+  </div>
+
+  <div class="sessions-backdrop" id="sessions-backdrop"></div>
+  <aside class="sessions-drawer" id="sessions-drawer">
+    <header>
+      <h3>Sessions</h3>
+      <button class="chat-btn-slim" id="btn-close-drawer">close</button>
+    </header>
+    <div class="sessions-drawer-body" id="sessions-drawer-body"><div style="color:var(--muted);padding:14px;font-size:11px">Loading…</div></div>
+  </aside>
+
+  <div class="paper-modal" id="paper-modal">
+    <div class="pm-card">
+      <div class="pm-head">
+        <h2 id="pm-title">—</h2>
+        <button class="pm-close" id="pm-close">close (esc)</button>
+      </div>
+      <div class="pm-body" id="pm-body"></div>
+    </div>
+  </div>
+</div><!-- #research-page -->
+
 </div><!-- #view-wrap -->
 
 <script>
@@ -1862,7 +2109,7 @@ let pnlCurveData = null;    // cached {rows, base_value}
 let valueCurveData = null;  // cached from /api/portfolio/value-curve
 
 function _setNavActive(which) {
-  for (const k of ['market','portfolio','strategies']) {
+  for (const k of ['market','portfolio','strategies','research']) {
     const el = document.getElementById('nav-'+k);
     if (!el) continue;
     if (k === which) el.classList.add('active'); else el.classList.remove('active');
@@ -1873,6 +2120,8 @@ function _hideAllPages() {
   document.getElementById('portfolio-page').style.display = 'none';
   const st = document.getElementById('strategies-page');
   if (st) st.style.display = 'none';
+  const rp = document.getElementById('research-page');
+  if (rp) rp.style.display = 'none';
 }
 
 function showMarket() {
@@ -1894,6 +2143,725 @@ async function showStrategies() {
   document.getElementById('strategies-page').style.display = 'block';
   _setNavActive('strategies');
   await loadStrategies();
+}
+
+// ── Research page ─────────────────────────────────────────────────────────────
+let _researchState = {
+  currentSessionId: null,
+  initialized:      false,
+  sessions:         [],
+};
+
+async function showResearch() {
+  _hideAllPages();
+  document.getElementById('research-page').style.display = 'block';
+  _setNavActive('research');
+  if (!_researchState.initialized) await _initResearch();
+  else await _refreshResearch();
+}
+
+async function _initResearch() {
+  _researchState.initialized = true;
+  document.getElementById('btn-new-session').onclick = _createSession;
+  document.getElementById('btn-sessions-drawer').onclick = _openSessionsDrawer;
+  document.getElementById('btn-close-drawer').onclick = _closeSessionsDrawer;
+  document.getElementById('sessions-backdrop').onclick = _closeSessionsDrawer;
+  document.getElementById('chat-send').onclick = _sendMessage;
+  document.getElementById('chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _sendMessage(); }
+  });
+  document.getElementById('papers-status').addEventListener('change', _refreshPapers);
+  document.getElementById('pm-close').onclick = _closePaperModal;
+  document.getElementById('paper-modal').onclick = (e) => { if (e.target.id === 'paper-modal') _closePaperModal(); };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('paper-modal').classList.contains('open')) _closePaperModal();
+      else if (document.getElementById('sessions-drawer').classList.contains('open')) _closeSessionsDrawer();
+    }
+  });
+  let qTimer;
+  document.getElementById('papers-q').addEventListener('input', () => {
+    clearTimeout(qTimer); qTimer = setTimeout(_refreshPapers, 250);
+  });
+  await _refreshResearch();
+  setInterval(() => {
+    if (document.getElementById('research-page').style.display === 'block') {
+      _refreshQueue(); _refreshStaging(); _refreshRunsHist(); _refreshCampaigns();
+    }
+  }, 5000);
+}
+
+async function _refreshResearch() {
+  await Promise.all([
+    _refreshSessions(),
+    _refreshCampaigns(),
+    _refreshQueue(),
+    _refreshPapers(),
+    _refreshStaging(),
+    _refreshRunsHist(),
+  ]);
+}
+
+function _rsEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function _fetchJSON(url, opts) {
+  try { const r = await fetch(url, opts); return await r.json(); }
+  catch (e) { return { error: e.message }; }
+}
+
+// Minimal markdown renderer — handles the subset assistants actually produce.
+function _renderMarkdown(src) {
+  if (!src) return '';
+  // Extract fenced code blocks first so we don't mangle them.
+  const codeBlocks = [];
+  let s = String(src).replace(/\`\`\`([a-zA-Z0-9_-]*)\\n([\\s\\S]*?)\`\`\`/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push({ lang, code });
+    return '\\u0000CB' + idx + '\\u0000';
+  });
+  s = _rsEsc(s);
+  // Headings
+  s = s.replace(/^###\\s+(.+)$/gm, '<h3>$1</h3>')
+       .replace(/^##\\s+(.+)$/gm,  '<h2>$1</h2>')
+       .replace(/^#\\s+(.+)$/gm,   '<h1>$1</h1>');
+  // Blockquote (one level)
+  s = s.replace(/^&gt;\\s+(.+)$/gm, '<blockquote>$1</blockquote>');
+  // Bold / italic / inline code (order matters)
+  s = s.replace(/\`([^\`\\n]+)\`/g, '<code>$1</code>');
+  s = s.replace(/\\*\\*([^*\\n]+)\\*\\*/g, '<strong>$1</strong>');
+  s = s.replace(/(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)/g, '<em>$1</em>');
+  // Links  [text](url)
+  s = s.replace(/\\[([^\\]]+)\\]\\(([^\\s)]+)\\)/g,
+    '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  // Lists — collapse runs of  - / * / digit.  lines into <ul>/<ol>.
+  const lines = s.split('\\n');
+  const out = [];
+  let inUl = false, inOl = false;
+  for (const ln of lines) {
+    const ul = /^\\s*[-*]\\s+(.*)$/.exec(ln);
+    const ol = /^\\s*\\d+\\.\\s+(.*)$/.exec(ln);
+    if (ul) {
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      if (!inUl) { out.push('<ul>'); inUl = true; }
+      out.push('<li>' + ul[1] + '</li>');
+    } else if (ol) {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (!inOl) { out.push('<ol>'); inOl = true; }
+      out.push('<li>' + ol[1] + '</li>');
+    } else {
+      if (inUl) { out.push('</ul>'); inUl = false; }
+      if (inOl) { out.push('</ol>'); inOl = false; }
+      out.push(ln);
+    }
+  }
+  if (inUl) out.push('</ul>');
+  if (inOl) out.push('</ol>');
+  s = out.join('\\n');
+  // Paragraphs — split on blank lines, skip block-level children.
+  s = s.split(/\\n{2,}/).map(block => {
+    const t = block.trim();
+    if (!t) return '';
+    if (/^<(h[1-3]|ul|ol|blockquote|pre)/i.test(t)) return t;
+    return '<p>' + t.replace(/\\n/g, '<br>') + '</p>';
+  }).join('');
+  // Restore code blocks
+  s = s.replace(/\\u0000CB(\\d+)\\u0000/g, (_, i) => {
+    const cb = codeBlocks[+i];
+    return '<pre><code>' + _rsEsc(cb.code) + '</code></pre>';
+  });
+  return s;
+}
+
+async function _refreshSessions() {
+  const { sessions = [] } = await _fetchJSON('/api/research/sessions');
+  _researchState.sessions = sessions;
+  _renderSessionHeaderStrip();
+  _renderSessionsDrawer();
+  if (!_researchState.currentSessionId && sessions.length) {
+    await _loadSession(sessions[0].id);
+  }
+}
+
+function _renderSessionHeaderStrip() {
+  const sessions = _researchState.sessions || [];
+  const cur = sessions.find(s => s.id === _researchState.currentSessionId);
+  const nameEl = document.getElementById('chat-session-name');
+  const costEl = document.getElementById('chat-session-cost');
+  if (cur) {
+    const label = cur.title || ('session ' + cur.id.slice(0,8));
+    nameEl.textContent = label;
+    nameEl.title = cur.id;
+    const cost = Number(cur.total_cost_usd || 0);
+    const tok = Number(cur.total_tokens || 0);
+    costEl.textContent = (tok ? _fmtTokens(tok) + ' · ' : '') + '$' + cost.toFixed(2);
+  } else {
+    nameEl.textContent = 'MasterMindJohn — Chat';
+    costEl.textContent = '';
+  }
+}
+
+function _renderSessionsDrawer() {
+  const host = document.getElementById('sessions-drawer-body');
+  const sessions = _researchState.sessions || [];
+  if (!sessions.length) { host.innerHTML = '<div style="color:var(--muted);padding:14px;font-size:11px">No sessions yet. Click "+ new" to start.</div>'; return; }
+  host.innerHTML = sessions.map(s => {
+    const active = s.id === _researchState.currentSessionId;
+    const label = _rsEsc(s.title || ('session ' + s.id.slice(0,8)));
+    const when = s.last_active_at ? new Date(s.last_active_at).toLocaleString() : '—';
+    const cost = '$' + Number(s.total_cost_usd || 0).toFixed(2);
+    return \`<div class="session-item \${active?'active':''}" data-sid="\${_rsEsc(s.id)}">
+      <div class="si-title">\${label}</div>
+      <div class="si-meta"><span>\${_rsEsc(when)}</span><span>\${cost}</span></div>
+    </div>\`;
+  }).join('');
+  for (const row of host.querySelectorAll('.session-item')) {
+    row.addEventListener('click', async () => {
+      await _loadSession(row.dataset.sid);
+      _closeSessionsDrawer();
+    });
+  }
+}
+
+function _openSessionsDrawer() {
+  document.getElementById('sessions-drawer').classList.add('open');
+  document.getElementById('sessions-backdrop').classList.add('open');
+  _renderSessionsDrawer();
+}
+function _closeSessionsDrawer() {
+  document.getElementById('sessions-drawer').classList.remove('open');
+  document.getElementById('sessions-backdrop').classList.remove('open');
+}
+
+function _fmtTokens(n) {
+  if (n < 1000) return n + 't';
+  if (n < 10_000) return (n/1000).toFixed(1) + 'kt';
+  if (n < 1_000_000) return Math.round(n/1000) + 'kt';
+  return (n/1_000_000).toFixed(2) + 'Mt';
+}
+
+async function _createSession() {
+  const r = await fetch('/api/research/sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: new Date().toISOString().slice(0, 16).replace('T', ' ') }),
+  });
+  const data = await r.json();
+  if (!r.ok) { alert('create failed: ' + (data.error || r.statusText)); return; }
+  _researchState.currentSessionId = data.id;
+  document.getElementById('chat-scroll').innerHTML = '<div style="color:var(--muted);padding:14px;font-size:11px">New session. Ask anything — MasterMindJohn has the dashboard snapshot loaded.</div>';
+  await _refreshSessions();
+}
+
+async function _loadSession(id) {
+  _researchState.currentSessionId = id;
+  const { messages = [] } = await _fetchJSON(\`/api/research/sessions/\${encodeURIComponent(id)}/history\`);
+  const scroll = document.getElementById('chat-scroll');
+  scroll.innerHTML = '';
+  for (const m of messages) _renderChatMessage(m.role, m.content);
+  scroll.scrollTop = scroll.scrollHeight;
+  _renderSessionHeaderStrip();
+  _renderSessionsDrawer();
+}
+
+function _renderChatMessage(role, content) {
+  const scroll = document.getElementById('chat-scroll');
+  const el = document.createElement('div');
+  if (role === 'user') {
+    el.className = 'chat-msg user';
+    el.textContent = (content && content.text) || '';
+  } else if (role === 'assistant') {
+    el.className = 'chat-msg assistant';
+    const body = document.createElement('div');
+    body.className = 'chat-md';
+    body.innerHTML = _renderMarkdown((content && content.text) || '');
+    el.appendChild(body);
+  } else if (role === 'tool_use') {
+    el.className = 'chat-msg tool';
+    _fillToolBubble(el, content, /*isResult*/ false);
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+  } else if (role === 'tool_result') {
+    el.className = 'chat-msg tool result';
+    _fillToolBubble(el, content, /*isResult*/ true);
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+  } else {
+    el.className = 'chat-msg tool';
+    el.textContent = role + ': ' + (JSON.stringify(content) || '').slice(0, 240);
+  }
+  scroll.appendChild(el);
+  scroll.scrollTop = scroll.scrollHeight;
+  return el;
+}
+
+function _fillToolBubble(el, content, isResult) {
+  if (isResult) {
+    const raw = (content && content.result);
+    const txt = typeof raw === 'string' ? raw
+      : (raw != null ? JSON.stringify(raw, null, 2) : JSON.stringify(content || {}, null, 2));
+    const preview = (typeof raw === 'string' ? raw : JSON.stringify(raw || content || {})).slice(0, 120).replace(/\\s+/g, ' ');
+    el.innerHTML = \`<div class="chat-tool-summary"><span class="chat-tool-badge">↳ result</span><span>\${_rsEsc(preview)}</span></div>
+      <div class="chat-tool-body">\${_rsEsc(txt).slice(0, 10_000)}</div>\`;
+    return;
+  }
+  const name = (content && content.name) || 'tool';
+  const input = (content && content.input) || {};
+  let summary = '';
+  if (name === 'Task' && input.subagent_type) {
+    const p = (input.prompt || '').slice(0, 80).replace(/\\s+/g, ' ');
+    summary = \`<span class="chat-tool-badge">⚙ Task → \${_rsEsc(input.subagent_type)}</span><span>\${_rsEsc(p)}</span>\`;
+  } else if (name === 'Bash' && input.command) {
+    const cmd = input.command.slice(0, 120).replace(/\\s+/g, ' ');
+    summary = \`<span class="chat-tool-badge">⚙ Bash</span><span>\${_rsEsc(cmd)}</span>\`;
+  } else if ((name === 'Read' || name === 'Edit' || name === 'Write') && input.file_path) {
+    summary = \`<span class="chat-tool-badge">⚙ \${_rsEsc(name)}</span><span>\${_rsEsc(input.file_path)}</span>\`;
+  } else {
+    const keys = Object.keys(input || {}).length;
+    summary = \`<span class="chat-tool-badge">⚙ \${_rsEsc(name)}</span><span>\${keys} key\${keys===1?'':'s'}</span>\`;
+  }
+  el.innerHTML = \`<div class="chat-tool-summary">\${summary}</div>
+    <div class="chat-tool-body">\${_rsEsc(JSON.stringify(input, null, 2)).slice(0, 10_000)}</div>\`;
+}
+
+async function _sendMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  if (!_researchState.currentSessionId) await _createSession();
+  const sid = _researchState.currentSessionId;
+  input.value = '';
+  document.getElementById('chat-send').disabled = true;
+  _renderChatMessage('user', { text });
+  const pending = document.createElement('div');
+  pending.className = 'chat-msg assistant';
+  pending.innerHTML = '<span style="color:var(--muted)">thinking…</span>';
+  document.getElementById('chat-scroll').appendChild(pending);
+  document.getElementById('chat-scroll').scrollTop = document.getElementById('chat-scroll').scrollHeight;
+
+  let assistantBuf = '';
+  let assistantEl = null;
+  try {
+    const resp = await fetch(\`/api/research/sessions/\${encodeURIComponent(sid)}/message\`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok || !resp.body) throw new Error('stream start failed: ' + resp.status);
+    pending.remove();
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const frames = buf.split(/\\n\\n/);
+      buf = frames.pop();
+      for (const f of frames) _handleSSE(f, (ev) => {
+        if (ev.type === 'assistant' && ev.message && ev.message.content) {
+          const texts = ev.message.content.filter(c => c.type === 'text').map(c => c.text).join('');
+          const tools = ev.message.content.filter(c => c.type === 'tool_use');
+          if (texts) {
+            assistantBuf += texts;
+            if (!assistantEl) {
+              assistantEl = _renderChatMessage('assistant', { text: '' });
+            }
+            const md = assistantEl.querySelector('.chat-md');
+            if (md) md.innerHTML = _renderMarkdown(assistantBuf);
+            else assistantEl.textContent = assistantBuf;
+          }
+          for (const t of tools) { _renderChatMessage('tool_use', t); assistantEl = null; }
+        } else if (ev.type === 'user' && ev.message && ev.message.content) {
+          for (const c of ev.message.content) {
+            if (c.type === 'tool_result') { _renderChatMessage('tool_result', c); assistantEl = null; }
+          }
+        } else if (ev.type === 'result' && ev.total_cost_usd != null) {
+          const m = document.createElement('div');
+          m.className = 'chat-meta';
+          m.textContent = \`turn cost $\${Number(ev.total_cost_usd).toFixed(3)} · \${ev.duration_ms}ms\`;
+          document.getElementById('chat-scroll').appendChild(m);
+        } else if (ev._sseEvent === 'error') {
+          const err = document.createElement('div');
+          err.className = 'chat-msg err';
+          err.textContent = 'error: ' + (ev.message || JSON.stringify(ev));
+          document.getElementById('chat-scroll').appendChild(err);
+        }
+      });
+    }
+  } catch (e) {
+    pending.remove();
+    const err = document.createElement('div');
+    err.className = 'chat-msg err';
+    err.textContent = 'stream error: ' + e.message;
+    document.getElementById('chat-scroll').appendChild(err);
+  } finally {
+    document.getElementById('chat-send').disabled = false;
+    _refreshSessions();
+  }
+}
+
+function _handleSSE(frame, onEvent) {
+  const lines = frame.split(/\\n/);
+  let eventName = 'message';
+  const dataLines = [];
+  for (const l of lines) {
+    if (l.startsWith('event:')) eventName = l.slice(6).trim();
+    else if (l.startsWith('data:')) dataLines.push(l.slice(5).trim());
+  }
+  if (!dataLines.length) return;
+  const raw = dataLines.join('\\n');
+  try {
+    const obj = JSON.parse(raw);
+    obj._sseEvent = eventName;
+    if (!obj.type) obj.type = eventName;
+    onEvent(obj);
+  } catch (_) { onEvent({ _sseEvent: eventName, raw }); }
+}
+
+async function _refreshCampaigns() {
+  const { campaigns = [] } = await _fetchJSON('/api/research/campaigns');
+  const active = campaigns.filter(c => ['awaiting_ack','running','planning'].includes(c.status));
+  document.getElementById('camp-count').textContent = active.length ? \`\${active.length} active · \${campaigns.length} total\` : \`\${campaigns.length}\`;
+  if (!campaigns.length) { document.getElementById('camp-body').innerHTML = '<div style="color:var(--muted);font-size:11px">— no campaigns yet —</div>'; return; }
+  document.getElementById('camp-body').innerHTML = campaigns.slice(0, 20).map(c => {
+    const plan = c.plan_json || {};
+    const items = Array.isArray(plan.items) ? plan.items : [];
+    const progress = c.progress_json || {};
+    const drafted = progress.drafted || c.candidates_inserted || 0;
+    const total = items.length || drafted;
+    const pct = total > 0 ? Math.min(100, Math.round(drafted * 100 / total)) : 0;
+    const cost = progress.cost_usd != null ? '$' + Number(progress.cost_usd).toFixed(2) : '—';
+    const est = plan.total_est_cost_usd != null ? '$' + Number(plan.total_est_cost_usd).toFixed(2) + ' est' : '';
+    return \`<div class="camp-row" data-cid="\${_rsEsc(c.id)}">
+      <div class="camp-head">
+        <span class="camp-name">\${_rsEsc(c.name)}</span>
+        <span class="rs-pill camp-pill \${_rsEsc(c.status)}">\${_rsEsc(c.status.replace('_',' '))}</span>
+      </div>
+      <div class="camp-meta">
+        <span>\${drafted}/\${total || '?'} drafted</span>
+        \${progress.deduped ? '<span style="color:var(--purple)">' + progress.deduped + ' deduped</span>' : ''}
+        <span>cost \${cost}</span>
+        \${est ? '<span>' + est + '</span>' : ''}
+        <span>\${new Date(c.created_at).toLocaleString()}</span>
+      </div>
+      <div class="camp-progress-bar"><div class="camp-progress-fill" style="width:\${pct}%"></div></div>
+    </div>\`;
+  }).join('');
+  for (const row of document.getElementById('camp-body').querySelectorAll('.camp-row')) {
+    row.addEventListener('click', () => _toggleCampaignDetail(row));
+  }
+}
+
+function _renderCampaignDag(plan, candidates) {
+  const items = Array.isArray(plan && plan.items) ? plan.items : [];
+  const tierItems = (plan && Array.isArray(plan.tiers) && plan.selected_tier)
+    ? (plan.tiers.find(t => t.name === plan.selected_tier) || {}).items : null;
+  const slugList = (tierItems && tierItems.length ? tierItems : items).map(it => {
+    if (typeof it === 'string') return { slug: it, name: it };
+    return { slug: it.slug || it.name, name: it.name || it.slug, thesis: it.thesis };
+  }).filter(x => x.slug);
+  if (!slugList.length && (!candidates || !candidates.length)) return '';
+  const candBySlug = new Map();
+  for (const c of (candidates || [])) {
+    const key = (c.slug || c.staging_name || c.strategy_id || '').toLowerCase();
+    if (key) candBySlug.set(key, c);
+  }
+  // Rows: planned items first, then any straggler candidate slugs not in plan.
+  const rows = [];
+  const seen = new Set();
+  for (const it of slugList) {
+    const key = (it.slug || '').toLowerCase();
+    seen.add(key);
+    rows.push({ slug: it.slug, cand: candBySlug.get(key) || null });
+  }
+  for (const [k, c] of candBySlug.entries()) {
+    if (!seen.has(k)) rows.push({ slug: c.slug || c.staging_name || k, cand: c });
+  }
+  if (!rows.length) return '';
+  const cells = rows.map(r => {
+    const c = r.cand;
+    const drafted = !!c;
+    const qbt = c && c.quick_backtest_json;
+    const qbtStatus = qbt ? qbt.status : null;
+    let btDot = 'off', btLabel = '—';
+    if (qbtStatus === 'ok') {
+      const s = Number(qbt.sharpe || 0);
+      btDot = s >= 0.5 ? 'on' : s <= 0 ? 'neg' : 'partial';
+      btLabel = \`sh \${s>=0?'+':''}\${s.toFixed(2)}\`;
+    } else if (qbtStatus === 'deferred') { btDot = 'partial'; btLabel = 'deferred'; }
+    else if (qbtStatus === 'error')      { btDot = 'neg';     btLabel = 'error'; }
+    else if (drafted)                     { btLabel = 'pending'; }
+    const approved = c && (c.staging_status === 'approved' || c.staging_status === 'promoted');
+    const live     = c && (c.registry_status === 'approved' || c.staging_status === 'promoted');
+    const pnlDot   = live ? 'blue' : 'off';
+    return \`<tr>
+      <td class="dag-slug">\${_rsEsc(r.slug)}</td>
+      <td><span class="dag-cell"><span class="dag-dot \${drafted?'on':'off'}"></span><span class="dag-cell-label">\${drafted?'drafted':'planned'}</span></span></td>
+      <td><span class="dag-cell"><span class="dag-dot \${btDot}"></span><span class="dag-cell-label">\${_rsEsc(btLabel)}</span></span></td>
+      <td><span class="dag-cell"><span class="dag-dot \${approved?'on':'off'}"></span><span class="dag-cell-label">\${approved ? _rsEsc(c.staging_status) : (c ? _rsEsc(c.staging_status || 'pending') : '—')}</span></span></td>
+      <td><span class="dag-cell"><span class="dag-dot \${pnlDot}"></span><span class="dag-cell-label">\${live ? 'live' : '—'}</span></span></td>
+    </tr>\`;
+  }).join('');
+  return \`<div class="camp-dag"><table>
+    <thead><tr><th>strategy</th><th>drafted</th><th>backtest</th><th>staging</th><th>live</th></tr></thead>
+    <tbody>\${cells}</tbody>
+  </table></div>\`;
+}
+
+async function _toggleCampaignDetail(row) {
+  const existing = row.querySelector('.camp-detail');
+  if (existing) { existing.remove(); return; }
+  const cid = row.dataset.cid;
+  const { campaign, candidates = [], error } = await _fetchJSON(\`/api/research/campaigns/\${encodeURIComponent(cid)}\`);
+  const detail = document.createElement('div');
+  detail.className = 'camp-detail';
+  if (error || !campaign) { detail.textContent = 'error: ' + (error || 'not found'); row.appendChild(detail); return; }
+  const plan = campaign.plan_json || {};
+  const items = Array.isArray(plan.items) ? plan.items : [];
+  const itemLines = items.slice(0, 30).map(it => {
+    const match = candidates.find(c => (c.strategy_id && c.strategy_id === it.slug) || (c.source_url && c.source_url.endsWith(it.slug)));
+    const status = match ? match.staging_status || match.status : 'pending';
+    return \`<div class="detail-item">• \${_rsEsc(it.slug || it.name || '')} — <span style="color:var(--text)">\${_rsEsc(status)}</span></div>\`;
+  }).join('');
+  const canCancel = !campaign.cancel_requested && ['awaiting_ack','running','planning'].includes(campaign.status);
+  const progress = campaign.progress_json || {};
+  const dedupNotes = Array.isArray(progress.dedup_notes) ? progress.dedup_notes : [];
+  const dedupHtml = dedupNotes.length
+    ? '<div class="detail-item" style="color:var(--purple);margin-top:6px"><strong>Deduped:</strong> ' +
+      dedupNotes.map(n => _rsEsc(typeof n === 'string' ? n : (n.slug + ' → ' + (n.match_id || n.matched_id || '?')))).join(', ') +
+      '</div>' : '';
+  const tiers = Array.isArray(plan.tiers) ? plan.tiers : [];
+  const selTier = plan.selected_tier || null;
+  const tiersHtml = tiers.length
+    ? '<div class="detail-item" style="margin-top:6px"><strong style="color:var(--text)">Tiers:</strong> ' +
+      tiers.map(t => {
+        const sel = selTier && t.name === selTier;
+        const color = sel ? 'var(--blue)' : 'var(--muted)';
+        const weight = sel ? '700' : '400';
+        const prefix = sel ? '▸ ' : '';
+        return \`<span style="color:\${color};font-weight:\${weight};margin-right:8px">\${prefix}\${_rsEsc(t.name)} $\${Number(t.est_cost_usd||0).toFixed(0)} · \${(t.items||[]).length}×</span>\`;
+      }).join('') + '</div>'
+    : '';
+  const dagHtml = _renderCampaignDag(plan, candidates);
+  detail.innerHTML = \`<div class="detail-item" style="color:var(--muted);margin-bottom:4px">\${_rsEsc(plan.summary || campaign.request_text || '').slice(0,240)}</div>
+    \${tiersHtml}
+    \${dagHtml || itemLines}
+    \${dedupHtml}
+    \${canCancel ? '<button class="camp-cancel-btn" data-cid="' + _rsEsc(cid) + '">Cancel campaign</button>' : ''}\`;
+  row.appendChild(detail);
+  const cb = detail.querySelector('.camp-cancel-btn');
+  if (cb) cb.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm('Cancel this campaign? MasterMindJohn will halt at next item boundary.')) return;
+    cb.disabled = true;
+    const r = await fetch(\`/api/research/campaigns/\${encodeURIComponent(cid)}/cancel\`, { method: 'POST' });
+    if (!r.ok) alert('cancel failed');
+    await _refreshCampaigns();
+  });
+}
+
+async function _refreshQueue() {
+  const { queued = [], recent_runs = [] } = await _fetchJSON('/api/research/queue');
+  document.getElementById('queue-count').textContent = \`\${queued.length} queued · \${recent_runs.length} recent\`;
+  const rows = queued.map(q => {
+    const title = _rsEsc((q.title || q.source_url || '').slice(0, 90));
+    const status = _rsEsc(q.status);
+    const cls = q.status === 'pending' ? 'warn' : (q.status && q.status.startsWith('blocked')) ? 'muted' : 'ok';
+    const kindPill = q.kind === 'internal'
+      ? '<span class="rs-pill" style="background:rgba(188,140,255,0.15);color:var(--purple)">internal</span>'
+      : '';
+    return \`<div class="rs-row">
+      <div class="rs-title">\${title}</div>
+      <div class="rs-meta">\${kindPill}<span class="rs-pill \${cls}">\${status}</span>p=\${_rsEsc(q.priority)} · \${_rsEsc(q.submitted_by)} · \${q.submitted_at ? new Date(q.submitted_at).toLocaleString() : ''}</div>
+    </div>\`;
+  }).join('');
+  document.getElementById('queue-body').innerHTML = rows || '<div style="color:var(--muted);font-size:11px">— no pending research —</div>';
+}
+
+async function _refreshPapers() {
+  const status = document.getElementById('papers-status').value;
+  const q = document.getElementById('papers-q').value;
+  const url = \`/api/research/papers?\${new URLSearchParams({ status, q })}\`;
+  const { papers = [] } = await _fetchJSON(url);
+  document.getElementById('papers-count').textContent = \`\${papers.length}\`;
+  if (!papers.length) { document.getElementById('papers-body').innerHTML = '<div style="color:var(--muted);font-size:11px">— no papers —</div>'; return; }
+  document.getElementById('papers-body').innerHTML = papers.map(p => {
+    const title = _rsEsc((p.title || p.source_url || '').slice(0, 110));
+    const status = _rsEsc(p.status);
+    const cls = p.status === 'done' ? 'ok' : (p.status && p.status.startsWith('blocked')) ? 'muted' : 'warn';
+    const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '—';
+    return \`<div class="rs-row" data-cid="\${_rsEsc(p.candidate_id)}" style="cursor:pointer">
+      <div class="rs-title">\${title}</div>
+      <div class="rs-meta"><span class="rs-pill \${cls}">\${status}</span>conf=\${conf} · \${_rsEsc(p.venue || '—')} · \${p.submitted_at ? new Date(p.submitted_at).toLocaleDateString() : ''}</div>
+    </div>\`;
+  }).join('');
+  for (const row of document.getElementById('papers-body').querySelectorAll('.rs-row[data-cid]')) {
+    row.addEventListener('click', () => _openPaperModal(row.dataset.cid));
+  }
+}
+
+async function _openPaperModal(candidateId) {
+  const modal = document.getElementById('paper-modal');
+  const bodyEl = document.getElementById('pm-body');
+  const titleEl = document.getElementById('pm-title');
+  titleEl.textContent = 'Loading…';
+  bodyEl.innerHTML = '<div style="color:var(--muted);font-size:11px">Loading…</div>';
+  modal.classList.add('open');
+  const { paper, gate_decisions = [], error } = await _fetchJSON(\`/api/research/papers/\${encodeURIComponent(candidateId)}\`);
+  if (error || !paper) {
+    titleEl.textContent = 'Error';
+    bodyEl.innerHTML = '<div style="color:var(--red);font-size:11px">' + _rsEsc(error || 'not found') + '</div>';
+    return;
+  }
+  titleEl.textContent = paper.title || paper.source_url || 'paper';
+  const authors = Array.isArray(paper.authors) ? paper.authors.join(', ') : (paper.authors || '—');
+  const gatesHtml = gate_decisions.length ? gate_decisions.map(g => \`
+    <div class="pm-gate-row">
+      <span>\${_rsEsc(g.gate_name)}</span>
+      <span class="pm-gate-outcome \${_rsEsc(g.outcome)}">\${_rsEsc(g.outcome)}</span>
+      <span>\${_rsEsc(g.reason_code || '')}\${g.reason_detail ? ' — ' + _rsEsc(g.reason_detail) : ''}</span>
+    </div>\`).join('') : '<div style="color:var(--muted);font-size:10px">no gate decisions yet</div>';
+  const huntJson = paper.hunter_result_json ? JSON.stringify(paper.hunter_result_json, null, 2) : null;
+  bodyEl.innerHTML = \`
+    <div class="pm-section">
+      <h4>Meta</h4>
+      <div class="pm-meta">
+        <span><strong>status</strong> \${_rsEsc(paper.status || '—')}</span>
+        <span><strong>kind</strong> \${_rsEsc(paper.kind || '—')}</span>
+        <span><strong>venue</strong> \${_rsEsc(paper.venue || '—')}</span>
+        <span><strong>published</strong> \${paper.published_date ? new Date(paper.published_date).toLocaleDateString() : '—'}</span>
+        <span><strong>submitted_by</strong> \${_rsEsc(paper.submitted_by || '—')}</span>
+        <span><strong>authors</strong> \${_rsEsc(authors)}</span>
+      </div>
+    </div>
+    <div class="pm-section">
+      <h4>Source</h4>
+      <a href="\${_rsEsc(paper.source_url)}" target="_blank" rel="noopener" style="color:var(--blue);font-size:11px">\${_rsEsc(paper.source_url)}</a>
+    </div>
+    \${paper.abstract ? '<div class="pm-section"><h4>Abstract</h4><div class="pm-abstract">' + _rsEsc(paper.abstract) + '</div></div>' : ''}
+    <div class="pm-section">
+      <h4>Gate decisions</h4>
+      <div class="pm-gates">\${gatesHtml}</div>
+    </div>
+    \${huntJson ? '<div class="pm-section"><h4>Hunter / spec JSON</h4><div class="pm-json">' + _rsEsc(huntJson) + '</div></div>' : ''}
+  \`;
+}
+
+function _closePaperModal() {
+  document.getElementById('paper-modal').classList.remove('open');
+}
+
+function _renderQbtBadges(it) {
+  const r = it.quick_backtest_json;
+  const started = it.quick_backtest_started_at;
+  if (!r) {
+    if (started) return '<span class="qbt-badge pending">⟳ backtest running…</span>';
+    return '<span class="qbt-badge">no backtest</span>';
+  }
+  if (r.status === 'deferred') {
+    return \`<span class="qbt-badge deferred" title="\${_rsEsc(r.message || '')}">deferred · needs strategycoder</span>\`;
+  }
+  if (r.status === 'error') {
+    return \`<span class="qbt-badge neg" title="\${_rsEsc(r.reason || '')}">bt error</span>\`;
+  }
+  const s = Number(r.sharpe || 0);
+  const dd = Number(r.max_dd || 0) * 100;
+  const ret = Number(r.total_return_pct || 0);
+  const cls = s >= 0.5 ? 'ok' : s <= 0 ? 'neg' : '';
+  return \`<span class="qbt-metrics">
+    <span class="qbt-badge \${cls}">sharpe \${s>=0?'+':''}\${s.toFixed(2)}</span>
+    <span class="qbt-badge">dd \${dd.toFixed(0)}%</span>
+    <span class="qbt-badge">ret \${ret>=0?'+':''}\${ret.toFixed(0)}%</span>
+  </span>\`;
+}
+
+function _renderQbtDetail(it) {
+  const r = it.quick_backtest_json;
+  if (!r) return '';
+  return \`<div style="margin-top:4px"><strong style="color:var(--text)">quick backtest</strong><pre>\${_rsEsc(JSON.stringify(r, null, 2))}</pre></div>\`;
+}
+
+async function _refreshStaging() {
+  const { items = [] } = await _fetchJSON('/api/research/staging');
+  const pending = items.filter(i => i.status === 'pending');
+  document.getElementById('staging-count').textContent = \`\${pending.length} pending / \${items.length} total\`;
+  if (!items.length) { document.getElementById('staging-body').innerHTML = '<div style="color:var(--muted);font-size:11px">— nothing staged —</div>'; return; }
+  document.getElementById('staging-body').innerHTML = items.map(it => {
+    const actions = it.status === 'pending'
+      ? \`<div class="stage-actions">
+          <button class="stage-btn ok" data-id="\${_rsEsc(it.id)}" data-action="approved">✓</button>
+          <button class="stage-btn err" data-id="\${_rsEsc(it.id)}" data-action="rejected">✗</button>
+        </div>\`
+      : \`<span class="rs-pill muted">\${_rsEsc(it.status)}</span>\`;
+    const params = it.parameters ? JSON.stringify(it.parameters, null, 2) : '{}';
+    const regime = it.regime_conditions ? JSON.stringify(it.regime_conditions, null, 2) : null;
+    const uni = Array.isArray(it.universe) ? it.universe.join(', ') : (it.universe || '');
+    const qbtBadges = _renderQbtBadges(it);
+    return \`<div class="stage-row" data-sid="\${_rsEsc(it.id)}">
+      <div>
+        <div class="rs-title">\${_rsEsc(it.name)}</div>
+        <div class="rs-meta">\${qbtBadges}\${_rsEsc((it.thesis || '').slice(0, 160))}</div>
+        <div class="rs-meta">by \${_rsEsc(it.proposed_by)} · \${new Date(it.created_at).toLocaleString()}\${uni ? ' · ' + _rsEsc(uni) : ''}\${it.signal_frequency ? ' · ' + _rsEsc(it.signal_frequency) : ''}</div>
+      </div>
+      \${actions}
+      <div class="stage-expanded-body" style="display:none">
+        \${it.thesis ? '<div><strong style="color:var(--text)">thesis</strong> ' + _rsEsc(it.thesis) + '</div>' : ''}
+        <div style="margin-top:4px"><strong style="color:var(--text)">parameters</strong><pre>\${_rsEsc(params)}</pre></div>
+        \${regime ? '<div style="margin-top:4px"><strong style="color:var(--text)">regime_conditions</strong><pre>' + _rsEsc(regime) + '</pre></div>' : ''}
+        \${_renderQbtDetail(it)}
+        <button class="stage-ask-btn" data-name="\${_rsEsc(it.name)}" data-id="\${_rsEsc(it.id)}">Ask MasterMindJohn about this →</button>
+      </div>
+    </div>\`;
+  }).join('');
+  for (const row of document.getElementById('staging-body').querySelectorAll('.stage-row')) {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return;
+      row.classList.toggle('expanded');
+      const body = row.querySelector('.stage-expanded-body');
+      if (body) body.style.display = row.classList.contains('expanded') ? 'block' : 'none';
+    });
+  }
+  for (const btn of document.getElementById('staging-body').querySelectorAll('.stage-ask-btn')) {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const input = document.getElementById('chat-input');
+      input.value = \`Review staged strategy: \${btn.dataset.name} (id: \${btn.dataset.id})\`;
+      input.focus();
+    });
+  }
+  for (const btn of document.getElementById('staging-body').querySelectorAll('button[data-id][data-action]')) {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.action;
+      if (!confirm(\`\${action.toUpperCase()} this proposal?\`)) return;
+      btn.disabled = true;
+      const r = await fetch(\`/api/research/staging/\${encodeURIComponent(btn.dataset.id)}/decision\`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, by: 'operator' }),
+      });
+      const data = await r.json();
+      if (!r.ok) { alert('error: ' + (data.error || r.statusText)); btn.disabled = false; return; }
+      await _refreshStaging();
+    });
+  }
+}
+
+async function _refreshRunsHist() {
+  const { runs = [] } = await _fetchJSON('/api/research/runs');
+  document.getElementById('runs-hist-count').textContent = \`\${runs.length}\`;
+  if (!runs.length) { document.getElementById('runs-hist-body').innerHTML = '<div style="color:var(--muted);font-size:10px">— no runs yet —</div>'; return; }
+  document.getElementById('runs-hist-body').innerHTML = runs.map(r => {
+    const stats = r.input_stats || {};
+    const cls = (r.status === 'ok' || r.status === 'completed' || r.status === 'applied') ? 'ok'
+              : (r.status === 'pending' || r.status === 'running' || r.status === 'partial') ? 'warn'
+              : (r.status === 'failed' || r.status === 'ignored' || r.status === 'superseded') ? 'err'
+              : 'muted';
+    const extras = [];
+    if (stats.strategy_id)      extras.push(_rsEsc(String(stats.strategy_id).slice(0, 20)));
+    if (stats.papers_imported != null) extras.push(stats.papers_imported + 'p imp');
+    if (stats.size_delta_pct != null) extras.push((stats.size_delta_pct >= 0 ? '+' : '') + Number(stats.size_delta_pct).toFixed(2) + '%Δ');
+    if (stats.input_count != null)  extras.push(stats.input_count + 'in');
+    if (stats.output_count != null) extras.push(stats.output_count + 'out');
+    return \`<span style="color:var(--muted);font-size:10px;margin-right:14px;font-family:'SF Mono',monospace">
+      \${_rsEsc(r.mode)} \${_rsEsc(String(r.run_date).slice(0,10))} <span class="rs-pill \${cls}">\${_rsEsc(r.status)}</span>\${r.cost_usd ? '$' + Number(r.cost_usd).toFixed(2) : ''}\${extras.length ? ' · ' + extras.join(' · ') : ''}
+    </span>\`;
+  }).join('');
 }
 
 async function loadPortfolio() {

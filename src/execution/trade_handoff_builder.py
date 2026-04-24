@@ -171,7 +171,9 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
 
 
 def load_mastermind_rec(uri: str) -> dict | None:
-    """Latest strategy-stack recommendation from MastermindJohn weekly."""
+    """Latest strategy_sizing_recommendations (derived from the Saturday
+    comprehensive_review memos) — per-strategy sizing / stop / target /
+    hold deltas that feed into TradeJohn's Monday handoff."""
     if not uri:
         return None
     try:
@@ -179,22 +181,30 @@ def load_mastermind_rec(uri: str) -> dict | None:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
-            SELECT run_date, recommendations
-              FROM mastermind_weekly_reports
-             WHERE mode = 'strategy-stack'
-             ORDER BY run_date DESC LIMIT 1
+            SELECT rec_date, strategy_id, current_size_pct, recommended_size_pct,
+                   size_delta_pct, stop_delta_pct, target_delta_pct,
+                   hold_days_delta, reasoning
+              FROM strategy_sizing_recommendations
+             WHERE rec_date = (SELECT MAX(rec_date) FROM strategy_sizing_recommendations)
+               AND action_taken IN ('pending', 'applied')
             """
         )
-        r = cur.fetchone()
+        rows = cur.fetchall()
         conn.close()
-        if r and r.get('recommendations'):
-            recs = r['recommendations']
-            if isinstance(recs, str):
-                recs = json.loads(recs)
-            return {'run_date': str(r['run_date']), 'recommendations': recs}
+        if not rows:
+            return None
+        recs = {r['strategy_id']: {
+            'current_size_pct':     float(r['current_size_pct']) if r['current_size_pct'] is not None else None,
+            'recommended_size_pct': float(r['recommended_size_pct']),
+            'size_delta_pct':       float(r['size_delta_pct']) if r['size_delta_pct'] is not None else None,
+            'stop_delta_pct':       float(r['stop_delta_pct']) if r['stop_delta_pct'] is not None else None,
+            'target_delta_pct':     float(r['target_delta_pct']) if r['target_delta_pct'] is not None else None,
+            'hold_days_delta':      int(r['hold_days_delta']) if r['hold_days_delta'] is not None else None,
+            'reasoning':            r['reasoning'],
+        } for r in rows}
+        return {'run_date': str(rows[0]['rec_date']), 'recommendations': recs}
     except Exception:
-        pass
-    return None
+        return None
 
 
 # ── Per-signal features ─────────────────────────────────────────────────────

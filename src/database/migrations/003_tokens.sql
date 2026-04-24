@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS subagent_costs (
     id           BIGSERIAL PRIMARY KEY,
     task_id      UUID NOT NULL REFERENCES task_costs(task_id) ON DELETE CASCADE,
     subagent_id  UUID NOT NULL,
-    subagent_type TEXT NOT NULL,               -- 'research', 'data-prep', 'equity-analyst', etc.
+    subagent_type TEXT NOT NULL,               -- e.g. 'botjohn', 'researchjohn', 'paperhunter', 'tradejohn', 'strategycoder', 'mastermind'
     ticker       TEXT,
     model        TEXT,
     cost_usd     NUMERIC(10, 6),

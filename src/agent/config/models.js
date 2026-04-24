@@ -33,7 +33,7 @@ const SUBAGENT_MODELS = {
   botjohn:         MODELS.orchestrator,
   researchjohn:    MODELS.primary,
   tradejohn:       MODELS.primary,
-  paperhunter:     MODELS.fast,
+  paperhunter:     MODELS.primary,
   strategycoder:   MODELS.primary,
   'mastermind':     MODELS.opus1m,
   'corpus-curator': MODELS.opus1m,

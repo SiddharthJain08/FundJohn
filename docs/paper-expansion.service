@@ -1,5 +1,5 @@
 [Unit]
-Description=MastermindJohn — weekly strategy-stack review (Friday)
+Description=MastermindJohn — Sunday paper expansion ingestion (web-scraped sources)
 After=network.target postgresql.service
 PartOf=johnbot.service
 
@@ -9,10 +9,11 @@ User=claudebot
 Group=claudebot
 EnvironmentFile=/root/openclaw/.env
 WorkingDirectory=/root/openclaw
-ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode strategy-stack
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode paper-expansion
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=1800
+# Opus with WebSearch/WebFetch — may take up to 25 minutes.
+TimeoutStartSec=2100
 
 [Install]
 WantedBy=multi-user.target

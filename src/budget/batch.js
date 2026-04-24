@@ -16,8 +16,8 @@
 const https = require('https');
 const { query } = require('../database/postgres');
 
-const BATCH_ELIGIBLE_TYPES = new Set(['research', 'data-prep', 'compute', 'report-builder']);
-const BATCH_NEVER_TYPES    = new Set(['equity-analyst']); // veto requires sync
+const BATCH_ELIGIBLE_TYPES = new Set(['research']);
+const BATCH_NEVER_TYPES    = new Set();
 
 // Standard vs batch pricing per million tokens (Sonnet 4.6)
 const PRICING = {

@@ -196,7 +196,7 @@ Key mechanics:
 - **Momentum signal:** 12-1 month return (12-month return minus most recent 1 month, to avoid reversal)
 - **Value signal:** FCF yield minus EV/Revenue (higher FCF yield + lower EV/Rev = higher rank)
 - **Absolute momentum filter:** If SPY 12-month return is negative (bear market), all LONG signals are suppressed
-- **Regime scaling:** Position scale applied by equity-analyst based on regime state
+- **Regime scaling:** Position scale applied by TradeJohn based on regime state
 
 Parameters (v1):
 ```python
@@ -346,7 +346,6 @@ Agents are Claude Code CLI subprocesses spawned by the swarm (`src/agent/subagen
 
 **Blocked forever:**
 - Per-ticker diligence (removed system — superseded by signal engine)
-- TIER_A / TIER_B data-prep modes (deprecated)
 - Research invoked directly (only via SIGNAL_PROCESSING pipeline)
 
 ---
@@ -400,104 +399,16 @@ The strategy is **inactive by default** — operator must run `/approve-strategy
 
 ---
 
-#### Data-prep
-**File:** `src/agent/prompts/subagents/data-prep.md`  
-**Mode:** MARKET_STATE only
-
-Runs the market state preprocessing pipeline. Collects HMM feature data (VIX, credit spreads, SPX returns, put/call ratio), updates or refits the HMM model, computes RORO score, writes the regime file, and generates the SP500 signal blocks.
-
-This agent is the prerequisite for everything else — no other agent should activate without a fresh regime file (today's date in `latest.json`).
-
-**Key outputs:**
-- `.agents/market-state/latest.json` — current regime state
-- `.agents/market-state/hmm_model_latest.pkl` — fitted HMM
-- `work/market-state/data/signal_blocks_{date}.csv` — pre-computed signal blocks per ticker
-- Update to `market_regime` table in Postgres
-
-**Note:** In the current architecture, `run_market_state.py` (Python script) handles this directly via cron — the Data-prep agent is available for manual market state refreshes or when the cron run fails.
-
----
-
-#### Research
-**File:** `src/agent/prompts/subagents/research.md`  
-**Mode:** SIGNAL_PROCESSING only
-
-Adds brief qualitative context to a pre-computed confluence signal before it goes to Compute and Equity-analyst. This is a **minimal-scope agent** — it reads pre-computed data from the DB and adds one paragraph of context.
-
-**What it does:**
-- Reads `signal_confluence` and `signal_output` tables for the target ticker
-- Reads the current regime file
-- Produces a structured `SIGNAL_CONTEXT` block: regime fit, primary driver, one risk/caveat
-
-**What it does NOT do:**
-- Generate new signals (signal_runner.py handles that)
-- Write memos or investment theses (removed system)
-- Call external APIs
-
-**Output:** Under 300 tokens. Feeds directly into Compute.
-
----
-
-#### Compute
-**File:** `src/agent/prompts/subagents/compute.md`  
-**Mode:** SIGNAL_PROCESSING
-
-Handles all quantitative calculations for a pre-computed signal candidate: expected value analysis, Kelly-fraction position sizing, stop/target levels, portfolio impact assessment.
-
-**Inputs:** Research context JSON, regime file, preferences.json  
-**Outputs:** `{TASK_DIR}/compute_output.json`
-
-**Key calculations:**
-- Expected Value: `EV = (bull_target - price) × P(bull) + (base - price) × P(base) + (bear - price) × P(bear)`
-- Sizing: half-Kelly with hard ceiling at `max_position_pct` (regime-scaled)
-- Three price targets with partial close schedule (33%/33%/34%)
-- Portfolio impact: sector concentration, correlation estimate, drawdown contribution
-- All math runs in Python — LLM only reads the structured output
-
----
-
-#### Equity-analyst
-**File:** `src/agent/prompts/subagents/equity-analyst.md`  
-**Mode:** SIGNAL_PROCESSING  
-**Authority:** Veto on position size and trade approval
-
-The portfolio risk gatekeeper. Runs six regime-adjusted risk checks on the compute output. Can APPROVE, REDUCE (half size), or BLOCK a candidate trade.
-
-**Six risk checks:**
-
-| Check | Limit (BASE) | Regime adjustment |
-|-------|-------------|-------------------|
-| Position limit | `max_position_pct` | ×1.0 / ×0.85 / ×0.70 / ×0.50 |
-| Sector concentration | `max_sector_pct` | Same multiplier |
-| Correlation | `max_correlation` | None |
-| Drawdown contribution | `max_drawdown_contribution_pct` | None |
-| Liquidity | Manual check | None |
-| Macro alignment | No longs in CRISIS | Hard block |
-
-**Verdicts:**
-- 0 fails → `APPROVED` (full size)
-- 1 fail → `REDUCED` (half size) + escalation if operator online
-- 2+ fails → `BLOCKED` (non-negotiable, no override)
-
-**Escalation logic:**
-- Operator online (Discord active <30min): `TRADE_REVIEW_REQUIRED`
-- Operator offline: `PENDING_REVIEW` (queued for next login)
-- 2+ fails with CRISIS macro: `BLOCKED_NO_ESCALATION`
-
-All veto decisions are logged to `results/{ticker}-{date}-veto.json` and the `verdict_cache` table.
-
----
-
-#### Report-builder
-**File:** `src/agent/prompts/subagents/report-builder.md`  
-**Modes:** TRADE, STRATEGY_PERFORMANCE
-
-**TRADE mode:** Assembles the final trade card from pre-computed compute + equity-analyst outputs. Determines entry timing from price cache (no API call). Writes `results/{TICKER}-{date}-trade.md` and posts Discord summary.
-
-**STRATEGY_PERFORMANCE mode:** Triggered after a strategy accumulates ≥30 closed trades. Reads signal P&L history from `signal_pnl` table, computes win rate, Sharpe, regime breakdown, best/worst conditions. Writes report to `results/strategies/`. Marks trades as `reported=TRUE`. Posts report to Discord.
-
-**Critical constraint:** Both modes read from DB only — no external API calls permitted.
-
+> **Historical note (2026-04-23):** Earlier iterations of this doc described
+> five placeholder subagents — `data-prep`, `research`, `compute`,
+> `equity-analyst`, `report-builder` — as part of the per-ticker diligence
+> flow. Those agents never had prompt files in `src/agent/prompts/subagents/`
+> and were never part of the live signal pipeline. Their responsibilities
+> moved into Python (`run_market_state.py`, `signal_runner.py`,
+> `strategy_runner.py`, `trade_handoff_builder.py`) and into TradeJohn
+> (risk veto + sizing). The placeholder types have been removed from
+> `subagent-types.json`, verification contracts, batch eligibility, and
+> the deployment gate. Live subagents are listed in §1.
 ---
 
 ## 7. Middleware Stack
@@ -632,7 +543,6 @@ Skills are operator-invokable slash commands loaded via `skills-loader` middlewa
 | Polygon rate limit still at 5 req/min | Medium | User confirmed increased Massive limits — `polygon_req_per_min` not yet updated in `pipeline_config`. Run: `UPDATE pipeline_config SET value='50' WHERE key='polygon_req_per_min';` after confirming new limit. |
 | 17 of 20 strategies not yet discovered | Ongoing | Strategist will populate during off-hours research sessions. Currently 3 deployed. |
 | `signal_performance` table has 0 bytes | Expected | No closed trades yet — strategies just registered. Will populate after first live signal cycle. |
-| `data-prep.md` still references TIER_A/TIER_B | Cleanup | Subagent prompt has legacy mode references. TIER_A/TIER_B are blocked by deployment gate but the prompt text should be cleaned. |
 
 ---
 
