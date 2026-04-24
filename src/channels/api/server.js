@@ -957,6 +957,8 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 /* Tables */
 .db-table{width:100%;border-collapse:collapse;font-size:11px}
 .db-table th{color:var(--dim);font-weight:600;text-align:left;padding:4px 8px;border-bottom:1px solid var(--border2);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+.db-table th[data-sort-key]{user-select:none;transition:color .12s}
+.db-table th[data-sort-key]:hover{color:var(--text)}
 .db-table td{padding:5px 8px;border-bottom:1px solid var(--border2)}
 .db-table tr:last-child td{border:none}
 .db-table .call{color:#58a6ff}.db-table .put{color:#f0883e}
@@ -1612,6 +1614,68 @@ function pnlCls(n, posCls='pf-pnl-pos', negCls='pf-pnl-neg', flatCls='pf-pnl-fla
   if (n == null || isNaN(n)) return '';
   if (Math.abs(n) < 0.005) return flatCls;
   return n > 0 ? posCls : negCls;
+}
+
+// ── Sortable tables (shared) ───────────────────────────────────────────────
+// Click any <th data-sort-key> to toggle asc/desc. Each render function that
+// opts in: caches its rows in _tableDataCache[id], emits ths with data-sort-key
+// + data-sort-type, and calls _bindSortable(id, renderFn) at the end.
+const _sortState      = {};   // { tableId: { key, dir } }
+const _tableDataCache = {};   // { tableId: rawRows }
+
+function _sortRows(rows, key, dir, type) {
+  const mul = dir === 'desc' ? -1 : 1;
+  const coerce = type === 'num'
+    ? v => (v == null || v === '' ? NaN : parseFloat(v))
+    : type === 'date'
+      ? v => (v == null || v === '' ? NaN : new Date(v).getTime())
+      : v => (v == null ? '' : String(v).toLowerCase());
+  const out = rows.slice();
+  out.sort((a, b) => {
+    const va = coerce(a[key]);
+    const vb = coerce(b[key]);
+    const aN = typeof va === 'number' && isNaN(va);
+    const bN = typeof vb === 'number' && isNaN(vb);
+    if (aN && bN) return 0;
+    if (aN) return 1;   // nulls always sort last
+    if (bN) return -1;
+    if (va < vb) return -1 * mul;
+    if (va > vb) return  1 * mul;
+    return 0;
+  });
+  return out;
+}
+
+function _bindSortable(tableId, renderFn) {
+  const host = document.getElementById(tableId);
+  if (!host) return;
+  host.querySelectorAll('th[data-sort-key]').forEach(th => {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', () => {
+      const key  = th.dataset.sortKey;
+      const type = th.dataset.sortType || 'str';
+      const s    = _sortState[tableId] || {};
+      if (s.key === key) s.dir = s.dir === 'asc' ? 'desc' : 'asc';
+      else { s.key = key; s.dir = 'asc'; }
+      s.type = type;
+      _sortState[tableId] = s;
+      const rows = _tableDataCache[tableId] || [];
+      renderFn(rows);
+    });
+    // Arrow indicator on the active sort column
+    const s = _sortState[tableId];
+    if (s && s.key === th.dataset.sortKey) {
+      const arrow = s.dir === 'asc' ? ' ▲' : ' ▼';
+      th.innerHTML = th.innerHTML.replace(/\s*[▲▼]$/, '') + arrow;
+    }
+  });
+}
+
+function _applySort(tableId, rows, defaultKey, defaultType) {
+  _tableDataCache[tableId] = rows;
+  const s = _sortState[tableId];
+  if (!s || !s.key) return rows;
+  return _sortRows(rows, s.key, s.dir, s.type || 'str');
 }
 function fmtChg(chg) {
   if (chg == null) return {text:'—',cls:'neutral'};
@@ -2996,9 +3060,21 @@ function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
   document.getElementById('pf-pos-count').textContent = rows.length ? rows.length + ' open' : '';
   if (!rows.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  const sorted = _applySort('pf-positions', rows);
   el.innerHTML = \`<table class="db-table" style="min-width:700px">
-    <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Current</th><th class="num">P&amp;L %</th><th class="num">Size %</th><th class="num">Days</th><th>Stop</th><th>Status</th></tr>
-    \${rows.map(r => {
+    <tr>
+      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+      <th data-sort-key="ticker" data-sort-type="str">Ticker</th>
+      <th data-sort-key="direction" data-sort-type="str">Dir</th>
+      <th class="num" data-sort-key="entry_price" data-sort-type="num">Entry</th>
+      <th class="num" data-sort-key="current_price" data-sort-type="num">Current</th>
+      <th class="num" data-sort-key="unrealized_pnl_pct" data-sort-type="num">P&amp;L %</th>
+      <th class="num" data-sort-key="position_size_pct" data-sort-type="num">Size %</th>
+      <th class="num" data-sort-key="days_held" data-sort-type="num">Days</th>
+      <th class="num" data-sort-key="stop_loss" data-sort-type="num">Stop</th>
+      <th data-sort-key="status" data-sort-type="str">Status</th>
+    </tr>
+    \${sorted.map(r => {
       const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) * 100 : null;
       const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
       const pnlClsName = pnlCls(pnl);
@@ -3017,15 +3093,27 @@ function renderPositions(rows) {
       </tr>\`;
     }).join('')}
   </table>\`;
+  _bindSortable('pf-positions', renderPositions);
 }
 
 function renderHistory(rows) {
   const el = document.getElementById('pf-history');
   document.getElementById('pf-hist-count').textContent = rows.length ? rows.length + ' trades' : '';
   if (!rows.length) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  const sorted = _applySort('pf-history', rows);
   el.innerHTML = \`<table class="db-table" style="min-width:680px">
-    <tr><th>Strategy</th><th>Ticker</th><th>Dir</th><th>Entry</th><th>Close</th><th class="num">P&amp;L %</th><th class="num">Days</th><th>Reason</th><th>Closed</th></tr>
-    \${rows.map(r => {
+    <tr>
+      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+      <th data-sort-key="ticker" data-sort-type="str">Ticker</th>
+      <th data-sort-key="direction" data-sort-type="str">Dir</th>
+      <th class="num" data-sort-key="entry_price" data-sort-type="num">Entry</th>
+      <th class="num" data-sort-key="closed_price" data-sort-type="num">Close</th>
+      <th class="num" data-sort-key="realized_pnl_pct" data-sort-type="num">P&amp;L %</th>
+      <th class="num" data-sort-key="days_held" data-sort-type="num">Days</th>
+      <th data-sort-key="close_reason" data-sort-type="str">Reason</th>
+      <th data-sort-key="closed_at" data-sort-type="date">Closed</th>
+    </tr>
+    \${sorted.map(r => {
       const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) * 100 : null;
       const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
       const pnlClsName = pnlCls(pnl);
@@ -3044,6 +3132,7 @@ function renderHistory(rows) {
       </tr>\`;
     }).join('')}
   </table>\`;
+  _bindSortable('pf-history', renderHistory);
 }
 
 // ── Strategies page ─────────────────────────────────────────────────────────
@@ -3193,18 +3282,35 @@ function _renderActiveStack(rows) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
   }
-  const sorted = rows.slice().sort((a, b) => {
-    const d = (_SUB_ORDER[_activeSub(a)] ?? 9) - (_SUB_ORDER[_activeSub(b)] ?? 9);
-    if (d !== 0) return d;
-    return String(a.strategy_id).localeCompare(String(b.strategy_id));
-  });
+  // Compute derived columns the user sorts on: d1_total = O+U+R.
+  const enriched = rows.map(r => Object.assign({}, r, {
+    d1_total: (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+  }));
+  // Default sort: status sub-group then strategy_id. Operator clicks override.
+  let sorted;
+  const s = _sortState['st-active-wrap'];
+  if (s && s.key) {
+    sorted = _applySort('st-active-wrap', enriched);
+  } else {
+    _tableDataCache['st-active-wrap'] = enriched;
+    sorted = enriched.slice().sort((a, b) => {
+      const d = (_SUB_ORDER[_activeSub(a)] ?? 9) - (_SUB_ORDER[_activeSub(b)] ?? 9);
+      if (d !== 0) return d;
+      return String(a.strategy_id).localeCompare(String(b.strategy_id));
+    });
+  }
   el.innerHTML = \`<table class="db-table" style="min-width:1100px">
     <tr>
-      <th>Strategy</th><th>Status</th><th>Regimes</th>
-      <th class="num">Open</th><th class="num">Closed</th><th class="num">Win %</th>
-      <th class="num">Avg Return</th>
-      <th class="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
-      <th>Last Signal</th><th>Actions</th>
+      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+      <th data-sort-key="state" data-sort-type="str">Status</th>
+      <th>Regimes</th>
+      <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
+      <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
+      <th class="num" data-sort-key="win_rate" data-sort-type="num">Win %</th>
+      <th class="num" data-sort-key="avg_realized_pct" data-sort-type="num">Avg Return</th>
+      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
+      <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
+      <th>Actions</th>
     </tr>
     \${sorted.map(r => {
       const sub = _activeSub(r);
@@ -3232,6 +3338,7 @@ function _renderActiveStack(rows) {
       </tr>\`;
     }).join('')}
   </table>\`;
+  _bindSortable('st-active-wrap', _renderActiveStack);
 }
 
 // ── Section 2: Inactive Stack ──────────────────────────────────────────────
@@ -3241,12 +3348,23 @@ function _renderInactiveStack(rows) {
     el.innerHTML = '<div class="empty">No decommissioned strategies.</div>';
     return;
   }
-  const sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  let sorted;
+  const s = _sortState['st-inactive-wrap'];
+  if (s && s.key) {
+    sorted = _applySort('st-inactive-wrap', rows);
+  } else {
+    _tableDataCache['st-inactive-wrap'] = rows;
+    sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  }
   el.innerHTML = \`<table class="db-table" style="min-width:900px">
     <tr>
-      <th>Strategy</th><th>Status</th><th>Regimes</th>
-      <th class="num">Live Days</th><th class="num">Live Sharpe</th><th class="num">Live Return</th>
-      <th>Last Signal</th>
+      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+      <th data-sort-key="state" data-sort-type="str">Status</th>
+      <th>Regimes</th>
+      <th class="num" data-sort-key="live_days" data-sort-type="num">Live Days</th>
+      <th class="num" data-sort-key="live_sharpe" data-sort-type="num">Live Sharpe</th>
+      <th class="num" data-sort-key="live_return_pct" data-sort-type="num">Live Return</th>
+      <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
     </tr>
     \${sorted.map(r => {
       const liveRet = r.live_return_pct != null ? parseFloat(r.live_return_pct) : null;
@@ -3261,6 +3379,7 @@ function _renderInactiveStack(rows) {
       </tr>\`;
     }).join('')}
   </table>\`;
+  _bindSortable('st-inactive-wrap', _renderInactiveStack);
 }
 
 // ── Section 3: Research Candidates ─────────────────────────────────────────
@@ -3271,12 +3390,23 @@ function _renderCandidates(rows) {
     el.innerHTML = '<div class="empty">No candidates awaiting approval.</div>';
     return;
   }
-  const sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  let sorted;
+  const s = _sortState['st-candidate-wrap'];
+  if (s && s.key) {
+    sorted = _applySort('st-candidate-wrap', rows);
+  } else {
+    _tableDataCache['st-candidate-wrap'] = rows;
+    sorted = rows.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
+  }
   el.innerHTML = \`<table class="db-table" style="min-width:1000px">
     <tr>
-      <th>Strategy</th><th>Status</th><th>Regimes</th>
-      <th class="num">BT Sharpe</th><th class="num">BT Return</th><th class="num">BT Max DD</th>
-      <th class="num">Backtest Trades</th>
+      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+      <th data-sort-key="state" data-sort-type="str">Status</th>
+      <th>Regimes</th>
+      <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
+      <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
+      <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
+      <th class="num" data-sort-key="total_count" data-sort-type="num">Backtest Trades</th>
       <th>Actions</th>
     </tr>
     \${sorted.map(r => {
@@ -3335,6 +3465,7 @@ function _renderCandidates(rows) {
       </tr>\`;
     }).join('')}
   </table>\`;
+  _bindSortable('st-candidate-wrap', _renderCandidates);
 }
 
 // ── Action handlers ────────────────────────────────────────────────────────
