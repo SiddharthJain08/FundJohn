@@ -349,18 +349,34 @@ app.get('/api/strategies', async (req, res) => {
       currentRegime = latestJson.state || 'TRANSITIONING';
     } catch (_) {}
 
-    // Latest d-1 per-strategy rollup (overperf / underperf / rejected counts)
-    // from today's structured handoff. Stamped by trade_handoff_builder.
-    // Displayed as "# O/U/R" in the Active Stack table.
-    let d1StrategyStats = {};
+    // Cumulative per-strategy O/U/R counts across all daily cycles.
+    //   O = performance_outliers WHERE kind='over'
+    //   U = performance_outliers WHERE kind='under'
+    //   R = veto_log (excluding legacy 'missing_field' from pre-Phase-2
+    //       lint_memo writer — those aren't trade rejections)
+    // Grows monotonically as each daily cycle's trade_handoff_builder +
+    // trade_agent_llm append rows to the two source tables.
+    const d1StrategyStats = {};
     try {
-      const handoffDir = path.join(__dirname, '../../../output/handoffs');
-      const files = fs.readdirSync(handoffDir)
-        .filter(n => /^\d{4}-\d{2}-\d{2}_structured\.json$/.test(n))
-        .sort();
-      if (files.length) {
-        const latest = JSON.parse(fs.readFileSync(path.join(handoffDir, files[files.length - 1]), 'utf8'));
-        d1StrategyStats = latest.d1_strategy_stats || {};
+      const [ouRes, rRes] = await Promise.all([
+        dbQuery(`SELECT strategy_id, kind, COUNT(*)::int AS n
+                   FROM performance_outliers
+                  WHERE strategy_id IS NOT NULL
+                  GROUP BY strategy_id, kind`).catch(() => ({ rows: [] })),
+        dbQuery(`SELECT strategy_id, COUNT(*)::int AS n
+                   FROM veto_log
+                  WHERE strategy_id IS NOT NULL
+                    AND veto_reason <> 'missing_field'
+                  GROUP BY strategy_id`).catch(() => ({ rows: [] })),
+      ]);
+      for (const row of ouRes.rows) {
+        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
+        if (row.kind === 'over')  s.overperf  = row.n;
+        if (row.kind === 'under') s.underperf = row.n;
+      }
+      for (const row of rRes.rows) {
+        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
+        s.rejected = row.n;
       }
     } catch (_) {}
 
@@ -3187,7 +3203,7 @@ function _renderActiveStack(rows) {
       <th>Strategy</th><th>Status</th><th>Regimes</th>
       <th class="num">Open</th><th class="num">Closed</th><th class="num">Win %</th>
       <th class="num">Avg Return</th>
-      <th class="num" title="d-1 counts: Overperformers / Underperformers / Rejected from today's handoff">#&nbsp;O/U/R</th>
+      <th class="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
       <th>Last Signal</th><th>Actions</th>
     </tr>
     \${sorted.map(r => {
@@ -3210,7 +3226,7 @@ function _renderActiveStack(rows) {
         <td class="num">\${r.closed_count || 0}</td>
         <td class="num">\${_fmtRate(r.win_rate)}</td>
         <td class="num \${pnlCls(avgR)}">\${_fmtPct(r.avg_realized_pct)}</td>
-        <td class="num" title="Over / Under / Rejected in d-1 handoff">\${ourCell}</td>
+        <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
       </tr>\`;

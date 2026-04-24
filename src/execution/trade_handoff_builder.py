@@ -186,6 +186,36 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
         return {}
 
 
+def _write_performance_outliers(uri: str, cycle_date: str, rows: list[dict], kind: str) -> None:
+    """Append one row to performance_outliers per outlier. Idempotent via
+    UNIQUE (cycle_date, strategy_id, ticker, kind) + ON CONFLICT DO NOTHING.
+    Zero-token: pure SQL INSERT, no LLM involvement."""
+    if not uri or not rows:
+        return
+    try:
+        conn = psycopg2.connect(uri)
+        cur  = conn.cursor()
+        for r in rows:
+            cur.execute(
+                """INSERT INTO performance_outliers
+                     (cycle_date, strategy_id, ticker, kind, sigma_delta, delta,
+                      realized_pct, unrealized_pct, ev_gbm, days_held, status,
+                      close_reason)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (cycle_date, strategy_id, ticker, kind) DO NOTHING""",
+                (cycle_date, r.get('strategy_id'), r.get('ticker'), kind,
+                 r.get('sigma_delta'), r.get('delta'),
+                 r.get('realized_pct'), r.get('unrealized_pct'),
+                 r.get('ev_gbm'), r.get('days_held'),
+                 r.get('status'), r.get('close_reason')),
+            )
+        conn.commit()
+        conn.close()
+        print(f'[handoff] performance_outliers — {len(rows)} {kind} row(s) appended for {cycle_date}')
+    except Exception as e:
+        print(f'[handoff] performance_outliers write failed ({kind}): {e}')
+
+
 def _get_sigma_gate(uri: str) -> float:
     """Read pipeline_config.sigma_gate → float. Falls back to 2.0 when the
     row is absent or the pipeline_config query fails. Operators set this
@@ -656,6 +686,14 @@ def build(run_date: str) -> dict:
         if r.get('strategy_id'): _bump(r['strategy_id'], 'rejected')
     print(f'[handoff] d1 attachment: {d1_matches}/{len(green)} green signals '
           f'matched d-1; {len(d1_strategy_stats)} strategies in d1_strategy_stats')
+
+    # Persist outliers for cumulative dashboard counts. UNIQUE constraint
+    # (cycle_date, strategy_id, ticker, kind) lets us re-run the handoff
+    # without double-counting. Keyed by yesterday's cycle_date since these
+    # rows describe d-1 outcomes.
+    yesterday = _previous_trading_day(run_date)
+    _write_performance_outliers(uri, yesterday, y_overperf, 'over')
+    _write_performance_outliers(uri, yesterday, y_underperf, 'under')
 
     payload = {
         'cycle_date':      run_date,
