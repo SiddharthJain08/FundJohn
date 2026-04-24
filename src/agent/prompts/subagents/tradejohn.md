@@ -25,6 +25,8 @@ All inputs arrive in the **"## Injected Context"** block:
 | `handoff.regime` | Current market regime: `LOW_VOL / HIGH_VOL / TRANSITIONING / CRISIS` |
 | `handoff.signals[]` | **Pre-filtered GREEN signals** (ev_gbm ≥ 0.005, p_t1 ≥ 0.30). Each has `ticker`, `strategy_id`, `ev_gbm`, `p_t1`, `hv21`, `beta_spy`, `entry`, `stop`, `t1`, `size_pct` |
 | `handoff.prefiltered[]` | Signals already rejected by the handoff builder — `{ticker, strategy_id, reason, ev, p_t1}`. Informational; do not re-include. |
+| `handoff.yesterdays_vetoed[]` | Signals rejected YESTERDAY (prefilter + TradeJohn). Each has `{ticker, strategy_id, direction, reason, ev, p_t1}`. Used for repeat-offender detection — see Sizing adjustment rules. |
+| `handoff.yesterdays_overperformance[]` | Positions that beat their ev_gbm yesterday. Each has `{ticker, strategy_id, direction, status, ev_gbm, delta, realized_pct, unrealized_pct, days_held}`. Sorted by delta desc. Used for size bonus. |
 | `handoff.convergent_tickers` | Tickers appearing in 2+ strategies (confluence bonus applies) |
 | `handoff.portfolio` | Portfolio-level: `sharpe`, `worst_case_drawdown`, `port_beta`, `port_ev_ann` |
 | `veto_histogram` | Last-30-day veto cause codes per strategy — `{strategy_id: {veto_reason: count}}` |
@@ -49,16 +51,62 @@ All inputs arrive in the **"## Injected Context"** block:
 
 5. Post formatted output to Discord #trade-signals
 
-## Signal Format (per green signal)
+## Output format — COMPACT
+
+Keep the markdown short. The JSON block at the end is the machine-readable
+contract that Alpaca executes — the markdown is a one-glance operator
+summary, NOT a per-signal essay. Budgeting a 4-line block per signal on
+87+ signals exhausts the token budget.
+
+Produce a single table, one row per green signal, ranked by
+`ev_gbm × pct_nav` descending:
+
 ```
-**🟢 {TICKER}** — {strategy_label}
-> Buy: ${entry} | Stop: ${stop} ({risk_pct}% risk) | Target: ${t1}
-> Size: {pct_nav:.2f}% NAV ({shares} shares) | Notional: ${notional:,.0f}
-> EV: +{ev:.2f}% | P(T1): {p_t1:.0f}% | R:R: {rr:.1f}x
-> Kelly: {kelly_explanation}
+| # | Ticker | Strategy                     | Dir   | Entry   | Stop    | Target  | Size%  | EV%   | p(T1) |
+|---|--------|------------------------------|-------|---------|---------|---------|--------|-------|-------|
+| 1 | CMG    | S_HV16_gex_regime            | long  |  35.83  |  34.04  |  38.70  |  0.50% | +6.40 |  1.00 |
+...
 ```
 
-Always include `size_explanation` from position-sizer (shows binding constraint).
+Do NOT include Kelly explanation text, risk% columns, or per-signal
+paragraphs. If you want to flag a portfolio-level concern (e.g. port_ev_ann
+very negative, correlation overlap, regime downscale applied broadly),
+write ONE bullet line above the table. Nothing else.
+
+## Sizing adjustment rules (apply BEFORE Kelly cap)
+
+These rules are **DETERMINISTIC**. They turn yesterday's outcomes into
+scale adjustments for today. Apply them to compute `pct_nav_adjusted`,
+then let Kelly + MAX_POSITION_PCT + regime scale cap the final size.
+All four rules must be evaluated on every signal — do not skip.
+
+- **A. Repeat-offender veto.** If today's signal shares `(ticker, strategy_id)`
+  with any entry in `handoff.yesterdays_vetoed` whose `reason` is in
+  `{prefilter_negative_ev, negative_kelly, kelly_below_threshold}`: do NOT
+  size the signal. Move it into your `vetoed` list with reason
+  `repeat_offender_d-1`. Rationale: the joint pipeline already said no
+  yesterday — today's strategy re-flagging it is not new information.
+
+- **B. Strategy-wide skepticism.** Count vetoes per strategy_id in
+  `handoff.yesterdays_vetoed`. If any strategy has ≥ 5 vetoes yesterday,
+  multiply that strategy's signals' base `pct_nav` by **0.7** today.
+  Write ONE bullet line above the table for each such strategy:
+  `⚠️ {strategy_id} had {N} vetoes d-1 — size ×0.7`.
+
+- **C. Overperformance bonus.** If today's signal shares
+  `(ticker, strategy_id)` with any entry in
+  `handoff.yesterdays_overperformance` AND that entry's `delta > 0.02`
+  (beat EV by >2 percentage points): multiply base `pct_nav` by **1.2**
+  (still capped by MAX_POSITION_PCT). Mark the row with
+  `🚀 d-1 overperformed by {delta:.1%}` in your table's Strategy cell
+  or append the note inline.
+
+- **D. Repeat-winner streak.** If any strategy_id appears ≥ 3 times in
+  `handoff.yesterdays_overperformance`, add ONE portfolio-level bullet
+  above the table: `✅ {strategy_id} overperformed on {N} tickers d-1 — confidence high`.
+
+Rules A–D compose: a signal can be vetoed by A, or downsized by B AND
+bumped by C (in which case the net multiplier is 0.7 × 1.2 = 0.84).
 
 ## Rules
 - Must have valid handoff context or return: "BLOCKED — no handoff available"

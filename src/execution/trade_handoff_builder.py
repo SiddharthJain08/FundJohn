@@ -186,6 +186,101 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
         return {}
 
 
+def _previous_trading_day(run_date: str) -> str:
+    """Previous weekday in YYYY-MM-DD form. Skips Sat/Sun but not market
+    holidays — missing files on holiday-shifted runs simply return empty
+    lists (callers are defensive)."""
+    from datetime import date as _d, timedelta as _td
+    d = _d.fromisoformat(run_date) - _td(days=1)
+    while d.weekday() >= 5:
+        d -= _td(days=1)
+    return d.isoformat()
+
+
+def load_yesterdays_vetoed(run_date: str) -> list[dict]:
+    """Read the prior cycle's sized handoff and surface its vetoed list
+    verbatim — reasons, EV, p_t1 intact. Lets TradeJohn catch repeat
+    offenders: signals still reported green by a strategy today but which
+    the joint pipeline (prefilter + TradeJohn) rejected yesterday."""
+    yesterday = _previous_trading_day(run_date)
+    sized = read_handoff(yesterday, 'sized') or {}
+    return sized.get('vetoed') or []
+
+
+def load_yesterdays_overperformance(uri: str, run_date: str) -> list[dict]:
+    """Cross-reference yesterday's structured handoff (for original ev_gbm
+    per signal) against signal_pnl (for realized / unrealized outcomes).
+    Returns signals whose outcome exceeded the model's ev_gbm by a
+    material margin: either closed at target_1 or still-open with
+    unrealized_pnl_pct > ev_gbm × 1.5. Sorted by delta desc, capped at
+    50 to keep the handoff compact."""
+    if not uri:
+        return []
+    yesterday = _previous_trading_day(run_date)
+    y_struct = read_handoff(yesterday, 'structured') or {}
+    ev_lookup = {}
+    for s in (y_struct.get('signals') or []) + (y_struct.get('prefiltered') or []):
+        ev = s.get('ev_gbm')
+        if ev is None:
+            continue
+        ev_lookup[(s.get('ticker'), s.get('strategy_id'))] = (float(ev), s.get('entry'))
+    if not ev_lookup:
+        return []
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT sp.signal_id, sp.strategy_id, sp.pnl_date, sp.close_price,
+                   sp.unrealized_pnl_pct, sp.realized_pnl_pct, sp.days_held,
+                   sp.status, sp.close_reason,
+                   es.ticker, es.direction, es.entry_price
+              FROM signal_pnl sp
+              JOIN execution_signals es ON es.id = sp.signal_id
+             WHERE sp.pnl_date = %s
+            """,
+            (yesterday,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        print(f'[handoff] overperformance query failed: {e}')
+        return []
+    out = []
+    for row in rows:
+        key = (row['ticker'], row['strategy_id'])
+        ev_entry = ev_lookup.get(key)
+        if ev_entry is None:
+            continue
+        ev_gbm, yest_entry = ev_entry
+        realized = float(row['realized_pnl_pct']) if row['realized_pnl_pct'] is not None else None
+        unreal   = float(row['unrealized_pnl_pct']) if row['unrealized_pnl_pct'] is not None else None
+        actual   = realized if realized is not None else unreal
+        if actual is None or ev_gbm is None:
+            continue
+        delta = actual - ev_gbm
+        is_target_hit = row['close_reason'] == 'target_1'
+        is_midflight_overperf = (unreal is not None and ev_gbm > 0 and unreal > ev_gbm * 1.5)
+        if not (is_target_hit or is_midflight_overperf):
+            continue
+        out.append({
+            'ticker':         row['ticker'],
+            'strategy_id':    row['strategy_id'],
+            'direction':      row['direction'],
+            'status':         row['status'],
+            'close_reason':   row['close_reason'],
+            'entry':          _safe(yest_entry),
+            'exit':           _safe(float(row['close_price'])) if row['close_price'] is not None else None,
+            'realized_pct':   _safe(realized),
+            'unrealized_pct': _safe(unreal),
+            'ev_gbm':         _safe(ev_gbm),
+            'delta':          _safe(delta),
+            'days_held':      int(row['days_held'] or 0),
+        })
+    out.sort(key=lambda r: (r.get('delta') or 0), reverse=True)
+    return out[:50]
+
+
 def load_mastermind_rec(uri: str) -> dict | None:
     """Latest strategy_sizing_recommendations (derived from the Saturday
     comprehensive_review memos) — per-strategy sizing / stop / target /
@@ -381,6 +476,9 @@ def build(run_date: str) -> dict:
     portfolio  = load_portfolio_state()
     veto       = load_veto_history(uri)
     mm_rec     = load_mastermind_rec(uri)
+    y_vetoed   = load_yesterdays_vetoed(run_date)
+    y_overperf = load_yesterdays_overperformance(uri, run_date)
+    print(f'[handoff] d-1 context: {len(y_vetoed)} vetoed / {len(y_overperf)} overperformers')
 
     enriched: list[dict] = []
     if signals:
@@ -442,6 +540,8 @@ def build(run_date: str) -> dict:
         'signals':         green,
         'prefiltered':     prefiltered,
         'veto_history_30d':veto,
+        'yesterdays_vetoed':         y_vetoed,
+        'yesterdays_overperformance':y_overperf,
         'mastermind_rec':  mm_rec,
         'stats': {
             'total_signals':       len(signals),

@@ -59,11 +59,11 @@
       "components": [],
       "tools": [],
       "iterationLimit": 15,
-      "timeoutSeconds": 900,
+      "timeoutSeconds": 1500,
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 1.5,
+      "maxBudgetUsd": 2.5,
       "modes": [
         "PM_TASK"
       ],

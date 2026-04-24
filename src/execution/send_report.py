@@ -115,6 +115,36 @@ def _fmt_greenlist(run_date: str, sized: dict) -> str:
     return '\n'.join(lines)
 
 
+def _fmt_overperformance_digest(run_date: str, overperf: list[dict]) -> str:
+    """Analogue of the veto digest — lists yesterday's positions that beat
+    their computed ev_gbm. Sourced from the structured handoff's
+    `yesterdays_overperformance` field (which trade_handoff_builder.py
+    built by cross-referencing signal_pnl with yesterday's handoff EVs)."""
+    if not overperf:
+        return f'📉 **{run_date}** — no overperformers from yesterday to report.'
+    lines = [f'🚀 **Overperformance digest — d-1** ({len(overperf)} beat EV)', '']
+    header = f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Status":<7} {"EV%":>7} {"Actual%":>8} {"Delta%":>7} {"Days":>5}'
+    lines.append('```')
+    lines.append(header)
+    lines.append('-' * len(header))
+    for o in overperf[:25]:
+        actual = o.get('realized_pct') if o.get('realized_pct') is not None else o.get('unrealized_pct')
+        lines.append(
+            f"{(o.get('ticker') or '?'):<8} "
+            f"{(o.get('strategy_id') or '?')[:28]:<28} "
+            f"{(o.get('direction') or '?')[:5]:<5} "
+            f"{(o.get('status') or '?')[:7]:<7} "
+            f"{(o.get('ev_gbm') or 0)*100:>+7.2f} "
+            f"{(actual or 0)*100:>+8.2f} "
+            f"{(o.get('delta') or 0)*100:>+7.2f} "
+            f"{o.get('days_held', 0):>5}"
+        )
+    lines.append('```')
+    if len(overperf) > 25:
+        lines.append(f'_+{len(overperf) - 25} more — see structured handoff_')
+    return '\n'.join(lines)
+
+
 def _fmt_veto_digest(run_date: str, sized: dict) -> str:
     vetoed = sized.get('vetoed') or []
     if not vetoed:
@@ -156,10 +186,24 @@ def main() -> int:
 
     ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized)) if wh_signals else False
     ok2 = _post_webhook(wh_reports, _fmt_veto_digest(run_date, sized)) if wh_reports else False
+
+    # Overperformance digest — read yesterday's overperformers from today's
+    # structured handoff (the handoff builder populated this by
+    # cross-referencing signal_pnl with yesterday's EVs).
+    overperf = []
+    try:
+        structured = read_handoff(run_date, 'structured') or {}
+        overperf = structured.get('yesterdays_overperformance') or []
+    except Exception as e:
+        print(f'[send_report] overperformance load skipped: {e}')
+    ok3 = _post_webhook(wh_reports, _fmt_overperformance_digest(run_date, overperf)) if wh_reports else False
+
     if not ok1:
         print('[send_report] greenlist post skipped/failed')
     if not ok2:
         print('[send_report] veto-digest post skipped/failed')
+    if not ok3:
+        print('[send_report] overperformance-digest post skipped/failed')
     # Non-fatal: pipeline completes even if Discord is throttled. The data
     # is already written to the sized handoff file; operator can re-post.
     return 0

@@ -415,7 +415,7 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         # a cold fire is ~62 min from 10am ET (≈ 11:02 ET completion).
         return (['node', str(js_pipe)], 3600)
     # default: src/execution/<script>.py
-    timeout = 1000 if script == 'trade_agent_llm' else 300
+    timeout = 1620 if script == 'trade_agent_llm' else 300
     argv = ['python3', str(py_exec), '--date', run_date]
     # Orchestrator-wide dry-run flag: when PIPELINE_ALPACA_DRY_RUN=1,
     # alpaca_executor.py is invoked with --dry-run so orders are logged
