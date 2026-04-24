@@ -115,48 +115,108 @@ def _fmt_greenlist(run_date: str, sized: dict) -> str:
     return '\n'.join(lines)
 
 
+# Shared table layout for veto + overperformance digests. Both digests use
+# the same 9-column schema so operators can scan the two side-by-side with
+# identical column positions. Cells that don't apply to a given digest are
+# rendered as an em-dash.
+_DIGEST_HEADER = (
+    f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Classification":<28} '
+    f'{"EV%":>8} {"Actual%":>8} {"Delta%":>8} {"p(T1)%":>7} {"Days":>5}'
+)
+_DIGEST_ROWS_MAX = 25
+
+
+def _fmt_pct(v, sign: bool = True) -> str:
+    if v is None:
+        return f'{"—":>8}'
+    fmt = f'{v*100:>+8.2f}' if sign else f'{v*100:>8.2f}'
+    return fmt
+
+
+def _fmt_int(v) -> str:
+    if v is None or v == '':
+        return f'{"—":>5}'
+    return f'{int(v):>5}'
+
+
+def _fmt_pt1(v) -> str:
+    if v is None:
+        return f'{"—":>7}'
+    return f'{v*100:>7.1f}'
+
+
+def _fmt_row(ticker, strategy, direction, classification, ev, actual, delta, p_t1, days) -> str:
+    return (
+        f'{(ticker or "?"):<8} '
+        f'{(strategy or "?")[:28]:<28} '
+        f'{(direction or "—")[:5]:<5} '
+        f'{(classification or "—")[:28]:<28} '
+        f'{_fmt_pct(ev)} '
+        f'{_fmt_pct(actual)} '
+        f'{_fmt_pct(delta)} '
+        f'{_fmt_pt1(p_t1)} '
+        f'{_fmt_int(days)}'
+    )
+
+
 def _fmt_overperformance_digest(run_date: str, overperf: list[dict]) -> str:
-    """Analogue of the veto digest — lists yesterday's positions that beat
-    their computed ev_gbm. Sourced from the structured handoff's
-    `yesterdays_overperformance` field (which trade_handoff_builder.py
-    built by cross-referencing signal_pnl with yesterday's handoff EVs)."""
+    """Yesterday's positions that beat their computed ev_gbm. Same 9-column
+    schema as the veto digest — columns are in identical positions."""
     if not overperf:
         return f'📉 **{run_date}** — no overperformers from yesterday to report.'
     lines = [f'🚀 **Overperformance digest — d-1** ({len(overperf)} beat EV)', '']
-    header = f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Status":<7} {"EV%":>7} {"Actual%":>8} {"Delta%":>7} {"Days":>5}'
     lines.append('```')
-    lines.append(header)
-    lines.append('-' * len(header))
-    for o in overperf[:25]:
+    lines.append(_DIGEST_HEADER)
+    lines.append('-' * len(_DIGEST_HEADER))
+    for o in overperf[:_DIGEST_ROWS_MAX]:
         actual = o.get('realized_pct') if o.get('realized_pct') is not None else o.get('unrealized_pct')
-        lines.append(
-            f"{(o.get('ticker') or '?'):<8} "
-            f"{(o.get('strategy_id') or '?')[:28]:<28} "
-            f"{(o.get('direction') or '?')[:5]:<5} "
-            f"{(o.get('status') or '?')[:7]:<7} "
-            f"{(o.get('ev_gbm') or 0)*100:>+7.2f} "
-            f"{(actual or 0)*100:>+8.2f} "
-            f"{(o.get('delta') or 0)*100:>+7.2f} "
-            f"{o.get('days_held', 0):>5}"
-        )
+        # classification: "closed/target_1" if closed, else "open"
+        cls = o.get('status') or '—'
+        if o.get('close_reason'):
+            cls = f'{cls}/{o["close_reason"]}'
+        lines.append(_fmt_row(
+            o.get('ticker'), o.get('strategy_id'), o.get('direction'),
+            cls,
+            o.get('ev_gbm'), actual, o.get('delta'),
+            None,                      # p(T1) — not tracked post-entry
+            o.get('days_held'),
+        ))
     lines.append('```')
-    if len(overperf) > 25:
-        lines.append(f'_+{len(overperf) - 25} more — see structured handoff_')
+    if len(overperf) > _DIGEST_ROWS_MAX:
+        lines.append(f'_+{len(overperf) - _DIGEST_ROWS_MAX} more — see structured handoff_')
     return '\n'.join(lines)
 
 
 def _fmt_veto_digest(run_date: str, sized: dict) -> str:
+    """Today's vetoed signals. Same 9-column schema as the overperformance
+    digest — `Classification` holds the veto reason; `Actual%`, `Delta%`,
+    and `Days` are always — since vetoes never become positions."""
     vetoed = sized.get('vetoed') or []
     if not vetoed:
         return f'🔕 **{run_date}** — no vetoed signals.'
-    by_reason: dict[str, list[dict]] = {}
-    for v in vetoed:
-        by_reason.setdefault(v.get('reason') or 'unknown', []).append(v)
+    # Sort by abs(ev) desc — biggest-EV losers first (including prefilter
+    # drops with the most-negative EV so operators see the worst at the top).
+    ordered = sorted(
+        vetoed,
+        key=lambda v: -abs(float(v.get('ev') or 0)),
+    )
     lines = [f'🟥 **Veto digest — {run_date}** ({len(vetoed)} vetoed)', '']
-    for reason, items in sorted(by_reason.items(), key=lambda kv: -len(kv[1])):
-        sample = ', '.join(f"{(i.get('ticker') or '?')}" for i in items[:10])
-        more = f' … +{len(items) - 10} more' if len(items) > 10 else ''
-        lines.append(f'• `{reason}` — {len(items)}: {sample}{more}')
+    lines.append('```')
+    lines.append(_DIGEST_HEADER)
+    lines.append('-' * len(_DIGEST_HEADER))
+    for v in ordered[:_DIGEST_ROWS_MAX]:
+        lines.append(_fmt_row(
+            v.get('ticker'), v.get('strategy_id'), v.get('direction'),
+            v.get('reason'),
+            v.get('ev'),
+            None,                      # Actual% — veto never entered
+            None,                      # Delta% — no realized outcome
+            v.get('p_t1'),
+            None,                      # Days — veto never held
+        ))
+    lines.append('```')
+    if len(vetoed) > _DIGEST_ROWS_MAX:
+        lines.append(f'_+{len(vetoed) - _DIGEST_ROWS_MAX} more — see sized handoff_')
     return '\n'.join(lines)
 
 
