@@ -1720,45 +1720,71 @@ function _candidateRankFor(row) {
 }
 
 // ── Bar chart builder (daily P&L) ──────────────────────────────────────────
-// Positive bars green, negative red, flat (|v| < 0.005) grey. Neat styling
-// matched to the existing line-chart axis / tooltip treatment.
+// Positive bars green, negative red, flat (|v| < 0.005%) grey. Style mirrors
+// the line chart: same accent hues, translucent fills, 1px top-edge border
+// for definition. Designed to stay readable at 90 bars:
+//   - barPercentage + categoryPercentage = 1.0  → bars touch (no gaps)
+//   - 0.55 alpha fill, 0.85 alpha border         → lifts a faint "filled-area"
+//     feel like the line chart's underlay
+//   - borderRadius: 0, borderWidth: 1 top-only  → clean rectangles at ~3px
+//   - hover = full-opacity same-hue bar          → pops on inspection
+//   - hover interaction mode 'nearest'           → precise single-bar lookup
 function _buildBarChart(labels, values, yFmt, tooltipFmt) {
   const wrap = document.getElementById('pnlChart');
   if (!wrap) return;
   if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
-  const COL_POS  = '#3fb950';
-  const COL_NEG  = '#f85149';
-  const COL_FLAT = '#6e7681';
-  const barCol = values.map(v => Math.abs(v) < 0.005 ? COL_FLAT : (v >= 0 ? COL_POS : COL_NEG));
+  const hues = {
+    pos:  { r:63,  g:185, b:80  },
+    neg:  { r:248, g:81,  b:73  },
+    flat: { r:110, g:118, b:129 },
+  };
+  const rgba = (h, a) => \`rgba(\${h.r},\${h.g},\${h.b},\${a})\`;
+  const classify = v => Math.abs(v) < 0.005 ? 'flat' : (v >= 0 ? 'pos' : 'neg');
+  const fillCol   = values.map(v => rgba(hues[classify(v)], 0.55));
+  const borderCol = values.map(v => rgba(hues[classify(v)], 0.85));
+  const hoverCol  = values.map(v => rgba(hues[classify(v)], 0.95));
   pnlChart = new Chart(wrap.getContext('2d'), {
     type: 'bar',
     data: { labels, datasets: [{
-      data: values,
-      backgroundColor: barCol,
-      borderColor:     barCol,
-      borderWidth:     0,
-      borderRadius:    2,
-      barPercentage:   0.85,
-      categoryPercentage: 0.9,
+      data:                 values,
+      backgroundColor:      fillCol,
+      borderColor:          borderCol,
+      hoverBackgroundColor: hoverCol,
+      hoverBorderColor:     borderCol,
+      borderWidth:          { top: 1, right: 0, bottom: 0, left: 0 },
+      borderRadius:         0,
+      borderSkipped:        false,
+      barPercentage:        1.0,
+      categoryPercentage:   1.0,
     }]},
     options: {
       responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      plugins: { legend: { display: false },
-        tooltip: { backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
+      animation: { duration: 250 },
+      interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
           titleColor:'#8b949e', bodyColor:'#e6edf3',
-          callbacks: { label: ctx => tooltipFmt(ctx.parsed.y) }
-        }
+          displayColors: false, padding: 8,
+          callbacks: { label: ctx => tooltipFmt(ctx.parsed.y) },
+        },
       },
       scales: {
-        x: { ticks: { color:'#484f58', maxTicksLimit:8, font:{size:10}, maxRotation:0, autoSkip:true },
-             grid: { display:false } },
-        y: { position:'right', ticks: { color:'#484f58', font:{size:10}, callback: yFmt },
-             grid: { color:'#21262d' },
-             beginAtZero: true,
-           },
-      }
-    }
+        x: {
+          ticks: { color:'#484f58', maxTicksLimit:8, font:{size:10}, maxRotation:0, autoSkip:true },
+          grid:  { display:false },
+          border:{ color:'#30363d' },
+        },
+        y: {
+          position:'right',
+          ticks: { color:'#484f58', font:{size:10}, callback: yFmt },
+          grid:  { color:'#21262d', drawTicks:false },
+          border:{ display:false },
+          beginAtZero: true,
+        },
+      },
+    },
   });
 }
 function fmtChg(chg) {
