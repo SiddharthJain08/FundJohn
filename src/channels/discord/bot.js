@@ -713,6 +713,42 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         break;
       }
 
+      case 'sigma-gate':
+      case 'sigma': {
+        // `!john /sigma-gate`           → show current value + row-count impact
+        // `!john /sigma-gate 2.0`       → set threshold, persist to pipeline_config
+        const store = require('../../pipeline/store');
+        const raw = args[0];
+        try {
+          if (raw === undefined || raw === '') {
+            const cur = await store.getConfig('sigma_gate');
+            const val = parseFloat(cur) || 2.0;
+            await notify(
+              `📏 **Outcomes digest σ-gate** = **${val.toFixed(2)}**\n` +
+              `Only d-1 positions with \`|σΔ| ≥ ${val.toFixed(2)}\` enter the outcomes ` +
+              `digest + TradeJohn context. Lower = more rows; higher = fewer, more extreme.\n` +
+              `Adjust with \`!john /sigma-gate <value>\` (e.g. \`1.5\`, \`2.5\`, \`3.0\`).`
+            );
+            break;
+          }
+          const n = parseFloat(raw);
+          if (!Number.isFinite(n) || n <= 0 || n > 10) {
+            await notify('❌ `/sigma-gate <value>` — value must be a positive number ≤ 10 (e.g. `2.0`).');
+            break;
+          }
+          const prev = parseFloat(await store.getConfig('sigma_gate')) || 2.0;
+          await store.setConfig('sigma_gate', String(n));
+          await notify(
+            `✅ **σ-gate updated**: ${prev.toFixed(2)} → **${n.toFixed(2)}**.\n` +
+            `Takes effect on the next cycle's handoff build (next 10am ET fire or any ` +
+            `manual \`python3 src/execution/trade_handoff_builder.py\` run).`
+          );
+        } catch (err) {
+          await notify(`⚠️ sigma-gate command failed: \`${err.message}\``);
+        }
+        break;
+      }
+
       case 'git': {
         const sub = args[0]?.toLowerCase();
         if (sub !== 'sync') { await notify('Usage: `!john /git sync`'); break; }

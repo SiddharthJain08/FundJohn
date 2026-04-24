@@ -185,6 +185,7 @@ ${ch('agent-chat')} — Freeform chat with BotJohn as PM agent (\`!john <anythin
 \`!john /fill [AAPL NVDA …]\` · \`!john /fill --force\` · \`!john /fetch AAPL\`
 \`!john /data {description}\`
 \`!john /pipeline status\` · \`!john /pipeline pause\` · \`!john /pipeline resume\` · \`!john /pipeline cycles [n]\`
+\`!john /sigma-gate [value]\` — tune the d-1 outcomes-digest σ threshold (default 2.0)
 
 **🤖 Agents** · \`!john /agents\`
 **🔌 System** · \`!john /shutdown confirm\` · \`!john /shutdown server confirm\`

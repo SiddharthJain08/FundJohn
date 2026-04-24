@@ -158,16 +158,10 @@ _DIGEST_HEADER = (
 _DIGEST_ROWS_MAX = 25
 
 
-def _fmt_pct(v) -> str:
+def _fmt_pct(v, width: int = 7) -> str:
     if v is None:
-        return f'{"—":>7}'
-    return f'{v*100:>+7.2f}'
-
-
-def _fmt_pct8(v) -> str:
-    if v is None:
-        return f'{"—":>8}'
-    return f'{v*100:>+8.2f}'
+        return f'{"—":>{width}}'
+    return f'{v*100:>+{width}.2f}'
 
 
 def _fmt_sigma(v) -> str:
@@ -192,60 +186,97 @@ def _fmt_outlier_row(r: dict) -> str:
         f'{(r.get("strategy_id") or "?")[:28]:<28} '
         f'{(r.get("direction") or "—")[:5]:<5} '
         f'{cls[:18]:<18} '
-        f'{_fmt_pct(r.get("ev_gbm"))} '
-        f'{_fmt_pct8(actual)} '
-        f'{_fmt_pct(r.get("delta"))} '
+        f'{_fmt_pct(r.get("ev_gbm"), 7)} '
+        f'{_fmt_pct(actual, 8)} '
+        f'{_fmt_pct(r.get("delta"), 7)} '
         f'{_fmt_sigma(r.get("sigma_delta"))} '
         f'{_fmt_int(r.get("days_held"))}'
     )
 
 
-def _fmt_outlier_section(rows: list[dict], kind: str) -> list[str]:
+def _sigma_distribution(rows: list[dict]) -> str:
+    """Bin rows by |σΔ| magnitude band for the summary block — gives
+    operators a quick read of how extreme the outliers are without
+    scanning the full attached table."""
+    bands = [(2.0, 3.0), (3.0, 5.0), (5.0, 10.0), (10.0, float('inf'))]
+    counts = [0, 0, 0, 0]
+    for r in rows:
+        s = abs(float(r.get('sigma_delta') or 0))
+        for i, (lo, hi) in enumerate(bands):
+            if lo <= s < hi:
+                counts[i] += 1
+                break
+    labels = ['2–3σ', '3–5σ', '5–10σ', '≥10σ']
+    return ' · '.join(f'{l}: **{c}**' for l, c in zip(labels, counts) if c > 0) or '_none_'
+
+
+def _fmt_outlier_section(rows: list[dict], kind: str, gate: float) -> list[str]:
     """Render one symmetric section (table) of the combined outcomes
     digest. Kind selects emoji + heading; table body is identical shape
     either way."""
     if kind == 'over':
-        heading = f'🚀 Overperformance — {len(rows)} position(s) beat EV by ≥1σ'
+        heading = f'🚀 Overperformance — {len(rows)} position(s) beat EV by ≥{gate:.1f}σ'
     else:
-        heading = f'🟥 Underperformance — {len(rows)} position(s) missed EV by ≥1σ'
+        heading = f'🟥 Underperformance — {len(rows)} position(s) missed EV by ≥{gate:.1f}σ'
     if not rows:
-        return [heading, '(no positions cleared the 1σ gate)']
+        return [heading, f'(no positions cleared the {gate:.1f}σ gate)']
     return (
         [heading, _DIGEST_HEADER, '-' * len(_DIGEST_HEADER)]
         + [_fmt_outlier_row(r) for r in rows]
     )
 
 
-def _fmt_outcomes_digest(run_date: str, overperf: list[dict], underperf: list[dict]) -> tuple[str, str]:
-    """Single-message d-1 outcomes digest. Returns (summary, file_text):
-    summary is a short Discord-embeddable recap with counts + top-5 from
-    each bucket; file_text is the full stacked-tables body delivered as
-    an attachment so operators get every row that cleared the 1σ gate
-    without fragmenting the feed into dozens of 1900-char messages."""
-    summary_lines = [f'🔭 **Daily outcomes — d-1 ({run_date})**', '']
+def _fmt_outcomes_digest(run_date: str,
+                          overperf: list[dict],
+                          underperf: list[dict],
+                          gate: float = 2.0) -> tuple[str, str]:
+    """Single-message d-1 outcomes digest. Returns (summary, file_text).
+
+    Summary contains, for each bucket: count, σΔ-magnitude distribution,
+    and top-5 rows with ticker/strategy/σΔ — so operators see BOTH
+    buckets at a glance and know the spread without opening the file.
+    Overperformance is listed first (the positive scenario) so when
+    Discord renders a collapsed embed only the over section is cut off
+    last — the operator always sees the under section too.
+
+    File attachment contains both full tables (over then under), same
+    9-column schema, every row that cleared the σ gate included."""
     if not overperf and not underperf:
-        summary_lines.append('_No positions cleared the 1σ gate in either direction._')
-        return ('\n'.join(summary_lines), '')
+        return (f'🟢 **Daily outcomes — d-1 ({run_date})** · '
+                f'no positions cleared the {gate:.1f}σ gate either way.', '')
 
     def _top5(rows: list[dict]) -> str:
         if not rows:
             return '_none_'
         return ', '.join(
-            f"{r.get('ticker')}/{(r.get('strategy_id') or '')[:18]} ({(r.get('sigma_delta') or 0):+.2f}σ)"
+            f"`{r.get('ticker')}`/`{(r.get('strategy_id') or '')[:20]}` "
+            f"**{(r.get('sigma_delta') or 0):+.2f}σ**"
             for r in rows[:5]
         )
 
-    summary_lines.append(f'🟥 **Underperformance** — {len(underperf)} · top 5: {_top5(underperf)}')
-    summary_lines.append(f'🚀 **Overperformance**  — {len(overperf)} · top 5: {_top5(overperf)}')
-    summary_lines.append('')
-    summary_lines.append('_Full tables attached._')
+    summary_lines = [
+        f'🔭 **Daily outcomes — d-1 ({run_date})** · gate `|σΔ| ≥ {gate:.2f}`',
+        '',
+        f'🚀 **Overperformance** — **{len(overperf)}** positions · {_sigma_distribution(overperf)}',
+        f'   top 5: {_top5(overperf)}',
+        '',
+        f'🟥 **Underperformance** — **{len(underperf)}** positions · {_sigma_distribution(underperf)}',
+        f'   top 5: {_top5(underperf)}',
+        '',
+        f'_Full tables attached (every row ≥ {gate:.1f}σ)._',
+    ]
 
-    # File body: both full tables, stacked. Plain monospaced text so
-    # Discord's attachment preview renders it inline.
-    file_lines = [f'Daily outcomes — d-1 ({run_date})', '=' * 60, '']
-    file_lines += _fmt_outlier_section(underperf, 'under')
+    # File body: overperformance first (winners on top), then
+    # underperformance. Both sections use the same 9-column table.
+    file_lines = [
+        f'Daily outcomes — d-1 ({run_date})',
+        f'Gate: |σΔ| ≥ {gate:.2f}',
+        '=' * 60,
+        '',
+    ]
+    file_lines += _fmt_outlier_section(overperf, 'over', gate)
     file_lines += ['', '']
-    file_lines += _fmt_outlier_section(overperf, 'over')
+    file_lines += _fmt_outlier_section(underperf, 'under', gate)
 
     return ('\n'.join(summary_lines), '\n'.join(file_lines))
 
@@ -268,18 +299,21 @@ def main() -> int:
           f'trade-reports={"ok" if wh_reports else "missing"}')
 
     # Yesterday's performance outliers — same source (signal_pnl × d-1
-    # structured handoff), symmetric 1σ gate, rendered with identical
-    # table layouts so operators can scan the two messages side-by-side.
+    # structured handoff), symmetric σ gate, rendered with identical
+    # table layouts. Gate is read from the structured handoff where the
+    # handoff builder stamped it (pipeline_config.sigma_gate, default 2.0).
     overperf: list = []
     underperf: list = []
+    gate = 2.0
     try:
         structured = read_handoff(run_date, 'structured') or {}
         overperf  = structured.get('yesterdays_overperformance')  or []
         underperf = structured.get('yesterdays_underperformance') or []
+        gate      = float(structured.get('sigma_gate') or 2.0)
     except Exception as e:
         print(f'[send_report] outlier load skipped: {e}')
 
-    summary, file_text = _fmt_outcomes_digest(run_date, overperf, underperf)
+    summary, file_text = _fmt_outcomes_digest(run_date, overperf, underperf, gate)
 
     if not wh_signals and not wh_reports:
         print('[send_report] no webhooks available — printing to stdout only')

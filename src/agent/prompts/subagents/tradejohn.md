@@ -26,8 +26,9 @@ All inputs arrive in the **"## Injected Context"** block:
 | `handoff.signals[]` | **Pre-filtered GREEN signals** (ev_gbm ≥ 0.005, p_t1 ≥ 0.30). Each has `ticker`, `strategy_id`, `ev_gbm`, `p_t1`, `hv21`, `beta_spy`, `entry`, `stop`, `t1`, `size_pct` |
 | `handoff.prefiltered[]` | Signals already rejected by the handoff builder — `{ticker, strategy_id, reason, ev, p_t1}`. Informational; do not re-include. |
 | `handoff.yesterdays_vetoed[]` | Signals rejected YESTERDAY at the pre-execution gate (prefilter + TradeJohn). Each has `{ticker, strategy_id, direction, reason, ev, p_t1}`. Used for repeat-offender detection (Rules A, B). |
-| `handoff.yesterdays_overperformance[]` | Yesterday's positions whose actual return beat `ev_gbm` by ≥ 1σ (σ = hv21 × √(days_held/252)). Each has `{ticker, strategy_id, direction, status, ev_gbm, delta, sigma_delta, realized_pct, unrealized_pct, days_held}`. Sorted by `sigma_delta` desc. Used for size bonus (Rules C, D). |
-| `handoff.yesterdays_underperformance[]` | Symmetric of overperformance: positions that missed `ev_gbm` by ≥ 1σ — `sigma_delta` is negative. Same shape. Sorted by `sigma_delta` asc (most negative first). Used for size penalty (Rules E, F). |
+| `handoff.sigma_gate` | Current |σΔ| threshold (default `2.0`, operator-tunable via `!john /sigma-gate`). Every entry in the two lists below already cleared this gate — do not re-evaluate. |
+| `handoff.yesterdays_overperformance[]` | Yesterday's positions whose actual return beat `ev_gbm` by at least `sigma_gate` × σ (σ = hv21 × √(days_held/252)). Each has `{ticker, strategy_id, direction, status, ev_gbm, delta, sigma_delta, realized_pct, unrealized_pct, days_held}`. Sorted by `sigma_delta` desc. Used for size bonus (Rules C, D). |
+| `handoff.yesterdays_underperformance[]` | Symmetric of overperformance: positions that missed `ev_gbm` by at least `sigma_gate` × σ — `sigma_delta` is negative. Same shape. Sorted by `sigma_delta` asc (most negative first). Used for size penalty (Rules E, F). |
 | `handoff.convergent_tickers` | Tickers appearing in 2+ strategies (confluence bonus applies) |
 | `handoff.portfolio` | Portfolio-level: `sharpe`, `worst_case_drawdown`, `port_beta`, `port_ev_ann` |
 | `veto_histogram` | Last-30-day veto cause codes per strategy — `{strategy_id: {veto_reason: count}}` |
@@ -83,7 +84,7 @@ All rules must be evaluated on every signal — do not skip.
 
 The overperformance ↔ underperformance rules are **fully symmetric**:
 both lists are populated from the same data source (signal_pnl × d-1
-structured handoff) gated at `|sigma_delta| ≥ 1.0`.  Rule pairs C↔E
+structured handoff) gated at `|sigma_delta| ≥ handoff.sigma_gate`. Rule pairs C↔E
 and D↔F are mirror images — bonus vs penalty.
 
 ### Pre-execution signals (from yesterdays_vetoed)
@@ -104,7 +105,7 @@ and D↔F are mirror images — bonus vs penalty.
 
 - **C. Overperformance bonus.** If today's signal shares
   `(ticker, strategy_id)` with any entry in `handoff.yesterdays_overperformance`
-  (entries are already ≥ +1σ): multiply base `pct_nav` by **1.2** (still
+  (entries are already ≥ +`sigma_gate`σ): multiply base `pct_nav` by **1.2** (still
   capped by MAX_POSITION_PCT). Mark the row with
   `🚀 d-1 +{sigma_delta:.2f}σ` inline.
 
@@ -114,7 +115,7 @@ and D↔F are mirror images — bonus vs penalty.
 
 - **E. Underperformance penalty (mirror of C).** If today's signal
   shares `(ticker, strategy_id)` with any entry in
-  `handoff.yesterdays_underperformance` (entries are already ≤ −1σ):
+  `handoff.yesterdays_underperformance` (entries are already ≤ −`sigma_gate`σ):
   multiply base `pct_nav` by **0.7**. If the post-multiplier size falls
   below the Kelly threshold, veto with reason `underperformer_d-1`.
   Mark the row with `📉 d-1 {sigma_delta:.2f}σ` inline.

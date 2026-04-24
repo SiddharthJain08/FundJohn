@@ -186,6 +186,28 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
         return {}
 
 
+def _get_sigma_gate(uri: str) -> float:
+    """Read pipeline_config.sigma_gate → float. Falls back to 2.0 when the
+    row is absent or the pipeline_config query fails. Operators set this
+    via the `!john /sigma-gate <value>` Discord command (see
+    src/channels/discord/bot.js)."""
+    DEFAULT = 2.0
+    if not uri:
+        return DEFAULT
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM pipeline_config WHERE key = 'sigma_gate'")
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            v = float(row[0])
+            return v if v > 0 else DEFAULT
+    except Exception as e:
+        print(f'[handoff] sigma_gate config read failed ({e}); using default {DEFAULT}')
+    return DEFAULT
+
+
 def _previous_trading_day(run_date: str) -> str:
     """Previous weekday in YYYY-MM-DD form. Skips Sat/Sun but not market
     holidays — missing files on holiday-shifted runs simply return empty
@@ -265,7 +287,11 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
 
     overperformers: list[dict] = []
     underperformers: list[dict] = []
-    SIGMA_GATE = 1.0
+    # Gate is configurable via pipeline_config.sigma_gate — operators can
+    # adjust with `!john /sigma-gate <value>` in Discord. Default 2.0: the
+    # 1-sigma default produced ~557 rows/day which overwhelmed the digest
+    # preview; 2-sigma is materially more selective (~177 rows/day).
+    SIGMA_GATE = _get_sigma_gate(uri)
     SIGMA_FLOOR = 0.005   # protect against near-zero hv → huge sigma_delta
 
     for row in rows:
@@ -515,9 +541,11 @@ def build(run_date: str) -> dict:
     veto       = load_veto_history(uri)
     mm_rec     = load_mastermind_rec(uri)
     y_vetoed   = load_yesterdays_vetoed(run_date)
+    sigma_gate = _get_sigma_gate(uri)
     y_overperf, y_underperf = load_yesterdays_performance_outliers(uri, run_date)
     print(f'[handoff] d-1 context: {len(y_vetoed)} vetoed / '
-          f'{len(y_overperf)} overperformers / {len(y_underperf)} underperformers (|σΔ|≥1)')
+          f'{len(y_overperf)} overperformers / {len(y_underperf)} underperformers '
+          f'(|σΔ|≥{sigma_gate})')
 
     enriched: list[dict] = []
     if signals:
@@ -582,6 +610,7 @@ def build(run_date: str) -> dict:
         'yesterdays_vetoed':          y_vetoed,
         'yesterdays_overperformance': y_overperf,
         'yesterdays_underperformance':y_underperf,
+        'sigma_gate':      sigma_gate,
         'mastermind_rec':  mm_rec,
         'stats': {
             'total_signals':       len(signals),
