@@ -277,9 +277,10 @@ app.get('/api/portfolio/summary', async (req, res) => {
       dbQuery(`
         SELECT COUNT(*) AS closed_count,
                COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins,
-               ROUND(AVG(realized_pnl_pct)::numeric, 2) AS avg_pnl,
-               ROUND(MAX(realized_pnl_pct)::numeric, 2) AS best,
-               ROUND(MIN(realized_pnl_pct)::numeric, 2) AS worst
+               ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
+               ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
+               ROUND(MIN(realized_pnl_pct)::numeric, 4) AS worst,
+               ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
         FROM signal_pnl WHERE status = 'closed'
       `),
     ]);
@@ -291,9 +292,10 @@ app.get('/api/portfolio/summary', async (req, res) => {
       open_count:   parseInt(open.open_count) || 0,
       closed_count: closedCount,
       win_rate:     closedCount > 0 ? Math.round(wins / closedCount * 100) : null,
-      avg_realized: closed.avg_pnl,
-      best_trade:   closed.best,
-      worst_trade:  closed.worst,
+      avg_realized:   closed.avg_pnl,
+      best_trade:     closed.best,
+      worst_trade:    closed.worst,
+      avg_days_held:  closed.avg_days_held,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1324,7 +1326,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
     <div class="pf-stat-card"><div class="pf-stat-label">Open Positions</div><div class="pf-stat-value" id="pf-open">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Closed Trades</div><div class="pf-stat-value" id="pf-closed">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Win Rate</div><div class="pf-stat-value" id="pf-winrate">—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
-    <div class="pf-stat-card"><div class="pf-stat-label">Avg Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label" title="Average realized P&L per closed trade, annualized over its average holding period: (1+r)^(252/d) - 1">Avg Annualized Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
   </div>
   <div class="pf-chart-wrap">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -1617,6 +1619,21 @@ function pnlCls(n, posCls='pf-pnl-pos', negCls='pf-pnl-neg', flatCls='pf-pnl-fla
   if (n == null || isNaN(n)) return '';
   if (Math.abs(n) < 0.005) return flatCls;
   return n > 0 ? posCls : negCls;
+}
+
+// Compound-annualize a per-trade return over its average holding window.
+// r = fractional return (0.05 = 5%), days = avg trading-days held.
+// Returns the annualized return as a percent (e.g. 42.5), or null when
+// inputs are missing / non-positive. Capped at ±500% so short-hold
+// outliers don't blow out the display.
+function _annualizePct(r, days) {
+  if (r == null || isNaN(r)) return null;
+  if (days == null || isNaN(days) || days <= 0) return null;
+  const exp = 252 / days;
+  const aar = (r >= -1) ? (Math.pow(1 + r, exp) - 1) : -1;
+  const pct = aar * 100;
+  if (!isFinite(pct)) return null;
+  return Math.max(-500, Math.min(500, pct));
 }
 
 // ── Sortable tables (shared) ───────────────────────────────────────────────
@@ -3160,22 +3177,31 @@ function renderAccountRow(a) {
 }
 
 function renderPortfolioSummary(s) {
-  const pnl = s.avg_realized != null ? parseFloat(s.avg_realized) * 100 : null;
+  const avgR    = s.avg_realized  != null ? parseFloat(s.avg_realized)  : null; // fraction
+  const avgDays = s.avg_days_held != null ? parseFloat(s.avg_days_held) : null;
+  const aarPct  = _annualizePct(avgR, avgDays); // display %, null when unknown
   const wr  = s.win_rate != null ? s.win_rate + '%' : '—';
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
   document.getElementById('pf-winrate').textContent = wr;
   document.getElementById('pf-winrate-sub').textContent = s.closed_count
     ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
-  if (pnl != null) {
+  if (aarPct != null) {
     const el = document.getElementById('pf-avgpnl');
-    el.textContent = (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%';
-    el.className = 'pf-stat-value ' + pnlCls(pnl, 'positive', 'negative', 'neutral');
-    const best = s.best_trade != null ? parseFloat(s.best_trade) * 100 : null;
-    const worst = s.worst_trade != null ? parseFloat(s.worst_trade) * 100 : null;
+    el.textContent = (aarPct > 0 ? '+' : '') + aarPct.toFixed(2) + '%';
+    el.className = 'pf-stat-value ' + pnlCls(aarPct, 'positive', 'negative', 'neutral');
+    // Sub-line keeps the per-trade best/worst (un-annualized, raw returns)
+    // + the per-trade average + hold days so users can sanity-check the AAR.
+    const best   = s.best_trade   != null ? parseFloat(s.best_trade)  * 100 : null;
+    const worst  = s.worst_trade  != null ? parseFloat(s.worst_trade) * 100 : null;
+    const rawAvg = avgR != null ? avgR * 100 : null;
+    const rawTxt = rawAvg != null ? ((rawAvg > 0 ? '+' : '') + rawAvg.toFixed(2) + '%') : '—';
+    const bestTxt  = best  != null ? (best  > 0 ? '+' : '') + best.toFixed(2) + '%' : '—';
+    const worstTxt = worst != null ? worst.toFixed(2) + '%' : '—';
+    const daysTxt  = avgDays != null ? ' over ' + avgDays.toFixed(1) + 'd avg hold' : '';
     document.getElementById('pf-pnl-sub').textContent =
-      'Best: ' + (best != null ? (best > 0 ? '+' : '') + best.toFixed(2) + '%' : '—') +
-      '  Worst: ' + (worst != null ? worst.toFixed(2) + '%' : '—');
+      'Per-trade avg ' + rawTxt + daysTxt +
+      '  ·  Best: ' + bestTxt + '  Worst: ' + worstTxt;
   } else {
     document.getElementById('pf-avgpnl').textContent = '—';
     document.getElementById('pf-pnl-sub').textContent = 'No closed trades';
@@ -3417,10 +3443,18 @@ function _renderActiveStack(rows) {
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
-  const enriched = rows.map(r => Object.assign({}, r, {
-    d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
-    _active_rank: _activeRankFor(r),
-  }));
+  const enriched = rows.map(r => {
+    const avgR    = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
+    const avgDays = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
+    return Object.assign({}, r, {
+      d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+      _active_rank: _activeRankFor(r),
+      // Compound-annualized avg realized return per strategy, for the
+      // AAR % column. Null when the strategy has no closed trades yet
+      // or the avg holding window is undefined.
+      _aar_pct: _annualizePct(avgR, avgDays),
+    });
+  });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
   let sorted;
   const s = _sortState['st-active-wrap'];
@@ -3443,7 +3477,7 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
       <th class="num" data-sort-key="win_rate" data-sort-type="num">Win %</th>
-      <th class="num" data-sort-key="avg_realized_pct" data-sort-type="num">Avg Return</th>
+      <th class="num" data-sort-key="_aar_pct" data-sort-type="num" title="Avg realized return per trade, annualized over the strategy's average holding period: (1+r)^(252/d) - 1">AAR&nbsp;%</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
@@ -3454,7 +3488,7 @@ function _renderActiveStack(rows) {
       const title = sub === 'waiting'
         ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
         : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
-      const avgR = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) * 100 : null;
+      const aar = r._aar_pct;  // already annualized, already in % units
       const o = r.d1_overperf || 0, u = r.d1_underperf || 0, x = r.d1_rejected || 0;
       const ourEmpty = o === 0 && u === 0 && x === 0;
       const ourCell = ourEmpty
@@ -3467,7 +3501,7 @@ function _renderActiveStack(rows) {
         <td class="num">\${r.open_count || 0}</td>
         <td class="num">\${r.closed_count || 0}</td>
         <td class="num">\${_fmtRate(r.win_rate)}</td>
-        <td class="num \${pnlCls(avgR)}">\${_fmtPct(r.avg_realized_pct)}</td>
+        <td class="num \${pnlCls(aar)}" title="Per-trade avg \${_fmtPct(r.avg_realized_pct)} over \${r.avg_days_held != null ? (parseFloat(r.avg_days_held).toFixed(1) + 'd') : '—'} avg hold">\${aar != null ? ((aar >= 0 ? '+' : '') + aar.toFixed(2) + '%') : '—'}</td>
         <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
