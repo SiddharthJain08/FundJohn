@@ -416,7 +416,14 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         return (['node', str(js_pipe)], 3600)
     # default: src/execution/<script>.py
     timeout = 1000 if script == 'trade_agent_llm' else 300
-    return (['python3', str(py_exec), '--date', run_date], timeout)
+    argv = ['python3', str(py_exec), '--date', run_date]
+    # Orchestrator-wide dry-run flag: when PIPELINE_ALPACA_DRY_RUN=1,
+    # alpaca_executor.py is invoked with --dry-run so orders are logged
+    # but not submitted. Every other step runs normally (useful for
+    # smoke-testing the end-to-end chain without moving the paper book).
+    if script == 'alpaca_executor' and os.environ.get('PIPELINE_ALPACA_DRY_RUN') == '1':
+        argv.append('--dry-run')
+    return (argv, timeout)
 
 
 def run_step(script, run_date, env):

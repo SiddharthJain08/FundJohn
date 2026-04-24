@@ -60,9 +60,9 @@ async function main() {
     const text = await buildDigest(new Date());
     console.log('[health] digest built:', text.length, 'chars');
 
-    const url = await getWebhook('databot', 'pipeline-feed');
+    const url = await getWebhook('botjohn', 'botjohn-log');
     if (!url) {
-      console.warn('[health] no databot:pipeline-feed webhook in agent_registry — printing to stdout only');
+      console.warn('[health] no botjohn:botjohn-log webhook in agent_registry — printing to stdout only');
       console.log(text);
       process.exit(0);
     }
@@ -72,7 +72,7 @@ async function main() {
       console.warn(`[health] webhook post failed: ${r.status} ${r.body.slice(0, 200)}`);
       process.exit(1);
     }
-    console.log('[health] posted to #pipeline-feed');
+    console.log('[health] posted to #botjohn-log');
     process.exit(0);
   } catch (err) {
     console.error('[health] error:', err && err.stack || err);
