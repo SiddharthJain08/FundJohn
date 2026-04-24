@@ -38,6 +38,22 @@ from execution.handoff import write_handoff, read_handoff  # noqa: E402
 TRADING_DAYS_PER_YEAR = 252
 RISK_FREE_DAILY       = 0.05 / TRADING_DAYS_PER_YEAR
 
+# Pre-filter: only signals clearing these gates are sent to TradeJohn.
+# Anything that fails here gets dropped to `prefiltered` with the reason —
+# those bubble into send_report.py's veto digest as a separate reason
+# bucket. Goal: keep TradeJohn's context focused on signals with real
+# positive-Kelly potential so it can spend its token budget on sizing
+# nuance instead of re-rejecting the same negative-EV signals every day.
+MIN_EV_GBM   = 0.005   # 0.5% expected value per trade — anything below
+                       # is below the friction+slippage floor for live
+                       # execution and never survives TradeJohn's gate
+                       # anyway. Empirically 99% of 04-23 vetoes were
+                       # below this line.
+MIN_P_T1     = 0.30    # target must be at least somewhat reachable;
+                       # strategies that report p_t1 < 30% are almost
+                       # always below the Kelly-viable boundary
+                       # (R/(R+1) ≈ 0.4 for R=1.5).
+
 # Per-strategy expected holding-period lookup. Keep in sync with the old
 # research_report; defaults cover any strategy not listed.
 _HP_OPTIONS = {'min': 1, 'target': 5, 'max': 21}
@@ -386,17 +402,52 @@ def build(run_date: str) -> dict:
             except Exception as e:
                 print(f'[handoff] {sig.get("ticker")}/{sig.get("strategy_id")}: {e}')
 
+    # Pre-filter: split enriched into green-for-TradeJohn vs prefiltered.
+    # The prefiltered list flows through to #trade-reports via send_report
+    # so the operator still sees what got dropped and why.
+    green: list[dict] = []
+    prefiltered: list[dict] = []
+    for f in enriched:
+        ev = f.get('ev_gbm')
+        p  = f.get('p_t1')
+        if ev is None or ev < MIN_EV_GBM:
+            prefiltered.append({
+                'ticker':      f.get('ticker'),
+                'strategy_id': f.get('strategy_id'),
+                'direction':   f.get('direction'),
+                'reason':      'prefilter_negative_ev' if (ev is not None and ev < 0) else 'prefilter_low_ev',
+                'ev':          ev,
+                'p_t1':        p,
+            })
+            continue
+        if p is None or p < MIN_P_T1:
+            prefiltered.append({
+                'ticker':      f.get('ticker'),
+                'strategy_id': f.get('strategy_id'),
+                'direction':   f.get('direction'),
+                'reason':      'prefilter_low_pt1',
+                'ev':          ev,
+                'p_t1':        p,
+            })
+            continue
+        green.append(f)
+    print(f'[handoff] prefilter: {len(green)} green / {len(prefiltered)} filtered '
+          f'(min_ev={MIN_EV_GBM}, min_p_t1={MIN_P_T1})')
+
     payload = {
         'cycle_date':      run_date,
         'generated_at':    datetime.now(timezone.utc).isoformat(),
         'regime':          regime,
         'portfolio':       portfolio,
-        'signals':         enriched,
+        'signals':         green,
+        'prefiltered':     prefiltered,
         'veto_history_30d':veto,
         'mastermind_rec':  mm_rec,
         'stats': {
             'total_signals':       len(signals),
             'features_computed':   len(enriched),
+            'green_signals':       len(green),
+            'prefiltered':         len(prefiltered),
             'skipped_missing_data':len(signals) - len(enriched),
         },
     }

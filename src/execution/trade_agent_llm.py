@@ -102,6 +102,28 @@ def _emit_sized_handoff(run_date, raw_stdout):
     payload.setdefault('cycle_date', run_date)
     payload['source']        = 'trade_agent_llm'
     payload['generated_at']  = date.today().isoformat()
+
+    # Fold any prefiltered signals from the structured handoff into the
+    # sized handoff's `vetoed` list so send_report's digest reflects
+    # everything that didn't make it to Alpaca — TradeJohn vetoes AND the
+    # prefilter drops. Deduplicates by (ticker, strategy_id) in case a
+    # prefiltered signal somehow also appears in TradeJohn's vetoes.
+    try:
+        from execution.handoff import read_handoff as _read_handoff
+        structured = _read_handoff(run_date, 'structured') or {}
+        prefiltered = structured.get('prefiltered') or []
+        if prefiltered:
+            existing = payload.setdefault('vetoed', [])
+            seen = {(v.get('ticker'), v.get('strategy_id')) for v in existing}
+            for p in prefiltered:
+                key = (p.get('ticker'), p.get('strategy_id'))
+                if key not in seen:
+                    existing.append(p)
+                    seen.add(key)
+            print(f'[trade_agent_llm] folded {len(prefiltered)} prefiltered signals into vetoed list')
+    except Exception as e:
+        print(f'[trade_agent_llm] prefilter-fold skipped: {e}')
+
     _write_handoff(run_date, 'sized', payload)
     print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
           f'{len(payload.get("vetoed", []))} vetoed.')
