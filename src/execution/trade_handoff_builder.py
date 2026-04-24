@@ -217,13 +217,10 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
         delta         = actual_return - ev_gbm
         sigma_delta   = delta / sigma_holding          # standardized surprise
 
-    Outliers are signals where |sigma_delta| ≥ 1.0 — i.e. the outcome
-    was at least one standard deviation away from what the model
-    expected over the position's holding window. This replaces the
-    earlier hard `delta > 0.02` / `unreal > ev × 1.5` heuristic.
-
-    Returns (overperformers, underperformers). Each list sorted by
-    |sigma_delta| desc and capped at 50 rows."""
+    Outliers are signals where |sigma_delta| ≥ SIGMA_GATE (currently 1.0).
+    Every candidate clearing the gate is returned — no row cap. Tuning
+    happens via the gate itself. Returns (overperformers, underperformers),
+    each sorted by |sigma_delta| desc."""
     import math as _math
     if not uri:
         return [], []
@@ -295,19 +292,19 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
         if abs(sigma_delta) < SIGMA_GATE:
             continue
 
+        # Trim to only fields the operator display + TradeJohn rules need.
+        # Omit hv21 + sigma_holding (derivable from other columns) and entry/exit
+        # (not used by the digest or the rules — present in yesterday's sized
+        # handoff if needed).
         record = {
             'ticker':         row['ticker'],
             'strategy_id':    row['strategy_id'],
             'direction':      row['direction'],
             'status':         row['status'],
             'close_reason':   row['close_reason'],
-            'entry':          _safe(y_entry.get('entry')),
-            'exit':           _safe(float(row['close_price'])) if row['close_price'] is not None else None,
             'realized_pct':   _safe(realized),
             'unrealized_pct': _safe(unreal),
             'ev_gbm':         _safe(ev_gbm),
-            'hv21':           _safe(hv21),
-            'sigma_holding':  _safe(sigma_holding),
             'delta':          _safe(delta),
             'sigma_delta':    _safe(sigma_delta, ndigits=2),
             'days_held':      days_held,
@@ -319,7 +316,7 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
 
     overperformers.sort(key=lambda r: (r.get('sigma_delta') or 0), reverse=True)
     underperformers.sort(key=lambda r: (r.get('sigma_delta') or 0))   # most negative first
-    return overperformers[:50], underperformers[:50]
+    return overperformers, underperformers
 
 
 def load_mastermind_rec(uri: str) -> dict | None:

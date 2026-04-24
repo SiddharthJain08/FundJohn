@@ -7,7 +7,8 @@ alpaca_executor.py) and posts two concise messages:
 
   • #trade-signals  — greenlist table (tickers that cleared the Kelly/EV
                       gate and went to Alpaca).
-  • #trade-reports  — veto digest (tickers that didn't clear, with reasons).
+  • #trade-reports  — combined underperformance + overperformance digest
+                      for yesterday's positions (1σ-gated outcome outliers).
 
 Replaces the legacy per-strategy memo avalanche with one line per side.
 No LLM, no markdown explosion — the dashboard is the source of truth for
@@ -86,6 +87,36 @@ def _post_webhook(webhook_url: str, text: str) -> bool:
         else:
             return False
     return True
+
+
+def _post_webhook_with_file(webhook_url: str, content: str, file_name: str, file_text: str) -> bool:
+    """Single webhook POST with a short content message + a file attachment.
+    Used to deliver the full d-1 outcomes tables (potentially hundreds of
+    rows) without fan-out across multiple Discord messages."""
+    import time
+    for _attempt in range(5):
+        try:
+            r = requests.post(
+                webhook_url,
+                data={'payload_json': json.dumps({'content': content[:1900]})},
+                files={'files[0]': (file_name, file_text.encode('utf-8'), 'text/plain')},
+                timeout=30,
+            )
+        except Exception as e:
+            print(f'[send_report] webhook-with-file exception: {e}')
+            return False
+        if r.ok:
+            return True
+        if r.status_code == 429:
+            try:
+                wait = float(r.headers.get('Retry-After') or r.json().get('retry_after') or 2)
+            except Exception:
+                wait = 2.0
+            time.sleep(min(wait + 0.5, 10))
+            continue
+        print(f'[send_report] webhook-with-file failed: {r.status_code} {r.text[:200]}')
+        return False
+    return False
 
 
 def _fmt_greenlist(run_date: str, sized: dict) -> str:
@@ -169,28 +200,54 @@ def _fmt_outlier_row(r: dict) -> str:
     )
 
 
-def _fmt_outlier_digest(run_date: str, rows: list[dict], kind: str) -> str:
-    """Render a d-1 over- or under-performance digest. `kind` selects the
-    heading and empty-state copy; the table body is symmetric either way.
-
-    Gated by |σΔ| ≥ 1.0 in the handoff builder, so every row printed here
-    represents an outcome that was at least one standard deviation from
-    what the model expected over the position's actual holding window."""
+def _fmt_outlier_section(rows: list[dict], kind: str) -> list[str]:
+    """Render one symmetric section (table) of the combined outcomes
+    digest. Kind selects emoji + heading; table body is identical shape
+    either way."""
     if kind == 'over':
-        header = f'🚀 **Overperformance digest — d-1** ({len(rows)} beat EV by ≥1σ)'
-        empty  = f'📉 **{run_date}** — no d-1 positions beat expected return by ≥1σ.'
+        heading = f'🚀 Overperformance — {len(rows)} position(s) beat EV by ≥1σ'
     else:
-        header = f'🟥 **Underperformance digest — d-1** ({len(rows)} missed EV by ≥1σ)'
-        empty  = f'🟢 **{run_date}** — no d-1 positions missed expected return by ≥1σ.'
+        heading = f'🟥 Underperformance — {len(rows)} position(s) missed EV by ≥1σ'
     if not rows:
-        return empty
-    out = [header, '', '```', _DIGEST_HEADER, '-' * len(_DIGEST_HEADER)]
-    for r in rows[:_DIGEST_ROWS_MAX]:
-        out.append(_fmt_outlier_row(r))
-    out.append('```')
-    if len(rows) > _DIGEST_ROWS_MAX:
-        out.append(f'_+{len(rows) - _DIGEST_ROWS_MAX} more — see structured handoff_')
-    return '\n'.join(out)
+        return [heading, '(no positions cleared the 1σ gate)']
+    return (
+        [heading, _DIGEST_HEADER, '-' * len(_DIGEST_HEADER)]
+        + [_fmt_outlier_row(r) for r in rows]
+    )
+
+
+def _fmt_outcomes_digest(run_date: str, overperf: list[dict], underperf: list[dict]) -> tuple[str, str]:
+    """Single-message d-1 outcomes digest. Returns (summary, file_text):
+    summary is a short Discord-embeddable recap with counts + top-5 from
+    each bucket; file_text is the full stacked-tables body delivered as
+    an attachment so operators get every row that cleared the 1σ gate
+    without fragmenting the feed into dozens of 1900-char messages."""
+    summary_lines = [f'🔭 **Daily outcomes — d-1 ({run_date})**', '']
+    if not overperf and not underperf:
+        summary_lines.append('_No positions cleared the 1σ gate in either direction._')
+        return ('\n'.join(summary_lines), '')
+
+    def _top5(rows: list[dict]) -> str:
+        if not rows:
+            return '_none_'
+        return ', '.join(
+            f"{r.get('ticker')}/{(r.get('strategy_id') or '')[:18]} ({(r.get('sigma_delta') or 0):+.2f}σ)"
+            for r in rows[:5]
+        )
+
+    summary_lines.append(f'🟥 **Underperformance** — {len(underperf)} · top 5: {_top5(underperf)}')
+    summary_lines.append(f'🚀 **Overperformance**  — {len(overperf)} · top 5: {_top5(overperf)}')
+    summary_lines.append('')
+    summary_lines.append('_Full tables attached._')
+
+    # File body: both full tables, stacked. Plain monospaced text so
+    # Discord's attachment preview renders it inline.
+    file_lines = [f'Daily outcomes — d-1 ({run_date})', '=' * 60, '']
+    file_lines += _fmt_outlier_section(underperf, 'under')
+    file_lines += ['', '']
+    file_lines += _fmt_outlier_section(overperf, 'over')
+
+    return ('\n'.join(summary_lines), '\n'.join(file_lines))
 
 
 def main() -> int:
@@ -222,20 +279,34 @@ def main() -> int:
     except Exception as e:
         print(f'[send_report] outlier load skipped: {e}')
 
+    summary, file_text = _fmt_outcomes_digest(run_date, overperf, underperf)
+
     if not wh_signals and not wh_reports:
         print('[send_report] no webhooks available — printing to stdout only')
         print(_fmt_greenlist(run_date, sized))
-        print('\n--- UNDERPERFORMANCE d-1 ---\n'); print(_fmt_outlier_digest(run_date, underperf, 'under'))
-        print('\n--- OVERPERFORMANCE  d-1 ---\n'); print(_fmt_outlier_digest(run_date, overperf,  'over'))
+        print()
+        print(summary)
+        if file_text:
+            print('\n--- ATTACHMENT (outcomes_d-1.txt) ---\n')
+            print(file_text)
         return 0
 
-    ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized))           if wh_signals else False
-    ok2 = _post_webhook(wh_reports, _fmt_outlier_digest(run_date, underperf, 'under')) if wh_reports else False
-    ok3 = _post_webhook(wh_reports, _fmt_outlier_digest(run_date, overperf,  'over'))  if wh_reports else False
+    ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized)) if wh_signals else False
+
+    if wh_reports:
+        if file_text:
+            ok2 = _post_webhook_with_file(
+                wh_reports, summary,
+                f'outcomes_d-1_{run_date}.txt', file_text,
+            )
+        else:
+            # No outliers — summary is short, no attachment needed.
+            ok2 = _post_webhook(wh_reports, summary)
+    else:
+        ok2 = False
 
     if not ok1: print('[send_report] greenlist post skipped/failed')
-    if not ok2: print('[send_report] underperformance-digest post skipped/failed')
-    if not ok3: print('[send_report] overperformance-digest post skipped/failed')
+    if not ok2: print('[send_report] outcomes-digest post skipped/failed')
     # Non-fatal: pipeline completes even if Discord is throttled. Data is
     # persisted in the sized / structured handoffs; operator can re-post.
     return 0
