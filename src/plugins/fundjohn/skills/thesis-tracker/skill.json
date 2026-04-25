@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:thesis-tracker",
+  "description": "Update an open thesis: progress vs drivers, risk-trigger status, conviction delta, action",
+  "triggers": ["/thesis", "/track"],
+  "agents": ["researchjohn", "botjohn", "mastermind"]
+}

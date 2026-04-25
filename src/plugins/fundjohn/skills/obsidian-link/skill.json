@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:obsidian-link",
+  "description": "Write notes with frontmatter, [[wikilinks]], and the canonical tag taxonomy so the workspace stays Obsidian-navigable and pgvector-indexable",
+  "triggers": ["/obsidian", "/note"],
+  "agents": ["botjohn", "researchjohn", "tradejohn", "mastermind", "paperhunter", "strategycoder"]
+}

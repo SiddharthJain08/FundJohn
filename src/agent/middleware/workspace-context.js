@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { retrieveRelevant, isEnabled: retrievalEnabled } = require('../memory/retrieve');
 
 /**
  * Workspace context middleware.
@@ -31,9 +32,35 @@ async function workspaceContext(state, next) {
   }
 
   // ── memory/*.md ───────────────────────────────────────────────────────────
+  // When MEMORY_RETRIEVAL=on AND the call site provides state.queryText
+  // (typically the most recent user/task message), do top-K pgvector retrieval
+  // instead of wholesale injection. Falls through to the legacy path if either
+  // is missing or retrieval fails.
   let memorySection = '';
+
+  if (retrievalEnabled() && state.queryText) {
+    try {
+      const chunks = await retrieveRelevant({
+        workspace,
+        queryText: state.queryText,
+        noteTypes: state.memoryFilterNoteTypes,
+        tags:      state.memoryFilterTags,
+        tickers:   state.memoryFilterTickers,
+      });
+      if (chunks && chunks.length) {
+        const parts = chunks.map((c) => {
+          const head = c.source_file ? `### ${path.basename(c.source_file)} (score=${(c.score || 0).toFixed(2)})` : '### memory';
+          return `${head}\n\n${c.chunk_text}`;
+        });
+        memorySection = `\n\n---\n\n## Persistent Memory (top-${chunks.length} retrieved)\n\n${parts.join('\n\n---\n\n')}`;
+      }
+    } catch (err) {
+      console.warn('[workspace-context] retrieval path failed, falling back:', err.message);
+    }
+  }
+
   const memDir = path.join(workspace, 'memory');
-  if (fs.existsSync(memDir)) {
+  if (!memorySection && fs.existsSync(memDir)) {
     // Ordered by relevance: active tasks first, then operational memory
     const ORDER = ['active_tasks', 'fund_journal', 'regime_context', 'signal_patterns', 'trade_learnings'];
     const allFiles = fs.readdirSync(memDir).filter(f => f.endsWith('.md')).sort((a, b) => {

@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:comps-analysis",
+  "description": "Build a peer-multiples comp set with bench median/mean and outlier flags",
+  "triggers": ["/comps", "/peers"],
+  "agents": ["researchjohn", "botjohn", "mastermind"]
+}

@@ -1,0 +1,6 @@
+{
+  "id": "fundjohn:morning-note",
+  "description": "Compose the pre-market briefing: regime, overnight movers, today's catalysts, signal queue",
+  "triggers": ["/morning", "/morning-note"],
+  "agents": ["botjohn", "researchjohn"]
+}

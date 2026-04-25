@@ -3,13 +3,24 @@
 const fs   = require('fs');
 const path = require('path');
 
-const MAX_RESULT_CHARS   = 160_000; // ~40k tokens — evict to disk
-const PREVIEW_CHARS      = 2_000;   // ~500 tokens head/tail each
+// All thresholds are token-counted (chars-per-token estimate is 4) so we
+// never have to think about which unit a config knob is in. Override per
+// subagent via state.pruningConfig (set by swarm.js from subagent-types.json).
+const CHARS_PER_TOKEN = 4;
+const tok = (n) => n * CHARS_PER_TOKEN;
+
+// Layer-1 SIZE eviction: tool results larger than this are written to disk
+// and replaced with a head + tail preview. Matches LangAlpha's documented
+// 40k-token threshold; tighten via OPENCLAW_EVICT_TOKENS env if needed.
+const MAX_RESULT_TOKENS  = parseInt(process.env.OPENCLAW_EVICT_TOKENS  || '40000', 10);
+const PREVIEW_TOKENS     = parseInt(process.env.OPENCLAW_EVICT_PREVIEW || '500',   10);
+const MAX_RESULT_CHARS   = tok(MAX_RESULT_TOKENS);  // legacy alias, kept for greppability
+const PREVIEW_CHARS      = tok(PREVIEW_TOKENS);
 
 // Session pruning defaults — overridden per subagent type via state.pruningConfig
 const DEFAULT_PRUNING = {
   enabled:             true,
-  maxToolResultTokens: 2000,  // cap old results at this many tokens (~4 chars/tok)
+  maxToolResultTokens: 2000,  // cap old results at this many tokens
   maxToolResultAge:    10,    // messages from end before pruning kicks in
 };
 
@@ -29,7 +40,7 @@ async function largeResultEviction(state, next) {
   if (!messages || !messages.length) return next(state);
 
   const pruning  = { ...DEFAULT_PRUNING, ...(pruningConfig || {}) };
-  const maxChars = pruning.maxToolResultTokens * 4; // ~4 chars per token
+  const maxChars = tok(pruning.maxToolResultTokens);
   const maxAge   = pruning.maxToolResultAge;
 
   const evictDir = workspace && threadId
