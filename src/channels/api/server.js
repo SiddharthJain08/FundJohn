@@ -1270,11 +1270,322 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .regime-prob-bar{height:100%;border-radius:3px;transition:width .4s}
 .regime-prob-pct{font-size:10px;color:var(--muted);width:34px;text-align:right;flex-shrink:0}
 .regime-alert-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+
+/* ── Mobile-only overrides (≤768px = iPhone-class width) ────────────────────
+ * Everything here is additive — desktop layout above is untouched. The
+ * goals: show essential information first, hide deep-dive columns behind
+ * horizontal scroll, give every tap target ≥32px height, kill the 300ms
+ * tap delay, and turn the 230px sidebar into an off-canvas drawer behind
+ * a hamburger. Sections also default-collapse to top-5 (vs top-10 on
+ * desktop) via the JS-side _collapseLimit() helper. */
+
+#mobile-menu, #mobile-backdrop { display: none; }
+
+@media (max-width: 768px) {
+  /* Snappier touch — disable iOS double-tap zoom + remove tap highlight. */
+  *,*::before,*::after { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+
+  /* Allow page-level scroll on mobile (desktop pins overflow:hidden). */
+  html, body { overflow-y: auto; }
+  body { font-size: 12px; -webkit-text-size-adjust: 100%; }
+
+  /* ── Header ──────────────────────────────────────────────────────────── */
+  #header {
+    height: 38px; padding: 0 8px; gap: 4px; flex-wrap: nowrap;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    backdrop-filter: blur(12px);
+    background: rgba(22, 27, 34, 0.88);
+    position: sticky; top: 0; z-index: 50;
+  }
+  #header::-webkit-scrollbar { display: none; }
+  #header h1 { font-size: 12px; flex-shrink: 0; }
+  #header h1 + .nav-btn { margin-left: 2px; }
+  .nav-btn {
+    padding: 5px 9px; font-size: 11px; flex-shrink: 0;
+    border-radius: 5px; transition: all .15s ease-out;
+  }
+  .nav-btn.active { box-shadow: 0 0 0 1px var(--blue) inset; }
+  #pipeline-badge, #clock { display: none; }
+  .refresh-btn { padding: 4px 7px !important; font-size: 10px !important; flex-shrink: 0; }
+
+  /* Hamburger toggle — visible only on mobile, sits at top-left. */
+  #mobile-menu {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; background: var(--border2);
+    border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-size: 14px; cursor: pointer; padding: 0;
+    flex-shrink: 0; transition: transform .2s ease-out, background .15s;
+  }
+  #mobile-menu:active { background: var(--border); transform: scale(0.94); }
+  body:has(#sidebar.mobile-open) #mobile-menu { transform: rotate(90deg); }
+
+  /* ── Market strip ───────────────────────────────────────────────────── */
+  #strip { height: 24px; }
+  .strip-item { padding: 0 10px; font-size: 9.5px; }
+
+  /* ── Off-canvas drawer + dim backdrop ──────────────────────────────── */
+  #sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0;
+    width: 86vw; max-width: 320px;
+    transform: translateX(-100%);
+    transition: transform .26s cubic-bezier(0.32, 0.72, 0, 1);
+    z-index: 1000;
+    background: var(--bg);
+    box-shadow: 8px 0 32px rgba(0,0,0,0.55);
+    border-right: 1px solid var(--border);
+  }
+  #sidebar.mobile-open { transform: translateX(0); }
+
+  #mobile-backdrop {
+    display: block;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.45);
+    backdrop-filter: blur(2px);
+    opacity: 0;
+    pointer-events: none;
+    z-index: 999;
+    transition: opacity .22s ease-out;
+  }
+  body:has(#sidebar.mobile-open) #mobile-backdrop { opacity: 1; pointer-events: auto; }
+
+  /* ── Main view ─────────────────────────────────────────────────────── */
+  #body { display: block; }
+  #view-wrap { padding-bottom: 8px; overflow: visible; }
+
+  /* Subtle fade-in when switching tabs — feels less jarring. */
+  #portfolio-page, #strategies-page, #research-page, #tab-content { animation: mobile-fade-in .18s ease-out; }
+  @keyframes mobile-fade-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* Tight tab-content padding — every pixel of vertical real-estate counts. */
+  #tab-content { padding: 6px 6px 14px; }
+
+  /* Compress section-to-section gaps. */
+  #portfolio-page > div > .pf-section,
+  #strategies-page > div > section { margin-top: 6px !important; margin-bottom: 6px !important; }
+
+  /* ── Strategies sub-tabs ─────────────────────────────────────────────── */
+  .st-tabs { flex-wrap: wrap; gap: 3px !important; }
+  .st-tab {
+    padding: 5px 9px !important; font-size: 10.5px !important;
+    min-height: 28px; border-radius: 5px; transition: all .15s;
+  }
+  .st-tab:active { transform: scale(0.96); }
+
+  /* ── Stat cards — extreme density, 4-up, uniform height ─────────────── *
+   * Verbose labels ("Annualized Equity Realization %") were wrapping to
+   * 3-4 lines while neighbours like "Cash" wrapped to 1 — created the
+   * "blank space" complaint. Fix: force all labels onto a single line
+   * with hard ellipsis, and hide the sub-text on mobile (it duplicates
+   * info already in the value or chart). Full text remains accessible
+   * via tap-and-hold on the card (title attr). */
+  .pf-summary-row { grid-template-columns: repeat(4, 1fr); gap: 3px; align-items: stretch; }
+  .pf-stat-card {
+    padding: 5px 6px; border-radius: 5px;
+    display: flex; flex-direction: column; justify-content: center;
+    min-height: 44px;
+    transition: transform .15s, border-color .15s;
+  }
+  .pf-stat-card:active { transform: scale(0.985); border-color: var(--blue); }
+  .pf-stat-label {
+    font-size: 7.5px; margin-bottom: 1px; letter-spacing: .03em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: var(--dim);
+  }
+  .pf-stat-value {
+    font-size: 13px; line-height: 1.1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* Sub-text adds clutter on phones — full context lives in title attrs. */
+  .pf-stat-sub { display: none !important; }
+
+  /* ── Charts ─────────────────────────────────────────────────────────── */
+  .pf-chart-wrap { height: 120px !important; padding: 8px 10px; border-radius: 8px; }
+  .pf-chart-label { font-size: 9.5px !important; }
+
+  /* ── Range buttons (1W/1M/3M/...) ───────────────────────────────────── */
+  .range-btn {
+    padding: 4px 8px; font-size: 10px; min-height: 26px;
+    border-radius: 5px; transition: all .15s;
+  }
+  .range-btn:active { transform: scale(0.94); }
+
+  /* ── Section panels & headers ───────────────────────────────────────── */
+  .pf-section { border-radius: 7px; }
+  .pf-section-header {
+    padding: 6px 9px; font-size: 10px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+  }
+
+  /* ── Horizontal scroll on tables ─────────────────────────────────────── *
+   * Only ONE scroll container — the outer .pf-section-body. The inner
+   * #pf-positions / #st-active-wrap divs get overflow:visible so they
+   * don't create a competing nested scroll region. Tables keep their
+   * desktop inline min-widths (700–1100px) which exceed any phone
+   * viewport, so the parent's overflow-x:auto naturally engages. The
+   * table itself is sized to content via min-width: max-content so all
+   * visible columns get their natural widths instead of being squeezed.
+   */
+  .pf-section-body {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    /* Right-edge fade indicator — anchored to the visible viewport via
+     * background-attachment: local. Vanishes when the user reaches the
+     * rightmost edge. */
+    background-image: linear-gradient(90deg, transparent 88%, rgba(22,27,34,0.9));
+    background-repeat: no-repeat;
+    background-attachment: local;
+    background-size: 100% 100%;
+  }
+  /* Inner wrappers must NOT have their own scroll context — collapses the
+   * nested-scroll problem that was eating the swipe gesture. */
+  #pf-positions, #pf-history,
+  #st-active-wrap, #st-inactive-wrap, #st-candidate-wrap {
+    overflow: visible !important;
+    width: max-content;
+    min-width: 100%;
+  }
+  /* Thin custom horizontal scrollbar — visible enough to hint at the gesture. */
+  .pf-section-body::-webkit-scrollbar { height: 5px; }
+  .pf-section-body::-webkit-scrollbar-track { background: transparent; }
+  .pf-section-body::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 3px;
+    transition: background .2s;
+  }
+  .pf-section-body::-webkit-scrollbar-thumb:active { background: var(--blue); }
+
+  /* ── Tables — extreme density, swipeable ──────────────────────────── *
+   * Cell padding cut to 4×5; row height 26px. First column (strategy /
+   * ticker name) hard-capped at 78px with ellipsis — long IDs like
+   * "S_robust_minimum_variance_hedge" become "S_robust_…", with the
+   * full name still on tap (the renderers already set title=). */
+  .db-table { font-size: 10.5px; }
+  .db-table th, .db-table td { white-space: nowrap; }
+  .db-table th {
+    padding: 4px 5px; font-size: 8.5px;
+    background: var(--panel); position: sticky; top: 0; z-index: 3;
+    letter-spacing: .02em;
+  }
+  .db-table td { padding: 5px 5px; }
+  .db-table tr { min-height: 26px; }
+  .db-table tr:active td { background: rgba(88,166,255,0.06); }
+
+  /* Sticky first column — pinned, tight, hard-ellipsis. */
+  .db-table th:first-child,
+  .db-table td:first-child {
+    position: sticky; left: 0; z-index: 4;
+    background: var(--panel);
+    box-shadow: 3px 0 5px -4px rgba(0,0,0,0.45);
+    width: 78px !important;
+    max-width: 78px !important;
+    min-width: 78px !important;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 10px;
+  }
+  .db-table th:first-child { z-index: 5; }
+  /* Pf-positions has a 2-char Strategy column (already short) — give it
+   * 60px instead of 78 so Ticker (col 2) gets more room. */
+  #pf-positions .db-table th:first-child,
+  #pf-positions .db-table td:first-child {
+    width: 60px !important; max-width: 60px !important; min-width: 60px !important;
+  }
+
+  /* ── Table buttons — compact ───────────────────────────────────────── */
+  .st-action-btn {
+    padding: 3px 7px !important; font-size: 9.5px !important;
+    min-height: 24px; border-radius: 4px; transition: transform .12s;
+  }
+  .st-action-btn:active { transform: scale(0.94); }
+
+  /* ── Per-table column hides ──────────────────────────────────────── *
+   * Active Stack: Strategy | Status | Regimes | Open | Closed | Win% | ARR% | ADR% | ACT | #O/U/R | Last Signal | Actions
+   * Hide: 3 (Regimes), 11 (Last Signal). */
+  #st-active-wrap .db-table th:nth-child(3),
+  #st-active-wrap .db-table td:nth-child(3),
+  #st-active-wrap .db-table th:nth-child(11),
+  #st-active-wrap .db-table td:nth-child(11) { display: none; }
+
+  /* Active positions: Strategy | Ticker | Dir | Entry | Current | P&L% | Size% | Days | Stop | Status
+   * Hide: 4 (Entry), 9 (Stop). */
+  #pf-positions .db-table th:nth-child(4),
+  #pf-positions .db-table td:nth-child(4),
+  #pf-positions .db-table th:nth-child(9),
+  #pf-positions .db-table td:nth-child(9) { display: none; }
+
+  /* Closed history — hide far-right columns. */
+  #pf-history .db-table th:nth-child(n+8),
+  #pf-history .db-table td:nth-child(n+8) { display: none; }
+
+  /* ── Research page ─────────────────────────────────────────────────── *
+   * Desktop uses CSS Grid with 1.4fr/1fr columns and the chat spanning
+   * both rows on the left. On phones we collapse the entire layout to a
+   * single linear column: chat first (fixed-height for usability), then
+   * the right-column cards stacked, then the runs row at the bottom.
+   * Also unlock #research-page from overflow:hidden so the page itself
+   * scrolls instead of clipping its grid children. */
+  #research-page { overflow-y: auto !important; overflow-x: hidden; }
+  #research-inner {
+    display: flex !important;
+    flex-direction: column !important;
+    grid-template-columns: none !important;
+    grid-template-rows: none !important;
+    height: auto !important;
+    overflow: visible !important;
+    padding: 6px !important;
+    gap: 6px !important;
+    max-width: 100% !important;
+  }
+  /* Reset every grid placement that desktop sets — they're meaningless in flex. */
+  .rs-chat, .rs-right-col, .rs-runs {
+    grid-row: auto !important;
+    grid-column: auto !important;
+  }
+  .rs-card { min-height: auto !important; max-height: none !important; border-radius: 7px; }
+  .rs-card header { padding: 5px 9px !important; font-size: 9.5px !important; }
+  .rs-card header h3 { font-size: 9.5px !important; }
+  .rs-card .rs-body { padding: 6px 9px !important; }
+  /* Chat takes 50vh — leaves screen room for campaigns/queue/papers below. */
+  .rs-chat { height: 50vh !important; flex: 0 0 auto !important; }
+  .rs-right-col { flex-direction: column !important; gap: 6px !important; min-height: auto !important; }
+  /* Cap each side-card body so the long lists don't dominate the page —
+   * each gets its own internal scroll, every section stays browsable. */
+  .rs-campaigns .rs-body, .rs-queue .rs-body, .rs-papers .rs-body {
+    max-height: 180px !important; overflow-y: auto !important;
+  }
+  .rs-runs { max-height: none !important; }
+  .rs-runs .rs-body { max-height: 160px !important; overflow-y: auto !important; }
+  .chat-scroll { padding: 6px 10px; gap: 6px; }
+  .chat-input-row { padding: 6px !important; }
+  .chat-input-row textarea { font-size: 16px; border-radius: 6px; min-height: 30px !important; }
+  /* Compact pills + meta lines inside research cards. */
+  .rs-row { padding: 5px 0 !important; }
+  .rs-title { font-size: 11px !important; line-height: 1.25 !important; }
+  .rs-meta { font-size: 9.5px !important; }
+  .rs-pill { font-size: 9px !important; padding: 1px 5px !important; }
+  .rs-filter { gap: 4px !important; flex-wrap: wrap; }
+  .rs-filter select, .rs-filter input { font-size: 11px; padding: 2px 5px; }
+
+  /* iOS auto-zooms text inputs <16px — bump to 16px so tap doesn't yank viewport. */
+  #search, .rs-filter input { font-size: 16px; border-radius: 8px; }
+
+  /* Collapse/expand footer — bigger tap area, gentler bg on press. */
+  [id$="-collapse"] {
+    padding: 12px 8px !important; font-size: 11px !important;
+    transition: background .15s;
+  }
+  [id$="-collapse"]:active { background: var(--border2) !important; }
+
+  /* Disable hover-only effects on touch devices. */
+  .nav-btn:hover { background: transparent; color: var(--muted); }
+  .nav-btn.active:hover, .nav-btn.active { background: var(--border2); color: var(--blue); }
+}
 </style>
 </head>
 <body>
 
 <div id="header">
+  <button id="mobile-menu" onclick="toggleSidebar()" aria-label="Toggle sidebar">☰</button>
   <span class="dot" id="dot"></span>
   <h1>🦞 OpenClaw</h1>
   <button class="nav-btn active" id="nav-market" onclick="showMarket()">Market</button>
@@ -1285,6 +1596,11 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
 </div>
+
+<!-- Mobile drawer backdrop — only visible when #sidebar.mobile-open is set.
+     Tap-to-dismiss is handled by the document-level outside-click listener
+     in JS; no inline onclick (would double-fire with the capture listener). -->
+<div id="mobile-backdrop" aria-hidden="true"></div>
 
 <div id="strip"><div id="strip-inner"></div></div>
 
@@ -1326,7 +1642,7 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
     <div class="pf-stat-card"><div class="pf-stat-label">Open Positions</div><div class="pf-stat-value" id="pf-open">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Closed Trades</div><div class="pf-stat-value" id="pf-closed">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Win Rate</div><div class="pf-stat-value" id="pf-winrate">—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
-    <div class="pf-stat-card"><div class="pf-stat-label" title="Portfolio equity-curve annualization: (1 + period_return)^(252 / trading_days) - 1. Projects the account's actual performance since inception out to a full year.">Avg Annualized Realized P&amp;L</div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
+    <div class="pf-stat-card"><div class="pf-stat-label" title="Annualized equity-curve return: (1 + period_return)^(252 / trading_days) - 1. Predicted = last 30 trading days only. Lifetime = since account inception. Identical until 30 trading days of equity history have accumulated.">Annualized Equity Realization %<br><span style="font-size:9px;color:var(--dim);font-weight:400">Predicted&nbsp;|&nbsp;Lifetime</span></div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
   </div>
   <div class="pf-chart-wrap">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
@@ -1702,10 +2018,19 @@ function _applySort(tableId, rows, defaultKey, defaultType) {
 // Each table can toggle between a top-10 preview and the full list. State
 // persists across re-renders in _collapseState. Default = collapsed.
 const _collapseState = {}; // { tableId: false means expanded; otherwise collapsed }
-const COLLAPSE_N = 10;
+// Collapse limit is mobile-aware: 5 on phones, 10 on desktop. Phones
+// have a fraction of the vertical real-estate, so the top-N preview
+// needs to be tighter or every section pushes the next off-screen.
+function _collapseLimit() {
+  // Show more rows by default on mobile — operator wants info density
+  // over whitespace. 8 rows × ~32px = ~256px, still leaves room for
+  // headers + the next section on screen.
+  return (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) ? 8 : 10;
+}
 
 function _collapseRows(tableId, rows) {
   const collapsed = _collapseState[tableId] !== false; // default true
+  const COLLAPSE_N = _collapseLimit();
   if (rows.length <= COLLAPSE_N) return { shown: rows, footer: '' };
   const shown = collapsed ? rows.slice(0, COLLAPSE_N) : rows;
   const label = collapsed
@@ -1898,6 +2223,30 @@ function setCat(cat) {
 }
 
 function filterTickers() { buildSidebar(); }
+
+// ── Mobile sidebar drawer ─────────────────────────────────────────────────
+// Below 768px the sidebar slides in from the left as an overlay drawer.
+// Tap the hamburger to show, tap a ticker / outside to dismiss. No-op on
+// desktop because the hamburger is display:none there.
+function toggleSidebar() {
+  const sb = document.getElementById('sidebar');
+  if (sb) sb.classList.toggle('mobile-open');
+}
+// Auto-close the drawer when the user picks a ticker (single-tap nav feels
+// natural). Also closes on tab switch via showMarket/Portfolio/etc.
+document.addEventListener('click', (e) => {
+  if (window.innerWidth > 768) return;
+  const sb = document.getElementById('sidebar');
+  if (!sb || !sb.classList.contains('mobile-open')) return;
+  // Don't dismiss if the tap originated inside the sidebar (let internal
+  // controls work) UNLESS it was on a ticker row — those should navigate
+  // and close.
+  const ticker = e.target.closest('.tk');
+  const insideSb = e.target.closest('#sidebar');
+  const onMenuBtn = e.target.closest('#mobile-menu');
+  if (onMenuBtn) return;
+  if (ticker || !insideSb) sb.classList.remove('mobile-open');
+}, true);
 
 // ── Market Overview (default view) ────────────────────────────────────────────
 function showOverview() {
@@ -3187,31 +3536,44 @@ function renderPortfolioSummary(s, valCurve) {
   document.getElementById('pf-winrate-sub').textContent = s.closed_count
     ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
 
-  // Avg Annualized Realized P&L — portfolio-level, from the Alpaca
-  // equity curve. The answer to "if the portfolio keeps performing
-  // exactly like it has, what annualized return does that project?"
-  // is based on (latest_equity / base_value), not per-trade averages
-  // (which assume 100% sequential reinvestment — not how the fund runs).
+  // Annualized Equity Realization % — Predicted | Lifetime.
+  //   Lifetime  = annualization of the entire observed equity curve
+  //               (anchor = Alpaca base_value, else first row).
+  //   Predicted = annualization of just the last 30 trading days. While
+  //               we have <30 days of history this collapses to the same
+  //               window as Lifetime, so the two values are identical
+  //               until the curve crosses one month.
   const rows      = (valCurve && valCurve.rows) || [];
   const baseValue = valCurve && valCurve.base_value != null ? parseFloat(valCurve.base_value) : null;
-  const latestEq  = rows.length ? parseFloat(rows[rows.length - 1].equity) : null;
   const firstEq   = rows.length ? parseFloat(rows[0].equity) : null;
-  // Anchor to base_value when Alpaca gave us one — that's the true account
-  // starting equity. Fall back to the first observed equity when it didn't.
-  const anchor    = (baseValue != null && baseValue > 0) ? baseValue : firstEq;
-  const periodRet = (anchor && latestEq != null) ? (latestEq - anchor) / anchor : null;
-  const nDays     = rows.length;  // trading days observed
-  const aarPct    = _annualizePct(periodRet, nDays);
+  const latestEq  = rows.length ? parseFloat(rows[rows.length - 1].equity) : null;
+  const lifeAnchor= (baseValue != null && baseValue > 0) ? baseValue : firstEq;
+  const lifeRet   = (lifeAnchor && latestEq != null) ? (latestEq - lifeAnchor) / lifeAnchor : null;
+  const lifeDays  = rows.length;
+  const lifeAar   = _annualizePct(lifeRet, lifeDays);
+
+  const predRows  = rows.slice(-30);
+  const predFirst = predRows.length ? parseFloat(predRows[0].equity) : null;
+  // Use base_value as the anchor only when the predicted window starts at
+  // the very beginning of the curve — otherwise the first row of the
+  // 30-day slice is the correct anchor.
+  const predAnchor= (predRows.length === rows.length && baseValue != null && baseValue > 0)
+                    ? baseValue : predFirst;
+  const predRet   = (predAnchor && latestEq != null) ? (latestEq - predAnchor) / predAnchor : null;
+  const predDays  = predRows.length;
+  const predAar   = _annualizePct(predRet, predDays);
+
   const el        = document.getElementById('pf-avgpnl');
   const subEl     = document.getElementById('pf-pnl-sub');
-  if (aarPct != null) {
-    el.textContent = (aarPct > 0 ? '+' : '') + aarPct.toFixed(2) + '%';
-    el.className   = 'pf-stat-value ' + pnlCls(aarPct, 'positive', 'negative', 'neutral');
-    // Sub-line: the raw period return + window size + current equity, so
-    // users can see the underlying numbers feeding the projection.
-    const periodTxt = ((periodRet * 100) >= 0 ? '+' : '') + (periodRet * 100).toFixed(2) + '%';
+  const fmt = v => v == null ? '—' : ((v >= 0 ? '+' : '') + v.toFixed(2) + '%');
+  if (lifeAar != null || predAar != null) {
+    el.innerHTML = '<span class="' + pnlCls(predAar, 'positive', 'negative', 'neutral') + '">' + fmt(predAar) + '</span>'
+                 + '<span style="color:var(--dim);font-weight:400">&nbsp;|&nbsp;</span>'
+                 + '<span class="' + pnlCls(lifeAar, 'positive', 'negative', 'neutral') + '">' + fmt(lifeAar) + '</span>';
+    el.className  = 'pf-stat-value';
+    const lifeTxt = ((lifeRet * 100) >= 0 ? '+' : '') + (lifeRet * 100).toFixed(2) + '%';
     const equityTxt = '$' + latestEq.toLocaleString('en-US', {maximumFractionDigits: 0});
-    subEl.textContent = periodTxt + ' over ' + nDays + (nDays === 1 ? ' day' : ' days')
+    subEl.textContent = lifeTxt + ' over ' + lifeDays + (lifeDays === 1 ? ' day' : ' days')
                       + '  ·  Equity: ' + equityTxt;
   } else {
     el.textContent = '—';
@@ -3455,19 +3817,27 @@ function _renderActiveStack(rows) {
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
   const enriched = rows.map(r => {
-    // Strategy equity-curve annualization: use live_return_pct (the
-    // strategy's ACTUAL cumulative return since going live) over
-    // live_days. Answers "if the strategy keeps performing like it
-    // already has, what annualized return does that project?" — the
-    // same methodology as the portfolio headline. Per-trade avg × 252/d
-    // was rejected as misleading (it assumes 100% sequential reinvestment
-    // which isn't how strategies compose into the portfolio).
-    const liveRet  = r.live_return_pct != null ? parseFloat(r.live_return_pct) / 100 : null;
-    const liveDays = r.live_days       != null ? parseFloat(r.live_days)             : null;
+    // ADR (Average Daily Return) = avg_realized_pct / avg_days_held.
+    // The natural decomposition of per-trade average return into a
+    // daily rate using average closing time. Filled for any strategy
+    // with an avg_realized_pct (i.e. ≥1 closed trade); does not require
+    // live equity-curve coverage. Annualization was rejected because
+    // regime-gated strategies activate with variable density across
+    // years — keeping the daily mean keeps the metric comparable.
+    // ACT (Average Closing Time) = avg_days_held across closed trades.
+    // avg_realized_pct is stored as a fraction (0.05 = 5%) — same as
+    // unrealized_pnl_pct. Multiply by 100 so the column is in % units.
+    const avgRet  = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
+    const actDays = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
+    const arrPct  = avgRet != null ? avgRet * 100 : null;     // per-trade %
+    const adrPct  = (avgRet != null && actDays != null && actDays > 0)
+                    ? (avgRet * 100 / actDays) : null;        // per-day %
     return Object.assign({}, r, {
       d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
       _active_rank: _activeRankFor(r),
-      _aar_pct:     _annualizePct(liveRet, liveDays),
+      _arr_pct:     arrPct,
+      _adr_pct:     adrPct,
+      _act_days:    actDays,
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -3492,7 +3862,9 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
       <th class="num" data-sort-key="win_rate" data-sort-type="num">Win %</th>
-      <th class="num" data-sort-key="_aar_pct" data-sort-type="num" title="Strategy equity-curve annualization: (1 + live_return)^(252 / live_days) - 1. Projects the strategy's actual performance since going live out to a full year.">AAR&nbsp;%</th>
+      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across this strategy's closed trades.">ARR&nbsp;%</th>
+      <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate. Filled for any strategy with closed trades; un-annualized because regime-gated strategies activate with variable density across the year.">ADR&nbsp;%</th>
+      <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across this strategy's closed trades.">ACT</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
@@ -3503,12 +3875,17 @@ function _renderActiveStack(rows) {
       const title = sub === 'waiting'
         ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
         : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
-      const aar = r._aar_pct;  // already annualized, already in % units
+      const arr = r._arr_pct;
+      const adr = r._adr_pct;
+      const act = r._act_days;
       const o = r.d1_overperf || 0, u = r.d1_underperf || 0, x = r.d1_rejected || 0;
       const ourEmpty = o === 0 && u === 0 && x === 0;
       const ourCell = ourEmpty
         ? '<span style="color:var(--dim)">—</span>'
         : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${x}</span>\`;
+      const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
+                     + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
+      const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
@@ -3516,7 +3893,9 @@ function _renderActiveStack(rows) {
         <td class="num">\${r.open_count || 0}</td>
         <td class="num">\${r.closed_count || 0}</td>
         <td class="num">\${_fmtRate(r.win_rate)}</td>
-        <td class="num \${pnlCls(aar)}" title="Live return \${r.live_return_pct != null ? ((parseFloat(r.live_return_pct) >= 0 ? '+' : '') + parseFloat(r.live_return_pct).toFixed(2) + '%') : '—'} over \${r.live_days != null ? r.live_days + (r.live_days === 1 ? ' day' : ' days') : '—'} live">\${aar != null ? ((aar >= 0 ? '+' : '') + aar.toFixed(2) + '%') : '—'}</td>
+        <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
+        <td class="num" style="color:var(--muted)">\${actTxt}</td>
         <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>

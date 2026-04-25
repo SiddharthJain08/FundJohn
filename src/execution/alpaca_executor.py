@@ -183,6 +183,48 @@ def execute_single(sess, equity, order, run_date):
     # for off-hours we submit a plain market opg entry and skip auto-brackets.
     tif = 'day' if in_market_hours() else 'opg'
     order_class = 'bracket' if tif == 'day' else 'simple'
+
+    # Pre-flight stop adjustment: TradeJohn's stop is computed off the
+    # signal-time entry, but Alpaca validates stop_loss against the
+    # CURRENT base_price (latest trade). When the market drifts between
+    # signal generation and submission, otherwise-valid brackets get
+    # rejected with 422 "stop_loss.stop_price must be <= base_price -
+    # 0.01" (longs) or ">= base_price + 0.01" (shorts). Refetching the
+    # latest quote and snapping the stop to the validity boundary
+    # rescues these orders rather than dropping them. Limited to
+    # bracket day-orders — opg simple orders don't have brackets.
+    adjusted_stop_note = None
+    if tif == 'day':
+        try:
+            qr = sess.get(f'{sess._base}/v2/stocks/{ticker}/quotes/latest', timeout=5)
+            if qr.status_code == 200:
+                qj = qr.json().get('quote', {})
+                bid = float(qj.get('bp') or 0.0)
+                ask = float(qj.get('ap') or 0.0)
+                # Use mid-price as the reference base; fall back to whichever side is non-zero.
+                base = ((bid + ask) / 2.0) if (bid > 0 and ask > 0) else (bid or ask)
+                if base > 0:
+                    # Long: stop must be <= base − 0.01. If TradeJohn's stop is too
+                    # high, snap to base − max(0.02, 0.5% of base) to leave a small
+                    # margin against further drift.
+                    if side == 'buy':
+                        max_valid = base - 0.01
+                        if stop >= max_valid:
+                            new_stop = round(base - max(0.02, base * 0.005), 2)
+                            adjusted_stop_note = f'stop adjusted long: {stop:.2f} → {new_stop:.2f} (base={base:.2f})'
+                            stop = new_stop
+                    # Short: stop must be >= base + 0.01.
+                    elif side == 'sell':
+                        min_valid = base + 0.01
+                        if stop <= min_valid:
+                            new_stop = round(base + max(0.02, base * 0.005), 2)
+                            adjusted_stop_note = f'stop adjusted short: {stop:.2f} → {new_stop:.2f} (base={base:.2f})'
+                            stop = new_stop
+        except Exception as _qe:
+            # Don't block submission on a quote fetch hiccup; let Alpaca's
+            # own validation be the final word.
+            pass
+
     body = {
         'symbol':          ticker,
         'qty':             str(qty),
@@ -195,6 +237,8 @@ def execute_single(sess, equity, order, run_date):
         body['order_class']  = 'bracket'
         body['take_profit']  = {'limit_price': _price_str(target)}
         body['stop_loss']    = {'stop_price':  _price_str(stop)}
+    if adjusted_stop_note:
+        log(f'  ↪ {ticker}: {adjusted_stop_note}')
 
     try:
         import requests  # noqa: F401

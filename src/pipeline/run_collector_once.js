@@ -61,11 +61,65 @@ console.log = (...args) => {
   }
 };
 
+// `--eod-only` selects the slimmed-down post-market refresh that only fetches
+// today's equity + market price bars. Used by openclaw-eod-refresh.timer at
+// 20:30 UTC (4:30pm ET), 30 min after market close, to capture EOD bars
+// the 10am ET cycle structurally cannot. Skips options/fundamentals/news/
+// insider/orchestrator-spawn — pure data hygiene.
+const eodOnly = process.argv.includes('--eod-only');
+
+function formatEodAlert(summary, ok) {
+  // summary is what runEodRefresh returns; ok=false means an exception was thrown.
+  if (!summary || !ok) {
+    return `❌ **EOD refresh FAILED** — ${new Date().toISOString().slice(0,10)}`;
+  }
+  const { elapsed_s, today, total_tickers, equity_tickers, advanced_count,
+          advanced_by_date, stagnant } = summary;
+  const lines = [];
+
+  if (advanced_count === 0) {
+    const stuckCount = stagnant.filter(s => !s.date || s.date < today).length;
+    if (stuckCount === 0) {
+      lines.push(`🌅 **EOD refresh — no gaps to fill** · ${elapsed_s}s`);
+      lines.push(`All ${total_tickers} tickers already current as of ${today}.`);
+    } else {
+      lines.push(`⚠️ **EOD refresh — no bars fetched** · ${elapsed_s}s`);
+      lines.push(`${stuckCount} of ${total_tickers} tickers still behind today (upstream delay or empty response).`);
+    }
+  } else {
+    lines.push(`🌅 **EOD refresh — ${advanced_count} tickers gained bars** · ${elapsed_s}s`);
+    // Filled dates breakdown, descending (today first)
+    const dateKeys = Object.keys(advanced_by_date).sort().reverse();
+    lines.push('**Filled dates:**');
+    for (const d of dateKeys) {
+      const list = advanced_by_date[d];
+      const eq = list.filter(t => equity_tickers.includes(t)).length;
+      const mk = list.length - eq;
+      lines.push(`  • ${d}: **${list.length}** tickers  (${eq} equity / ${mk} market)`);
+    }
+    // Tickers that didn't advance and remain behind today are the ones
+    // worth flagging — they signal a persistent upstream blank.
+    const stuck = stagnant.filter(s => !s.date || s.date < today);
+    if (stuck.length > 0) {
+      const sample = stuck.slice(0, 12).map(s => s.ticker).join(', ');
+      const more   = stuck.length > 12 ? ` … (+${stuck.length - 12} more)` : '';
+      lines.push(`**Still behind today (${stuck.length}):** ${sample}${more}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 async function main() {
-  console.log('[collector-once] starting single-shot collection cycle');
+  const mode = eodOnly ? 'EOD refresh' : 'full daily collection';
+  console.log(`[collector-once] starting single-shot ${mode} cycle`);
   let ok = true;
+  let eodSummary = null;
   try {
-    await collector.runDailyCollection();
+    if (eodOnly) {
+      eodSummary = await collector.runEodRefresh();
+    } else {
+      await collector.runDailyCollection();
+    }
     console.log('[collector-once] cycle complete');
   } catch (err) {
     console.error('[collector-once] cycle failed:', err && err.stack || err);
@@ -77,11 +131,17 @@ async function main() {
     const total_s = Math.round((Date.now() - phaseStart) / 1000);
     const url = await getWebhook();
     if (url) {
-      const phaseLines = phases.slice(-15).map((p) => `• ${p.line}`).join('\n') || '(no phase output captured)';
-      const header = ok
-        ? `📦 **Daily ingestion complete** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`
-        : `❌ **Daily ingestion FAILED** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`;
-      await post(url, `${header}\n${phaseLines}`);
+      let body;
+      if (eodOnly) {
+        body = formatEodAlert(eodSummary, ok);
+      } else {
+        const phaseLines = phases.slice(-15).map((p) => `• ${p.line}`).join('\n') || '(no phase output captured)';
+        const header = ok
+          ? `📦 **Daily ingestion complete** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`
+          : `❌ **Daily ingestion FAILED** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`;
+        body = `${header}\n${phaseLines}`;
+      }
+      await post(url, body);
     }
   } catch (err) {
     console.warn('[collector-once] data-alerts summary post failed:', err.message);

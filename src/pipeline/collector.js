@@ -1577,6 +1577,85 @@ async function runFreshnessCheckOnBoot() {
 }
 
 // ── Boot integrity check ───────────────────────────────────────────────────────
+// ── Evening EOD refresh ───────────────────────────────────────────────────────
+// Slimmed-down cycle that runs after market close to capture today's EOD
+// bars. Only Phase 2 (equity prices + market prices) — no options,
+// fundamentals, news, insider, or orchestrator spawn. Force-fetches even
+// when getGapSummary says "covered" because the morning cycle's
+// updateCoverage may have advanced past today's date_to incorrectly
+// (now corrected, but the EOD pass is the durable safety net).
+async function runEodRefresh() {
+  const cycleStart = Date.now();
+  notify('🌅 EOD refresh — fetching today\'s closing bars');
+
+  const fullUniverse  = await store.getActiveUniverse();
+  const equityTickers = fullUniverse.filter(u => u.category === 'equity').map(u => u.ticker);
+  const marketTickers = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
+  const tickerSet     = new Set([...equityTickers, ...marketTickers]);
+  const historyDays   = 7;  // small lookback — yfinance gap calc needs only a few days
+
+  // Snapshot coverage state BEFORE the run so we can diff per-ticker after
+  // and build an accurate "gaps filled" report. Map: ticker → 'YYYY-MM-DD'.
+  const toIso = (v) => {
+    if (!v) return null;
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    const s = String(v);
+    return s.length >= 10 ? s.slice(0, 10) : null;
+  };
+  const beforeRows = await store.getAllCoverage('prices').catch(() => []);
+  const before = new Map();
+  for (const r of beforeRows) {
+    if (tickerSet.has(r.ticker)) before.set(r.ticker, toIso(r.date_to));
+  }
+
+  await runHistoricalPrices(historyDays, equityTickers);
+  await runMarketPricesYFinance(marketTickers, historyDays);
+
+  // Diff coverage AFTER the run.
+  const afterRows = await store.getAllCoverage('prices').catch(() => []);
+  const after = new Map();
+  for (const r of afterRows) {
+    if (tickerSet.has(r.ticker)) after.set(r.ticker, toIso(r.date_to));
+  }
+
+  // Group: per "new date_to" how many tickers landed there?
+  // Also: tickers whose date_to didn't advance (yfinance gave nothing).
+  const advancedByDate = new Map();   // newDate → ticker[]
+  const stagnant       = [];           // [{ticker, date}]
+  let advancedCount = 0;
+  for (const tk of tickerSet) {
+    const b = before.get(tk) || null;
+    const a = after.get(tk)  || null;
+    if (a && a !== b) {
+      advancedCount++;
+      const list = advancedByDate.get(a) || [];
+      list.push(tk);
+      advancedByDate.set(a, list);
+    } else {
+      stagnant.push({ ticker: tk, date: a });
+    }
+  }
+
+  const elapsed = Math.round((Date.now() - cycleStart) / 1000);
+  notify(`✅ EOD refresh complete — ${elapsed}s | advanced: ${advancedCount}/${tickerSet.size}`);
+
+  // Return a structured summary so run_collector_once.js (which owns the
+  // webhook plumbing for this path) can format and post a proper alert.
+  // Convert advancedByDate Map → plain object so callers can JSON it.
+  const advancedByDateObj = {};
+  for (const [d, list] of advancedByDate) advancedByDateObj[d] = list;
+  return {
+    elapsed_s:        elapsed,
+    today:            new Date().toISOString().slice(0, 10),
+    total_tickers:    tickerSet.size,
+    equity_tickers:   equityTickers,
+    market_tickers:   marketTickers,
+    advanced_count:   advancedCount,
+    advanced_by_date: advancedByDateObj,
+    stagnant,         // [{ticker, date}]
+  };
+}
+
 async function runIntegrityCheck() {
   try {
     const { verifyManifest } = require('../security/integrity');
@@ -1590,4 +1669,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };

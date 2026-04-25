@@ -42,13 +42,16 @@ class DualMomentum(BaseStrategy):
         Absolute momentum: each position must have positive trailing return (no shorting losing names).
         Regime gate: only active in LOW_VOL and TRANSITIONING regimes.
         """
-        p = self.parameters
-        if not self.should_run(regime.get('state', 'LOW_VOL')):
+        if prices is None or prices.empty:
             return []
-        if prices is None or len(prices) < self.min_lookback:
+        p = self.parameters
+        regime_state = regime.get('state', 'LOW_VOL')
+        if not self.should_run(regime_state):
+            return []
+        if len(prices) < self.min_lookback:
             return []
 
-        scale     = self.position_scale(regime.get('state', 'LOW_VOL'))
+        scale     = self.position_scale(regime_state)
         mom_w     = p['mom_window']
         skip_w    = p['skip_window']
         top_n     = p['top_n']
@@ -69,6 +72,7 @@ class DualMomentum(BaseStrategy):
                 moms[ticker] = m
 
         if not moms:
+            print(f'[debug] signals=0', file=sys.stderr)
             return []
 
         winners = pd.Series(moms).sort_values(ascending=False).head(top_n)
@@ -78,7 +82,7 @@ class DualMomentum(BaseStrategy):
         for ticker in winners.index:
             ts      = prices[ticker].dropna()
             current = float(ts.iloc[-1])
-            stops   = self.compute_stops_and_targets(ts, 'LONG', current)
+            stops   = self.compute_stops_and_targets(ts, 'LONG', current, regime_state=regime_state)
             signals.append(Signal(
                 ticker            = ticker,
                 direction         = 'LONG',
@@ -95,4 +99,5 @@ class DualMomentum(BaseStrategy):
                 },
             ))
 
+        print(f'[debug] signals={len(signals)}', file=sys.stderr)
         return signals

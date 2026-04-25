@@ -33,7 +33,11 @@ CRITICAL_PCT    = 0.10   # pause if token budget drops below 10% remaining
 PAUSE_ON_RED    = True   # pause if budget:mode == RED (USD spend too high)
 CHECKPOINT_KEY  = 'pipeline:resume_checkpoint'
 LOCK_KEY        = 'pipeline:running'
-LOCK_TTL        = 3600   # 1 hour lock TTL (prevents double-run)
+LOCK_TTL        = 7200   # 2 hour lock TTL — covers worst-case collector
+                         # (45min) + slow TradeJohn (27min on 04-24's
+                         # third attempt) + buffer. Was 3600s, but a 14:00
+                         # cron failure followed by 17:37 retry beat that
+                         # window and produced two concurrent runs.
 COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
 COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 

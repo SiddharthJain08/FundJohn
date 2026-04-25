@@ -98,6 +98,34 @@ def _emit_sized_handoff(run_date, raw_stdout):
     except Exception as e:
         print(f'[trade_agent_llm] prefilter-fold skipped: {e}')
 
+    # Idempotency guard: if Alpaca has already received this cycle's
+    # orders, refuse to overwrite the sized handoff. A direct rerun of
+    # this script (bypassing the orchestrator's lock) could otherwise
+    # clobber the artifact Alpaca consumed, leaving post-hoc
+    # reconciliation reading a payload that doesn't match what was sent.
+    # Override via OPENCLAW_FORCE_RESIZE=1 when intentionally rerunning.
+    if os.environ.get('OPENCLAW_FORCE_RESIZE') != '1':
+        postgres_uri = os.environ.get('POSTGRES_URI', '')
+        if postgres_uri:
+            try:
+                import psycopg2
+                _conn = psycopg2.connect(postgres_uri)
+                _cur  = _conn.cursor()
+                _cur.execute(
+                    "SELECT COUNT(*) FROM alpaca_submissions WHERE submitted_at::date = %s",
+                    (run_date,),
+                )
+                already = _cur.fetchone()[0] or 0
+                _conn.close()
+                if already > 0:
+                    print(f'[trade_agent_llm] Refusing to overwrite sized handoff: '
+                          f'{already} Alpaca submission(s) already exist for {run_date}. '
+                          f'Set OPENCLAW_FORCE_RESIZE=1 to override.')
+                    return
+            except Exception as _e:
+                # Don't block on a DB hiccup — just log and proceed.
+                print(f'[trade_agent_llm] alpaca_submissions check skipped: {_e}')
+
     _write_handoff(run_date, 'sized', payload)
     print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
           f'{len(payload.get("vetoed", []))} vetoed.')
@@ -196,6 +224,35 @@ if __name__ == '__main__':
             'd1_strategy_stats': handoff.get('d1_strategy_stats') or {},
             'mastermind_rec':    handoff.get('mastermind_rec'),
         }
+
+        # Last-line defense against runaway prompt size. The 04-24 first
+        # TradeJohn attempt burned $1.66 (over the old $1.50 cap) on a
+        # 200KB+ prompt that overflowed the cache prefix and forced
+        # cache_creation tokens. The whitelist above already cuts heavy
+        # fields; this cap pre-truncates the signals list to keep the
+        # LLM context bounded even on outlier-signal-volume days. We drop
+        # the LOWEST-EV greens first, so what remains is the most
+        # actionable subset. Dropped tickers are logged so the operator
+        # knows the cap fired.
+        MAX_HANDOFF_BYTES = 100_000
+        size = len(json.dumps(tradejohn_handoff, default=str))
+        if size > MAX_HANDOFF_BYTES:
+            sigs = tradejohn_handoff['signals']
+            # Sort by EV ascending — lowest EV at the head, highest at the tail.
+            sigs_sorted = sorted(sigs, key=lambda s: float(s.get('ev_gbm') or s.get('ev') or 0))
+            dropped = []
+            while size > MAX_HANDOFF_BYTES and len(sigs_sorted) > 1:
+                dropped.append(sigs_sorted.pop(0))
+                tradejohn_handoff['signals'] = sigs_sorted
+                size = len(json.dumps(tradejohn_handoff, default=str))
+            print(f'[trade_agent_llm] handoff size cap fired: dropped {len(dropped)} '
+                  f'lowest-EV signal(s), kept {len(sigs_sorted)}, final size {size/1024:.1f} KB')
+            if dropped:
+                tradejohn_handoff['_truncated'] = {
+                    'cap_bytes': MAX_HANDOFF_BYTES,
+                    'dropped_count': len(dropped),
+                    'dropped_tickers': [(d.get('ticker'), d.get('strategy_id')) for d in dropped[:20]],
+                }
     else:
         # Legacy research / memos stages — pass as-is for backwards compat.
         tradejohn_handoff = handoff

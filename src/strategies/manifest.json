@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-23T20:20:03.583Z",
+  "updated_at": "2026-04-25T02:08:21.080Z",
   "strategies": {
     "S5_max_pain": {
       "state": "live",
@@ -664,14 +664,31 @@
       ]
     },
     "S_skewness_dispersion_macro": {
-      "state": "candidate",
-      "state_since": "2026-04-19T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-04-25T01:43:13.063Z",
       "metadata": {
         "canonical_file": "S_skewness_dispersion_macro.py",
         "class": "SkewnessDispersionMacro",
         "description": "LONG/SHORT based on cross-sectional realized-skewness dispersion z-score, monthly cadence"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-25T01:43:05.201612+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-25T01:43:13.063Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_quantum_rebalance_qaoa": {
       "state": "live",
@@ -868,8 +885,8 @@
       ]
     },
     "S25_dual_momentum": {
-      "state": "candidate",
-      "state_since": "2026-04-22T05:23:56.127700+00:00",
+      "state": "live",
+      "state_since": "2026-04-25T02:08:21.080Z",
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
@@ -882,6 +899,22 @@
           "timestamp": "2026-04-22T05:23:56.127700+00:00",
           "actor": "reconcile:2026-04-22",
           "reason": "Wired in from strategy_registry (pending_approval, no prior manifest entry)",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-25T01:54:03.061330+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 7.58, DD 1.6%, trades 259",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-25T02:08:21.080Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
           "metadata": {}
         }
       ]

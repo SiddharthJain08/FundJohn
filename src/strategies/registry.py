@@ -37,6 +37,7 @@ _IMPL_MAP = {
     'S_custom_jt_momentum_12mo': ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
     'S23_regime_momentum':      ('strategies.implementations.S23_regime_momentum',      'RegimeMomentumStrategy'),
     'S24_52wk_high_proximity':  ('strategies.implementations.S24_52wk_high_proximity',  'FiftyTwoWeekHighProximityStrategy'),
+    'S25_dual_momentum':        ('strategies.implementations.S25_dual_momentum',         'DualMomentum'),
     'S25_dual_momentum_v2':     ('strategies.implementations.S25_dual_momentum',         'DualMomentum'),
         'S_HV13_call_put_iv_spread': ('strategies.implementations.shv13_call_put_iv_spread', 'CallPutIVSpread'),
         'S_HV14_otm_skew_factor':      ('strategies.implementations.shv14_otm_skew_factor',      'OTMSkewFactor'),

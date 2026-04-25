@@ -278,6 +278,16 @@ async function getGaps(ticker, dataType, requestedFrom, requestedTo) {
 }
 
 async function updateCoverage(ticker, dataType, dateFrom, dateTo, rowsAdded = 0) {
+  // Only advance coverage when we actually wrote rows. A zero-row fetch
+  // means the data isn't available yet (pre-EOD on cycle day) or the
+  // upstream API genuinely has nothing — in both cases, advancing
+  // date_to would silently lie and cause the next cycle to skip the
+  // fetch, cascading the gap forward. Skipping the update lets the next
+  // cycle retry naturally. Tickers with permanently no data (e.g.
+  // USDCNH=X) will keep retrying each cycle — that's an acceptable cost
+  // (one empty HTTP call per ticker per cycle) for never lying about
+  // coverage state.
+  if (!rowsAdded || rowsAdded <= 0) return;
   await query(
     `INSERT INTO data_coverage (ticker, data_type, date_from, date_to, rows_stored, last_updated)
      VALUES ($1, $2, $3::date, $4::date, $5, NOW())
