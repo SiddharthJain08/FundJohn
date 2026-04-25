@@ -36,6 +36,17 @@ Top-level namespaces only — see `_templates/README.md`. Allowed:
 `#paper #strategy #position #thesis-checkin #weekly-review #morning-note #initiating`
 `#factor/* #asset/* #ticker/* #sector/* #state/* #regime/* #conviction/* #status/*`
 
+**YAML caveat — write tags WITHOUT the `#` prefix in frontmatter.** The `#` is
+the *display* form (what Obsidian's tag pane shows). In YAML, an unquoted `#`
+starts a comment, so `tags: [#strategy]` parses as `tags: []`. Correct:
+
+```yaml
+tags: [strategy, strategy/BS03_options_mispricing, state/live, ticker/AAPL]
+```
+
+Obsidian and Dataview prepend the `#` automatically when matching against
+queries like `FROM #strategy`.
+
 Inventing a new top-level tag without updating `_templates/README.md` is a quality-gate failure.
 
 ### 4. File location rules

@@ -11,7 +11,7 @@ capacity_usd: <<int>>
 inception_date: YYYY-MM-DD
 last_review: <<today>>
 parent_papers: [[paper-name-1]]
-tags: [#strategy, #factor/<<factor>>, #state/<<state>>]
+tags: [strategy, factor/<<factor>>, state/<<state>>]
 ---
 
 ## Hypothesis (≤3 sentences)

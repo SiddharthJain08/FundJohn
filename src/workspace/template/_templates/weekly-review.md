@@ -10,7 +10,7 @@ alpha_pct: 0.00
 worst_drawdown_pct: 0.00
 trades_open: 0
 trades_closed: 0
-tags: [#weekly-review, #regime/<<regime>>]
+tags: [weekly-review, regime/<<regime>>]
 ---
 
 ## Summary (one paragraph)

@@ -49,7 +49,7 @@ function inferFrontmatter(absPath) {
       type: 'initiating',
       ticker: m[1],
       tickers: [m[1]],
-      tags: ['#initiating', `#ticker/${m[1]}`],
+      tags: ['initiating', `ticker/${m[1]}`],
       backfilled: today,
     };
   }
@@ -61,7 +61,7 @@ function inferFrontmatter(absPath) {
       type: 'thesis_checkin',
       ticker: m[1],
       tickers: [m[1]],
-      tags: ['#thesis-checkin', `#ticker/${m[1]}`],
+      tags: ['thesis-checkin', `ticker/${m[1]}`],
       backfilled: today,
     };
   }
@@ -75,7 +75,7 @@ function inferFrontmatter(absPath) {
         type: 'strategy',
         strategy_id: m[1],
         review_date: m[2],
-        tags: ['#strategy', '#review', `#strategy/${m[1]}`],
+        tags: ['strategy', 'review', `strategy/${m[1]}`],
         backfilled: today,
       };
     }
@@ -86,7 +86,7 @@ function inferFrontmatter(absPath) {
         type: 'strategy',
         session_id: m[1],
         date: m[2],
-        tags: ['#strategy', '#session'],
+        tags: ['strategy', 'session'],
         backfilled: today,
       };
     }
@@ -96,7 +96,7 @@ function inferFrontmatter(absPath) {
       return {
         type: 'strategy',
         session_date: m[1],
-        tags: ['#strategy', '#ideation'],
+        tags: ['strategy', 'ideation'],
         backfilled: today,
       };
     }
@@ -107,17 +107,17 @@ function inferFrontmatter(absPath) {
         type: 'strategy',
         strategy_id: m[1],
         date: m[3],
-        tags: ['#strategy', `#strategy/${m[1]}`],
+        tags: ['strategy', `strategy/${m[1]}`],
         backfilled: today,
       };
       if (m[2]) {
         fm.status = 'deployed';
-        fm.tags.push('#state/live');
+        fm.tags.push('state/live');
       }
       return fm;
     }
     // catch-all: tagged as strategy but no specific id
-    return { type: 'strategy', tags: ['#strategy'], backfilled: today };
+    return { type: 'strategy', tags: ['strategy'], backfilled: today };
   }
 
   // Anything else under results/ that doesn't match — skip
@@ -149,18 +149,30 @@ function walk(dir) {
   return out;
 }
 
+function stripExistingFrontmatter(text) {
+  if (!text.startsWith('---\n') && !text.startsWith('---\r\n')) return text;
+  const end = text.indexOf('\n---', 3);
+  if (end < 0) return text;
+  return text.slice(end + 4).replace(/^\n/, '');
+}
+
 function main() {
   const dryRun = process.argv.includes('--dry-run');
+  const force  = process.argv.includes('--force');
   const files = walk(RESULTS_DIR);
   let modified = 0;
   let skipped = 0;
   let unmatched = 0;
 
-  for (const f of files) {
-    const text = fs.readFileSync(f, 'utf8');
-    if (text.startsWith('---\n') || text.startsWith('---\r\n')) {
+  for (let f of files) {
+    let text = fs.readFileSync(f, 'utf8');
+    const hasFm = text.startsWith('---\n') || text.startsWith('---\r\n');
+    if (hasFm && !force) {
       skipped++;
       continue;
+    }
+    if (hasFm && force) {
+      text = stripExistingFrontmatter(text);
     }
     const fm = inferFrontmatter(f);
     if (!fm) {

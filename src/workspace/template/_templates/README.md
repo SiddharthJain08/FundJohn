@@ -37,3 +37,10 @@ Stable top-level tag namespaces:
 - `#status/{open|closed|scaled|pending_approval}`
 
 Do not invent new top-level tags without updating this file.
+
+**YAML note**: in frontmatter, write tags **without the `#` prefix** —
+`tags: [strategy, ticker/AAPL]`, not `tags: [#strategy, #ticker/AAPL]`. An
+unquoted `#` is a YAML comment marker and silently produces `tags: []`.
+Obsidian/Dataview re-add the `#` automatically when matching queries like
+`FROM #strategy`. The `#` form above is the *display* form (what you see
+in the tag pane).

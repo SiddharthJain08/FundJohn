@@ -12,7 +12,7 @@ horizon_days: <<int>>
 confidence: 0.00         # 0..1, MastermindJohn rates this
 status: candidate | promoted | rejected
 linked_strategies: [[strategy-name-1]], [[strategy-name-2]]
-tags: [#paper, #factor/<<factor>>, #asset/<<asset_class>>]
+tags: [paper, factor/<<factor>>, asset/<<asset_class>>]
 ---
 
 ## TL;DR

@@ -13,7 +13,7 @@ parent_thesis: [[initiating-<<TICKER>>]]
 status: open | closed | scaled
 conviction: 0.00
 catalyst_date: YYYY-MM-DD
-tags: [#position, #ticker/<<TICKER>>, #status/<<status>>]
+tags: [position, ticker/<<TICKER>>, status/<<status>>]
 ---
 
 ## Why we own it (one paragraph, link to thesis)
