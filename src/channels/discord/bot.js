@@ -599,21 +599,76 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
       case 'diligence':
       case 'run': {
-        const ticker = args[0]?.toUpperCase();
-        if (!ticker) { await notify('Usage: `!john /diligence AAPL`'); break; }
-        const dilTaskId = memoryWriter.openTask(`Diligence: ${ticker}`, `threadId:${threadId}`);
-        agentPersonas.setStatus('researchdesk', 'busy', `Diligence: ${ticker}`).catch(() => {});
-        agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning subagents`).catch(() => {});
-        const result = await main.runTask({ task: `Research ${ticker} strategy`, ticker, workspaceId, threadId, notify });
-        await postResult(message, ticker, result, 'diligence');
-        // ResearchDesk posts verdict to #strategy-memos
-        const verdict = result?.verdict || result?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
-        if (verdict) {
-          agentPersonas.post('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
-          memoryWriter.closeTask(dilTaskId, `${verdict} — ${ticker}`);
-        } else {
-          memoryWriter.closeTask(dilTaskId, `complete — ${ticker}`);
+        // Multi-ticker support: `/diligence AAPL MSFT GOOG` fans out N parallel
+        // diligence runs sharing one CYCLE_ID. The second-Nth ticker hits the
+        // Python cycle-cache for any shared data (regime, sector, macro), and
+        // identical system prompts share Anthropic's prompt-cache prefix
+        // within the 5-min TTL window. Capped at MAX_DILIGENCE_BATCH because
+        // beyond ~10 the operator should be doing a screen, not a batch.
+        const TICKER_RE = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+        const MAX_DILIGENCE_BATCH = 10;
+        const tickers = args
+          .map((a) => String(a || '').toUpperCase())
+          .filter((t) => TICKER_RE.test(t))
+          .slice(0, MAX_DILIGENCE_BATCH);
+        if (tickers.length === 0) { await notify('Usage: `!john /diligence AAPL [MSFT GOOG ...]` (up to 10 tickers)'); break; }
+
+        if (tickers.length === 1) {
+          const ticker = tickers[0];
+          const dilTaskId = memoryWriter.openTask(`Diligence: ${ticker}`, `threadId:${threadId}`);
+          agentPersonas.setStatus('researchdesk', 'busy', `Diligence: ${ticker}`).catch(() => {});
+          agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning subagents`).catch(() => {});
+          const result = await main.runTask({ task: `Research ${ticker} strategy`, ticker, workspaceId, threadId, notify });
+          await postResult(message, ticker, result, 'diligence');
+          const verdict = result?.verdict || result?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
+          if (verdict) {
+            agentPersonas.post('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
+            memoryWriter.closeTask(dilTaskId, `${verdict} — ${ticker}`);
+          } else {
+            memoryWriter.closeTask(dilTaskId, `complete — ${ticker}`);
+          }
+          agentPersonas.setStatus('researchdesk', 'idle', null).catch(() => {});
+          break;
         }
+
+        // Multi-ticker batch path
+        const batchId = `diligence-batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await notify(`🔬 Diligence batch starting for **${tickers.join(', ')}** — sharing CYCLE_ID for cache amortization`);
+        agentPersonas.setStatus('researchdesk', 'busy', `Diligence batch: ${tickers.length} tickers`).catch(() => {});
+        agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence batch started for **${tickers.join(', ')}** (n=${tickers.length})`).catch(() => {});
+
+        const taskIds = tickers.map((t) => memoryWriter.openTask(`Diligence: ${t}`, `threadId:${threadId} batchId:${batchId}`));
+        const results = await Promise.allSettled(tickers.map((ticker) =>
+          main.runTask({
+            task: `Research ${ticker} strategy`,
+            ticker,
+            workspaceId,
+            threadId,
+            cycleId: batchId,
+            notify: () => {},  // suppress per-ticker progress to avoid Discord spam; final summary below
+          })
+        ));
+
+        for (let i = 0; i < tickers.length; i++) {
+          const ticker = tickers[i];
+          const r = results[i];
+          if (r.status === 'fulfilled') {
+            await postResult(message, ticker, r.value, 'diligence');
+            const verdict = r.value?.verdict || r.value?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
+            if (verdict) {
+              agentPersonas.post('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
+              memoryWriter.closeTask(taskIds[i], `${verdict} — ${ticker}`);
+            } else {
+              memoryWriter.closeTask(taskIds[i], `complete — ${ticker}`);
+            }
+          } else {
+            await notify(`⚠️ ${ticker} diligence failed: ${String(r.reason?.message || r.reason).slice(0, 200)}`);
+            memoryWriter.closeTask(taskIds[i], `error — ${ticker}`);
+          }
+        }
+
+        const ok = results.filter((r) => r.status === 'fulfilled').length;
+        await notify(`✅ Diligence batch complete — ${ok}/${tickers.length} succeeded (batch=${batchId})`);
         agentPersonas.setStatus('researchdesk', 'idle', null).catch(() => {});
         break;
       }

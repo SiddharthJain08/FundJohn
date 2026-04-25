@@ -46,7 +46,7 @@ async function runCycle({ cycleDate, portfolioState, strategyList, threadId, not
  * @param {Function} [opts.notify]   — Discord notify function
  * @returns {Promise<Object>}
  */
-async function runTask({ task, ticker, threadId, notify,
+async function runTask({ task, ticker, threadId, notify, cycleId,
                          participantId, participantName, participantType, channelId }) {
   return botjohnDirect.respond({
     participantId:   participantId   || 'operator',
@@ -54,6 +54,7 @@ async function runTask({ task, ticker, threadId, notify,
     participantType: participantType || 'user',
     channelId:       channelId       || null,
     message:         task,
+    cycleId:         cycleId         || null,
   });
 }
 

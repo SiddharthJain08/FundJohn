@@ -51,7 +51,7 @@ function buildPrompt(history, participantName, message, systemCtx) {
   return lines.join('\n');
 }
 
-async function respond({ participantId, participantName, participantType, channelId, message }) {
+async function respond({ participantId, participantName, participantType, channelId, message, cycleId }) {
   const [history, systemCtx] = await Promise.all([
     chatHistory.loadHistory(participantId),
     buildSystemContext(),
@@ -59,7 +59,7 @@ async function respond({ participantId, participantName, participantType, channe
 
   const prompt = buildPrompt(history, participantName, message, systemCtx);
 
-  const text = await runClaudeBin(prompt);
+  const text = await runClaudeBin(prompt, { cycleId });
 
   await chatHistory.saveExchange(
     participantId, participantName, participantType, channelId, message, text
@@ -68,7 +68,7 @@ async function respond({ participantId, participantName, participantType, channe
   return { output: text };
 }
 
-function runClaudeBin(prompt) {
+function runClaudeBin(prompt, { cycleId } = {}) {
   return new Promise((resolve, reject) => {
     const args = [
       '--dangerously-skip-permissions',
@@ -86,6 +86,10 @@ function runClaudeBin(prompt) {
         ...process.env,
         HOME:       CLAUDE_HOME,
         CLAUDE_HOME,
+        // Cycle-cache namespace for Python tools — shared across parallel
+        // /diligence fan-outs so the second-Nth ticker hits Redis on any
+        // shared data fetches (regime, sector indices, macro snapshots).
+        ...(cycleId ? { CYCLE_ID: String(cycleId) } : {}),
       },
       cwd: OPENCLAW_DIR,
     });

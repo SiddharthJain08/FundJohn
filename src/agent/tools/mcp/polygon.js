@@ -4,18 +4,28 @@ function generatePython(server) {
   return `# Auto-generated — Polygon.io tool module
 # ${server.description}
 import os, requests
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _API_KEY = os.environ.get("POLYGON_API_KEY", "")
 _BASE = "https://api.polygon.io"
 _PROVIDER = "polygon"
 
 def _get(path: str, params: dict = None) -> dict:
+    # Cycle-cache layer: when CYCLE_ID is set (LangGraph cycle path), the
+    # second-Nth subagent in the same cycle hits Redis instead of refetching.
+    # Transparent passthrough when CYCLE_ID is unset.
+    cache_params = {"path": path, "params": params or {}}
+    cached = _cycle_cache_get("polygon:get", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     headers = {"Authorization": f"Bearer {_API_KEY}"}
     r = requests.get(f"{_BASE}{path}", params=params or {}, headers=headers, timeout=30)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _cycle_cache_set("polygon:get", cache_params, data)
+    return data
 
 def get_snapshot(ticker: str) -> dict:
     """Real-time snapshot: price, volume, VWAP, open/close."""

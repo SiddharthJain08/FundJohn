@@ -18,6 +18,7 @@ const { StateGraph, Annotation, END, START } = require('@langchain/langgraph');
 const { PostgresSaver } = require('@langchain/langgraph-checkpoint-postgres');
 const path = require('path');
 const traceBus = require('./traceBus');
+const cycleCache = require('./services/cycle-cache');
 
 // LangSmith auto-tracing: if the user sets LANGSMITH_API_KEY in .env, flip
 // LANGCHAIN_TRACING_V2=true so every graph invocation lands in their dashboard.
@@ -224,15 +225,22 @@ async function runCycleGraph(input) {
     const out = await compiled.invoke(statePayload, config);
     const snap = await compiled.getState(config);
     if (snap?.next?.length) {
-      // Interrupted — waiting for HITL
+      // Interrupted — waiting for HITL. Don't clear cycle cache yet; resume
+      // path may still want the cached data.
       traceBus.endRun(runId, 'awaiting_approval', null);
       emit(runId, 'hitl', 'pending', { next: snap.next });
       return { ...out, runId, threadId, status: 'awaiting_approval', next: snap.next };
     }
     traceBus.endRun(runId, 'ok');
+    // Cycle terminated normally (botjohn END or tradejohn-no-signals END);
+    // drop cycle keys so the namespace doesn't sit in Redis until 24h TTL.
+    await cycleCache.clear(threadId).catch(() => {});
     return { ...out, runId, threadId, status: 'ok' };
   } catch (err) {
     traceBus.endRun(runId, 'error', String(err.message || err));
+    // On error, also drop cycle keys — failed cycles should not leak data
+    // into a manually-restarted retry.
+    await cycleCache.clear(threadId).catch(() => {});
     throw err;
   }
 }
@@ -256,6 +264,8 @@ async function resumeCycle({ threadId, approval, notify }) {
   await compiled.updateState(config, { approval });
   const out = await compiled.invoke(null, config);
   traceBus.endRun(runId, approval === 'vetoed' ? 'vetoed' : 'ok');
+  // Resume path also terminates the cycle; drop cycle keys.
+  await cycleCache.clear(threadId).catch(() => {});
   return { ...out, runId, threadId, status: approval === 'vetoed' ? 'vetoed' : 'ok' };
 }
 

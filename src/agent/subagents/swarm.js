@@ -109,6 +109,14 @@ async function init({ type, ticker, workspace, threadId, prompt, notify, mode, f
         TICKER:         ticker,
         WORKSPACE:      workspace,
         PRUNING_CONFIG: JSON.stringify(pruningConfig),
+        // CYCLE_ID is the cycle-scoped key used by Python tools
+        // (workspace/tools/_rate_limiter.py::_cycle_cache_*) to share fetched
+        // data across subagents within the same daily cycle. graph.js sets
+        // threadId once per cycle and we forward it as CYCLE_ID. Ad-hoc
+        // Discord tasks have a threadId but typically aren't a cycle — we
+        // still set it so per-thread dedup applies; Python helpers treat
+        // missing CYCLE_ID as a passthrough.
+        ...(threadId ? { CYCLE_ID: String(threadId) } : {}),
       },
       cwd: workDir,
     });

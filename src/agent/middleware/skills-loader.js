@@ -132,10 +132,25 @@ async function skillsLoader(state, next) {
   const workspaceBlock = systemBlocks.find((b) => b._blockType === 'workspace');
   const runtimeBlock   = systemBlocks.find((b) => b._blockType === 'runtime');
 
+  // Skill-def blocks are stable per (subagent type, active skills set) and run
+  // 3-5k tokens each. Without a cache breakpoint they re-bill as fresh input on
+  // every LLM call. Mark the LAST one as ephemeral — this anchors the cached
+  // prefix at end-of-skill-defs, which amortizes ALL skill-def tokens before
+  // the workspace/runtime (dynamic) blocks. Anthropic permits up to 4
+  // breakpoints per request; cache-control already sets static + skills + last
+  // tool, leaving room for this one.
+  const taggedSkillDefs = extraBlocks.map((b, i) => ({
+    ...b,
+    _blockType: 'skill-def',
+    ...(i === extraBlocks.length - 1 && extraBlocks.length > 0
+      ? { cache_control: { type: 'ephemeral' } }
+      : {}),
+  }));
+
   const newSystemBlocks = [
     ...staticBlocks,
     { ...skillsBlock, _blockType: 'skills' },
-    ...extraBlocks.map((b) => ({ ...b, _blockType: 'skill-def' })),
+    ...taggedSkillDefs,
     ...(workspaceBlock ? [workspaceBlock] : []),
     ...(runtimeBlock   ? [runtimeBlock]   : []),
   ];

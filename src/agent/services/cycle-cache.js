@@ -3,15 +3,24 @@
 const { getClient } = require('../../database/redis');
 
 /**
- * Cross-subagent per-cycle data cache.
+ * Cross-subagent per-cycle data cache (JS side — secondary path).
  *
- * Problem: ResearchJohn and TradeJohn both fetch AAPL prices in the same daily
- * cycle. Two API hits, two big tool-result blocks injected into context, two
- * cache-write paths.
+ * The PRIMARY cycle cache is Python-side, in workspace/tools/_rate_limiter.py
+ * (_cycle_cache_get / _cycle_cache_set), because all FMP/Polygon/EDGAR/etc.
+ * tools run inside Python subagent processes spawned by swarm.js. That's
+ * where the real cross-subagent dedup happens.
  *
- * Solution: shared Redis hash keyed by cycleId. First fetcher populates;
- * subsequent fetchers hit Redis. Tool wrappers in src/agent/tools/registry.js
- * call `wrap()` to layer this in front of the existing 5-min provider cache.
+ * This JS module is the equivalent helper for any future graph-node-level
+ * JS fetchers (none today) AND owns the `clear()` lifecycle hook called from
+ * graph.js at cycle END. Keep it: same Redis key namespace (`cycle:*`) so
+ * either side can drop the cycle cleanly.
+ *
+ * Problem this solves: ResearchJohn and TradeJohn both fetch AAPL prices in
+ * the same daily cycle. Two API hits, two big tool-result blocks injected
+ * into context, two cache-write paths.
+ *
+ * Solution: shared Redis namespace keyed by cycleId. First fetcher populates;
+ * subsequent fetchers hit Redis.
  *
  * Lifecycle: cycleId is the LangGraph thread_id of the current daily-cycle run
  * (graph.js sets it). Keys auto-expire 24h after cycle start so stale cycles
