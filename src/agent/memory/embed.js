@@ -159,13 +159,19 @@ function chunkBody(body, opts = {}) {
 
 /**
  * Embed a single string. Returns 1024-dim Float array, or null on error.
- * Inputs > VOYAGE_INPUT_CAP chars are truncated (caller's choice; we don't
- * silently drop content).
+ *
+ * 429-aware retry: on rate-limit response, sleeps `retry-after` seconds
+ * (or 22s default — Voyage free tier is 3 RPM = 20s spacing; +2s safety)
+ * and retries up to VOYAGE_MAX_RETRIES times. Logs each backoff so a
+ * stuck loop is visible.
+ *
+ * Inputs > VOYAGE_INPUT_CAP chars are truncated (caller's choice; we
+ * don't silently drop content).
  */
-function embedOne(text, { inputType = 'document' } = {}) {
-  if (!process.env.VOYAGE_API_KEY) return Promise.resolve(null);
-  const trimmed = text.length > VOYAGE_INPUT_CAP ? text.slice(0, VOYAGE_INPUT_CAP) : text;
+function _sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+function _voyageOnce(text, inputType) {
+  const trimmed = text.length > VOYAGE_INPUT_CAP ? text.slice(0, VOYAGE_INPUT_CAP) : text;
   const body = JSON.stringify({
     model:      VOYAGE_MODEL,
     input:      [trimmed],
@@ -187,6 +193,10 @@ function embedOne(text, { inputType = 'document' } = {}) {
       let data = '';
       res.on('data', (d) => data += d);
       res.on('end', () => {
+        if (res.statusCode === 429) {
+          const ra = parseInt(res.headers['retry-after'] || '0', 10);
+          return resolve({ rateLimited: true, retryAfter: ra, body: data });
+        }
         try {
           if (res.statusCode !== 200) return reject(new Error(`voyage status ${res.statusCode}: ${data.slice(0, 200)}`));
           const json = JSON.parse(data);
@@ -194,7 +204,7 @@ function embedOne(text, { inputType = 'document' } = {}) {
           if (!Array.isArray(v) || v.length !== VOYAGE_DIM) {
             return reject(new Error(`voyage returned dim ${v?.length} (expected ${VOYAGE_DIM})`));
           }
-          resolve(v);
+          resolve({ embedding: v });
         } catch (e) { reject(e); }
       });
     });
@@ -202,10 +212,29 @@ function embedOne(text, { inputType = 'document' } = {}) {
     req.on('error', reject);
     req.write(body);
     req.end();
-  }).catch((err) => {
-    console.warn('[memory/embed] voyage call failed:', err.message);
-    return null;
   });
+}
+
+async function embedOne(text, { inputType = 'document' } = {}) {
+  if (!process.env.VOYAGE_API_KEY) return null;
+  const maxRetries  = parseInt(process.env.VOYAGE_MAX_RETRIES   || '6',  10);
+  const defaultWait = parseInt(process.env.VOYAGE_DEFAULT_WAIT_MS || '22000', 10); // 22s — over 3 RPM spacing
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const r = await _voyageOnce(text, inputType);
+      if (r.embedding) return r.embedding;
+      // 429: back off and retry
+      const waitMs = (r.retryAfter > 0 ? r.retryAfter * 1000 : defaultWait);
+      console.warn(`[memory/embed] voyage 429 — backing off ${Math.round(waitMs/1000)}s (attempt ${attempt + 1}/${maxRetries + 1})`);
+      await _sleep(waitMs);
+    } catch (err) {
+      console.warn('[memory/embed] voyage call failed:', err.message);
+      return null;
+    }
+  }
+  console.warn(`[memory/embed] voyage gave up after ${maxRetries + 1} attempts (rate-limited)`);
+  return null;
 }
 
 // ── File-level embed pipeline ──────────────────────────────────────────────
