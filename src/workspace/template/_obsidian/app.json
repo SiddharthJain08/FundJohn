@@ -1,0 +1,10 @@
+{
+  "useMarkdownLinks": false,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "results",
+  "attachmentFolderPath": ".attachments",
+  "alwaysUpdateLinks": true,
+  "promptDelete": false,
+  "showLineNumber": true,
+  "readableLineLength": true
+}
