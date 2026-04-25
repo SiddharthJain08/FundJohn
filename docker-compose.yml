@@ -2,7 +2,11 @@ version: '3.9'
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 is the official pgvector image based on debian
+    # postgres:16. Swapped from postgres:16-alpine on 2026-04-25 to enable the
+    # vector extension for memory_chunks (migration 054). Volume contents
+    # carry over — pg16 PGDATA layout is compatible.
+    image: pgvector/pgvector:pg16
     container_name: openclaw-postgres
     environment:
       POSTGRES_DB: openclaw

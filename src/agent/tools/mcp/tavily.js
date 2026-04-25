@@ -4,19 +4,27 @@ function generatePython(server) {
   return `# Auto-generated — Tavily search tool module
 # ${server.description}
 import os, requests
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _API_KEY = os.environ.get("TAVILY_API_KEY", "")
 _BASE = "https://api.tavily.com"
 _PROVIDER = "tavily"
 
 def _post(endpoint: str, payload: dict) -> dict:
+    # Cycle-cache: api_key excluded from cache key (constant per process).
+    cache_params = {"endpoint": endpoint, "payload": payload}
+    cached = _cycle_cache_get("tavily:post", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     r = requests.post(f"{_BASE}{endpoint}",
                       json={"api_key": _API_KEY, **payload},
                       timeout=30)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _cycle_cache_set("tavily:post", cache_params, data)
+    return data
 
 def search(query: str, max_results: int = 5, search_depth: str = "basic",
            include_domains: list = None, exclude_domains: list = None) -> dict:

@@ -5,7 +5,7 @@ function generatePython(server) {
 # ${server.description}
 # WARNING: Yahoo Finance is unofficial. Use only when Tier 1 providers are unavailable.
 import requests, time
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _PROVIDER = "yahoo"
 _CRUMB = None
@@ -32,13 +32,23 @@ def _get_crumb():
     return _CRUMB, _COOKIES
 
 def _get(url: str, params: dict = None) -> dict:
+    # Cycle-cache: crumb deliberately excluded from cache key — it rotates
+    # every 30 minutes per session but Yahoo accepts any valid crumb for
+    # any session, so it's not part of the response identity.
+    cache_params = {"url": url, "params": params or {}}
+    cached = _cycle_cache_get("yahoo:get", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     crumb, cookies = _get_crumb()
     p = {**(params or {}), "crumb": crumb}
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, params=p, cookies=cookies, headers=headers, timeout=30)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _cycle_cache_set("yahoo:get", cache_params, data)
+    return data
 
 def get_quote(ticker: str) -> dict:
     """Fallback quote from Yahoo Finance."""

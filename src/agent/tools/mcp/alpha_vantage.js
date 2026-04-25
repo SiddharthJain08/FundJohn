@@ -6,13 +6,21 @@ function generatePython(server) {
   return `# Auto-generated — Alpha Vantage tool module
 # ${server.description}
 import os, requests
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _API_KEY = os.environ.get("ALPHA_VANTAGE_API_KEY", "")
 _BASE = "${AV_BASE}"
 _PROVIDER = "alpha_vantage"
 
 def _get(params: dict) -> dict:
+    # Cycle-cache: apikey excluded from cache key (constant per process).
+    # Don't cache rate-limit / quota error responses — they aren't
+    # representative data, so we let the next request retry.
+    cache_params = {"params": params}
+    cached = _cycle_cache_get("av:get", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     p = {"apikey": _API_KEY, **params}
     r = requests.get(_BASE, params=p, timeout=30)
@@ -22,6 +30,7 @@ def _get(params: dict) -> dict:
         raise RuntimeError(f"Alpha Vantage rate limit: {data['Note']}")
     if "Information" in data:
         raise RuntimeError(f"Alpha Vantage quota: {data['Information']}")
+    _cycle_cache_set("av:get", cache_params, data)
     return data
 
 def get_rsi(ticker: str, interval: str = "daily", time_period: int = 14, series_type: str = "close") -> dict:

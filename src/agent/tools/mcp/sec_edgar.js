@@ -4,18 +4,28 @@ function generatePython(server) {
   return `# Auto-generated — SEC EDGAR tool module
 # ${server.description}
 import os, requests
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _USER_AGENT = os.environ.get("SEC_USER_AGENT", "OpenClaw/1.0 (contact@example.com)")
 _BASE = "https://data.sec.gov"
 _PROVIDER = "sec_edgar"
 
 def _get(path: str, params: dict = None) -> dict:
+    # Cycle-cache around JSON endpoints (submissions, companyfacts,
+    # companyconcept). Note: get_filing() returns raw HTML/text and is
+    # NOT cached here — large text would blow up Redis values.
+    cache_params = {"path": path, "params": params or {}}
+    cached = _cycle_cache_get("edgar:get", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
     r = requests.get(f"{_BASE}{path}", params=params or {}, headers=headers, timeout=30)
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _cycle_cache_set("edgar:get", cache_params, data)
+    return data
 
 def get_submissions(cik: str) -> dict:
     """Company submissions + recent filing index. CIK must be zero-padded to 10 digits."""

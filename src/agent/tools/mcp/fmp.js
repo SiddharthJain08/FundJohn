@@ -6,20 +6,29 @@ function generatePython(server) {
   return `# Auto-generated — FMP (Financial Modeling Prep) tool module
 # ${server.description}
 import os, json, requests
-from _rate_limiter import _acquire_token
+from _rate_limiter import _acquire_token, _cycle_cache_get, _cycle_cache_set
 
 _API_KEY = os.environ.get("FMP_API_KEY", "")
 _BASE = "${FMP_BASE}"
 _PROVIDER = "fmp"
 
 def _get(endpoint: str, params: dict = None) -> dict:
+    # Cycle-cache: apikey deliberately excluded from cache key (it's a
+    # constant per process and would just bloat the hash).
+    cache_params = {"endpoint": endpoint, "params": params or {}}
+    cached = _cycle_cache_get("fmp:get", cache_params)
+    if cached is not None:
+        return cached
+
     _acquire_token(_PROVIDER)
     p = {"apikey": _API_KEY, **(params or {})}
     r = requests.get(f"{_BASE}/{endpoint}", params=p, timeout=30)
     if r.status_code == 402:
         raise RuntimeError(f"FMP free tier limit hit on /{endpoint} — upgrade plan or reduce limit param")
     r.raise_for_status()
-    return r.json()
+    data = r.json()
+    _cycle_cache_set("fmp:get", cache_params, data)
+    return data
 
 def get_profile(ticker: str) -> dict:
     """Company profile: name, sector, market cap, CIK, description."""

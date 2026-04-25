@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenClaw — async refresh of stale verdict_cache rows
+After=network.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/bin/refresh-stale-verdicts.js
+StandardOutput=journal
+StandardError=journal
