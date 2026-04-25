@@ -27,12 +27,13 @@ const WORKSPACE    = path.join(OPENCLAW_DIR, 'workspaces/default');
 const DEFAULT_DIRS = ['memory', 'results'];
 
 function parseArgs(argv) {
-  const out = { dryRun: false, force: false, dirs: DEFAULT_DIRS };
+  const out = { dryRun: false, force: false, dirs: DEFAULT_DIRS, throttleMs: 30_000 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--dry-run') out.dryRun = true;
     else if (a === '--force') out.force = true;
     else if (a === '--dir')   out.dirs = [argv[++i]];
+    else if (a === '--throttle-ms') out.throttleMs = parseInt(argv[++i], 10);
   }
   return out;
 }
@@ -66,12 +67,15 @@ async function dryRun(rootDir) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const mode = opts.dryRun ? 'DRY-RUN' : (opts.force ? 'FORCE' : 'INCREMENTAL');
-  console.log(`[backfill] mode=${mode} workspace=${WORKSPACE} dirs=[${opts.dirs.join(', ')}]`);
+  console.log(`[backfill] mode=${mode} workspace=${WORKSPACE} dirs=[${opts.dirs.join(', ')}] throttle=${opts.throttleMs}ms`);
 
   if (!opts.dryRun && !process.env.VOYAGE_API_KEY) {
     console.error('[backfill] VOYAGE_API_KEY not set. Add it to .env and re-run.');
     process.exit(2);
   }
+  // Inter-call throttle to stay under voyage's 3 RPM free-tier ceiling.
+  // Override with --throttle-ms 0 once paid-tier limits apply.
+  process.env.VOYAGE_INTER_CALL_MS = String(opts.throttleMs);
 
   let totFiles = 0, totWritten = 0, totSkipped = 0, totErrors = 0, totChunksDryRun = 0, totCharsDryRun = 0;
   for (const sub of opts.dirs) {

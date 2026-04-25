@@ -296,9 +296,18 @@ async function embedFile({ workspace, sourceFile, force = false } = {}) {
   const tags     = Array.isArray(frontmatter.tags) ? frontmatter.tags.map(String) : [];
   const tickers  = extractTickers(frontmatter, body);
 
+  // Inter-call pacing for free-tier voyage (3 RPM ceiling). Set via env
+  // VOYAGE_INTER_CALL_MS — backfill CLI sets this to 30000 by default to
+  // proactively stay under the rolling rate window. 0 = no pacing (paid
+  // tier or low-traffic write hook).
+  const interCallMs = parseInt(process.env.VOYAGE_INTER_CALL_MS || '0', 10);
+
   let written = 0;
   let errors  = 0;
+  let firstChunk = true;
   for (const c of chunks) {
+    if (!firstChunk && interCallMs > 0) await new Promise((r) => setTimeout(r, interCallMs));
+    firstChunk = false;
     const v = await embedOne(c.text);
     if (!v) { errors++; continue; }
     const vecLit = `[${v.join(',')}]`;
