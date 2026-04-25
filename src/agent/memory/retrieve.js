@@ -11,12 +11,13 @@
  *
  * Feature-flagged on MEMORY_RETRIEVAL=on. When off, returns null and the
  * middleware falls back to the legacy wholesale-injection path. Enable in
- * production only after the embed pipeline (memory/embed.js — TBD) has
- * populated memory_chunks.
+ * production only after the embed pipeline (memory/embed.js) has populated
+ * memory_chunks.
  *
- * Cost note: this issues one embedding call (text-embedding-3-small via
- * Anthropic-compatible Voyage or OpenAI; we already use OpenAI for some flows,
- * but the call site is encapsulated so we can switch).
+ * Provider: Voyage AI (voyage-3, 1024 dim — matches migration 054). Same
+ * call shape as memory/embed.js. Read calls use input_type=query while
+ * embed/write calls use input_type=document — Voyage tunes the projection
+ * for asymmetric retrieval.
  */
 
 const https = require('https');
@@ -24,7 +25,8 @@ const { query } = require('../../database/postgres');
 
 const ENABLED = (process.env.MEMORY_RETRIEVAL || '').toLowerCase() === 'on';
 const TOP_K = parseInt(process.env.MEMORY_RETRIEVAL_K || '8', 10);
-const EMBED_MODEL = process.env.MEMORY_EMBED_MODEL || 'text-embedding-3-small';
+const EMBED_MODEL = process.env.VOYAGE_MODEL || 'voyage-3';
+const VOYAGE_DIM  = 1024;
 
 function isEnabled() { return ENABLED; }
 
@@ -52,7 +54,8 @@ async function retrieveRelevant({ workspace, queryText, noteTypes, tags, tickers
   if (!embedding) return null;
 
   const limit = k || TOP_K;
-  const params = [workspace, JSON.stringify(embedding), limit];
+  const vecLit = `[${embedding.join(',')}]`;
+  const params = [workspace, vecLit, limit];
   let where = 'WHERE workspace = $1';
   if (noteTypes && noteTypes.length) { params.push(noteTypes); where += ` AND note_type = ANY($${params.length})`; }
   if (tags && tags.length)           { params.push(tags);      where += ` AND tags && $${params.length}`; }
@@ -76,24 +79,25 @@ async function retrieveRelevant({ workspace, queryText, noteTypes, tags, tickers
 }
 
 /**
- * Embed a single string. Uses OpenAI's embeddings endpoint by default
- * (text-embedding-3-small, 1536 dim — matches migration 054 schema).
- * Override with MEMORY_EMBED_PROVIDER=voyage if/when we move there.
+ * Embed a single query string via Voyage AI (voyage-3, 1024 dim).
+ * Uses input_type='query' (vs 'document' on the embed/write side) — Voyage
+ * tunes the projection for asymmetric retrieval.
  */
 async function embed(text) {
-  if ((process.env.MEMORY_EMBED_PROVIDER || 'openai') !== 'openai') {
-    throw new Error('Only openai embed provider implemented; set MEMORY_EMBED_PROVIDER=openai');
-  }
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY not set');
+  if (!process.env.VOYAGE_API_KEY) throw new Error('VOYAGE_API_KEY not set');
 
-  const body = JSON.stringify({ model: EMBED_MODEL, input: text.slice(0, 8000) });
+  const body = JSON.stringify({
+    model:      EMBED_MODEL,
+    input:      [text.slice(0, 12_000)],
+    input_type: 'query',
+  });
   return new Promise((resolve, reject) => {
     const req = https.request({
-      hostname: 'api.openai.com',
+      hostname: 'api.voyageai.com',
       path: '/v1/embeddings',
       method: 'POST',
       headers: {
-        'authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'authorization': `Bearer ${process.env.VOYAGE_API_KEY}`,
         'content-type':  'application/json',
         'content-length': Buffer.byteLength(body),
       },
@@ -105,7 +109,11 @@ async function embed(text) {
         try {
           if (res.statusCode !== 200) return reject(new Error(`status ${res.statusCode}: ${data.slice(0, 200)}`));
           const json = JSON.parse(data);
-          resolve(json.data?.[0]?.embedding || null);
+          const v = json.data?.[0]?.embedding;
+          if (!Array.isArray(v) || v.length !== VOYAGE_DIM) {
+            return reject(new Error(`voyage returned dim ${v?.length} (expected ${VOYAGE_DIM})`));
+          }
+          resolve(v);
         } catch (e) { reject(e); }
       });
     });
@@ -116,4 +124,22 @@ async function embed(text) {
   });
 }
 
-module.exports = { retrieveRelevant, isEnabled };
+/**
+ * Count chunks in a workspace — used by the runbook to verify the table is
+ * populated before flipping MEMORY_RETRIEVAL=on. Returns 0 when table is
+ * absent (pgvector not yet installed) so callers don't have to special-case.
+ */
+async function getChunkCount({ workspace } = {}) {
+  try {
+    const params = workspace ? [workspace] : [];
+    const where  = workspace ? 'WHERE workspace = $1' : '';
+    const { rows } = await query(`SELECT COUNT(*)::int AS n FROM memory_chunks ${where}`, params);
+    return rows[0]?.n || 0;
+  } catch (err) {
+    if (/relation "memory_chunks" does not exist/i.test(err.message)) return 0;
+    console.warn('[memory/retrieve] getChunkCount failed:', err.message);
+    return 0;
+  }
+}
+
+module.exports = { retrieveRelevant, isEnabled, getChunkCount };

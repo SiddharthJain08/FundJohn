@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     note_type       TEXT,            -- frontmatter type when present (paper|strategy|position|...)
     tags            TEXT[],          -- frontmatter tags when present
     tickers         TEXT[],          -- extracted from frontmatter or body
-    embedding       vector(1536),    -- text-embedding-3-small dim; change with care
+    embedding       vector(1024),    -- voyage-3 dim; change with care (and reset memory_chunks)
     embed_model     TEXT        NOT NULL,
     char_count      INTEGER     NOT NULL,
     source_mtime    TIMESTAMPTZ NOT NULL,  -- mtime at embed time → invalidate when file changes

@@ -23,10 +23,32 @@ function memDir(workspace) {
   return path.join(workspace || DEFAULT_WORKSPACE, 'memory');
 }
 
-function appendToFile(filePath, entry) {
+/**
+ * Embed-on-write hook. Fire-and-forget so a slow Voyage call or DB hiccup
+ * never blocks the write itself. Only fires for .md files, only when
+ * VOYAGE_API_KEY is set, and only for workspace-rooted paths. Failures
+ * log but never propagate.
+ */
+function _kickEmbed(filePath, workspace) {
+  if (!process.env.VOYAGE_API_KEY)   return;
+  if (!filePath.endsWith('.md'))     return;
+  const ws = workspace || DEFAULT_WORKSPACE;
+  if (!filePath.startsWith(ws))      return;
+  // Defer to next tick so the synchronous write completes first
+  setImmediate(() => {
+    let embedFile;
+    try { ({ embedFile } = require('./embed')); }
+    catch (e) { return; }  // module load issue — silently skip
+    embedFile({ workspace: ws, sourceFile: filePath })
+      .catch((e) => console.warn(`[memory] embed-on-write failed for ${filePath}: ${e.message}`));
+  });
+}
+
+function appendToFile(filePath, entry, workspace) {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.appendFileSync(filePath, entry + '\n');
+    _kickEmbed(filePath, workspace);
   } catch (e) {
     console.warn(`[memory] Failed to write ${filePath}: ${e.message}`);
   }
@@ -36,10 +58,11 @@ function readFile(filePath) {
   try { return fs.readFileSync(filePath, 'utf8'); } catch { return ''; }
 }
 
-function writeFile(filePath, content) {
+function writeFile(filePath, content, workspace) {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, 'utf8');
+    _kickEmbed(filePath, workspace);
   } catch (e) {
     console.warn(`[memory] Failed to write ${filePath}: ${e.message}`);
   }
@@ -56,7 +79,7 @@ function writeFile(filePath, content) {
 function journalEntry(type, entry, workspace) {
   const ts = new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
   const line = `${ts} | ${type} | ${entry}`;
-  appendToFile(path.join(memDir(workspace), 'fund_journal.md'), line);
+  appendToFile(path.join(memDir(workspace), 'fund_journal.md'), line, workspace);
 }
 
 // ── Active Tasks ──────────────────────────────────────────────────────────────
@@ -69,7 +92,7 @@ function openTask(description, notes, workspace) {
   const ts = new Date().toISOString().slice(0, 10);
   const taskId = Date.now().toString(36);
   const line = `[OPEN] ${ts} | ${description} | ${notes || ''} | id:${taskId}`;
-  appendToFile(path.join(memDir(workspace), 'active_tasks.md'), line);
+  appendToFile(path.join(memDir(workspace), 'active_tasks.md'), line, workspace);
   journalEntry('TASK_OPEN', description, workspace);
   return taskId;
 }
@@ -84,7 +107,7 @@ function closeTask(taskId, outcome, workspace) {
     new RegExp(`(\\[OPEN\\][^\\n]*id:${taskId}[^\\n]*)`, 'g'),
     (match) => match.replace('[OPEN]', '[CLOSED]') + ` → ${outcome}`
   );
-  writeFile(fpath, updated);
+  writeFile(fpath, updated, workspace);
   journalEntry('TASK_CLOSE', `id:${taskId} — ${outcome}`, workspace);
 }
 
@@ -98,7 +121,7 @@ function progressTask(taskId, note, workspace) {
     new RegExp(`(\\[OPEN\\][^\\n]*id:${taskId}[^\\n]*)`, 'g'),
     (match) => match.replace('[OPEN]', '[IN_PROGRESS]') + (note ? ` [${note}]` : '')
   );
-  writeFile(fpath, updated);
+  writeFile(fpath, updated, workspace);
 }
 
 /**
