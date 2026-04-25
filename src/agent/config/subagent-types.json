@@ -31,7 +31,8 @@
       ],
       "skills": [
         "fundjohn:veto-explainer",
-        "fundjohn:paper-to-strategy"
+        "fundjohn:paper-to-strategy",
+        "fundjohn:obsidian-link"
       ],
       "description": "Orchestrator and portfolio manager. Approves/vetoes trade signals. Interfaces with operator via Discord."
     },
@@ -50,7 +51,8 @@
       ],
       "skills": [
         "fundjohn:memo-schema",
-        "fundjohn:veto-explainer"
+        "fundjohn:veto-explainer",
+        "fundjohn:obsidian-link"
       ],
       "description": "Reads strategy memos, produces consolidated research report: regime, performance table, convergence analysis, recommendations."
     },
@@ -68,7 +70,8 @@
         "PM_TASK"
       ],
       "skills": [
-        "fundjohn:position-sizer"
+        "fundjohn:position-sizer",
+        "fundjohn:obsidian-link"
       ],
       "description": "Signal generation and position sizing. Reads research report, outputs ranked trade signals with EV, sizing, entry/stop/target."
     },
@@ -84,7 +87,7 @@
       "maxBudgetUsd": 0.15,
       "already_in_ledger_check": true,
       "modes": ["RESEARCH"],
-      "skills": ["fundjohn:paper-to-strategy"],
+      "skills": ["fundjohn:paper-to-strategy", "fundjohn:obsidian-link"],
       "description": "Ephemeral parallel alpha-paper extractor. One paper per invocation. 4 self-rejection gates. $0.15 budget cap."
     },
     "strategycoder": {
@@ -100,7 +103,8 @@
       "modes": ["DEPLOY"],
       "skills": [
         "fundjohn:strategy-coder",
-        "fundjohn:backtest-plumb"
+        "fundjohn:backtest-plumb",
+        "fundjohn:obsidian-link"
       ],
       "description": "On-demand strategy implementation. Produces implementations/*.py + registry + manifest wiring."
     },
@@ -143,7 +147,7 @@
       "effortLevel": "low",
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH", "STRATEGY_STACK"],
-      "skills": [],
+      "skills": ["fundjohn:obsidian-link"],
       "description": "MastermindJohn — Opus 4.7 (1M ctx). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
     },
     "corpus-curator": {
