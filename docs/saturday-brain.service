@@ -1,0 +1,30 @@
+[Unit]
+Description=Saturday brain — consolidated weekly research run (replaces openclaw-mastermind-corpus)
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+
+# 8-phase pipeline: source-expansion (Opus + WebSearch) → ingest
+# (arxiv/openalex/expanded_sources, all-time first run else incremental) →
+# corpus rate (mastermind w/ implementability axis) → paperhunter fan-out →
+# data-tier filter → Tier-A synchronous code+backtest → strategist-ideator →
+# Tier-B push to STAGING. Operator approval gates: STAGING → CANDIDATE
+# (data-fetch authorization) and PAPER → LIVE (Alpaca deployment).
+
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode saturday-brain
+
+StandardOutput=journal
+StandardError=journal
+
+# All-time backfill on first run plus 200 paperhunter fan-out and ~80
+# strategycoder runs can take 4–6 hours. 21600 = 6 hours hard ceiling.
+TimeoutStartSec=21600
+
+[Install]
+WantedBy=multi-user.target

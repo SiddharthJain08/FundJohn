@@ -113,19 +113,18 @@ async function buildServerMap(channelMap) {
   const time  = now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true });
 
   // ── Live pending-approval queries ──────────────────────────────────────────
-  let dataReqs = [], deprReqs = [], stratReqs = [];
+  // (deprecation queue removed 2026-04-28 per NEVER-DELETE-DATA invariant)
+  let dataReqs = [], stratReqs = [];
   try {
     const pgUri = process.env.POSTGRES_URI;
     if (pgUri) {
       const { Pool } = require('pg');
       const pool = new Pool({ connectionString: pgUri, max: 2 });
-      const [d, dep, s] = await Promise.all([
+      const [d, s] = await Promise.all([
         pool.query(`SELECT request_id, column_name, requested_by_candidate_id FROM data_ingestion_queue  WHERE status='PENDING'  ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
-        pool.query(`SELECT request_id, column_name, recommended_action         FROM data_deprecation_queue WHERE status='PENDING' ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
         pool.query(`SELECT id, name, tier                                       FROM strategy_registry      WHERE status='pending_approval' ORDER BY created_at ASC LIMIT 10`).catch(() => ({ rows: [] })),
       ]);
       dataReqs  = d.rows;
-      deprReqs  = dep.rows;
       stratReqs = s.rows;
       await pool.end().catch(() => {});
     }
@@ -197,10 +196,7 @@ ${ch('agent-chat')} — Freeform chat with BotJohn as PM agent (\`!john <anythin
 ${pendingList(dataReqs, r => `\`${r.request_id.slice(0, 8)}\` — \`${r.column_name}\``)}
 
 *Strategy registry — \`!john /approve-strategy {id}\`*
-${pendingList(stratReqs, r => `\`${r.id}\` — ${r.name} [T${r.tier}]`)}
-
-*Column deprecations — \`!john /approve-deprecation {id}\`*
-${pendingList(deprReqs, r => `\`${r.request_id.slice(0, 8)}\` — \`${r.column_name}\` (${r.recommended_action})`)}`,
+${pendingList(stratReqs, r => `\`${r.id}\` — ${r.name} [T${r.tier}]`)}`,
 
     `**🦉 Opus Corpus Curator** *(Saturday 10:00 ET weekly — Phase 1–5)*
 \`!john /curator run\` — full corpus curation + promote high + spot-check sample

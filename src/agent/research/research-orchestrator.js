@@ -622,14 +622,42 @@ class ResearchOrchestrator {
       },
     });
 
-    // ── Phase 3: Auto-promote CANDIDATE → PAPER ───────────────────────────────
+    // ── Phase 3: Auto-promote (state-aware) ─────────────────────────────────
+    // Under the fused-approval lifecycle (2026-04-27), the canonical promotion
+    // is STAGING → CANDIDATE: the fused worker invokes _codeFromQueue inline
+    // once data is backfilled, and the backtest result lands the strategy in
+    // CANDIDATE for the operator's live-click decision.
+    //
+    // BUT: _codeFromQueue is also called from saturday_brain Phase 6
+    // (un-staged Tier-A candidates), saturday_brain_recovery, the daily
+    // research-cycle's _runQueueLoop, and a stale-row sweep in cron-schedule.
+    // For those paths the strategy may not be in the manifest at all, or may
+    // already be in CANDIDATE. Reading the current state and only transitioning
+    // when from→CANDIDATE is valid keeps every caller working.
     onPhase('promoting', 90);
     const reason = `Auto-backtest: Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, trades ${btResult.trade_count}`;
     const lifecyclePy = [
       `import sys; sys.path.insert(0, 'src')`,
-      `from strategies.lifecycle import LifecycleStateMachine, StrategyState`,
+      `from strategies.lifecycle import LifecycleStateMachine, StrategyState, VALID_TRANSITIONS`,
       `lsm = LifecycleStateMachine.from_manifest('src/strategies/manifest.json')`,
-      `lsm.transition('${stratId}', StrategyState.PAPER, actor='auto_backtest', reason=${JSON.stringify(reason)})`,
+      `sid = ${JSON.stringify(stratId)}`,
+      `if not lsm.is_registered(sid):`,
+      `    # Strategy isn't in the manifest yet (saturday_brain Tier-A path). Register`,
+      `    # in CANDIDATE so the dashboard surfaces it with the backtest metrics that`,
+      `    # are about to land in strategy_registry.`,
+      `    lsm.register(sid, initial_state=StrategyState.CANDIDATE, metadata={'canonical_file': sid + '.py'})`,
+      `else:`,
+      `    cur = lsm.get_state(sid)`,
+      `    if (cur, StrategyState.CANDIDATE) in VALID_TRANSITIONS:`,
+      `        lsm.transition(sid, StrategyState.CANDIDATE, actor='auto_backtest', reason=${JSON.stringify(reason)})`,
+      `    elif cur == StrategyState.CANDIDATE:`,
+      `        # Already in candidate — no transition needed. Touch state_since so the dashboard`,
+      `        # surfaces freshness.`,
+      `        from datetime import datetime, timezone`,
+      `        lsm.get_record(sid).state_since = datetime.now(timezone.utc).isoformat()`,
+      `    else:`,
+      `        # No legal path to CANDIDATE from current state — leave state alone, just record metrics.`,
+      `        print(f'lifecycle skip: cannot transition {sid} from {cur.value} to candidate', flush=True)`,
       `lsm.save_manifest('src/strategies/manifest.json')`,
     ].join('\n');
     const lc = await _spawnPython(['-c', lifecyclePy], { cwd: OPENCLAW_DIR, timeoutMs: 30_000 });
@@ -640,22 +668,37 @@ class ResearchOrchestrator {
     // Update strategy_registry: status + measured backtest metrics.
     // btResult.max_dd is a fraction (e.g. 0.058 = 5.8%); registry stores it as a percent number.
     // btResult.total_return_pct is already a percent (added by auto_backtest.py), nullable for older builds.
-    // Filter: 0-trade runs produce garbage sharpe (-3.15M) from auto_backtest's
-    // near-zero-std path; reject those outright rather than pollute the DB.
+    //
+    // 2026-04-27: We persist trade_count unconditionally so the dashboard can
+    // distinguish "0 trades — strategy emitted no signals" from "never
+    // backtested" (which leaves trade_count NULL). For sharpe/dd/return we
+    // still cap garbage values: |sharpe| > 100 is auto_backtest.py's
+    // near-zero-std artifact, NaN/inf can leak through too. Anything in the
+    // valid envelope — including the legitimate sharpe of a 0-trade run
+    // (which is 0 or near-0) — is now persisted instead of dropped.
     const btTrades = Number.isFinite(btResult.trade_count) ? btResult.trade_count : 0;
-    const btSharpeRaw = (btResult.sharpe != null && isFinite(btResult.sharpe)) ? btResult.sharpe : null;
-    const validBt = btTrades > 0 && btSharpeRaw !== null && Math.abs(btSharpeRaw) <= 100;
-    const btSharpe = validBt ? btSharpeRaw : null;
-    const btDdPct  = (validBt && btResult.max_dd != null && isFinite(btResult.max_dd)) ? Math.round(btResult.max_dd * 100 * 100) / 100 : null;
-    const btRetPct = (validBt && btResult.total_return_pct != null && isFinite(btResult.total_return_pct)) ? btResult.total_return_pct : null;
+    const inEnvelope = (x) => x != null && isFinite(x) && Math.abs(x) <= 100;
+    const sharpeOK = inEnvelope(btResult.sharpe);
+    const ddOK     = inEnvelope(btResult.max_dd);
+    const retOK    = inEnvelope(btResult.total_return_pct);
+    const btSharpe = sharpeOK ? btResult.sharpe : null;
+    const btDdPct  = ddOK     ? Math.round(btResult.max_dd * 100 * 100) / 100 : null;
+    const btRetPct = retOK    ? btResult.total_return_pct : null;
+    // Per-regime breakdown from auto_backtest. Nullable — strategies whose
+    // backtest errored out keep the prior value.
+    const btBreakdown = (btResult.regime_breakdown && typeof btResult.regime_breakdown === 'object')
+      ? JSON.stringify(btResult.regime_breakdown)
+      : null;
     await this._query(
       `UPDATE strategy_registry
-          SET status              = 'paper',
-              backtest_sharpe     = COALESCE($2, backtest_sharpe),
-              backtest_max_dd_pct = COALESCE($3, backtest_max_dd_pct),
-              backtest_return_pct = COALESCE($4, backtest_return_pct)
+          SET status                    = 'pending_approval',
+              backtest_sharpe           = COALESCE($2, backtest_sharpe),
+              backtest_max_dd_pct       = COALESCE($3, backtest_max_dd_pct),
+              backtest_return_pct       = COALESCE($4, backtest_return_pct),
+              backtest_trade_count      = $5,
+              backtest_regime_breakdown = COALESCE($6::jsonb, backtest_regime_breakdown)
         WHERE id = $1`,
-      [stratId, btSharpe, btDdPct, btRetPct]
+      [stratId, btSharpe, btDdPct, btRetPct, btTrades, btBreakdown]
     ).catch((e) => console.error(`[research-orch] registry update failed: ${e.message}`));
 
     await this._query(
@@ -679,8 +722,8 @@ class ResearchOrchestrator {
     const coderCost = this._sessionCost - costBeforeCoding;
     const summary = `Sharpe ${btResult.sharpe?.toFixed(2)}, DD ${(btResult.max_dd * 100)?.toFixed(1)}%, ${btResult.trade_count} trades`;
     const costLine = `Creation cost: $${coderCost.toFixed(4)} | Session total: $${this._sessionCost.toFixed(4)}`;
-    notify?.(`  🚀 ${stratId} → PAPER trading (${summary}) | ${costLine}`);
-    channelNotify?.(`🚀 **${stratId}** auto-promoted to paper trading — ${summary}\n💰 ${costLine}`);
+    notify?.(`  🚀 ${stratId} → CANDIDATE (awaiting live click) (${summary}) | ${costLine}`);
+    channelNotify?.(`🚀 **${stratId}** auto-promoted to candidate (awaiting candidate→live approval) — ${summary}\n💰 ${costLine}`);
 
     // One-shot mode: auto-pause after N promotions
     try {
@@ -739,67 +782,150 @@ class ResearchOrchestrator {
     return result;
   }
 
-  /**
-   * Wire removal of a deprecated column after BotJohn approval.
-   */
-  async _unwireColumn(queueRow) {
-    const ctx = {
-      role:        'remove_column',
-      REQUEST_ID:  queueRow.request_id,
-      COLUMN_NAME: queueRow.column_name,
-      action:      queueRow.recommended_action,
-    };
-    return this._runSubagent('datawiring', queueRow.column_name, ctx);
-  }
-
-  // ── Weekly Reaper ───────────────────────────────────────────────────────────
-
-  async runReaperPass(notify) {
-    notify?.('🔍 Reaper pass starting — scanning for orphaned data columns...');
-
-    let rows;
-    try {
-      const result = await this._query(
-        `SELECT column_name, last_consumed_at
-         FROM data_ledger
-         WHERE current_users = '{}'
-           AND (last_consumed_at IS NULL OR last_consumed_at < NOW() - INTERVAL '30 days')`
-      );
-      rows = result.rows;
-    } catch (e) {
-      notify?.(`⚠️ Reaper: data_ledger query failed — ${e.message}`);
-      return;
-    }
-
-    if (rows.length === 0) {
-      notify?.('✅ Reaper pass complete — no orphaned columns found.');
-      return;
-    }
-
-    for (const row of rows) {
-      await this._query(
-        `INSERT INTO data_deprecation_queue (column_name, recommended_action)
-         VALUES ($1, 'stop_collecting')
-         ON CONFLICT DO NOTHING`,
-        [row.column_name]
-      ).catch(() => {});
-    }
-
-    notify?.(`🗑️ Reaper: ${rows.length} orphaned column(s) queued for deprecation: ${rows.map(r => r.column_name).join(', ')}`);
-  }
+  // _unwireColumn + runReaperPass removed 2026-04-28 per CLAUDE.md
+  // NEVER-DELETE-DATA core invariant. The data ledger is append-only —
+  // orphaned columns from deprecated strategies stay collected so future
+  // strategies can opt into them without re-backfilling history.
 
   // ── Internal helpers ────────────────────────────────────────────────────────
 
   async _runPaperHunter(candidateRow) {
     const ledger = await this._loadLedgerSnapshot();
+    // Hydrate the paper's abstract + biblio from research_corpus so the
+    // hunter has primary content even when WebFetch fails on a paywalled
+    // DOI. With Sonnet 4.6 + a 1500-char abstract, ~80% of papers can be
+    // blueprinted directly from the abstract; fetch becomes an optional
+    // enhancement rather than a hard prerequisite.
+    let paperBlock = { title: '', abstract: '', authors: [], venue: '', published_date: '' };
+    try {
+      const r = await this._query(
+        `SELECT title, abstract, authors, venue, published_date::text AS published_date
+           FROM research_corpus WHERE source_url = $1 LIMIT 1`,
+        [candidateRow.source_url]
+      );
+      if (r.rows[0]) paperBlock = r.rows[0];
+    } catch (_) { /* best-effort */ }
+
     const ctx = {
-      role:           'extract',
-      SOURCE_URL:     candidateRow.source_url,
-      CANDIDATE_ID:   candidateRow.candidate_id,
-      AVAILABLE_DATA: JSON.stringify(ledger),
+      role:            'extract',
+      SOURCE_URL:      candidateRow.source_url,
+      CANDIDATE_ID:    candidateRow.candidate_id,
+      AVAILABLE_DATA:  JSON.stringify(ledger),
+      PAPER_TITLE:     paperBlock.title || '',
+      PAPER_ABSTRACT:  (paperBlock.abstract || '').slice(0, 8000),  // generous cap
+      PAPER_AUTHORS:   Array.isArray(paperBlock.authors) ? paperBlock.authors.join(', ') : (paperBlock.authors || ''),
+      PAPER_VENUE:     paperBlock.venue || '',
+      PAPER_DATE:      paperBlock.published_date || '',
     };
     const raw = await this._runSubagent('paperhunter', candidateRow.candidate_id.slice(0, 8), ctx);
     return this._parseJSON(raw) || { rejection_reason_if_any: 'parse_failed', candidate_id: candidateRow.candidate_id };
+  }
+
+  /**
+   * Saturday-brain fan-out: take an explicit list of candidate IDs (already
+   * promoted to research_candidates by mastermind corpus rating), spawn
+   * paperhunter in parallel for each, persist hunter_result_json + emit
+   * paper_gate_decisions, and return the array of results in the same order.
+   *
+   * Differs from processQueue() in three ways:
+   *   - Candidate IDs are passed in (no pending-status claim).
+   *   - We do NOT invoke researchjohn classification or _codeFromQueue here;
+   *     the saturday brain's Phase 5 (data_tier_filter) decides what runs
+   *     synchronously in Phase 6 vs. drops to STAGING in Phase 7.
+   *   - Concurrency is capped explicitly (paperhunter is parallel-safe but
+   *     we don't want a 200-wide spawn storm overwhelming claude-bin).
+   *
+   * @param {string[]} candidateIds  array of research_candidates.candidate_id
+   * @param {object}   opts
+   *    - concurrency: max parallel paperhunters (default 8)
+   *    - notify:      progress callback `(msg) => void`
+   *    - onResult:    per-candidate callback `(idx, result) => void`
+   * @returns {Promise<object[]>}    hunter results, indexed parallel to input
+   */
+  async runHunterFanout(candidateIds, opts = {}) {
+    if (!Array.isArray(candidateIds) || candidateIds.length === 0) return [];
+    const concurrency = Math.max(1, Math.min(opts.concurrency || 8, 32));
+    const notify = opts.notify || (() => {});
+    const onResult = opts.onResult || (() => {});
+
+    // Hydrate candidate rows by ID. Order-preserving via a map.
+    const { rows: rows } = await this._query(
+      `SELECT candidate_id, source_url, kind, hunter_result_json
+         FROM research_candidates
+        WHERE candidate_id::text = ANY($1::text[])`,
+      [candidateIds]
+    );
+    const byId = new Map(rows.map(r => [r.candidate_id, r]));
+    const ordered = candidateIds
+      .map(id => byId.get(id))
+      .filter(Boolean);
+
+    notify(`runHunterFanout: ${ordered.length}/${candidateIds.length} candidates resolved; concurrency=${concurrency}`);
+
+    const results = new Array(ordered.length);
+    let cursor = 0;
+    let done = 0;
+
+    const worker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= ordered.length) return;
+        const row = ordered[i];
+        try {
+          let result;
+          if (row.kind === 'internal' && row.hunter_result_json && typeof row.hunter_result_json === 'object') {
+            // MasterMindJohn pre-filled spec (e.g. ideator drafts) — skip
+            // paperhunter spawn, just pass the spec through with bypass tag.
+            result = {
+              ...row.hunter_result_json,
+              candidate_id: row.candidate_id,
+              source_url:   row.source_url,
+              _bypass:      'kind_internal',
+            };
+          } else {
+            result = await this._runPaperHunter(row);
+          }
+          results[i] = result;
+
+          // Persist + emit gate decision (mirrors processQueue:341–363).
+          const isBypass = result?._bypass === 'kind_internal';
+          if (!isBypass) {
+            await this._query(
+              `UPDATE research_candidates SET hunter_result_json = $1 WHERE candidate_id = $2`,
+              [JSON.stringify(result), row.candidate_id]
+            ).catch(() => {});
+          }
+          try {
+            const paperId   = await paperIdForCandidate(row.candidate_id);
+            const rejection = result?.rejection_reason_if_any;
+            await emitGateDecision({
+              paperId,
+              candidateId:  row.candidate_id,
+              strategyId:   result?.strategy_id || null,
+              gateName:     'paperhunter',
+              outcome:      rejection ? 'reject' : 'pass',
+              reasonCode:   rejection || (isBypass ? 'kind_internal_bypass' : null),
+              reasonDetail: rejection ? (result.rejection_detail || null) : null,
+              metadata:     { has_spec: Boolean(result?.strategy_id), bypass: isBypass || undefined, source: 'saturday_brain' },
+            });
+          } catch (_) { /* gate emit best-effort */ }
+        } catch (e) {
+          results[i] = {
+            rejection_reason_if_any: 'fetch_failed',
+            candidate_id: row.candidate_id,
+            source_url:   row.source_url,
+            error:        e.message,
+          };
+        }
+        done += 1;
+        if (done % 10 === 0 || done === ordered.length) {
+          notify(`runHunterFanout: ${done}/${ordered.length} done`);
+        }
+        try { onResult(i, results[i]); } catch (_) {}
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    return results;
   }
 
   async _codeStrategy(strategySpec) {
@@ -933,7 +1059,16 @@ class ResearchOrchestrator {
       child.on('exit', (code) => {
         fs.unlink(tmpFile, () => {});
         if (code !== 0) {
-          return reject(new Error(`${type} exited ${code}: ${stderr.slice(0, 200)}`));
+          // claude-bin sometimes exits non-zero with all useful detail on
+          // stdout (the Anthropic CLI dumps its error JSON there in --print
+          // mode). Capture both streams so the operator sees the actual cause
+          // — auth failure, rate limit, prompt parse error — instead of just
+          // the spawn-line preamble.
+          const combined = [
+            stderr ? `stderr: ${stderr.trim()}` : '',
+            stdout ? `stdout: ${stdout.trim()}` : '',
+          ].filter(Boolean).join(' | ').slice(0, 1500);
+          return reject(new Error(`${type} exited ${code}: ${combined || '(no output captured)'}`));
         }
         try {
           const parsed = JSON.parse(stdout);

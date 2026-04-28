@@ -1,7 +1,168 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-25T02:08:21.080Z",
+  "updated_at": "2026-04-27T04:02:11.248Z",
   "strategies": {
+    "S_3d_pca_characteristic_factors": {
+      "state": "candidate",
+      "state_since": "2026-04-27T03:36:31.524787+00:00",
+      "metadata": {
+        "canonical_file": "S_3d_pca_characteristic_factors.py",
+        "class": "ThreeDPCACharacteristicFactors",
+        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly — Lettau (2024)"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2021-04-27",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "0b11457e-4318-4607-87e6-40ec5c77ae61"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T03:34:37.748159+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe -45.25, DD 0.0%, trades 1",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_price_earnings_momentum_drift": {
+      "state": "candidate",
+      "state_since": "2026-04-27T03:30:26.384532+00:00",
+      "metadata": {
+        "canonical_file": "s_price_earnings_momentum_drift.py",
+        "class": "S_price_earnings_momentum_drift",
+        "description": "Stocks with high past price returns and positive earnings surprises continue to drift upward because the market underreacts gradually to both price and fundamental information, making a composite price+earnings momentum rank persistently profitable."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-08-07→2026-02-19; needs ≥ 2024-12-08)",
+                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "earnings"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2024-12-08",
+                  "gap_to": "2025-08-07"
+                }
+              ]
+            },
+            "candidate_id": "6aa5e1e7-5019-4d15-a4b2-14d50f11f5c7"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T03:30:26.384532+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_institutional_lead_lag": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_institutional_lead_lag.py",
+        "class": "InstitutionalLeadLag",
+        "description": "Lagged returns of high-inst-ownership stocks predict low-inst-ownership stocks via informed-trader lead-lag effect."
+      },
+      "history": []
+    },
+    "S_least_squares_risk_parity": {
+      "state": "candidate",
+      "state_since": "2026-04-27T02:56:07.804646+00:00",
+      "metadata": {
+        "canonical_file": "S_least_squares_risk_parity.py",
+        "class": "LeastSquaresRiskParity",
+        "description": "Risk parity portfolios equalize each asset marginal risk contribution via least-squares alternating linearization."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T22:39:13.386738+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T02:56:07.804646+00:00",
+          "actor": "migration:fused_approval",
+          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_daily_high_ml_classifier": {
+      "state": "candidate",
+      "state_since": "2026-04-27T02:56:07.804646+00:00",
+      "metadata": {
+        "canonical_file": "S_daily_high_ml_classifier.py",
+        "class": "DailyHighMLClassifier",
+        "description": "Predict next-day high direction using lagged OHLCV features; go long equal-weight portfolio of predicted-UP stocks daily."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:38:54.302014+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T02:56:07.804646+00:00",
+          "actor": "migration:fused_approval",
+          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        }
+      ]
+    },
     "S5_max_pain": {
       "state": "live",
       "state_since": "2025-01-01T00:00:00+00:00",
@@ -265,14 +426,23 @@
       ]
     },
     "S_HV12_vrp_normalization": {
-      "state": "paper",
-      "state_since": "2026-04-16T07:17:59+00:00",
+      "state": "candidate",
+      "state_since": "2026-04-27T02:56:07.804646+00:00",
       "metadata": {
         "canonical_file": "shv12_vrp_normalization.py",
         "class": "VRPNormalization",
         "description": "VRP Normalization  VRP z-score mean reversion (Carr & Wu 2009)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T02:56:07.804646+00:00",
+          "actor": "migration:fused_approval",
+          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        }
+      ]
     },
     "S_HV13_call_put_iv_spread": {
       "state": "live",
@@ -414,14 +584,23 @@
       ]
     },
     "S1_event_driven_new_news": {
-      "state": "candidate",
-      "state_since": "2026-04-18T00:00:00+00:00",
+      "state": "staging",
+      "state_since": "2026-04-27T04:02:11.214Z",
       "metadata": {
         "canonical_file": "s1_event_driven_new_news.py",
         "class": "EventDrivenNewNews",
         "description": "IV term structure crush + post-event momentum on SP500 catalyst events"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "staging",
+          "timestamp": "2026-04-27T04:02:11.214Z",
+          "actor": "manual:operator",
+          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
+          "metadata": {}
+        }
+      ]
     },
     "S_markov_frontier_regimes": {
       "state": "live",
@@ -866,8 +1045,8 @@
       "history": []
     },
     "S22_quality_momentum": {
-      "state": "candidate",
-      "state_since": "2026-04-22T05:23:56.127700+00:00",
+      "state": "staging",
+      "state_since": "2026-04-27T04:02:11.248Z",
       "metadata": {
         "canonical_file": "S22_quality_momentum.py",
         "class": "S22QualityMomentum",
@@ -880,6 +1059,14 @@
           "timestamp": "2026-04-22T05:23:56.127700+00:00",
           "actor": "reconcile:2026-04-22",
           "reason": "Wired in from strategy_registry (pending_approval, no prior manifest entry)",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "staging",
+          "timestamp": "2026-04-27T04:02:11.248Z",
+          "actor": "manual:operator",
+          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
           "metadata": {}
         }
       ]
@@ -1434,6 +1621,623 @@
           "metadata": {}
         }
       ]
+    },
+    "low_volatility_us": {
+      "state": "candidate",
+      "state_since": "2026-04-25T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "low_volatility_us.py",
+        "class": "LowVolatilityUS",
+        "description": "Rank stocks asc by 252d realized vol; select lowest-volatility decile; equal-weight"
+      },
+      "history": []
+    },
+    "S_cross_sectional_price_momentum": {
+      "state": "live",
+      "state_since": "2026-04-26T22:37:18.343Z",
+      "metadata": {
+        "canonical_file": "S_cross_sectional_price_momentum.py",
+        "class": "CrossSectionalPriceMomentum",
+        "description": "J&T cross-sectional momentum — LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)"
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:27:17.151212+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.18, DD 1.0%, trades 181",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-26T22:37:18.343Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_momentum_delayed_overreaction": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "s_momentum_delayed_overreaction.py",
+        "class": "MomentumDelayedOverreaction",
+        "description": "Past 12-month winners (skip 1m) outperform losers over next 6m due to investor delayed overreaction (Jegadeesh & Titman 2001)"
+      },
+      "history": []
+    },
+    "S_pairs_trading_jump_diffusion_intraday": {
+      "state": "live",
+      "state_since": "2026-04-26T22:37:16.380Z",
+      "metadata": {
+        "canonical_file": "S_pairs_trading_jump_diffusion_intraday.py",
+        "class": "PairsTradingJumpDiffusionIntraday",
+        "description": "OU+jump-diffusion pairs: rank by kappa, trade individualized z-score entry/exit thresholds"
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:34:39.058999+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 2.00, DD 0.2%, trades 72",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-26T22:37:16.380Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_ivol_mispricing_asymmetry": {
+      "state": "candidate",
+      "state_since": "2026-04-27T02:56:07.804646+00:00",
+      "metadata": {
+        "canonical_file": "s_ivol_mispricing_asymmetry.py",
+        "class": "IvolMispricingAsymmetry",
+        "description": "Arbitrage asymmetry IVOL puzzle: long underpriced, short overpriced high-IVOL stocks"
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:36:35.461731+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.26, DD 0.7%, trades 204",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T02:56:07.804646+00:00",
+          "actor": "migration:fused_approval",
+          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_conditional_coskewness_factor": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_conditional_coskewness_factor.py",
+        "class": "ConditionalCoskewnessFactor",
+        "description": "Long-short coskewness factor: LONG neg-skew stocks, SHORT pos-skew stocks, monthly rebalance"
+      },
+      "history": []
+    },
+    "S_extreme_intraday_reversal_nasdaq": {
+      "state": "live",
+      "state_since": "2026-04-26T22:36:59.093Z",
+      "metadata": {
+        "canonical_file": "S_extreme_intraday_reversal_nasdaq.py",
+        "class": "ExtremeIntradayReversalNasdaq",
+        "description": "Contrarian mean-reversion after extreme intraday moves in liquid stocks (Zawadowski et al. 2006)"
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:40:39.898984+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 5.44, DD 0.5%, trades 197",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "live",
+          "timestamp": "2026-04-26T22:36:59.093Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_volume_return_autocorr_lmsw": {
+      "state": "candidate",
+      "state_since": "2026-04-27T02:56:07.804646+00:00",
+      "metadata": {
+        "canonical_file": "S_volume_return_autocorr_lmsw.py",
+        "class": "VolumeReturnAutocorrLMSW",
+        "description": "LMSW (2002): C2 coefficient from volume-interacted return regression ranks stocks for long/short."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "paper",
+          "timestamp": "2026-04-26T21:41:58.293080+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T02:56:07.804646+00:00",
+          "actor": "migration:fused_approval",
+          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_fama_french_five_factor": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_fama_french_five_factor.py",
+        "class": "FamaFrenchFiveFactor",
+        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile — Fama & French (2015)"
+      },
+      "history": []
+    },
+    "S_sparse_cca_mean_revert": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_sparse_cca_mean_revert.py",
+        "class": "SparseCCAMeanRevert",
+        "description": "Sparse portfolios formed by maximizing mean reversion via sparse CCA exhibit negative autocorrelation; trade long/short on spread z-score."
+      },
+      "history": []
+    },
+    "S_ma_tsmom_crossover": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_ma_tsmom_crossover.py",
+        "class": "MATSMOMCrossover",
+        "description": "MA crossover generates earlier trend signals than TSMOM; vol-scaled sizing (Marshall et al. 2016)."
+      },
+      "history": []
+    },
+    "S_long_term_price_reversal": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_long_term_price_reversal.py",
+        "class": "LongTermPriceReversal",
+        "description": "LONG 36-month prior losers, SHORT prior winners — behavioral overreaction reversal (De Bondt & Thaler 1985)"
+      },
+      "history": []
+    },
+    "S_pairs_cointegration_copula": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_pairs_cointegration_copula.py",
+        "class": "PairsCointegrationCopula",
+        "description": "Statistical arbitrage in US equity pairs via cointegration z-score entry/exit."
+      },
+      "history": []
+    },
+    "S_quality_adjusted_size": {
+      "state": "candidate",
+      "state_since": "2026-04-27T03:40:19.455243+00:00",
+      "metadata": {
+        "canonical_file": "S_quality_adjusted_size.py",
+        "class": "QualityAdjustedSize",
+        "description": "The size premium is robust and stable once you control for quality (junk) factor, as low-quality small firms contaminate the raw size signal and prior critiques vanish after this adjustment."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2021-04-27",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "b464d5b8-a977-42bf-83bb-065cf6eeac5c"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T03:40:03.612367+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_bankruptcy_risk_anomaly": {
+      "state": "candidate",
+      "state_since": "2026-04-27T03:39:12.355575+00:00",
+      "metadata": {
+        "canonical_file": "s_bankruptcy_risk_anomaly.py",
+        "class": "S_bankruptcy_risk_anomaly",
+        "description": "Firms with high bankruptcy risk (measured by Z-score or O-score) earn anomalously low subsequent returns, enabling a contrarian long-safety/short-distress spread that persists despite its counter-intuitive direction relative to standard risk-return theory."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-11-13",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "68dee4e2-85b3-4f16-a01a-ff842621c852"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T03:39:12.355575+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ]
+    },
+    "S_fear_index_return_prediction": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_fear_index_return_prediction.py",
+        "class": "S_fear_index_return_prediction",
+        "description": "Extreme spikes in implied volatility indices (VIX, VXN, VDAX) predict positive 20-60 day forward returns because fear-driven selling creates a risk premium that subsequently compresses as sentiment normalizes."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "macro: reachable but not backfilled (providers alpha_vantage)",
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpha_vantage",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2024-12-08",
+                  "gap_to": "2026-04-26"
+                }
+              ]
+            },
+            "candidate_id": "93b6687a-2fc8-4c3d-96f2-5cee1f57e0b1"
+          }
+        }
+      ]
+    },
+    "S_industry_momentum_moskowitz": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_industry_momentum_moskowitz.py",
+        "class": "S_industry_momentum_moskowitz",
+        "description": "Industry-level momentum drives the majority of individual stock momentum — buying stocks from past winning industries and shorting stocks from past losing industries earns significant risk-adjusted returns because slow information diffusion causes industry return continuation."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2021-04-27",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "0dd5eb6f-bcf9-43e2-b829-c5179412c79c"
+          }
+        }
+      ]
+    },
+    "S_path_dependent_vol_pdv": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_path_dependent_vol_pdv.py",
+        "class": "S_path_dependent_vol_pdv",
+        "description": "Up to 90% of equity index implied volatility variance is explained endogenously by a deterministic path-dependent function of past returns (power-law weighted sums of past returns and squared returns capturing short+long memory), enabling systematic options mispricing trades when"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yahoo",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2024-12-08",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "2a7c9c79-b9cc-49f3-84c2-3945e75e9554"
+          }
+        }
+      ]
+    },
+    "S_vix_conditioned_short_reversal": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_vix_conditioned_short_reversal.py",
+        "class": "S_vix_conditioned_short_reversal",
+        "description": "Short-term equity reversal returns proxy for liquidity provision compensation; when VIX is elevated, financially-constrained intermediaries withdraw supply, making reversal returns highly predictable and unusually large — an exploitable, economically-grounded risk premium."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "macro: reachable but not backfilled (providers alpha_vantage)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpha_vantage",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2025-08-17",
+                  "gap_to": "2026-04-26"
+                }
+              ]
+            },
+            "candidate_id": "0eba6d49-8bfc-41a7-8664-c79a8210c587"
+          }
+        }
+      ]
+    },
+    "S_q_theory_investment_growth": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_q_theory_investment_growth.py",
+        "class": "S_q_theory_investment_growth",
+        "description": "Firms with low investment growth rates earn higher returns than high-investment firms because Q-theory predicts rational managers invest until marginal q equals 1, so high investment signals low discount rates (low expected returns) and vice versa."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-11-13",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "039d731c-1813-47d6-836e-17cf2ce9ca26"
+          }
+        }
+      ]
+    },
+    "S_macro_risk_momentum_ip_beta": {
+      "state": "staging",
+      "state_since": "2026-04-26T22:09:55.422Z",
+      "metadata": {
+        "canonical_file": "s_macro_risk_momentum_ip_beta.py",
+        "class": "S_macro_risk_momentum_ip_beta",
+        "description": "Price momentum winners carry temporarily higher loadings on industrial production growth than losers, so momentum profits represent compensation for macroeconomic risk rather than a persistent mispricing anomaly."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "macro: reachable but not backfilled (providers alpha_vantage)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "alpha_vantage",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2024-03-31",
+                  "gap_to": "2026-04-26"
+                }
+              ]
+            },
+            "candidate_id": "35d09fa8-9f8c-4d9e-9b94-9febaed63351"
+          }
+        }
+      ]
+    },
+    "S_risk_neutral_skew_cross_section": {
+      "state": "live",
+      "state_since": "2026-04-27T03:56:40.164Z",
+      "metadata": {
+        "canonical_file": "S_risk_neutral_skew_cross_section.py",
+        "class": "RiskNeutralSkewCrossSection",
+        "description": "Stocks with anomalously negative residual risk-neutral skewness (after controlling for beta, market volatility, index skewness, firm size, and trading volume) have systematically overpriced downside protection exploitable via cross-sectional put-spread selling."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-04-26T22:09:55.422Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)",
+                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled (2023-06-30→2026-02-28, providers fmp/yahoo)"
+              ],
+              "missing_columns": [
+                "options_eod"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yahoo",
+                  "column": "options_eod",
+                  "data_type": "options",
+                  "gap_from": "2024-12-08",
+                  "gap_to": "2026-04-08"
+                }
+              ]
+            },
+            "candidate_id": "6e8482dd-b0c7-48a3-9ca4-86b4ebf2c7dc"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-04-27T03:42:33.531888+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-04-27T03:56:40.164Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override)",
+          "metadata": {
+            "override": true,
+            "failed_gates": []
+          }
+        }
+      ]
     }
   },
   "decommissioned": {
@@ -1471,6 +2275,66 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "S_renko_kagi_pairs_spread": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_renko_kagi_pairs_spread.py",
+        "class": "RenkoKagiPairsSpread",
+        "description": "Pairs trading via renko/kagi chart reversals on vol-calibrated spread bricks"
+      },
+      "history": []
+    },
+    "S_expected_idiosyncratic_skewness": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_expected_idiosyncratic_skewness.py",
+        "class": "ExpectedIdiosyncraticSkewness",
+        "description": "Sort on forecasted idiosyncratic skewness: LONG low-skew, SHORT high-skew stocks"
+      },
+      "history": []
+    },
+    "S_partial_cointegration_pairs": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_partial_cointegration_pairs.py",
+        "class": "PartialCointegrationPairs",
+        "description": "Partial cointegration pairs: Kalman-filter spread decomposition, trade mean-reverting z-score."
+      },
+      "history": []
+    },
+    "S_pairs_trading_min_distance": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_pairs_trading_min_distance.py",
+        "class": "PairsTradingMinDistance",
+        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2σ, exit at zero-crossing."
+      },
+      "history": []
+    },
+    "S_pca_etf_stat_arb_reversion": {
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_pca_etf_stat_arb_reversion.py",
+        "class": "PCAETFStatArbReversion",
+        "description": "Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals."
+      },
+      "history": []
+    },
+    "S_bankruptcy_risk_anomaly": {
+      "state": "candidate",
+      "state_since": "2026-04-27T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_bankruptcy_risk_anomaly.py",
+        "class": "BankruptcyRiskAnomaly",
+        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score — Dichev (1998)"
+      },
+      "history": []
     }
   }
 }

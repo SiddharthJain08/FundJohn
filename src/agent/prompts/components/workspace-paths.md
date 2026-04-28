@@ -24,7 +24,6 @@ workspace/
 │   ├── validate.py
 │   ├── fmp.py
 │   ├── polygon.py
-│   ├── alpha_vantage.py
 │   ├── sec_edgar.py
 │   ├── tavily.py
 │   ├── yahoo.py

@@ -55,6 +55,44 @@ const HARD_PROMOTE_CAP        = 600;
 const DEFAULT_SPOT_CHECK_MAX  = 10;   // per run
 const SPOT_CHECK_WEIGHTS      = { med: 3, low: 1, reject: 0 };   // sampling weights
 
+// Saturday brain (2026-04-25): pre-filter papers whose abstracts lack any
+// blueprint-signal terms before sending them to Opus. Drops ~30–50% of pure
+// theory / survey / non-strategy papers without spending Opus tokens on them.
+// Keep this regex permissive — false positives are cheap (Opus filters them
+// anyway) but false negatives are expensive (we'd skip a real strategy).
+const BLUEPRINT_SIGNAL_RX = new RegExp(
+  '\\b(' +
+  'factor|signal|portfolio|momentum|reversal|long-short|long\\/short|' +
+  'backtest|sharpe|alpha|hedge|formula|rule|strategy|cross[- ]sectional|' +
+  'time[- ]series|carry|pairs|ranking|decile|quintile|kelly|optimal|' +
+  'mean[- ]variance|risk[- ]parity|trend|breakout|reversion|gamma|' +
+  'volatility|skew|term[- ]structure' +
+  ')\\b',
+  'i'
+);
+
+// New bucket added by the saturday brain: 'implementable_candidate'. Indicates
+// implementability_score ≥ 0.40 — direction is clear and StrategyCoder can
+// fill in heuristic gaps. The data-tier filter (Phase 5) takes care of "do
+// we have the data" downstream; gating here on confidence-based pessimism
+// would silently drop concrete recipes that Opus thinks won't backtest
+// well — that's exactly the call the operator wants paperhunter + the
+// actual backtest to make, not the rater. The operator's directive is
+// implementability-first, "find 100+ blueprints per run".
+//
+// Threshold calibration (2026-04-25): set initially at 0.65, observed
+// distribution on the all-time historical corpus showed only ~1% of
+// papers clear 0.65 (Opus is pessimistic on academic theory papers).
+// Lowering to 0.40 yields ~8% of corpus — extrapolates to ~110 candidates
+// per all-time run, ~50 per incremental week. Matches the operator's
+// "100+ blueprints" target. StrategyCoder + paperhunter handle the gap
+// between "paper says do X" and "Python file does X" — they're the
+// mechanism the operator chose for filling heuristic recipes.
+//
+// Old high/med/low/reject buckets still tracked alongside.
+const IMPL_BUCKET_THRESH = 0.40;   // implementability_score floor
+const ALL_BUCKETS = ['high', 'med', 'low', 'reject', 'implementable_candidate'];
+
 class MastermindCurator {
   constructor() {
     this._pool = null;
@@ -107,7 +145,7 @@ class MastermindCurator {
     // Persist per-batch so a mid-run failure doesn't lose completed work.
     const allResults = [];
     let totalCost = 0;
-    const buckets = { high: 0, med: 0, low: 0, reject: 0 };
+    const buckets = { high: 0, med: 0, low: 0, reject: 0, implementable_candidate: 0 };
 
     const MAX_BATCH_RETRIES = 2;
 
@@ -199,30 +237,44 @@ class MastermindCurator {
     if (!runId) throw new Error('promoteHighBucket: runId required');
 
     // ── High-bucket promotion ───────────────────────────────────────────────
+    // Saturday brain extension: 'implementable_candidate' is treated as a
+    // high-tier promotion class. Priority for that bucket factors in
+    // implementability_score (so the most concrete recipes go first into the
+    // Phase-4 paperhunter fan-out).
     const { rows: picks } = await this._query(
-      `SELECT cc.candidate_eval_id, cc.paper_id, cc.confidence, p.source_url
+      `SELECT cc.candidate_eval_id, cc.paper_id, cc.confidence,
+              cc.implementability_score, cc.predicted_bucket, p.source_url
          FROM curated_candidates cc
          JOIN research_corpus p USING (paper_id)
         WHERE cc.run_id = $1
-          AND cc.predicted_bucket = 'high'
+          AND cc.predicted_bucket IN ('high','implementable_candidate')
           AND cc.queued_candidate_id IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM research_candidates rc
              WHERE rc.source_url = p.source_url
           )
-        ORDER BY cc.confidence DESC
+        ORDER BY
+          (CASE WHEN cc.predicted_bucket = 'implementable_candidate' THEN 1 ELSE 0 END) DESC,
+          (COALESCE(cc.implementability_score, 0) * cc.confidence) DESC,
+          cc.confidence DESC
         LIMIT $2`,
       [runId, maxToPromote]
     );
 
     let promoted = 0;
     for (const row of picks) {
+      // Saturday brain priority blends confidence × implementability so the
+      // research_candidates queue (read by paperhunter fan-out) ranks
+      // implementable papers ahead of merely-high-confidence ones.
+      const blended = (row.predicted_bucket === 'implementable_candidate' && row.implementability_score != null)
+        ? Math.round(row.confidence * Number(row.implementability_score) * 10)
+        : Math.round(row.confidence * 10);
       const { rows: inserted } = await this._query(
         `INSERT INTO research_candidates (source_url, submitted_by, priority, status)
          VALUES ($1, 'curator', $2, 'pending')
          ON CONFLICT DO NOTHING
          RETURNING candidate_id`,
-        [row.source_url, Math.round(row.confidence * 10)]
+        [row.source_url, Math.max(1, blended)]
       );
       if (inserted.length) {
         await this._query(
@@ -496,7 +548,16 @@ class MastermindCurator {
          AND LENGTH(COALESCE(p.abstract, '')) >= 50
          ORDER BY p.ingested_at DESC`
     );
-    return rows;
+    // Saturday-brain pre-filter: skip abstracts that lack any blueprint-signal
+    // term. Cheap regex on the title+abstract; saves Opus tokens on pure
+    // theory/survey/non-strategy papers without changing the rated set's
+    // downstream meaning. Bypassed when paperIds was passed (caller-driven
+    // re-curation should rate exactly what was asked, no filtering).
+    const filtered = rows.filter(r => {
+      const blob = `${r.title || ''} ${r.abstract || ''}`;
+      return BLUEPRINT_SIGNAL_RX.test(blob);
+    });
+    return filtered;
   }
 
   /** Pull the live coverage + manifest + server columns for the curator prompt. */
@@ -830,10 +891,30 @@ class MastermindCurator {
           researchjohn: { pass_prob: Math.cbrt(Math.max(rawConf, 0.001)), reason: 'synthesised from legacy confidence' },
           convergence:  { pass_prob: Math.cbrt(Math.max(rawConf, 0.001)), reason: 'synthesised from legacy confidence' },
         };
+        // Saturday-brain implementability_score (0..1). Opus may emit it
+        // directly; if not present, derive a conservative default from
+        // confidence so downstream tier-promotion still has a usable axis.
+        const rawImpl = (r.implementability_score != null)
+          ? Math.max(0, Math.min(1, Number(r.implementability_score)))
+          : Math.max(0, Math.min(1, rawConf * 0.7));
+        // Saturday-brain bucket promotion: 'implementable_candidate' wins
+        // when implementability crosses the floor — confidence is NOT
+        // gating here. The data-tier filter + paperhunter downstream make
+        // the "is this actually viable" call; the rater's job is just to
+        // identify recipes concrete enough to be coded. The downstream
+        // promoteHighBucket call promotes both 'high' and
+        // 'implementable_candidate' labels.
+        let bucket = r.predicted_bucket || this._bucketFromConfidence(rawConf);
+        if (rawImpl >= IMPL_BUCKET_THRESH) {
+          bucket = 'implementable_candidate';
+        }
         return {
           paper_id:                 p.paper_id,
           confidence:               rawConf,
-          predicted_bucket:         r.predicted_bucket || this._bucketFromConfidence(rawConf),
+          implementability_score:   rawImpl,
+          data_requirements_hint:   (r.data_requirements_hint && typeof r.data_requirements_hint === 'object')
+                                        ? r.data_requirements_hint : null,
+          predicted_bucket:         bucket,
           reasoning:                String(r.reasoning || '').slice(0, 2000),
           predicted_failure_modes:  Array.isArray(r.predicted_failure_modes) ? r.predicted_failure_modes : [],
           gate_predictions:         gatePredictions,
@@ -843,6 +924,8 @@ class MastermindCurator {
       return {
         paper_id:                p.paper_id,
         confidence:              0,
+        implementability_score:  0,
+        data_requirements_hint:  null,
         predicted_bucket:        'reject',
         reasoning:               'Curator did not return an entry for this paper.',
         predicted_failure_modes: ['curator_no_response'],
@@ -869,18 +952,23 @@ class MastermindCurator {
       await this._query(
         `INSERT INTO curated_candidates
            (paper_id, run_id, confidence, predicted_bucket, reasoning,
-            predicted_failure_modes, gate_predictions)
-         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+            predicted_failure_modes, gate_predictions,
+            implementability_score, data_requirements_hint)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb)
          ON CONFLICT (paper_id, run_id) DO UPDATE
            SET confidence = EXCLUDED.confidence,
                predicted_bucket = EXCLUDED.predicted_bucket,
                reasoning = EXCLUDED.reasoning,
                predicted_failure_modes = EXCLUDED.predicted_failure_modes,
-               gate_predictions = EXCLUDED.gate_predictions`,
+               gate_predictions = EXCLUDED.gate_predictions,
+               implementability_score = EXCLUDED.implementability_score,
+               data_requirements_hint = EXCLUDED.data_requirements_hint`,
         [
           r.paper_id, runId, r.confidence, r.predicted_bucket, r.reasoning,
           r.predicted_failure_modes,
           r.gate_predictions ? JSON.stringify(r.gate_predictions) : null,
+          r.implementability_score != null ? r.implementability_score : null,
+          r.data_requirements_hint ? JSON.stringify(r.data_requirements_hint) : null,
         ]
       );
       // Funnel instrumentation: 'pass' for high bucket, 'reject' otherwise.

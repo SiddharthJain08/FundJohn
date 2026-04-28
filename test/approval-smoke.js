@@ -58,18 +58,42 @@ async function main() {
   assert.strictEqual(r3.status, 422);
   console.log('✓ /approve refuses live state (422)');
 
-  // 4. Manual /transition on candidate/staging still blocked for non-system actor.
-  //    Pick any candidate strategy dynamically (alpha191 may already have been promoted).
-  const { rows: cands } = await dbQuery(
-    `SELECT id FROM strategy_registry WHERE status='pending_approval' LIMIT 1`);
-  const candSid = cands[0]?.id;
+  // 4. Under the fused-approval lifecycle (2026-04-27), the only valid
+  //    operator-driven transition from CANDIDATE is candidate→live (sharpe/dd
+  //    gated). POST /approve on a candidate row redirects to /transition.
+  const fs = require('fs');
+  const path = require('path');
+  const manifestPath = path.resolve(__dirname, '..', 'src', 'strategies', 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const candSid = Object.entries(manifest.strategies)
+    .find(([, r]) => r.state === 'candidate')?.[0];
   if (candSid) {
-    const r4 = await call('POST', `/api/strategies/${candSid}/transition`, { to_state: 'paper' });
+    const r4 = await call('POST', `/api/strategies/${candSid}/approve`, {});
     assert.strictEqual(r4.status, 409, `expected 409, got ${r4.status} ${r4.raw}`);
-    assert.ok(/approve/.test(r4.body.error), 'should redirect to /approve');
-    console.log(`✓ manual candidate→paper still blocked for ${candSid} (409, directs to /approve)`);
+    assert.ok(/transition/.test(r4.body.error), 'should redirect to /transition');
+    console.log(`✓ /approve on candidate redirects to /transition for ${candSid} (409)`);
+
+    // Manual /transition with bad metrics is gated. Probe only on a
+    // candidate whose metrics are NUMERIC and BELOW the gate (so the call
+    // returns 422 without committing). NULL metrics pass the gate (no
+    // assertion possible) and good metrics would promote as a side effect.
+    const { rows: weakCands } = await dbQuery(
+      `SELECT id FROM strategy_registry
+        WHERE id = $1
+          AND backtest_sharpe IS NOT NULL
+          AND backtest_max_dd_pct IS NOT NULL
+          AND ( backtest_sharpe < 0.5 OR backtest_max_dd_pct > 20 )`,
+      [candSid]);
+    if (weakCands.length) {
+      const r5 = await call('POST', `/api/strategies/${candSid}/transition`, { to_state: 'live' });
+      assert.strictEqual(r5.status, 422, `expected 422 (gate fail), got ${r5.status} ${r5.raw}`);
+      assert.ok(r5.body.failed_gates, 'gate failure should list failed_gates');
+      console.log(`✓ candidate→live blocked by sharpe/dd gate for ${candSid}: ${r5.body.failed_gates.join(',')}`);
+    } else {
+      console.log(`(skip candidate→live gate probe for ${candSid} — metrics NULL or already passing; would mutate state)`);
+    }
   } else {
-    console.log('(skip candidate 409 check — no pending_approval strategy available)');
+    console.log('(skip candidate /approve check — no candidate-state strategy available)');
   }
 
   // 5. Cleanup

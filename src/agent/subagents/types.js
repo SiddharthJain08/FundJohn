@@ -63,9 +63,11 @@ function buildPrompt(type, ticker, workspace, additionalPrompt = '', templateVar
     }
   }
 
-  // Substitute template variables
+  // Substitute template variables. AlphaVantage was removed 2026-04-28 —
+  // its capabilities (technical indicators, macro, economic calendar) are
+  // covered by Polygon + FMP. Subagent prompts no longer reference the
+  // AV_KEY substitution.
   const FMP_KEY = process.env.FMP_API_KEY || '';
-  const AV_KEY = process.env.ALPHA_VANTAGE_API_KEY || '';
   const POLYGON_KEY = process.env.POLYGON_API_KEY || '';
   const TAVILY_KEY = process.env.TAVILY_API_KEY || '';
 
@@ -84,11 +86,9 @@ function buildPrompt(type, ticker, workspace, additionalPrompt = '', templateVar
   prompt = prompt
     .replace(/\{\{TICKER\}\}/g, ticker || '')
     .replace(/\{\{FMP_KEY\}\}/g, FMP_KEY)
-    .replace(/\{\{AV_KEY\}\}/g, AV_KEY)
     .replace(/\{\{POLYGON_KEY\}\}/g, POLYGON_KEY)
     .replace(/\{\{TAVILY_KEY\}\}/g, TAVILY_KEY)
     .replace(/\$\{FMP_API_KEY\}/g, FMP_KEY)
-    .replace(/\$\{ALPHA_VANTAGE_API_KEY\}/g, AV_KEY)
     .replace(/TICKER/g, ticker || '');  // bare TICKER references
 
   // Substitute caller-supplied template vars (e.g. SEARCH_THEME from context JSON)

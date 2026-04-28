@@ -14,10 +14,21 @@ const _buffers = {
   macro:        [],
 };
 
+// Tier 3 dry-run gate: skip parquet writes (and the coverage/runs DB
+// updates downstream) when OPENCLAW_DRY_RUN=1. Keeps in-memory buffers
+// populated so phase summaries still report row counts; just doesn't
+// persist to disk or DB. Callers from collector.js remain unchanged.
+function _isDryRun() {
+  return process.env.OPENCLAW_DRY_RUN === '1';
+}
+
 async function _flush(name, writer) {
   const rows = _buffers[name];
   if (!rows.length) return 0;
   _buffers[name] = [];
+  if (_isDryRun()) {
+    return { flushed: 0, total_after: 0, dry_run: true, would_have_written: rows.length };
+  }
   try {
     const after = await writer(rows);
     return { flushed: rows.length, total_after: after };
@@ -287,6 +298,7 @@ async function updateCoverage(ticker, dataType, dateFrom, dateTo, rowsAdded = 0)
   // USDCNH=X) will keep retrying each cycle — that's an acceptable cost
   // (one empty HTTP call per ticker per cycle) for never lying about
   // coverage state.
+  if (_isDryRun()) return;
   if (!rowsAdded || rowsAdded <= 0) return;
   await query(
     `INSERT INTO data_coverage (ticker, data_type, date_from, date_to, rows_stored, last_updated)

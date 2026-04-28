@@ -55,10 +55,36 @@ function postWebhook(url, content) {
   });
 }
 
+function _parseArg(name) {
+  const flag = `--${name}`;
+  const i = process.argv.indexOf(flag);
+  return i >= 0 ? process.argv[i + 1] : null;
+}
+
 async function main() {
   try {
-    const text = await buildDigest(new Date());
+    // Parse optional failure-context flags. The orchestrator passes these
+    // when it aborts mid-cycle so the digest flags the failure rather
+    // than reporting business-as-usual on a broken cycle.
+    const failedStep = _parseArg('failed-step');
+    const completed  = _parseArg('completed');
+    const errorMsg   = _parseArg('error');
+    const failureCtx = failedStep ? {
+      step:      failedStep,
+      completed: completed ? completed.split(',').map(s => s.trim()).filter(Boolean) : [],
+      error:     errorMsg || null,
+    } : null;
+
+    const dryRun = process.argv.includes('--dry-run');
+
+    const text = await buildDigest(new Date(), failureCtx);
     console.log('[health] digest built:', text.length, 'chars');
+
+    if (dryRun) {
+      console.log('[health] DRY-RUN — printing digest to stdout (skipping webhook POST)');
+      console.log(text);
+      process.exit(0);
+    }
 
     const url = await getWebhook('botjohn', 'botjohn-log');
     if (!url) {

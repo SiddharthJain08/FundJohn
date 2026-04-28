@@ -5,12 +5,33 @@
  * run_mastermind.js — CLI entry for MastermindJohn (Opus 4.7, 1M ctx).
  *
  * Modes (required):
- *   --mode corpus                 Paper curation flow (Sat 10:00 ET timer).
+ *   --mode saturday-brain         Consolidated Saturday research run (Sat 10:00 ET timer).
+ *                                 8-phase pipeline: source expand → ingest →
+ *                                 corpus rate (implementability axis) →
+ *                                 paperhunter fan-out → data-tier filter →
+ *                                 Tier-A synchronous code+backtest →
+ *                                 strategist-ideator → Tier-B staging dispatch →
+ *                                 vault linking + Discord summary.
+ *                                 Replaces --mode corpus + --mode paper-expansion.
+ *   --mode corpus                 LEGACY paper curation flow. Kept for
+ *                                 dry-run + back-compat; saturday-brain
+ *                                 supersedes it on the live timer.
  *   --mode comprehensive-review   Per-strategy lifetime memos (Sat 18:00 ET).
  *   --mode position-recs          Sizing recs from latest memos (Sat 19:00 ET).
- *   --mode paper-expansion        Opus-steered paper hunt w/ web scraping (Sun 08:00 ET).
+ *   --mode paper-expansion        LEGACY Opus paper hunt. Subsumed by
+ *                                 saturday-brain Phase 1; kept for back-compat.
  *
- * Corpus-mode flags (unchanged from legacy run_curator.js):
+ * Saturday-brain flags:
+ *   --dry-run           Build context + tier mock candidates, no DB writes,
+ *                       no LLM spend. Useful for verifying capability_map.
+ *   --since-iso         YYYY-MM-DD override for Phase 2 incremental ingestion
+ *                       (default: derived from previous saturday_runs row).
+ *   --all-time          Force Phase 2 to do a full historical backfill even
+ *                       if previous saturday_runs exist (used after schema
+ *                       resets or to recover from a partial run).
+ *   --max-budget-usd    Override the $400 default cap.
+ *
+ * Corpus-mode flags (unchanged):
  *   --full              Curate every paper in research_corpus not yet curated.
  *   --paper-ids file    Curate only the UUIDs in this newline-delimited file.
  *   --dry-run           Do everything except persist; emit calibration report.
@@ -22,10 +43,10 @@
  *   --dry-run           Build outputs but do not post or persist.
  *
  * Examples:
- *   node src/agent/curators/run_mastermind.js --mode corpus --full
+ *   node src/agent/curators/run_mastermind.js --mode saturday-brain
+ *   node src/agent/curators/run_mastermind.js --mode saturday-brain --dry-run
  *   node src/agent/curators/run_mastermind.js --mode comprehensive-review
  *   node src/agent/curators/run_mastermind.js --mode position-recs
- *   node src/agent/curators/run_mastermind.js --mode paper-expansion
  */
 
 const fs = require('fs');
@@ -140,13 +161,41 @@ async function runPaperExpansion() {
   console.log(JSON.stringify({ mode: 'paper-expansion', dry_run: dryRun, ...result }, null, 2));
 }
 
+async function runSaturdayBrain() {
+  // Saturday brain is the consolidated weekly research run (Sat 10am ET).
+  // It folds the legacy corpus + paper-expansion timers into one orchestrator
+  // and adds paperhunter fan-out + data-availability tiering + Tier-A
+  // synchronous code+backtest. See plan: workspaces/default or the team's
+  // architectural notes.
+  const { run } = require('./saturday_brain');
+  const dryRun     = !!getArg('--dry-run', false);
+  const sinceIso   = getArg('--since-iso');
+  const allTime    = !!getArg('--all-time', false);
+  const budgetArg  = getArg('--max-budget-usd');
+  const maxBudget  = budgetArg && budgetArg !== true ? parseFloat(budgetArg) : null;
+
+  console.error(`[mastermind:brain] Starting Saturday brain${dryRun ? ' (DRY RUN)' : ''}...`);
+  const t0 = Date.now();
+  const result = await run({
+    dryRun,
+    sinceIso: (typeof sinceIso === 'string' && sinceIso !== 'true') ? sinceIso : null,
+    allTime,
+    maxBudgetUsd: maxBudget,
+    notify: (m) => console.error(`[mastermind:brain] ${m}`),
+  });
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.error(`[mastermind:brain] Done in ${elapsed}s — $${(result.costUsd || 0).toFixed(4)}.`);
+  console.log(JSON.stringify({ mode: 'saturday-brain', dry_run: dryRun, ...result }, null, 2));
+}
+
 (async () => {
   const mode = getArg('--mode', 'corpus');
+  if (mode === 'saturday-brain')        return runSaturdayBrain();
   if (mode === 'corpus')                return runCorpusMode();
   if (mode === 'comprehensive-review')  return runComprehensiveReview();
   if (mode === 'position-recs')         return runPositionRecs();
   if (mode === 'paper-expansion')       return runPaperExpansion();
-  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: corpus | comprehensive-review | position-recs | paper-expansion`);
+  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion`);
   process.exit(2);
 })().catch((e) => {
   console.error(`[mastermind] FATAL: ${e.message}`);

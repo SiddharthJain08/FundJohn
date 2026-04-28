@@ -40,15 +40,96 @@ def load_portfolio_state():
     return {}
 
 
+def _finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
+    """Shared persistence path for both the deterministic and LLM sizers.
+
+    Mutates `payload` to add `source`/`generated_at`/`cycle_date` defaults,
+    folds the structured handoff's `prefiltered[]` into `vetoed[]`, runs
+    the alpaca_submissions idempotency guard, writes the sized handoff,
+    and appends veto_log rows. Returns True on success, False if the
+    idempotency guard refused the write.
+    """
+    from execution.handoff import write_handoff as _write_handoff
+
+    payload.setdefault('cycle_date', run_date)
+    payload['source']       = source
+    payload['generated_at'] = date.today().isoformat()
+
+    # Fold any prefiltered signals from the structured handoff into the
+    # sized handoff's `vetoed` list so send_report's digest reflects
+    # everything that didn't make it to Alpaca — sizer vetoes AND the
+    # prefilter drops. Deduplicates by (ticker, strategy_id).
+    try:
+        from execution.handoff import read_handoff as _read_handoff
+        structured = _read_handoff(run_date, 'structured') or {}
+        prefiltered = structured.get('prefiltered') or []
+        if prefiltered:
+            existing = payload.setdefault('vetoed', [])
+            seen = {(v.get('ticker'), v.get('strategy_id')) for v in existing}
+            for p in prefiltered:
+                key = (p.get('ticker'), p.get('strategy_id'))
+                if key not in seen:
+                    existing.append(p)
+                    seen.add(key)
+            print(f'[trade_agent_llm] folded {len(prefiltered)} prefiltered signals into vetoed list')
+    except Exception as e:
+        print(f'[trade_agent_llm] prefilter-fold skipped: {e}')
+
+    # Idempotency guard: if Alpaca has already received this cycle's
+    # orders, refuse to overwrite the sized handoff. Override via
+    # OPENCLAW_FORCE_RESIZE=1 when intentionally rerunning.
+    if os.environ.get('OPENCLAW_FORCE_RESIZE') != '1':
+        postgres_uri = os.environ.get('POSTGRES_URI', '')
+        if postgres_uri:
+            try:
+                import psycopg2
+                _conn = psycopg2.connect(postgres_uri)
+                _cur  = _conn.cursor()
+                # Check by run_date (the cycle this sized handoff belongs
+                # to) — NOT submitted_at::date. submitted_at can be later
+                # than run_date (e.g. a recovery script for run_date=Mon
+                # that fires Tue morning), and the wrong key causes today's
+                # legitimate cycle to refuse-overwrite because yesterday's
+                # straggler-recovery happened to land today.
+                _cur.execute(
+                    "SELECT COUNT(*) FROM alpaca_submissions WHERE run_date = %s",
+                    (run_date,),
+                )
+                already = _cur.fetchone()[0] or 0
+                _conn.close()
+                if already > 0:
+                    print(f'[trade_agent_llm] Refusing to overwrite sized handoff: '
+                          f'{already} Alpaca submission(s) already exist for {run_date}. '
+                          f'Set OPENCLAW_FORCE_RESIZE=1 to override.')
+                    return False
+            except Exception as _e:
+                print(f'[trade_agent_llm] alpaca_submissions check skipped: {_e}')
+
+    if os.environ.get('OPENCLAW_TRADE_AGENT_DRY_RUN') == '1':
+        n_orders = len(payload.get('orders', []))
+        n_vetoed = len(payload.get('vetoed', []))
+        print(f'[trade_agent_llm] DRY-RUN: would have written sized handoff — '
+              f'{n_orders} orders, {n_vetoed} vetoed (skipping write + veto_log)')
+        # Print the sized payload to stdout so an operator can eyeball it
+        print('--- DRY-RUN sized payload ---')
+        print(json.dumps(payload, indent=2, default=str)[:8000])
+        print('--- end ---')
+        return True
+
+    _write_handoff(run_date, 'sized', payload)
+    print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
+          f'{len(payload.get("vetoed", []))} vetoed.')
+    _write_veto_log_rows(run_date, payload.get('vetoed') or [])
+    return True
+
+
 def _emit_sized_handoff(run_date, raw_stdout):
     """Parse TradeJohn's stdout → write output/handoffs/<run_date>_sized.json.
 
-    run-subagent-cli prints one JSON envelope per line; the last envelope with
-    subtype='success' contains TradeJohn's markdown in `.result`. Inside that
-    markdown we expect a fenced ```tradejohn_orders block (see tradejohn.md).
+    Used only on the legacy LLM path. The deterministic path at the top of
+    __main__ writes the sized handoff directly via _finalize_sized_payload.
     """
     import re
-    from execution.handoff import write_handoff as _write_handoff
     markdown = None
     for line in reversed(raw_stdout.splitlines()):
         line = line.strip()
@@ -73,68 +154,28 @@ def _emit_sized_handoff(run_date, raw_stdout):
     except ValueError as e:
         print(f'[trade_agent_llm] tradejohn_orders block not valid JSON: {e}')
         return
-    payload.setdefault('cycle_date', run_date)
-    payload['source']        = 'trade_agent_llm'
-    payload['generated_at']  = date.today().isoformat()
+    _finalize_sized_payload(run_date, payload, source='trade_agent_llm')
 
-    # Fold any prefiltered signals from the structured handoff into the
-    # sized handoff's `vetoed` list so send_report's digest reflects
-    # everything that didn't make it to Alpaca — TradeJohn vetoes AND the
-    # prefilter drops. Deduplicates by (ticker, strategy_id) in case a
-    # prefiltered signal somehow also appears in TradeJohn's vetoes.
+
+def _run_deterministic_sizer(run_date: str, tradejohn_handoff: dict) -> bool:
+    """Skip the LLM. Apply the deterministic sizer to the whitelisted
+    TradeJohn handoff and write the sized payload via the shared finalizer.
+    Returns True iff the sized handoff was written.
+    """
+    from execution.deterministic_sizer import size_orders
+
+    manifest_path = ROOT / 'src' / 'strategies' / 'manifest.json'
+    manifest = {}
     try:
-        from execution.handoff import read_handoff as _read_handoff
-        structured = _read_handoff(run_date, 'structured') or {}
-        prefiltered = structured.get('prefiltered') or []
-        if prefiltered:
-            existing = payload.setdefault('vetoed', [])
-            seen = {(v.get('ticker'), v.get('strategy_id')) for v in existing}
-            for p in prefiltered:
-                key = (p.get('ticker'), p.get('strategy_id'))
-                if key not in seen:
-                    existing.append(p)
-                    seen.add(key)
-            print(f'[trade_agent_llm] folded {len(prefiltered)} prefiltered signals into vetoed list')
+        manifest = json.loads(manifest_path.read_text())
     except Exception as e:
-        print(f'[trade_agent_llm] prefilter-fold skipped: {e}')
+        print(f'[trade_agent_llm] manifest load failed (lifecycle gate disabled): {e}')
 
-    # Idempotency guard: if Alpaca has already received this cycle's
-    # orders, refuse to overwrite the sized handoff. A direct rerun of
-    # this script (bypassing the orchestrator's lock) could otherwise
-    # clobber the artifact Alpaca consumed, leaving post-hoc
-    # reconciliation reading a payload that doesn't match what was sent.
-    # Override via OPENCLAW_FORCE_RESIZE=1 when intentionally rerunning.
-    if os.environ.get('OPENCLAW_FORCE_RESIZE') != '1':
-        postgres_uri = os.environ.get('POSTGRES_URI', '')
-        if postgres_uri:
-            try:
-                import psycopg2
-                _conn = psycopg2.connect(postgres_uri)
-                _cur  = _conn.cursor()
-                _cur.execute(
-                    "SELECT COUNT(*) FROM alpaca_submissions WHERE submitted_at::date = %s",
-                    (run_date,),
-                )
-                already = _cur.fetchone()[0] or 0
-                _conn.close()
-                if already > 0:
-                    print(f'[trade_agent_llm] Refusing to overwrite sized handoff: '
-                          f'{already} Alpaca submission(s) already exist for {run_date}. '
-                          f'Set OPENCLAW_FORCE_RESIZE=1 to override.')
-                    return
-            except Exception as _e:
-                # Don't block on a DB hiccup — just log and proceed.
-                print(f'[trade_agent_llm] alpaca_submissions check skipped: {_e}')
-
-    _write_handoff(run_date, 'sized', payload)
-    print(f'[trade_agent_llm] Sized handoff written — {len(payload.get("orders", []))} orders, '
-          f'{len(payload.get("vetoed", []))} vetoed.')
-
-    # Append one row per vetoed entry to veto_log so MastermindJohn's
-    # 30-day histogram (comprehensive_review._buildTradePack) stays
-    # populated. Zero-token: pure SQL INSERT, no LLM. Captures both
-    # TradeJohn's judgement vetoes AND the prefilter folds above.
-    _write_veto_log_rows(run_date, payload.get('vetoed') or [])
+    payload = size_orders(tradejohn_handoff, manifest)
+    print(f'[trade_agent_llm] deterministic sizer: '
+          f'{payload["total_green"]} orders, {payload["total_vetoed"]} vetoed, '
+          f'sum_pct_nav={sum(o["pct_nav"] for o in payload["orders"]):.4f}')
+    return _finalize_sized_payload(run_date, payload, source='deterministic_sizer')
 
 
 def _write_veto_log_rows(run_date: str, vetoed: list[dict]) -> None:
@@ -172,10 +213,20 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--date', default=str(date.today()))
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Build the structured handoff + sized payload but '
+                             'do NOT write <date>_sized.json or insert any '
+                             'alpaca_submissions rows. Prints the would-be '
+                             'sized payload to stdout instead.')
     args = parser.parse_args()
 
     run_date     = args.date
     postgres_uri = os.environ.get('POSTGRES_URI', '')
+
+    if args.dry_run:
+        os.environ['OPENCLAW_TRADE_AGENT_DRY_RUN'] = '1'
+        print(f'[trade_agent_llm] DRY-RUN: writes to <date>_sized.json + '
+              f'alpaca_submissions will be SKIPPED for {run_date}')
 
     print(f'[trade_agent_llm] Building TradeJohn context for {run_date}...')
 
@@ -256,6 +307,17 @@ if __name__ == '__main__':
     else:
         # Legacy research / memos stages — pass as-is for backwards compat.
         tradejohn_handoff = handoff
+
+    # Deterministic sizing path. Default ON so the daily cycle no longer
+    # has an LLM step. The LLM remains available for offline diff /
+    # debugging by exporting OPENCLAW_DETERMINISTIC_TRADEJOHN=0.
+    if os.environ.get('OPENCLAW_DETERMINISTIC_TRADEJOHN', '1') == '1':
+        if handoff_stage != 'structured':
+            print('[trade_agent_llm] deterministic sizer requires structured handoff; '
+                  'falling back to LLM path')
+        else:
+            ok = _run_deterministic_sizer(run_date, tradejohn_handoff)
+            sys.exit(0 if ok else 0)  # idempotency-block is not a hard failure
 
     ctx = {
         'cycle_date':      run_date,

@@ -28,6 +28,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import date, datetime, time, timezone
 from pathlib import Path
@@ -48,6 +49,9 @@ MAX_ORDER_PCT_NAV            = 0.05   # 5% NAV hard cap per order
 MAX_DAILY_NEW_NOTIONAL_PCT   = 0.25   # 25% NAV max in new notional per run
 MIN_EFFECTIVE_PCT            = 0.001  # drop sub-0.1% NAV orders (noise)
 
+# Alpaca CLI binary. Override with ALPACA_CLI_BIN env var if installed elsewhere.
+ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
+
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -56,19 +60,49 @@ def log(msg):
     print(f'{ts} [ALPACA_EXEC] {msg}')
 
 
+_market_hours_cache = {'is_open': None, 'cached_at': 0.0}
+
+
 def in_market_hours():
-    """Return True if current time is within 09:30–16:00 America/New_York."""
+    """Return True if regular trading hours per `alpaca clock`.
+
+    Cached for 60s — the CLI subprocess shell-out is ~50–100 ms, and tight
+    loops (orchestrator → alpaca_executor → execute_single) might call this
+    several times per cycle. Falls back to a static 09:30–16:00 ET weekday
+    window if the CLI is unavailable (e.g. credentials missing in tests).
+    """
+    import time as _time
+    now = _time.time()
+    if (_market_hours_cache['is_open'] is not None and
+            now - _market_hours_cache['cached_at'] < 60.0):
+        return _market_hours_cache['is_open']
+
+    try:
+        proc = subprocess.run(
+            [ALPACA_CLI, 'clock'],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            payload = json.loads(proc.stdout)
+            is_open = bool(payload.get('is_open'))
+            _market_hours_cache.update({'is_open': is_open, 'cached_at': now})
+            return is_open
+        # CLI returned an error — log and fall through to static check.
+        log(f'alpaca clock returned rc={proc.returncode} — falling back to static ET window')
+    except Exception as exc:
+        log(f'alpaca clock failed ({type(exc).__name__}: {exc}) — falling back to static ET window')
+
+    # Static fallback: 09:30–16:00 America/New_York, Mon–Fri.
     try:
         from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo('America/New_York'))
+        now_et = datetime.now(ZoneInfo('America/New_York'))
     except Exception:
-        # Fallback: treat UTC-4 as ET (DST naive); worst case: over-tight gate
-        now = datetime.now(timezone.utc).astimezone()
-    if now.weekday() >= 5:
+        now_et = datetime.now(timezone.utc).astimezone()
+    if now_et.weekday() >= 5:
         return False
     rth_open  = time(9, 30)
     rth_close = time(16, 0)
-    return rth_open <= now.time() <= rth_close
+    return rth_open <= now_et.time() <= rth_close
 
 
 def check_signal_quality(conn):
@@ -115,11 +149,14 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           run_date, ticker, strategy_id, direction, qty,
           entry_price, stop_price, target_price, pct_nav, notional_usd,
           time_in_force, order_class, client_order_id,
-          alpaca_order_id, alpaca_status, submitted_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+          alpaca_order_id, alpaca_status, alpaca_http, alpaca_error,
+          submitted_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
           alpaca_order_id = EXCLUDED.alpaca_order_id,
           alpaca_status   = EXCLUDED.alpaca_status,
+          alpaca_http     = EXCLUDED.alpaca_http,
+          alpaca_error    = EXCLUDED.alpaca_error,
           submitted_at    = EXCLUDED.submitted_at
     """, (
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
@@ -133,6 +170,8 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
         tif, order_class, coid,
         alpaca_resp.get('order_id'),
         alpaca_resp.get('status'),
+        alpaca_resp.get('http'),
+        alpaca_resp.get('body') or alpaca_resp.get('reason'),
     ))
     conn.commit()
     cur.close()
@@ -155,12 +194,98 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
     return t
 
 
+def _run_alpaca_cli(args, timeout=30):
+    """Run the alpaca CLI subprocess.
+
+    Returns (ok, payload, err) where:
+      ok=True  → payload is the parsed stdout JSON (or raw stdout if not JSON);
+                 err is None.
+      ok=False → payload is None; err is a dict with keys
+                 {exit_code, status, code, error, error_json, raw_stderr}.
+                 `status` is the HTTP status (422, 404, etc.) when the CLI
+                 emits a structured error JSON to stderr; None otherwise.
+
+    The CLI emits JSON to stdout on success and a JSON error envelope to
+    stderr on failure (with `"status": <http>`, `"error": "..."`,
+    `"code": <numeric>`). Exit code is 0 on success, non-zero on error.
+    """
+    proc = subprocess.run(
+        [ALPACA_CLI, *args],
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )
+    if proc.returncode == 0:
+        try:
+            return True, json.loads(proc.stdout), None
+        except json.JSONDecodeError:
+            return True, proc.stdout, None
+    err = {
+        'exit_code': proc.returncode,
+        'raw_stderr': proc.stderr,
+        'status': None,
+        'error': proc.stderr.strip(),
+        'code': None,
+        'error_json': None,
+    }
+    try:
+        ej = json.loads(proc.stderr)
+        err['error_json'] = ej
+        err['status'] = ej.get('status')
+        err['code']   = ej.get('code')
+        if ej.get('error'):
+            err['error'] = ej.get('error')
+    except json.JSONDecodeError:
+        pass
+    return False, None, err
+
+
+def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, coid):
+    """Submit a single bracket/simple order via `alpaca order submit`.
+    Returns the same (ok, payload, err) tuple as _run_alpaca_cli."""
+    args = [
+        'order', 'submit',
+        '--symbol',          ticker,
+        '--side',             side,
+        '--qty',              str(qty),
+        '--type',             'market',
+        '--time-in-force',    tif,
+        '--client-order-id',  coid,
+    ]
+    if order_class == 'bracket':
+        args += [
+            '--order-class',  'bracket',
+            '--take-profit',  json.dumps({'limit_price': _price_str(target)}),
+            '--stop-loss',    json.dumps({'stop_price':  _price_str(stop)}),
+        ]
+    return _run_alpaca_cli(args)
+
+
+def _get_order_by_coid(coid):
+    return _run_alpaca_cli(['order', 'get-by-client-id', '--client-order-id', coid])
+
+
 def execute_single(sess, equity, order, run_date):
-    """Submit one bracket order. Returns result dict."""
+    """Submit one bracket order. Returns result dict.
+
+    Computes a unique `client_order_id` BEFORE any SKIP early-return so
+    every result dict carries a unique coid (the alpaca_submissions table
+    has a UNIQUE constraint on client_order_id; an empty string would
+    collide on the second SKIP).
+    """
     raw_ticker = order['ticker']
     ticker = _normalize_alpaca_symbol(raw_ticker)
+
+    # Compute coid up-front from the RAW ticker + strategy_id so SKIP rows
+    # also get a unique key. Alpaca allows 128 chars on client_order_id.
+    import re as _re
+    _coid_ticker = (ticker or raw_ticker or 'UNKNOWN').replace(' ', '_')
+    _coid_ticker = _re.sub(r'[^A-Za-z0-9._-]', '_', _coid_ticker)
+    _sid_clean = _re.sub(r'[^A-Za-z0-9._-]', '_', order.get('strategy_id') or 'unknown')
+    coid = f'AX{run_date.replace("-","")}_{_coid_ticker}_{_sid_clean}'[:128]
+
     if ticker is None:
-        return {'ticker': raw_ticker, 'status': 'SKIP', 'reason': f'unsupported on Alpaca paper ({raw_ticker})'}
+        return {'ticker': raw_ticker, 'status': 'SKIP',
+                'reason': f'unsupported on Alpaca paper ({raw_ticker})',
+                'client_order_id': coid}
     pct_nav = float(order.get('pct_nav') or 0.0)
     entry   = order.get('entry')
     stop    = order.get('stop')
@@ -168,15 +293,14 @@ def execute_single(sess, equity, order, run_date):
     side    = 'sell' if str(order.get('direction') or '').lower() == 'short' else 'buy'
 
     if not (entry and stop and target):
-        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'missing levels'}
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'missing levels',
+                'client_order_id': coid}
 
     entry, stop, target = float(entry), float(stop), float(target)
 
     pct_nav = max(MIN_EFFECTIVE_PCT, min(pct_nav, MAX_ORDER_PCT_NAV))
     notional = equity * pct_nav
     qty = max(1, int(notional / entry))
-
-    coid = f'AX{run_date.replace("-","")}_{ticker}_{(order.get("strategy_id") or "")[:8]}'[:48]
     # In-hours: execute immediately ('day' TIF). Off-hours: queue for next open
     # ('opg' TIF) so the nightly pipeline still produces live bracket orders.
     # Note: Alpaca rejects bracket orders with order_class='bracket' + TIF='opg';
@@ -222,52 +346,88 @@ def execute_single(sess, equity, order, run_date):
                             stop = new_stop
         except Exception as _qe:
             # Don't block submission on a quote fetch hiccup; let Alpaca's
-            # own validation be the final word.
-            pass
+            # own validation be the final word. Logged so we can see when
+            # the snap path is silently failing (otherwise an order looks
+            # like a "fresh" 422 from Alpaca rather than our pre-flight
+            # whiffing).
+            log(f'  ↯ {ticker}: pre-flight quote fetch failed ({type(_qe).__name__}: {_qe}) — submitting unsnapped')
 
-    body = {
-        'symbol':          ticker,
-        'qty':             str(qty),
-        'side':            side,
-        'type':            'market',
-        'time_in_force':   tif,
-        'client_order_id': coid,
-    }
-    if tif == 'day':
-        body['order_class']  = 'bracket'
-        body['take_profit']  = {'limit_price': _price_str(target)}
-        body['stop_loss']    = {'stop_price':  _price_str(stop)}
     if adjusted_stop_note:
         log(f'  ↪ {ticker}: {adjusted_stop_note}')
 
     try:
-        import requests  # noqa: F401
-        r = sess.post(f'{sess._base}/v2/orders', data=json.dumps(body), timeout=15)
-        if r.status_code in (200, 201):
-            oid = r.json().get('id', '?')
+        ok, payload, err = _submit_order_via_cli(
+            ticker=ticker, side=side, qty=qty, tif=tif,
+            order_class=order_class, target=target, stop=stop, coid=coid,
+        )
+        if ok:
+            oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
             log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
             return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                     'side': side, 'qty': qty, 'notional': notional,
                     'entry': entry, 'stop': stop, 'target': target,
                     'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+
+        err_text   = (err.get('error') or '').lower()
+        err_status = err.get('status')
+
         # Duplicate client_order_id → recover the existing order so DB stays in sync.
-        if r.status_code == 422 and 'client_order_id' in (r.text or '').lower():
-            try:
-                g = sess.get(f'{sess._base}/v2/orders:by_client_order_id', params={'client_order_id': coid}, timeout=10)
-                if g.status_code == 200:
-                    oid = g.json().get('id', '?')
-                    log(f'RECOVERED {ticker} (duplicate client_order_id) → existing order={oid}')
-                    return {'ticker': ticker, 'status': 'recovered', 'order_id': oid,
-                            'side': side, 'qty': qty, 'notional': notional,
-                            'entry': entry, 'stop': stop, 'target': target,
-                            'tif': tif, 'order_class': order_class, 'client_order_id': coid}
-            except Exception:
-                pass
-        log(f'HTTP {r.status_code} {ticker}: {r.text[:200]}')
-        return {'ticker': ticker, 'status': 'error', 'http': r.status_code, 'body': r.text[:200]}
+        if err_status == 422 and 'client_order_id' in err_text:
+            ok2, payload2, _err2 = _get_order_by_coid(coid)
+            if ok2 and isinstance(payload2, dict):
+                oid = payload2.get('id', '?')
+                log(f'RECOVERED {ticker} (duplicate client_order_id) → existing order={oid}')
+                return {'ticker': ticker, 'status': 'recovered', 'order_id': oid,
+                        'side': side, 'qty': qty, 'notional': notional,
+                        'entry': entry, 'stop': stop, 'target': target,
+                        'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+
+        # 422 with base_price violation → Alpaca's error envelope carries the
+        # base_price it validated against. If our pre-flight snap whiffed
+        # (quote fetch returned 0/exception, or quote was stale by the time
+        # the order hit), use the authoritative value from the 422 and retry
+        # once with a freshly snapped stop.
+        if err_status == 422 and side in ('buy', 'sell') and tif == 'day':
+            ej     = err.get('error_json') or {}
+            bp_raw = ej.get('base_price')
+            if bp_raw and ('stop_loss' in err_text or 'base_price' in err_text):
+                try:
+                    bp = float(bp_raw)
+                except (TypeError, ValueError):
+                    bp = 0.0
+                if bp > 0:
+                    if side == 'buy':
+                        new_stop = round(bp - max(0.02, bp * 0.005), 2)
+                    else:
+                        new_stop = round(bp + max(0.02, bp * 0.005), 2)
+                    log(f'  ↻ {ticker}: 422 base_price={bp:.2f} — retry with stop {stop:.2f}→{new_stop:.2f}')
+                    ok3, payload3, err3 = _submit_order_via_cli(
+                        ticker=ticker, side=side, qty=qty, tif=tif,
+                        order_class=order_class, target=target, stop=new_stop, coid=coid,
+                    )
+                    if ok3:
+                        oid = (payload3 or {}).get('id', '?') if isinstance(payload3, dict) else '?'
+                        log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={new_stop:.2f}  notional=${notional:,.0f}  order={oid} (snap-retry)')
+                        return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
+                                'side': side, 'qty': qty, 'notional': notional,
+                                'entry': entry, 'stop': new_stop, 'target': target,
+                                'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+                    err = err3 or err
+
+        body_text = (err.get('error') or '')[:200]
+        http      = err.get('status') or 0
+        log(f'CLI rc={err.get("exit_code")} status={http} {ticker}: {body_text}')
+        return {'ticker': ticker, 'status': 'error', 'http': http,
+                'body': body_text, 'client_order_id': coid,
+                'tif': tif, 'order_class': order_class}
+    except subprocess.TimeoutExpired as exc:
+        log(f'CLI timeout {ticker}: {exc}')
+        return {'ticker': ticker, 'status': 'exception', 'reason': f'cli timeout: {exc}',
+                'client_order_id': coid, 'tif': tif, 'order_class': order_class}
     except Exception as exc:
         log(f'Exception {ticker}: {exc}')
-        return {'ticker': ticker, 'status': 'exception', 'reason': str(exc)}
+        return {'ticker': ticker, 'status': 'exception', 'reason': str(exc),
+                'client_order_id': coid, 'tif': tif, 'order_class': order_class}
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -282,7 +442,7 @@ def main():
     uri = os.environ.get('POSTGRES_URI', '')
     if not uri:
         log('POSTGRES_URI not set — aborting')
-        sys.exit(1)
+        sys.exit(2)   # config error per Tier 3 exit-code discipline
 
     log(f'Run date: {run_date}')
 
@@ -336,11 +496,16 @@ def main():
             continue
 
         result = execute_single(sess, equity, order, run_date)
+        # Persist *every* attempt — submitted, recovered, AND rejects —
+        # so the audit trail in alpaca_submissions reflects what we tried,
+        # not just what succeeded. Reject rows carry alpaca_http +
+        # alpaca_error and have alpaca_order_id NULL, so already_executed()
+        # still treats them as "not yet executed" for retry semantics.
+        record_submission(conn, run_date, order, result,
+                          result.get('tif') or ('day' if rth else 'opg'),
+                          result.get('order_class') or ('bracket' if rth else 'simple'),
+                          result.get('client_order_id') or '')
         if result.get('status') in ('submitted', 'recovered'):
-            record_submission(conn, run_date, order, result,
-                              result.get('tif') or 'day',
-                              result.get('order_class') or 'simple',
-                              result.get('client_order_id') or '')
             submitted.append(result)
             new_notional_total += result.get('notional') or 0.0
         else:

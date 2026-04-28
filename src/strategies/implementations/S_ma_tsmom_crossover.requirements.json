@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ma_tsmom_crossover",
+  "required": ["prices"],
+  "optional": ["realized_vol"]
+}

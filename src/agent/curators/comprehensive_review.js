@@ -77,7 +77,8 @@ async function _buildTradePack(strategyId) {
     ),
     _query(
       `SELECT signal_id::text, pnl_date, close_price, unrealized_pnl_pct,
-              days_held, status, closed_price, closed_at, close_reason
+              realized_pnl_pct, days_held, status, closed_price, closed_at,
+              close_reason
          FROM signal_pnl
         WHERE strategy_id = $1
         ORDER BY pnl_date DESC

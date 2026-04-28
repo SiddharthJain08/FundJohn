@@ -2,10 +2,24 @@
 
 This project contains all system optimizations for FundJohn, a bot-network quantitative hedge fund built on OpenClaw using Claude Code agents.
 
+## Core invariant — NEVER DELETE FROM THE MASTER DATABASE
+The master parquets and Postgres tables under `data/master/` are append-only.
+Columns may be ADDED at any time. Tickers may be ADDED at any time. Date
+ranges may only grow. **No code path is allowed to drop columns, drop
+tickers, truncate the date axis, deprecate columns, or delete rows from
+prices.parquet, options_eod.parquet, financials.parquet, macro.parquet,
+insider.parquet, earnings.parquet, prices_30m.parquet, or
+historical_regimes.parquet.** Same rule applies to the canonical
+Postgres tables (`execution_signals`, `signal_pnl`, `alpaca_submissions`,
+`data_coverage`, `data_columns`). The system's job is to grow the data
+forever and let strategies opt into whichever subset they need; it is
+NOT to optimize storage by pruning. Any future "deprecation" must be a
+flag (`active=false`) on a metadata row, never a `DELETE`.
+
 ## System Overview
 Autonomous quant PM system + hardcoded data pipeline:
 - **BotJohn** (claude-opus-4-6): Orchestrator and portfolio manager
-- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 7-step 10am daily cycle — queue_drain → collect → signals → handoff → trade → alpaca → report.
+- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 6-step 10am daily cycle — collect → signals → handoff → trade → alpaca → report. (queue_drain removed 2026-04-28; fused-staging-approval handles inline column backfills.)
 - **TradeJohn** (claude-sonnet-4-6): Signal selection + Kelly sizing. Reads the structured handoff from `trade_handoff_builder.py`; emits sized bracket orders. Single LLM step in the cycle.
 - **PaperHunter** (claude-haiku-4-5): Per-paper extraction + 4 rejection gates
 - **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation

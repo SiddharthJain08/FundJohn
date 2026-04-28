@@ -1,3 +1,20 @@
+---
+name: fundjohn:position-sizer
+description: Half-Kelly sizing with regime scale, lifecycle discount, and confluence bonus.
+triggers:
+  - daily TradeJohn handoff
+  - position-recommender
+inputs:
+  - signal
+  - regime
+  - d1_history
+  - lifecycle_state
+outputs:
+  - pct_nav
+  - shares
+  - reason
+keywords: [kelly, sizing, regime, lifecycle]
+---
 # Skill: fundjohn:position-sizer
 **Trigger**: `/position-sizer` or `/size`
 
@@ -33,16 +50,23 @@ If `confluence_count < MIN_CONFLUENCE`, use `base_pct` only — no bonus.
 
 ## Regime Scale
 
+The current regime scale is read from `handoff.regime.scale` — that
+field is the authoritative value, computed deterministically by
+`src/execution/trade_handoff_builder.py:135`. Do NOT hard-code a
+table here; if the upstream value changes, the sizer must follow.
+
+For reference, the values used as of 2026-04-27:
+
 ```python
 REGIME_POSITION_SCALE = {
     'LOW_VOL':       1.00,
-    'TRANSITIONING': 0.70,
-    'HIGH_VOL':      0.50,
-    'CRISIS':        0.25,
+    'TRANSITIONING': 0.55,
+    'HIGH_VOL':      0.35,
+    'CRISIS':        0.15,
 }
 ```
 
-Multiply `pct_nav` by the scale factor for the current regime.
+Multiply `pct_nav` by `handoff.regime.scale` for the current cycle.
 
 ## Lifecycle Discount
 

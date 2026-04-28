@@ -1,3 +1,18 @@
+---
+name: fundjohn:comps-analysis
+description: Build a public-comps multiples table for relative-value analysis.
+triggers:
+  - /comps
+  - comparable companies analysis request
+inputs:
+  - ticker
+  - peer_set
+  - multiples_to_compute
+outputs:
+  - comps_table
+  - quality_gates
+keywords: [comps, multiples, peer-analysis, EV/EBITDA]
+---
 # Skill: fundjohn:comps-analysis
 **Trigger**: `/comps` or `/peers`
 

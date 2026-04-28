@@ -87,7 +87,7 @@ def build_dossier(strategy_id: str, days: int = 30) -> dict:
             cur,
             """SELECT COUNT(*)::int AS n_rows,
                       COUNT(*) FILTER (WHERE status='closed')::int AS n_closed,
-                      AVG(unrealized_pnl_pct) FILTER (WHERE status='closed') AS avg_closed_pct,
+                      AVG(realized_pnl_pct) FILTER (WHERE status='closed') AS avg_closed_pct,
                       AVG(days_held) FILTER (WHERE status='closed') AS avg_hold_days,
                       COUNT(*) FILTER (WHERE close_reason='stop_loss')::int AS stops_hit
                  FROM signal_pnl

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ivol_mispricing_asymmetry",
+  "required": ["prices", "financials"],
+  "optional": ["macro"]
+}

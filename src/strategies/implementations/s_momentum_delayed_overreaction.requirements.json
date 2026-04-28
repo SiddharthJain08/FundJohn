@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_momentum_delayed_overreaction",
+  "required": ["prices"],
+  "optional": []
+}

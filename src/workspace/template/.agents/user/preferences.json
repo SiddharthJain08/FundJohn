@@ -24,7 +24,7 @@
   "rate_limits": {
     "fmp": { "per_minute": 300, "per_day": 250 },
     "polygon": { "per_minute": 100, "per_day": null },
-    "alpha_vantage": { "per_minute": 5, "per_day": 25 },
+    "alpaca": { "per_minute": 200, "per_day": null },
     "sec_edgar": { "per_second": 10, "per_day": null },
     "tavily": { "per_minute": 60, "per_day": null },
     "yahoo": { "per_minute": 60, "per_day": null }
@@ -37,9 +37,10 @@
     "compute_hours": 24
   },
   "fallback_chain": {
-    "prices": ["polygon", "alpha_vantage", "yahoo"],
+    "prices": ["polygon", "yahoo"],
     "fundamentals": ["fmp", "yahoo"],
     "filings": ["sec_edgar"],
-    "news": ["tavily"]
+    "news": ["tavily"],
+    "broker_state": ["alpaca"]
   }
 }

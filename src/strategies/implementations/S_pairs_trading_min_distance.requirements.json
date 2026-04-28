@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_pairs_trading_min_distance",
+  "required": ["prices"],
+  "optional": []
+}

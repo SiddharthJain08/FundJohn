@@ -1,3 +1,18 @@
+---
+name: fundjohn:thesis-tracker
+description: Track open theses against catalysts; flag invalidations and decision points.
+triggers:
+  - /thesis-tracker
+  - weekly thesis review
+inputs:
+  - open_theses
+  - recent_news
+  - price_action
+outputs:
+  - thesis_status_table
+  - decision_recommendations
+keywords: [thesis, tracker, catalyst, invalidation]
+---
 # Skill: fundjohn:thesis-tracker
 **Trigger**: `/thesis {ticker}` or `/track {ticker}`
 

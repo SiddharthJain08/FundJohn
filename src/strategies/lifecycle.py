@@ -49,15 +49,21 @@ class StrategyState(str, Enum):
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Keyed (from_state, to_state) → human description of the move.
+#
+# Lifecycle (post fused-staging-approval rewrite, 2026-04-27):
+#   staging → candidate    fused worker: backfill + strategycoder + backtest
+#   candidate → live       operator click; gated on sharpe/dd
+#   PAPER is a frozen legacy state — no outbound transitions. Existing PAPER
+#   manifest rows were migrated to CANDIDATE by scripts/migrate_paper_to_candidate.py.
 VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
-    (StrategyState.STAGING,    StrategyState.CANDIDATE):   "data pipeline setup complete",
+    (StrategyState.STAGING,    StrategyState.CANDIDATE):   "fused approval: backfill + strategycoder + backtest complete",
     (StrategyState.STAGING,    StrategyState.ARCHIVED):    "abandon before data is available",
     (StrategyState.CANDIDATE,  StrategyState.STAGING):     "regress — needs additional data sources",
-    (StrategyState.CANDIDATE,  StrategyState.PAPER):       "begin backtesting",
-    (StrategyState.CANDIDATE,  StrategyState.ARCHIVED):    "abandon before implementation",
-    (StrategyState.PAPER,      StrategyState.LIVE):        "promote to live after passing backtest guards",
-    (StrategyState.PAPER,      StrategyState.CANDIDATE):   "regress — failed backtest",
-    (StrategyState.PAPER,      StrategyState.ARCHIVED):    "archive without going live",
+    (StrategyState.CANDIDATE,  StrategyState.LIVE):        "promote to live after passing backtest guards",
+    (StrategyState.CANDIDATE,  StrategyState.ARCHIVED):    "abandon without going live",
+    # paper → archived: safety-valve for any legacy/orphan PAPER row that
+    # missed the one-shot migration. No other outbound transitions from PAPER.
+    (StrategyState.PAPER,      StrategyState.ARCHIVED):    "archive legacy paper row",
     (StrategyState.LIVE,       StrategyState.MONITORING):  "escalate to monitoring",
     (StrategyState.LIVE,       StrategyState.DEPRECATED):  "demote from live",
     (StrategyState.MONITORING, StrategyState.LIVE):        "restore confidence, back to live",
@@ -65,9 +71,12 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
     (StrategyState.DEPRECATED, StrategyState.ARCHIVED):    "archive after review period",
 }
 
-# Backtest thresholds required for paper → live promotion.
-PAPER_TO_LIVE_MIN_SHARPE:   float = 0.5
-PAPER_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
+# Backtest thresholds required for candidate → live promotion (formerly paper → live).
+CANDIDATE_TO_LIVE_MIN_SHARPE:   float = 0.5
+CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
+# Back-compat aliases — old names still imported by some callers.
+PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
+PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -208,24 +217,24 @@ class LifecycleStateMachine:
                 f"Valid destinations from '{rec.state.value}': {allowed}"
             )
 
-        # Guard: paper → live requires backtest thresholds
-        if key == (StrategyState.PAPER, StrategyState.LIVE):
+        # Guard: candidate → live requires backtest thresholds
+        if key == (StrategyState.CANDIDATE, StrategyState.LIVE):
             md = metadata or {}
             sharpe   = md.get("sharpe")
             drawdown = md.get("max_drawdown")
             if sharpe is None or drawdown is None:
                 return False, (
-                    "paper→live requires metadata keys 'sharpe' and 'max_drawdown'"
+                    "candidate→live requires metadata keys 'sharpe' and 'max_drawdown'"
                 )
-            if sharpe < PAPER_TO_LIVE_MIN_SHARPE:
+            if sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE:
                 return False, (
-                    f"paper→live blocked: sharpe {sharpe:.2f} < "
-                    f"minimum {PAPER_TO_LIVE_MIN_SHARPE}"
+                    f"candidate→live blocked: sharpe {sharpe:.2f} < "
+                    f"minimum {CANDIDATE_TO_LIVE_MIN_SHARPE}"
                 )
-            if drawdown > PAPER_TO_LIVE_MAX_DRAWDOWN:
+            if drawdown > CANDIDATE_TO_LIVE_MAX_DRAWDOWN:
                 return False, (
-                    f"paper→live blocked: max_drawdown {drawdown:.2%} > "
-                    f"limit {PAPER_TO_LIVE_MAX_DRAWDOWN:.0%}"
+                    f"candidate→live blocked: max_drawdown {drawdown:.2%} > "
+                    f"limit {CANDIDATE_TO_LIVE_MAX_DRAWDOWN:.0%}"
                 )
 
         return True, VALID_TRANSITIONS[key]
@@ -267,17 +276,12 @@ class LifecycleStateMachine:
         )
         self._persist_lifecycle_event(strategy_id, event, metadata)
 
-        # Unstack → queue orphaned data columns for removal. Only fires on
-        # transitions INTO deprecated/archived (per user spec: removal is
-        # symmetric to approval, and only activates upon unstack).
-        if to_state in (StrategyState.DEPRECATED, StrategyState.ARCHIVED):
-            try:
-                self._enqueue_orphan_columns(strategy_id, actor)
-            except Exception as exc:
-                logger.warning(
-                    "unstack-deprecation queueing skipped for %s: %s",
-                    strategy_id, exc,
-                )
+        # 2026-04-28: orphan-column removal removed. The master database is
+        # append-only — strategies that get deprecated/archived no longer
+        # trigger column drops in data_columns or schema_registry. Past
+        # data stays forever; future strategies can opt into any column
+        # already collected. See CLAUDE.md "NEVER DELETE FROM THE MASTER
+        # DATABASE" core invariant.
 
         return rec
 
@@ -317,82 +321,43 @@ class LifecycleStateMachine:
 
     # ── unstack helper ───────────────────────────────────────────────────────
 
-    def _enqueue_orphan_columns(self, strategy_id: str, actor: str) -> None:
-        """When ``strategy_id`` is unstacked (deprecated/archived), scan its
-        requirements.json; for every column no remaining live/paper/monitoring
-        strategy still depends on, insert an auto-APPROVED row into
-        ``data_deprecation_queue`` so the daily queue drainer removes it.
+    # Strategy states that count as "still consuming data". A column is
+    # orphaned (and gets removed inline on unstack) only when no remaining
+    # strategy in any of these states declares it as a requirement.
+    #
+    # NB: PAPER is intentionally absent. After the fused-approval rewrite
+    # (2026-04-27), PAPER is a frozen legacy state — every former PAPER row
+    # was migrated to CANDIDATE. Treating PAPER as a live consumer here
+    # would block legitimate cleanups if any orphan PAPER row slips through.
+    _ACTIVE_KEEP_STATES = (
+        StrategyState.LIVE,
+        StrategyState.MONITORING,
+        StrategyState.CANDIDATE,
+        StrategyState.STAGING,
+    )
 
-        No-op if the strategy has no requirements.json or no Postgres reach.
+    def _read_strategy_requirements(self, sid: str) -> set[str]:
+        """Return the union of required + optional columns from
+        ``<canonical_file>.requirements.json`` for *sid*. Empty set if the
+        strategy has no requirements.json on disk.
         """
-        import os, json as _json
+        import json as _json
         from pathlib import Path
-
-        postgres_uri = os.environ.get("POSTGRES_URI")
-        if not postgres_uri:
-            return
-
         root = Path(__file__).resolve().parents[2]
         req_dir = root / "src" / "strategies" / "implementations"
-
-        def _read_reqs(sid: str) -> set[str]:
-            rec = self._records.get(sid)
-            canonical = None
-            if rec and rec.metadata:
-                canonical = rec.metadata.get("canonical_file")
-            base = (canonical or f"{sid.lower()}.py").replace(".py", "")
-            p = req_dir / f"{base}.requirements.json"
-            if not p.exists():
-                return set()
-            j = _json.loads(p.read_text())
-            return set(j.get("required", [])) | set(j.get("optional", []))
-
-        unstack_cols = _read_reqs(strategy_id)
-        if not unstack_cols:
-            return
-
-        # Columns still referenced by any live/paper/monitoring peer
-        still_needed: set[str] = set()
-        keep_states = (
-            StrategyState.LIVE,
-            StrategyState.PAPER,
-            StrategyState.MONITORING,
-        )
-        for sid, rec in self._records.items():
-            if sid == strategy_id:
-                continue
-            if rec.state in keep_states:
-                still_needed |= _read_reqs(sid)
-
-        orphans = sorted(unstack_cols - still_needed)
-        if not orphans:
-            logger.info(
-                "lifecycle[%s]: no orphan columns on unstack — %d cols retained by peers",
-                strategy_id, len(unstack_cols),
-            )
-            return
-
-        import psycopg2
-        conn = psycopg2.connect(postgres_uri)
+        rec = self._records.get(sid)
+        canonical = None
+        if rec and rec.metadata:
+            canonical = rec.metadata.get("canonical_file")
+        base = (canonical or f"{sid.lower()}.py").replace(".py", "")
+        p = req_dir / f"{base}.requirements.json"
+        if not p.exists():
+            return set()
         try:
-            with conn:
-                with conn.cursor() as cur:
-                    for col in orphans:
-                        cur.execute(
-                            """INSERT INTO data_deprecation_queue
-                                 (column_name, last_used_by, recommended_action,
-                                  status, approved_by, approved_at)
-                               VALUES (%s, %s, 'remove', 'APPROVED', %s, NOW())
-                               ON CONFLICT DO NOTHING""",
-                            (col, strategy_id, f"unstack:{actor}"),
-                        )
-        finally:
-            conn.close()
-
-        logger.info(
-            "lifecycle[%s]: queued %d orphan column(s) for removal: %s",
-            strategy_id, len(orphans), ", ".join(orphans),
-        )
+            j = _json.loads(p.read_text())
+        except Exception:
+            return set()
+        return set(j.get("required") or []) | set(j.get("optional") or [])
 
     # ── registration ─────────────────────────────────────────────────────────
 
@@ -444,7 +409,49 @@ class LifecycleStateMachine:
         }
 
     def save_manifest(self, path: str | Path) -> None:
+        """Save under cross-process lock + atomic rename.
+
+        The lock prevents interleaved writes when this method runs in
+        parallel with the JS writers (saturday_brain.js, finisher,
+        approvals). The merge-with-disk strategy prevents the lost-update
+        problem: if another writer added a strategy between our
+        from_manifest() read and this save() call, we keep their entry —
+        our snapshot's strategies override only the entries we explicitly
+        modified.
+
+        Last-writer-wins on the same strategy_id (mirrors SQL UPDATE
+        semantics).
+        """
+        # Lazy import so a missing _manifest_lock module doesn't break
+        # callers that don't actually save (e.g. read-only inspection).
+        try:
+            from . import _manifest_lock as _ml
+        except ImportError:
+            import importlib.util, sys
+            spec = importlib.util.spec_from_file_location(
+                "_manifest_lock",
+                str(Path(__file__).parent / "_manifest_lock.py"),
+            )
+            _ml = importlib.util.module_from_spec(spec)  # type: ignore
+            spec.loader.exec_module(_ml)  # type: ignore
+
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.to_dict(), indent=2))
+        my_view = self.to_dict()
+
+        def _merge(disk: dict) -> dict:
+            disk_strategies = (disk or {}).get("strategies") or {}
+            disk_decom      = (disk or {}).get("decommissioned") or {}
+            # Start from disk; our entries override on conflict. Strategies
+            # only-on-disk are preserved (concurrent writer additions).
+            merged_strategies = {**disk_strategies, **my_view["strategies"]}
+            merged_decom      = {**disk_decom, **my_view["decommissioned"]}
+            return {
+                "schema_version":  my_view.get("schema_version", "1.0"),
+                "updated_at":      my_view["updated_at"],
+                "strategies":      merged_strategies,
+                "decommissioned":  merged_decom,
+            }
+
+        _ml.with_manifest_lock(p, _merge, actor="lifecycle.save_manifest")
         logger.info("Manifest saved to %s", p)

@@ -9,13 +9,15 @@ Never process financial data in context (LLM math). Write Python. Execute. Read 
 import pandas as pd
 import numpy as np
 from tools.fmp import get_financial_statements, get_key_metrics, get_profile, get_peers
-from tools.polygon import get_prices, get_snapshot
-from tools.alpha_vantage import get_rsi, get_sma, get_bbands, get_sector
+from tools.polygon import get_prices, get_snapshot, get_rsi, get_sma, get_bbands, get_sector
 from tools.sec_edgar import get_filing, get_submissions
 from tools.tavily import search
 from tools.yahoo import get_options, get_insider_transactions  # fallback only
 from tools.validate import validate_manifest
 from tools._rate_limiter import _call_mcp
+# Note: AlphaVantage was removed 2026-04-28. Technical indicators
+# (RSI/SMA/EMA/BBands) and sector data now come from Polygon. Macro /
+# economic calendar comes from FMP.
 ```
 
 ### Data Flow

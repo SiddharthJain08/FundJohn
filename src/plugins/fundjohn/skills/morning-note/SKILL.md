@@ -1,3 +1,17 @@
+---
+name: fundjohn:morning-note
+description: 7-minute pre-market briefing with regime read, overnight tape, and watchlist nudges.
+triggers:
+  - /morning
+  - /morning-note
+inputs:
+  - regime_context
+  - overnight_market_data
+  - watchlist
+outputs:
+  - morning_note_md
+keywords: [morning, pre-market, briefing, regime]
+---
 # Skill: fundjohn:morning-note
 **Trigger**: `/morning` or `/morning-note`
 
@@ -19,7 +33,7 @@ tags: [#morning-note, #regime/{regime}]
 ## Required Sections (max one paragraph each)
 1. **Regime read** — current label + what changed since yesterday's close (1 line). Pull from `regime_context.md`; if stale >24h, recompute via Polygon vol surface.
 2. **Overnight tape** — ES, NQ, RTY, VIX, DXY, US10Y. One line: `ES -0.4 / NQ -0.6 / RTY +0.1 / VIX 14.8 / DXY 104.2 / US10Y 4.21%`
-3. **Today's catalysts** — earnings before/after-the-bell, scheduled FOMC/BLS prints, expected speakers. Pull from FMP `earnings_calendar` + AlphaVantage `economic_calendar`. Cap at 8 items.
+3. **Today's catalysts** — earnings before/after-the-bell, scheduled FOMC/BLS prints, expected speakers. Pull from FMP `earnings_calendar` + FMP `economic_calendar`. Cap at 8 items.
 4. **Signal queue** — latest TradeJohn output filtered to `status: pending_approval`. Show ticker, side, size %, EV. Maximum 10 rows.
 5. **Watchlist deltas** — anything from `active_tasks.md` with `status: watching` that triggered overnight (price through stop, news hit, IV spike). Cap at 5.
 6. **Decision needed** — one bullet per question requiring operator input today. Empty section allowed.

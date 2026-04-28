@@ -1,3 +1,16 @@
+---
+name: fundjohn:strategy-coder
+description: Implement a strategy spec as a strategies/implementations/<id>.py module.
+triggers:
+  - strategy-spec ready for implementation
+  - /strategy-coder
+inputs:
+  - strategy_spec
+outputs:
+  - strategy_module_py
+  - manifest_entry
+keywords: [strategy, coder, implementation, manifest]
+---
 # Skill: fundjohn:strategy-coder
 **Trigger**: `/strategy-coder` or `/code-strategy`
 

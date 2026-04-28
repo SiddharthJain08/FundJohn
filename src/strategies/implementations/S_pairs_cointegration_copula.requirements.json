@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_pairs_cointegration_copula",
+  "required": ["prices"],
+  "optional": []
+}

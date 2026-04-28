@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_risk_neutral_skew_cross_section",
+  "required": ["prices", "options_eod", "financials"],
+  "optional": ["realized_vol"]
+}

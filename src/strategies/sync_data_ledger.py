@@ -36,11 +36,13 @@ DERIVED_FROM_PRICES = [
     ('realized_vol',  'computed'),
 ]
 
-# Provider mapping
+# Provider mapping. AlphaVantage was removed 2026-04-28 — macro now sources
+# from yfinance (matches the actual ingestion path in
+# src/ingestion/fetch_vol_indices.py, which writes 'source': 'yfinance').
 PROVIDERS = {
     'prices':      'polygon',
-    'options_eod': 'yahoo',
-    'macro':       'alpha_vantage',
+    'options_eod': 'polygon',     # Alpaca CLI alpha-preview returns 0 greeks; polygon stays primary
+    'macro':       'yfinance',
     'financials':  'fmp',
     'earnings':    'fmp',
     'insider':     'sec_edgar',

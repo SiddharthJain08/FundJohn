@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_renko_kagi_pairs_spread",
+  "required": ["prices"],
+  "optional": []
+}

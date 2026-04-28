@@ -1,3 +1,16 @@
+---
+name: fundjohn:obsidian-link
+description: Generate Obsidian-format wikilinks between research artifacts (memos, notes, theses).
+triggers:
+  - cross-link memo references
+  - vault hygiene pass
+inputs:
+  - source_artifact
+  - target_artifacts
+outputs:
+  - wikilinks_block
+keywords: [obsidian, vault, wikilink, research-graph]
+---
 # Skill: fundjohn:obsidian-link
 **Trigger**: `/obsidian` or `/note`
 

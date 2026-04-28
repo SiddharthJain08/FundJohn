@@ -1,22 +1,24 @@
 // Approval-job orchestration.
 //
 // Entry points:
-//   approveStaging(sid, rec, actor)   → returns {status, body}
-//   approveCandidate(sid, rec, actor) → returns {status, body}
-//   approvePaper(sid, rec, actor, {force})
-//     → returns {status, body}        (synchronous; reuses existing paper→live
-//                                      gate check + manifest/registry write)
+//   approveStaging(sid, rec, actor) → returns {status, body}
 //
-// The dispatch happens in server.js; this module owns job lifecycle
-// (insert row → run worker → finish/fail) and exposes a poll tick that
-// advances awaiting_snapshot staging jobs after each collector pass.
+// The dispatch happens in server.js; this module owns job lifecycle (insert
+// row → run worker → finish/fail) and exposes a poll tick that resumes
+// long-running approve_staging jobs across process restarts.
+//
+// Under the fused-approval lifecycle (2026-04-27), there is only ONE
+// asynchronous job kind: approve_staging. The worker runs the entire
+// pipeline (backfill → strategycoder → validate → backtest → manifest
+// transition staging→candidate) in-process. The remaining operator gate
+// (candidate→live) uses the synchronous /api/strategies/:id/transition
+// endpoint, where the sharpe ≥ 0.5 / max_dd ≤ 20% guard now lives.
 
 const fs   = require('fs');
 const path = require('path');
 
 const { query: dbQuery } = require('../../database/postgres');
 const stagingApprover    = require('./staging_approver');
-const candidateApprover  = require('./candidate_approver');
 
 const OPENCLAW_DIR = path.resolve(__dirname, '..', '..', '..');
 const MANIFEST_PATH = path.join(OPENCLAW_DIR, 'src', 'strategies', 'manifest.json');
@@ -26,7 +28,7 @@ let _broadcast = () => {};
 function setBroadcast(fn) { _broadcast = fn; }
 
 // In-memory map: job_id → currently-running child process. Populated by
-// _codeFromQueue via onChild callback so cancelJob can SIGTERM it.
+// _codeFromQueue / runBackfill via onChild callbacks so cancelJob can SIGTERM.
 const _jobChildren = new Map();
 function registerChild(jobId, child) {
   _jobChildren.set(jobId, child);
@@ -90,27 +92,49 @@ async function failJob(job, result) {
 
 function emit(event) { _broadcast(event); }
 
+const { withManifestLock } = require('../../lib/manifest_lock');
+
 function readManifest() { return JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8')); }
 function writeManifest(m) {
+  // Plain atomic write — kept for back-compat with callers that already
+  // hold the lock externally. New code should prefer withManifestLock().
   const tmp = MANIFEST_PATH + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(m, null, 2));
   fs.renameSync(tmp, MANIFEST_PATH);
 }
 
-// System-driven state transition that bypasses the candidate/staging dashboard
-// guard. Writes manifest + lifecycle_events + strategy_registry.status.
+// Lifecycle state → strategy_registry.status. Locked values per the fused-
+// approval rewrite plan:
+//   live, monitoring         → 'approved' (execution gate)
+//   candidate, staging       → 'pending_approval' (awaiting operator)
+//   deprecated, archived     → 'deprecated'
+// `paper` is intentionally absent — legacy state, no new transitions land here.
+const REGISTRY_STATUS_FOR = {
+  live:       'approved',
+  monitoring: 'approved',
+  candidate:  'pending_approval',
+  staging:    'pending_approval',
+  deprecated: 'deprecated',
+  archived:   'deprecated',
+};
+
+// System-driven state transition that bypasses the dashboard guard. Writes
+// manifest + lifecycle_events + strategy_registry.status under the cross-
+// process manifest lock so concurrent writers cannot lose updates.
 async function systemTransition(sid, toState, actor, reason) {
-  const manifest = readManifest();
-  const rec = manifest.strategies[sid];
-  if (!rec) throw new Error(`strategy ${sid} not in manifest`);
-  const fromState = rec.state;
-  const now = new Date().toISOString();
-  rec.history = rec.history || [];
-  rec.history.push({ from_state: fromState, to_state: toState, timestamp: now, actor, reason, metadata: {} });
-  rec.state = toState;
-  rec.state_since = now;
-  manifest.updated_at = now;
-  writeManifest(manifest);
+  let fromState, now;
+  await withManifestLock(MANIFEST_PATH, (manifest) => {
+    const rec = manifest.strategies[sid];
+    if (!rec) throw new Error(`strategy ${sid} not in manifest`);
+    fromState = rec.state;
+    now = new Date().toISOString();
+    rec.history = rec.history || [];
+    rec.history.push({ from_state: fromState, to_state: toState, timestamp: now, actor, reason, metadata: {} });
+    rec.state = toState;
+    rec.state_since = now;
+    manifest.updated_at = now;
+    return manifest;
+  }, { actor: 'approvals.systemTransition' });
 
   await dbQuery(
     `INSERT INTO lifecycle_events (strategy_id, from_state, to_state, actor, reason, metadata)
@@ -118,11 +142,6 @@ async function systemTransition(sid, toState, actor, reason) {
     [sid, fromState, toState, actor, reason, '{}'],
   ).catch(e => console.warn('[approvals] lifecycle_events insert failed:', e.message));
 
-  const REGISTRY_STATUS_FOR = {
-    live: 'approved', monitoring: 'approved',
-    paper: 'pending_approval', candidate: 'pending_approval', staging: 'pending_approval',
-    deprecated: 'deprecated', archived: 'deprecated',
-  };
   const target = REGISTRY_STATUS_FOR[toState];
   if (target) {
     const sql = target === 'approved'
@@ -160,17 +179,7 @@ async function approveStaging(sid, rec, actor) {
   return { status: 202, body: { job_id: job.job_id, phase: job.phase } };
 }
 
-async function approveCandidate(sid, rec, actor) {
-  const job = await insertJob({
-    strategyId: sid, kind: 'approve_candidate', phase: 'strategycoder',
-    payload: {}, actor,
-  });
-  emit({ type: 'approval_job', job_id: job.job_id, strategy_id: sid, status: 'running', phase: job.phase, progress: 0 });
-  candidateApprover.start(job, ctx()).catch(e => failJob(job, { error: e.message }));
-  return { status: 202, body: { job_id: job.job_id, phase: job.phase } };
-}
-
-// Shared context/helpers passed to the workers.
+// Shared context/helpers passed to the worker.
 function ctx() {
   return {
     dbQuery,
@@ -192,11 +201,10 @@ async function cancelJob(sid) {
   const { rows } = await dbQuery(`SELECT * FROM strategy_approval_jobs WHERE job_id=$1`, [active.job_id]);
   const job = rows[0];
 
-  // SIGTERM any running python subprocess for this job (candidate_approver
-  // backtest/validate runs). Killing the child makes _codeFromQueue's
-  // await resolve with a non-zero exit code; its catch branch then calls
-  // failJob → the job is already marked cancelled here, so failJob's UPDATE
-  // is a no-op thanks to the finished_at filter we add in finishJob.
+  // SIGTERM any running python subprocess for this job (backfill, validate,
+  // backtest). Killing the child makes the awaited spawn resolve with a
+  // non-zero exit; the worker's catch branch then calls failJob, which is a
+  // no-op once we've already marked cancelled here.
   const killed = killChild(job.job_id);
 
   const insertedIds = (job.payload && job.payload.inserted_queue_ids) || [];
@@ -215,9 +223,7 @@ async function cancelJob(sid) {
 }
 
 // ── Recent failures (dashboard hydration, survives restart) ─────────────
-// Returns the latest failed/cancelled job per strategy that the user hasn't
-// dismissed yet. The dashboard populates its red banner from this so the
-// alert persists across page reloads and server restarts.
+
 async function listRecentFailures(limitDays = 30) {
   const { rows } = await dbQuery(
     `SELECT DISTINCT ON (strategy_id)
@@ -232,10 +238,6 @@ async function listRecentFailures(limitDays = 30) {
 }
 
 async function dismissFailure(jobId) {
-  // Dismissing one failure means "clear this strategy's red banner until a
-  // new failure lands". Cascade the dismissal to every earlier undismissed
-  // failed/cancelled job for the same strategy, so the next rehydrate
-  // doesn't surface an older row that was already superseded visually.
   const { rows } = await dbQuery(
     `WITH target AS (SELECT strategy_id FROM strategy_approval_jobs WHERE job_id = $1)
      UPDATE strategy_approval_jobs
@@ -260,20 +262,27 @@ async function listActive() {
   return rows;
 }
 
-// ── Poll tick ────────────────────────────────────────────────────────────
-// Runs every 60s. Staging approvals read as much as they need from
-// data_coverage; candidate approvals do their own orchestration and don't
-// need the tick.
+// ── Crash-recovery poll tick ─────────────────────────────────────────────
+// Runs every 60s. Looks for approve_staging jobs that are still 'running'
+// (likely because the previous process crashed) and asks the worker to
+// resume from the last-persisted phase. Active jobs in this process drive
+// themselves via the in-memory state machine and are no-ops here.
 
 let _pollTimer = null;
+const _resumed = new Set();
 async function _pollOnce() {
   try {
     const { rows: jobs } = await dbQuery(
       `SELECT * FROM strategy_approval_jobs
         WHERE status='running' AND kind='approve_staging'`);
     for (const job of jobs) {
-      try { await stagingApprover.tick(job, ctx()); }
-      catch (e) { console.warn('[approvals] tick failed for', job.job_id, e.message); }
+      if (_resumed.has(job.job_id)) continue;   // already kicked
+      // Skip just-started jobs; the in-process start() is still driving them.
+      const ageMs = Date.now() - new Date(job.started_at).getTime();
+      if (ageMs < 90_000) continue;
+      _resumed.add(job.job_id);
+      stagingApprover.resumeIfRunning(job, ctx())
+        .catch(e => console.warn('[approvals] resume failed for', job.job_id, e.message));
     }
   } catch (e) {
     console.warn('[approvals] poll failed:', e.message);
@@ -292,20 +301,24 @@ function stopPolling() {
   _pollTimer = null;
 }
 
-// Startup sweep: any job still 'running' from a previous process that
-// doesn't match a live underlying queue row gets failed as interrupted.
+// Startup sweep: clear legacy jobs that the fused-approval rewrite
+// (2026-04-27) no longer drives. Two flavours:
+//   1. kind='approve_candidate'                        — worker deleted
+//   2. kind='approve_staging' AND phase='awaiting_snapshot' — old polled phase
+// Fresh jobs use the new state machine and resume via _pollOnce above.
 async function reconcileOnStartup() {
   const { rows } = await dbQuery(
-    `SELECT job_id, strategy_id, kind, payload, started_at
-       FROM strategy_approval_jobs WHERE status='running'`);
+    `SELECT job_id, strategy_id, kind, phase, started_at
+       FROM strategy_approval_jobs
+      WHERE status='running'
+        AND ( kind='approve_candidate'
+              OR (kind='approve_staging' AND phase='awaiting_snapshot') )`);
   for (const job of rows) {
-    // Staging jobs are self-healing (polling will resume). Only candidate jobs
-    // need rescuing — their _codeFromQueue promise died with the old process.
-    if (job.kind !== 'approve_candidate') continue;
-    const ageMin = (Date.now() - new Date(job.started_at).getTime()) / 60_000;
-    if (ageMin < 2) continue; // just-started; leave it
-    await finishJob(job.job_id, 'failed', { error: 'restart_interrupted' });
-    emit({ type: 'approval_job', job_id: job.job_id, strategy_id: job.strategy_id, status: 'failed', result: { error: 'restart_interrupted' } });
+    const err = job.kind === 'approve_candidate'
+      ? 'approve_candidate flow removed (fused approval rewrite)'
+      : 'awaiting_snapshot phase removed (fused approval rewrite — re-approve to use the new fused worker)';
+    await finishJob(job.job_id, 'failed', { error: err });
+    emit({ type: 'approval_job', job_id: job.job_id, strategy_id: job.strategy_id, status: 'failed', result: { error: err } });
   }
 }
 
@@ -319,12 +332,17 @@ module.exports = {
   init,
   setBroadcast,
   approveStaging,
-  approveCandidate,
   cancelJob,
   hasActiveJob,
   listActive,
   listRecentFailures,
   dismissFailure,
   // exposed for tests + inter-module use
-  _internals: { insertJob, updateJob, finishJob, failJob, systemTransition, startPolling, stopPolling, _pollOnce, readManifest, writeManifest, registerChild, killChild },
+  _internals: {
+    insertJob, updateJob, finishJob, failJob, systemTransition,
+    startPolling, stopPolling, _pollOnce,
+    readManifest, writeManifest,
+    registerChild, killChild, ctx,
+    REGISTRY_STATUS_FOR,
+  },
 };

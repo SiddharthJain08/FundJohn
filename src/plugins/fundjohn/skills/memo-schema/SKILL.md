@@ -1,3 +1,17 @@
+---
+name: fundjohn:memo-schema
+description: Validate a strategy memo against the SO-6 required-fields contract.
+triggers:
+  - memo-schema validation
+  - pre-merge memo gate
+inputs:
+  - memo_md
+  - signal_object
+outputs:
+  - validation_result
+  - rejection_reasons
+keywords: [memo, schema, so-6, validation, gate]
+---
 # Skill: fundjohn:memo-schema
 **Trigger**: `/memo-schema`
 

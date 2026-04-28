@@ -6,7 +6,7 @@ Runs after every data collection cycle (spawned by collector.js).
 Agents communicate DIRECTLY — Discord posts are write-only for human visibility only.
 
 Pipeline (direct agent-to-agent, no Discord round-trip):
-  1. queue_drain.py        → backfill approved columns, prune deprecated ones
+  (queue_drain removed 2026-04-28 — fused-staging-approval handles backfills inline)
   2. run_collector_once.js → one collector cycle (prices/options/fundamentals/news)
   3. engine.py             → run strategies → execution_signals (zero-LLM)
   4. trade_handoff_builder → HV/beta/momentum/EV per signal → structured JSON
@@ -43,12 +43,16 @@ COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
 # Ordered pipeline steps: key → script name (without .py)
 STEPS = [
-    ('queue_drain', 'queue_drain'),           # src/pipeline/queue_drain.py — backfill + deprecate
+    # queue_drain removed 2026-04-28: the fused-staging-approval worker now
+    # backfills required columns inline at approval time, so the daily cycle
+    # has nothing to drain. No replacement needed — staging approvals run
+    # their own backfill against the master parquets directly.
     ('collect',     'run_collector_once'),    # Node wrapper: one cycle of collector.js (parquet-primary)
     ('signals',     'engine'),                # zero-LLM strategy executor → execution_signals
     ('handoff',     'trade_handoff_builder'), # deterministic features → handoff:{date}:structured
-    ('trade',       'trade_agent_llm'),       # Claude LLM: TradeJohn sizing + signal generation
+    ('trade',       'trade_agent_llm'),       # Deterministic sizer (LLM bypassed by default)
     ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
+    ('reconcile',   'alpaca_reconcile'),      # Reconcile alpaca_submissions vs broker FILL activities
     ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
     ('health',      'daily_health_digest'),   # End-of-cycle: build + post daily health digest to #pipeline-feed
 ]
@@ -68,7 +72,6 @@ NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
 # #data-alerts; trade-pipeline step failures surface in #trade-reports.
 # Phase boundaries (▶️/✅/❌) continue to go to #pipeline-feed for every step.
 STEP_FAILURE_CHANNEL = {
-    'queue_drain': 'data-alerts',
     'collect':     'data-alerts',
     'signals':     'data-alerts',
     'handoff':     'trade-reports',
@@ -162,10 +165,16 @@ def is_completed_today(r, run_date):
         return False
 
 
-def mark_completed(r, run_date):
-    """Set the once-per-day sentinel so repeat triggers exit early."""
+def mark_completed(r, run_date, status='1'):
+    """Set the once-per-day sentinel so repeat triggers exit early.
+
+    The default status='1' preserves legacy behavior. Tier 3 callers may
+    pass status='aborted_auth' so the next-day cron + dashboard can
+    distinguish a clean cycle complete from a credentials-revoked abort
+    (the value lands in the same Redis key under COMPLETED_KEY).
+    """
     try:
-        r.set(f'{COMPLETED_KEY}:{run_date}', '1', ex=COMPLETED_TTL)
+        r.set(f'{COMPLETED_KEY}:{run_date}', str(status), ex=COMPLETED_TTL)
     except Exception as e:
         log(f'mark_completed failed: {e}')
 
@@ -238,6 +247,34 @@ def notify(msg, channel='pipeline-feed'):
                 log(f'Notify webhook failed: {r.status_code}')
         except Exception as e:
             log(f'Notify webhook error: {e}')
+
+
+def _emit_maintenance_report(run_date, *, failed_step=None,
+                              completed_steps=None, error_msg=None):
+    """Fire the end-of-cycle daily-health digest. Called on BOTH success
+    and failure paths so the operator gets a maintenance report at every
+    cycle exit. When a failure is being reported the failed-step +
+    completed-steps + error are passed as CLI args so the digest can
+    flag the abort explicitly.
+
+    Best-effort — never raises; never blocks the orchestrator's own exit.
+    """
+    import subprocess as _sp
+    script = ROOT / 'src' / 'pipeline' / 'daily_health_digest.js'
+    if not script.exists():
+        log('maintenance report skipped: daily_health_digest.js missing')
+        return
+    argv = ['node', str(script)]
+    if failed_step:
+        argv += ['--failed-step', str(failed_step)]
+    if completed_steps:
+        argv += ['--completed', ','.join(sorted(set(completed_steps)))]
+    if error_msg:
+        argv += ['--error', str(error_msg)[:300]]
+    try:
+        _sp.run(argv, cwd=str(ROOT), timeout=60, check=False)
+    except Exception as exc:
+        log(f'maintenance report invocation failed (non-fatal): {exc}')
 
 
 # ── Pipeline-feed channel posts (Phase 4) ────────────────────────────────────
@@ -408,35 +445,62 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
     py_pipe = ROOT / 'src' / 'pipeline'  / f'{script}.py'
     js_pipe = ROOT / 'src' / 'pipeline'  / f'{script}.js'
 
+    # PIPELINE_DRY_RUN=1 (Tier 3) → append --dry-run to every step. Each
+    # script's --dry-run handler is responsible for skipping its own
+    # external writes (DB, parquet, Discord) while still running enough
+    # logic to validate the cycle's plumbing. PIPELINE_ALPACA_DRY_RUN=1
+    # is preserved as the legacy alpaca-only switch.
+    full_dry = os.environ.get('PIPELINE_DRY_RUN') == '1'
+    alpaca_dry = os.environ.get('PIPELINE_ALPACA_DRY_RUN') == '1'
+
+    def _maybe_dry(argv):
+        if full_dry:
+            argv.append('--dry-run')
+        elif alpaca_dry and script == 'alpaca_executor':
+            argv.append('--dry-run')
+        return argv
+
     if py_pipe.exists():
-        return (['python3', str(py_pipe), '--date', run_date], 600)
+        return (_maybe_dry(['python3', str(py_pipe), '--date', run_date]), 600)
     if js_pipe.exists():
         # Collector: the longest step. A warm-cache cycle is minutes; a cold
-        # cycle with wide fundamentals/options gaps can exceed 45 min when
-        # upstream (yfinance, FMP, polygon) is throttling. 60 min cap leaves
-        # headroom before handing off to the LLM trade step.
-        # The health-digest step at the end is ~5s, so the total budget for
-        # a cold fire is ~62 min from 10am ET (≈ 11:02 ET completion).
-        return (['node', str(js_pipe)], 3600)
+        # cycle with wide fundamentals/options gaps has hit the 60 min cap
+        # multiple times this week (3 of 4 runs timed out at 3600s on the
+        # options-chain phase with 401 tickers). Bumped to 90 min as a
+        # buffer — the LLM trade step is now deterministic (~1s) so the
+        # total cycle budget is dominated by collect; we have plenty of
+        # headroom before market close. Re-evaluate if the 90 min cap is
+        # also chronically hit.
+        return (_maybe_dry(['node', str(js_pipe)]), 5400)
     # default: src/execution/<script>.py
     timeout = 1620 if script == 'trade_agent_llm' else 300
-    argv = ['python3', str(py_exec), '--date', run_date]
-    # Orchestrator-wide dry-run flag: when PIPELINE_ALPACA_DRY_RUN=1,
-    # alpaca_executor.py is invoked with --dry-run so orders are logged
-    # but not submitted. Every other step runs normally (useful for
-    # smoke-testing the end-to-end chain without moving the paper book).
-    if script == 'alpaca_executor' and os.environ.get('PIPELINE_ALPACA_DRY_RUN') == '1':
-        argv.append('--dry-run')
-    return (argv, timeout)
+    return (_maybe_dry(['python3', str(py_exec), '--date', run_date]), timeout)
+
+
+class CycleAbort(Exception):
+    """Raised when a step exits with code 2 (auth/config) under strict
+    exit-code discipline. Distinct from a regular step failure: the
+    orchestrator does NOT retry, write a checkpoint, or attempt the next
+    step — the cycle exits with the daily completion sentinel set to
+    `aborted_auth` so tomorrow's cron starts clean rather than retrying
+    into the same auth wall."""
+    def __init__(self, step, rc, detail=''):
+        super().__init__(f'{step} exited {rc} (auth/config) — cycle aborted')
+        self.step = step
+        self.rc = rc
+        self.detail = detail
 
 
 def run_step(script, run_date, env):
     """
-    Spawn a pipeline script. Returns True on success.
-    Stdout+stderr are streamed line-by-line to the orchestrator log so long
-    steps (the collector in particular) give live progress instead of going
-    dark for 25 minutes. On timeout we SIGTERM the child and the partial
-    output already in the log gives us the diagnostic trail.
+    Spawn a pipeline script. Returns (ok, rc) so callers can route on
+    exit-code discipline (Tier 3): 0=success, 1=transient/data error
+    (existing retry/skip path), 2=auth/config error (raise CycleAbort).
+
+    Backwards-compat: the old caller path used `ok = run_step(...)` —
+    truthy == success — and that still works because the bool() of a
+    tuple is True iff non-empty. Callers that care about rc must
+    unpack explicitly; everywhere else `if ok:` continues to work.
     """
     import threading
     cmd, timeout = _resolve_script(script, run_date)
@@ -463,16 +527,16 @@ def run_step(script, run_date, env):
             except subprocess.TimeoutExpired:
                 proc.kill(); proc.wait()
             t.join(timeout=5)
-            return False
+            return (False, -1)   # treat timeout as a regular failure (rc=-1)
         t.join(timeout=5)
         if rc != 0:
             log(f'{script} exited {rc}')
-            return False
+            return (False, rc)
         log(f'{script} done.')
-        return True
+        return (True, 0)
     except Exception as e:
         log(f'{script} error: {e}')
-        return False
+        return (False, -1)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -489,7 +553,36 @@ if __name__ == '__main__':
     postgres_uri = os.environ.get('POSTGRES_URI', '')
     if not postgres_uri:
         log('POSTGRES_URI not set — aborting')
-        sys.exit(1)
+        sys.exit(2)   # auth/config error per Tier 3 exit-code discipline
+
+    # ── Pre-flight: doctor --required-only ──────────────────────────────────
+    # Exit 2 from the doctor means a critical dependency is broken (Alpaca
+    # auth failed, Postgres unreachable, env vars missing). Burning the
+    # collect step on a broken setup just produces a partial cycle that has
+    # to be cleaned up later — abort up front instead.
+    try:
+        doctor_proc = subprocess.run(
+            [sys.executable, str(ROOT / 'src' / 'maintenance' / 'doctor.py'),
+             '--required-only', '--json'],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if doctor_proc.returncode == 2:
+            try:
+                payload = json.loads(doctor_proc.stdout)
+                fails = [c for c in payload.get('checks', []) if c.get('severity') == 'fail']
+                detail = '; '.join(f'{c["name"]}: {c["detail"]}' for c in fails) or 'see doctor output'
+            except json.JSONDecodeError:
+                detail = doctor_proc.stdout[:200]
+            log(f'doctor pre-flight FAILED — aborting cycle: {detail}')
+            sys.exit(2)
+        elif doctor_proc.returncode == 1:
+            log('doctor pre-flight reports warnings (continuing)')
+        else:
+            log('doctor pre-flight OK')
+    except subprocess.TimeoutExpired:
+        log('doctor pre-flight timed out (>30s) — continuing without it')
+    except Exception as exc:
+        log(f'doctor pre-flight error: {type(exc).__name__}: {exc} — continuing')
 
     # engine.py, alpaca_executor.py etc import `strategies.xxx` / `database.xxx`
     # as top-level packages — those live under src/, so PYTHONPATH needs both
@@ -542,7 +635,6 @@ if __name__ == '__main__':
     # Agent status mapping: step_key → (agent_id, busy_task, idle_task).
     # Covers the 10am cycle step list.
     STEP_AGENTS = {
-        'queue_drain': ('databot',      f'Draining data queue: {run_date}',         None),
         'collect':     ('databot',      f'Collecting data: {run_date}',             None),
         'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
         'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
@@ -552,6 +644,7 @@ if __name__ == '__main__':
     }
 
     try:
+      try:
         for step_key, script in STEPS:
 
             # Skip already-completed steps
@@ -596,7 +689,35 @@ if __name__ == '__main__':
             pipeline_feed(f'▶️ `{step_key}` starting ({run_date})')
 
             # Run the step
-            ok = run_step(script, run_date, env)
+            ok, rc = run_step(script, run_date, env)
+
+            # Tier 3 exit-code discipline (gated): rc == 2 means auth/config
+            # error — abort the cycle without retrying. Behind the
+            # OPENCLAW_STRICT_EXIT_CODES feature flag for one cycle so we
+            # can validate the routing before flipping default-on.
+            if rc == 2 and os.environ.get('OPENCLAW_STRICT_EXIT_CODES') == '1':
+                log(f'Step {script} exited 2 (auth/config) — raising CycleAbort')
+                fail_channel = STEP_FAILURE_CHANNEL.get(step_key, 'pipeline-feed')
+                notify(
+                    f'🚨 **Pipeline AUTH/CONFIG ABORT: {script}** | {run_date}\n'
+                    f'Exit code 2 — credentials revoked or required env var '
+                    f'missing. Cycle will NOT retry.\n'
+                    f'Completed: {sorted(completed) or "none"}\n'
+                    f'Run `python3 src/maintenance/doctor.py` to diagnose.',
+                    channel=fail_channel,
+                )
+                _emit_maintenance_report(run_date, failed_step=step_key,
+                                          completed_steps=sorted(completed),
+                                          error_msg=f'{script} exited 2 (auth/config)')
+                release_lock(r, run_date)
+                # Mark cycle aborted so tomorrow's cron sees a clean slate.
+                # We re-use mark_completed with a sentinel value rather than
+                # leaving the lock open.
+                try: mark_completed(r, run_date, status='aborted_auth')
+                except TypeError:
+                    # Older mark_completed signature without status kwarg
+                    mark_completed(r, run_date)
+                raise CycleAbort(step_key, rc, detail=f'{script} returned exit 2')
 
             # #pipeline-feed: phase boundary END
             dt = int(time.time() - _t0)
@@ -612,14 +733,20 @@ if __name__ == '__main__':
                 # Update checkpoint after each success so resume works if we crash mid-pipeline
                 write_checkpoint(r, completed, run_date, 'in_progress')
             else:
-                log(f'Step {script} failed — aborting pipeline')
+                log(f'Step {script} failed (rc={rc}) — aborting pipeline')
                 fail_channel = STEP_FAILURE_CHANNEL.get(step_key, 'pipeline-feed')
                 notify(
-                    f'❌ **Pipeline step failed: {script}** | {run_date}\n'
+                    f'❌ **Pipeline step failed: {script}** (rc={rc}) | {run_date}\n'
                     f'Completed: {sorted(completed) or "none"}\n'
                     f'Log: `logs/pipeline_orchestrator_{run_date}.log`',
                     channel=fail_channel,
                 )
+                # Always-emit maintenance report — fires even on abort so the
+                # operator gets the same daily digest shape every day, with
+                # the failure flagged explicitly rather than silently absent.
+                _emit_maintenance_report(run_date, failed_step=step_key,
+                                          completed_steps=sorted(completed),
+                                          error_msg=f'{script} exited {rc}')
                 release_lock(r, run_date)
                 sys.exit(1)
 
@@ -637,6 +764,12 @@ if __name__ == '__main__':
         except Exception as e:
             log(f'Dashboard broadcast failed ({e}) — pipeline still OK.')
 
+      except CycleAbort as exc:
+        # Exit-code-2 abort path: the strict-exit-codes branch above already
+        # marked completion=aborted_auth and posted the alert. Surface the
+        # exit non-zero (1) so external cron sees the cycle didn't finish.
+        log(f'Cycle aborted (auth/config): {exc}')
+        sys.exit(1)
     finally:
         release_lock(r, run_date)
 

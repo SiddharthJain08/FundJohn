@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_institutional_lead_lag",
+  "required": ["prices", "financials"],
+  "optional": []
+}

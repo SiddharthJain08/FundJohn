@@ -306,11 +306,30 @@ router.post('/campaigns/:id/cancel', async (req, res) => {
 
 router.get('/runs', async (_req, res) => {
   try {
-    // Unified recent-runs feed across the three new weekly Opus jobs plus
-    // the existing Saturday corpus rater (curator_runs). Each source is
-    // projected to the same shape so the UI doesn't need to know which
-    // table a row came from.
-    const [memos, recs, expansions, corpus] = await Promise.all([
+    // Unified recent-runs feed. Each source is projected to the same shape
+    // so the UI doesn't need to know which table a row came from.
+    //
+    // Saturday brain rolls up multiple sub-tables (paper_source_expansions
+    // for Phase 1, curator_runs for Phase 3), but the brain's own row in
+    // saturday_runs is the canonical "one weekly research run" record —
+    // it carries tier counts, sync-coding totals, and the budget envelope.
+    // Surface it FIRST so operators see the brain run as one entity, with
+    // the sub-rows still listed below for drill-down.
+    const [brain, memos, recs, expansions, corpus] = await Promise.all([
+      query(`SELECT run_id::text AS id, 'saturday-brain' AS mode,
+                    started_at::date AS run_date, status, cost_usd,
+                    jsonb_build_object(
+                      'papers_ingested',  papers_ingested,
+                      'papers_rated',     papers_rated,
+                      'paperhunters_run', paperhunters_run,
+                      'tier_a',           tier_a_count,
+                      'tier_b',           tier_b_count,
+                      'tier_c',           tier_c_count,
+                      'coded',            coded_synchronous
+                    ) AS input_stats,
+                    started_at AS created_at
+               FROM saturday_runs
+              ORDER BY started_at DESC LIMIT 6`),
       query(`SELECT id::text AS id, 'comprehensive-review' AS mode,
                     memo_date AS run_date, 'ok' AS status, cost_usd,
                     jsonb_build_object('strategy_id', strategy_id) AS input_stats,
@@ -339,9 +358,9 @@ router.get('/runs', async (_req, res) => {
                FROM curator_runs
               ORDER BY started_at DESC LIMIT 6`),
     ]);
-    const all = [...memos.rows, ...recs.rows, ...expansions.rows, ...corpus.rows]
+    const all = [...brain.rows, ...memos.rows, ...recs.rows, ...expansions.rows, ...corpus.rows]
       .sort((a, b) => (new Date(b.created_at) - new Date(a.created_at)))
-      .slice(0, 20);
+      .slice(0, 24);
     res.json({ runs: all });
   } catch (e) {
     res.status(500).json({ error: e.message });

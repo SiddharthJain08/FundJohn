@@ -14,7 +14,7 @@
       "tools": [
         "fmp",
         "polygon",
-        "alpha_vantage",
+        "alpaca",
         "sec_edgar",
         "tavily",
         "yahoo"
@@ -78,17 +78,17 @@
     "paperhunter": {
       "promptFile": "src/agent/prompts/subagents/paperhunter.md",
       "components": [],
-      "tools": ["fetch"],
-      "iterationLimit": 10,
-      "timeoutSeconds": 180,
+      "tools": ["WebFetch", "WebSearch", "Read"],
+      "iterationLimit": 16,
+      "timeoutSeconds": 300,
       "parallel": true,
       "vetoAuthority": false,
-      "effortLevel": "low",
-      "maxBudgetUsd": 0.15,
+      "effortLevel": "medium",
+      "maxBudgetUsd": 0.40,
       "already_in_ledger_check": true,
       "modes": ["RESEARCH"],
       "skills": ["fundjohn:paper-to-strategy", "fundjohn:obsidian-link"],
-      "description": "Ephemeral parallel alpha-paper extractor. One paper per invocation. 4 self-rejection gates. $0.15 budget cap."
+      "description": "Sonnet 4.6 alpha-paper extractor. Receives abstract + URL; uses WebFetch with arxiv/openalex/semantic-scholar fallbacks; can extract from abstract alone if all fetches fail. 4 self-rejection gates. $0.40 budget cap."
     },
     "strategycoder": {
       "promptFile": "src/agent/prompts/subagents/strategycoder.md",
@@ -99,7 +99,7 @@
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 0.5,
+      "maxBudgetUsd": 1.0,
       "modes": ["DEPLOY"],
       "skills": [
         "fundjohn:strategy-coder",

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_pca_etf_stat_arb_reversion",
+  "required": ["prices"],
+  "optional": []
+}

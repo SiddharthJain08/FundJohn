@@ -160,6 +160,11 @@ async function executeTask(taskId, alertPost) {
     alertPost(lines.join('\n'));
   }
 
+  // The fused staging-approval worker (src/agent/approvals/staging_approver.js)
+  // performs its own inline backfill via src/lib/backfill_runner.js — there
+  // is no separate post-fetch hook to fire here. Daily-cycle data tasks just
+  // run the collectors and write their rows.
+
   return { collected, unavailable, rowsAdded: totalRowsAdded };
 }
 

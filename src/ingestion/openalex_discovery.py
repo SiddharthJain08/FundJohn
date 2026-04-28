@@ -183,14 +183,25 @@ def _as_paper(w: dict, source_tag: str, venue_name: str | None = None) -> dict |
     }
 
 
-def discover(days: int = 90, limit_per_venue: int = 200,
+def discover(days: int | None = 90, limit_per_venue: int = 200,
              min_citations: int = 0,
-             author_works_per: int = 10) -> list[dict]:
+             author_works_per: int = 10,
+             since_iso: str | None = None) -> list[dict]:
     """Return deduplicated papers from every configured OpenAlex venue PLUS the
     author watchlist. Authors override venue — a Fama paper on a non-watchlist
     journal still gets picked up.
+
+    Date-window resolution priority:
+      1. since_iso ('YYYY-MM-DD' from saturday_runs incremental mode)
+      2. days (legacy 'last N days' window)
+      3. neither → all-time, anchored at 1900-01-01
     """
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    if since_iso:
+        since = since_iso
+    elif days is not None:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+    else:
+        since = '1900-01-01'  # all-time
     concepts = '|'.join(FINANCE_CONCEPTS)
     cite_filter = f'cited_by_count:>{max(0, min_citations - 1)}'
 
@@ -329,7 +340,17 @@ def expand_citation_graph(seed_openalex_ids: list[str],
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--days', type=int, default=90)
+    # Date-window flags. Saturday brain passes either --since-iso (incremental
+    # steady state) or --all-time (first run after the brain consolidation);
+    # the legacy timer's --days 90 keeps working for back-compat.
+    parser.add_argument('--days', type=int, default=None,
+                        help='Days back to search (legacy; ignored if --since-iso or --all-time)')
+    parser.add_argument('--since-iso', type=str, default=None,
+                        help='Fetch papers published on or after this ISO date '
+                             '(YYYY-MM-DD). Used by Saturday brain incremental mode.')
+    parser.add_argument('--all-time', action='store_true',
+                        help='Fetch the full historical archive (overrides --days). '
+                             'Used by Saturday brain first-run backfill.')
     parser.add_argument('--limit-per-venue', type=int, default=200,
                         help='Cap per venue. Total ceiling = len(VENUES) × limit.')
     parser.add_argument('--min-citations', type=int, default=0,
@@ -343,6 +364,18 @@ if __name__ == '__main__':
                         help='Cap on refs per seed paper.')
     args = parser.parse_args()
 
+    # Resolve effective window. since-iso wins, then all-time, then days,
+    # then default to legacy 90-day behavior so back-compat is preserved.
+    if args.since_iso:
+        eff_since, eff_days = args.since_iso, None
+        window_label = f'since {args.since_iso}'
+    elif args.all_time:
+        eff_since, eff_days = None, None
+        window_label = 'ALL-TIME (full archive)'
+    else:
+        eff_since, eff_days = None, (args.days if args.days is not None else 90)
+        window_label = f'last {eff_days}d'
+
     if args.citation_seeds:
         seeds_arg = args.citation_seeds
         if os.path.exists(seeds_arg):
@@ -354,9 +387,10 @@ if __name__ == '__main__':
         papers = expand_citation_graph(seeds, max_per_seed=args.citation_max_per_seed)
         print(f'[openalex] Got {len(papers)} unique cited works.')
     else:
-        print(f'[openalex] Fetching last {args.days}d from {len(VENUES)} venues + '
+        print(f'[openalex] Fetching {window_label} from {len(VENUES)} venues + '
               f'{len(AUTHOR_WATCHLIST)} watchlist authors...')
-        papers = discover(args.days, args.limit_per_venue, args.min_citations, args.author_works_per)
+        papers = discover(eff_days, args.limit_per_venue, args.min_citations,
+                          args.author_works_per, since_iso=eff_since)
         print(f'[openalex] Got {len(papers)} unique papers.')
 
     n = insert_into_corpus(papers)

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_bankruptcy_risk_anomaly",
+  "required": ["prices", "financials"],
+  "optional": []
+}

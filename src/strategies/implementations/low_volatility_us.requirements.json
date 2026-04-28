@@ -1,0 +1,5 @@
+{
+  "strategy_id": "low_volatility_us",
+  "required": ["prices"],
+  "optional": []
+}

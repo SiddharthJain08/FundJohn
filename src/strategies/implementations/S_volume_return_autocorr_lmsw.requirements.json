@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_volume_return_autocorr_lmsw",
+  "required": ["prices"],
+  "optional": []
+}

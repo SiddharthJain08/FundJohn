@@ -8,12 +8,12 @@ const SP500 = [
   'AAPL','MSFT','NVDA','AVGO','CRM','ORCL','AMD','QCOM','ADBE','TXN',
   'INTU','CSCO','IBM','AMAT','MU','NOW','KLAC','LRCX','ADI','MCHP',
   'PANW','CDNS','SNPS','FTNT','KEYS','TEL','GLW','HPQ','WDC','STX',
-  'NTAP','GDDY','CDW','ZBRA','SWKS','FFIV','JNPR','FSLR','EPAM','PTC',
-  'TER','AKAM','ANSS','LDOS','DXC','HPE','ENPH','GEN','MPWR','VRSN',
+  'NTAP','GDDY','CDW','ZBRA','SWKS','FFIV','FSLR','EPAM','PTC',
+  'TER','AKAM','LDOS','DXC','HPE','ENPH','GEN','MPWR','VRSN',
   // Communication Services
   'META','GOOGL','GOOG','NFLX','DIS','CMCSA','T','VZ','CHTR','TMUS',
-  'PARA','WBD','FOXA','FOX','LYV','TTWO','EA','NWSA','NWS','OMC',
-  'IPG','ZG','MTCH','ATVI',
+  'WBD','FOXA','FOX','LYV','TTWO','EA','NWSA','NWS','OMC',
+  'IPG','ZG','MTCH',
   // Consumer Discretionary
   'AMZN','TSLA','HD','MCD','NKE','LOW','SBUX','TJX','BKNG','ABNB',
   'CMG','MAR','HLT','YUM','DRI','ROST','ORLY','AZO','BBY','EXPE',
@@ -22,14 +22,14 @@ const SP500 = [
   'PVH','HAS','ETSY','EBAY','CPRI','TPR','RL','DECK','UAA',
   // Consumer Staples
   'WMT','PG','COST','KO','PEP','PM','MO','MDLZ','CL','GIS',
-  'KHC','KMB','SYY','HSY','MKC','TSN','HRL','CAG','CPB','K',
+  'KHC','KMB','SYY','HSY','MKC','TSN','HRL','CAG','CPB',
   'CLX','CHD','EL','COTY','SPB',
   // Health Care
   'LLY','UNH','JNJ','ABBV','MRK','TMO','ABT','DHR','BMY','AMGN',
   'GILD','VRTX','ISRG','SYK','MDT','BSX','ZTS','REGN','BIIB','EW',
   'IDXX','MTD','BAX','ALGN','HOLX','DGX','LH','IQV','CRL','HSIC',
-  'TECH','PKI','GEHC','HZNP','NTRA','RMD','COO','STE','PODD','DXCM',
-  'INCY','EXAS','SGEN','MRNA','PFE','CVS','CI','HUM','ELV','CNC',
+  'TECH','PKI','GEHC','NTRA','RMD','COO','STE','PODD','DXCM',
+  'INCY','EXAS','MRNA','PFE','CVS','CI','HUM','ELV','CNC',
   'MOH','DVA',
   // Financials
   'BRK-B','JPM','V','MA','BAC','WFC','GS','MS','C','AXP',
@@ -46,13 +46,13 @@ const SP500 = [
   'AOS','CHRW','JBHT','EXPD','FW','AXTA','HII','TDG','SPR','AIR',
   'J','LDOS','SAIC','GVA','PWR','MTZ','URI','AGCO',
   // Energy
-  'XOM','CVX','COP','SLB','EOG','PSX','VLO','MPC','PXD','OXY',
-  'HAL','DVN','BKR','HES','CTRA','APA','MRO','FANG','EQT','OKE',
+  'XOM','CVX','COP','SLB','EOG','PSX','VLO','MPC','OXY',
+  'HAL','DVN','BKR','CTRA','APA','FANG','EQT','OKE',
   'WMB','KMI','LNG','ET','EPD',
   // Materials
   'LIN','APD','SHW','FCX','NEM','NUE','VMC','MLM','PKG','IP',
   'CF','MOS','ALB','CE','EMN','RPM','SEE','AVY','SON','CCK',
-  'BLL','AMCR','WRK','IFF','PPG','ECL','DD','CTVA',
+  'BLL','AMCR','IFF','PPG','ECL','DD','CTVA',
   // Real Estate
   'AMT','PLD','EQIX','CCI','SPG','PSA','O','WELL','EXR','AVB',
   'EQR','ARE','DLR','VTR','BXP','SLG','KIM','MAA','CPT','NNN',

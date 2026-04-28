@@ -67,6 +67,15 @@ console.log = (...args) => {
 // the 10am ET cycle structurally cannot. Skips options/fundamentals/news/
 // insider/orchestrator-spawn — pure data hygiene.
 const eodOnly = process.argv.includes('--eod-only');
+// `--dry-run` propagates to collector.js — API calls still happen so we
+// can validate auth/quota, but parquet writes (store.upsert*) and DB
+// updates (store.updateCoverage) are SKIPPED. Set OPENCLAW_DRY_RUN=1
+// for the same effect via env so subprocess invocations inherit cleanly.
+const dryRun = process.argv.includes('--dry-run');
+if (dryRun) {
+  process.env.OPENCLAW_DRY_RUN = '1';
+  console.log('[collector-once] DRY-RUN: parquet writes + coverage updates will be skipped');
+}
 
 function formatEodAlert(summary, ok) {
   // summary is what runEodRefresh returns; ok=false means an exception was thrown.
@@ -114,6 +123,22 @@ async function main() {
   console.log(`[collector-once] starting single-shot ${mode} cycle`);
   let ok = true;
   let eodSummary = null;
+
+  // Wire #data-alerts progress posts. collector.js's tickProgress()
+  // already builds the per-10-ticker progress block:
+  //   **{phase}** — {progressBar} `{n}/{total}` ({pct}%)
+  //   Ticker: `{ticker}` | Speed: **{rate} tickers/min** | ETA: **{eta}**
+  //   Rows written this phase: **{rows}** | Errors: {errors}
+  // Without setDiscordHooks the alerts go to console only — fix is to
+  // pipe an alertPost callback that POSTs to the DataBot webhook.
+  let _webhookUrl = null;
+  try { _webhookUrl = await getWebhook(); } catch (_) { /* best effort */ }
+  if (_webhookUrl) {
+    collector.setDiscordHooks({
+      alertPost: (msg) => post(_webhookUrl, msg).catch(() => {}),
+    });
+  }
+
   try {
     if (eodOnly) {
       eodSummary = await collector.runEodRefresh();

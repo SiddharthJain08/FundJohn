@@ -154,6 +154,8 @@ Output a single JSON array — one entry per input paper, in the same order. **N
       "convergence":  { "pass_prob": 0.60, "reason": "trade count borderline on monthly rebalance" }
     },
     "confidence": 0.43,
+    "implementability_score": 0.78,
+    "data_requirements_hint": { "required": ["prices", "options_eod"], "optional": ["earnings"] },
     "predicted_bucket": "low",
     "reasoning": "One to three sentences. Cite the specific gate(s) you think this clears or fails. Be concrete.",
     "predicted_failure_modes": []
@@ -169,11 +171,22 @@ Output a single JSON array — one entry per input paper, in the same order. **N
 
 **`confidence`** — **MUST** equal the product of the three pass_probs (paperhunter × researchjohn × convergence), rounded to 2 decimals. This is the end-to-end probability of reaching PAPER state.
 
+**`implementability_score`** (0.000–1.000) — Saturday brain axis. Independent of confidence. Score how concretely the paper specifies a strategy a coder could turn into Python TODAY:
+- 0.85+ — explicit signal formula with named columns + a clear ranking/sizing rule + a backtest window. StrategyCoder could produce a runnable file from the abstract alone.
+- 0.65–0.85 — clear hypothesis with deterministic logic but missing one detail (e.g. parameter ranges, exact universe). Recoverable from the full PDF.
+- 0.40–0.65 — direction is clear but the recipe is heuristic, requires reading multiple papers, or hand-tunable thresholds.
+- < 0.40 — pure theory, survey, or qualitative discussion without a concrete recipe.
+
+**`data_requirements_hint`** — your best inference of the data columns the strategy needs, BEFORE paperhunter has done its full extraction. Keys: `required` (array of canonical column names — `prices`, `options_eod`, `financials`, `earnings`, `insider`, `macro`, `realized_vol`, `log_returns`, etc.) and `optional`. Used by Saturday brain Phase 5 to tier candidates. Best-effort — paperhunter overrides this later. Empty arrays OK if undetermined.
+
 **`predicted_bucket`** — derived from confidence using the same mapping as before:
 - confidence ≥ 0.75 → `high`
 - 0.50 ≤ confidence < 0.75 → `med`
 - 0.25 ≤ confidence < 0.50 → `low`
 - confidence < 0.25 → `reject`
+
+**Saturday brain bucket override** (auto-applied downstream — emit your bucket per the mapping above and let the system override):
+- If `confidence ≥ 0.60` AND `implementability_score ≥ 0.65`, the system reassigns `predicted_bucket = "implementable_candidate"`. This bucket promotes to `research_candidates` with paperhunter fan-out priority. Don't emit `implementable_candidate` yourself — emit the standard high/med/low/reject and let the floor logic decide.
 
 **`predicted_failure_modes`** — free-form tags, leave empty for `high`. Examples:
 - `"overfit_risk_in_sample"`

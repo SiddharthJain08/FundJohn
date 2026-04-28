@@ -284,8 +284,12 @@ def _fmt_outcomes_digest(run_date: str,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=str(date.today()))
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Build the Discord post bodies and print to stdout '
+                         'instead of POSTing to webhooks.')
     args = ap.parse_args()
     run_date = args.date
+    dry_run  = args.dry_run
 
     sized = read_handoff(run_date, 'sized') or {}
 
@@ -315,13 +319,16 @@ def main() -> int:
 
     summary, file_text = _fmt_outcomes_digest(run_date, overperf, underperf, gate)
 
-    if not wh_signals and not wh_reports:
-        print('[send_report] no webhooks available — printing to stdout only')
+    if dry_run or (not wh_signals and not wh_reports):
+        msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \
+              else '[send_report] no webhooks available — printing to stdout only'
+        print(msg)
+        print('--- #trade-signals body ---')
         print(_fmt_greenlist(run_date, sized))
-        print()
+        print('--- #trade-reports body ---')
         print(summary)
         if file_text:
-            print('\n--- ATTACHMENT (outcomes_d-1.txt) ---\n')
+            print('--- ATTACHMENT (outcomes_d-1.txt) ---')
             print(file_text)
         return 0
 

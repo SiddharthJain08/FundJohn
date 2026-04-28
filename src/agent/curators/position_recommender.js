@@ -14,9 +14,18 @@
  * joins with current sizing (from strategy_registry.parameters or
  * execution_signals history), produces concrete old → new numbers, and
  * writes rows that trade_handoff_builder.py picks up Monday morning.
+ *
+ * Stop-replacement application: when a memo carries a non-zero
+ * stop_delta_pct, the recommender shells to
+ * `python3 src/execution/alpaca_replace_stop.py` per currently-filled
+ * Alpaca position for that strategy. The Python helper itself is gated
+ * by OPENCLAW_ALPACA_LIVE_REPLACE — if unset (default), it dry-logs the
+ * intended replacement and exits clean. Set the env var only after a
+ * dedicated review of the proposed deltas.
  */
 
 const fs = require('fs');
+const { spawn } = require('child_process');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 
@@ -150,6 +159,25 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
   const digest = _formatDigest(persisted);
   notify(`writing digest — ${digest.length} chars`);
 
+  // Apply stop replacements per recommendation (gated default-OFF in the
+  // Python helper itself via OPENCLAW_ALPACA_LIVE_REPLACE). Any rec with
+  // a non-trivial stop_delta_pct (|x| >= 0.005, ie 0.5%) gets each
+  // currently-filled Alpaca position for that strategy snapped to a new
+  // stop = current_stop * (1 + stop_delta_pct).
+  //
+  // Even in dry-run mode we compute the proposed (coid, old_stop, new_stop)
+  // tuples — the operator wants to SEE what would change before flipping
+  // OPENCLAW_ALPACA_LIVE_REPLACE=1. reportOnly=true skips the Python
+  // subprocess spawn (no broker calls) and emits only the planned deltas.
+  const stopReplacements = await _applyStopReplacements(persisted, notify,
+                                                        { reportOnly: dryRun });
+  if (stopReplacements.length) {
+    const live   = stopReplacements.filter(r => r.status === 'replaced').length;
+    const dryLog = stopReplacements.filter(r => r.status === 'skipped_dry_run').length;
+    const planned = stopReplacements.filter(r => r.status === 'planned_dry_run').length;
+    notify(`stop replacements: ${live} live, ${dryLog} dry-logged, ${planned} planned, ${stopReplacements.length - live - dryLog - planned} other`);
+  }
+
   let posted = false;
   if (!dryRun) {
     posted = await _postToDiscord('position-recommendations', digest);
@@ -166,8 +194,92 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
     inserted: persisted.filter(r => r.rec_id).length,
     posted,
     digest_preview: digest.slice(0, 600),
-    recommendations: persisted,
+    recommendations:    persisted,
+    stop_replacements:  stopReplacements,
   };
 }
 
-module.exports = { run };
+// ── Stop-replacement application ────────────────────────────────────────────
+
+async function _filledPositionsForStrategy(strategyId, days = 14) {
+  // Find currently-filled positions: alpaca_submissions with broker_status
+  // ='filled' or 'partial' and submitted in the recent window. We don't
+  // attempt to detect closed positions here — Alpaca rejects replace on
+  // already-closed orders cleanly, and the result lands in the digest as
+  // 'replace_failed'. Future enhancement: cross-ref against signal_pnl
+  // status='open'.
+  const { rows } = await _query(
+    `SELECT client_order_id, ticker, stop_price
+       FROM alpaca_submissions
+      WHERE strategy_id = $1
+        AND submitted_at >= NOW() - INTERVAL '${parseInt(days, 10)} days'
+        AND broker_status IN ('filled', 'partial')
+        AND alpaca_order_id IS NOT NULL
+        AND stop_price IS NOT NULL`,
+    [strategyId],
+  );
+  return rows;
+}
+
+function _spawnReplaceStop(coid, newStop) {
+  return new Promise((resolve) => {
+    const args = [
+      `${OPENCLAW_DIR}/src/execution/alpaca_replace_stop.py`,
+      '--coid',     coid,
+      '--new-stop', String(newStop),
+    ];
+    let stdout = '';
+    let stderr = '';
+    const proc = spawn('python3', args, {
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    proc.stdout.on('data', (c) => { stdout += c; });
+    proc.stderr.on('data', (c) => { stderr += c; });
+    proc.on('close', (code) => {
+      let parsed = null;
+      try { parsed = JSON.parse(stdout); } catch (_) {}
+      resolve({
+        ok: code === 0,
+        result: parsed || { status: 'spawn_error', error: stderr || `exit ${code}`, coid },
+      });
+    });
+    proc.on('error', (err) => {
+      resolve({ ok: false, result: { status: 'spawn_error', error: err.message, coid } });
+    });
+  });
+}
+
+async function _applyStopReplacements(persisted, notify, { reportOnly = false } = {}) {
+  const all = [];
+  for (const rec of persisted) {
+    const delta = Number(rec.stop_delta_pct);
+    if (!delta || Math.abs(delta) < 0.005) continue;     // < 0.5% → noise
+    const positions = await _filledPositionsForStrategy(rec.strategy_id);
+    if (!positions.length) continue;
+    notify(`  ${rec.strategy_id}: stop_delta_pct=${delta.toFixed(3)} → ${positions.length} open positions`);
+    for (const p of positions) {
+      const currentStop = Number(p.stop_price);
+      if (!Number.isFinite(currentStop) || currentStop <= 0) continue;
+      const newStop = Math.max(0.01, currentStop * (1 + delta));
+      const base = {
+        strategy_id: rec.strategy_id,
+        ticker:      p.ticker,
+        coid:        p.client_order_id,
+        old_stop:    currentStop,
+        new_stop:    newStop,
+      };
+      if (reportOnly) {
+        // Skip the Python subprocess entirely. Useful for `--dry-run`
+        // operator review before flipping OPENCLAW_ALPACA_LIVE_REPLACE=1.
+        all.push({ ...base, status: 'planned_dry_run' });
+        continue;
+      }
+      const r = await _spawnReplaceStop(p.client_order_id, newStop);
+      all.push({ ...base, ...r.result });
+    }
+  }
+  return all;
+}
+
+module.exports = { run, _applyStopReplacements };

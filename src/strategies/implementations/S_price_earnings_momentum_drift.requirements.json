@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_price_earnings_momentum_drift",
+  "required": ["prices", "earnings"],
+  "optional": ["financials"]
+}

@@ -7,6 +7,7 @@ const { getAllSubagentStatuses, getBucketStatus } = require('../../database/redi
 const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
+const { runAlpaca } = require('./alpaca_cli');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -257,15 +258,26 @@ app.get('/api/portfolio/positions', async (req, res) => {
 
 app.get('/api/portfolio/history', async (req, res) => {
   try {
+    // Tie-breaker on signal_id is critical: closed_at is a date column, so
+    // dozens of rows share a timestamp. Without a deterministic secondary
+    // sort, LIMIT cuts non-deterministically and per-strategy entries can
+    // disappear between page loads. Bumped 100→500 so older closes stay
+    // visible — with ~230 closed rows total today this comfortably covers
+    // the live history.
+    const sid = (req.query.strategy_id || '').toString().trim();
+    const params = [];
+    let where = `WHERE sp.status = 'closed'`;
+    if (sid) { params.push(sid); where += ` AND es.strategy_id = $${params.length}`; }
     const result = await dbQuery(`
       SELECT es.strategy_id, es.ticker, es.direction, es.entry_price,
              sp.closed_price, sp.realized_pnl_pct, sp.days_held,
-             sp.close_reason, sp.closed_at
+             sp.close_reason, sp.closed_at, sp.signal_id::text
       FROM signal_pnl sp
       JOIN execution_signals es ON es.id = sp.signal_id
-      WHERE sp.status = 'closed'
-      ORDER BY sp.closed_at DESC LIMIT 100
-    `);
+      ${where}
+      ORDER BY sp.closed_at DESC, sp.signal_id DESC
+      LIMIT 500
+    `, params);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -337,14 +349,41 @@ app.get('/api/strategies', async (req, res) => {
     const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
     const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
 
-    // Load regime_conditions + backtest/live metrics from strategy_registry DB
+    // Load regime_conditions + backtest/live metrics from strategy_registry DB.
+    // Saturday-brain additions (058): data_requirements_planned (the missing
+    // data spec the dashboard renders for STAGING strategies) and
+    // staging_approved_at (operator's data-fetch approval timestamp).
     const srRows = (await dbQuery(`
       SELECT id, regime_conditions,
-             backtest_sharpe, backtest_return_pct, backtest_max_dd_pct,
-             live_days, live_sharpe, live_return_pct
+             backtest_sharpe, backtest_return_pct, backtest_max_dd_pct, backtest_trade_count,
+             backtest_regime_breakdown,
+             live_days, live_sharpe, live_return_pct,
+             data_requirements_planned, staging_approved_at
       FROM strategy_registry
     `)).rows;
     const srById = Object.fromEntries(srRows.map(r => [r.id, r]));
+
+    // Resolve which `data_requirements_planned` columns are NOT known to any
+    // provider/collector. These rows would be rejected by the staging worker
+    // with `error: 'unsupported_source'`. We surface them on staging rows as
+    // a ⚠ data badge so the operator sees the gap before clicking Approve.
+    const { _internals: _stgInternals } = require('../../agent/approvals/staging_approver');
+    const _schemaReg = _stgInternals.readSchemaRegistry();
+    const unsupportedByStrategyId = {};
+    for (const sr of srRows) {
+      let planned = sr.data_requirements_planned;
+      if (!planned) continue;
+      if (typeof planned === 'string') {
+        try { planned = JSON.parse(planned); } catch { continue; }
+      }
+      if (!Array.isArray(planned) || planned.length === 0) continue;
+      const columns = [...new Set(planned.map(p => p?.column || p?.data_type).filter(Boolean))];
+      const bad = [];
+      for (const c of columns) {
+        if (!await _stgInternals.sourceIsKnownToProvider(c, _schemaReg, dbQuery)) bad.push(c);
+      }
+      if (bad.length) unsupportedByStrategyId[sr.id] = bad;
+    }
 
     // Current regime state from latest.json (authoritative)
     let currentRegime = 'TRANSITIONING';
@@ -423,15 +462,27 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:     sr.backtest_sharpe     ?? null,
-        backtest_return_pct: sr.backtest_return_pct ?? null,
-        backtest_max_dd_pct: sr.backtest_max_dd_pct ?? null,
+        backtest_sharpe:           sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
         d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
+        // Saturday-brain Tier-B fields. Only populated for state='staging'
+        // strategies pushed by Saturday brain. The dashboard's strategies
+        // page renders these so the operator sees exactly what the Approve
+        // click would fetch + when they last approved.
+        data_requirements_planned: sr.data_requirements_planned || null,
+        staging_approved_at:       sr.staging_approved_at || null,
+        // Columns from data_requirements_planned that no collector/provider
+        // knows about — would fail the staging worker's source-validation
+        // step. Dashboard renders a ⚠ data badge on staging rows.
+        unsupported_sources:       unsupportedByStrategyId[sid] || null,
       });
     }
     // Orphans: strategy_ids with signals but no manifest entry
@@ -461,9 +512,11 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:     sr.backtest_sharpe     ?? null,
-        backtest_return_pct: sr.backtest_return_pct ?? null,
-        backtest_max_dd_pct: sr.backtest_max_dd_pct ?? null,
+        backtest_sharpe:           sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
@@ -480,25 +533,28 @@ app.get('/api/strategies', async (req, res) => {
 
 // Strategy lifecycle transition (manual dashboard actions).
 // Body: { to_state, force?, reason?, actor? }
+//
+// Lifecycle (post fused-staging-approval rewrite, 2026-04-27):
+//   staging → candidate    fused worker only (no manual)
+//   candidate → live       operator click; sharpe/dd gated
+//   PAPER is frozen-legacy. Existing PAPER manifest rows were migrated to
+//   CANDIDATE by scripts/migrate_paper_to_candidate.py. The transitions
+//   below keep `paper:archived` as an escape hatch for any orphaned rows.
 const STRATEGY_VALID_TRANSITIONS = new Map([
-  ['candidate:paper',       'begin backtesting'],
-  ['candidate:archived',    'abandon before implementation'],
-  ['paper:live',            'promote to live after passing backtest guards'],
-  ['paper:candidate',       'regress — failed backtest'],
-  ['paper:archived',        'archive without going live'],
-  // `staging` is treated as awaiting-approval alongside paper in the dashboard.
-  ['staging:live',          'promote staging to live after passing backtest guards'],
-  ['staging:candidate',     'regress staging — failed backtest'],
-  ['staging:paper',         'move staging to paper backtesting'],
+  ['staging:candidate',     'fused approval: backfill + strategycoder + backtest complete'],
   ['staging:archived',      'archive staging without going live'],
+  ['candidate:live',        'promote to live after passing backtest guards'],
+  ['candidate:staging',     'regress candidate — needs additional data sources'],
+  ['candidate:archived',    'abandon without going live'],
+  ['paper:archived',        'archive legacy paper row'],
   ['live:monitoring',       'escalate to monitoring'],
   ['live:deprecated',       'demote from live'],
   ['monitoring:live',       'restore confidence, back to live'],
   ['monitoring:deprecated', 'demote from monitoring'],
   ['deprecated:archived',   'archive after review period'],
 ]);
-const PAPER_TO_LIVE_MIN_SHARPE = 0.5;
-const PAPER_TO_LIVE_MAX_DD_PCT = 20;   // DB stores as percent (e.g. 15.0 = 15%)
+const CANDIDATE_TO_LIVE_MIN_SHARPE = 0.5;
+const CANDIDATE_TO_LIVE_MAX_DD_PCT = 20;   // DB stores as percent (e.g. 15.0 = 15%)
 
 app.post('/api/strategies/:id/transition', async (req, res) => {
   const fs   = require('fs');
@@ -527,18 +583,18 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   const fromState = rec.state;
   const tKey = `${fromState}:${toState}`;
 
-  // Dashboard callers can't directly promote candidate/staging — they must use
-  // POST /api/strategies/:id/approve, which runs the data-import or
-  // strategycoder pipeline and then calls this endpoint as a system actor
-  // (actor starts with 'system:') to finalize the transition. We honour that
-  // bypass here so the approval workers can flip state.
+  // Dashboard callers can't directly promote staging — they must use
+  // POST /api/strategies/:id/approve, which runs the fused approval pipeline
+  // (backfill + strategycoder + backtest) and then calls this endpoint as a
+  // system actor (actor starts with 'system:') to finalize. The candidate→live
+  // gate stays manual (sharpe/dd guarded below).
   const isSystemActor = typeof actor === 'string' && actor.startsWith('system:');
   if (!isSystemActor) {
-    if (fromState === 'staging' || fromState === 'candidate') {
-      const forwardTargets = new Set(['paper', 'live', 'monitoring']);
+    if (fromState === 'staging') {
+      const forwardTargets = new Set(['candidate', 'live', 'monitoring']);
       if (forwardTargets.has(toState)) {
         return res.status(409).json({
-          error: `Use POST /api/strategies/${sid}/approve — ${fromState} strategies can't be promoted directly.`,
+          error: `Use POST /api/strategies/${sid}/approve — staging strategies can't be promoted directly.`,
         });
       }
     }
@@ -554,9 +610,11 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     });
   }
 
-  // Guard: paper/staging → live requires Sharpe/DD thresholds unless force=true.
+  // Guard: candidate → live requires Sharpe/DD thresholds unless force=true.
+  // Under the fused-approval lifecycle, this is the single remaining
+  // operator-gated promotion step.
   const failedGates = [];
-  if ((tKey === 'paper:live' || tKey === 'staging:live') && !force) {
+  if (tKey === 'candidate:live' && !force) {
     let sr = {};
     try {
       const srRes = await dbQuery(
@@ -567,18 +625,24 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     } catch (_) {}
     const sharpe = parseFloat(sr.backtest_sharpe);
     const maxDd  = parseFloat(sr.backtest_max_dd_pct);
-    if (!isNaN(sharpe) && sharpe < PAPER_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
-    if (!isNaN(maxDd)  && maxDd  > PAPER_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
+    if (!isNaN(sharpe) && sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
+    if (!isNaN(maxDd)  && maxDd  > CANDIDATE_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
     if (failedGates.length > 0) {
       return res.status(422).json({
-        error: `paper→live blocked: ${failedGates.join(', ')} gate(s) failed`,
+        error: `candidate→live blocked: ${failedGates.join(', ')} gate(s) failed`,
         failed_gates: failedGates,
         allow_override: true,
       });
     }
   }
 
-  // Atomic manifest write: .tmp → rename.
+  // Cross-process locked read-modify-write — see src/lib/manifest_lock.js.
+  // Re-read the manifest under the lock so concurrent writers (lifecycle.py
+  // auto_backtest, saturday_brain.js _stage, the approvals worker) can't be
+  // clobbered by stale in-memory state from this request handler. The
+  // validation above happened against the snapshot we read at line 540;
+  // re-validate on the fresh disk view in case the strategy was archived
+  // by another writer in the millisecond between read and write.
   const now = new Date().toISOString();
   const event = {
     from_state: fromState,
@@ -588,16 +652,18 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     reason:     reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
     metadata:   force ? { override: true, failed_gates: failedGates } : {},
   };
-  rec.state       = toState;
-  rec.state_since = now;
-  rec.history     = rec.history || [];
-  rec.history.push(event);
-  manifest.updated_at = now;
-
-  const tmpPath = manifestPath + '.tmp';
   try {
-    fs.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2));
-    fs.renameSync(tmpPath, manifestPath);
+    const { withManifestLock } = require('../../lib/manifest_lock');
+    await withManifestLock(manifestPath, (m) => {
+      const r = (m.strategies || {})[sid];
+      if (!r) throw new Error(`strategy ${sid} not in manifest`);
+      r.state       = toState;
+      r.state_since = now;
+      r.history     = r.history || [];
+      r.history.push(event);
+      m.updated_at = now;
+      return m;
+    }, { actor: `dashboard:${actor || 'unknown'}` });
   } catch (e) {
     return res.status(500).json({ error: 'Manifest write failed: ' + e.message });
   }
@@ -615,15 +681,13 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
 
   // ── Sync strategy_registry.status ───────────────────────────────────────
   // The daily execution pipeline reads strategy_registry.status='approved'
-  // as the gate for which strategies actually fire. Without this sync the
-  // manifest state and real-world execution drift apart:
-  //   * Approving a paper strategy via the dashboard wouldn't turn it on
-  //     unless someone also runs the /approve Discord command.
-  //   * Unstacking a live strategy wouldn't stop it from firing.
-  // Map lifecycle state → registry status the pipeline honors:
+  // as the gate for which strategies actually fire. Map lifecycle state →
+  // registry status:
   //   live, monitoring         → 'approved' (runs daily)
-  //   paper, candidate, staging→ 'pending_approval'
+  //   candidate, staging       → 'pending_approval'
   //   deprecated, archived     → 'deprecated'
+  // (`paper` is legacy/frozen — no rows should be transitioning into it
+  // post-rewrite. Map it defensively to 'pending_approval' for any orphan.)
   const REGISTRY_STATUS_FOR = {
     live:       'approved',
     monitoring: 'approved',
@@ -664,13 +728,18 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
 
 // ── Approval dispatcher ──────────────────────────────────────────────────────
 // POST /api/strategies/:id/approve — state-aware entry point for the
-// Approve button. Staging/candidate rows kick off async workers; paper rows
-// run the synchronous paper→live gate via the existing /transition endpoint.
+// Approve button.
+//
+// Under the fused-approval lifecycle (2026-04-27):
+//   staging   → kicks off the async fused worker (backfill + strategycoder
+//               + validate + backtest → manifest staging→candidate)
+//   candidate → use POST /transition with to_state=live (sharpe/dd guarded)
+//   paper     → legacy; redirect to /transition with to_state=archived (the
+//               only remaining outbound transition)
 app.post('/api/strategies/:id/approve', async (req, res) => {
   const path = require('path');
   const fs   = require('fs');
   const sid   = req.params.id;
-  const force = !!(req.body && req.body.force);
   const actor = (req.body && req.body.actor) || 'manual:dashboard';
 
   try {
@@ -683,18 +752,41 @@ app.post('/api/strategies/:id/approve', async (req, res) => {
     if (existing) return res.status(409).json({ error: 'job already running', job_id: existing.job_id });
 
     if (rec.state === 'staging') {
+      // Defensive: ensure a strategy_registry row exists before the worker
+      // creates strategy_approval_jobs (FK constraint). Older manifest
+      // entries (S_HV10_triple_gate_fear, hand-curated SXX series) sometimes
+      // exist in manifest without a registry row. Upsert via the canonical
+      // helper using whatever metadata the manifest carries.
+      const { upsertStrategyRegistry } = require('../../lib/strategy_registry_upsert');
+      const md = rec.metadata || {};
+      const canonical = md.canonical_file || `${sid.toLowerCase()}.py`;
+      try {
+        await upsertStrategyRegistry({
+          id: sid,
+          name: md.class || sid,
+          implementationPath: `src/strategies/implementations/${canonical}`,
+          status: 'pending_approval',
+          parameters: { description: md.description || '' },
+          dbQuery,
+        });
+      } catch (e) {
+        return res.status(500).json({ error: `registry upsert failed: ${e.message}` });
+      }
       const { status, body } = await approvals.approveStaging(sid, rec, actor);
       return res.status(status).json(body);
     }
     if (rec.state === 'candidate') {
-      const { status, body } = await approvals.approveCandidate(sid, rec, actor);
-      return res.status(status).json(body);
+      // Operator's promote-to-live click. Sharpe/dd gate runs in /transition.
+      return res.status(409).json({
+        error: 'candidate strategies use POST /api/strategies/:id/transition with to_state=live',
+        redirect: 'transition',
+      });
     }
     if (rec.state === 'paper') {
-      // Paper rows keep using the synchronous /transition endpoint directly
-      // from the frontend (it runs the Sharpe / max-DD gate). Tell the caller.
+      // Legacy/frozen state. Existing rows should have been migrated to
+      // candidate; if any orphan slipped through, archive it via /transition.
       return res.status(409).json({
-        error: 'paper strategies use POST /api/strategies/:id/transition with to_state=live',
+        error: 'paper is a legacy state — use POST /api/strategies/:id/transition with to_state=archived',
         redirect: 'transition',
       });
     }
@@ -736,69 +828,38 @@ app.post('/api/strategies/:id/approve/cancel', async (req, res) => {
 });
 
 app.get('/api/portfolio/account', async (req, res) => {
-  const key    = process.env.ALPACA_API_KEY    || '';
-  const secret = process.env.ALPACA_SECRET_KEY || '';
-  const base   = process.env.ALPACA_BASE_URL   || 'https://paper-api.alpaca.markets';
   try {
-    const https = require('https');
-    const fetch = (url) => new Promise((resolve, reject) => {
-      const u = new URL(url);
-      const opts = {
-        hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
-        headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'Accept': 'application/json' },
-      };
-      const req2 = https.request(opts, r => {
-        let body = '';
-        r.on('data', c => body += c);
-        r.on('end', () => resolve({ status: r.statusCode, body }));
-      });
-      req2.on('error', reject);
-      req2.end();
-    });
-
-    const acct = await fetch(`${base}/v2/account`);
-    if (acct.status !== 200) return res.status(acct.status).json({ error: `Alpaca: ${acct.body}` });
-    const a = JSON.parse(acct.body);
-
+    const r = await runAlpaca(['account', 'get']);
+    if (!r.ok) {
+      const status = r.error?.status || 500;
+      return res.status(status).json({ error: r.error?.error || r.stderr || 'alpaca cli error' });
+    }
+    const a = r.payload || {};
     res.json({
-      equity:          parseFloat(a.equity)          || 0,
-      cash:            parseFloat(a.cash)            || 0,
-      buying_power:    parseFloat(a.buying_power)    || 0,
-      last_equity:     parseFloat(a.last_equity)     || 0,
+      equity:             parseFloat(a.equity)             || 0,
+      cash:               parseFloat(a.cash)               || 0,
+      buying_power:       parseFloat(a.buying_power)       || 0,
+      last_equity:        parseFloat(a.last_equity)        || 0,
       long_market_value:  parseFloat(a.long_market_value)  || 0,
       short_market_value: parseFloat(a.short_market_value) || 0,
-      day_pnl:         (parseFloat(a.equity) - parseFloat(a.last_equity)) || 0,
-      day_pnl_pct:     parseFloat(a.last_equity) > 0
-                         ? ((parseFloat(a.equity) - parseFloat(a.last_equity)) / parseFloat(a.last_equity) * 100)
-                         : 0,
+      day_pnl:           (parseFloat(a.equity) - parseFloat(a.last_equity)) || 0,
+      day_pnl_pct:        parseFloat(a.last_equity) > 0
+                            ? ((parseFloat(a.equity) - parseFloat(a.last_equity)) / parseFloat(a.last_equity) * 100)
+                            : 0,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/api/portfolio/value-curve', async (req, res) => {
-  const key    = process.env.ALPACA_API_KEY    || '';
-  const secret = process.env.ALPACA_SECRET_KEY || '';
-  const base   = process.env.ALPACA_BASE_URL   || 'https://paper-api.alpaca.markets';
   const period = req.query.period || '1M';
   try {
-    const https = require('https');
-    const url   = `${base}/v2/account/portfolio/history?period=${period}&timeframe=1D&extended_hours=false`;
-    const u     = new URL(url);
-    const data  = await new Promise((resolve, reject) => {
-      const opts = {
-        hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
-        headers: { 'APCA-API-KEY-ID': key, 'APCA-API-SECRET-KEY': secret, 'Accept': 'application/json' },
-      };
-      const req2 = require('https').request(opts, r => {
-        let body = '';
-        r.on('data', c => body += c);
-        r.on('end', () => resolve({ status: r.statusCode, body }));
-      });
-      req2.on('error', reject);
-      req2.end();
-    });
-    if (data.status !== 200) return res.status(data.status).json({ error: `Alpaca: ${data.body}` });
-    const h = JSON.parse(data.body);
+    const r = await runAlpaca(['account', 'portfolio',
+                               '--period', period, '--timeframe', '1D']);
+    if (!r.ok) {
+      const status = r.error?.status || 500;
+      return res.status(status).json({ error: r.error?.error || r.stderr || 'alpaca cli error' });
+    }
+    const h = r.payload || {};
     // Zip timestamps + equity into [{date, equity, profit_loss, profit_loss_pct}]
     const rows = (h.timestamp || []).map((ts, i) => ({
       date:             new Date(ts * 1000).toISOString().slice(0, 10),
@@ -806,7 +867,114 @@ app.get('/api/portfolio/value-curve', async (req, res) => {
       profit_loss:      h.profit_loss?.[i]     ?? null,
       profit_loss_pct:  h.profit_loss_pct?.[i] ?? null,
     })).filter(r => r.equity !== null && r.equity > 0);
+
+    // Alpaca paper's portfolio history stamps each day's snapshot only
+    // after the NEXT session opens, so the curve lags by ~1 trading day.
+    // Synthesize today's running point from `alpaca account get` equity
+    // unless OPENCLAW_TRUST_CLI_PORTFOLIO=1 says the CLI already did it.
+    //
+    // Verified 2026-04-28: the alpha-preview CLI's `account portfolio`
+    // DOES emit today's date in its timestamp array, but the equity value
+    // for today's slot is `last_equity` (prior session close), not the
+    // live mark-to-market. So the synthesis fallback is still load-
+    // bearing — flipping the trust flag would replace live equity with
+    // the stale prior close in the dashboard.
+    const trustCli = process.env.OPENCLAW_TRUST_CLI_PORTFOLIO === '1';
+    if (!trustCli) {
+      try {
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const lastRowDate = rows.length ? rows[rows.length - 1].date : null;
+        if (lastRowDate !== todayIso) {
+          const acctR = await runAlpaca(['account', 'get']);
+          if (acctR.ok && acctR.payload) {
+            const a = acctR.payload;
+            const todayEquity = parseFloat(a.equity);
+            if (todayEquity > 0) {
+              const prevEquity = rows.length ? parseFloat(rows[rows.length - 1].equity)
+                                              : parseFloat(a.last_equity || 0);
+              const pl    = prevEquity > 0 ? todayEquity - prevEquity : null;
+              const plPct = prevEquity > 0 ? (todayEquity - prevEquity) / prevEquity : null;
+              rows.push({
+                date:            todayIso,
+                equity:          todayEquity,
+                profit_loss:     pl,
+                profit_loss_pct: plPct,
+                _live:           true,
+              });
+            }
+          }
+        }
+      } catch (_) { /* fall through with whatever the history endpoint returned */ }
+    }
+
     res.json({ rows, base_value: h.base_value ?? null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Broker-side watchlist (Phase 2.5 of alpaca-cli integration) ──────────────
+// Replaces the manual operator-edited list pattern with a broker watchlist
+// named OPENCLAW_WATCHLIST_NAME (default 'fundjohn-core'). The dashboard
+// surfaces add/remove buttons that call these endpoints; no JSON file edits.
+const WATCHLIST_NAME = process.env.OPENCLAW_WATCHLIST_NAME || 'fundjohn-core';
+
+app.get('/api/watchlist', async (req, res) => {
+  try {
+    const r = await runAlpaca(['watchlist', 'get-by-name', '--name', WATCHLIST_NAME]);
+    if (!r.ok) {
+      // 404 → watchlist doesn't exist yet (caller may want to call /create)
+      const status = r.error?.status || 500;
+      return res.status(status).json({
+        error: r.error?.error || r.stderr || 'alpaca cli error',
+        watchlist: WATCHLIST_NAME,
+      });
+    }
+    res.json(r.payload || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/watchlist/create', async (req, res) => {
+  const symbols = (req.body && req.body.symbols) || [];
+  try {
+    const args = ['watchlist', 'create', '--name', WATCHLIST_NAME];
+    if (Array.isArray(symbols) && symbols.length) {
+      args.push('--symbols', symbols.join(','));
+    }
+    const r = await runAlpaca(args);
+    if (!r.ok) {
+      const status = r.error?.status || 500;
+      return res.status(status).json({ error: r.error?.error || r.stderr });
+    }
+    res.json(r.payload || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/watchlist/add', async (req, res) => {
+  const symbol = (req.body && req.body.symbol) || '';
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+  try {
+    const r = await runAlpaca(['watchlist', 'add-by-name',
+                                '--name',   WATCHLIST_NAME,
+                                '--symbol', symbol]);
+    if (!r.ok) {
+      const status = r.error?.status || 500;
+      return res.status(status).json({ error: r.error?.error || r.stderr });
+    }
+    res.json(r.payload || {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/watchlist/remove', async (req, res) => {
+  const symbol = (req.body && req.body.symbol) || '';
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
+  try {
+    const r = await runAlpaca(['watchlist', 'remove-by-name',
+                                '--name',   WATCHLIST_NAME,
+                                '--symbol', symbol]);
+    if (!r.ok) {
+      const status = r.error?.status || 500;
+      return res.status(status).json({ error: r.error?.error || r.stderr });
+    }
+    res.json(r.payload || {});
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1007,16 +1175,34 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
-#research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:grid;grid-template-columns:1.4fr 1fr;grid-template-rows:minmax(0,1fr) auto;gap:10px;overflow:hidden}
+#research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden}
 .rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .rs-card header h3{font-size:11px;font-weight:700;color:var(--text);letter-spacing:.04em}
 .rs-card .rs-body{flex:1;overflow:auto;padding:8px 12px;min-height:0}
-.rs-chat{grid-row:1 / span 2;display:flex;flex-direction:column}
-.rs-right-col{display:flex;flex-direction:column;gap:10px;min-height:0}
-.rs-queue{flex:0 0 40%;min-height:140px}
-.rs-papers{flex:1;min-height:0}
-.rs-runs{grid-column:1 / -1;max-height:90px}
+/* Chat is now a fullscreen overlay reached via the floating speech-bubble FAB. */
+.rs-chat{position:fixed;inset:0;z-index:90;background:rgba(13,17,23,0.96);backdrop-filter:blur(8px);display:none;flex-direction:column;border-radius:0;border:0}
+.rs-chat.open{display:flex}
+body.rs-chat-locked{overflow:hidden}
+/* Right-col now spans full research-inner width with a 2-col grid. Papers + Staging + Runs go full-width. */
+.rs-right-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;flex:1;min-height:0}
+.rs-campaigns{grid-column:1;max-height:230px}
+.rs-queue{grid-column:2;min-height:230px;max-height:none}
+.rs-papers{grid-column:1 / -1;min-height:340px}
+.rs-right-col > .rs-card:nth-child(4){grid-column:1 / -1;max-height:240px}
+.rs-runs{max-height:110px}
+/* Floating speech-bubble + brain FAB to launch the chat overlay. */
+.chat-fab{position:fixed;right:22px;bottom:22px;z-index:80;width:58px;height:58px;border-radius:50%;border:0;background:#0d0420;box-shadow:0 8px 24px rgba(168,85,247,0.45),0 2px 6px rgba(0,0,0,0.5);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;transition:transform .15s ease,box-shadow .2s ease}
+.chat-fab:hover{transform:translateY(-2px) scale(1.04);box-shadow:0 12px 32px rgba(168,85,247,0.6),0 3px 8px rgba(0,0,0,0.5)}
+.chat-fab:active{transform:translateY(0) scale(0.98)}
+.chat-fab svg{display:block}
+.chat-fab.hidden{display:none}
+.rs-chat .chat-close-bar{position:absolute;top:14px;right:14px;z-index:5}
+.rs-chat .chat-close-bar button{background:rgba(168,85,247,0.12);border:1px solid rgba(168,85,247,0.45);color:#c084fc;padding:5px 12px;border-radius:6px;font-size:11px;cursor:pointer;font-family:inherit;letter-spacing:.04em}
+.rs-chat .chat-close-bar button:hover{background:rgba(168,85,247,0.22);color:#fff}
+.rs-chat > header{background:rgba(13,17,23,0.85);border-bottom:1px solid rgba(168,85,247,0.25);padding:14px 24px}
+.rs-chat .chat-scroll{max-width:920px;width:100%;margin:0 auto}
+.rs-chat .chat-input-row{max-width:920px;width:100%;margin:0 auto;border-top:1px solid rgba(168,85,247,0.2);background:transparent}
 /* Chat */
 .chat-sessions-bar{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
 .session-pill{display:inline-block;padding:2px 8px;border-radius:10px;background:var(--border2);border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit}
@@ -1069,6 +1255,28 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .chat-msg.tool.expanded .chat-tool-body{display:block}
 .chat-msg.tool .chat-tool-badge{color:var(--purple);font-weight:600}
 .chat-msg.tool.result{background:rgba(63,185,80,0.05);border-left:2px solid var(--purple);border-color:var(--border2) var(--border2) var(--border2) var(--purple)}
+/* Single-line streaming progress — replaces per-tool bubble spam during a turn.
+ * The text in .chat-progress-text updates in place as new tool_use events
+ * arrive; on turn completion the whole row removes itself. Three pulsing
+ * purple dots (Claude shimmer style) sit to the left of the text. */
+.chat-progress{align-self:flex-start;display:flex;align-items:center;gap:9px;font-size:11px;color:#c084fc;font-family:'SF Pro Text','Inter',system-ui,sans-serif;padding:6px 12px;background:rgba(168,85,247,0.06);border:1px solid rgba(168,85,247,0.18);border-radius:8px;max-width:80%;letter-spacing:.01em}
+.chat-progress .chat-progress-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chat-progress-dots{display:inline-flex;gap:4px;align-items:center;flex-shrink:0}
+.chat-progress-dots span{width:6px;height:6px;border-radius:50%;background:#a855f7;display:block;animation:chat-pulse 1.3s ease-in-out infinite}
+.chat-progress-dots span:nth-child(2){animation-delay:.18s}
+.chat-progress-dots span:nth-child(3){animation-delay:.36s}
+@keyframes chat-pulse{0%,70%,100%{opacity:.25;transform:scale(.78)}35%{opacity:1;transform:scale(1.12)}}
+/* Used-tools footer shown after the assistant message — clickable to expand
+ * a compact log of every tool call from this turn. Lives inside the assistant
+ * bubble so it visually attaches to the answer it produced. */
+.chat-tool-log{margin-top:8px;padding-top:6px;border-top:1px dashed var(--border2)}
+.chat-tool-log-header{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--purple);cursor:pointer;font-family:'SF Mono',monospace;background:rgba(168,85,247,0.07);padding:2px 8px;border-radius:9px;border:1px solid rgba(168,85,247,0.18)}
+.chat-tool-log-header:hover{background:rgba(168,85,247,0.15)}
+.chat-tool-log-list{display:none;margin-top:6px;flex-direction:column;gap:4px}
+.chat-tool-log.expanded .chat-tool-log-list{display:flex}
+.chat-tool-log-row{font-family:'SF Mono',monospace;font-size:10px;color:var(--muted);padding:3px 6px;background:var(--bg);border:1px solid var(--border2);border-radius:4px;cursor:pointer}
+.chat-tool-log-row:hover{border-color:var(--purple);color:var(--text)}
+.chat-tool-log-row.expanded{white-space:pre-wrap;word-break:break-word}
 .chat-md{line-height:1.55}
 .chat-md p{margin:0 0 6px 0}
 .chat-md p:last-child{margin-bottom:0}
@@ -1223,6 +1431,9 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 .toast-info{border-color:var(--blue)}
 .st-reject-btn:hover {border-color:var(--yellow);color:var(--yellow)}
 .st-gate-fail{color:var(--red)}
+/* Staging unsupported-source warning — shown on staging rows whose
+   data_requirements_planned references a column no provider knows about. */
+.st-data-warn{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .pf-stat-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -1536,8 +1747,8 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
     gap: 6px !important;
     max-width: 100% !important;
   }
-  /* Reset every grid placement that desktop sets — they're meaningless in flex. */
-  .rs-chat, .rs-right-col, .rs-runs {
+  /* Reset desktop grid placements — chat is now a fullscreen overlay, not a column. */
+  .rs-right-col, .rs-runs, .rs-campaigns, .rs-queue, .rs-papers {
     grid-row: auto !important;
     grid-column: auto !important;
   }
@@ -1545,9 +1756,12 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
   .rs-card header { padding: 5px 9px !important; font-size: 9.5px !important; }
   .rs-card header h3 { font-size: 9.5px !important; }
   .rs-card .rs-body { padding: 6px 9px !important; }
-  /* Chat takes 50vh — leaves screen room for campaigns/queue/papers below. */
-  .rs-chat { height: 50vh !important; flex: 0 0 auto !important; }
-  .rs-right-col { flex-direction: column !important; gap: 6px !important; min-height: auto !important; }
+  /* Chat overlay still works as fullscreen on mobile when opened. */
+  .rs-chat.open { height: 100vh !important; }
+  .rs-right-col { display: flex !important; flex-direction: column !important; gap: 6px !important; min-height: auto !important; }
+  /* Smaller FAB on mobile so it doesn't dominate. */
+  .chat-fab { width: 50px !important; height: 50px !important; right: 14px !important; bottom: 14px !important; }
+  .chat-fab svg { transform: scale(0.85); }
   /* Cap each side-card body so the long lists don't dominate the page —
    * each gets its own internal scroll, every section stays browsable. */
   .rs-campaigns .rs-body, .rs-queue .rs-body, .rs-papers .rs-body {
@@ -1704,27 +1918,48 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 </div><!-- #strategies-page -->
 
 <div id="research-page">
-  <div id="research-inner">
-    <section class="rs-card rs-chat">
-      <header>
-        <div class="chat-header-strip">
-          <span class="chat-session-name" id="chat-session-name">MasterMindJohn — Chat</span>
-          <span class="chat-session-cost" id="chat-session-cost"></span>
-        </div>
-        <div class="chat-session-btns">
-          <button class="chat-btn-slim" id="btn-sessions-drawer" title="Session history">history</button>
-          <button class="chat-btn-slim" id="btn-new-session" title="New session">+ new</button>
-        </div>
-      </header>
-      <div class="chat-scroll" id="chat-scroll">
-        <div style="color:var(--muted);padding:14px;font-size:11px">Start a new session or pick one from history. MasterMindJohn has the dashboard snapshot loaded.</div>
+  <!-- Chat lives as a fullscreen overlay; toggled open/closed by the FAB below. -->
+  <section class="rs-card rs-chat" id="rs-chat-overlay">
+    <div class="chat-close-bar">
+      <button id="chat-close" title="Close chat (Esc)">✕ close</button>
+    </div>
+    <header>
+      <div class="chat-header-strip">
+        <span class="chat-session-name" id="chat-session-name">MasterMindJohn — Chat</span>
+        <span class="chat-session-cost" id="chat-session-cost"></span>
       </div>
-      <div class="chat-input-row">
-        <textarea id="chat-input" placeholder="Ask MasterMindJohn… (Enter sends · Shift+Enter newline)"></textarea>
-        <button id="chat-send">Send</button>
+      <div class="chat-session-btns">
+        <button class="chat-btn-slim" id="btn-sessions-drawer" title="Session history">history</button>
+        <button class="chat-btn-slim" id="btn-new-session" title="New session">+ new</button>
       </div>
-    </section>
+    </header>
+    <div class="chat-scroll" id="chat-scroll">
+      <div style="color:var(--muted);padding:14px;font-size:11px">Start a new session or pick one from history. MasterMindJohn has the dashboard snapshot loaded.</div>
+    </div>
+    <div class="chat-input-row">
+      <textarea id="chat-input" placeholder="Ask MasterMindJohn… (Enter sends · Shift+Enter newline)"></textarea>
+      <button id="chat-send">Send</button>
+    </div>
+  </section>
 
+  <!-- Speech-bubble + brain FAB. Clicking opens the chat overlay above. -->
+  <button class="chat-fab" id="chat-fab" aria-label="Open MasterMindJohn chat" title="Open chat">
+    <svg viewBox="0 0 40 40" width="30" height="30" aria-hidden="true">
+      <path d="M6 9 Q6 5 10 5 H30 Q34 5 34 9 V22 Q34 26 30 26 H22 L15 32 V26 H10 Q6 26 6 22 Z"
+            fill="#0d0420" stroke="#a855f7" stroke-width="1.8" stroke-linejoin="round"/>
+      <g transform="translate(20 16)">
+        <path d="M -1.5 -5 Q -6 -5 -6 -1.5 Q -8 -.5 -7 1.5 Q -8 3 -6 4.5 Q -5 6.5 -2.5 5.5 Q -1.5 6.5 0 5.8 V -5.5 Q -1 -5 -1.5 -5Z" fill="#c084fc"/>
+        <path d="M 1.5 -5 Q 6 -5 6 -1.5 Q 8 -.5 7 1.5 Q 8 3 6 4.5 Q 5 6.5 2.5 5.5 Q 1.5 6.5 0 5.8 V -5.5 Q 1 -5 1.5 -5Z" fill="#c084fc"/>
+        <line x1="0" y1="-5.4" x2="0" y2="5.7" stroke="#0d0420" stroke-width="0.8"/>
+        <path d="M -3.5 -2.5 Q -5 -1 -3.5 .5" stroke="#0d0420" stroke-width="0.6" fill="none"/>
+        <path d="M 3.5 -2.5 Q 5 -1 3.5 .5" stroke="#0d0420" stroke-width="0.6" fill="none"/>
+        <path d="M -4 2 Q -3 3 -2 2.5" stroke="#0d0420" stroke-width="0.5" fill="none"/>
+        <path d="M 4 2 Q 3 3 2 2.5" stroke="#0d0420" stroke-width="0.5" fill="none"/>
+      </g>
+    </svg>
+  </button>
+
+  <div id="research-inner">
     <div class="rs-right-col">
       <section class="rs-card rs-campaigns">
         <header><h3>Active Campaigns</h3><span id="camp-count" style="color:var(--muted);font-size:10px"></span></header>
@@ -2752,10 +2987,13 @@ async function _initResearch() {
   document.getElementById('papers-status').addEventListener('change', _refreshPapers);
   document.getElementById('pm-close').onclick = _closePaperModal;
   document.getElementById('paper-modal').onclick = (e) => { if (e.target.id === 'paper-modal') _closePaperModal(); };
+  document.getElementById('chat-fab').onclick = _openChatOverlay;
+  document.getElementById('chat-close').onclick = _closeChatOverlay;
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (document.getElementById('paper-modal').classList.contains('open')) _closePaperModal();
       else if (document.getElementById('sessions-drawer').classList.contains('open')) _closeSessionsDrawer();
+      else if (document.getElementById('rs-chat-overlay').classList.contains('open')) _closeChatOverlay();
     }
   });
   let qTimer;
@@ -2999,6 +3237,99 @@ function _fillToolBubble(el, content, isResult) {
     <div class="chat-tool-body">\${_rsEsc(JSON.stringify(input, null, 2)).slice(0, 10_000)}</div>\`;
 }
 
+function _openChatOverlay() {
+  const ov = document.getElementById('rs-chat-overlay');
+  ov.classList.add('open');
+  document.body.classList.add('rs-chat-locked');
+  document.getElementById('chat-fab').classList.add('hidden');
+  setTimeout(() => { try { document.getElementById('chat-input').focus(); } catch (_) {} }, 50);
+  const scroll = document.getElementById('chat-scroll');
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function _closeChatOverlay() {
+  document.getElementById('rs-chat-overlay').classList.remove('open');
+  document.body.classList.remove('rs-chat-locked');
+  document.getElementById('chat-fab').classList.remove('hidden');
+}
+
+// Single-line description of what a tool_use is currently doing — drives the
+// in-place progress text under the shimmer dots. Mirrors how Claude/ChatGPT
+// surface the active step ("Reading X…", "Running Y…") without papering the
+// thread with one bubble per tool call.
+function _progressLabelFor(toolUse) {
+  const name = (toolUse && toolUse.name) || 'tool';
+  const input = (toolUse && toolUse.input) || {};
+  if (name === 'Task' && input.subagent_type) return \`Spawning \${input.subagent_type}…\`;
+  if (name === 'Bash' && input.command) {
+    const c = input.command.replace(/\\s+/g, ' ').slice(0, 80);
+    return \`Running: \${c}\`;
+  }
+  if (name === 'Read'  && input.file_path) return \`Reading \${input.file_path.split('/').pop()}\`;
+  if (name === 'Edit'  && input.file_path) return \`Editing \${input.file_path.split('/').pop()}\`;
+  if (name === 'Write' && input.file_path) return \`Writing \${input.file_path.split('/').pop()}\`;
+  if ((name === 'Grep' || name === 'Glob') && (input.pattern || input.path)) {
+    return \`\${name}: \${input.pattern || input.path}\`;
+  }
+  if (name === 'WebFetch' && input.url)    return \`Fetching \${input.url.replace(/^https?:\\/\\//,'').slice(0,60)}…\`;
+  if (name === 'WebSearch' && input.query) return \`Searching: \${String(input.query).slice(0,60)}\`;
+  return \`Calling \${name}…\`;
+}
+
+function _ensureProgressRow() {
+  let row = document.getElementById('chat-progress-row');
+  if (row) return row;
+  row = document.createElement('div');
+  row.className = 'chat-progress';
+  row.id = 'chat-progress-row';
+  row.innerHTML = '<span class="chat-progress-dots"><span></span><span></span><span></span></span><span class="chat-progress-text">Thinking…</span>';
+  document.getElementById('chat-scroll').appendChild(row);
+  return row;
+}
+
+function _setProgressLabel(label) {
+  const row = _ensureProgressRow();
+  const t = row.querySelector('.chat-progress-text');
+  if (t) t.textContent = label;
+  const scroll = document.getElementById('chat-scroll');
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function _removeProgressRow() {
+  const row = document.getElementById('chat-progress-row');
+  if (row) row.remove();
+}
+
+// After the turn ends, fold the silent tool log into a compact pill on the
+// final assistant bubble. Click the pill to expand the per-call list.
+function _attachToolLogFooter(assistantEl, toolUses) {
+  if (!assistantEl || !toolUses || !toolUses.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'chat-tool-log';
+  const header = document.createElement('span');
+  header.className = 'chat-tool-log-header';
+  header.textContent = \`🔧 \${toolUses.length} tool\${toolUses.length===1?'':'s'} used · expand\`;
+  const list = document.createElement('div');
+  list.className = 'chat-tool-log-list';
+  for (const t of toolUses) {
+    const r = document.createElement('div');
+    r.className = 'chat-tool-log-row';
+    r.textContent = _progressLabelFor(t).replace(/…$/, '');
+    r.addEventListener('click', (e) => {
+      e.stopPropagation();
+      r.classList.toggle('expanded');
+      r.textContent = r.classList.contains('expanded')
+        ? JSON.stringify(t.input || {}, null, 2).slice(0, 4_000)
+        : _progressLabelFor(t).replace(/…$/, '');
+    });
+    list.appendChild(r);
+  }
+  header.addEventListener('click', () => wrap.classList.toggle('expanded'));
+  wrap.appendChild(header);
+  wrap.appendChild(list);
+  assistantEl.appendChild(wrap);
+}
+
 async function _sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
@@ -3008,21 +3339,17 @@ async function _sendMessage() {
   input.value = '';
   document.getElementById('chat-send').disabled = true;
   _renderChatMessage('user', { text });
-  const pending = document.createElement('div');
-  pending.className = 'chat-msg assistant';
-  pending.innerHTML = '<span style="color:var(--muted)">thinking…</span>';
-  document.getElementById('chat-scroll').appendChild(pending);
-  document.getElementById('chat-scroll').scrollTop = document.getElementById('chat-scroll').scrollHeight;
+  _setProgressLabel('Thinking…');
 
   let assistantBuf = '';
   let assistantEl = null;
+  const toolLog = []; // captured tool_uses for the post-turn footer
   try {
     const resp = await fetch(\`/api/research/sessions/\${encodeURIComponent(sid)}/message\`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     });
     if (!resp.ok || !resp.body) throw new Error('stream start failed: ' + resp.status);
-    pending.remove();
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -3039,23 +3366,35 @@ async function _sendMessage() {
           if (texts) {
             assistantBuf += texts;
             if (!assistantEl) {
+              // Promote: progress row stays after the bubble for the next tool.
+              const row = document.getElementById('chat-progress-row');
               assistantEl = _renderChatMessage('assistant', { text: '' });
+              if (row) document.getElementById('chat-scroll').appendChild(row);
             }
             const md = assistantEl.querySelector('.chat-md');
             if (md) md.innerHTML = _renderMarkdown(assistantBuf);
             else assistantEl.textContent = assistantBuf;
           }
-          for (const t of tools) { _renderChatMessage('tool_use', t); assistantEl = null; }
-        } else if (ev.type === 'user' && ev.message && ev.message.content) {
-          for (const c of ev.message.content) {
-            if (c.type === 'tool_result') { _renderChatMessage('tool_result', c); assistantEl = null; }
+          for (const t of tools) {
+            toolLog.push(t);
+            _setProgressLabel(_progressLabelFor(t));
+            // Tool break ends the current text stream — next text starts a new bubble.
+            assistantEl = null;
           }
+        } else if (ev.type === 'user' && ev.message && ev.message.content) {
+          // tool_result events are silent now; the progress line moves to the
+          // NEXT tool_use or to the final assistant text. We still bump the
+          // label briefly so the user sees forward motion on long tools.
+          const hasResult = ev.message.content.some(c => c.type === 'tool_result');
+          if (hasResult) _setProgressLabel('Processing…');
+          assistantEl = null;
         } else if (ev.type === 'result' && ev.total_cost_usd != null) {
           const m = document.createElement('div');
           m.className = 'chat-meta';
           m.textContent = \`turn cost $\${Number(ev.total_cost_usd).toFixed(3)} · \${ev.duration_ms}ms\`;
           document.getElementById('chat-scroll').appendChild(m);
         } else if (ev._sseEvent === 'error') {
+          _removeProgressRow();
           const err = document.createElement('div');
           err.className = 'chat-msg err';
           err.textContent = 'error: ' + (ev.message || JSON.stringify(ev));
@@ -3063,13 +3402,19 @@ async function _sendMessage() {
         }
       });
     }
+    // Find the last assistant bubble in the scroll for the tool-log footer
+    // (assistantEl may have been nulled mid-stream).
+    const scroll = document.getElementById('chat-scroll');
+    const allAsst = scroll.querySelectorAll('.chat-msg.assistant');
+    const lastAsst = allAsst[allAsst.length - 1] || null;
+    _attachToolLogFooter(lastAsst, toolLog);
   } catch (e) {
-    pending.remove();
     const err = document.createElement('div');
     err.className = 'chat-msg err';
     err.textContent = 'stream error: ' + e.message;
     document.getElementById('chat-scroll').appendChild(err);
   } finally {
+    _removeProgressRow();
     document.getElementById('chat-send').disabled = false;
     _refreshSessions();
   }
@@ -3978,44 +4323,70 @@ function _renderCandidates(rows) {
       <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
       <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
       <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
-      <th class="num" data-sort-key="total_count" data-sort-type="num">Backtest Trades</th>
+      <th class="num" data-sort-key="backtest_trade_count" data-sort-type="num">Backtest Trades</th>
       <th>Actions</th>
     </tr>
     \${shown.map(r => {
       const sharpe = r.backtest_sharpe;
       const maxDd  = r.backtest_max_dd_pct;
       const ret    = r.backtest_return_pct;
-      const trades = r.total_count;
+      // Backtest trade count from the convergence run, NOT live trade count
+      // (which is r.total_count). 0 = strategy ran but emitted no signals;
+      // null = never backtested. Both render as "—" but mean different
+      // things — distinguish in the title.
+      const trades = r.backtest_trade_count;
       const sharpeFail = sharpe != null && parseFloat(sharpe) < 0.5;
       const ddFail     = maxDd  != null && Math.abs(parseFloat(maxDd)) > 20;
       const gateWarn   = sharpeFail || ddFail;
+      // Per-regime breakdown tooltip — built from backtest_regime_breakdown
+      // (regime-stratified). Strategies without a breakdown render with a
+      // generic tooltip; v1 metrics have been purged (NULL'd) elsewhere.
+      const breakdown = r.backtest_regime_breakdown;
+      const _bdLine = (lbl, b) => {
+        if (!b) return lbl + ': —';
+        if (b.note === 'not_declared') return lbl + ': not declared';
+        if (b.note === 'no_oos_window') return lbl + ': no historical window meeting min_days';
+        const sh = b.sharpe ?? 0;
+        const dd = b.max_dd != null ? (b.max_dd * 100).toFixed(1) + '%' : '—';
+        const tc = b.trade_count ?? 0;
+        const od = b.oos_days ?? 0;
+        return lbl + ': sharpe=' + (typeof sh === 'number' ? sh.toFixed(2) : sh)
+                  + '  dd=' + dd + '  trades=' + tc + '  (' + od + ' OOS days)';
+      };
+      const sharpeTitle = breakdown
+        ? ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS']
+            .map(k => _bdLine(k.padEnd(14, ' '), breakdown[k]))
+            .join('\\n')
+        : 'No regime breakdown available';
       // Per-state approve button emoticon + label + click handler.
-      //   staging   → 📡 starts data-pipeline setup (auto-promote to candidate)
-      //   candidate → 🔨 invokes StrategyCoder + backtest (auto-promote to paper)
-      //   paper     → ✅ promotes to live (synchronous gate check; ⚠ on failing metrics)
-      //   last failure? → ❌ Retry  (with tooltip containing the reason)
+      // Under the fused-staging-approval lifecycle (2026-04-27):
+      //   staging   → 📡 starts the fused worker (backfill + strategycoder + backtest;
+      //                  auto-promotes to CANDIDATE on success)
+      //   candidate → ✅ promotes to LIVE (synchronous /transition with sharpe/dd gate;
+      //                  ⚠ on failing metrics — operator can override with force=true)
+      //   paper     → legacy/frozen; no automatic Approve. Operator can archive via /transition.
+      //   last failure? → ❌ Retry (tooltip carries the reason)
       const lastFail = _stLastFailures[r.strategy_id];
       const approveLbl = lastFail
         ? '❌ Retry'
         : (r.state === 'staging'   ? '📡 Approve'
-        :  r.state === 'candidate' ? '🔨 Approve'
         :  gateWarn                ? '⚠ Approve'
                                    : '✅ Approve');
       const approveTitle = lastFail
         ? ('Last run failed: ' + (lastFail.reason || lastFail) + '. Click to retry.')
         : (r.state === 'staging'
-            ? 'Register missing data sources for daily collection; auto-promotes to CANDIDATE once the first complete snapshot lands.'
+            ? 'Run fused approval: backfill required data + invoke StrategyCoder + 3-window convergence backtest. Auto-promotes to CANDIDATE on pass.'
             : r.state === 'candidate'
-              ? 'Invoke StrategyCoder to implement + run the 3-window convergence backtest; auto-promotes to PAPER on pass.'
-              : (gateWarn
+              ? (gateWarn
                   ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
-                  : 'Promote to Active Stack'));
+                  : 'Promote candidate → live (Alpaca paper/live trading).')
+              : 'Promote to Active Stack');
       const approveCls = lastFail
         ? 'st-action-btn st-approve-btn st-approve-retry'
-        : ((r.state === 'staging' || r.state === 'candidate')
+        : (r.state === 'staging'
             ? 'st-action-btn st-approve-btn st-approve-async'
             : 'st-action-btn st-approve-btn');
-      const approveOnClick = (r.state === 'staging' || r.state === 'candidate')
+      const approveOnClick = r.state === 'staging'
         ? \`stApproveGated('\${r.strategy_id}', '\${r.state}')\`
         : \`stApprove('\${r.strategy_id}', \${gateWarn})\`;
       const jobChip = _stJobChipHTML(r.strategy_id);
@@ -4025,14 +4396,24 @@ function _renderCandidates(rows) {
         : (failBanner +
            \`<button class="\${approveCls}" title="\${_escStr(approveTitle)}" onclick="\${approveOnClick}">\${approveLbl}</button>
             <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>\`);
+      // Warning badge for staging strategies whose Saturday-brain-planned
+      // data columns include something no collector/provider can backfill.
+      // The staging worker would reject Approve with unsupported_source.
+      const dataWarn = (r.state === 'staging'
+                       && Array.isArray(r.unsupported_sources)
+                       && r.unsupported_sources.length > 0)
+        ? \` <span class="st-data-warn" title="\${_escStr(
+            'No collector/provider registered for: ' + r.unsupported_sources.join(', ')
+            + '. Approve would fail with unsupported_source.\\nAdd these to data/master/schema_registry.json or data_columns first.')}">⚠ data</span>\`
+        : '';
       return \`<tr>
-        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
         <td>\${_regimesCell(r)}</td>
-        <td class="num\${sharpeFail ? ' st-gate-fail' : ''}">\${_fmtNum(sharpe)}</td>
+        <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
         <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
         <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
-        <td class="num" style="color:var(--muted)">\${trades != null ? trades : '—'}</td>
+        <td class="num" style="color:var(--muted)" title="\${trades == null ? 'Never backtested' : (trades === 0 ? 'Backtest ran but emitted no signals' : trades + ' trades across the regime-stratified backtest windows')}">\${trades != null ? trades : '—'}</td>
         <td>\${actionsCell}</td>
       </tr>\`;
     }).join('')}
@@ -4097,16 +4478,31 @@ async function stApprove(sid, gateWarn) {
 }
 
 async function stReject(sid) {
-  if (!confirm('Reject ' + sid + '? It will move back to candidate for further research.')) return;
-  await _stTransition(sid, 'candidate', false, 'Manual reject via dashboard');
+  // State-aware reject:
+  //   staging   → archived  (abandon before approval)
+  //   candidate → staging   (regress: needs additional data / re-backtest)
+  //   paper     → archived  (legacy escape — no rows should be in paper post-migration)
+  const row = strategiesData.find(r => r.strategy_id === sid);
+  const state = row && row.state;
+  let target = 'archived';
+  let label  = 'Archive ' + sid + '? It will be removed from the active stack.';
+  if (state === 'candidate') {
+    target = 'staging';
+    label = 'Reject ' + sid + '? It will regress to STAGING so the data pipeline can be reviewed and the strategy re-built.';
+  }
+  if (!confirm(label)) return;
+  await _stTransition(sid, target, false, 'Manual reject via dashboard');
 }
 
 async function stApproveGated(sid, state) {
-  const label = state === 'staging'
-    ? 'This will register missing data sources for daily collection and auto-promote ' + sid +
-      ' to CANDIDATE once the first complete snapshot lands. Continue?'
-    : 'This will invoke StrategyCoder to implement ' + sid +
-      ' and run the convergence backtest (5–15 min). On pass, it promotes to PAPER. Continue?';
+  // Under the fused-staging-approval flow this only fires for staging-state
+  // strategies. The worker handles backfill + strategycoder + backtest and
+  // promotes the manifest staging→candidate on success.
+  const label =
+    'This will run fused approval for ' + sid + ': backfill required data sources, ' +
+    'invoke StrategyCoder to implement the strategy, and run the 3-window convergence ' +
+    'backtest (typically 5–15 min). On success the strategy promotes to CANDIDATE ' +
+    'with backtest metrics — you click Approve again from CANDIDATE to go LIVE. Continue?';
   if (!confirm(label)) return;
   // Dismiss any persisted failure banner server-side before retrying; if the
   // retry also fails, a fresh banner row will replace it.

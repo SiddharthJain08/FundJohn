@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_cross_sectional_price_momentum",
+  "required": ["prices"],
+  "optional": ["earnings"]
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_long_term_price_reversal",
+  "required": ["prices"],
+  "optional": ["financials"]
+}

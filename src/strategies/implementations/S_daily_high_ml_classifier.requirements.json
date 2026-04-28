@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_daily_high_ml_classifier",
+  "required": ["prices"],
+  "optional": []
+}

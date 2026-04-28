@@ -29,7 +29,9 @@ const store = require('./store');
 
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const FMP_KEY     = process.env.FMP_API_KEY;
-const AV_KEY      = process.env.ALPHA_VANTAGE_API_KEY;
+// AlphaVantage was removed 2026-04-28 — its capabilities are covered by
+// Polygon (technical indicators, sector data) and FMP (macro / economic
+// calendar). The previous `AV_KEY` constant was unused even before removal.
 
 // Rate interval derived from DB config — reloaded each cycle
 let POLYGON_INTERVAL_MS = 13_000; // default: ~4.6 req/min (free tier safe margin)
@@ -343,11 +345,17 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 async function fillPricesYFinance(ticker, fromDate, toDate) {
   const { execSync: _ex } = require('child_process');
   const _fs = require('fs');
+  // yfinance end is EXCLUSIVE on the date passed. Pass toDate+1d so
+  // today's close (when toDate is today) is actually included. Without
+  // this bump, the EOD refresh asking for end=today returns 0 rows
+  // because yfinance treats end=today as exclusive of today.
+  const _endExclusive = new Date(new Date(toDate + 'T00:00:00Z').getTime() + 86400_000)
+                          .toISOString().slice(0, 10);
   const script = `/tmp/yf_prices_${Date.now()}.py`;
   _fs.writeFileSync(script, `
 import yfinance as yf, json, sys
 tk = yf.Ticker("${ticker}")
-hist = tk.history(start="${fromDate}", end="${toDate}", auto_adjust=True)
+hist = tk.history(start="${fromDate}", end="${_endExclusive}", auto_adjust=True)
 bars = []
 for dt, row in hist.iterrows():
     bars.append({
@@ -366,14 +374,28 @@ print(json.dumps(bars))
 }
 
 
-// ── Phase 3: Options chains — Polygon Options Starter or Yahoo Finance fallback ─
+// ── Phase 3: Options chains — Polygon Starter, Alpaca CLI, or Yahoo Finance ─
+
+// Per-phase soft budget (default 30 min) — when exceeded, the options
+// phase logs the partial result and exits cleanly so signals/handoff/
+// trade/alpaca can still run on time. Override with OPTIONS_PHASE_BUDGET_S.
+const OPTIONS_PHASE_BUDGET_S = parseInt(process.env.OPTIONS_PHASE_BUDGET_S || '1800', 10);
+
+// Source dispatch:
+//   polygon  (default) — Polygon Options Starter (paid, full greeks + IV)
+//   alpaca             — `alpaca data option chain` via the CLI helper
+//                        (alpha preview; greeks may be 0 for thin strikes,
+//                        no IV field — caller must compute)
+//   yfinance           — direct yfinance fallback (no paid sources)
+const OPTIONS_DATA_SOURCE = (process.env.OPTIONS_DATA_SOURCE || 'polygon').toLowerCase();
 
 async function runOptions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
   const today = new Date().toISOString().slice(0, 10);
-  notify(`🎲 Options chains: ${tickers.length} tickers`);
-  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers`);
-  _progress = { phase: '🎲 Options', current: 0, total: tickers.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
+  notify(`🎲 Options chains: ${tickers.length} tickers (budget ${OPTIONS_PHASE_BUDGET_S}s, source=${OPTIONS_DATA_SOURCE})`);
+  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers (${OPTIONS_DATA_SOURCE})`);
+  const phaseStart = Date.now();
+  _progress = { phase: '🎲 Options', current: 0, total: tickers.length, ticker: null, phaseStart, rowsThisPhase: 0 };
 
   // Determine which tickers still need today's options data
   const needed = [];
@@ -390,9 +412,38 @@ async function runOptions(tickers = null) {
     return;
   }
 
-  // Polygon Options Starter tier — options snapshot endpoint confirmed authorised
+  // Source dispatch (Phase 2.1 of alpaca-cli integration). Each path falls
+  // back to the next on auth/permission failure so a misconfigured Alpaca
+  // account doesn't kill the whole phase.
+  if (OPTIONS_DATA_SOURCE === 'alpaca') {
+    return runOptionsAlpacaPath(needed, today, skipped, tickers.length, phaseStart);
+  }
+  if (OPTIONS_DATA_SOURCE === 'yfinance') {
+    return runOptionsYFinance(needed, today, skipped);
+  }
+
+  // Default: Polygon Options Starter (auth confirmed)
   // Yahoo Finance fallback retained only for unexpected auth failures
+  let budgetExceeded = false;
+  let processed = 0;
   for (let i = 0; i < needed.length; i++) {
+    // Soft budget check — bail out cleanly so the rest of the daily
+    // cycle (signals/handoff/trade/alpaca) doesn't starve while we
+    // wait on a slow upstream. Strategies that need options use
+    // whatever was collected today plus yesterday's snapshot.
+    const elapsedS = (Date.now() - phaseStart) / 1000;
+    if (elapsedS > OPTIONS_PHASE_BUDGET_S) {
+      const remaining = needed.length - i;
+      notify(`⏰ Options budget exceeded (${Math.round(elapsedS)}s > ${OPTIONS_PHASE_BUDGET_S}s) — `
+           + `processed ${processed}/${needed.length}, deferring ${remaining} tickers to next cycle`);
+      if (_alertPost) _alertPost(
+        `⏰ **Options budget hit** — ${processed}/${needed.length} fetched, ` +
+        `${remaining} deferred (will retry next cycle). Phase took ${Math.round(elapsedS)}s of ${OPTIONS_PHASE_BUDGET_S}s budget.`
+      );
+      budgetExceeded = true;
+      break;
+    }
+
     const ticker = needed[i];
     if (_paused) { while (_paused) await sleep(1000); }
     const start = Date.now();
@@ -405,6 +456,7 @@ async function runOptions(tickers = null) {
       _stats.options += written;
       tickProgress('🎲 Options', skipped + i + 1, tickers.length, ticker, written);
       await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
+      processed++;
     } catch (err) {
       // If we hit an auth error (plan changed / endpoint removed) fall back to YFinance for remainder
       if (err.message.includes('403') || err.message.includes('NOT_AUTHORIZED')) {
@@ -417,9 +469,13 @@ async function runOptions(tickers = null) {
       await store.logRun(ticker, 'options', 'error', 0, err.message, Date.now() - start, 1);
     }
   }
-  const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
-  notify(`✅ Options chains complete — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s`);
-  if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${_progress.rowsThisPhase.toLocaleString()} option contracts stored`);
+  const elapsed = Math.round((Date.now() - phaseStart) / 1000);
+  if (budgetExceeded) {
+    notify(`⚠️ Options chains partial — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s (budget capped)`);
+  } else {
+    notify(`✅ Options chains complete — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s`);
+    if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${_progress.rowsThisPhase.toLocaleString()} option contracts stored`);
+  }
 }
 
 // Yahoo Finance options fallback — fetches nearest 3 expiries per ticker via yfinance
@@ -595,6 +651,70 @@ print(json.dumps(results))
   } finally {
     try { fs.unlinkSync(script); } catch {}
   }
+}
+
+// ── Phase 3 (alpaca-cli path): fetch chains via `alpaca data option chain` ─
+//
+// Used when OPTIONS_DATA_SOURCE=alpaca. Adapts the alpaca_options.js
+// helper's flat row output to the contract-dict shape store._optionRow
+// expects, so the parquet schema is identical regardless of source.
+async function runOptionsAlpacaPath(needed, today, alreadySkipped, totalTickers, phaseStart) {
+  const { runOptionsAlpaca } = require('./alpaca_options');
+  let processed = 0;
+  let budgetExceeded = false;
+  for (let i = 0; i < needed.length; i++) {
+    const elapsedS = (Date.now() - phaseStart) / 1000;
+    if (elapsedS > OPTIONS_PHASE_BUDGET_S) {
+      const remaining = needed.length - i;
+      notify(`⏰ Options budget exceeded (alpaca) — processed ${processed}/${needed.length}, deferring ${remaining}`);
+      budgetExceeded = true;
+      break;
+    }
+    const ticker = needed[i];
+    if (_paused) { while (_paused) await sleep(1000); }
+    const start = Date.now();
+    try {
+      const rows = await runOptionsAlpaca(ticker, { limit: 100 });
+      // Adapt our flat schema → the c.details / c.greeks / c.day shape that
+      // store._optionRow already understands. Keeps the parquet schema
+      // identical between Polygon and Alpaca sources.
+      const contracts = rows.map(r => ({
+        details: {
+          expiration_date: r.expiration,
+          strike_price:    r.strike,
+          contract_type:   r.option_type,
+        },
+        greeks: {
+          delta: r.delta, gamma: r.gamma, theta: r.theta,
+          vega:  r.vega,  rho:   r.rho,
+        },
+        implied_volatility: r.implied_volatility,
+        day:                { last_price: r.last_price, volume: null },
+        last_quote:         { bid: r.bid, ask: r.ask },
+        open_interest:      null,
+      }));
+      const written = await store.upsertOptions(ticker, contracts, today);
+      await store.updateCoverage(ticker, 'options', today, today, written);
+      _stats.options += written;
+      tickProgress('🎲 Options', alreadySkipped + i + 1, totalTickers, ticker, written);
+      await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
+      processed++;
+    } catch (err) {
+      const msg = err.message || String(err);
+      // 403/permission → fall back to yfinance for the remainder so a
+      // misconfigured Alpaca account doesn't kill the whole phase.
+      if (msg.includes('403') || msg.toLowerCase().includes('not enabled')) {
+        notify(`🎲 Options: alpaca permission error on ${ticker} — falling back to yfinance for remainder`);
+        await runOptionsYFinance(needed.slice(i), today, alreadySkipped + i);
+        return;
+      }
+      _stats.errors++;
+      notify(`⚠️ Options ${ticker} (alpaca): ${msg.slice(0, 120)}`);
+      await store.logRun(ticker, 'options', 'error', 0, msg.slice(0, 200), Date.now() - start, 1);
+    }
+  }
+  await store.flushOptions();
+  notify(`✅ Options (alpaca): ${processed}/${needed.length} processed${budgetExceeded ? ' (budget hit)' : ''}`);
 }
 
 // ── Phase 4: Fundamentals via FMP ────────────────────────────────────────────
@@ -899,7 +1019,9 @@ def f(v):
 
 tickers = ${tickerJson}
 from_date = "${fromDate}"
-to_date   = "${toDate}"
+# yf.download end is EXCLUSIVE — pass toDate+1 so today's close
+# (when toDate is today) is actually included.
+to_date   = "${(new Date(new Date(toDate + 'T00:00:00Z').getTime() + 86400_000).toISOString().slice(0, 10))}"
 results = {}
 
 try:

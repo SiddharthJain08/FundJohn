@@ -1,3 +1,19 @@
+---
+name: fundjohn:dcf-model
+description: Run a discounted-cash-flow valuation and emit a structured output schema.
+triggers:
+  - /dcf
+  - fundamental valuation request
+inputs:
+  - ticker
+  - wacc
+  - terminal_growth
+  - revenue_projections
+outputs:
+  - fair_value_per_share
+  - sensitivity_table
+keywords: [dcf, valuation, wacc, fundamental]
+---
 # Skill: fundjohn:dcf-model
 **Trigger**: `/dcf` or `/valuation`
 

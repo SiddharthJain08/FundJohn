@@ -234,18 +234,11 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
-    // Sunday 08:00 ET — weekly memory synthesis + reaper + universe sync
+    // Sunday 08:00 ET — weekly memory synthesis + universe sync
+    // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
+    // orphan-column detection no longer feeds data_deprecation_queue.)
     cron.schedule('0 8 * * 0', async () => {
-        log('Weekly maintenance starting — reaper, signatures, universe sync');
-
-        // Weekly reaper: detect orphaned data columns → data_deprecation_queue
-        try {
-            const ResearchOrchestrator = require('../agent/research/research-orchestrator');
-            const orch = new ResearchOrchestrator();
-            await orch.runReaperPass((msg) => log(`[reaper] ${msg}`));
-        } catch (e) {
-            log(`Reaper pass error: ${e.message}`);
-        }
+        log('Weekly maintenance starting — signatures, universe sync');
 
         // Refresh data_ledger materialized view
         await pool.query('REFRESH MATERIALIZED VIEW CONCURRENTLY data_ledger').catch((e) =>
@@ -270,25 +263,12 @@ function start(swarm, generateId, notifyDiscord) {
             log(`Universe sync error: ${e.message.slice(0, 200)}`);
         }
 
-        // StrategyIdeator: generate 3-5 novel strategy ideas from memory files
-        log('StrategyIdeator starting — generating ideas from memory...');
-        await swarm.init({
-            type:      'strategist-ideator',
-            mode:      'IDEATE',
-            workspace: WORKSPACE_DIR,
-            threadId:  generateId(),
-            prompt:    'Generate 3–5 novel strategy ideas based on the current memory files. ' +
-                       'Insert each into research_candidates with source=\'ideator\'.',
-        }).catch((e) => log(`StrategyIdeator error: ${e.message}`));
-
-        // arXiv discovery: harvest recent q-fin papers
-        log('arXiv discovery starting...');
-        try {
-            const arxivOut = runPython('src/ingestion/arxiv_discovery.py');
-            log(`arXiv discovery complete: ${arxivOut.slice(0, 200)}`);
-        } catch (e) {
-            log(`arXiv discovery error: ${e.message.slice(0, 200)}`);
-        }
+        // strategist-ideator + arXiv discovery moved into Saturday brain
+        // Phase 6.5 + Phase 2 respectively. Both now run once per week from
+        // src/agent/curators/saturday_brain.js, sequenced *after* tier-A
+        // synchronous coding so the ideator can react to today's data
+        // gaps. The previous Sunday-morning duplication was a Phase-1
+        // legacy that double-spent tokens.
 
         // Sunday backtest sweep: re-run gate on stale pending/failed strategies
         log('Sunday backtest sweep starting...');

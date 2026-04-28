@@ -46,8 +46,25 @@ LEGACY_MIN_SCORE = 4
 LEGACY_TOP_N     = 10
 
 
-def _arxiv_search(category: str, days: int, max_results: int) -> list[dict]:
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y%m%d%H%M%S')
+def _arxiv_search(category: str, days: int | None, max_results: int,
+                  since_iso: str | None = None) -> list[dict]:
+    """Fetch one category's recent submissions.
+
+    Date-window resolution priority:
+      1. since_iso ('YYYY-MM-DD' from saturday_runs incremental mode)
+      2. days (legacy 'last N days' window)
+      3. neither → all-time, from 1900-01-01
+
+    All-time mode is used by Saturday brain Phase 2 on first runs (no prior
+    saturday_runs row to anchor 'since'); subsequent runs pass since_iso to
+    fetch only new arrivals.
+    """
+    if since_iso:
+        since = since_iso.replace('-', '') + '000000'
+    elif days is not None:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y%m%d%H%M%S')
+    else:
+        since = '19000101000000'  # all-time
     query = f'cat:{category} AND submittedDate:[{since} TO 99991231235959]'
     params = urlencode({
         'search_query': query,
@@ -92,12 +109,18 @@ def _arxiv_search(category: str, days: int, max_results: int) -> list[dict]:
     return papers
 
 
-def discover(days: int = 30, max_per_cat: int = MAX_RESULTS_DEFAULT) -> list[dict]:
-    """Return deduped papers from every configured q-fin category — no filtering."""
+def discover(days: int | None = 30, max_per_cat: int = MAX_RESULTS_DEFAULT,
+             since_iso: str | None = None) -> list[dict]:
+    """Return deduped papers from every configured q-fin category — no filtering.
+
+    Pass since_iso='YYYY-MM-DD' for incremental mode (Saturday brain steady
+    state). Pass days=None and since_iso=None for all-time backfill (first
+    Saturday run after the brain consolidation).
+    """
     seen: set[str] = set()
     out: list[dict] = []
     for cat in CATEGORIES:
-        for p in _arxiv_search(cat, days, max_per_cat):
+        for p in _arxiv_search(cat, days, max_per_cat, since_iso=since_iso):
             if p['source_url'] in seen:
                 continue
             seen.add(p['source_url'])
@@ -178,16 +201,39 @@ def legacy_insert_candidates(papers: list[dict], conn) -> tuple[int, int]:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--days', type=int, default=30, help='Days back to search')
+    # Date-window flags (mutually exclusive in spirit; precedence: since-iso >
+    # all-time > days). Saturday brain passes either --since-iso (incremental
+    # steady state) or --all-time (first run after the brain consolidation);
+    # the legacy timer's --days 90 keeps working for back-compat.
+    parser.add_argument('--days', type=int, default=None,
+                        help='Days back to search (legacy; ignored if --since-iso or --all-time)')
+    parser.add_argument('--since-iso', type=str, default=None,
+                        help='Fetch papers submitted on or after this ISO date '
+                             '(YYYY-MM-DD). Used by Saturday brain incremental mode.')
+    parser.add_argument('--all-time', action='store_true',
+                        help='Fetch the full historical archive (overrides --days). '
+                             'Used by Saturday brain first-run backfill.')
     parser.add_argument('--max-per-cat', type=int, default=MAX_RESULTS_DEFAULT,
                         help='Max results per arXiv category')
     parser.add_argument('--no-legacy', action='store_true',
                         help='Skip legacy research_candidates population (set in Phase 2)')
     args = parser.parse_args()
 
-    print(f'[arxiv] Broad-fetch last {args.days}d across {len(CATEGORIES)} categories '
+    # Resolve effective window. since-iso wins, then all-time, then days,
+    # then default to legacy 30-day behavior so back-compat is preserved.
+    if args.since_iso:
+        eff_since, eff_days = args.since_iso, None
+        window_label = f'since {args.since_iso}'
+    elif args.all_time:
+        eff_since, eff_days = None, None
+        window_label = 'ALL-TIME (full archive)'
+    else:
+        eff_since, eff_days = None, (args.days if args.days is not None else 30)
+        window_label = f'last {eff_days}d'
+
+    print(f'[arxiv] Broad-fetch {window_label} across {len(CATEGORIES)} categories '
           f'(up to {args.max_per_cat}/cat)...')
-    papers = discover(args.days, args.max_per_cat)
+    papers = discover(eff_days, args.max_per_cat, since_iso=eff_since)
     print(f'[arxiv] Fetched {len(papers)} unique papers.')
 
     pg_uri = os.environ.get('POSTGRES_URI')

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_least_squares_risk_parity",
+  "required": ["prices"],
+  "optional": []
+}

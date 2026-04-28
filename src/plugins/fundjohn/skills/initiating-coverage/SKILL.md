@@ -1,3 +1,17 @@
+---
+name: fundjohn:initiating-coverage
+description: Produce an initiation-of-coverage memo conforming to the FundJohn template.
+triggers:
+  - /initiate <ticker>
+  - new-name research kickoff
+inputs:
+  - ticker
+  - thesis_summary
+  - catalysts
+outputs:
+  - initiating_memo_md
+keywords: [initiation, coverage, research-memo]
+---
 # Skill: fundjohn:initiating-coverage
 **Trigger**: `/initiate` or `/coverage`
 

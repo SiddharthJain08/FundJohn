@@ -1377,36 +1377,10 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         break;
       }
 
-      case 'approve-deprecation': {
-        const reqId = args[0];
-        if (!reqId) { await notify('Usage: `/approve-deprecation <request_id>`'); break; }
-        try {
-          const { Pool } = require('pg');
-          const pool = new Pool({ connectionString: process.env.POSTGRES_URI });
-          const { rows } = await pool.query(
-            `UPDATE data_deprecation_queue SET status='APPROVED', approved_by=$1, approved_at=NOW()
-             WHERE request_id=$2 AND status='PENDING'
-             RETURNING request_id, column_name, recommended_action`,
-            [userId, reqId]
-          );
-          await pool.end();
-          if (rows.length === 0) { await notify(`⚠️ No pending deprecation found for ID \`${reqId}\``); break; }
-          const col = rows[0].column_name;
-          await notify(`✅ Deprecation of \`${col}\` approved — DataWiringAgent will remove it.`);
-          agentPersonas.post('researchdesk', 'research-feed',
-            `🗑️ **Column deprecation approved:** \`${col}\` — DataWiringAgent removing...`).catch(() => {});
-          triggerMapRefresh().catch(() => {});
-          const orch = getResearchOrch();
-          orch._unwireColumn(rows[0]).catch((e) => {
-            console.error('[bot] DataWiringAgent (remove) failed:', e.message);
-            agentPersonas.post('researchdesk', 'research-feed',
-              `❌ DataWiringAgent (remove) failed for \`${col}\`: ${e.message}`).catch(() => {});
-          });
-        } catch (e) {
-          await notify(`❌ approve-deprecation error: ${e.message}`);
-        }
-        break;
-      }
+      // approve-deprecation removed 2026-04-28: per the NEVER-DELETE-DATA
+      // core invariant in CLAUDE.md, the system no longer supports
+      // column deprecation. Past data stays forever; new strategies
+      // simply opt into the columns they need.
 
       case 'refresh-map': {
         await notify('🗺️ Refreshing server map...');

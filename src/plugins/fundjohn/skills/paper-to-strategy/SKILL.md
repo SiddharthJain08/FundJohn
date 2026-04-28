@@ -1,3 +1,16 @@
+---
+name: fundjohn:paper-to-strategy
+description: Translate a research paper into a strategy spec the StrategyCoder can implement.
+triggers:
+  - paper-hunter promotes a paper
+  - /paper-to-strategy
+inputs:
+  - paper_metadata
+  - extracted_methodology
+outputs:
+  - strategy_spec_md
+keywords: [paper, strategy, extraction, methodology]
+---
 # Skill: fundjohn:paper-to-strategy
 **Trigger**: `/paper-to-strategy` or `/p2s`
 

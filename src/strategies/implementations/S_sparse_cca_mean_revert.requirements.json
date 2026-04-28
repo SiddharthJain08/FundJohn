@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_sparse_cca_mean_revert",
+  "required": ["prices"],
+  "optional": []
+}

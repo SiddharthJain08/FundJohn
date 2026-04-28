@@ -22,8 +22,8 @@
       "enabled": true,
       "exposure": "summary",
       "tier": 1,
-      "fallback": "alpha_vantage",
-      "description": "Polygon — OHLCV prices, snapshots, market movers, trading signals",
+      "fallback": "yahoo",
+      "description": "Polygon — OHLCV prices, snapshots, market movers, trading signals, technical indicators (RSI/SMA/EMA/MACD/BBands)",
       "tool_count": 12,
       "import_path": "from tools.polygon import ...",
       "unit_cost_per_request": 0.00005,
@@ -34,19 +34,19 @@
       ]
     },
     {
-      "name": "alpha_vantage",
+      "name": "alpaca",
       "enabled": true,
       "exposure": "summary",
-      "tier": 2,
+      "tier": 1,
       "fallback": null,
-      "description": "Alpha Vantage — macro data (GDP, CPI, rates), technical indicators (RSI, SMA, BBands), intraday",
-      "tool_count": 15,
-      "import_path": "from tools.alpha_vantage import ...",
-      "unit_cost_per_request": 0.00002,
+      "description": "Alpaca CLI (broker side) — account state, positions, fills, watchlists, screener (movers/most-actives), corporate actions, options chain (no greeks/IV in alpha-preview).",
+      "tool_count": 8,
+      "import_path": "alpaca subprocess (see src/channels/api/alpaca_cli.js / src/execution/alpaca_executor.py)",
+      "unit_cost_per_request": 0.0,
       "covered_columns": [
-        "macro", "gdp", "cpi", "inflation", "unemployment",
-        "federal_funds_rate", "treasury_yield", "vix",
-        "rsi", "sma", "ema", "macd", "bbands", "stoch", "adx"
+        "account_equity", "buying_power", "positions", "fills",
+        "watchlist", "screener_movers", "screener_most_actives",
+        "corporate_actions", "forward_split", "reverse_split"
       ]
     },
     {

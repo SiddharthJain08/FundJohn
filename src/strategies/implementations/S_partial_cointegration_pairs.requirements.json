@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_partial_cointegration_pairs",
+  "required": ["prices"],
+  "optional": []
+}

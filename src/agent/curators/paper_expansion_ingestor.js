@@ -43,7 +43,8 @@ async function _gatherContext() {
               FROM strategy_registry
              WHERE status IN ('live','monitoring','approved')
              ORDER BY backtest_sharpe DESC NULLS LAST LIMIT 40`),
-    _query(`SELECT DISTINCT substring(markdown_body from 1 for 280) AS preview, strategy_id
+    _query(`SELECT substring(markdown_body from 1 for 280) AS preview,
+                   strategy_id, memo_date
               FROM strategy_memos
              WHERE memo_date >= CURRENT_DATE - 21
              ORDER BY memo_date DESC LIMIT 8`),
@@ -58,24 +59,86 @@ async function _gatherContext() {
                    MAX(ingested_at) AS last_ingest
               FROM research_corpus`),
   ]).then(r => [r[0].rows, r[1].rows, r[2].rows, r[3].rows, r[4].rows[0]]);
+
+  // Fold in the Obsidian vault so the LLM steers from what we've already
+  // catalogued. strategy-notes/ is the per-strategy memo set the agents
+  // append to; surfacing the most-recently-touched ones gives Opus a real
+  // picture of which signal families are active without re-reading every
+  // file. We just hand it the filenames + first-paragraph blurbs — Opus
+  // can Read/Glob the vault from its cwd if it wants more.
+  const vaultStrategyNotes = _vaultIndex(`${WORKSPACE}/strategy-notes`, 12, 600);
+  // results/strategies/ holds session reports (review-XXX, session-YYY).
+  // These are short lessons-learned dumps; one-paragraph previews are
+  // enough to surface themes without exploding token cost.
+  const vaultResultNotes   = _vaultIndex(`${WORKSPACE}/results/strategies`, 8, 400);
+
   return {
     portfolio_strategies: strategies,
     recent_memo_themes:   recentMemoThemes,
     recent_corpus_venues: portfolio,   // note: positional arg reorder
     corpus_freshness:     lastExpansion,
+    vault_strategy_notes: vaultStrategyNotes,
+    vault_result_notes:   vaultResultNotes,
   };
 }
 
+// Read up to `max` most-recently-modified .md files in `dir`; return
+// {filename, mtime, preview} for each. preview = first ~previewLen chars
+// after the YAML frontmatter, with whitespace collapsed. Best-effort —
+// returns [] on any error so a missing/empty vault never blocks the run.
+function _vaultIndex(dir, max, previewLen) {
+  try {
+    if (!fs.existsSync(dir)) return [];
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.md'))
+      .map(f => {
+        const p = path.join(dir, f);
+        try {
+          const st = fs.statSync(p);
+          return { filename: f, mtime: st.mtimeMs };
+        } catch (_) { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, max);
+    return files.map(({ filename, mtime }) => {
+      let preview = '';
+      try {
+        const raw = fs.readFileSync(path.join(dir, filename), 'utf8');
+        const body = raw.replace(/^---[\s\S]*?---\s*/, '').replace(/\s+/g, ' ').trim();
+        preview = body.slice(0, previewLen);
+      } catch (_) {}
+      return {
+        filename,
+        last_touched: new Date(mtime).toISOString(),
+        preview,
+      };
+    });
+  } catch (_) { return []; }
+}
+
 const EXPANSION_PROMPT_PREAMBLE = `\
-You are MasterMindJohn (Opus 4.7, 1M ctx) running the Sunday paper-expansion
-pass. Your job: discover NEW sources of quantitative finance research
+You are MasterMindJohn (Opus 4.7, 1M ctx) running Phase 1 of the Saturday
+brain. Your job: discover NEW SOURCE FEEDS of quantitative finance research
 BEYOND the standard arXiv + OpenAlex ingestion pipelines. You have
 WebSearch + WebFetch + Bash access in this workspace.
+
+**Reframed for Saturday brain (2026-04-25):** you are no longer scraping
+individual papers. Phase 2 (\`expanded_sources.py\`) does the bulk ingestion
+once you point it at structured feeds. Your output is the *source registry*
+that drives Phase 2. Quality over quantity — 6–15 well-characterised feeds
+beat 50 one-off papers.
+
+**Target feed kinds:**
+  * RSS / Atom feeds (working-paper series, conference proceedings, blogs)
+  * JSON sitemaps (OpenAlex-style cursor-paginated APIs)
+  * HTML index pages with stable anchor structure (author pages, journal
+    "latest articles" pages)
 
 **Target sources beyond arXiv/OpenAlex:**
   * Federal Reserve / ECB / BIS / IMF / central-bank working papers
   * CFA Institute, Journal of Portfolio Management, Risk.net white papers
-  * Prop-shop research: AQR, Two Sigma, Renaissance, D.E. Shaw (public)
+  * Prop-shop research: AQR insights, Two Sigma articles, D.E. Shaw white papers
   * Corporate research: Goldman / Morgan Stanley / JPM quant strategy
   * Conference proceedings: QuantCon, WBS, Global Derivatives
   * University research pages (Chicago Booth, NYU Stern, MIT Sloan…)
@@ -84,38 +147,64 @@ WebSearch + WebFetch + Bash access in this workspace.
 
 **Your process (MUST FOLLOW):**
 
-1. **Read the context** below (portfolio, strategy memo themes, last 60
-   days of corpus venues, previous expansion runs). Identify 2–4 THEMES
-   where the research_corpus is thin relative to the portfolio's needs.
+1. **Read the context** below (portfolio, strategy memo themes, recent
+   corpus venues, previous expansion runs, **the Obsidian vault index of
+   recent strategy + result notes**). Identify 2–4 THEMES where the
+   research_corpus is thin relative to the portfolio's needs.
 
-2. **Formulate 4–8 diverse search queries** that target the themes via
-   the sources above. Prefer queries that surface NEW venues not in
-   recent_corpus_venues. Avoid duplicating prior queries (provided).
+   The vault is your authoritative source for "what the portfolio is
+   actually doing" — the previews under VAULT STRATEGY NOTES + VAULT
+   RESULT NOTES are real notes the agents wrote during prior cycles. If
+   a preview catches your eye, **Read** the full file (cwd is the vault
+   root, so e.g. Read strategy-notes/S_TR06_baltussen_eod_reversal.md)
+   before committing to a theme.
 
-3. **Run WebSearch on each query**, then WebFetch the 1–3 most promising
-   results per query. Extract paper metadata. If a result links to a PDF
-   or preprint, record the landing page as source_url.
+2. **Formulate 4–8 search queries** targeting your themes. Use WebSearch
+   to find candidate FEED URLs (the index page that lists papers — not
+   individual papers). Visit promising ones with WebFetch and inspect:
+     * does the page have an RSS/Atom feed link? (Look for
+       \`<link rel="alternate" type="application/rss+xml">\` or similar.)
+     * if no feed, is the page structured enough that anchor-link
+       extraction would work? (PDFs or paper-shaped HTML pages with
+       titles in anchor text)
+     * does it cover papers we don't already have in
+       \`recent_corpus_venues\`?
 
-4. **For each candidate paper, collect:**
-     { source_url, title, abstract (≤ 2000 chars), authors (array),
-       venue, published_date, source (e.g. 'ssrn','nber','journal','blog') }
-   Skip anything that's just a news article or review without a
-   hypothesis / strategy / empirical result.
+3. **For each viable feed, characterise it:**
+     - feed_url       (the URL Phase 2 will fetch)
+     - kind           ('rss' | 'atom' | 'html' — your best guess; Phase 2
+                       sniffs the response anyway)
+     - name           (human label, e.g. "AQR Insights", "Fed FEDS papers")
+     - domain         (registrable domain, for dedup)
+     - strategy_types (what kinds of strategies typically appear here:
+                       e.g. ["momentum","factor","options"])
+     - notes          (≤140 chars: anything Phase 2 / curator should
+                       know — paywalled? volume? backfill window?)
 
-5. **Emit a final JSON block** (fenced \`\`\`json ... \`\`\`) with:
+4. **Emit a final JSON block** (fenced \`\`\`json ... \`\`\`):
+   \`\`\`json
    {
      "queries_used":       ["q1", "q2", ...],
      "sources_discovered": [
-       { "domain": "...", "name": "...", "papers_found": N, "notes": "..." }
-     ],
-     "papers":             [ { source_url, title, abstract, authors[],
-                               venue, published_date, source }, ... ]
+       {
+         "domain":         "federalreserve.gov",
+         "name":           "Fed FEDS working papers",
+         "feed_url":       "https://www.federalreserve.gov/econres/feds/feds.htm",
+         "kind":           "html",
+         "strategy_types": ["macro","factor","monetary policy"],
+         "notes":          "Quarterly drop, ~30 papers/year. Title in anchor text."
+       }
+     ]
    }
+   \`\`\`
 
-   Target: 10–40 new candidate papers. Do NOT flood — quality > quantity.
+   Target: 6–15 new feeds across diverse domains. Don't pad with feeds
+   we already ingest (cross-check \`recent_corpus_venues\` and
+   \`previous_expansion_runs.sources_discovered\`).
 
-**Do NOT insert into Postgres yourself** — the caller will handle INSERT
-with dedup by source_url.
+**Do NOT WebFetch every paper from each feed yourself.** Phase 2 will
+do bulk ingestion using the feed_urls you provide. Your role is feed
+*discovery*, not paper extraction.
 
 Context follows below.`;
 
@@ -133,6 +222,12 @@ ${JSON.stringify(ctx.recent_corpus_venues || [], null, 2)}
 
 --- CORPUS FRESHNESS ---
 ${JSON.stringify(ctx.corpus_freshness || {}, null, 2)}
+
+--- VAULT STRATEGY NOTES (most-recent in workspaces/default/strategy-notes/) ---
+${JSON.stringify(ctx.vault_strategy_notes || [], null, 2)}
+
+--- VAULT RESULT NOTES (most-recent in workspaces/default/results/strategies/) ---
+${JSON.stringify(ctx.vault_result_notes || [], null, 2)}
 
 Begin. Think step-by-step in your natural reply, run your searches and
 fetches, and end with the fenced JSON block.`;

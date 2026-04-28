@@ -1,3 +1,16 @@
+---
+name: fundjohn:veto-explainer
+description: Explain why TradeJohn vetoed a signal in plain language using veto reason codes.
+triggers:
+  - /veto-explainer
+  - investigating a vetoed signal
+inputs:
+  - signal_id
+  - veto_reason_code
+outputs:
+  - plain_language_explanation
+keywords: [veto, explanation, tradejohn, reason-codes]
+---
 # Skill: fundjohn:veto-explainer
 **Trigger**: `/veto-explainer` or `/why-veto`
 

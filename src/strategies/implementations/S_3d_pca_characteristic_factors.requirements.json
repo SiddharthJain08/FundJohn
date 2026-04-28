@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_3d_pca_characteristic_factors",
+  "required": ["prices", "financials"],
+  "optional": []
+}

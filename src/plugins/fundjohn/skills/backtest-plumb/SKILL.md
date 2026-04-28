@@ -1,3 +1,17 @@
+---
+name: fundjohn:backtest-plumb
+description: Diagnose why a strategy is stuck below its promotion gate; produce a triage checklist.
+triggers:
+  - /backtest-plumb
+  - strategy stuck below promotion threshold
+inputs:
+  - strategy_id
+  - recent_backtest_metrics
+outputs:
+  - triage_checklist
+  - recommended_actions
+keywords: [backtest, promotion-gate, diagnose, triage]
+---
 # Skill: fundjohn:backtest-plumb
 **Trigger**: `/backtest-plumb` or `/plumb`
 

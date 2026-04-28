@@ -1,0 +1,10 @@
+[Unit]
+Description=Saturday brain — Sat 10:00 America/New_York
+
+[Timer]
+OnCalendar=Sat *-*-* 10:00:00 America/New_York
+Persistent=true
+Unit=openclaw-saturday-brain.service
+
+[Install]
+WantedBy=timers.target

@@ -9,12 +9,42 @@
  *  - Data freshness alerts
  *  - Curator status (last run, any false positives)
  *  - Open/closed position counts
+ *  - Doctor footer (Tier 3 — infra-health summary from src/maintenance/doctor.py)
  */
 
+const { spawn } = require('child_process');
+const path = require('path');
 const { query: dbQuery } = require('../database/postgres');
 const { getDataFreshness } = require('../pipeline/freshness');
 
-async function buildDigest(date = new Date()) {
+// Run `python3 src/maintenance/doctor.py --json` and return the parsed
+// payload. Resolves to null on any error (timeout, parse fail, missing
+// script) — the digest is best-effort and never aborts on doctor issues.
+function _runDoctor() {
+  return new Promise((resolve) => {
+    const root      = path.join(__dirname, '..', '..');
+    const doctorPy  = path.join(root, 'src', 'maintenance', 'doctor.py');
+    let stdout = '';
+    let stderr = '';
+    const proc = spawn('python3', [doctorPy, '--json'], {
+      env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      resolve(null);
+    }, 15_000);
+    proc.stdout.on('data', (c) => { stdout += c; });
+    proc.stderr.on('data', (c) => { stderr += c; });
+    proc.on('error', () => { clearTimeout(timer); resolve(null); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(stdout)); }
+      catch (_) { resolve(null); }
+    });
+  });
+}
+
+async function buildDigest(date = new Date(), failureCtx = null) {
   const [signalRow, prevSignalRow, openCounts, closedStats, freshness, curatorRow] = await Promise.all([
     dbQuery(`SELECT run_date, regime, n_signals, ev_pos, avg_ev, high_conv_count
              FROM daily_signal_summary ORDER BY run_date DESC, created_at DESC LIMIT 1`),
@@ -82,8 +112,44 @@ async function buildDigest(date = new Date()) {
     curatorLine = `🔎 Curator last run: ${ago}h ago, ${cur.input_count}→${cur.output_count} papers, $${parseFloat(cur.total_cost_usd).toFixed(2)}`;
   }
 
+  // Failure block — fires when the orchestrator aborted mid-cycle. The
+  // user wants a maintenance report on EVERY cycle exit, success or
+  // failure, with failures explicitly flagged (not just silent absence).
+  let failureBlock = '';
+  if (failureCtx) {
+    const lines = [
+      '🚨 **CYCLE ABORTED — PIPELINE FAILURE**',
+      `   Failed step: \`${failureCtx.step || 'unknown'}\``,
+      `   Completed:   ${(failureCtx.completed && failureCtx.completed.length)
+                          ? failureCtx.completed.join(', ') : 'none'}`,
+    ];
+    if (failureCtx.error) {
+      lines.push(`   Error: ${String(failureCtx.error).slice(0, 200)}`);
+    }
+    failureBlock = lines.join('\n') + '\n';
+  } else {
+    failureBlock = '✅ Cycle completed cleanly\n';
+  }
+
+  // Doctor footer — best-effort infra summary (auth/db/redis/master/data
+  // coverage). Truncated to one line so the digest stays scannable.
+  const doctor = await _runDoctor();
+  let doctorLine = '';
+  if (doctor) {
+    const overall = doctor.overall || 'unknown';
+    const summary = doctor.summary || '';
+    const fails = (doctor.checks || [])
+      .filter(c => c.severity === 'fail')
+      .map(c => c.name)
+      .join(',');
+    const marker = overall === 'pass' ? '✅' : overall === 'warn' ? '⚠️' : '🚨';
+    doctorLine = `${marker} Doctor: ${summary} (${doctor.elapsed_ms}ms)${fails ? ` — failing: ${fails}` : ''}`;
+  } else {
+    doctorLine = '⚠️ Doctor: not run (subprocess error)';
+  }
+
   const header = `📰 **OpenClaw daily health digest — ${date.toISOString().slice(0,10)}**`;
-  return [header, gateLine, deltaLine, posLine, pnlLine, stalenessLine, curatorLine].filter(Boolean).join('\n');
+  return [header, failureBlock, gateLine, deltaLine, posLine, pnlLine, stalenessLine, curatorLine, doctorLine].filter(Boolean).join('\n');
 }
 
 /** Register a Mon–Fri 08:15 ET cron via node-cron. */
