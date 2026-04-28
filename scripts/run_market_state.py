@@ -380,7 +380,14 @@ import psycopg2.extras as _psycopg2_extras
 _db_uri = os.environ.get('POSTGRES_URI')
 if _db_uri:
     try:
-        _vix_pct = round(float(np.mean(features['vix'].values <= today_features['vix']) * 100), 1)
+        # CAST every numpy scalar to a native Python float before handing
+        # it to psycopg2 — np.float64 reprs as "np.float64(18.02)" which
+        # psycopg2 parses as `np.<schema>.float64(18.02)` and fails with
+        # `schema "np" does not exist`. Caused 7+ days of silent DB-sync
+        # drift (the file regime_latest.json was fresh, but engine.py
+        # reads from market_regime DB which stayed stale at TRANSITIONING).
+        _vix_pct  = round(float(np.mean(features['vix'].values <= today_features['vix']) * 100), 1)
+        _vix_curr = round(float(today_features['vix']), 2)
         _regime_data = {
             'state_raw':                 current_state,
             'state_probabilities':       current_probs,
@@ -402,17 +409,17 @@ if _db_uri:
         if _existing:
             _cur.execute(
                 "UPDATE market_regime SET state=%s, vix_level=%s, vix_percentile=%s, regime_data=%s, updated_at=NOW() WHERE id=%s",
-                (effective_state, round(today_features['vix'], 2), _vix_pct, json.dumps(_regime_data), _existing['id'])
+                (effective_state, _vix_curr, _vix_pct, json.dumps(_regime_data), _existing['id'])
             )
         else:
             _cur.execute(
                 "INSERT INTO market_regime (state, vix_level, vix_percentile, regime_data) VALUES (%s, %s, %s, %s)",
-                (effective_state, round(today_features['vix'], 2), _vix_pct, json.dumps(_regime_data))
+                (effective_state, _vix_curr, _vix_pct, json.dumps(_regime_data))
             )
         _conn.commit()
         _cur.close()
         _conn.close()
-        print(f'  DB updated: market_regime → {effective_state} (VIX={today_features["vix"]:.2f}, pct={_vix_pct:.1f}%)')
+        print(f'  DB updated: market_regime → {effective_state} (VIX={_vix_curr:.2f}, pct={_vix_pct:.1f}%)')
     except Exception as e:
         print(f'  [WARN] DB write failed: {e}')
 else:
