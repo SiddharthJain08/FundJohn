@@ -73,6 +73,8 @@ The cycle and paper-hunt flows run through LangGraph.js:
 - `docs/strategy-review.{service,timer}` — Saturday 18:00 ET comprehensive review
 - `docs/position-recs.{service,timer}` — Saturday 19:00 ET sizing recs
 - `docs/paper-expansion.{service,timer}` — Sunday 08:00 ET paper expansion ingestion
+- `src/agent/run_maintenance.js` — Daily 12:00 ET (Mon-Fri) BotJohn maintenance driver: doctor + digest + investigate + fix + post to #general
+- `docs/botjohn-maintenance.{service,timer}` — Mon-Fri 12:00 ET maintenance run (installed at `/etc/systemd/system/openclaw-botjohn-maintenance.*`)
 - `agents/` — agent identity and soul files
 - `data/` — master parquet datasets
 - `johnbot/` — Discord bot

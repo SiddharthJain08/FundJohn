@@ -1,0 +1,17 @@
+[Unit]
+Description=BotJohn — daily system maintenance (weekdays 12:00 ET)
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/run_maintenance.js
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=2400
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run BotJohn daily maintenance at 12:00 America/New_York Mon-Fri
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 12:00:00 America/New_York
+Persistent=true
+Unit=openclaw-botjohn-maintenance.service
+
+[Install]
+WantedBy=timers.target
