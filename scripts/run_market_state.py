@@ -339,6 +339,12 @@ regime_change_alert = (
     (stress_score > 50 and prior.get('stress_score', 0) <= 50)
 )
 
+# vix_percentile is read by engine.py + trade_handoff_builder.py — they
+# now consume this file directly (file-primary, 2026-04-29) so it must
+# carry every field they need. Compute once here so the file and the DB
+# row stay numerically identical.
+_vix_pct_file = round(float(np.mean(features['vix'].values <= today_features['vix']) * 100), 1)
+
 output = {
     'date':                      TODAY,
     'state':                     effective_state,
@@ -349,6 +355,8 @@ output = {
     'stress_score':              stress_score,
     'roro_score':                round(roro_score, 1),
     'features':                  {k: round(float(v), 4) for k, v in today_features.items()},
+    'vix_level':                 round(float(today_features['vix']), 2),
+    'vix_percentile':            _vix_pct_file,
     'regime_change_alert':       regime_change_alert,
     'days_in_current_state':     days_in_state,
     'prior_state':               prior_state,
@@ -386,7 +394,13 @@ if _db_uri:
         # `schema "np" does not exist`. Caused 7+ days of silent DB-sync
         # drift (the file regime_latest.json was fresh, but engine.py
         # reads from market_regime DB which stayed stale at TRANSITIONING).
-        _vix_pct  = round(float(np.mean(features['vix'].values <= today_features['vix']) * 100), 1)
+        # Append-only history (2026-04-29): every cycle inserts a new row.
+        # The prior UPSERT pattern overwrote a single row, throwing away
+        # the regime time-series — useless for analytics + masked
+        # silent-write failures (the row stayed "fresh" by mtime even
+        # when the underlying value was being silently re-applied).
+        # Append matches the CLAUDE.md core invariant (master tables are
+        # append-only) and gives downstream consumers a real history.
         _vix_curr = round(float(today_features['vix']), 2)
         _regime_data = {
             'state_raw':                 current_state,
@@ -402,24 +416,14 @@ if _db_uri:
         }
         _conn = _psycopg2.connect(_db_uri, cursor_factory=_psycopg2_extras.DictCursor)
         _cur  = _conn.cursor()
-        # Upsert the most-recent regime row so engine.py's "ORDER BY updated_at DESC LIMIT 1"
-        # always sees fresh state. Target the latest id to avoid multi-row overwrites.
-        _cur.execute("SELECT id FROM market_regime ORDER BY updated_at DESC LIMIT 1")
-        _existing = _cur.fetchone()
-        if _existing:
-            _cur.execute(
-                "UPDATE market_regime SET state=%s, vix_level=%s, vix_percentile=%s, regime_data=%s, updated_at=NOW() WHERE id=%s",
-                (effective_state, _vix_curr, _vix_pct, json.dumps(_regime_data), _existing['id'])
-            )
-        else:
-            _cur.execute(
-                "INSERT INTO market_regime (state, vix_level, vix_percentile, regime_data) VALUES (%s, %s, %s, %s)",
-                (effective_state, _vix_curr, _vix_pct, json.dumps(_regime_data))
-            )
+        _cur.execute(
+            "INSERT INTO market_regime (state, vix_level, vix_percentile, regime_data) VALUES (%s, %s, %s, %s)",
+            (effective_state, _vix_curr, _vix_pct_file, json.dumps(_regime_data))
+        )
         _conn.commit()
         _cur.close()
         _conn.close()
-        print(f'  DB updated: market_regime → {effective_state} (VIX={_vix_curr:.2f}, pct={_vix_pct:.1f}%)')
+        print(f'  DB appended: market_regime → {effective_state} (VIX={_vix_curr:.2f}, pct={_vix_pct_file:.1f}%)')
     except Exception as e:
         print(f'  [WARN] DB write failed: {e}')
 else:

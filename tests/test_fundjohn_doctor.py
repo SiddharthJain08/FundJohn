@@ -250,56 +250,78 @@ class TestRegimeFreshness(unittest.TestCase):
 
 
 class TestEngineStalenessGate(unittest.TestCase):
-    """Layer 2 of the defense — engine.py refuses to run on stale regime."""
+    """Layer 2 of the defense — engine.py refuses to run on stale regime.
 
-    def test_load_regime_exits_2_when_market_regime_stale(self):
-        from datetime import datetime, timedelta, timezone
-        # Lazy-import via execution path so engine.py's logger is set up
+    Post-2026-04-29 engine.load_regime reads `regime_latest.json`
+    file-primary (not `market_regime` DB). Staleness is keyed off file
+    mtime, not DB updated_at. The DB is now an append-only history copy.
+    """
+
+    def _write_regime_file(self, tmp_path, mtime_offset_hours=1):
+        """Write a synthetic regime_latest.json + return engine module
+        wired to point at it via REGIME_LATEST_FILE override."""
+        import json, os, time
         sys.path.insert(0, str(ROOT / 'src'))
-        # Re-import in case a prior test memoized the module under a stale state
         if 'execution.engine' in sys.modules:
             del sys.modules['execution.engine']
         from execution import engine
-
-        # Stub cursor: returns a regime row stamped 100h ago — should trip
-        # the 80h ENGINE_REGIME_FAIL_HOURS gate.
-        ts = datetime.now(timezone.utc) - timedelta(hours=100)
-        cur = MagicMock()
-        cur.fetchone.return_value = {
+        engine.REGIME_LATEST_FILE = tmp_path / 'regime_latest.json'
+        payload = {
             'state':           'TRANSITIONING',
             'vix_level':       18.0,
             'vix_percentile':  60.0,
-            'regime_data':     {},
-            'updated_at':      ts,
+            'features':        {'vix': 18.0},
+            'stress_score':    44,
         }
-        with patch.dict('os.environ',
-                        {'ENGINE_REGIME_FAIL_HOURS': '80'}, clear=False):
-            import os
-            os.environ.pop('OPENCLAW_ALLOW_STALE_REGIME', None)
-            with self.assertRaises(SystemExit) as ctx:
-                engine.load_regime(cur)
-        self.assertEqual(ctx.exception.code, 2)
+        engine.REGIME_LATEST_FILE.write_text(json.dumps(payload))
+        # Backdate mtime
+        target = time.time() - (mtime_offset_hours * 3600)
+        os.utime(str(engine.REGIME_LATEST_FILE), (target, target))
+        return engine
+
+    def test_load_regime_exits_2_when_file_stale(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._write_regime_file(pathlib.Path(td), mtime_offset_hours=100)
+            with patch.dict('os.environ',
+                            {'ENGINE_REGIME_FAIL_HOURS': '80'}, clear=False):
+                import os
+                os.environ.pop('OPENCLAW_ALLOW_STALE_REGIME', None)
+                with self.assertRaises(SystemExit) as ctx:
+                    engine.load_regime()
+            self.assertEqual(ctx.exception.code, 2)
 
     def test_load_regime_allows_stale_when_override_set(self):
-        from datetime import datetime, timedelta, timezone
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._write_regime_file(pathlib.Path(td), mtime_offset_hours=100)
+            with patch.dict('os.environ',
+                            {'OPENCLAW_ALLOW_STALE_REGIME': '1'}, clear=False):
+                res = engine.load_regime()
+            self.assertEqual(res['state'], 'TRANSITIONING')
+
+    def test_load_regime_exits_2_when_file_missing(self):
+        import tempfile, pathlib
         sys.path.insert(0, str(ROOT / 'src'))
         if 'execution.engine' in sys.modules:
             del sys.modules['execution.engine']
         from execution import engine
+        with tempfile.TemporaryDirectory() as td:
+            engine.REGIME_LATEST_FILE = pathlib.Path(td) / 'does_not_exist.json'
+            with self.assertRaises(SystemExit) as ctx:
+                engine.load_regime()
+            self.assertEqual(ctx.exception.code, 2)
 
-        ts = datetime.now(timezone.utc) - timedelta(hours=100)
-        cur = MagicMock()
-        cur.fetchone.return_value = {
-            'state':           'TRANSITIONING',
-            'vix_level':       18.0,
-            'vix_percentile':  60.0,
-            'regime_data':     {},
-            'updated_at':      ts,
-        }
-        with patch.dict('os.environ',
-                        {'OPENCLAW_ALLOW_STALE_REGIME': '1'}, clear=False):
-            res = engine.load_regime(cur)
-        self.assertEqual(res['state'], 'TRANSITIONING')
+    def test_load_regime_returns_state_and_vix_when_fresh(self):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as td:
+            engine = self._write_regime_file(pathlib.Path(td), mtime_offset_hours=1)
+            res = engine.load_regime()
+            self.assertEqual(res['state'], 'TRANSITIONING')
+            self.assertEqual(res['vix_level'], 18.0)
+            self.assertEqual(res['vix_percentile'], 60.0)
+            # Whole file payload exposed under regime_data for downstream
+            self.assertEqual(res['regime_data']['stress_score'], 44)
 
 
 if __name__ == '__main__':
