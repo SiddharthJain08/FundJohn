@@ -74,6 +74,20 @@ def resolve_workspace(cur, name_or_id: str) -> str:
 
 
 def load_regime(cur) -> dict:
+    """Load the latest regime from `market_regime` and refuse to run if
+    it's stale. Stale regime → wrong strategy basket fires (the
+    2026-04-28 LOW_VOL miss had market_regime stuck at TRANSITIONING for
+    7 days while regime_latest.json was fresh; engine reads the DB).
+
+    Hard fail (exit 2 via SystemExit) when the row is older than
+    ENGINE_REGIME_FAIL_HOURS — the orchestrator's CycleAbort path then
+    pages the operator instead of silently producing TRANSITIONING
+    signals on a LOW_VOL day. Override with
+    OPENCLAW_ALLOW_STALE_REGIME=1 only for offline backtest runs.
+    """
+    import os
+    from datetime import datetime, timezone
+
     cur.execute("""
         SELECT state, vix_level, vix_percentile, regime_data, updated_at
         FROM market_regime
@@ -83,6 +97,28 @@ def load_regime(cur) -> dict:
     if not row:
         logger.warning("No regime row found — defaulting to HIGH_VOL")
         return {'state': 'HIGH_VOL', 'vix_level': 25.0}
+
+    # Staleness gate.
+    fail_hours = float(os.environ.get('ENGINE_REGIME_FAIL_HOURS', '80'))
+    allow_stale = os.environ.get('OPENCLAW_ALLOW_STALE_REGIME') == '1'
+    updated_at = row['updated_at']
+    if updated_at is not None:
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        age_h = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600.0
+        if age_h > fail_hours and not allow_stale:
+            msg = (f'market_regime is stale: state={row["state"]}, '
+                   f'updated_at={updated_at.isoformat()} ({age_h:.1f}h ago, '
+                   f'limit={fail_hours}h). Refusing to generate signals — '
+                   f'regime drift detected. Run scripts/run_market_state.py '
+                   f'or set OPENCLAW_ALLOW_STALE_REGIME=1 for backtests.')
+            logger.error(f'[engine] {msg}')
+            print(f'[engine] FATAL: {msg}', flush=True)
+            # Exit 2 so the orchestrator's strict-exit-codes path raises
+            # CycleAbort and the cycle aborts cleanly (vs degrading silently).
+            import sys
+            sys.exit(2)
+
     return {
         'state':           row['state'],
         'vix_level':       float(row['vix_level'] or 25),

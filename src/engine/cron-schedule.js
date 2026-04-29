@@ -29,13 +29,76 @@ const WORKSPACE_DIR    = path.join(ROOT, 'workspaces', 'default');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+const _https = require('https');
+
+// Bubble subprocess [WARN]/[ERROR]/[FAIL]/FATAL lines to #pipeline-feed so
+// silent stdout failures don't go unnoticed. The 2026-04-28 LOW_VOL miss
+// happened because run_market_state.py's `[WARN] DB write failed` line
+// went to stdout, was captured by execSync, and then discarded by the
+// caller — nothing surfaced for 7 days. This rescues the next instance.
+const _ALERT_PATTERN = /^\s*(\[(WARN|ERROR|FAIL)\]|FATAL:)/i;
+let   _alertWebhook = null;
+async function _resolveAlertWebhook() {
+    if (_alertWebhook !== null) return _alertWebhook;
+    try {
+        const r = await pool.query(
+            "SELECT webhook_urls FROM agent_registry WHERE id='botjohn' LIMIT 1"
+        );
+        const urls = r.rows[0]?.webhook_urls || {};
+        _alertWebhook = urls['pipeline-feed'] || urls['botjohn-log'] || '';
+    } catch (_) { _alertWebhook = ''; }
+    return _alertWebhook;
+}
+function _postAlert(content) {
+    _resolveAlertWebhook().then((url) => {
+        if (!url) return;
+        const u = new URL(url);
+        const body = JSON.stringify({ content: content.slice(0, 1900) });
+        const req = _https.request({
+            hostname: u.hostname, path: u.pathname + u.search, method: 'POST',
+            headers: {
+                'Content-Type':   'application/json',
+                'Content-Length': Buffer.byteLength(body),
+            },
+        }, (res) => { res.on('data', () => {}); res.on('end', () => {}); });
+        req.on('error', () => {});
+        req.write(body); req.end();
+    }).catch(() => {});
+}
+
+function _scanAlerts(scriptName, output) {
+    if (!output) return;
+    const lines = output.split('\n').filter(l => _ALERT_PATTERN.test(l));
+    if (!lines.length) return;
+    const head = lines.slice(0, 6).map(l => `  ${l.trim()}`).join('\n');
+    const more = lines.length > 6 ? `\n  …+${lines.length - 6} more` : '';
+    _postAlert(`⚠️ **cron[${scriptName}]** captured ${lines.length} alert line(s):\n${head}${more}`);
+}
+
 function runPython(script, args = '') {
-    return execSync(`${PYTHON} ${script} ${args}`, {
-        cwd: ROOT,
-        env: { ...process.env },
-        stdio: 'pipe',
-        timeout: 600_000,
-    }).toString();
+    let stdout = '';
+    let exitCode = 0;
+    try {
+        stdout = execSync(`${PYTHON} ${script} ${args}`, {
+            cwd: ROOT,
+            env: { ...process.env },
+            stdio: 'pipe',
+            timeout: 600_000,
+        }).toString();
+    } catch (err) {
+        exitCode = err.status || -1;
+        stdout = (err.stdout && err.stdout.toString()) || '';
+        const stderr = (err.stderr && err.stderr.toString()) || '';
+        // Surface the failure even if the script never reached its
+        // own `[WARN]` print. exit-code discipline (0/1/2) is repo-wide
+        // per Tier 3.
+        const tag = exitCode === 2 ? 'AUTH/CONFIG' : exitCode === 1 ? 'TRANSIENT' : 'EXCEPTION';
+        _postAlert(`🚨 **cron[${script}] exit ${exitCode} (${tag})**\n` +
+                    '```\n' + (stderr.slice(-500) || stdout.slice(-500) || err.message).slice(0, 1700) + '\n```');
+        throw err;
+    }
+    _scanAlerts(script, stdout);
+    return stdout;
 }
 
 function log(msg) {

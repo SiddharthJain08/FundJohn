@@ -177,5 +177,130 @@ class TestRunModes(unittest.TestCase):
         self.assertEqual(exit_code, 2)
 
 
+class TestRegimeFreshness(unittest.TestCase):
+    """Defense-in-depth check added 2026-04-28 after a 7-day silent regime
+    drift (np.float64 → 'schema "np" does not exist' bug in
+    run_market_state.py wrote regime_latest.json fresh but stalled the DB)."""
+
+    def _patch_pg(self, db_state, db_age_hours):
+        """Build a psycopg2 mock that returns one row from market_regime."""
+        from datetime import datetime, timedelta, timezone
+        ts = datetime.now(timezone.utc) - timedelta(hours=db_age_hours)
+        cur = MagicMock()
+        cur.fetchone.return_value = (db_state, ts)
+        cur.execute.return_value = None
+        cur.close.return_value = None
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        conn.close.return_value = None
+        return patch('psycopg2.connect', return_value=conn)
+
+    def _patch_file(self, file_state, file_age_hours, exists=True):
+        """Patch the regime_latest.json read + mtime."""
+        import time
+        path_mock = MagicMock()
+        path_mock.exists.return_value = exists
+        path_mock.stat.return_value = MagicMock(
+            st_mtime=time.time() - (file_age_hours * 3600))
+        return patch.object(doctor, 'REGIME_LATEST_FILE', path_mock), \
+               patch('builtins.open',
+                     unittest.mock.mock_open(read_data=json.dumps({'state': file_state})))
+
+    def test_regime_freshness_passes_when_db_and_file_agree_and_fresh(self):
+        with patch.dict('os.environ',
+                        {'POSTGRES_URI': 'postgres://x'}, clear=False), \
+             self._patch_pg('LOW_VOL', db_age_hours=2):
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=3)
+            with file_p1, file_p2:
+                res = doctor.check_regime_freshness()
+        self.assertEqual(res['severity'], doctor.PASS)
+
+    def test_regime_freshness_fails_on_state_disagreement(self):
+        """File says LOW_VOL but DB stuck at TRANSITIONING — engine.py would
+        generate the wrong basket. This is the smoking-gun signature of the
+        2026-04-28 incident."""
+        with patch.dict('os.environ',
+                        {'POSTGRES_URI': 'postgres://x'}, clear=False), \
+             self._patch_pg('TRANSITIONING', db_age_hours=2):
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=3)
+            with file_p1, file_p2:
+                res = doctor.check_regime_freshness()
+        self.assertEqual(res['severity'], doctor.FAIL)
+        self.assertIn('STATE MISMATCH', res['detail'])
+
+    def test_regime_freshness_fails_on_db_stale_beyond_fail_hours(self):
+        """DB hasn't updated in 100h (>REGIME_FAIL_HOURS=80). engine.py
+        would silently use stale state. Catch this even if file is fresh."""
+        with patch.dict('os.environ',
+                        {'POSTGRES_URI': 'postgres://x'}, clear=False), \
+             self._patch_pg('LOW_VOL', db_age_hours=100):
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=2)
+            with file_p1, file_p2:
+                res = doctor.check_regime_freshness()
+        self.assertEqual(res['severity'], doctor.FAIL)
+
+    def test_regime_freshness_warns_when_only_warn_window_breached(self):
+        with patch.dict('os.environ',
+                        {'POSTGRES_URI': 'postgres://x'}, clear=False), \
+             self._patch_pg('LOW_VOL', db_age_hours=40):    # > 30h, < 80h
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=2)
+            with file_p1, file_p2:
+                res = doctor.check_regime_freshness()
+        self.assertEqual(res['severity'], doctor.WARN)
+
+
+class TestEngineStalenessGate(unittest.TestCase):
+    """Layer 2 of the defense — engine.py refuses to run on stale regime."""
+
+    def test_load_regime_exits_2_when_market_regime_stale(self):
+        from datetime import datetime, timedelta, timezone
+        # Lazy-import via execution path so engine.py's logger is set up
+        sys.path.insert(0, str(ROOT / 'src'))
+        # Re-import in case a prior test memoized the module under a stale state
+        if 'execution.engine' in sys.modules:
+            del sys.modules['execution.engine']
+        from execution import engine
+
+        # Stub cursor: returns a regime row stamped 100h ago — should trip
+        # the 80h ENGINE_REGIME_FAIL_HOURS gate.
+        ts = datetime.now(timezone.utc) - timedelta(hours=100)
+        cur = MagicMock()
+        cur.fetchone.return_value = {
+            'state':           'TRANSITIONING',
+            'vix_level':       18.0,
+            'vix_percentile':  60.0,
+            'regime_data':     {},
+            'updated_at':      ts,
+        }
+        with patch.dict('os.environ',
+                        {'ENGINE_REGIME_FAIL_HOURS': '80'}, clear=False):
+            import os
+            os.environ.pop('OPENCLAW_ALLOW_STALE_REGIME', None)
+            with self.assertRaises(SystemExit) as ctx:
+                engine.load_regime(cur)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_load_regime_allows_stale_when_override_set(self):
+        from datetime import datetime, timedelta, timezone
+        sys.path.insert(0, str(ROOT / 'src'))
+        if 'execution.engine' in sys.modules:
+            del sys.modules['execution.engine']
+        from execution import engine
+
+        ts = datetime.now(timezone.utc) - timedelta(hours=100)
+        cur = MagicMock()
+        cur.fetchone.return_value = {
+            'state':           'TRANSITIONING',
+            'vix_level':       18.0,
+            'vix_percentile':  60.0,
+            'regime_data':     {},
+            'updated_at':      ts,
+        }
+        with patch.dict('os.environ',
+                        {'OPENCLAW_ALLOW_STALE_REGIME': '1'}, clear=False):
+            res = engine.load_regime(cur)
+        self.assertEqual(res['state'], 'TRANSITIONING')
+
+
 if __name__ == '__main__':
     unittest.main()

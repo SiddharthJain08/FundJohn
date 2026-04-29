@@ -62,8 +62,19 @@ STALE_WARN_HOURS = 30   # data older than this on a critical source → warn
 STALE_FAIL_HOURS = 96   # data older than this → fail (4 days = past weekend)
 CRITICAL_DATA_TYPES = ['prices', 'options_eod']
 
+# Regime-freshness window. The 9:00 AM ET cron writes a fresh regime daily;
+# weekends are tolerated by the higher fail bound. Anything beyond
+# REGIME_FAIL_HOURS is catastrophic — engine.py would generate signals
+# under stale regime context (the 2026-04-28 LOW_VOL miss exhibited this
+# silently for 7 days due to a numpy→psycopg2 type-cast bug in
+# scripts/run_market_state.py).
+REGIME_WARN_HOURS = 30
+REGIME_FAIL_HOURS = 80   # Fri evening + weekend tolerance
+
 # Slow-check tags so --quick can skip them.
 SLOW_CHECKS = {'redis', 'data_coverage', 'systemd_services'}
+
+REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
 
 
 def _check(name, slow=False):
@@ -214,6 +225,86 @@ def check_env_optional():
     if not missing:
         return _ok('env_optional', f'{len(OPTIONAL_ENV)}/{len(OPTIONAL_ENV)} optional vars present')
     return _warn('env_optional', f'missing: {",".join(missing)}')
+
+
+@_check('regime_freshness')
+def check_regime_freshness():
+    """Detect drift between `regime_latest.json` (daily-cron output) and
+    `market_regime` Postgres table (what engine.py reads). They MUST agree
+    on `state` and both must be fresh; otherwise signal generation runs
+    under stale regime context.
+
+    Failure modes this catches:
+      - DB write silently fails (e.g. type-cast bug in run_market_state.py
+        — caused the 2026-04-28 LOW_VOL miss for 7 days).
+      - Cron schedule fails to fire (json file goes stale too).
+      - Manual override of one source without the other.
+    """
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        return _warn('regime_freshness', 'POSTGRES_URI not set — skipped')
+    try:
+        import psycopg2
+        conn = psycopg2.connect(uri, connect_timeout=5)
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT state, updated_at FROM market_regime "
+            "ORDER BY updated_at DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return _warn('regime_freshness', f'DB query failed: {type(exc).__name__}')
+
+    if not row:
+        return _fail('regime_freshness', 'market_regime table empty — engine.py will default to HIGH_VOL')
+
+    db_state, db_updated = row
+    if db_updated.tzinfo is None:
+        db_updated = db_updated.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    db_age_h = (now - db_updated).total_seconds() / 3600.0
+
+    file_state = None
+    file_age_h = None
+    if REGIME_LATEST_FILE.exists():
+        try:
+            with open(REGIME_LATEST_FILE) as f:
+                file_state = json.load(f).get('state')
+            file_mtime = datetime.fromtimestamp(
+                REGIME_LATEST_FILE.stat().st_mtime, tz=timezone.utc)
+            file_age_h = (now - file_mtime).total_seconds() / 3600.0
+        except Exception:
+            pass
+
+    # Worst severity wins.
+    severity = PASS
+    notes = [f'db={db_state} ({db_age_h:.0f}h)']
+    if file_state is not None:
+        notes.append(f'file={file_state} ({file_age_h:.0f}h)')
+
+    if db_age_h > REGIME_FAIL_HOURS:
+        severity = FAIL
+    elif db_age_h > REGIME_WARN_HOURS and severity != FAIL:
+        severity = WARN
+
+    if file_age_h is not None:
+        if file_age_h > REGIME_FAIL_HOURS:
+            severity = FAIL
+        elif file_age_h > REGIME_WARN_HOURS and severity != FAIL:
+            severity = WARN
+
+    if file_state is not None and file_state != db_state:
+        # State disagreement is more dangerous than staleness alone — engine
+        # might generate the wrong signal basket all day.
+        severity = FAIL
+        notes.append(f'STATE MISMATCH (file={file_state} ≠ db={db_state})')
+
+    detail = '; '.join(notes)
+    if severity == FAIL: return _fail('regime_freshness', detail)
+    if severity == WARN: return _warn('regime_freshness', detail)
+    return _ok('regime_freshness', detail)
 
 
 @_check('data_coverage', slow=True)
