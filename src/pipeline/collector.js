@@ -307,6 +307,38 @@ async function runSnapshots() {
   await store.logRun(null, 'snapshot', 'success', tickers.length, null, 0, 0);
 }
 
+// ── Phase 1b: Macro vol indices (VIX/VIX3M/VVIX) ─────────────────────────
+// Wraps src/ingestion/fetch_vol_indices.py. Pre-2026-04-29 this only ran
+// via operator-triggered backfills, so macro.parquet drifted between
+// runs. Strategies that read aux_data['macro'] depend on these series
+// being current. Fast (<10s wall-clock) since each series is incremental.
+async function runVolIndices() {
+  const { execSync } = require('child_process');
+  const start = Date.now();
+  notify('📈 Macro vol indices: VIX/VIX3M/VVIX via yfinance');
+  try {
+    const out = execSync(
+      'python3 src/ingestion/fetch_vol_indices.py',
+      { cwd: require('path').resolve(__dirname, '..', '..'), timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] },
+    ).toString();
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    let inserted = 0;
+    try {
+      const m = out.match(/\{.*?inserted.*?\}/s);
+      if (m) {
+        const r = JSON.parse(m[0]);
+        inserted = Object.values(r.inserted || {}).reduce((a, b) => a + Math.max(0, b), 0);
+      }
+    } catch (_) {}
+    notify(`✅ Macro vol indices complete — ${inserted} rows in ${elapsed}s`);
+    await store.logRun(null, 'macro', 'success', inserted, null, Date.now() - start, 0);
+  } catch (err) {
+    // Non-fatal — collector continues with prices/options/etc.
+    notify(`[WARN] Macro vol indices failed: ${err.message.slice(0, 200)}`);
+    await store.logRun(null, 'macro', 'error', 0, err.message.slice(0, 500), Date.now() - start, 0);
+  }
+}
+
 // ── Phase 2: Historical prices — gap-aware, never re-fetches known data ────────
 
 async function runHistoricalPrices(daysBack = 3650, tickers = null) {
@@ -510,6 +542,23 @@ async function runOptions(tickers = null) {
       await store.logRun(ticker, 'options', 'error', 0, err.message, Date.now() - start, 1);
     }
   }
+  // Flush the in-memory buffer to options_eod.parquet. The pre-2026-04-29
+  // code path skipped this — `upsertOptions` only buffers, and without a
+  // matching `flushOptions` the rows were dropped on collector exit while
+  // data_coverage was still being marked fresh. Resulted in 8 days of
+  // silent options-data drift: parquet max_date stuck at 2026-04-21,
+  // but every cycle reported "Options chains complete". Same bug shape
+  // as 2026-04-28 regime drift — coverage table healthy, real store stale.
+  try {
+    const flushed = await store.flushOptions();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Options flush: ${flushed.flushed} rows → options_eod.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Options flush FAILED: ${err.message}`);
+    notify(`[ERROR] Options parquet flush failed: ${err.message}`);
+  }
+
   const elapsed = Math.round((Date.now() - phaseStart) / 1000);
   if (budgetExceeded) {
     notify(`⚠️ Options chains partial — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s (budget capped)`);
@@ -1007,6 +1056,18 @@ print(json.dumps(results))
       _stats.fundamentals += records.length;
       totalWritten += records.length;
       await store.logRun(r.ticker, 'fundamentals', 'success', records.length, null, 0, 0);
+    }
+
+    // Flush the YFinance fallback's buffer to financials.parquet — same
+    // bug shape as the Polygon options path: upsert is in-memory only.
+    try {
+      const flushed = await store.flushFundamentals();
+      if (flushed && flushed.flushed) {
+        console.log(`[collector] Fundamentals (YFinance) flush: ${flushed.flushed} rows → financials.parquet (total ${flushed.total_after})`);
+      }
+    } catch (err) {
+      console.error(`[collector] Fundamentals (YFinance) flush FAILED: ${err.message}`);
+      notify(`[ERROR] Fundamentals YFinance flush failed: ${err.message}`);
     }
 
     const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
@@ -1553,6 +1614,17 @@ async function runDailyCollection() {
 
   // Phase 1: Snapshots — always runs (live price refresh)
   await runSnapshots();
+
+  // Phase 1b: Macro / vol indices — VIX, VIX3M, VVIX via yfinance
+  // (incremental fetch keyed off macro.parquet max_date per series).
+  // Pre-2026-04-29 the daily cycle never refreshed these, so
+  // macro.parquet would drift by however many days passed between
+  // operator-triggered runs. Strategies that read from
+  // `aux_data['macro']` (e.g., VVIX early-warning, VIX-term-slope)
+  // were silently using stale data.
+  if (cfg.collect_macro !== 'false') {
+    await runVolIndices();
+  }
 
   // Phase 2a: S&P 100 equity prices — only tickers with gaps (yfinance fallback if Polygon 403)
   const priceEquityNeeded = gaps?.prices.tickers.filter(t => equityTickers.includes(t)) ?? equityTickers;

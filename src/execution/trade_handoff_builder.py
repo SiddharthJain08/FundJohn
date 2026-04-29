@@ -736,6 +736,55 @@ def build(run_date: str) -> dict:
     write_handoff(run_date, 'structured', payload)
     print(f'[handoff] structured handoff written — {len(enriched)} signals, '
           f'{len(json.dumps(payload)) / 1024:.1f} KB')
+
+    # Persist the per-cycle aggregate row consumed by:
+    #   - pipeline_orchestrator.check_signal_quality (the trade-step gate)
+    #   - alpaca_executor (the alpaca-step gate)
+    #   - daily_health_digest "Latest run" line
+    # The original writer was research_report.py; when that script was
+    # retired and replaced by trade_handoff_builder (parquet-primary
+    # refactor), the INSERT was dropped. Result: daily_signal_summary
+    # stuck at 2026-04-22 for a full week, with the trade-quality gate
+    # making decisions on week-old EV / green counts. Same multi-source
+    # silent pattern as the regime drift — consumer reads, producer is
+    # gone, no one notices.
+    try:
+        ev_vals  = [s.get('ev_gbm') for s in enriched if s.get('ev_gbm') is not None]
+        p_vals   = [s.get('p_t1')   for s in enriched if s.get('p_t1')   is not None]
+        ev_pos   = sum(1 for v in ev_vals if v >  0)
+        ev_neg   = sum(1 for v in ev_vals if v <= 0)
+        avg_ev   = (sum(ev_vals) / len(ev_vals)) if ev_vals else None
+        avg_p_t1 = (sum(p_vals)  / len(p_vals))  if p_vals  else None
+        # high-conv = green AND p_t1 >= 0.65 (≥65% chance of hitting target
+        # before stop). Threshold matches the historical ratio observed
+        # across pre-2026-04-22 rows (~40% of green).
+        high_conv_count = sum(
+            1 for s in green if (s.get('p_t1') or 0) >= 0.65
+        )
+        with psycopg2.connect(uri) as _c, _c.cursor() as _cur:
+            _cur.execute("""
+                INSERT INTO daily_signal_summary
+                  (run_date, regime, n_signals, ev_pos, ev_neg,
+                   avg_ev, avg_p_t1, high_conv_count, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            """, (
+                run_date, regime.get('state'), len(enriched), ev_pos, ev_neg,
+                avg_ev, avg_p_t1, high_conv_count,
+                json.dumps({
+                    'green':       len(green),
+                    'prefiltered': len(prefiltered),
+                    'd1_matches':  d1_matches,
+                }),
+            ))
+            _c.commit()
+        print(f'[handoff] daily_signal_summary appended: '
+              f'n={len(enriched)}, ev_pos={ev_pos}, high_conv={high_conv_count}')
+    except Exception as _e:
+        # Surface as [WARN] for the cron alert-bubbler (silent-failure
+        # pattern — never let a missing aggregate row cascade silently
+        # into a broken trade-quality gate).
+        print(f'[WARN] daily_signal_summary insert failed: {_e}', flush=True)
+
     return payload
 
 
