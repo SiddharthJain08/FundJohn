@@ -504,22 +504,54 @@ def run_step(script, run_date, env):
     """
     import threading
     cmd, timeout = _resolve_script(script, run_date)
-    log(f'Starting {script} timeout={timeout}s (cmd: {" ".join(cmd)})...')
+    # Stdout-idle watchdog: if the subprocess emits nothing for this many
+    # seconds we treat it as wedged and SIGTERM it. The 2026-04-29 cycle
+    # got stuck in collector Phase 3 (options) for 30+ minutes with zero
+    # stdout — a half-open Polygon TCP stream wedged the await. The
+    # underlying httpGet bug is fixed in collector.js, but this watchdog
+    # is the belt-and-suspenders defense for any future silent stall.
+    # Override per-step via STEP_STDOUT_IDLE_MAX_S env (default 600s).
+    stdout_idle_max_s = int(os.environ.get('STEP_STDOUT_IDLE_MAX_S', '600'))
+    log(f'Starting {script} timeout={timeout}s stdout_idle_max={stdout_idle_max_s}s (cmd: {" ".join(cmd)})...')
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(ROOT), env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
+        last_output_ts = [time.time()]
         def _pump():
             for line in proc.stdout:
+                last_output_ts[0] = time.time()
                 line = line.rstrip()
                 if line:
                     print(f'  [{script}] {line}', flush=True)
         t = threading.Thread(target=_pump, daemon=True)
         t.start()
+        deadline = time.time() + timeout
+        wedged = False
         try:
-            rc = proc.wait(timeout=timeout)
+            while True:
+                # Poll on a 30s grain — light on CPU, fast enough to detect
+                # both hard-timeout and stdout-idle stalls.
+                try:
+                    rc = proc.wait(timeout=30)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                now = time.time()
+                if now >= deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout)
+                idle_s = now - last_output_ts[0]
+                if idle_s > stdout_idle_max_s:
+                    log(f'{script} stdout idle {int(idle_s)}s > {stdout_idle_max_s}s — wedge detected, SIGTERM')
+                    wedged = True
+                    proc.terminate()
+                    try: proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill(); proc.wait()
+                    t.join(timeout=5)
+                    return (False, -2)   # rc=-2 distinguishes wedge from hard-timeout
         except subprocess.TimeoutExpired:
             log(f'{script} timed out after {timeout}s — SIGTERM')
             proc.terminate()
@@ -528,6 +560,8 @@ def run_step(script, run_date, env):
                 proc.kill(); proc.wait()
             t.join(timeout=5)
             return (False, -1)   # treat timeout as a regular failure (rc=-1)
+        if wedged:
+            return (False, -2)
         t.join(timeout=5)
         if rc != 0:
             log(f'{script} exited {rc}')

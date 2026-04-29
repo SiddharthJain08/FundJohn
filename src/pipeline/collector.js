@@ -199,15 +199,48 @@ async function checkCompletionStatus(tickers, fromDate, toDate) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Hard request-deadline (ms) — used to wrap every Polygon/FMP call so a
+// half-open / silently-stalled TCP stream cannot wedge the cycle. Node's
+// `timeout` option is socket-idle only; if a server keeps sending one byte
+// every <30s, or if the response stream emits an unhandled 'error' after
+// the connection RSTs mid-body, the socket-idle timer is irrelevant. The
+// 2026-04-29 cycle wedged in Phase 3 (Polygon options chain) on this exact
+// shape — no error surfaced, no progress, ep_poll forever. See git log.
+const HTTP_REQUEST_DEADLINE_MS = parseInt(process.env.HTTP_REQUEST_DEADLINE_MS || '60000', 10);
+
 async function httpGet(url, _retryCount = 0) {
   const raw = await new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn, arg) => { if (settled) return; settled = true; fn(arg); };
+
+    // Hard overall-deadline — covers the case where a response stream RSTs
+    // mid-body and node never fires 'end' (the bug that wedged the
+    // 2026-04-29 cycle).
+    const deadline = setTimeout(() => {
+      try { req.destroy(); } catch (_) {}
+      settle(reject, new Error(`Request deadline exceeded (${HTTP_REQUEST_DEADLINE_MS}ms)`));
+    }, HTTP_REQUEST_DEADLINE_MS);
+
     const req = https.get(url, { timeout: 30_000 }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+      res.on('end', () => {
+        clearTimeout(deadline);
+        settle(resolve, { status: res.statusCode, headers: res.headers, body: data });
+      });
+      // Without this handler, a connection RST after headers causes the
+      // promise to pend forever (no end, no error path). Found 2026-04-29.
+      res.on('error', (err) => {
+        clearTimeout(deadline);
+        settle(reject, err);
+      });
     });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.on('error', (err) => { clearTimeout(deadline); settle(reject, err); });
+    req.on('timeout', () => {
+      clearTimeout(deadline);
+      try { req.destroy(); } catch (_) {}
+      settle(reject, new Error('Request timeout'));
+    });
   });
 
   if (raw.status === 429) {
@@ -457,6 +490,14 @@ async function runOptions(tickers = null) {
       tickProgress('🎲 Options', skipped + i + 1, tickers.length, ticker, written);
       await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
       processed++;
+      // Heartbeat to orchestrator stdout every 25 fetched tickers — lets the
+      // orchestrator's stdout-idle watchdog distinguish "still working" from
+      // "wedged". tickProgress only fires Discord webhooks; stdout is silent
+      // through the entire phase otherwise.
+      if (processed % 25 === 0) {
+        const phaseElapsed = Math.round((Date.now() - phaseStart) / 1000);
+        notify(`🎲 Options progress — ${processed}/${needed.length} fetched, ${_progress.rowsThisPhase.toLocaleString()} contracts in ${phaseElapsed}s`);
+      }
     } catch (err) {
       // If we hit an auth error (plan changed / endpoint removed) fall back to YFinance for remainder
       if (err.message.includes('403') || err.message.includes('NOT_AUTHORIZED')) {

@@ -65,18 +65,49 @@ class TestRunStepReturnShape(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_timeout_returns_minus_1(self):
-        """Timeouts are flagged as rc=-1 (distinct from any user-facing exit
-        code) so the caller can log a different message but still falls
-        into the 'failure' branch via ok=False."""
+        """Hard-timeout (entire wall-clock budget exceeded) returns rc=-1.
+        The new polling loop calls proc.wait(timeout=30) repeatedly; we
+        clamp _resolve_script to return a 0s budget so the deadline trips
+        on the first iteration."""
         import subprocess as sp
         proc = MagicMock()
         proc.stdout = iter([])
-        proc.wait.side_effect = [sp.TimeoutExpired(cmd='x', timeout=1), 0]
+        proc.wait.side_effect = sp.TimeoutExpired(cmd='x', timeout=1)
         with patch('execution.pipeline_orchestrator.subprocess.Popen',
-                   return_value=proc):
+                   return_value=proc), \
+             patch('execution.pipeline_orchestrator._resolve_script',
+                   return_value=(['python3', '-c', 'pass'], 0)):
             ok, rc = po.run_step('alpaca_executor', '2026-04-28', {})
         self.assertFalse(ok)
         self.assertEqual(rc, -1)
+
+    def test_stdout_idle_wedge_returns_minus_2(self):
+        """rc=-2 distinguishes a stdout-idle wedge (subprocess alive but
+        producing no output for too long) from a hard wall-clock timeout
+        (rc=-1). 2026-04-29 cycle wedge would now trip this path."""
+        import subprocess as sp, os
+        os.environ['STEP_STDOUT_IDLE_MAX_S'] = '0'   # any tick is "too long"
+        try:
+            proc = MagicMock()
+            proc.stdout = iter([])     # no output → triggers idle watchdog
+            calls = {'n': 0}
+            def _wait(*a, **kw):
+                calls['n'] += 1
+                # First call: simulate "still running" (poll-loop iteration).
+                # Subsequent calls: simulate "process exited" after kill.
+                if calls['n'] == 1:
+                    raise sp.TimeoutExpired(cmd='x', timeout=30)
+                return -9  # signal-killed
+            proc.wait.side_effect = _wait
+            with patch('execution.pipeline_orchestrator.subprocess.Popen',
+                       return_value=proc), \
+                 patch('execution.pipeline_orchestrator._resolve_script',
+                       return_value=(['python3', '-c', 'pass'], 5400)):
+                ok, rc = po.run_step('alpaca_executor', '2026-04-28', {})
+            self.assertFalse(ok)
+            self.assertEqual(rc, -2)
+        finally:
+            os.environ.pop('STEP_STDOUT_IDLE_MAX_S', None)
 
 
 class TestCycleAbortException(unittest.TestCase):
