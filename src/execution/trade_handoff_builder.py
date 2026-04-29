@@ -119,34 +119,61 @@ def load_prices() -> pd.DataFrame:
 
 
 def load_regime(uri: str) -> dict:
+    """Load regime from `market_regime` — the same source engine.py reads.
+
+    Pre-2026-04-29 this queried `regime_states` (a table that doesn't
+    exist), let the exception silently fall through, then defaulted to
+    a hard-coded TRANSITIONING with scale=0.55. On a LOW_VOL day that
+    silently downsized every position to 55% of intent. Same shape as
+    the 2026-04-28 file-vs-DB drift: producer healthy, consumer reading
+    the wrong source.
+
+    Single-source rule: the engine and the handoff must agree, so both
+    read `market_regime`. Staleness gating mirrors engine.load_regime
+    (ENGINE_REGIME_FAIL_HOURS, OPENCLAW_ALLOW_STALE_REGIME).
+    """
+    state    = 'TRANSITIONING'
+    stress   = 50.0
+    scale    = 0.55
     try:
         conn = psycopg2.connect(uri)
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT state, stress_score, timestamp FROM regime_states ORDER BY timestamp DESC LIMIT 1"
-        )
+        cur  = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute("""
+            SELECT state, vix_level, vix_percentile, regime_data, updated_at
+            FROM market_regime
+            ORDER BY updated_at DESC LIMIT 1
+        """)
         r = cur.fetchone()
         conn.close()
-        if r:
-            state = r.get('state') or 'TRANSITIONING'
-            return {
-                'state':   state,
-                'stress':  float(r.get('stress_score') or 0),
-                'scale':   {'LOW_VOL':1.0,'TRANSITIONING':0.55,'HIGH_VOL':0.35,'CRISIS':0.15}.get(state, 0.55),
-            }
-    except Exception:
-        pass
-    # Fallback: read workspaces/default/regime.json
-    rj = ROOT / 'workspaces' / 'default' / 'regime.json'
-    if rj.exists():
-        try:
-            j = json.loads(rj.read_text())
-            return {'state': j.get('state', 'TRANSITIONING'),
-                    'stress': float(j.get('stress', 0)),
-                    'scale':  float(j.get('position_scale', 0.55))}
-        except Exception:
-            pass
-    return {'state': 'TRANSITIONING', 'stress': 50.0, 'scale': 0.55}
+        if r and r.get('state'):
+            updated_at = r['updated_at']
+            if updated_at is not None and updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            age_h = ((datetime.now(timezone.utc) - updated_at).total_seconds() / 3600.0
+                     if updated_at else 0.0)
+            fail_hours  = float(os.environ.get('ENGINE_REGIME_FAIL_HOURS', '80'))
+            allow_stale = os.environ.get('OPENCLAW_ALLOW_STALE_REGIME') == '1'
+            if age_h > fail_hours and not allow_stale:
+                msg = (f'market_regime is stale ({age_h:.1f}h, limit={fail_hours}h) — '
+                       f'refusing to build handoff under wrong regime.')
+                print(f'[handoff] FATAL: {msg}', flush=True)
+                sys.exit(2)
+            state    = r['state']
+            stress   = float((r.get('regime_data') or {}).get('stress_score') or 0)
+            scale    = {'LOW_VOL':1.0,'TRANSITIONING':0.55,
+                        'HIGH_VOL':0.35,'CRISIS':0.15}.get(state, 0.55)
+            return {'state': state, 'stress': stress, 'scale': scale,
+                    'vix_level': float(r.get('vix_level') or 0),
+                    'updated_at': str(updated_at) if updated_at else None}
+    except SystemExit:
+        raise
+    except Exception as e:
+        # Surface as a [WARN] so the cron alert-bubbler catches it
+        # (matches the silent-failure pattern from 2026-04-28).
+        print(f'[WARN] handoff regime DB read failed: {e}', flush=True)
+    # Fallback only if the DB had no rows — never silently default to
+    # TRANSITIONING when the *connection* succeeded but the *query* errored.
+    return {'state': state, 'stress': stress, 'scale': scale}
 
 
 def load_portfolio_state() -> dict:
