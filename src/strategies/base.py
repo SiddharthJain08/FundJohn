@@ -121,7 +121,16 @@ class BaseStrategy(ABC):
         cls.active_in_regimes = normalized or ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
     def __init__(self, parameters: dict = None):
-        self.parameters = parameters or self.default_parameters()
+        # Merge DB overrides on top of code defaults — replacing the dict
+        # outright (the prior behavior) caused KeyErrors when a strategy's
+        # default_parameters() defined a key the DB row didn't carry. The
+        # 2026-04-29 cycle hit this on S15_iv_rv_arb (`min_option_vol`) and
+        # S_sparse_basis_pursuit_sdf (`n_rff`) — both rows in
+        # strategy_registry.parameters were Mastermind-curated subsets.
+        defaults = self.default_parameters()
+        if parameters:
+            defaults.update(parameters)
+        self.parameters = defaults
 
     def default_parameters(self) -> dict:
         return {}
