@@ -10,7 +10,9 @@ Run:
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -88,21 +90,75 @@ class TestPostgresCheck(unittest.TestCase):
 
 
 class TestDataMasterWritable(unittest.TestCase):
-    def test_data_master_writable_check_passes_when_writable(self):
-        # Real check — data/master/ exists in this repo and is writable by root
-        res = doctor.check_data_master_writable()
-        # Should pass under normal repo conditions
-        self.assertIn(res['severity'], (doctor.PASS, doctor.FAIL))
-        # If it does pass, the detail should be the absolute path
-        if res['severity'] == doctor.PASS:
-            self.assertIn('data/master', res['detail'])
+    """Post-2026-05-01 the check is permission-honest: it asks "is the path
+    being written to?" rather than "can THIS process write here?". The
+    pre-fix check failed when invoked as claudebot from the maintenance
+    timer because data/master is root-owned, even though the cycle (root)
+    was happily writing it every morning."""
 
-    def test_data_master_writable_check_fails_when_path_missing(self):
-        # Patch ROOT to a nonexistent path
+    def _setup_master_dir(self, tmp_path: Path, file_age_hours: float):
+        master = tmp_path / 'data' / 'master'
+        master.mkdir(parents=True)
+        f = master / 'prices.parquet'
+        f.write_bytes(b'parquet')
+        target = time.time() - (file_age_hours * 3600)
+        os.utime(str(f), (target, target))
+        return master
+
+    def test_pass_when_recent_file_present(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._setup_master_dir(Path(td), file_age_hours=2)
+            with patch.object(doctor, 'ROOT', Path(td)):
+                res = doctor.check_data_master_writable()
+        self.assertEqual(res['severity'], doctor.PASS)
+        self.assertIn('prices.parquet', res['detail'])
+
+    def test_warn_when_file_aged_beyond_fresh_window(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._setup_master_dir(Path(td), file_age_hours=48)
+            with patch.object(doctor, 'ROOT', Path(td)):
+                res = doctor.check_data_master_writable()
+        self.assertEqual(res['severity'], doctor.WARN)
+
+    def test_fail_when_file_stale_beyond_stale_window(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._setup_master_dir(Path(td), file_age_hours=200)
+            with patch.object(doctor, 'ROOT', Path(td)):
+                res = doctor.check_data_master_writable()
+        self.assertEqual(res['severity'], doctor.FAIL)
+
+    def test_fail_when_dir_empty(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / 'data' / 'master').mkdir(parents=True)
+            with patch.object(doctor, 'ROOT', Path(td)):
+                res = doctor.check_data_master_writable()
+        self.assertEqual(res['severity'], doctor.FAIL)
+        self.assertIn('empty', res['detail'].lower())
+
+    def test_fail_when_path_missing(self):
         with patch.object(doctor, 'ROOT', Path('/nonexistent/openclaw-zzz')):
             res = doctor.check_data_master_writable()
         self.assertEqual(res['severity'], doctor.FAIL)
         self.assertIn('missing', res['detail'].lower())
+
+    def test_check_is_permission_invariant(self):
+        """Drop perms via mock os.access — check must still PASS based on mtime,
+        not on the calling user's write permission. Regression guard for the
+        2026-05-01 false-positive that caused BotJohn's daily report to flag
+        a non-issue."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._setup_master_dir(Path(td), file_age_hours=1)
+            with patch.object(doctor, 'ROOT', Path(td)), \
+                 patch('maintenance.doctor.os.access', return_value=False):
+                res = doctor.check_data_master_writable()
+        # Even with os.access lying that nothing is writable, the new check
+        # passes — because it doesn't call os.access at all.
+        self.assertEqual(res['severity'], doctor.PASS)
 
 
 class TestEnvVars(unittest.TestCase):

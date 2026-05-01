@@ -51,8 +51,13 @@ FAIL = 'fail'
 # Required env vars: missing → exit 2 (cycle cannot proceed).
 REQUIRED_ENV = ['ALPACA_API_KEY', 'ALPACA_SECRET_KEY', 'POSTGRES_URI']
 # Optional env vars: missing → exit 1 (cycle can proceed but reduced functionality).
-OPTIONAL_ENV = ['ANTHROPIC_API_KEY', 'DATABOT_TOKEN', 'BOT_TOKEN',
-                'POLYGON_KEY', 'FMP_API_KEY', 'LANGSMITH_API_KEY']
+# Names must match the actual variables in /root/openclaw/.env. Pre-2026-05-01
+# this list contained ANTHROPIC_API_KEY (unused — claude-bin uses OAuth),
+# BOT_TOKEN (actual var is DISCORD_BOT_TOKEN), POLYGON_KEY (actual var is
+# POLYGON_API_KEY), and LANGSMITH_API_KEY (not enabled), so env_optional
+# warned every cycle on the same 4 stale names. Audit before adding.
+OPTIONAL_ENV = ['DATABOT_TOKEN', 'DISCORD_BOT_TOKEN',
+                'POLYGON_API_KEY', 'FMP_API_KEY']
 
 # Daily-cycle systemd services we expect to be active.
 EXPECTED_SERVICES = ['johnbot.service', 'fundjohn-dashboard.service']
@@ -203,12 +208,38 @@ def check_redis_reachable():
 
 @_check('data_master_writable')
 def check_data_master_writable():
+    """Verify data/master is being written to. Pre-2026-05-01 this checked
+    `os.access(p, os.W_OK)` against the *current process's* uid — but
+    pipeline_orchestrator runs as root while doctor (when invoked from
+    the BotJohn maintenance timer) runs as claudebot. data/master is
+    owned 755 root:root, so doctor would FAIL even though the cycle was
+    successfully writing the path every morning. The check is asking
+    the wrong question.
+
+    Permission-honest replacement: confirm the dir exists AND has at
+    least one non-lock file modified within MASTER_FRESH_HOURS. This
+    actually measures the thing we care about (is the path functioning
+    end-to-end) and is invariant to which user invokes doctor.
+    """
+    MASTER_FRESH_HOURS = 36   # warn beyond a full weekend gap
+    MASTER_STALE_HOURS = 96   # fail at >4 days (a real outage)
+
     p = ROOT / 'data' / 'master'
     if not p.exists():
         return _fail('data_master_writable', f'{p}: missing')
-    if not os.access(p, os.W_OK):
-        return _fail('data_master_writable', f'{p}: not writable by uid={os.getuid()}')
-    return _ok('data_master_writable', str(p))
+    files = [f for f in p.iterdir() if f.is_file() and not f.name.endswith('.lock')]
+    if not files:
+        return _fail('data_master_writable', f'{p}: empty (no parquets)')
+    newest = max(files, key=lambda f: f.stat().st_mtime)
+    age_h = (time.time() - newest.stat().st_mtime) / 3600.0
+    if age_h > MASTER_STALE_HOURS:
+        return _fail('data_master_writable',
+                     f'{p}: newest file {newest.name} is {age_h:.0f}h old (>{MASTER_STALE_HOURS}h)')
+    if age_h > MASTER_FRESH_HOURS:
+        return _warn('data_master_writable',
+                     f'{p}: newest file {newest.name} is {age_h:.0f}h old')
+    return _ok('data_master_writable',
+               f'{p}: newest={newest.name} ({age_h:.1f}h)')
 
 
 @_check('env_required')
@@ -451,11 +482,18 @@ def _format_table(results):
 
 
 def main():
-    # Always load .env so subprocess CLIs inherit Alpaca creds.
+    # Best-effort .env load so subprocess CLIs inherit Alpaca creds when
+    # the doctor is invoked directly (operator on the box). When invoked
+    # from the BotJohn maintenance timer, systemd's EnvironmentFile= has
+    # already populated the env, and the .env file itself is mode 0600
+    # root:root — load_dotenv() would raise PermissionError as claudebot
+    # and crash the whole script. Treat any read-side failure as
+    # already-loaded-or-not-our-job and continue with whatever env we
+    # already have.
     try:
         from dotenv import load_dotenv
         load_dotenv(ROOT / '.env')
-    except ImportError:
+    except (ImportError, PermissionError, OSError):
         pass
 
     ap = argparse.ArgumentParser()

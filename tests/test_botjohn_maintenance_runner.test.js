@@ -49,6 +49,69 @@ test('formatReport handles missing/NaN cost gracefully', () => {
     `should fall back to $0.00, got: ${out}`);
 });
 
+// ── clipToTemplate (preamble stripping) ───────────────────────────────
+
+test('clipToTemplate strips claude-bin narration before ✅ marker', () => {
+  // Real fixture from the May 1 maintenance run that prompted this fix.
+  const fixture = [
+    'All data gathered. Let me compose the maintenance report.',
+    '',
+    '**Summary:**',
+    '- Pipeline: all 8/8 steps completed cleanly at 14:17 ET',
+    '',
+    '---',
+    '',
+    '✅ **Daily maintenance — 2026-05-01**',
+    'Pipeline ran cleanly. Doctor: 10/12 pass.',
+    'No action taken.',
+  ].join('\n');
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('✅ **Daily maintenance'),
+    `clipped output must begin with the template emoji, got: ${JSON.stringify(out.slice(0,80))}`);
+  assert.ok(!out.includes('All data gathered'),
+    'preamble narration must be removed');
+});
+
+test('clipToTemplate handles 🔧 fix-and-recovered marker', () => {
+  const fixture = 'Here is what I found... \n---\n🔧 **Daily maintenance — 2026-05-04**\nDetected: ...';
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('🔧 **Daily maintenance'));
+});
+
+test('clipToTemplate handles 🚨 escalation marker', () => {
+  const fixture = 'Investigation:\n\n🚨 **Daily maintenance — 2026-05-05**\nCould not auto-fix...';
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('🚨 **Daily maintenance'));
+});
+
+test('clipToTemplate falls back to original text when no marker found', () => {
+  // Defensive: never drop the message — the user still needs SOMETHING
+  // even if the LLM produced a fully-malformed response.
+  const fixture = 'Pipeline looks healthy but I forgot to use the template';
+  assert.equal(runner.clipToTemplate(fixture), fixture);
+});
+
+test('clipToTemplate is a no-op when text already starts with marker', () => {
+  const fixture = '✅ **Daily maintenance — 2026-05-02**\nPipeline ran cleanly.';
+  assert.equal(runner.clipToTemplate(fixture), fixture);
+});
+
+test('formatReport integrates clipping: real-world preamble dropped', () => {
+  const fixture = [
+    'All checks complete. Pipeline log confirms all 8 steps finished.',
+    '',
+    '---',
+    '',
+    '✅ **Daily maintenance — 2026-04-30**',
+    'Pipeline ran cleanly.',
+    'No action taken.',
+  ].join('\n');
+  const out = runner.formatReport(fixture, 0.18, 78_000);
+  assert.ok(out.startsWith('✅ **Daily maintenance'),
+    'Discord-bound output must lead with the template emoji');
+  assert.ok(out.includes('_session cost: $0.18 | duration: 78s_'));
+});
+
 // ── main(): dependency-injected end-to-end ────────────────────────────
 
 function _stubFor({ runClaudeBin, getWebhook, postWebhook } = {}) {

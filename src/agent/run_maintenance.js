@@ -232,10 +232,30 @@ function postWebhook(url, content) {
 }
 
 // ── report formatting ─────────────────────────────────────────────────
+// Clip preamble narration. Sonnet 4.6 sometimes ignores the prompt's
+// "no narration" instruction and prepends "All checks complete..." or
+// "Let me compose the maintenance report" before the actual ✅/🔧/🚨
+// template. The first scheduled runs (Apr 30 + May 1) buried the green
+// line at row 11 of the message; the user couldn't see them at a glance.
+// Defensive extraction here is more robust than re-prompting.
+const TEMPLATE_MARKER_RE = /[✅🔧🚨]\s*\*\*Daily maintenance/u;
+
+function clipToTemplate(text) {
+  if (!text) return '';
+  const m = TEMPLATE_MARKER_RE.exec(text);
+  // No marker → BotJohn produced a malformed report; pass through so
+  // the user still sees something rather than dropping the message.
+  if (!m) return text;
+  return text.slice(m.index);
+}
+
 function formatReport(text, costUsd, durationMs) {
-  // Slice the assistant body so the cost footer (and optional cost-cap
-  // line) always fit inside Discord's 1900-char webhook limit.
-  const body = (text || '').slice(0, 1750).trimEnd();
+  // 1. Strip preamble narration before slicing — otherwise we'd lose
+  //    the actual report when claude-bin's narration is long.
+  const clipped = clipToTemplate(text || '');
+  // 2. Slice the assistant body so the cost footer (and optional
+  //    cost-cap line) always fit inside Discord's 1900-char limit.
+  const body = clipped.slice(0, 1750).trimEnd();
   const seconds = Math.round((durationMs || 0) / 1000);
   const dollars = (Number.isFinite(costUsd) ? costUsd : 0).toFixed(2);
   let footer = `\n_session cost: $${dollars} | duration: ${seconds}s_`;
@@ -298,6 +318,7 @@ module.exports = {
   getWebhook,
   postWebhook,
   formatReport,
+  clipToTemplate,
   postFallback,
   main,
   MAINTENANCE_PROMPT,
