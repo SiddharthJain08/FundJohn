@@ -148,8 +148,10 @@ test('main(): claude-bin throw → fallback alert posted, exit 1', async () => {
   assert.equal(r.ok, false);
   assert.equal(r.reason, 'wrapper_failure');
   assert.equal(calls.post.length, 1, 'fallback must still post');
-  assert.ok(calls.post[0].content.startsWith('🚨 BotJohn maintenance run failed:'),
+  assert.ok(calls.post[0].content.startsWith('🚨 BotJohn maintenance run failed'),
     `expected 🚨 prefix, got: ${calls.post[0].content}`);
+  assert.ok(calls.post[0].content.includes('mode='),
+    'fallback must include mode= so journal alerts identify which timer fired');
   assert.ok(calls.post[0].content.includes('exit 137'), 'must surface underlying error');
   assert.equal(process.exitCode, 1);
 });
@@ -180,7 +182,7 @@ test('main(): webhook 5xx → exit 1, error reason returned', async () => {
 
 // ── prompt + buildPrompt ──────────────────────────────────────────────
 
-test('buildPrompt: interpolates {{TODAY_ISO}} everywhere', () => {
+test('buildPrompt: interpolates {{TODAY_ISO}} everywhere (default daily mode)', () => {
   const out = runner.buildPrompt({ today: '2026-04-30' });
   assert.ok(!out.includes('{{TODAY_ISO}}'), 'no template tokens left over');
   assert.ok(out.includes('2026-04-30'), 'date must appear in body');
@@ -188,6 +190,134 @@ test('buildPrompt: interpolates {{TODAY_ISO}} everywhere', () => {
   assert.ok(out.includes('python3 src/maintenance/doctor.py --json'));
   assert.ok(out.includes('node src/pipeline/daily_health_digest.js --dry-run'));
   assert.ok(out.includes('python3 scripts/run_pipeline.py --force-resume'));
+  // Daily prompt must NOT contain Saturday-specific scripts (regression guard
+  // against accidental cross-pollination of templates).
+  assert.ok(!out.includes('saturday_runs'),
+    'daily mode must not reference saturday_runs');
+  assert.ok(!out.includes('saturday_brain_finisher'),
+    'daily mode must not reference saturday_brain_finisher');
+});
+
+test('buildPrompt: mode=saturday selects research-maintenance template', () => {
+  const out = runner.buildPrompt({ today: '2026-05-02', mode: 'saturday' });
+  assert.ok(!out.includes('{{TODAY_ISO}}'), 'no template tokens left over');
+  assert.ok(out.includes('2026-05-02'));
+  // Saturday-specific scripts and tables
+  assert.ok(out.includes('saturday_runs'),
+    'saturday mode must query saturday_runs');
+  assert.ok(out.includes('saturday_brain_finisher.js'),
+    'saturday mode must reference the surgical Phase-6 lever');
+  assert.ok(out.includes('saturday_brain_retry_failed.js'),
+    'saturday mode must reference the fetch-failed retry lever');
+  assert.ok(out.includes('systemctl start openclaw-saturday-brain.service'),
+    'saturday mode must reference the full re-trigger lever');
+  assert.ok(out.includes('curated_candidates'),
+    'saturday mode must query bucket distribution');
+  assert.ok(out.includes('paper_gate_decisions'),
+    'saturday mode must query paperhunter outcomes');
+  // Must not leak weekday-only commands
+  assert.ok(!out.includes('--force-resume'),
+    'saturday mode must not reference --force-resume (saturday-brain has no resume flag)');
+});
+
+test('buildPrompt: mode=saturday-verify is read-only and reads yesterday', () => {
+  const out = runner.buildPrompt({ today: '2026-05-03', mode: 'saturday-verify' });
+  assert.ok(!out.includes('{{TODAY_ISO}}'));
+  assert.ok(out.includes('2026-05-03'));
+  assert.ok(out.includes('READ-ONLY'),
+    'verify prompt must explicitly mark itself read-only');
+  assert.ok(out.includes("INTERVAL '1 day'"),
+    'verify prompt must read yesterday, not today');
+  // Verify must NOT contain mutation commands
+  assert.ok(!out.includes('saturday_brain_finisher.js'),
+    'verify must not reference recovery scripts (read-only)');
+  assert.ok(!out.includes('systemctl start openclaw-saturday-brain.service'),
+    'verify must not reference re-triggers (read-only)');
+});
+
+test('buildPrompt: unknown mode throws with helpful message', () => {
+  assert.throws(
+    () => runner.buildPrompt({ today: '2026-05-02', mode: 'unknown-mode-xyz' }),
+    /unknown mode: unknown-mode-xyz/,
+  );
+});
+
+// ── clipToTemplate handles all three modes' header markers ────────────
+
+test('clipToTemplate strips preamble before ✅ Saturday research', () => {
+  const fixture = 'Investigation:\n- saturday_runs row...\n\n✅ **Saturday research — 2026-05-02**\nbody';
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('✅ **Saturday research'),
+    `Saturday research green-light must clip preamble, got: ${out.slice(0,60)}`);
+});
+
+test('clipToTemplate strips preamble before 🔧 Saturday research', () => {
+  const fixture = 'I found a Phase-6 bug. Here is what I did.\n\n🔧 **Saturday research — 2026-05-02**\nDetected: ...';
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('🔧 **Saturday research'));
+});
+
+test('clipToTemplate strips preamble before ✅ Saturday verify', () => {
+  const fixture = 'Yesterday completed cleanly.\n\n✅ **Saturday verify — 2026-05-03**\nbody';
+  const out = runner.clipToTemplate(fixture);
+  assert.ok(out.startsWith('✅ **Saturday verify'));
+});
+
+// ── main(): mode dispatch wires through to runClaudeBin prompt ─────────
+
+test('main(): mode passed through deps overrides argv', async () => {
+  let capturedPrompt = null;
+  const stub = _stubFor({
+    runClaudeBin: async (prompt) => {
+      capturedPrompt = prompt;
+      return { result: '✅ **Saturday research — 2026-05-02**\nbody', costUsd: 0.10, durationMs: 5_000, raw: '{}' };
+    },
+  });
+  process.exitCode = 0;
+  const r = await runner.main({ ...stub.deps, mode: 'saturday' });
+  assert.equal(r.ok, true);
+  assert.equal(r.mode, 'saturday');
+  assert.ok(capturedPrompt.includes('saturday_runs'),
+    'main() must pass the saturday prompt to runClaudeBin when mode=saturday');
+  assert.ok(stub.calls.post[0].content.startsWith('✅ **Saturday research'),
+    'posted message must lead with Saturday template (clipped)');
+});
+
+test('main(): unknown mode posts no report and exits 1', async () => {
+  const stub = _stubFor({});
+  process.exitCode = 0;
+  const r = await runner.main({ ...stub.deps, mode: 'totally-bogus' });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'unknown_mode');
+  assert.equal(stub.calls.post.length, 0, 'no post when mode is unrecognized');
+  assert.equal(process.exitCode, 1);
+});
+
+test('main(): no mode → defaults to daily (back-compat with weekday timer)', async () => {
+  let capturedPrompt = null;
+  const stub = _stubFor({
+    runClaudeBin: async (prompt) => {
+      capturedPrompt = prompt;
+      return { result: '✅ **Daily maintenance — 2026-05-04**\nclean', costUsd: 0.05, durationMs: 4_000, raw: '{}' };
+    },
+  });
+  process.exitCode = 0;
+  // Note: no `mode` in deps; relies on default. argv may or may not have
+  // --mode (depends on how tests are invoked). buildPrompt's default
+  // argument is 'daily'.
+  const argvBefore = process.argv;
+  process.argv = ['node', 'run_maintenance.js']; // ensure no --mode flag
+  try {
+    const r = await runner.main(stub.deps);
+    assert.equal(r.ok, true);
+    assert.equal(r.mode, 'daily');
+    assert.ok(capturedPrompt.includes('--force-resume'),
+      'no-flag invocation must select daily prompt');
+    assert.ok(!capturedPrompt.includes('saturday_runs'),
+      'no-flag invocation must NOT select saturday prompt');
+  } finally {
+    process.argv = argvBefore;
+  }
 });
 
 // Earlier failure-path tests intentionally set process.exitCode=1 to

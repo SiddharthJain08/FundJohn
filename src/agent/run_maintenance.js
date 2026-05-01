@@ -1,21 +1,31 @@
 'use strict';
 
 /**
- * run_maintenance.js — daily 12:00 PM ET BotJohn system-maintenance driver.
+ * run_maintenance.js — BotJohn system-maintenance driver.
  *
- * Mon-Fri at 12:00 America/New_York the systemd timer
- *   openclaw-botjohn-maintenance.timer
- * fires this script. We spawn claude-bin with a fixed maintenance prompt
- * (no chat history, no system-context injection — fresh-shot job), capture
- * the assistant's report + cost, append a footer, and POST to Discord
- * #general via the webhook persisted in agent_registry.webhook_urls.
+ * Three modes, selected via --mode {daily|saturday|saturday-verify}.
+ * Default mode=daily so the original weekday timer's flag-less ExecStart
+ * keeps working unchanged.
  *
- * On any wrapper failure (claude-bin crash, malformed JSON, empty result,
- * webhook 5xx) we still post a fallback `🚨 BotJohn maintenance run failed`
- * line to #general so silence is never the failure mode.
+ *   daily            Mon-Fri 12:00 ET — audits the 10:00 ET trade pipeline.
+ *                    Driven by openclaw-botjohn-maintenance.timer.
+ *   saturday         Sat 16:00 ET — audits the 10:00 ET saturday-brain run.
+ *                    Recovery levers: saturday_brain_finisher.js,
+ *                    saturday_brain_retry_failed.js, full re-trigger.
+ *                    Driven by openclaw-botjohn-saturday-maintenance.timer.
+ *   saturday-verify  Sun 12:00 ET, READ-ONLY — verifies any Saturday
+ *                    recovery actually completed.
+ *                    Driven by openclaw-botjohn-saturday-verify.timer.
+ *
+ * Each mode uses its own prompt constant; everything else (claude-bin
+ * spawn, webhook lookup, Discord post, preamble clip, cost footer,
+ * fallback alert) is shared. On any wrapper failure (claude-bin crash,
+ * malformed JSON, empty result, webhook 5xx) we still post a fallback
+ * `🚨 BotJohn maintenance run failed` line to #general so silence is
+ * never the failure mode.
  *
  * Run as: claudebot user (uid 1001) with .env loaded.
- *   /usr/bin/node src/agent/run_maintenance.js
+ *   /usr/bin/node src/agent/run_maintenance.js [--mode <mode>]
  *
  * Reuses:
  *   - getWebhook/postWebhook pattern from src/pipeline/daily_health_digest.js
@@ -48,8 +58,17 @@ const CLAUDE_HOME = process.env.CLAUDE_HOME || '/home/claudebot';
 const CLAUDE_TIMEOUT_MS = parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS || '1800000', 10); // 30 min
 const COST_CAP_USD = parseFloat(process.env.MAINT_COST_CAP_USD || '5.00');
 
-// ── maintenance prompt ────────────────────────────────────────────────
-const MAINTENANCE_PROMPT = `# BotJohn — Daily System Maintenance
+// ── argv helper (mirrors run_mastermind.js:66-72) ─────────────────────
+function getArg(name, fallback = null) {
+  const i = process.argv.indexOf(name);
+  if (i < 0) return fallback;
+  const next = process.argv[i + 1];
+  if (!next || next.startsWith('--')) return true;
+  return next;
+}
+
+// ── prompts ───────────────────────────────────────────────────────────
+const DAILY_PROMPT = `# BotJohn — Daily System Maintenance
 
 You are BotJohn, portfolio manager and orchestrator of the OpenClaw quant
 hedge fund. Today is {{TODAY_ISO}} (America/New_York). It is 12:00 PM ET on
@@ -126,8 +145,270 @@ cost — the wrapper appends it.
   single root cause, write the cannot-auto-fix template and stop.
 `;
 
-function buildPrompt({ today }) {
-  return MAINTENANCE_PROMPT.replace(/\{\{TODAY_ISO\}\}/g, today);
+const SATURDAY_PROMPT = `# BotJohn — Saturday Research Maintenance
+
+You are BotJohn, portfolio manager and orchestrator of the OpenClaw quant
+hedge fund. Today is {{TODAY_ISO}} (America/New_York). It is 16:00 ET on
+Saturday. The 10:00 AM saturday-brain pipeline should have completed
+(typical runtime ~1h; recent runs landed by ~11:00 ET). At 16:00 ET the
+run has been done for hours — anything still 'running' is a zombie.
+
+Your job: audit the run, report counts to #general, fix anything broken
+SURGICALLY, and re-trigger the appropriate recovery lever DETACHED. You
+have 30 minutes wrapper budget; you cannot wait for a saturday-brain
+re-run (~1h). Sunday 12:00 ET verify run will close the loop on
+whatever recovery you kick off.
+
+## Step 1 — Pull canonical run state
+
+Connect via $POSTGRES_URI:
+
+    SELECT run_id, started_at, finished_at, status, current_phase,
+           sources_discovered, papers_ingested, papers_rated,
+           implementable_n, paperhunters_run,
+           tier_a_count, tier_b_count, tier_c_count,
+           coded_synchronous, coded_failed,
+           cost_usd, error_detail
+      FROM saturday_runs
+     ORDER BY started_at DESC
+     LIMIT 3;
+
+Capture latest run_id. Status values seen in production:
+'completed', 'partial', 'abandoned', 'failed', 'running'.
+
+## Step 2 — Pull complementary metrics
+
+    -- bucket distribution from corpus rating
+    SELECT predicted_bucket, COUNT(*) AS n
+      FROM curated_candidates
+     WHERE run_id = '<run_id>'
+     GROUP BY predicted_bucket
+     ORDER BY 1;
+
+    -- candidate staging counts (today)
+    SELECT status, data_tier, COUNT(*) AS n
+      FROM research_candidates
+     WHERE created_at::date = '{{TODAY_ISO}}'::date
+     GROUP BY 1,2
+     ORDER BY 1,2;
+
+    -- paperhunter rejection breakdown (today)
+    SELECT gate_name, outcome, COUNT(*) AS n
+      FROM paper_gate_decisions
+     WHERE occurred_at::date = '{{TODAY_ISO}}'::date
+     GROUP BY 1,2
+     ORDER BY 1, 3 DESC;
+
+    -- Tier-A backtest results landed today
+    SELECT name, status, backtest_sharpe, backtest_return_pct, backtest_max_dd_pct
+      FROM strategy_registry
+     WHERE created_at::date = '{{TODAY_ISO}}'::date
+        OR updated_at::date = '{{TODAY_ISO}}'::date
+     ORDER BY backtest_sharpe DESC NULLS LAST
+     LIMIT 20;
+
+## Step 3 — Classify
+
+  GREEN-LIGHT  status='completed' AND finished_at IS NOT NULL
+               AND papers_ingested >= 1
+               AND papers_rated >= 1
+               AND (coded_synchronous >= 1 OR implementable_n == 0)
+               AND cost_usd <= 100.
+
+  ZOMBIE       status='running' AND started_at < NOW() - INTERVAL '7 hours'.
+
+  PARTIAL      status='partial' OR (status='completed' AND any green-light
+               criterion above is violated except cost).
+
+  FAILED       status IN ('failed','abandoned')
+               OR papers_ingested == 0 (with status not 'running').
+
+  COST_OVERRUN cost_usd > 100. Compose alongside the above.
+
+## Step 4 — Recovery (PARTIAL / FAILED / ZOMBIE only)
+
+Choose surgical-first. Re-trigger always DETACHED.
+
+  coded_synchronous == 0 AND implementable_n > 0  (Phase 6 silently broken)
+     1. tail -200 logs/saturday_brain_<run_id>.log to find the cause
+     2. Apply code fix in src/agent/curators/* if obvious; commit
+        with \`[botjohn-saturday] <reason>\` and git push
+     3. Re-run finisher detached:
+          nohup /usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js \\
+              > /root/openclaw/logs/saturday_brain_finisher_{{TODAY_ISO}}.log 2>&1 &
+        Idempotent on strategy_id. ~30 min.
+
+  Many gate_decisions.outcome='fetch_failed'
+     nohup /usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_retry_failed.js \\
+         --max-age-hours 36 \\
+         > /root/openclaw/logs/saturday_brain_retry_{{TODAY_ISO}}.log 2>&1 &
+     Chains finisher automatically. ~45 min.
+
+  status='partial' with persisted hunter rows
+     finisher (same as Phase 6 case).
+
+  status IN ('failed','abandoned') with no salvage
+     1. Diagnose root cause from error_detail JSONB and logs
+     2. Apply code fix if applicable; commit + push
+     3. systemctl start openclaw-saturday-brain.service
+        (full re-run, ~1h, ~$40)
+
+  status='running' >7h (ZOMBIE)
+     1. UPDATE saturday_runs
+           SET status='failed', finished_at=NOW(),
+               error_detail=jsonb_build_object('reason','zombie_killed_by_botjohn',
+                                                'killed_at',NOW())
+         WHERE run_id='<run_id>' AND status='running';
+     2. systemctl start openclaw-saturday-brain.service
+
+  papers_ingested == 0 (arxiv/openalex API issue)
+     If \`curl https://export.arxiv.org/api/query?search_query=cat:q-fin.PM&max_results=1\`
+     fails → ESCALATE (transient, retry next week).
+     If logic bug → fix code, commit, full re-trigger.
+
+  cost_usd > 100  → ESCALATE. Do not re-trigger.
+
+After any re-trigger, confirm it actually started:
+  systemctl status openclaw-saturday-brain.service --no-pager | head -10
+or for nohup:
+  ps -ef | grep saturday_brain_finisher | head -3
+
+## Step 5 — Output (Discord-ready Markdown ≤1700 chars)
+
+Wrapper handles posting + cost footer. Lead with the ✅/🔧/🚨 emoji.
+
+### GREEN-LIGHT:
+    ✅ **Saturday research — {{TODAY_ISO}}**
+    Run \`<run_id_short>\` completed in <H>h<M>m. Cost: $<N>.
+    **Papers looked at:** <sources_discovered>
+    **Papers ingested:** <papers_ingested> new (research_corpus)
+    **Sent for staging:** <buildable+pending> candidates
+    Buckets: high=<n> · med=<n> · low=<n> · reject=<n> · implementable=<implementable_n>
+    **Directly implemented:** <coded_synchronous>/<tier_a_count> backtested
+    Top: <name> (Sharpe <S>, ret <R>%, DD <DD>%)
+    Tier-B staged: <tier_b_count> · Tier-C deferred: <tier_c_count>
+    No action taken.
+
+### FIX-AND-RECOVERED:
+    🔧 **Saturday research — {{TODAY_ISO}}**
+    Run \`<run_id_short>\` status=<status> at phase=<current_phase>.
+    **Detected:** <one-line summary>
+    **Root cause:** <2-3 lines from error_detail / logs>
+    **Fix applied:** commit \`<sha>\` (<file>: <one-line change>)
+    **Recovery:** \`<finisher|retry_failed|full re-trigger>\` started detached at <HH:MM ET>
+    PID <pid> · log: logs/<file>
+    **Salvaged so far:** ingested=<n> rated=<n> implementable=<n> coded=<n>
+    **Verification:** Sunday 12:00 ET verify run will confirm completion.
+
+### ESCALATION:
+    🚨 **Saturday research — {{TODAY_ISO}}**
+    Run \`<run_id_short>\` status=<status>, cannot auto-fix.
+    **Detected:** <summary>
+    **Investigation:** <what you tried>
+    **Could not auto-fix because:** <reason>
+    **Suggested next steps:**
+    - <bullet>
+    - <bullet>
+    **Salvaged so far:** ingested=<n> rated=<n> implementable=<n> coded=<n>
+
+## Boundaries
+- NEVER delete from master parquets / canonical Postgres tables. Schema additions only.
+- NEVER full re-trigger when surgical lever applies. Cost: ~$40 vs ~$5.
+- ALWAYS detach re-triggers (\`nohup ... &\` or \`systemctl start\`). Wrapper times out at 30 min.
+- ALWAYS update zombie saturday_runs row to status='failed' BEFORE re-triggering — keeps the dashboard coherent.
+- Do NOT spawn subagents.
+- Do NOT post to Discord yourself.
+- Keep your own audit-session budget under $5. If multiple bugs interact, use ESCALATION and stop.
+`;
+
+const SATURDAY_VERIFY_PROMPT = `# BotJohn — Saturday Research Verify
+
+You are BotJohn. Today is {{TODAY_ISO}} (Sunday). At 12:00 ET we close
+the loop on yesterday's saturday-brain run + any recovery that fired
+Saturday evening.
+
+This run is READ-ONLY. Do not apply fixes. Report status; if anything
+looks wrong, escalate so a human can intervene Monday morning.
+
+## Step 1 — Pull yesterday's runs
+
+    SELECT run_id, started_at, finished_at, status, current_phase,
+           sources_discovered, papers_ingested, papers_rated,
+           implementable_n, paperhunters_run,
+           tier_a_count, tier_b_count, tier_c_count,
+           coded_synchronous, coded_failed,
+           cost_usd, error_detail
+      FROM saturday_runs
+     WHERE started_at::date = ('{{TODAY_ISO}}'::date - INTERVAL '1 day')::date
+     ORDER BY started_at;
+
+May have 1 row (clean Saturday) or multiple (original + recovery
+re-trigger).
+
+## Step 2 — Check finisher / retry artifacts
+
+    -- strategy_registry rows landed yesterday or overnight
+    SELECT COUNT(*) FROM strategy_registry
+     WHERE created_at >= ('{{TODAY_ISO}}'::date - INTERVAL '1 day')
+       AND created_at <  '{{TODAY_ISO}}'::date;
+
+    -- finisher log if exists
+    ls -la /root/openclaw/logs/saturday_brain_*_$(date -d yesterday +%Y-%m-%d).log
+
+## Step 3 — Decide outcome
+
+  CONFIRMED      Latest row status='completed', all green-light criteria met.
+
+  RECOVERY-OK    First row failed/partial/zombie BUT a later row (or a
+                 finisher log) shows recovery completed cleanly.
+
+  RECOVERY-FAIL  First row failed AND no later completed row, OR latest
+                 row still status='running' (>26h orphan), OR finisher
+                 log shows non-zero exit / no new strategy_registry rows.
+
+  NO-RUN         Zero rows for yesterday — timer failed to fire.
+
+## Step 4 — Output (≤1200 chars)
+
+### CONFIRMED:
+    ✅ **Saturday verify — {{TODAY_ISO}}**
+    Yesterday's run \`<run_id_short>\` closed cleanly: <coded_synchronous> backtested,
+    <tier_b_count> staged, $<cost> spent. No action.
+
+### RECOVERY-OK:
+    ✅ **Saturday verify — {{TODAY_ISO}}**
+    Run \`<run_id_1_short>\` failed at <phase>; recovery (<finisher|retry|run_2>) closed it.
+    Final: <coded_synchronous> backtested, <tier_b_count> staged.
+
+### RECOVERY-FAIL:
+    🚨 **Saturday verify — {{TODAY_ISO}}**
+    Recovery did NOT complete. Run \`<run_id_short>\` still <status>;
+    <coded_synchronous> Tier-A entries vs <implementable_n> implementable.
+    **Suggested next steps:** <bullets>
+
+### NO-RUN:
+    🚨 **Saturday verify — {{TODAY_ISO}}**
+    No saturday_runs row exists for yesterday. Timer may have failed to fire.
+    Check: \`systemctl status openclaw-saturday-brain.timer\`
+
+## Boundaries
+- READ-ONLY. No fixes, commits, or re-triggers.
+- Keep audit budget under $2.
+- Do NOT post yourself; wrapper handles posting.
+`;
+
+const PROMPT_BY_MODE = {
+  'daily':            DAILY_PROMPT,
+  'saturday':         SATURDAY_PROMPT,
+  'saturday-verify':  SATURDAY_VERIFY_PROMPT,
+};
+
+function buildPrompt({ today, mode = 'daily' }) {
+  const tmpl = PROMPT_BY_MODE[mode];
+  if (!tmpl) {
+    throw new Error(`unknown mode: ${mode} (expected one of: ${Object.keys(PROMPT_BY_MODE).join(', ')})`);
+  }
+  return tmpl.replace(/\{\{TODAY_ISO\}\}/g, today);
 }
 
 function todayET() {
@@ -238,7 +519,9 @@ function postWebhook(url, content) {
 // template. The first scheduled runs (Apr 30 + May 1) buried the green
 // line at row 11 of the message; the user couldn't see them at a glance.
 // Defensive extraction here is more robust than re-prompting.
-const TEMPLATE_MARKER_RE = /[✅🔧🚨]\s*\*\*Daily maintenance/u;
+// Match any of the three template headers. The Saturday and verify modes
+// share the same wrapper so a single regex covers all three.
+const TEMPLATE_MARKER_RE = /[✅🔧🚨]\s*\*\*(Daily maintenance|Saturday research|Saturday verify)/u;
 
 function clipToTemplate(text) {
   if (!text) return '';
@@ -271,14 +554,23 @@ async function main(deps = {}) {
   const _getWebhook   = deps.getWebhook   || getWebhook;
   const _postWebhook  = deps.postWebhook  || postWebhook;
 
+  const mode  = deps.mode || getArg('--mode', 'daily');
   const today = todayET();
-  const prompt = buildPrompt({ today });
+  let prompt;
+  try {
+    prompt = buildPrompt({ today, mode });
+  } catch (err) {
+    console.error(`[run_maintenance] ${err.message}`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'unknown_mode', mode };
+  }
+  console.log(`[run_maintenance] mode=${mode} today=${today}`);
 
   let session;
   try {
     session = await _runClaudeBin(prompt);
   } catch (err) {
-    return postFallback(_getWebhook, _postWebhook, `🚨 BotJohn maintenance run failed: ${err.message}`);
+    return postFallback(_getWebhook, _postWebhook, `🚨 BotJohn maintenance run failed (mode=${mode}): ${err.message}`);
   }
 
   const content = formatReport(session.result, session.costUsd, session.durationMs);
@@ -295,8 +587,8 @@ async function main(deps = {}) {
     process.exitCode = 1;
     return { ok: false, reason: 'post_failed', status: r.status };
   }
-  console.log(`[run_maintenance] posted ${content.length} chars to #general (cost $${session.costUsd.toFixed(4)}, ${Math.round(session.durationMs/1000)}s)`);
-  return { ok: true, costUsd: session.costUsd, durationMs: session.durationMs };
+  console.log(`[run_maintenance] posted ${content.length} chars to #general (mode=${mode}, cost $${session.costUsd.toFixed(4)}, ${Math.round(session.durationMs/1000)}s)`);
+  return { ok: true, mode, costUsd: session.costUsd, durationMs: session.durationMs };
 }
 
 async function postFallback(getWebhookFn, postWebhookFn, content) {
@@ -314,6 +606,7 @@ async function postFallback(getWebhookFn, postWebhookFn, content) {
 module.exports = {
   buildPrompt,
   todayET,
+  getArg,
   runClaudeBin,
   getWebhook,
   postWebhook,
@@ -321,7 +614,12 @@ module.exports = {
   clipToTemplate,
   postFallback,
   main,
-  MAINTENANCE_PROMPT,
+  DAILY_PROMPT,
+  SATURDAY_PROMPT,
+  SATURDAY_VERIFY_PROMPT,
+  PROMPT_BY_MODE,
+  // Back-compat alias — pre-2026-05-02 the daily prompt was the only one.
+  MAINTENANCE_PROMPT: DAILY_PROMPT,
   COST_CAP_USD,
 };
 
