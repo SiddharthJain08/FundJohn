@@ -93,14 +93,14 @@
       "components": [],
       "tools": ["postgres", "filesystem"],
       "iterationLimit": 15,
-      "timeoutSeconds": 300,
+      "timeoutSeconds": 600,
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 0.30,
+      "maxBudgetUsd": 2.00,
       "modes": ["IDEATE"],
       "skills": [],
-      "description": "Weekly strategy idea generator. Reads memory files and manifest to propose 3–5 novel research candidates."
+      "description": "Weekly strategy idea generator. Reads memory files and manifest to propose 3–5 novel research candidates. Budget bumped 2026-05-02 from $0.30 → $2.00 — every prior Saturday run hit error_max_budget_usd at the $0.30 cap and produced zero output (Sonnet 4.6 + WebSearch + multi-strategy prompt blows past the original cap). $2 covers a complete generation pass."
     },
     "datawiring": {
       "promptFile": "src/agent/prompts/subagents/datawiring.md",

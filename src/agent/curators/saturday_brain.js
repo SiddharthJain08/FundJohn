@@ -590,14 +590,65 @@ async function run(opts = {}) {
     // Phase 3
     rateData = await _rate(opts, notify);
     totalCost += rateData.costUsd;
-    await updatePhase('hunt', {
+    await updatePhase('recurate', {
       papers_rated:     rateData.rated,
       implementable_n:  rateData.implementableN,
       cost_usd:         totalCost,
     });
 
+    // Phase 3.5 — re-curate one rotating recoverable failure_mode bucket.
+    // Pre-2026-05-02 saturday-brain only rated NEW papers; the ~2400+
+    // accumulated reject candidates went un-revisited. Many of them were
+    // rejected with recoverable reasons (data we now have, prompt that's
+    // since improved, anomaly we wrongly assumed decayed). Rotate through
+    // four recoverable reasons across the month; each Saturday re-rates
+    // one of them. The reCurateByFailureMode API already exists in
+    // mastermind.js:437 — we just call it.
+    const RECOVERABLE_MODES = [
+      'unavailable_alt_data',       // re-rate as data columns land
+      'ambiguous_methodology',      // re-rate after prompt evolution
+      'pre_2010_decayed_anomaly',   // re-rate; many anomalies still work
+      'universe_too_narrow',        // re-rate as universe expands
+    ];
+    const _weekIdx = Math.floor(Date.now() / (7 * 86400 * 1000));
+    const recurateMode = RECOVERABLE_MODES[_weekIdx % RECOVERABLE_MODES.length];
+    let recurateData = { rated: 0, implementableN: 0, promoted: 0, costUsd: 0 };
+    if (!opts.dryRun) {
+      try {
+        notify(`recurate: re-rating reject bucket failure_mode=${recurateMode} (rotation ${(_weekIdx % RECOVERABLE_MODES.length) + 1}/${RECOVERABLE_MODES.length})`);
+        const curator = new MastermindCurator();
+        const recRes = await curator.reCurateByFailureMode({
+          failureMode: recurateMode,
+          maxPapers:   100,
+          dryRun:      false,
+          notify:      (m) => notify(`  recurate: ${m}`),
+        });
+        recurateData.rated         = recRes.outputCount || 0;
+        recurateData.costUsd       = Number(recRes.costUsd || 0);
+        recurateData.implementableN = (recRes.buckets && recRes.buckets.implementable_candidate) || 0;
+        // Promote the implementable_candidates this re-curation found.
+        if (recRes.runId) {
+          const promo = await curator.promoteHighBucket({
+            runId: recRes.runId, maxToPromote: 200,
+          });
+          recurateData.promoted = promo.promoted || 0;
+          notify(`recurate: re-rated ${recurateData.rated} (impl=${recurateData.implementableN}), promoted ${recurateData.promoted} to candidates, $${recurateData.costUsd.toFixed(2)}`);
+        }
+        totalCost += recurateData.costUsd;
+      } catch (e) {
+        notify(`recurate: skipped — ${e.message}`);
+      }
+    }
+    await updatePhase('hunt', {
+      // Keep the implementable_n count cumulative across rate + recurate so
+      // downstream phases see the full pipeline yield.
+      implementable_n: rateData.implementableN + recurateData.implementableN,
+      cost_usd:        totalCost,
+    });
+
     // Phase 4
-    const fanoutN = Math.min(DEFAULT_HUNTER_FANOUT_N, rateData.promoted || DEFAULT_HUNTER_FANOUT_N);
+    const totalPromoted = (rateData.promoted || 0) + (recurateData.promoted || 0);
+    const fanoutN = Math.min(DEFAULT_HUNTER_FANOUT_N, totalPromoted || DEFAULT_HUNTER_FANOUT_N);
     huntData = await _hunt(fanoutN, opts, notify);
     // Approximate paperhunter cost: $0.15 × runs.
     totalCost += huntData.run * 0.15;
