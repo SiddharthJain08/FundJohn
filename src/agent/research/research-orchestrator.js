@@ -29,6 +29,25 @@ const BATCH_SIZE = 5;  // candidates per processQueue call
 
 const STOP_AFTER_KEY = 'research:stop_after_promoted';   // Redis key for one-shot mode
 
+const IMPLEMENTATIONS_DIR = path.join(OPENCLAW_DIR, 'src/strategies/implementations');
+const MANIFEST_PATH       = path.join(OPENCLAW_DIR, 'src/strategies/manifest.json');
+
+/**
+ * Resolve a strategy's implementation .py path. Honours `metadata.canonical_file`
+ * from the manifest when present so the orchestrator picks up hand-coded files
+ * (e.g. `str02_hurst_regime_flip.py`) that don't follow the `${stratId}.py`
+ * default naming.
+ */
+function _resolveImplPath(stratId) {
+  let canonical = `${stratId}.py`;
+  try {
+    const m = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
+    const cf = m.strategies?.[stratId]?.metadata?.canonical_file;
+    if (cf) canonical = cf;
+  } catch (_) { /* manifest read error → fall back to default */ }
+  return path.join(IMPLEMENTATIONS_DIR, canonical);
+}
+
 // Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
 // Node event loop keeps serving HTTP traffic while this runs, so the Cancel
 // button / other dashboard actions remain responsive during long backtests.
@@ -482,7 +501,10 @@ class ResearchOrchestrator {
   async _codeFromQueue(item, notify, channelNotify, opts = {}) {
     const { candidate_id, strategy_spec } = item;
     const stratId  = strategy_spec?.strategy_id || 'unknown';
-    const implPath = path.join(OPENCLAW_DIR, 'src', 'strategies', 'implementations', `${stratId}.py`);
+    // Resolve the implementation path via manifest.canonical_file when set,
+    // mirroring src/agent/approvals/staging_approver.js::readRequirements.
+    // Falls back to "${stratId}.py" only when no canonical_file is recorded.
+    const implPath = _resolveImplPath(stratId);
     const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
 
     await this._query(
@@ -490,23 +512,36 @@ class ResearchOrchestrator {
       [candidate_id]
     );
 
-    notify?.(`  ⚙️ Coding: ${stratId}...`);
+    // Skip strategycoder when a hand-coded implementation already exists at
+    // the canonical path. The fused-approval rewrite was designed for
+    // candidates where strategycoder writes the .py from scratch; running
+    // it against an existing file risks overwriting working code with a
+    // weaker LLM-rewritten version.
+    const skipCoding = fs.existsSync(implPath);
+    notify?.(`  ⚙️ Coding: ${stratId}${skipCoding ? ' (existing file — skipping strategycoder)' : '...'}`);
     onPhase('strategycoder', 20);
     const costBeforeCoding = this._sessionCost;
-    try {
-      await this._codeStrategy(strategy_spec);
+    if (skipCoding) {
       await this._query(
         `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
         [candidate_id]
       );
-      notify?.(`  ✅ ${stratId} implemented — running validation...`);
-    } catch (e) {
-      await this._query(
-        `UPDATE implementation_queue SET status = 'failed' WHERE candidate_id = $1`,
-        [candidate_id]
-      );
-      notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
-      return { promoted: false, reasonCode: 'coding_failed', error: e.message };
+    } else {
+      try {
+        await this._codeStrategy(strategy_spec);
+        await this._query(
+          `UPDATE implementation_queue SET status = 'done', coded_at = NOW() WHERE candidate_id = $1`,
+          [candidate_id]
+        );
+        notify?.(`  ✅ ${stratId} implemented — running validation...`);
+      } catch (e) {
+        await this._query(
+          `UPDATE implementation_queue SET status = 'failed' WHERE candidate_id = $1`,
+          [candidate_id]
+        );
+        notify?.(`  ⚠️ ${stratId} coding failed: ${e.message}`);
+        return { promoted: false, reasonCode: 'coding_failed', error: e.message };
+      }
     }
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
@@ -1019,11 +1054,55 @@ class ResearchOrchestrator {
 
   _parseJSON(raw) {
     if (!raw) return null;
-    try {
-      if (typeof raw === 'object') return raw;
-      const str = (raw.match(/[\[{][\s\S]*[\]}]/) || [raw])[0];
-      return JSON.parse(str);
-    } catch { return null; }
+    if (typeof raw === 'object') return raw;
+    const text = String(raw);
+
+    // 1. Try a fenced ```json block first — Sonnet 4.6 reliably ignores
+    //    "no markdown" instructions and wraps in ```json...``` even when
+    //    told otherwise. (2026-05-02 saturday-brain hit this — 2/2
+    //    paperhunter outputs failed parse via the old greedy regex.)
+    const fence = text.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
+    if (fence) {
+      try { return JSON.parse(fence[1].trim()); } catch (_) { /* fallthrough */ }
+    }
+
+    // 2. Try balanced-brace extraction starting at the first `{` or `[`.
+    //    The pre-2026-05-02 regex /[\[{][\s\S]*[\]}]/ is greedy across
+    //    nested/multi-block content; e.g. an opening `[` inside the
+    //    preamble plus a closing `}` after the JSON yields invalid spans.
+    const start = text.search(/[\[{]/);
+    if (start >= 0) {
+      const open  = text[start];
+      const close = open === '{' ? '}' : ']';
+      let depth = 0, inStr = false, esc = false;
+      for (let i = start; i < text.length; i++) {
+        const c = text[i];
+        if (inStr) {
+          if (esc) { esc = false; continue; }
+          if (c === '\\') { esc = true; continue; }
+          if (c === '"') { inStr = false; }
+          continue;
+        }
+        if (c === '"') { inStr = true; continue; }
+        if (c === open)  depth++;
+        else if (c === close) {
+          depth--;
+          if (depth === 0) {
+            const slice = text.slice(start, i + 1);
+            try { return JSON.parse(slice); } catch (_) { break; }
+          }
+        }
+      }
+    }
+
+    // 3. Direct parse of the trimmed text (LLM occasionally complies).
+    try { return JSON.parse(text.trim()); } catch (_) { /* nope */ }
+
+    // 4. Last resort — log a truncated snippet so the operator can
+    //    diagnose why parse failed (pre-fix this was silent → "parse_failed"
+    //    sentinel hid root cause for weeks).
+    console.error(`[research-orch] _parseJSON failed; raw head: ${text.slice(0, 400).replace(/\n/g, '\\n')}`);
+    return null;
   }
 
   // ── Core subagent runner ────────────────────────────────────────────────────
