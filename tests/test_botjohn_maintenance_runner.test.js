@@ -293,6 +293,30 @@ test('main(): unknown mode posts no report and exits 1', async () => {
   assert.equal(process.exitCode, 1);
 });
 
+test('main(): claude-bin auth-error JSON triggers fallback (regression for 2026-05-02)', async () => {
+  // claude-bin can return success-shaped JSON when OAuth is expired —
+  // result is the literal "Failed to authenticate..." string and cost=0.
+  // Wrapper must detect this and post 🚨 fallback, not the error string.
+  // The auth-failure detection lives inside runClaudeBin, so we exercise
+  // it by stubbing runClaudeBin to throw the same way auth detection
+  // would (since main() consumes runClaudeBin's promise rejection).
+  const { deps, calls } = _stubFor({
+    runClaudeBin: async () => {
+      throw new Error('claude-bin auth failure: Failed to authenticate. API Error: 401 ...');
+    },
+  });
+  process.exitCode = 0;
+  const r = await runner.main(deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'wrapper_failure');
+  assert.equal(calls.post.length, 1, 'auth failure must trigger fallback post');
+  assert.ok(calls.post[0].content.startsWith('🚨'),
+    'fallback post must start with 🚨');
+  assert.ok(calls.post[0].content.toLowerCase().includes('auth'),
+    'fallback message should surface "auth" so the alert is actionable');
+  assert.equal(process.exitCode, 1);
+});
+
 test('main(): no mode → defaults to daily (back-compat with weekday timer)', async () => {
   let capturedPrompt = null;
   const stub = _stubFor({

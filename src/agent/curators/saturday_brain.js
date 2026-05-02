@@ -451,12 +451,16 @@ async function _closeout(allRunData, opts, notify) {
   });
   notify(`closeout: ${paperNotes} paper, ${deferredNotes} deferred, ${strategyNotes} strategy notes; summary=${summaryFile ? 'yes' : 'no'}`);
 
-  // Discord summary post (best-effort; reuse DataBot's #strategy-memos webhook).
+  // Discord summary post: routed via MastermindJohn → #research-feed
+  // (2026-05-02 — was previously routed via DataBot → #strategy-memos
+  // which conflated brain digests with comprehensive_review per-strategy
+  // memos. ResearchJohn/ResearchDesk was retired in the same change;
+  // mastermind now owns both #research-feed and #strategy-memos).
   try {
     const r = await _query(
-      `SELECT webhook_urls FROM agent_registry WHERE id='databot'`
+      `SELECT webhook_urls FROM agent_registry WHERE id='mastermind'`
     );
-    const url = ((r.rows[0]?.webhook_urls) || {})['strategy-memos'];
+    const url = ((r.rows[0]?.webhook_urls) || {})['research-feed'];
     if (url) {
       const lines = [
         `🧠 **Saturday brain — ${runRow.started_at?.toString().slice(0,10) || ''}**`,
@@ -468,7 +472,9 @@ async function _closeout(allRunData, opts, notify) {
         `**Tier C (deferred):** ${runRow.tier_c_count ?? 0}`,
       ].join('\n');
       await _postWebhook(url, lines);
-      notify('closeout: Discord summary posted to #strategy-memos');
+      notify('closeout: Discord summary posted to #research-feed (mastermind)');
+    } else {
+      notify('closeout: skipping Discord post — mastermind has no research-feed webhook (run johnbot to initialize)');
     }
   } catch (e) {
     notify(`closeout: Discord post failed — ${e.message}`);

@@ -471,6 +471,21 @@ function runClaudeBin(prompt) {
         return reject(new Error('empty result from BotJohn'));
       }
       const costUsd = Number(parsed.total_cost_usd ?? parsed.cost_usd ?? 0) || 0;
+      // Guard: claude-bin can return success-shaped JSON when the OAuth
+      // token is expired — `result` becomes the literal API error
+      // ("Failed to authenticate. API Error: 401 ...") and cost_usd is 0.
+      // Without this guard the wrapper happily posts the error string to
+      // #general (saw this 2026-05-02 — Saturday's first scheduled run
+      // posted "Failed to authenticate" verbatim instead of triggering
+      // the 🚨 fallback). Detect by signature: 0 cost + sub-30s + the
+      // result starts with an error-like prefix.
+      const looksLikeAuthError =
+          costUsd === 0
+          && durationMs < 30_000
+          && /^(Failed to authenticate|API Error:|401\b|authentication_error|Invalid authentication credentials)/i.test(result.trim());
+      if (looksLikeAuthError) {
+        return reject(new Error(`claude-bin auth failure: ${result.trim().slice(0, 200)}`));
+      }
       resolve({ result, costUsd, durationMs, raw: stdout });
     });
     child.on('error', (err) => { clearTimeout(t); reject(err); });

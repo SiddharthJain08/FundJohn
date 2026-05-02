@@ -28,11 +28,15 @@ const AGENTS = {
     description: 'Portfolio Manager & Orchestrator',
     channelKeys: ['general', 'botjohn-log'],
   },
-  researchdesk: {
-    displayName: '🔬 ResearchDesk',
-    emoji:       '🔬',
-    model:       'claude-sonnet-4-6',
-    description: 'Equity Research & Diligence',
+  // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below
+  // (Opus 4.7) which now owns both #research-feed and #strategy-memos.
+  // The on-demand /research diligence flow that ResearchDesk fronted has
+  // also been removed — see commit history for the deletion sweep.
+  mastermind: {
+    displayName: '🧠 MastermindJohn',
+    emoji:       '🧠',
+    model:       'claude-opus-4-7',
+    description: 'Research curator & strategy reviewer',
     channelKeys: ['research-feed', 'strategy-memos'],
   },
   tradedesk: {
@@ -174,10 +178,10 @@ async function getAllStatuses() {
             status, current_task, last_seen_at
      FROM agent_registry ORDER BY
        CASE id
-         WHEN 'botjohn'      THEN 1
-         WHEN 'databot'      THEN 2
-         WHEN 'researchdesk' THEN 3
-         WHEN 'tradedesk'    THEN 4
+         WHEN 'botjohn'    THEN 1
+         WHEN 'databot'    THEN 2
+         WHEN 'mastermind' THEN 3
+         WHEN 'tradedesk'  THEN 4
          ELSE 9
        END`
   ).catch(() => ({ rows: [] }));
