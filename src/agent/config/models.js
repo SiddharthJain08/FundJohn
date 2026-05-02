@@ -9,7 +9,7 @@ const MODELS = {
   primary: {
     provider: 'anthropic',
     model: 'claude-sonnet-4-6',
-    description: 'Default — ResearchJohn, TradeJohn',
+    description: 'Default — TradeJohn',
   },
   fast: {
     provider: 'anthropic',
@@ -28,13 +28,12 @@ const MODELS = {
   },
 };
 
-// Subagent model assignments — 4-agent FundJohn system
+// Subagent model assignments — FundJohn system (ResearchJohn retired 2026-05-02)
 const SUBAGENT_MODELS = {
-  botjohn:         MODELS.orchestrator,
-  researchjohn:    MODELS.primary,
-  tradejohn:       MODELS.primary,
-  paperhunter:     MODELS.primary,
-  strategycoder:   MODELS.primary,
+  botjohn:          MODELS.orchestrator,
+  tradejohn:        MODELS.primary,
+  paperhunter:      MODELS.primary,
+  strategycoder:    MODELS.primary,
   'mastermind':     MODELS.opus1m,
   'corpus-curator': MODELS.opus1m,
 };

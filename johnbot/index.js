@@ -46,10 +46,11 @@ const tokenFeed  = new TokenFeed();
 discordRelay.setFeed(feed);
 
 // Direct agent address map — maps @name → { dir, model }
+// (ResearchJohn retired 2026-05-02; mastermind owns research-feed.)
 const DIRECT_AGENTS = {
   botjohn:{label:"BotJohn"},
   datajohn:{label:"DataJohn"},
-  researchjohn:{label:"ResearchJohn"},
+  mastermind:{label:"MastermindJohn"},
   tradejohn:{label:"TradeJohn"},
 };
 

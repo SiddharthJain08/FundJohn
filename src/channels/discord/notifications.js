@@ -50,9 +50,11 @@ async function personaPost(agentId, channelKey, text) {
 
 // Notification types — routed to appropriate channels/personas
 const notify = {
-  // Research flow → ResearchDesk in #research-feed
-  subagentComplete:   (type, ticker, duration) => personaPost('researchdesk', 'research-feed', `✅ **${capitalize(type)}** complete for **${ticker}** [${duration}s]`),
-  validationFailed:   (ticker, errors) => personaPost('researchdesk', 'research-feed', `⛔ DATA VALIDATION FAILED for **${ticker}**: ${errors}`),
+  // Research flow → MastermindJohn in #research-feed (was ResearchDesk
+  // pre-2026-05-02; ResearchDesk persona retired with the on-demand
+  // /research diligence flow).
+  subagentComplete:   (type, ticker, duration) => personaPost('mastermind', 'research-feed', `✅ **${capitalize(type)}** complete for **${ticker}** [${duration}s]`),
+  validationFailed:   (ticker, errors) => personaPost('mastermind', 'research-feed', `⛔ DATA VALIDATION FAILED for **${ticker}**: ${errors}`),
 
   // Trade flow → TradeDesk in #trade-signals / #trade-reports
   tradePipeline:      (ticker) => personaPost('tradedesk', 'trade-signals', `📐 Trade pipeline: Compute → Analyst → Report | **${ticker}**`),
@@ -129,17 +131,19 @@ async function notifyEmergencyAlert(alert) {
 }
 
 /**
- * Post DataBot strategy execution memo to #strategy-memos.
+ * Post strategy execution memo to #strategy-memos via MastermindJohn.
+ * (Pre-2026-05-02 this posted via DataBot; ownership of #strategy-memos
+ * moved to mastermind alongside the ResearchDesk retirement.)
  */
 async function notifyStrategyMemo(memo) {
-    await personaPost('databot', 'strategy-memos', memo).catch(() => {});
+    await personaPost('mastermind', 'strategy-memos', memo).catch(() => {});
 }
 
 /**
- * Post ResearchDesk signal synthesis to #research-feed.
+ * Post signal synthesis to #research-feed via MastermindJohn.
  */
 async function notifySignalSynthesis(synthesis) {
-    await personaPost('researchdesk', 'research-feed', synthesis).catch(() => {});
+    await personaPost('mastermind', 'research-feed', synthesis).catch(() => {});
 }
 
 /**

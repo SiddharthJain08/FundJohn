@@ -60,15 +60,15 @@ const STRUCTURE = [
     ],
   },
   {
-    category: '🔬 RESEARCH DESK',
+    category: '🧠 MASTERMIND',
     channels: [
       {
         name: 'research-feed', key: 'research-feed', operatorWrite: false,
-        topic: 'ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot = budget % consumed. Use /research start to begin.',
+        topic: 'MastermindJohn — Saturday-brain digest, paper ingestion, strategy candidates.',
       },
       {
         name: 'strategy-memos', key: 'strategy-memos', operatorWrite: false,
-        topic: 'Daily strategy execution memos + PROCEED / REVIEW / KILL verdicts from diligence runs.',
+        topic: 'MastermindJohn per-strategy memos (Saturday comprehensive_review) + diligence verdicts.',
       },
     ],
   },
@@ -143,7 +143,7 @@ ${ch('pipeline-feed')} — Phase completions, cycle start/end, errors
 ${ch('data-alerts')} — Progress every 10 tickers (speed, ETA, rows written), sleep/wake notices
 
 **🔬 RESEARCH DESK**
-${ch('research-feed')} — ResearchJohn live research loop: phase updates, papers found, strategies coded. Status dot shows budget % consumed.
+${ch('research-feed')} — MastermindJohn Saturday-brain digest: papers ingested, candidates staged, Tier-A backtest results.
 ${ch('strategy-memos')} — Strategy execution memos + PROCEED / REVIEW / KILL verdicts
 
 **📈 TRADING DESK**

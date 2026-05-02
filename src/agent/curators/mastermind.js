@@ -888,7 +888,6 @@ class MastermindCurator {
         // synthesise flat gate predictions.
         const gatePredictions = gp || {
           paperhunter:  { pass_prob: Math.cbrt(Math.max(rawConf, 0.001)), reason: 'synthesised from legacy confidence' },
-          researchjohn: { pass_prob: Math.cbrt(Math.max(rawConf, 0.001)), reason: 'synthesised from legacy confidence' },
           convergence:  { pass_prob: Math.cbrt(Math.max(rawConf, 0.001)), reason: 'synthesised from legacy confidence' },
         };
         // Saturday-brain implementability_score (0..1). Opus may emit it
@@ -931,7 +930,6 @@ class MastermindCurator {
         predicted_failure_modes: ['curator_no_response'],
         gate_predictions:        {
           paperhunter:  { pass_prob: 0, reason: 'no response' },
-          researchjohn: { pass_prob: 0, reason: 'no response' },
           convergence:  { pass_prob: 0, reason: 'no response' },
         },
       };

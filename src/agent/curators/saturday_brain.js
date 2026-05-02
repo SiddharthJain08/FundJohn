@@ -565,10 +565,25 @@ async function run(opts = {}) {
     });
 
     // Phase 2
-    const sinceIso = opts.sinceIso
+    // Resolve since-window. Minimum 30 days back so that on quiet weeks
+    // we still fan out across enough venue history to actually find new
+    // papers — OpenAlex's indexing for SSRN/NBER/JF/RFS/JFE/JFQA/QF lags
+    // by ~2-3 weeks, so a "since-last-Saturday" 7-day window returned 0
+    // papers on 2026-05-02 (regression vs. the 2026-04-25 all-time
+    // first-run that ingested ~3500). Duplicates are deduped by
+    // research_corpus.source_url ON CONFLICT — the cost of a wider
+    // window is only API quota, not duplicate rows.
+    const MIN_SINCE_DAYS = 30;
+    const _ms = Date.now() - MIN_SINCE_DAYS * 86400 * 1000;
+    const _floorIso = new Date(_ms).toISOString().slice(0, 10);
+    let sinceIso = opts.sinceIso
       || (preflightData.lastRunStartedAt && !opts.allTime
             ? preflightData.lastRunStartedAt.slice(0, 10)
             : null);
+    if (sinceIso && sinceIso > _floorIso && !opts.allTime) {
+      notify(`sweep: sinceIso=${sinceIso} is < ${MIN_SINCE_DAYS}d ago; widening to ${_floorIso} to avoid OpenAlex indexing-lag holes`);
+      sinceIso = _floorIso;
+    }
     sweepData = await _sweep({ sinceIso, allTime: opts.allTime, expansionId: expandData.expansionId, dryRun: opts.dryRun }, notify);
     await updatePhase('rate', { papers_ingested: sweepData.ingested });
 

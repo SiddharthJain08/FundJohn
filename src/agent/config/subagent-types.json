@@ -36,26 +36,6 @@
       ],
       "description": "Orchestrator and portfolio manager. Approves/vetoes trade signals. Interfaces with operator via Discord."
     },
-    "researchjohn": {
-      "promptFile": "src/agent/prompts/subagents/researchjohn.md",
-      "components": [],
-      "tools": [],
-      "iterationLimit": 15,
-      "timeoutSeconds": 300,
-      "parallel": false,
-      "vetoAuthority": false,
-      "effortLevel": "medium",
-      "maxBudgetUsd": 0.3,
-      "modes": [
-        "PM_TASK"
-      ],
-      "skills": [
-        "fundjohn:memo-schema",
-        "fundjohn:veto-explainer",
-        "fundjohn:obsidian-link"
-      ],
-      "description": "Reads strategy memos, produces consolidated research report: regime, performance table, convergence analysis, recommendations."
-    },
     "tradejohn": {
       "promptFile": "src/agent/prompts/subagents/tradejohn.md",
       "components": [],

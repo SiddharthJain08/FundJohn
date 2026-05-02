@@ -1,9 +1,12 @@
 /**
  * FundJohn pipeline as a LangGraph StateGraph.
  *
- *   datajohn ─► researchjohn ─► tradejohn ─► (interrupt: HITL) ─► botjohn ─► END
- *                                       │
- *                                       └─► (no signals) ─► END
+ *   datajohn ─► tradejohn ─► (interrupt: HITL) ─► botjohn ─► END
+ *                       │
+ *                       └─► (no signals) ─► END
+ *
+ * (researchjohn node retired 2026-05-02; mastermind handles weekly research
+ *  via saturday_brain.js + comprehensive_review.js, not this graph.)
  *
  * - PostgresSaver:  durable checkpoints in the openclaw DB so a run can resume
  *                   across johnbot restarts (table: langgraph_checkpoints).
@@ -62,26 +65,6 @@ async function datajohnNode(state, config) {
   const dataResult = await runner.runDailyClose('default', state.memoDir);
   emit(state.runId, 'datajohn', 'ok', { summary: summarize(dataResult) });
   return { dataResult };
-}
-
-async function researchjohnNode(state, config) {
-  const notify = notifierFor(config);
-  emit(state.runId, 'researchjohn', 'start');
-  const { init } = require('./subagents/swarm');
-  const researchResult = await init({
-    type:      'researchjohn',
-    ticker:    state.cycleDate,
-    workspace: state.workspace,
-    threadId:  state.threadId,
-    notify,
-    mode:      'PM_TASK',
-    prompt:    `CYCLE_DATE=${state.cycleDate}\nMEMO_DIR=${state.memoDir}`,
-  });
-  emit(state.runId, 'researchjohn', 'ok', {
-    subagentId: researchResult.subagentId,
-    duration: researchResult.duration,
-  });
-  return { researchResult };
 }
 
 async function tradejohnNode(state, config) {
@@ -183,13 +166,11 @@ function getCompiled() {
   if (_compiled) return _compiled;
   const { checkpointer } = getCheckpointer();
   const g = new StateGraph(CycleState)
-    .addNode('datajohn',     datajohnNode)
-    .addNode('researchjohn', researchjohnNode)
-    .addNode('tradejohn',    tradejohnNode)
-    .addNode('botjohn',      botjohnNode)
+    .addNode('datajohn',  datajohnNode)
+    .addNode('tradejohn', tradejohnNode)
+    .addNode('botjohn',   botjohnNode)
     .addEdge(START, 'datajohn')
-    .addEdge('datajohn',     'researchjohn')
-    .addEdge('researchjohn', 'tradejohn')
+    .addEdge('datajohn', 'tradejohn')
     .addConditionalEdges('tradejohn', afterTradejohn, { botjohn: 'botjohn', [END]: END })
     .addEdge('botjohn', END);
 

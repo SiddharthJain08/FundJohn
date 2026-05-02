@@ -150,7 +150,6 @@ Output a single JSON array — one entry per input paper, in the same order. **N
     "paper_id": "<uuid from input>",
     "gate_predictions": {
       "paperhunter":  { "pass_prob": 0.88, "reason": "deterministic signal, all data in ledger" },
-      "researchjohn": { "pass_prob": 0.82, "reason": "coverage depth > 504 days for all required columns" },
       "convergence":  { "pass_prob": 0.60, "reason": "trade count borderline on monthly rebalance" }
     },
     "confidence": 0.43,
@@ -166,10 +165,9 @@ Output a single JSON array — one entry per input paper, in the same order. **N
 
 **`gate_predictions`** — three independent pass probabilities (0.0–1.0), one per gate, each with a ≤120-char reason. This lets us measure your calibration gate-by-gate rather than globally.
 - `paperhunter.pass_prob` — probability PaperHunter accepts the paper (gates A1-A4 pass)
-- `researchjohn.pass_prob` — probability ResearchJohn classifies it READY (data coverage + depth OK)
 - `convergence.pass_prob` — probability the backtest clears ≥2 of 3 walk-forward windows
 
-**`confidence`** — **MUST** equal the product of the three pass_probs (paperhunter × researchjohn × convergence), rounded to 2 decimals. This is the end-to-end probability of reaching PAPER state.
+**`confidence`** — **MUST** equal the product of the two pass_probs (paperhunter × convergence), rounded to 2 decimals. This is the end-to-end probability of reaching PAPER state.
 
 **`implementability_score`** (0.000–1.000) — Saturday brain axis. Independent of confidence. Score how concretely the paper specifies a strategy a coder could turn into Python TODAY:
 - 0.85+ — explicit signal formula with named columns + a clear ranking/sizing rule + a backtest window. StrategyCoder could produce a runnable file from the abstract alone.
@@ -204,9 +202,9 @@ Output a single JSON array — one entry per input paper, in the same order. **N
 
 - Output must be valid JSON parseable by `JSON.parse()`. No trailing commas, no comments.
 - One output entry per input paper. Same `paper_id` passed through unchanged.
-- `gate_predictions` is REQUIRED and must contain all three keys: paperhunter, researchjohn, convergence.
+- `gate_predictions` is REQUIRED and must contain all two keys: paperhunter, convergence.
 - Each `pass_prob` is a float 0.000 to 1.000.
-- `confidence` is the product of the three pass_probs. `predicted_bucket` MUST match the bucket-mapping rule above.
-- If a paper's abstract is empty or uninformative, set all three pass_probs to 0.10 with `reason: "abstract too sparse"` and `confidence: 0.001` — do NOT guess optimistically.
+- `confidence` is the product of the two pass_probs. `predicted_bucket` MUST match the bucket-mapping rule above.
+- If a paper's abstract is empty or uninformative, set all two pass_probs to 0.10 with `reason: "abstract too sparse"` and `confidence: 0.001` — do NOT guess optimistically.
 - Do NOT emit any prose before or after the JSON array.
 - Do NOT output a single JSON object — the output is always an array, even for batch-size-1.

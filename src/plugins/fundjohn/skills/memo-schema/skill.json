@@ -1,6 +1,10 @@
 {
   "id": "fundjohn:memo-schema",
   "description": "SO-6 memo field requirements and validation rules for strategy memos",
-  "triggers": ["/memo-schema"],
-  "agents": ["researchjohn", "botjohn"]
+  "triggers": [
+    "/memo-schema"
+  ],
+  "agents": [
+    "botjohn"
+  ]
 }

@@ -616,26 +616,26 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         if (tickers.length === 1) {
           const ticker = tickers[0];
           const dilTaskId = memoryWriter.openTask(`Diligence: ${ticker}`, `threadId:${threadId}`);
-          agentPersonas.setStatus('researchdesk', 'busy', `Diligence: ${ticker}`).catch(() => {});
-          agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning subagents`).catch(() => {});
+          agentPersonas.setStatus('mastermind', 'busy', `Diligence: ${ticker}`).catch(() => {});
+          agentPersonas.post('mastermind', 'research-feed', `🔬 Diligence started for **${ticker}** — spawning subagents`).catch(() => {});
           const result = await main.runTask({ task: `Research ${ticker} strategy`, ticker, workspaceId, threadId, notify });
           await postResult(message, ticker, result, 'diligence');
           const verdict = result?.verdict || result?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
           if (verdict) {
-            agentPersonas.post('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
+            agentPersonas.post('mastermind', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
             memoryWriter.closeTask(dilTaskId, `${verdict} — ${ticker}`);
           } else {
             memoryWriter.closeTask(dilTaskId, `complete — ${ticker}`);
           }
-          agentPersonas.setStatus('researchdesk', 'idle', null).catch(() => {});
+          agentPersonas.setStatus('mastermind', 'idle', null).catch(() => {});
           break;
         }
 
         // Multi-ticker batch path
         const batchId = `diligence-batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         await notify(`🔬 Diligence batch starting for **${tickers.join(', ')}** — sharing CYCLE_ID for cache amortization`);
-        agentPersonas.setStatus('researchdesk', 'busy', `Diligence batch: ${tickers.length} tickers`).catch(() => {});
-        agentPersonas.post('researchdesk', 'research-feed', `🔬 Diligence batch started for **${tickers.join(', ')}** (n=${tickers.length})`).catch(() => {});
+        agentPersonas.setStatus('mastermind', 'busy', `Diligence batch: ${tickers.length} tickers`).catch(() => {});
+        agentPersonas.post('mastermind', 'research-feed', `🔬 Diligence batch started for **${tickers.join(', ')}** (n=${tickers.length})`).catch(() => {});
 
         const taskIds = tickers.map((t) => memoryWriter.openTask(`Diligence: ${t}`, `threadId:${threadId} batchId:${batchId}`));
         const results = await Promise.allSettled(tickers.map((ticker) =>
@@ -656,7 +656,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
             await postResult(message, ticker, r.value, 'diligence');
             const verdict = r.value?.verdict || r.value?.output?.match(/\b(PROCEED|REVIEW|KILL)\b/)?.[0];
             if (verdict) {
-              agentPersonas.post('researchdesk', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
+              agentPersonas.post('mastermind', 'strategy-memos', `🦞 **${ticker}** — **${verdict}** | 📎 memo attached`).catch(() => {});
               memoryWriter.closeTask(taskIds[i], `${verdict} — ${ticker}`);
             } else {
               memoryWriter.closeTask(taskIds[i], `complete — ${ticker}`);
@@ -669,7 +669,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
         const ok = results.filter((r) => r.status === 'fulfilled').length;
         await notify(`✅ Diligence batch complete — ${ok}/${tickers.length} succeeded (batch=${batchId})`);
-        agentPersonas.setStatus('researchdesk', 'idle', null).catch(() => {});
+        agentPersonas.setStatus('mastermind', 'idle', null).catch(() => {});
         break;
       }
 
@@ -748,7 +748,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
             `**Agents**`,
             agentStatusLine('botjohn',      '🦞'),
             agentStatusLine('databot',      '📡'),
-            agentStatusLine('researchdesk', '🔬'),
+            agentStatusLine('mastermind', '🔬'),
             agentStatusLine('tradedesk',    '📈'),
             ``,
             `**Universe** | ${universeSize} tickers active in universe_config`,
@@ -886,56 +886,6 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
           notify,
           prompt:    `Generate strategy performance report for strategy_id: ${stratId}. Load all signal_pnl records for this strategy and compute win rate, P&L, regime breakdown, and best/worst conditions.`,
         });
-        break;
-      }
-
-      case 'research': {
-        const subcmd = args[0]?.toLowerCase();
-        const orch = getResearchOrch();
-        const channelNotify = (t) => agentPersonas.post('researchdesk', 'research-feed', t).catch(() => {});
-
-        switch (subcmd) {
-          case 'submit': {
-            const url = args[1];
-            if (!url) { await notify('Usage: `/research submit <url>`'); break; }
-            const { candidate_id, message } = await orch.submit({ url, submittedBy: userId });
-            await notify(`✅ ${message}`);
-            channelNotify?.(`📥 **Paper submitted** by <@${userId}>: ${url}\nID: \`${candidate_id}\``);
-            break;
-          }
-          case 'start': {
-            const msg = await orch.start({ notify: (t) => notify(t), channelNotify });
-            await notify(msg);
-            break;
-          }
-          case 'pause': {
-            await notify(await orch.pause());
-            break;
-          }
-          case 'status': {
-            await notify(await orch.getStatus());
-            break;
-          }
-          case 'queue': {
-            await notify(await orch.listQueue(10));
-            break;
-          }
-          case 'run-one': {
-            // Populate queue from arXiv if empty, then run until 1 strategy promoted, then auto-pause.
-            const msg = await orch.runOne({ notify: (t) => notify(t), channelNotify });
-            await notify(msg);
-            break;
-          }
-          case 'discover': {
-            // Populate the research queue from arXiv without starting processing.
-            const days = parseInt(args[1]) || 14;
-            await orch.discover({ days, notify: (t) => notify(t), channelNotify });
-            await notify(await orch.getStatus());
-            break;
-          }
-          default:
-            await notify('Usage: `/research [submit <url> | start | pause | status | queue | run-one | discover]`');
-        }
         break;
       }
 
@@ -1339,14 +1289,14 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
           if (rows.length === 0) { await notify(`⚠️ No pending request found for ID \`${reqId}\``); break; }
           const col = rows[0].column_name;
           await notify(`✅ Data column \`${col}\` approved — DataWiringAgent will wire it.`);
-          agentPersonas.post('researchdesk', 'research-feed',
+          agentPersonas.post('mastermind', 'research-feed',
             `🔧 **Column approved:** \`${col}\` — DataWiringAgent wiring now...`).catch(() => {});
           triggerMapRefresh().catch(() => {});
           // Fire DataWiringAgent asynchronously
           const orch = getResearchOrch();
           orch._wireColumn(rows[0]).catch((e) => {
             console.error('[bot] DataWiringAgent failed:', e.message);
-            agentPersonas.post('researchdesk', 'research-feed',
+            agentPersonas.post('mastermind', 'research-feed',
               `❌ DataWiringAgent failed for \`${col}\`: ${e.message}`).catch(() => {});
           });
         } catch (e) {
@@ -1683,7 +1633,7 @@ client.once('ready', async () => {
   try {
     await agentPersonas.initWebhooks(client, channelMap);
     await agentPersonas.setStatus('botjohn', 'online', 'System startup');
-    await agentPersonas.setStatus('researchdesk', 'idle', 'Awaiting research task').catch(() => {});
+    await agentPersonas.setStatus('mastermind', 'idle', 'Awaiting research task').catch(() => {});
     await agentPersonas.setStatus('tradedesk', 'idle', 'No active trades').catch(() => {});
     // Inject agentPersonas into notifications so trade/research/alert channels work
     notifications.init(client, { agentPersonas });
@@ -1691,25 +1641,11 @@ client.once('ready', async () => {
     console.warn('[bot] Agent persona init failed:', err.message);
   }
 
-  // Research team go-live: set initial status + post announcement to #research-feed
-  try {
-    const _orch = getResearchOrch();
-    const { status: rStatus, text: rText } = await _orch.getStatusText().catch(() => ({ status: 'idle', text: 'Ready — /research submit <url>' }));
-    await agentPersonas.setStatus('researchdesk', rStatus, rText).catch(() => {});
-    await agentPersonas.post('researchdesk', 'research-feed',
-      '🔬 **ResearchJohn online** — queue-driven research ready.\nSubmit a paper with `/research submit <url>`, then run `/research start` to process the queue.'
-    ).catch(() => {});
-    // 30-second live token monitor — updates ResearchJohn's Discord presence with budget %
-    setInterval(async () => {
-      try {
-        const { status, text } = await getResearchOrch().getStatusText();
-        await agentPersonas.setStatus('researchdesk', status, text);
-      } catch { /* non-critical */ }
-    }, 30_000);
-    console.log('[bot] Research team online, 30s monitor started');
-  } catch (err) {
-    console.warn('[bot] Research team init failed:', err.message);
-  }
+  // ResearchJohn / on-demand /research diligence flow retired 2026-05-02.
+  // Mastermind now owns #research-feed and #strategy-memos; the saturday-brain
+  // weekly run + comprehensive_review per-strategy memos are the only
+  // automated writers. No startup announcement (was misleading noise).
+
 
   // Start background data pipeline — broadcasts to #pipeline-feed
   if (collector) {

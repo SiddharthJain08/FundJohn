@@ -45,7 +45,7 @@ At every step maintain a complete understanding of:
 
 ## LangGraph Orchestration (added 2026-04-22)
 The cycle and paper-hunt flows run through LangGraph.js:
-- `src/agent/graph.js` — daily cycle StateGraph (datajohn → researchjohn → tradejohn → HITL → botjohn); PostgresSaver checkpointer in `langgraph` schema; `interruptBefore: ['botjohn']` for operator approval; conditional edge skips botjohn if tradejohn produced zero signals.
+- `src/agent/graph.js` — daily cycle StateGraph (datajohn → tradejohn → HITL → botjohn); PostgresSaver checkpointer in `langgraph` schema; `interruptBefore: ['botjohn']` for operator approval; conditional edge skips botjohn if tradejohn produced zero signals. (ResearchJohn retired 2026-05-02 — mastermind handles research via saturday_brain.js + comprehensive_review.js, not this graph.)
 - `src/agent/graphs/paperhunter.js` — Send-based parallel fan-out for paper extraction.
 - `src/agent/graphs/index.js` — graph registry. Add new flows here.
 - `src/agent/traceBus.js` — in-memory event ring buffer fanning out to dashboard SSE.

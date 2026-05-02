@@ -5,6 +5,7 @@ _http_retry.py — shared retry helper for ingestion fetchers.
 response bytes (or raises after final attempt). Logs each retry.
 """
 
+import socket
 import sys
 import time
 from typing import Callable, Optional
@@ -29,6 +30,12 @@ def fetch_with_retry(
     Returns response bytes on success, None on final failure (caller handles).
     Exponential backoff: base_delay, base_delay*2, base_delay*4.
     Honors Retry-After header on 429.
+
+    Catches HTTPError, URLError, and socket-level timeouts (TimeoutError /
+    socket.timeout / OSError). Pre-2026-05-02 a socket read timeout from
+    arxiv slipped past as an uncaught TimeoutError, killing the whole
+    sweep — that's the regression that dropped 2026-05-02 saturday-brain
+    ingestion from 656 → 31 papers.
     """
     last_exc: Optional[Exception] = None
     for attempt in range(1, attempts + 1):
@@ -51,6 +58,24 @@ def fetch_with_retry(
                 return None
             delay = base_delay * (2 ** (attempt - 1))
             print(f'[{label}] URLError attempt {attempt}/{attempts}: {e}; sleeping {delay:.1f}s', file=sys.stderr)
+            time.sleep(delay)
+        except (TimeoutError, socket.timeout) as e:
+            last_exc = e
+            if attempt == attempts:
+                print(f'[{label}] timeout (final, {timeout}s): {url_of(url_or_req)[:140]}', file=sys.stderr)
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f'[{label}] timeout attempt {attempt}/{attempts} ({timeout}s); sleeping {delay:.1f}s', file=sys.stderr)
+            time.sleep(delay)
+        except OSError as e:
+            # Catch-all for transient network/socket failures (DNS, conn-reset,
+            # SSL handshake errors). Same retry policy as URLError.
+            last_exc = e
+            if attempt == attempts:
+                print(f'[{label}] OSError (final): {type(e).__name__}: {e}', file=sys.stderr)
+                return None
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f'[{label}] OSError attempt {attempt}/{attempts}: {type(e).__name__}: {e}; sleeping {delay:.1f}s', file=sys.stderr)
             time.sleep(delay)
     return None
 

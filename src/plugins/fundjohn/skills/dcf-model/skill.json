@@ -1,6 +1,12 @@
 {
   "id": "fundjohn:dcf-model",
   "description": "Build a discounted-cash-flow valuation with sensitivity table and explicit assumption block",
-  "triggers": ["/dcf", "/valuation"],
-  "agents": ["researchjohn", "botjohn", "mastermind"]
+  "triggers": [
+    "/dcf",
+    "/valuation"
+  ],
+  "agents": [
+    "botjohn",
+    "mastermind"
+  ]
 }

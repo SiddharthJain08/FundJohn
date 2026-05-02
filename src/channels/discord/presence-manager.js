@@ -23,13 +23,7 @@ const Redis = require('ioredis');
 // ── Agent definitions ─────────────────────────────────────────────────────────
 
 const AGENTS = [
-  {
-    id:          'researchdesk',
-    token:       process.env.RESEARCHDESK_TOKEN,
-    displayName: 'ResearchDesk',
-    defaultStatus:   'idle',
-    defaultActivity: '🔬 Awaiting research task',
-  },
+  // ResearchDesk presence retired 2026-05-02 (replaced by mastermind webhook persona)
   {
     id:          'tradedesk',
     token:       process.env.TRADEDESK_TOKEN,

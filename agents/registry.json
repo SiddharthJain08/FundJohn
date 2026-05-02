@@ -26,18 +26,6 @@
       "channels": ["#data-alerts"],
       "reports_to": "botjohn"
     },
-    "researchjohn": {
-      "name": "ResearchJohn",
-      "model": "claude-sonnet-4-6",
-      "role": "research_and_synthesis",
-      "identity": "agents/researchjohn/IDENTITY.md",
-      "soul": "agents/researchjohn/SOUL.md",
-      "prompt": "agents/researchjohn/PROMPT.md",
-      "subagent_prompt": "src/agent/prompts/subagents/researchjohn.md",
-      "discord_emoji": "🔬",
-      "channels": ["#research"],
-      "reports_to": "botjohn"
-    },
     "tradejohn": {
       "name": "TradeJohn",
       "model": "claude-sonnet-4-6",

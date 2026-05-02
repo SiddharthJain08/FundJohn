@@ -65,8 +65,9 @@ function formatTrade(ticker, direction, entryLow, entryHigh, stop, target1, size
 async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, generateId }) {
     // Lazy-load agentPersonas to avoid circular dep — bot.js requires relay.js at top level
     const agentPersonas = (() => { try { return require('./agent-personas'); } catch { return null; } })();
-    const rdPost   = (msg) => agentPersonas?.post('researchdesk', 'research-feed', msg).catch(() => {});
-    const memoPost = (msg) => agentPersonas?.post('researchdesk', 'strategy-memos', msg).catch(() => {});
+    // 2026-05-02: ResearchDesk persona retired; mastermind owns both channels.
+    const rdPost   = (msg) => agentPersonas?.post('mastermind', 'research-feed', msg).catch(() => {});
+    const memoPost = (msg) => agentPersonas?.post('mastermind', 'strategy-memos', msg).catch(() => {});
     const tdPost   = (msg) => agentPersonas?.post('tradedesk', 'trade-signals', msg).catch(() => {});
     const rpPost   = (msg) => agentPersonas?.post('tradedesk', 'trade-reports', msg).catch(() => {});
 

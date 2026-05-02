@@ -1,6 +1,12 @@
 {
   "id": "fundjohn:initiating-coverage",
   "description": "Produce a structured initiating-coverage memo (thesis, 3 drivers, 3 risks, valuation, catalyst, sizing)",
-  "triggers": ["/initiate", "/coverage"],
-  "agents": ["researchjohn", "botjohn", "mastermind"]
+  "triggers": [
+    "/initiate",
+    "/coverage"
+  ],
+  "agents": [
+    "botjohn",
+    "mastermind"
+  ]
 }

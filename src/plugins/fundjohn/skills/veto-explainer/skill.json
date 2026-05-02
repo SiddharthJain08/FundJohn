@@ -1,6 +1,11 @@
 {
   "id": "fundjohn:veto-explainer",
   "description": "Explain veto decisions and surface actionable patterns from historical veto_log",
-  "triggers": ["/veto-explainer", "/why-veto"],
-  "agents": ["botjohn", "researchjohn"]
+  "triggers": [
+    "/veto-explainer",
+    "/why-veto"
+  ],
+  "agents": [
+    "botjohn"
+  ]
 }

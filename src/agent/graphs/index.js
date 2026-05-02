@@ -11,11 +11,11 @@ const paperhunter = require('./paperhunter');
 const graphs = {
   cycle: {
     name: 'cycle',
-    description: 'Daily cycle: datajohn → researchjohn → tradejohn → (HITL) → botjohn',
+    description: 'Daily cycle: datajohn → tradejohn → (HITL) → botjohn',
     run: async (input) => cycleGraph.runCycleGraph(input),
     resume: async (input) => cycleGraph.resumeCycle(input),
     state: async (threadId) => cycleGraph.listThreadState(threadId),
-    nodes: ['datajohn', 'researchjohn', 'tradejohn', 'botjohn'],
+    nodes: ['datajohn', 'tradejohn', 'botjohn'],
     features: ['postgres-checkpoint', 'hitl-interrupt', 'conditional-routing'],
   },
   paperhunter: {
