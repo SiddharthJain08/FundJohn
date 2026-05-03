@@ -242,6 +242,95 @@ test('buildPrompt: unknown mode throws with helpful message', () => {
   );
 });
 
+// ── per-mode caps + prompt templating ─────────────────────────────────
+//
+// Pre-2026-05-03 the cost cap and timeout were single global values, and
+// the prompts themselves had hardcoded "$5" / "30 min" boundaries. That
+// meant raising the cap via env var didn't actually let BotJohn spend
+// more — the prompt still told him to stop at $5. These tests guard the
+// per-mode resolution AND the prompt-side interpolation so the boundary
+// BotJohn reads matches the cap actually in effect.
+
+test('costCapFor + timeoutMsFor: mode-specific defaults', () => {
+  assert.equal(runner.costCapFor('daily'),            5.00);
+  assert.equal(runner.costCapFor('saturday'),         15.00);
+  assert.equal(runner.costCapFor('saturday-verify'),  3.00);
+  assert.equal(runner.timeoutMsFor('daily'),           1_800_000);
+  assert.equal(runner.timeoutMsFor('saturday'),        3_000_000);
+  assert.equal(runner.timeoutMsFor('saturday-verify'),   900_000);
+});
+
+test('costCapFor: unknown mode falls back to daily', () => {
+  // We don't want a typo in --mode to silently get 0 cap.
+  assert.equal(runner.costCapFor('totally-bogus'), runner.costCapFor('daily'));
+  assert.equal(runner.timeoutMsFor('totally-bogus'), runner.timeoutMsFor('daily'));
+});
+
+test('buildPrompt: interpolates {{COST_CAP_USD}} per mode (daily=$5, saturday=$15, verify=$3)', () => {
+  const daily   = runner.buildPrompt({ today: '2026-05-04', mode: 'daily' });
+  const sat     = runner.buildPrompt({ today: '2026-05-09', mode: 'saturday' });
+  const verify  = runner.buildPrompt({ today: '2026-05-10', mode: 'saturday-verify' });
+
+  // Daily prompt's boundary line should mention $5.00, not $15 or $3.
+  assert.ok(daily.includes('budget under $5.00'),
+    `daily prompt must say budget under $5.00, got fragments: ${
+      daily.split('\n').filter(l => l.includes('budget')).map(l => l.trim()).join(' | ')}`);
+
+  // Saturday prompt's boundary line must say $15.00 — and the
+  // ~$40 vs ~$5 fragment must NOT leak (that was the pre-fix copy).
+  assert.ok(sat.includes('audit-session budget under $15.00'),
+    `saturday prompt must say audit budget under $15.00`);
+  assert.ok(!sat.includes('vs ~$5.'),
+    `saturday prompt must not retain the legacy '~$5' boundary copy`);
+
+  // Verify prompt mentions the lower cap.
+  assert.ok(verify.includes('audit budget under $3.00'),
+    `saturday-verify prompt must say audit budget under $3.00`);
+});
+
+test('buildPrompt: interpolates {{TIMEOUT_MIN}} per mode', () => {
+  const sat = runner.buildPrompt({ today: '2026-05-09', mode: 'saturday' });
+  assert.ok(sat.includes('have 50 minutes wrapper budget'),
+    `saturday prompt must reflect the 50-min timeout (not the legacy 30 min)`);
+  assert.ok(sat.includes('Wrapper times out at 50 min.'),
+    `saturday prompt's recovery boundary must say Wrapper times out at 50 min`);
+});
+
+test('formatReport: cost-cap warning uses caller-supplied cap', () => {
+  // Saturday spend $12, cap $15 → no warning
+  const sat = runner.formatReport('🔧 saturday work', 12.00, 1_500_000, 15.00);
+  assert.ok(!sat.includes('exceeded'),
+    `$12 of a $15 cap should NOT trigger warning`);
+
+  // Same spend $12, daily cap $5 → must warn
+  const daily = runner.formatReport('🔧 daily fix', 12.00, 1_500_000, 5.00);
+  assert.ok(/⚠️ cost exceeded \$5\.00 budget/.test(daily),
+    `$12 of a $5 cap should warn with the caller-supplied cap`);
+
+  // Verify cap $3, spend $3.50 → must warn
+  const verify = runner.formatReport('✅ verify', 3.50, 200_000, 3.00);
+  assert.ok(/⚠️ cost exceeded \$3\.00 budget/.test(verify),
+    `verify cap should be $3.00 in the warning text`);
+});
+
+test('main: per-mode cap propagates through to runClaudeBin timeout + footer', async () => {
+  let capturedTimeout = null;
+  const stub = _stubFor({
+    runClaudeBin: async (prompt, opts) => {
+      capturedTimeout = opts?.timeoutMs;
+      return { result: '🔧 **Saturday research — 2026-05-09**\nfix applied', costUsd: 6.50, durationMs: 600_000, raw: '{}' };
+    },
+  });
+  process.exitCode = 0;
+  const r = await runner.main({ ...stub.deps, mode: 'saturday' });
+  assert.equal(r.ok, true);
+  assert.equal(capturedTimeout, 3_000_000,
+    `saturday mode should pass 50min timeout into runClaudeBin`);
+  // $6.50 < $15 saturday cap → no warning even though it exceeds the daily cap
+  assert.ok(!stub.calls.post[0].content.includes('exceeded'),
+    `saturday cost $6.50 under $15 cap should NOT warn`);
+});
+
 // ── clipToTemplate handles all three modes' header markers ────────────
 
 test('clipToTemplate strips preamble before ✅ Saturday research', () => {

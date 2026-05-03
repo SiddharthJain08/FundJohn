@@ -55,8 +55,49 @@ const CLAUDE_BIN  = process.env.CLAUDE_BIN  || '/usr/local/bin/claude-bin';
 const CLAUDE_UID  = parseInt(process.env.CLAUDE_UID  || '1001', 10);
 const CLAUDE_GID  = parseInt(process.env.CLAUDE_GID  || '1001', 10);
 const CLAUDE_HOME = process.env.CLAUDE_HOME || '/home/claudebot';
-const CLAUDE_TIMEOUT_MS = parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS || '1800000', 10); // 30 min
-const COST_CAP_USD = parseFloat(process.env.MAINT_COST_CAP_USD || '5.00');
+
+// Per-mode caps. Daily runs are quick green-lights or short fixes; Saturday
+// runs are the heaviest investigation+recovery path (today's 14-strategy
+// debug session needed multi-script edits and iterative re-runs); verify is
+// strictly read-only.
+//
+// Empirical baseline (from 4 production runs Apr 30 → May 3): median cost
+// $0.27, median duration 152s. Headroom is generous on every mode; raising
+// these is virtually free unless a cycle goes catastrophically off-rails.
+const COST_CAP_BY_MODE = {
+  'daily':           parseFloat(process.env.MAINT_COST_CAP_USD_DAILY    || '5.00'),
+  'saturday':        parseFloat(process.env.MAINT_COST_CAP_USD_SATURDAY || '15.00'),
+  'saturday-verify': parseFloat(process.env.MAINT_COST_CAP_USD_VERIFY   || '3.00'),
+};
+const TIMEOUT_MS_BY_MODE = {
+  'daily':           parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS_DAILY    || '1800000', 10),  // 30 min
+  'saturday':        parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS_SATURDAY || '3000000', 10),  // 50 min
+  'saturday-verify': parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS_VERIFY   || '900000',  10),  //  15 min
+};
+
+// Legacy global env knobs retained for back-compat. If MAINT_COST_CAP_USD or
+// MAINT_CLAUDE_TIMEOUT_MS are set, they override every mode (operator
+// short-circuit). Tests + unit tests still reach in via these globals.
+const _GLOBAL_COST_CAP_OVERRIDE = process.env.MAINT_COST_CAP_USD ? parseFloat(process.env.MAINT_COST_CAP_USD) : null;
+const _GLOBAL_TIMEOUT_OVERRIDE  = process.env.MAINT_CLAUDE_TIMEOUT_MS ? parseInt(process.env.MAINT_CLAUDE_TIMEOUT_MS, 10) : null;
+
+function costCapFor(mode) {
+  if (_GLOBAL_COST_CAP_OVERRIDE !== null && Number.isFinite(_GLOBAL_COST_CAP_OVERRIDE)) {
+    return _GLOBAL_COST_CAP_OVERRIDE;
+  }
+  return COST_CAP_BY_MODE[mode] ?? COST_CAP_BY_MODE.daily;
+}
+function timeoutMsFor(mode) {
+  if (_GLOBAL_TIMEOUT_OVERRIDE !== null && Number.isFinite(_GLOBAL_TIMEOUT_OVERRIDE)) {
+    return _GLOBAL_TIMEOUT_OVERRIDE;
+  }
+  return TIMEOUT_MS_BY_MODE[mode] ?? TIMEOUT_MS_BY_MODE.daily;
+}
+
+// Back-compat alias — formatReport uses this for the cost-cap warning line.
+// Resolved per-call in main(), not at module load, so the prompt's
+// {{COST_CAP_USD}} interpolation always matches the cap actually in effect.
+let COST_CAP_USD = costCapFor('daily');
 
 // ── argv helper (mirrors run_mastermind.js:66-72) ─────────────────────
 function getArg(name, fallback = null) {
@@ -141,8 +182,8 @@ cost — the wrapper appends it.
 - Do NOT skip a real fix and just send a green light.
 - Do NOT spawn subagents. Run tools directly.
 - Do NOT post to any Discord webhook yourself.
-- Keep total session budget under $5. If your work expands beyond a
-  single root cause, write the cannot-auto-fix template and stop.
+- Keep total session budget under $\{\{COST_CAP_USD\}\}. If your work expands beyond
+  a single root cause, write the cannot-auto-fix template and stop.
 `;
 
 const SATURDAY_PROMPT = `# BotJohn — Saturday Research Maintenance
@@ -155,9 +196,9 @@ run has been done for hours — anything still 'running' is a zombie.
 
 Your job: audit the run, report counts to #general, fix anything broken
 SURGICALLY, and re-trigger the appropriate recovery lever DETACHED. You
-have 30 minutes wrapper budget; you cannot wait for a saturday-brain
-re-run (~1h). Sunday 12:00 ET verify run will close the loop on
-whatever recovery you kick off.
+have \{\{TIMEOUT_MIN\}\} minutes wrapper budget; you cannot wait for a
+saturday-brain re-run (~1h). Sunday 12:00 ET verify run will close the
+loop on whatever recovery you kick off.
 
 ## Step 1 — Pull canonical run state
 
@@ -313,12 +354,12 @@ Wrapper handles posting + cost footer. Lead with the ✅/🔧/🚨 emoji.
 
 ## Boundaries
 - NEVER delete from master parquets / canonical Postgres tables. Schema additions only.
-- NEVER full re-trigger when surgical lever applies. Cost: ~$40 vs ~$5.
-- ALWAYS detach re-triggers (\`nohup ... &\` or \`systemctl start\`). Wrapper times out at 30 min.
+- NEVER full re-trigger when surgical lever applies. Cost: ~$40 vs $\{\{COST_CAP_USD\}\}.
+- ALWAYS detach re-triggers (\`nohup ... &\` or \`systemctl start\`). Wrapper times out at \{\{TIMEOUT_MIN\}\} min.
 - ALWAYS update zombie saturday_runs row to status='failed' BEFORE re-triggering — keeps the dashboard coherent.
 - Do NOT spawn subagents.
 - Do NOT post to Discord yourself.
-- Keep your own audit-session budget under $5. If multiple bugs interact, use ESCALATION and stop.
+- Keep your own audit-session budget under $\{\{COST_CAP_USD\}\}. If multiple bugs interact, use ESCALATION and stop.
 `;
 
 const SATURDAY_VERIFY_PROMPT = `# BotJohn — Saturday Research Verify
@@ -393,7 +434,7 @@ re-trigger).
 
 ## Boundaries
 - READ-ONLY. No fixes, commits, or re-triggers.
-- Keep audit budget under $2.
+- Keep audit budget under $\{\{COST_CAP_USD\}\}.
 - Do NOT post yourself; wrapper handles posting.
 `;
 
@@ -408,7 +449,12 @@ function buildPrompt({ today, mode = 'daily' }) {
   if (!tmpl) {
     throw new Error(`unknown mode: ${mode} (expected one of: ${Object.keys(PROMPT_BY_MODE).join(', ')})`);
   }
-  return tmpl.replace(/\{\{TODAY_ISO\}\}/g, today);
+  const cap        = costCapFor(mode);
+  const timeoutMin = Math.round(timeoutMsFor(mode) / 60000);
+  return tmpl
+    .replace(/\{\{TODAY_ISO\}\}/g,    today)
+    .replace(/\{\{COST_CAP_USD\}\}/g, cap.toFixed(2))
+    .replace(/\{\{TIMEOUT_MIN\}\}/g,  String(timeoutMin));
 }
 
 function todayET() {
@@ -422,7 +468,10 @@ function todayET() {
 }
 
 // ── claude-bin spawn (mirrors botjohn-direct.js, drops chat path) ─────
-function runClaudeBin(prompt) {
+function runClaudeBin(prompt, { timeoutMs } = {}) {
+  // Caller passes the mode-resolved timeout. Falls back to the daily
+  // default when called without one (legacy test paths + back-compat).
+  const effectiveTimeoutMs = Number.isFinite(timeoutMs) ? timeoutMs : timeoutMsFor('daily');
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     const args = [
@@ -452,13 +501,13 @@ function runClaudeBin(prompt) {
     const t = setTimeout(() => {
       timedOut = true;
       try { child.kill('SIGTERM'); } catch {}
-    }, CLAUDE_TIMEOUT_MS);
+    }, effectiveTimeoutMs);
 
     child.on('exit', (code) => {
       clearTimeout(t);
       const durationMs = Date.now() - t0;
       if (timedOut) {
-        return reject(new Error(`claude-bin timed out at ${Math.round(CLAUDE_TIMEOUT_MS/1000)}s`));
+        return reject(new Error(`claude-bin timed out at ${Math.round(effectiveTimeoutMs/1000)}s`));
       }
       if (code !== 0 && !stdout) {
         return reject(new Error(`claude-bin exit ${code}: ${stderr.slice(0, 200)}`));
@@ -547,7 +596,7 @@ function clipToTemplate(text) {
   return text.slice(m.index);
 }
 
-function formatReport(text, costUsd, durationMs) {
+function formatReport(text, costUsd, durationMs, costCap = COST_CAP_USD) {
   // 1. Strip preamble narration before slicing — otherwise we'd lose
   //    the actual report when claude-bin's narration is long.
   const clipped = clipToTemplate(text || '');
@@ -557,8 +606,8 @@ function formatReport(text, costUsd, durationMs) {
   const seconds = Math.round((durationMs || 0) / 1000);
   const dollars = (Number.isFinite(costUsd) ? costUsd : 0).toFixed(2);
   let footer = `\n_session cost: $${dollars} | duration: ${seconds}s_`;
-  if (Number.isFinite(costUsd) && costUsd > COST_CAP_USD) {
-    footer += `\n⚠️ cost exceeded $${COST_CAP_USD.toFixed(2)} budget — investigate.`;
+  if (Number.isFinite(costUsd) && costUsd > costCap) {
+    footer += `\n⚠️ cost exceeded $${costCap.toFixed(2)} budget — investigate.`;
   }
   return body + footer;
 }
@@ -569,8 +618,16 @@ async function main(deps = {}) {
   const _getWebhook   = deps.getWebhook   || getWebhook;
   const _postWebhook  = deps.postWebhook  || postWebhook;
 
-  const mode  = deps.mode || getArg('--mode', 'daily');
-  const today = todayET();
+  const mode      = deps.mode || getArg('--mode', 'daily');
+  const today     = todayET();
+  // Resolve per-mode cap + timeout once. The prompt was already templated
+  // with these in buildPrompt(); reusing the same values here keeps the
+  // cost-cap warning line, the wrapper kill-deadline, and the boundary
+  // text BotJohn read all aligned.
+  const costCap   = costCapFor(mode);
+  const timeoutMs = timeoutMsFor(mode);
+  COST_CAP_USD    = costCap;   // keep formatReport's default sane
+
   let prompt;
   try {
     prompt = buildPrompt({ today, mode });
@@ -579,16 +636,16 @@ async function main(deps = {}) {
     process.exitCode = 1;
     return { ok: false, reason: 'unknown_mode', mode };
   }
-  console.log(`[run_maintenance] mode=${mode} today=${today}`);
+  console.log(`[run_maintenance] mode=${mode} today=${today} cap=$${costCap.toFixed(2)} timeout=${Math.round(timeoutMs/60000)}min`);
 
   let session;
   try {
-    session = await _runClaudeBin(prompt);
+    session = await _runClaudeBin(prompt, { timeoutMs });
   } catch (err) {
     return postFallback(_getWebhook, _postWebhook, `🚨 BotJohn maintenance run failed (mode=${mode}): ${err.message}`);
   }
 
-  const content = formatReport(session.result, session.costUsd, session.durationMs);
+  const content = formatReport(session.result, session.costUsd, session.durationMs, costCap);
 
   const url = await _getWebhook('botjohn', 'general').catch(() => null);
   if (!url) {
@@ -633,9 +690,14 @@ module.exports = {
   SATURDAY_PROMPT,
   SATURDAY_VERIFY_PROMPT,
   PROMPT_BY_MODE,
-  // Back-compat alias — pre-2026-05-02 the daily prompt was the only one.
+  COST_CAP_BY_MODE,
+  TIMEOUT_MS_BY_MODE,
+  costCapFor,
+  timeoutMsFor,
+  // Back-compat aliases — pre-2026-05-02 the daily prompt was the only one,
+  // and external callers occasionally read COST_CAP_USD as a constant.
   MAINTENANCE_PROMPT: DAILY_PROMPT,
-  COST_CAP_USD,
+  get COST_CAP_USD() { return COST_CAP_USD; },
 };
 
 if (require.main === module) {

@@ -12,7 +12,7 @@ WorkingDirectory=/root/openclaw
 ExecStart=/usr/bin/node /root/openclaw/src/agent/run_maintenance.js --mode saturday
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=2400
+TimeoutStartSec=3600
 
 [Install]
 WantedBy=multi-user.target
