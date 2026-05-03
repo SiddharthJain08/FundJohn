@@ -193,12 +193,26 @@ async function _rate(opts, notify) {
 }
 
 // ── Phase 4: paperhunter fan-out across implementable candidates ────────────
+// Pulls TWO populations and fans paperhunter across both in one call so the
+// downstream _tier/_code/_stage phases process a unified result set:
+//
+//   1. Fresh candidates from THIS Saturday's rate + recurate phases that
+//      haven't been paperhunter-extracted yet.
+//
+//   2. Stuck `fetch_failed` candidates from the last RETRY_FETCH_FAILED_AGE_HRS
+//      hours (default 14 days). Their hunter_result_json is cleared first so
+//      paperhunter re-extracts. This is what produced 13 of today's 14 new
+//      strategies — the 33 candidates from prior Saturdays that originally
+//      failed on paywalled DOIs but recover via the abstract-only fallback
+//      path. Pre-2026-05-03 this was a separate manual script
+//      (saturday_brain_retry_failed.js); now folded into the auto Saturday
+//      flow so next Saturday's run picks them up without operator action.
+const RETRY_FETCH_FAILED_AGE_HRS = parseInt(process.env.SATURDAY_RETRY_FETCH_FAILED_AGE_HRS || '336', 10);
+
 async function _hunt(maxFanout, opts, notify) {
-  // Pull the top-N research_candidates that came from the just-completed
-  // rating run (priority desc) AND haven't been paperhunter-extracted yet.
-  // We scope to curator-submitted rows from this run window.
-  const { rows } = await _query(
-    `SELECT candidate_id::text AS candidate_id
+  // Population 1: fresh candidates from today's rating + recurate.
+  const { rows: fresh } = await _query(
+    `SELECT candidate_id::text AS candidate_id, 'fresh' AS pop
        FROM research_candidates
       WHERE submitted_by IN ('curator','curator_spotcheck','ideator')
         AND (hunter_result_json IS NULL OR hunter_result_json::text IN ('null','{}'))
@@ -207,22 +221,52 @@ async function _hunt(maxFanout, opts, notify) {
       LIMIT $1`,
     [maxFanout]
   );
-  if (rows.length === 0) {
-    notify('hunt: nothing to extract (no pending candidates without hunter results)');
+
+  // Population 2: stuck fetch_failed candidates from prior weeks. Cap so a
+  // single Saturday doesn't blow the paperhunter budget — typical recovery
+  // pool sits at 30-50 candidates after a normal week.
+  const stuckCap = Math.min(60, Math.max(0, maxFanout - fresh.length));
+  let stuck = [];
+  if (stuckCap > 0) {
+    const r = await _query(
+      `SELECT candidate_id::text AS candidate_id, 'retry' AS pop
+         FROM research_candidates
+        WHERE hunter_result_json->>'rejection_reason_if_any' = 'fetch_failed'
+          AND submitted_at > NOW() - INTERVAL '${RETRY_FETCH_FAILED_AGE_HRS} hours'
+        ORDER BY priority DESC, submitted_at DESC
+        LIMIT $1`,
+      [stuckCap]
+    );
+    stuck = r.rows;
+  }
+
+  if (fresh.length === 0 && stuck.length === 0) {
+    notify('hunt: nothing to extract (no pending candidates and no recoverable fetch_failed)');
     return { run: 0, results: [] };
   }
-  notify(`hunt: spawning paperhunter on ${rows.length} candidates (concurrency ${DEFAULT_HUNTER_CONCURR})`);
+
+  // Clear stale hunter_result_json on the retry pool so paperhunter re-extracts.
+  if (stuck.length > 0 && !opts.dryRun) {
+    await _query(
+      `UPDATE research_candidates SET hunter_result_json = NULL
+        WHERE candidate_id::text = ANY($1::text[])`,
+      [stuck.map(s => s.candidate_id)]
+    );
+  }
+
+  const all = [...fresh, ...stuck];
+  notify(`hunt: spawning paperhunter on ${all.length} candidates (${fresh.length} fresh + ${stuck.length} retry-failed) at concurrency ${DEFAULT_HUNTER_CONCURR}`);
 
   if (opts.dryRun) {
     notify('hunt: DRY RUN — skipping spawn, returning empty results');
-    return { run: 0, results: [], candidateIds: rows.map(r => r.candidate_id) };
+    return { run: 0, results: [], candidateIds: all.map(r => r.candidate_id) };
   }
   const orch = new ResearchOrchestrator();
   const results = await orch.runHunterFanout(
-    rows.map(r => r.candidate_id),
+    all.map(r => r.candidate_id),
     { concurrency: DEFAULT_HUNTER_CONCURR, notify: (m) => notify(`  hunt: ${m}`) }
   );
-  return { run: rows.length, results, candidateIds: rows.map(r => r.candidate_id) };
+  return { run: all.length, results, candidateIds: all.map(r => r.candidate_id) };
 }
 
 // ── Phase 5: data-tier the hunter results ───────────────────────────────────
@@ -576,15 +620,40 @@ async function run(opts = {}) {
     const MIN_SINCE_DAYS = 30;
     const _ms = Date.now() - MIN_SINCE_DAYS * 86400 * 1000;
     const _floorIso = new Date(_ms).toISOString().slice(0, 10);
+
+    // Monthly all-time refresh: on the FIRST Saturday of each month, force
+    // an --all-time backfill regardless of last_run_started_at. This
+    // catches:
+    //   - Newly-added venues from Phase 1's Opus expand pass (sources
+    //     discovered last week may have been mid-month, before this month's
+    //     papers got published).
+    //   - Backfill gaps where a long-tail paper from 2 years ago indexes
+    //     to OpenAlex this week — incremental "since-last-run" never sees it.
+    //   - Schema changes / dedup bug recoveries — new ON CONFLICT path
+    //     handles fresh ingest on already-seen URLs gracefully.
+    // The 30-day delta against last weekly increment costs roughly
+    // ~$3-5 of extra arxiv/openalex calls (no LLM cost in sweep itself);
+    // the additional rate-phase tokens are bounded by the rater's existing
+    // batch logic (BLUEPRINT_SIGNAL_RX + abstract>=50 filter still apply,
+    // so we only pay Opus on net-new strategy-shaped papers).
+    const _today = new Date();
+    const _firstSaturdayOfMonth =
+        _today.getUTCDay() === 6 && _today.getUTCDate() <= 7;
+    const monthlyAllTime = _firstSaturdayOfMonth && !opts.dryRun;
+    const effectiveAllTime = opts.allTime || monthlyAllTime;
+    if (monthlyAllTime && !opts.allTime) {
+      notify(`sweep: first Saturday of month — auto-promoting to --all-time backfill`);
+    }
+
     let sinceIso = opts.sinceIso
-      || (preflightData.lastRunStartedAt && !opts.allTime
+      || (preflightData.lastRunStartedAt && !effectiveAllTime
             ? preflightData.lastRunStartedAt.slice(0, 10)
             : null);
-    if (sinceIso && sinceIso > _floorIso && !opts.allTime) {
+    if (sinceIso && sinceIso > _floorIso && !effectiveAllTime) {
       notify(`sweep: sinceIso=${sinceIso} is < ${MIN_SINCE_DAYS}d ago; widening to ${_floorIso} to avoid OpenAlex indexing-lag holes`);
       sinceIso = _floorIso;
     }
-    sweepData = await _sweep({ sinceIso, allTime: opts.allTime, expansionId: expandData.expansionId, dryRun: opts.dryRun }, notify);
+    sweepData = await _sweep({ sinceIso, allTime: effectiveAllTime, expansionId: expandData.expansionId, dryRun: opts.dryRun }, notify);
     await updatePhase('rate', { papers_ingested: sweepData.ingested });
 
     // Phase 3
