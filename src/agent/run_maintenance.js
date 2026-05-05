@@ -664,13 +664,25 @@ async function main(deps = {}) {
 }
 
 async function postFallback(getWebhookFn, postWebhookFn, content) {
-  const url = await getWebhookFn('botjohn', 'general').catch(() => null);
+  // Visible entry log — without this, a fallback delivery is indistinguishable
+  // from a hard crash in journalctl. 2026-05-05: claudebot OAuth expired at
+  // 16:00 UTC and the wrapper's auth-detector triggered postFallback, but
+  // the silent path made it look like a hard exit; only the session jsonl
+  // revealed the synthetic 401 actually fired.
+  console.error(`[run_maintenance] fallback path: ${content.slice(0, 160)}`);
+  const url = await getWebhookFn('botjohn', 'general').catch((e) => { console.error(`[run_maintenance] webhook lookup failed in fallback: ${e.message}`); return null; });
   if (!url) {
     console.error(`[run_maintenance] FATAL: ${content} (and no webhook to alert on)`);
     process.exitCode = 1;
     return { ok: false, reason: 'no_webhook' };
   }
-  await postWebhookFn(url, content);
+  const r = await postWebhookFn(url, content);
+  if (!r || !r.ok) {
+    console.error(`[run_maintenance] fallback POST failed: status=${r?.status} body=${(r?.body || '').slice(0, 200)}`);
+    process.exitCode = 1;
+    return { ok: false, reason: 'fallback_post_failed', status: r?.status };
+  }
+  console.error(`[run_maintenance] posted fallback (${content.length} chars) to #general (status ${r.status})`);
   process.exitCode = 1;
   return { ok: false, reason: 'wrapper_failure' };
 }
