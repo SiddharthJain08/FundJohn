@@ -238,6 +238,12 @@ app.get('/api/db/cycles', async (req, res) => {
 
 app.get('/api/portfolio/positions', async (req, res) => {
   try {
+    // Cap to recent open signals. execution_signals.status='open' currently
+    // matches ~4.6k rows because stale paper signals from prior cycles never
+    // get flipped to 'closed' — that returned a 1.66 MB JSON payload that
+    // dominated the portfolio page's perceived load time. The dashboard
+    // collapses to 10 visible rows by default, so restricting to the most
+    // recent 500 (within 90d) is more than the UI can ever surface.
     const result = await dbQuery(`
       SELECT es.id, es.strategy_id, es.ticker, es.direction,
              es.entry_price, es.stop_loss, es.target_1, es.position_size_pct,
@@ -250,7 +256,9 @@ app.get('/api/portfolio/positions', async (req, res) => {
         FROM signal_pnl WHERE signal_id = es.id ORDER BY pnl_date DESC LIMIT 1
       ) sp ON true
       WHERE es.status = 'open'
+        AND es.signal_date >= CURRENT_DATE - INTERVAL '90 days'
       ORDER BY es.signal_date DESC
+      LIMIT 500
     `);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -335,6 +343,215 @@ app.get('/api/data/freshness', async (req, res) => {
     const { getDataFreshness } = require('../../pipeline/freshness');
     res.json(await getDataFreshness());
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Per-parameter data-usage list.
+// Granularity: one row per individual financial parameter (e.g. close,
+// implied_volatility, ebitda) instead of the parent data category.
+// Sourced from data/master/schema_registry.json (the canonical column
+// dictionary per parquet) plus computed columns from the data_columns
+// table that don't appear in schema_registry (returns, log_returns,
+// realized_vol).
+//
+// Identifier columns (ticker, date, …) are filtered out so the list
+// only carries columns an operator would call a "financial parameter".
+//
+// Strategies still declare data dependencies at the parent-category
+// level (e.g. parameters.required_columns = ['prices', 'options_eod']).
+// To stay honest about what we know, every parameter inherits the
+// category-level user count: if 14 strategies declared `prices`, all
+// of close / open / high / low / volume / vwap / transactions report
+// 14 users. Once strategy authors start declaring at column-level the
+// counts will diverge naturally.
+const DATA_CATEGORY_ORDER = [
+  'prices', 'returns', 'log_returns', 'realized_vol',
+  'options_eod', 'financials', 'earnings', 'insider', 'macro',
+];
+const DATA_PARAM_IGNORE = new Set([
+  'ticker', 'date', 'datetime', 'period', 'source',
+  'transaction_date', 'filing_date', 'last_updated',
+  'id', 'symbol', 'raw', 'cusip',
+]);
+const DATA_PARAM_DESC = {
+  // prices
+  open: 'Session open price', high: 'Intraday high', low: 'Intraday low',
+  close: 'Session close price', volume: 'Daily trading volume',
+  vwap: 'Volume-weighted average price', transactions: 'Trade count',
+  // options_eod
+  expiry: 'Option expiration date', strike: 'Option strike price',
+  option_type: 'Call vs put',
+  market_price: 'Last option price',
+  implied_volatility: 'Black–Scholes implied volatility',
+  delta: 'Option delta (∂price/∂spot)',
+  gamma: 'Option gamma (∂²price/∂spot²)',
+  theta: 'Option theta (decay)',
+  vega:  'Option vega (∂price/∂σ)',
+  rho:   'Option rho (∂price/∂rate)',
+  open_interest: 'Open contracts outstanding',
+  bid: 'Best bid', ask: 'Best ask',
+  // financials
+  revenue: 'Quarterly revenue', gross_profit: 'Gross profit',
+  ebitda: 'EBITDA', net_income: 'Net income', eps: 'Earnings per share',
+  gross_margin: 'Gross margin', operating_margin: 'Operating margin',
+  net_margin: 'Net margin', revenue_growth: 'YoY revenue growth',
+  ev_revenue: 'Enterprise value / revenue',
+  ev_ebitda:  'Enterprise value / EBITDA',
+  pe_ratio: 'Price / earnings', market_cap: 'Market capitalization',
+  roe: 'Return on equity', roic: 'Return on invested capital',
+  debt_equity_ratio: 'Debt / equity',
+  p_fcf_ratio: 'Price / free cash flow',
+  // earnings
+  eps_actual: 'Reported EPS',
+  eps_estimated: 'Consensus EPS estimate',
+  revenue_actual: 'Reported revenue',
+  revenue_estimated: 'Consensus revenue estimate',
+  // insider
+  insider_name: 'Filer name', role: 'Filer role at issuer',
+  transaction_type: 'Buy / sell / award / option exercise',
+  shares: 'Shares transacted',
+  price_per_share: 'Filing price per share',
+  net_value: 'Notional value of filing',
+  shares_owned_after: 'Position after filing',
+  // macro
+  series: 'FRED / economic series id',
+  value:  'Series observation',
+  // computed
+  returns: 'Daily simple returns', log_returns: 'Daily log returns',
+  realized_vol: 'Realized volatility (rolling)',
+};
+
+app.get('/api/data/usage', async (req, res) => {
+  try {
+    const fs2   = require('fs');
+    const path2 = require('path');
+
+    // Category-level metadata from data_columns.
+    const colsRes = await dbQuery(`
+      SELECT column_name AS category, provider, refresh_cadence,
+             min_date, max_date, row_count, ticker_count
+      FROM data_columns
+    `);
+    const catMeta = {};
+    for (const r of colsRes.rows) {
+      const minDate = r.min_date ? r.min_date.toISOString().slice(0, 10) : null;
+      const maxDate = r.max_date ? r.max_date.toISOString().slice(0, 10) : null;
+      const days = (minDate && maxDate)
+        ? Math.round((Date.parse(maxDate) - Date.parse(minDate)) / 86400000) + 1
+        : 0;
+      catMeta[r.category] = {
+        provider:        r.provider || null,
+        refresh_cadence: r.refresh_cadence || null,
+        min_date:        minDate,
+        max_date:        maxDate,
+        history_days:    days,
+        row_count:       parseInt(r.row_count)    || 0,
+        ticker_count:    parseInt(r.ticker_count) || 0,
+      };
+    }
+
+    // Schema registry: per-category list of fine-grained columns.
+    let registry = {};
+    try {
+      registry = JSON.parse(fs2.readFileSync(
+        path2.join(__dirname, '../../../data/master/schema_registry.json'), 'utf8'));
+    } catch (_) {}
+
+    // Per-strategy declared categories (used at category-level since
+    // that's the granularity strategies emit today).
+    const stratRes = await dbQuery(`
+      SELECT id AS strategy_id,
+             parameters->'required_columns'   AS req_cols,
+             data_requirements_planned        AS planned
+      FROM strategy_registry
+    `);
+    const usersByCategory = {};
+    for (const s of stratRes.rows) {
+      let cats = [];
+      if (Array.isArray(s.req_cols)) cats = s.req_cols.filter(c => typeof c === 'string');
+      if (!cats.length && Array.isArray(s.planned)) {
+        cats = s.planned.map(p => p && (p.column || p.data_type)).filter(c => typeof c === 'string');
+      }
+      for (const c of new Set(cats)) {
+        if (!usersByCategory[c]) usersByCategory[c] = [];
+        usersByCategory[c].push(s.strategy_id);
+      }
+    }
+    for (const k of Object.keys(usersByCategory)) usersByCategory[k].sort();
+
+    const strategiesTotal = stratRes.rows.length;
+
+    // Build the flat parameter list:
+    //   1. Walk schema_registry → emit one parameter per non-identifier column
+    //   2. Append computed-only categories from data_columns (returns,
+    //      log_returns, realized_vol) which don't appear in the registry
+    const params = [];
+    const seenCats = new Set();
+    for (const cat of Object.keys(registry)) {
+      seenCats.add(cat);
+      const cols = (registry[cat] && Array.isArray(registry[cat].columns)) ? registry[cat].columns : [];
+      for (const col of cols) {
+        if (DATA_PARAM_IGNORE.has(col)) continue;
+        const meta = catMeta[cat] || {};
+        params.push({
+          name:          col,
+          category:      cat,
+          description:   DATA_PARAM_DESC[col] || null,
+          provider:      meta.provider     || null,
+          refresh_cadence: meta.refresh_cadence || null,
+          history_days:  meta.history_days || 0,
+          min_date:      meta.min_date     || null,
+          max_date:      meta.max_date     || null,
+          row_count:     meta.row_count    || 0,
+          ticker_count:  meta.ticker_count || 0,
+          user_count:    (usersByCategory[cat] || []).length,
+          users:         (usersByCategory[cat] || []).slice(0, 50),
+        });
+      }
+    }
+    // Computed/derived columns tracked in data_columns but not in the
+    // schema registry (they have no parquet schema — they live as
+    // post-collection feature columns).
+    for (const r of colsRes.rows) {
+      if (seenCats.has(r.category)) continue;
+      const meta = catMeta[r.category] || {};
+      params.push({
+        name:          r.category,
+        category:      'computed',
+        description:   DATA_PARAM_DESC[r.category] || null,
+        provider:      meta.provider     || 'computed',
+        refresh_cadence: meta.refresh_cadence || null,
+        history_days:  meta.history_days || 0,
+        min_date:      meta.min_date     || null,
+        max_date:      meta.max_date     || null,
+        row_count:     meta.row_count    || 0,
+        ticker_count:  meta.ticker_count || 0,
+        user_count:    (usersByCategory[r.category] || []).length,
+        users:         (usersByCategory[r.category] || []).slice(0, 50),
+      });
+    }
+
+    // Default sort: rank desc by user_count, ties broken by the canonical
+    // category order (so prices columns float to the top of equal-count
+    // ties), then by parameter name. Client may re-sort.
+    const catRank = {};
+    DATA_CATEGORY_ORDER.forEach((c, i) => { catRank[c] = i; });
+    params.sort((a, b) => {
+      const d = (b.user_count || 0) - (a.user_count || 0);
+      if (d !== 0) return d;
+      const ra = catRank[a.category] != null ? catRank[a.category] : 999;
+      const rb = catRank[b.category] != null ? catRank[b.category] : 999;
+      if (ra !== rb) return ra - rb;
+      return a.name.localeCompare(b.name);
+    });
+
+    res.json({
+      parameters:        params,
+      strategies_total:  strategiesTotal,
+      categories_total:  Object.keys(catMeta).length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Strategies page: manifest + per-strategy stats join.
@@ -424,6 +641,47 @@ app.get('/api/strategies', async (req, res) => {
       }
     } catch (_) {}
 
+    // Live per-strategy per-regime aggregates, computed from closed trades.
+    // Joined to execution_signals for the regime tag captured at signal entry.
+    // Keyed by strategy_id → regime_state → {trades, arr, adr, act, win_rate}.
+    // arr is a fraction (0.05 = 5%); the dashboard converts to percent for
+    // display, matching the convention used elsewhere on the page.
+    const liveRegimeBreakdown = {};
+    try {
+      const lrRes = await dbQuery(`
+        SELECT es.strategy_id,
+               es.regime_state                                                  AS regime,
+               COUNT(*)::int                                                    AS trades,
+               AVG(sp.realized_pnl_pct)                                         AS arr,
+               AVG(sp.days_held)                                                AS act,
+               COUNT(*) FILTER (WHERE sp.realized_pnl_pct > 0)::numeric
+                 / NULLIF(COUNT(*), 0)                                          AS win_rate,
+               MIN(sp.realized_pnl_pct)                                         AS worst,
+               MAX(sp.realized_pnl_pct)                                         AS best
+        FROM signal_pnl sp
+        JOIN execution_signals es ON sp.signal_id = es.id
+        WHERE sp.status = 'closed'
+          AND sp.realized_pnl_pct IS NOT NULL
+          AND es.regime_state IS NOT NULL
+        GROUP BY es.strategy_id, es.regime_state
+      `);
+      for (const row of lrRes.rows) {
+        const arr  = row.arr != null ? parseFloat(row.arr) : null;
+        const act  = row.act != null ? parseFloat(row.act) : null;
+        const adr  = (arr != null && act != null && act > 0) ? (arr / act) : null;
+        if (!liveRegimeBreakdown[row.strategy_id]) liveRegimeBreakdown[row.strategy_id] = {};
+        liveRegimeBreakdown[row.strategy_id][row.regime] = {
+          trades:    parseInt(row.trades) || 0,
+          arr,                          // fraction (0.05 = 5%)
+          adr,                          // fraction per day
+          act,                          // days
+          win_rate:  row.win_rate != null ? parseFloat(row.win_rate) : null,
+          best:      row.best != null ? parseFloat(row.best) : null,
+          worst:     row.worst != null ? parseFloat(row.worst) : null,
+        };
+      }
+    } catch (_) { /* leave breakdown empty if join fails */ }
+
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
     const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
@@ -467,6 +725,7 @@ app.get('/api/strategies', async (req, res) => {
         backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
         backtest_trade_count:      sr.backtest_trade_count      ?? null,
         backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
@@ -517,6 +776,7 @@ app.get('/api/strategies', async (req, res) => {
         backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
         backtest_trade_count:      sr.backtest_trade_count      ?? null,
         backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
@@ -547,6 +807,7 @@ const STRATEGY_VALID_TRANSITIONS = new Map([
   ['candidate:staging',     'regress candidate — needs additional data sources'],
   ['candidate:archived',    'abandon without going live'],
   ['paper:archived',        'archive legacy paper row'],
+  ['live:candidate',        'pull back from live to candidate to re-observe backtest metrics'],
   ['live:monitoring',       'escalate to monitoring'],
   ['live:deprecated',       'demote from live'],
   ['monitoring:live',       'restore confidence, back to live'],
@@ -850,65 +1111,517 @@ app.get('/api/portfolio/account', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/portfolio/value-curve', async (req, res) => {
-  const period = req.query.period || '1M';
-  try {
-    const r = await runAlpaca(['account', 'portfolio',
-                               '--period', period, '--timeframe', '1D']);
-    if (!r.ok) {
-      const status = r.error?.status || 500;
-      return res.status(status).json({ error: r.error?.error || r.stderr || 'alpaca cli error' });
-    }
-    const h = r.payload || {};
-    // Zip timestamps + equity into [{date, equity, profit_loss, profit_loss_pct}]
-    const rows = (h.timestamp || []).map((ts, i) => ({
-      date:             new Date(ts * 1000).toISOString().slice(0, 10),
-      equity:           h.equity?.[i]          ?? null,
-      profit_loss:      h.profit_loss?.[i]     ?? null,
-      profit_loss_pct:  h.profit_loss_pct?.[i] ?? null,
-    })).filter(r => r.equity !== null && r.equity > 0);
+async function _buildValueCurve(period) {
+  const r = await runAlpaca(['account', 'portfolio',
+                             '--period', period, '--timeframe', '1D'],
+                            { timeout: 30_000 });
+  if (!r.ok) {
+    const e = new Error(r.error?.error || r.stderr || 'alpaca cli error');
+    e.status = r.error?.status || 500;
+    throw e;
+  }
+  const h = r.payload || {};
+  // Zip timestamps + equity into [{date, equity, profit_loss, profit_loss_pct}]
+  const rows = (h.timestamp || []).map((ts, i) => ({
+    date:             new Date(ts * 1000).toISOString().slice(0, 10),
+    equity:           h.equity?.[i]          ?? null,
+    profit_loss:      h.profit_loss?.[i]     ?? null,
+    profit_loss_pct:  h.profit_loss_pct?.[i] ?? null,
+  })).filter(r => r.equity !== null && r.equity > 0);
 
-    // Alpaca paper's portfolio history stamps each day's snapshot only
-    // after the NEXT session opens, so the curve lags by ~1 trading day.
-    // Synthesize today's running point from `alpaca account get` equity
-    // unless OPENCLAW_TRUST_CLI_PORTFOLIO=1 says the CLI already did it.
-    //
-    // Verified 2026-04-28: the alpha-preview CLI's `account portfolio`
-    // DOES emit today's date in its timestamp array, but the equity value
-    // for today's slot is `last_equity` (prior session close), not the
-    // live mark-to-market. So the synthesis fallback is still load-
-    // bearing — flipping the trust flag would replace live equity with
-    // the stale prior close in the dashboard.
-    const trustCli = process.env.OPENCLAW_TRUST_CLI_PORTFOLIO === '1';
-    if (!trustCli) {
-      try {
-        const todayIso = new Date().toISOString().slice(0, 10);
-        const lastRowDate = rows.length ? rows[rows.length - 1].date : null;
-        if (lastRowDate !== todayIso) {
-          const acctR = await runAlpaca(['account', 'get']);
-          if (acctR.ok && acctR.payload) {
-            const a = acctR.payload;
-            const todayEquity = parseFloat(a.equity);
-            if (todayEquity > 0) {
-              const prevEquity = rows.length ? parseFloat(rows[rows.length - 1].equity)
-                                              : parseFloat(a.last_equity || 0);
-              const pl    = prevEquity > 0 ? todayEquity - prevEquity : null;
-              const plPct = prevEquity > 0 ? (todayEquity - prevEquity) / prevEquity : null;
-              rows.push({
-                date:            todayIso,
-                equity:          todayEquity,
-                profit_loss:     pl,
-                profit_loss_pct: plPct,
-                _live:           true,
-              });
-            }
+  // Alpaca paper's portfolio history stamps each day's snapshot only
+  // after the NEXT session opens, so the curve lags by ~1 trading day.
+  // Synthesize today's running point from `alpaca account get` equity
+  // unless OPENCLAW_TRUST_CLI_PORTFOLIO=1 says the CLI already did it.
+  //
+  // Verified 2026-04-28: the alpha-preview CLI's `account portfolio`
+  // DOES emit today's date in its timestamp array, but the equity value
+  // for today's slot is `last_equity` (prior session close), not the
+  // live mark-to-market. So the synthesis fallback is still load-
+  // bearing — flipping the trust flag would replace live equity with
+  // the stale prior close in the dashboard.
+  const trustCli = process.env.OPENCLAW_TRUST_CLI_PORTFOLIO === '1';
+  if (!trustCli) {
+    try {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const lastRowDate = rows.length ? rows[rows.length - 1].date : null;
+      if (lastRowDate !== todayIso) {
+        const acctR = await runAlpaca(['account', 'get'], { timeout: 10_000 });
+        if (acctR.ok && acctR.payload) {
+          const a = acctR.payload;
+          const todayEquity = parseFloat(a.equity);
+          if (todayEquity > 0) {
+            const prevEquity = rows.length ? parseFloat(rows[rows.length - 1].equity)
+                                            : parseFloat(a.last_equity || 0);
+            const pl    = prevEquity > 0 ? todayEquity - prevEquity : null;
+            const plPct = prevEquity > 0 ? (todayEquity - prevEquity) / prevEquity : null;
+            rows.push({
+              date:            todayIso,
+              equity:          todayEquity,
+              profit_loss:     pl,
+              profit_loss_pct: plPct,
+              _live:           true,
+            });
           }
         }
-      } catch (_) { /* fall through with whatever the history endpoint returned */ }
+      }
+    } catch (_) { /* fall through with whatever the history endpoint returned */ }
+  }
+
+  return { rows, base_value: h.base_value ?? null };
+}
+
+app.get('/api/portfolio/value-curve', async (req, res) => {
+  // Alpaca's history endpoint accepts "all" only as a lowercase keyword;
+  // the dashboard surfaces it as "all" so just pass through.
+  const period = req.query.period || '1M';
+  try {
+    const data = await _cached(`vc:${period}`, VALUE_CURVE_TTL,
+                                () => _buildValueCurve(period));
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Portfolio P&L candlestick — daily OHLC of account equity for a 90d window.
+// Alpaca caps intraday timeframe at 30 days. We fetch:
+//   - last 30D at 1H        → real OHLC per day from intraday samples
+//   - last 90D at 1D        → daily marks for older days (degenerate candle:
+//                             open=prev_close, close=today, high=max,
+//                             low=min). Bands beyond day 30 will look like
+//                             thin "marks" but still convey direction.
+// Alpaca's intraday endpoint can spike to 15-30s under load (verified
+// 2026-04-29), so we cache responses and stream a background warmer to
+// keep dashboard loads instant. The data only gains a new daily candle
+// once per session, and the live close is approximated by the latest
+// 1H sample — caching at minute granularity is plenty fresh for a
+// daily-resolution chart.
+const _portfolioCache = new Map();  // key → { ts, ttl, value, inflight }
+const PNL_CANDLES_TTL  = 90_000;
+const VALUE_CURVE_TTL  = 60_000;
+
+async function _cached(key, ttlMs, factory) {
+  const now = Date.now();
+  const hit = _portfolioCache.get(key);
+  if (hit && (now - hit.ts) < hit.ttl && hit.value !== undefined) {
+    return hit.value;
+  }
+  if (hit && hit.inflight) return hit.inflight;
+  const inflight = (async () => {
+    try {
+      const value = await factory();
+      _portfolioCache.set(key, { ts: Date.now(), ttl: ttlMs, value });
+      return value;
+    } catch (err) {
+      // On failure, drop the inflight marker so the next caller retries.
+      // Keep any prior cached value (stale-on-error) for 30s so the
+      // dashboard renders something while Alpaca recovers.
+      const prior = _portfolioCache.get(key);
+      if (prior && prior.value !== undefined) {
+        _portfolioCache.set(key, { ts: prior.ts, ttl: 30_000, value: prior.value });
+        return prior.value;
+      }
+      _portfolioCache.delete(key);
+      throw err;
+    }
+  })();
+  _portfolioCache.set(key, { ts: now, ttl: ttlMs, value: hit?.value, inflight });
+  return inflight;
+}
+
+async function _buildCandles(days) {
+  // Alpaca's intraday endpoint rejects period >30 days when paired with
+  // --intraday-reporting continuous (the API errors "invalid timeframe
+  // provided: 1H. Valid timeframe for days > 30 is 1D" verified
+  // 2026-04-29) — even though the message says "> 30" the actual cap is
+  // 29 days. Floor at 29 so candles always come back populated.
+  //
+  // We pull two parallel intraday streams so the candles can show
+  // **session-bracketed Open/Close** while the **wicks span the full
+  // 24-hour day** (capturing after-hours and overnight movement):
+  //   continuous   → high / low across the full day, ensures adjacent
+  //                  candles join end-to-end (today's intraday range
+  //                  starts at yesterday's close)
+  //   market_hours → only regular session (9:30-16:00 ET) samples, used
+  //                  for the candle's Open (first session sample) and
+  //                  Close (last session sample). Days with no market
+  //                  samples (weekends/holidays) fall back to the
+  //                  continuous-stream open/close so the candle still
+  //                  renders as a flat mark.
+  const intradayPeriod = `${Math.min(days, 29)}D`;
+  const [contR, mktR, dailyR] = await Promise.all([
+    runAlpaca(['account', 'portfolio',
+               '--period', intradayPeriod, '--timeframe', '1H',
+               '--intraday-reporting', 'continuous'],
+              { timeout: 45_000 }),
+    runAlpaca(['account', 'portfolio',
+               '--period', intradayPeriod, '--timeframe', '1H',
+               '--intraday-reporting', 'market_hours'],
+              { timeout: 45_000 }),
+    runAlpaca(['account', 'portfolio',
+               '--period', `${days}D`, '--timeframe', '1D'],
+              { timeout: 30_000 }),
+  ]);
+  // We need at least one of the three to succeed; if all three fail,
+  // surface the first error.
+  if (!contR.ok && !mktR.ok && !dailyR.ok) {
+    const err = contR.error || mktR.error || dailyR.error;
+    const e = new Error(err?.error || 'alpaca cli error');
+    e.status = err?.status || 500;
+    throw e;
+  }
+
+  // Outlier gate: Alpaca's portfolio-history endpoint occasionally emits a
+  // single intraday equity sample that's 1-2 orders of magnitude off (saw
+  // a $1,285 sample stamped on 2026-05-04 while the same day's
+  // market-hours stream and account endpoint both reported ~$100k). One
+  // bad sample destroys the y-axis range on the 90d chart. Reject any
+  // sample that diverges by >50% from a running baseline; the threshold
+  // is generous (legitimate intraday moves on a 3x-leverage paper account
+  // are well under that), and the baseline self-heals because we only
+  // update it on accepted samples.
+  const RATIO_HI = 2.0;
+  const RATIO_LO = 0.5;
+
+  // Per-day continuous range: high, low, and a fallback open/close drawn
+  // from the first/last continuous sample (used only if market_hours has
+  // no sample for that day).
+  const contByDay = new Map();
+  if (contR.ok && contR.payload) {
+    const h = contR.payload;
+    const ts = h.timestamp || [];
+    const eq = h.equity    || [];
+    let baseline = null;
+    for (let i = 0; i < ts.length; i++) {
+      const v = parseFloat(eq[i]);
+      if (!Number.isFinite(v) || v <= 0) continue;
+      if (baseline != null && (v < baseline * RATIO_LO || v > baseline * RATIO_HI)) continue;
+      baseline = v;
+      const d = new Date(ts[i] * 1000)
+        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const slot = contByDay.get(d) || { open: v, high: v, low: v, close: v };
+      slot.high  = Math.max(slot.high, v);
+      slot.low   = Math.min(slot.low, v);
+      slot.close = v;
+      contByDay.set(d, slot);
+    }
+  }
+
+  // Per-day market-hours open/close (regular session 9:30-16:00 ET only).
+  const mktByDay = new Map();
+  if (mktR.ok && mktR.payload) {
+    const h = mktR.payload;
+    const ts = h.timestamp || [];
+    const eq = h.equity    || [];
+    let baseline = null;
+    for (let i = 0; i < ts.length; i++) {
+      const v = parseFloat(eq[i]);
+      if (!Number.isFinite(v) || v <= 0) continue;
+      if (baseline != null && (v < baseline * RATIO_LO || v > baseline * RATIO_HI)) continue;
+      baseline = v;
+      const d = new Date(ts[i] * 1000)
+        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const slot = mktByDay.get(d) || { open: v, close: v };
+      slot.close = v;
+      mktByDay.set(d, slot);
+    }
+  }
+
+  // Daily fallback for days beyond the 30-day intraday window.
+  const dailyByDay = new Map();
+  if (dailyR.ok && dailyR.payload) {
+    const h  = dailyR.payload;
+    const ts = h.timestamp || [];
+    const eq = h.equity    || [];
+    for (let i = 0; i < ts.length; i++) {
+      const v = parseFloat(eq[i]);
+      if (!Number.isFinite(v) || v <= 0) continue;
+      const d = new Date(ts[i] * 1000)
+        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      dailyByDay.set(d, v);
+    }
+  }
+
+  // Merge strategy:
+  //   - Chart open/high/low/close come from the continuous stream so
+  //     adjacent candles join end-to-end (today's open == yesterday's
+  //     close, no after-hours discontinuities in the body or wicks).
+  //   - market_open / market_close are surfaced as separate fields so
+  //     the hover tooltip can report regular-session open/close even
+  //     though the bar geometry uses continuous values. The client
+  //     prefers market_* in the tooltip and falls back to open/close
+  //     on weekends/holidays where the session has no samples.
+  //   - Daily fallback mark is used only when the intraday window
+  //     doesn't cover the day (older than ~29 days back).
+  const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(), ...dailyByDay.keys()]);
+  const sorted  = [...allDays].sort();
+  const candles = [];
+  let prevClose = null;
+  for (const d of sorted) {
+    let row;
+    const cont = contByDay.get(d);
+    const mkt  = mktByDay.get(d);
+    if (cont) {
+      row = {
+        date: d,
+        open: cont.open,
+        high: cont.high,
+        low:  cont.low,
+        close: cont.close,
+        // Session-bracketed open/close (market hours only) — used by
+        // the tooltip, not by the bar geometry.
+        market_open:  mkt ? mkt.open  : null,
+        market_close: mkt ? mkt.close : null,
+        intraday: true,
+      };
+    } else {
+      const v = dailyByDay.get(d);
+      const op = prevClose ?? v;
+      row = {
+        date: d,
+        open: op, high: Math.max(op, v), low: Math.min(op, v), close: v,
+        market_open:  null,
+        market_close: null,
+        intraday: false,
+      };
+    }
+    row.pct_change = prevClose != null && prevClose > 0
+      ? (row.close - prevClose) / prevClose
+      : null;
+    candles.push(row);
+    prevClose = row.close;
+  }
+  return candles;
+}
+
+app.get('/api/portfolio/pnl-candles', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days) || 90, 365);
+  try {
+    const candles = await _cached(`candles:${days}`, PNL_CANDLES_TTL,
+                                   () => _buildCandles(days));
+    res.json(candles);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Volatility-regime history for chart background bands.
+// Sources, in priority order per date:
+//   1. .agents/market-state/regime_YYYY-MM-DD.json (recent days, written
+//      by run_market_state.py — covers up to ~today)
+//   2. data/master/historical_regimes.parquet (long history, refreshed by
+//      strategies/historical_regimes.py)
+// Parquet read is delegated to a short python3 helper; result cached for
+// 1 hour since the parquet only changes on the daily refit cadence.
+let _regimeParquetCache = null;
+async function _loadRegimeParquet() {
+  const now = Date.now();
+  if (_regimeParquetCache && (now - _regimeParquetCache.ts) < 60 * 60 * 1000) {
+    return _regimeParquetCache.rows;
+  }
+  const path = require('path');
+  const parquetPath = path.join(__dirname, '../../../data/master/historical_regimes.parquet');
+  if (!fs.existsSync(parquetPath)) { _regimeParquetCache = { ts: now, rows: [] }; return []; }
+  const { spawn } = require('child_process');
+  const py = `
+import sys, json
+import pandas as pd
+df = pd.read_parquet(sys.argv[1])
+df = df[['date', 'regime']].copy()
+df['date'] = df['date'].astype(str).str.slice(0, 10)
+sys.stdout.write(df.to_json(orient='records'))
+`;
+  const rows = await new Promise((resolve) => {
+    let out = '', err = '';
+    const proc = spawn('python3', ['-c', py, parquetPath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} resolve([]); }, 10_000);
+    proc.stdout.on('data', c => { out += c; });
+    proc.stderr.on('data', c => { err += c; });
+    proc.on('close', code => {
+      clearTimeout(t);
+      if (code !== 0) { console.error('[regime-history] parquet read failed:', err); return resolve([]); }
+      try { resolve(JSON.parse(out)); } catch (e) { console.error('[regime-history] parse:', e.message); resolve([]); }
+    });
+  });
+  _regimeParquetCache = { ts: now, rows };
+  return rows;
+}
+
+app.get('/api/portfolio/regime-history', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days) || 90, 4_000);
+  try {
+    const cutoff = new Date(Date.now() - days * 86400 * 1000)
+      .toISOString().slice(0, 10);
+    const path = require('path');
+    const stateDir = path.join(__dirname, '../../../.agents/market-state');
+
+    const byDate = new Map();
+    // Bulk: parquet
+    const parq = await _loadRegimeParquet();
+    for (const r of parq) {
+      if (!r.date || r.date < cutoff) continue;
+      byDate.set(r.date, r.regime || 'NO_DATA');
+    }
+    // Per-day overrides: regime_YYYY-MM-DD.json (newer than parquet refit).
+    if (fs.existsSync(stateDir)) {
+      const files = fs.readdirSync(stateDir)
+        .filter(f => /^regime_\d{4}-\d{2}-\d{2}\.json$/.test(f));
+      for (const f of files) {
+        const d = f.slice(7, 17);
+        if (d < cutoff) continue;
+        try {
+          const raw = fs.readFileSync(path.join(stateDir, f), 'utf8');
+          const j = JSON.parse(raw);
+          if (j.state) byDate.set(d, j.state);
+        } catch (_) { /* skip malformed */ }
+      }
+    }
+    // Forward-fill across every calendar day in the window so weekends,
+    // holidays, and any single-day gaps inherit the prior trading day's
+    // regime. The regime is a *state* — Friday's reading carries through
+    // Saturday and Sunday until Monday's update — so chart backdrops
+    // should paint continuously rather than leaving uncoloured strips
+    // between trading sessions.
+    const start = new Date(cutoff + 'T00:00:00Z');
+    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    const filled = [];
+    let last = null;
+    for (let cur = new Date(start); cur <= today; cur.setUTCDate(cur.getUTCDate() + 1)) {
+      const d = cur.toISOString().slice(0, 10);
+      if (byDate.has(d)) last = byDate.get(d);
+      // Skip leading days where we have no regime reading yet (last
+      // remains null until the first observation in the window).
+      if (last) filled.push({ date: d, regime: last });
+    }
+    res.json(filled);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Per-strategy rolling ARR curve.
+// ARR = Average Return Rate, the mean of `realized_pnl_pct` across closed
+// trades. "ARR over time" plots a trailing-N-day rolling mean so the
+// metric tracks how the strategy's per-trade economics shift across
+// regimes. The response also carries the regime per day so the chart
+// can paint the regime backdrop without a second fetch.
+//
+// Window default = 30d. The curve starts at the strategy's first close
+// date (or first regime sample, whichever later) and runs to today.
+// Days with no trades in the trailing window emit `rolling_arr_pct: null`
+// so the line breaks correctly across long quiet stretches.
+app.get('/api/strategies/:id/arr-curve', async (req, res) => {
+  const sid    = String(req.params.id || '');
+  const window = Math.min(Math.max(parseInt(req.query.window) || 30, 7), 365);
+  if (!sid) return res.status(400).json({ error: 'strategy id required' });
+  try {
+    // Pull every closed trade for the strategy ordered by close date.
+    // realized_pnl_pct is stored as a fraction (0.05 = 5%); we leave it
+    // as a fraction in the response and let the client multiply by 100
+    // for display, matching the convention used elsewhere.
+    const trades = (await dbQuery(`
+      SELECT closed_at::date AS d, realized_pnl_pct
+      FROM signal_pnl
+      WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
+        AND realized_pnl_pct IS NOT NULL
+      ORDER BY closed_at
+    `, [sid])).rows;
+    if (!trades.length) return res.json({ window_days: window, rows: [] });
+
+    // Daily position-flow counts: # signals opened (signal_date) and
+    // # signals closed (closed_at). Bucketed per day for the bar chart
+    // stacked under the ARR curve so the operator can see trade flow
+    // alongside per-trade economics.
+    const openedByDay = new Map();
+    const closedByDay = new Map();
+    const [openedRes, closedRes] = await Promise.all([
+      dbQuery(`SELECT signal_date::date AS d, COUNT(*)::int AS n
+                 FROM execution_signals
+                WHERE strategy_id = $1 AND signal_date IS NOT NULL
+                GROUP BY signal_date`, [sid]).catch(() => ({ rows: [] })),
+      dbQuery(`SELECT closed_at::date AS d, COUNT(*)::int AS n
+                 FROM signal_pnl
+                WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
+                GROUP BY closed_at`, [sid]).catch(() => ({ rows: [] })),
+    ]);
+    for (const row of openedRes.rows) {
+      openedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
+    }
+    for (const row of closedRes.rows) {
+      closedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
     }
 
-    res.json({ rows, base_value: h.base_value ?? null });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    // Bucket trades by close date, then sweep a rolling window across the
+    // calendar from first close → today.
+    const byDay = new Map();
+    for (const t of trades) {
+      const d = t.d.toISOString().slice(0, 10);
+      if (!byDay.has(d)) byDay.set(d, []);
+      byDay.get(d).push(parseFloat(t.realized_pnl_pct));
+    }
+    const startIso = trades[0].d.toISOString().slice(0, 10);
+    const endIso   = new Date().toISOString().slice(0, 10);
+
+    const regimeMap = new Map();
+    for (const r of await _loadRegimeParquet()) {
+      if (r.date >= startIso) regimeMap.set(r.date, r.regime || null);
+    }
+    // Daily JSON overrides win over parquet for the recent days.
+    const stateDir = require('path').join(__dirname, '../../../.agents/market-state');
+    if (fs.existsSync(stateDir)) {
+      for (const f of fs.readdirSync(stateDir)
+        .filter(f => /^regime_\d{4}-\d{2}-\d{2}\.json$/.test(f))) {
+        const d = f.slice(7, 17);
+        if (d < startIso) continue;
+        try {
+          const j = JSON.parse(fs.readFileSync(require('path').join(stateDir, f), 'utf8'));
+          if (j.state) regimeMap.set(d, j.state);
+        } catch (_) {}
+      }
+    }
+
+    // Iterate calendar days [startIso, endIso]. We accumulate an explicit
+    // window deque so the rolling mean is O(N) total rather than
+    // O(N*window).
+    const out  = [];
+    const deque = [];   // [{d, ret}]
+    let sum   = 0;
+    let lastRegime = null; // forward-fill carry: weekends + gap days
+                           // inherit the prior trading day's regime so
+                           // the ARR chart's regime backdrop paints
+                           // continuously rather than going blank
+                           // across non-trading days.
+    const start = new Date(startIso + 'T00:00:00Z');
+    const end   = new Date(endIso   + 'T00:00:00Z');
+    for (let cur = new Date(start); cur <= end; cur.setUTCDate(cur.getUTCDate() + 1)) {
+      const dIso = cur.toISOString().slice(0, 10);
+      // Push today's trades.
+      const todays = byDay.get(dIso);
+      if (todays) {
+        for (const v of todays) { deque.push({ d: dIso, ret: v }); sum += v; }
+      }
+      // Drop trades that fell out of the trailing window.
+      const cutoff = new Date(cur);
+      cutoff.setUTCDate(cutoff.getUTCDate() - window);
+      const cutoffIso = cutoff.toISOString().slice(0, 10);
+      while (deque.length && deque[0].d < cutoffIso) {
+        sum -= deque.shift().ret;
+      }
+      // Forward-fill regime: use today's reading if we have one, else
+      // carry forward the most recent prior reading.
+      if (regimeMap.has(dIso)) lastRegime = regimeMap.get(dIso);
+      out.push({
+        date:             dIso,
+        rolling_arr_pct:  deque.length ? (sum / deque.length) : null,
+        trade_count:      deque.length,
+        regime:           lastRegime,
+        opened:           openedByDay.get(dIso) || 0,
+        closed:           closedByDay.get(dIso) || 0,
+      });
+    }
+    res.json({ window_days: window, rows: out });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Broker-side watchlist (Phase 2.5 of alpaca-cli integration) ──────────────
@@ -1355,6 +2068,49 @@ body.rs-chat-locked{overflow:hidden}
 .paper-modal{position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:none;align-items:center;justify-content:center;padding:40px}
 .paper-modal.open{display:flex}
 .paper-modal .pm-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;max-width:900px;width:100%;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.6)}
+.paper-modal .pm-card.du-card{max-width:980px}
+
+/* ── Data Usage (ranked horizontal bar list) ─────────────────────────── */
+.du-wrap{padding:14px 18px 18px}
+.du-summary{font-size:10.5px;color:var(--muted);margin-bottom:10px}
+.du-summary b{color:var(--text);font-weight:700}
+.du-summary-top{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;justify-content:space-between}
+.du-summary-explain{font-size:10px;color:var(--dim);margin-top:4px}
+.du-list{max-height:70vh;overflow-y:auto;display:flex;flex-direction:column;gap:2px;padding-right:4px}
+/* Single-row, table-like layout: name | category | history | description |
+   bar | count. Each row collapses to ~24px so 50+ parameters fit without
+   scrolling for normal usage. */
+.du-row{display:grid;grid-template-columns:135px 92px 86px minmax(160px,1fr) minmax(140px,1.4fr) 56px;gap:10px;align-items:center;padding:4px 10px;border-radius:4px;background:var(--border2);border:1px solid transparent;transition:border-color .12s;min-height:24px}
+.du-row:hover{border-color:var(--border)}
+.du-row .du-name{min-width:0;font-size:11px;font-weight:700;color:var(--text);letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.du-row .du-cat{font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 7px;border-radius:3px;color:#fff;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.du-cat-prices       {background:rgba(88,166,255,0.85)}
+.du-cat-options_eod  {background:rgba(188,140,255,0.85)}
+.du-cat-financials   {background:rgba(63,185,80,0.85)}
+.du-cat-earnings     {background:rgba(46,160,67,0.85);color:#fff}
+.du-cat-insider      {background:rgba(240,136,62,0.85)}
+.du-cat-macro        {background:rgba(210,153,34,0.95);color:#000}
+.du-cat-computed     {background:var(--border);color:var(--muted)}
+.du-cat-other        {background:var(--border);color:var(--muted)}
+.du-row .du-history{font-size:9.5px;color:var(--dim);letter-spacing:.04em;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.du-row .du-desc{min-width:0;font-size:9.5px;color:var(--muted);font-style:italic;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.du-bar-track{position:relative;height:14px;border-radius:3px;background:rgba(48,54,61,0.5);overflow:hidden}
+.du-bar-fill{position:absolute;top:0;left:0;bottom:0;background:linear-gradient(90deg,rgba(88,166,255,0.85),rgba(88,166,255,0.55));border-radius:3px;transition:width .3s ease}
+.du-bar-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:8.5px;color:var(--dim);font-style:italic;letter-spacing:.04em}
+.du-row.du-zero .du-bar-fill{display:none}
+.du-count{text-align:right;font-size:11px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
+.du-count small{font-size:8.5px;font-weight:400;color:var(--dim);margin-left:3px}
+/* Header strip mirroring the row grid so columns line up. */
+.du-list-head{display:grid;grid-template-columns:135px 92px 86px minmax(160px,1fr) minmax(140px,1.4fr) 56px;gap:10px;align-items:center;padding:0 10px 4px;font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--dim);text-transform:uppercase;border-bottom:1px solid var(--border2);margin-bottom:4px}
+.du-list-head > span:nth-child(6){text-align:right}
+@media (max-width: 760px){
+  .du-row, .du-list-head{grid-template-columns:1fr 80px 70px 56px;}
+  .du-row .du-cat, .du-list-head > span:nth-child(2){grid-column:2 / 3}
+  .du-row .du-history, .du-list-head > span:nth-child(3){grid-column:3 / 4}
+  .du-row .du-desc, .du-list-head > span:nth-child(4){display:none}
+  .du-row .du-bar-track, .du-list-head > span:nth-child(5){grid-column:1 / -1}
+  .du-row .du-count, .du-list-head > span:nth-child(6){grid-column:4 / 5}
+}
 .pm-head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .pm-head h2{font-size:14px;font-weight:700;color:var(--text);line-height:1.4;letter-spacing:0;text-transform:none}
 .pm-close{background:transparent;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;padding:3px 10px;border-radius:3px;font-family:inherit;flex-shrink:0}
@@ -1373,11 +2129,13 @@ body.rs-chat-locked{overflow:hidden}
 .pm-gate-outcome.buildable,.pm-gate-outcome.error{color:var(--yellow)}
 .pm-json{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;font-family:'SF Mono',monospace;font-size:10px;max-height:260px;overflow:auto;color:var(--text);white-space:pre-wrap}
 #strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
-.st-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:4px}
+.st-tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:4px}
 .st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
 .st-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px}
 .st-tile-value{font-size:22px;font-weight:700}
 .st-tile-sub{font-size:10px;color:var(--muted);margin-top:3px}
+.st-tile-link{display:inline-block;font-size:10px;color:var(--blue);margin-top:6px;cursor:pointer;letter-spacing:.04em;border-bottom:1px dashed transparent;transition:border-color .12s}
+.st-tile-link:hover{border-bottom-color:var(--blue)}
 .st-sub-label{color:var(--muted);font-weight:400;font-size:10px}
 /* Sub-status badges (Active Stack) */
 .sg-status{display:inline-block;padding:2px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.04em;white-space:nowrap}
@@ -1404,6 +2162,88 @@ body.rs-chat-locked{overflow:hidden}
 .st-action-btn{transition:all .12s ease;white-space:nowrap}
 .st-action-btn:active{transform:translateY(1px)}
 .st-action-btn:disabled{opacity:0.5;cursor:not-allowed}
+
+/* ── Regime filter strip (Active Stack) ────────────────────────────────── */
+.st-regime-filter{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 14px;border-bottom:1px solid var(--border2);background:var(--panel)}
+.st-regime-filter .srf-label{font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-right:6px}
+.st-regime-filter .srf-btn{font-family:inherit;font-size:10px;font-weight:600;padding:3px 10px;border-radius:12px;border:1px solid var(--border);background:var(--border2);color:var(--muted);cursor:pointer;letter-spacing:.04em;transition:all .12s ease}
+.st-regime-filter .srf-btn:hover{color:var(--text);border-color:var(--blue)}
+.st-regime-filter .srf-btn.active{color:#fff;background:var(--blue);border-color:var(--blue)}
+.st-regime-filter .srf-btn.srf-LOW_VOL.active      {background:#2ea043;border-color:#2ea043}
+.st-regime-filter .srf-btn.srf-TRANSITIONING.active{background:#d29922;border-color:#d29922;color:#000}
+.st-regime-filter .srf-btn.srf-HIGH_VOL.active     {background:#f0883e;border-color:#f0883e}
+.st-regime-filter .srf-btn.srf-CRISIS.active       {background:#f85149;border-color:#f85149}
+.st-regime-filter .srf-hint{margin-left:auto;font-size:9.5px;color:var(--dim);letter-spacing:.04em}
+/* Inline tag in column headers when a regime filter is active */
+.srf-col-tag{display:inline-block;font-size:8.5px;font-weight:700;letter-spacing:.06em;padding:1px 4px;border-radius:3px;margin-left:4px;color:#fff;vertical-align:middle}
+.srf-col-tag-LOW_VOL      {background:rgba(63,185,80,0.5)}
+.srf-col-tag-TRANSITIONING{background:rgba(210,153,34,0.55);color:#000}
+.srf-col-tag-HIGH_VOL     {background:rgba(240,136,62,0.6)}
+.srf-col-tag-CRISIS       {background:rgba(248,81,73,0.7)}
+
+/* ── By-Regime breakdown cell (Active Stack) ───────────────────────────── */
+/* Only the strategy's active regimes are rendered. Each cell is a
+   self-contained rounded pill — same artistic language as the regime
+   pills used in the Research Candidates "Regimes" column — with a
+   small gap separating adjacent pills. The full regime name is shown
+   (LOW_VOL / TRANSITIONING / HIGH_VOL / CRISIS) so the format matches
+   the candidates page; cells auto-size to fit the longest visible name. */
+.st-regime-grid{display:inline-flex;flex-wrap:nowrap;gap:3px;min-width:fit-content;letter-spacing:.04em}
+.st-regime-cell{position:relative;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;padding:2px 9px 3px;border-radius:5px;font-size:9px;font-weight:600;line-height:1.15;min-width:fit-content}
+.st-regime-cell .st-rg-tag{font-size:8.5px;font-weight:700;text-transform:none;letter-spacing:.04em;opacity:0.95;white-space:nowrap}
+.st-regime-cell .st-rg-val{font-size:10px;font-weight:700;margin-top:1px}
+.st-regime-cell.st-rg-na .st-rg-val{opacity:0.55;font-weight:500}
+.st-regime-cell.st-rg-current::after{content:'';position:absolute;top:1px;right:2px;width:5px;height:5px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px var(--blue)}
+.st-rg-LOW_VOL      {color:#fff;background:var(--green)}
+.st-rg-TRANSITIONING{color:#000;background:var(--yellow)}
+.st-rg-HIGH_VOL     {color:#fff;background:var(--orange)}
+.st-rg-CRISIS       {color:#fff;background:var(--red)}
+
+/* ── Strategy-row expand/collapse (Active Stack) ───────────────────────── */
+.st-row-expandable td.st-name-cell{cursor:pointer;user-select:none}
+.st-row-expandable td.st-name-cell:hover .st-chevron{color:var(--blue)}
+.st-chevron{display:inline-block;width:12px;color:var(--dim);transition:transform .18s ease;margin-right:4px;font-size:11px}
+.st-row-open .st-chevron{transform:rotate(90deg);color:var(--blue)}
+.st-row-open td.st-name-cell{color:var(--blue)}
+.st-expand-row > td{padding:0 !important;background:var(--bg);border-top:1px solid var(--border2);border-bottom:1px solid var(--border2)}
+.st-expand-shell{overflow:hidden;max-height:0;opacity:0;transition:max-height .35s ease, opacity .25s ease}
+.st-expand-shell.st-open{max-height:780px;opacity:1}
+.st-expand-pad{padding:14px 18px 16px}
+.st-expand-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:12px}
+.st-expand-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:.02em}
+.st-expand-title small{display:block;font-size:10px;color:var(--muted);font-weight:400;margin-top:2px}
+.st-expand-close{background:none;border:1px solid var(--border);color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;cursor:pointer;font-family:inherit}
+.st-expand-close:hover{color:var(--text);border-color:var(--red)}
+.st-expand-grid{display:grid;grid-template-columns:1.05fr 1.4fr;gap:14px;align-items:start}
+@media (max-width: 900px){.st-expand-grid{grid-template-columns:1fr}}
+.st-expand-section{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:10px 12px}
+.st-expand-section-title{font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.st-regime-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.st-regime-stats .st-rs-cell{padding:7px 8px;border-radius:5px;border:1px solid var(--border);background:var(--border2);min-height:78px}
+.st-regime-stats .st-rs-head{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;display:flex;align-items:center;justify-content:space-between}
+.st-regime-stats .st-rs-row{display:flex;justify-content:space-between;font-size:10px;line-height:1.4;color:var(--muted)}
+.st-regime-stats .st-rs-row b{color:var(--text);font-weight:600}
+.st-regime-stats .st-rs-na{color:var(--dim);font-style:italic}
+.st-similar{display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;padding-right:2px}
+.st-similar-row{display:grid;grid-template-columns:1fr repeat(4,40px);gap:4px;align-items:center;font-size:10px;padding:3px 6px;border-radius:4px;background:var(--border2)}
+.st-similar-row .st-sm-name{color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st-similar-row .st-sm-cell{padding:2px 4px;border-radius:3px;text-align:center;font-size:9.5px;font-weight:600;background:var(--bg);color:var(--muted)}
+.st-similar-row .st-sm-cell.pos{color:var(--green)}
+.st-similar-row .st-sm-cell.neg{color:var(--red)}
+.st-similar-row .st-sm-cell.empty{color:var(--dim)}
+.st-arr-wrap{position:relative}
+.st-arr-meta{font-size:9.5px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center}
+.st-arr-empty{padding:30px 0;text-align:center;color:var(--dim);font-size:10.5px}
+/* Stable, fixed-height wrapper so Chart.js responsive sizing has a real
+   reference frame. Without this the canvas measured during the expand
+   max-height transition, which shrinks the chart on every re-render. */
+.st-arr-canvas-wrap{position:relative;height:200px;width:100%}
+/* Position-flow bar chart sits directly under the ARR curve, sharing
+   its x-axis dates so the operator can read trade flow alongside
+   per-trade economics. */
+.st-flow-row{margin-top:10px}
+.st-flow-meta{display:flex;justify-content:space-between;align-items:center;font-size:9.5px;color:var(--muted);letter-spacing:.04em;margin-bottom:4px}
+.st-flow-canvas-wrap{position:relative;height:80px;width:100%}
 
 /* In-flight job chip: progress-bar fill + label overlay */
 .st-job-wrap{display:inline-flex;align-items:center;gap:6px}
@@ -1440,8 +2280,17 @@ body.rs-chat-locked{overflow:hidden}
 .pf-stat-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px}
 .pf-stat-value{font-size:22px;font-weight:700;color:var(--text)}
 .pf-stat-sub{font-size:10px;color:var(--dim);margin-top:3px}
-.pf-chart-wrap{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;position:relative;height:180px}
+.pf-chart-wrap{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;position:relative;height:218px}
 .pf-chart-label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}
+.pf-regime-legend{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:6px;font-size:9.5px;color:var(--muted);letter-spacing:0.04em}
+.pf-regime-legend .rl-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em}
+.pf-regime-legend .rl-item{display:inline-flex;align-items:center;gap:5px;opacity:.45;transition:opacity .15s}
+.pf-regime-legend .rl-item.rl-on{opacity:1}
+.pf-regime-legend .rl-dot{display:inline-block;width:10px;height:10px;border-radius:2px;border:1px solid rgba(255,255,255,0.06)}
+.pf-regime-legend .rl-dot-low{background:rgba(63,185,80,0.55)}
+.pf-regime-legend .rl-dot-trans{background:rgba(210,153,34,0.6)}
+.pf-regime-legend .rl-dot-high{background:rgba(240,136,62,0.7)}
+.pf-regime-legend .rl-dot-crisis{background:rgba(248,81,73,0.8)}
 .pf-section{background:var(--panel);border:1px solid var(--border);border-radius:8px;overflow:hidden}
 .pf-section-header{padding:11px 16px;border-bottom:1px solid var(--border2);font-size:11px;font-weight:600;color:var(--text);display:flex;align-items:center;justify-content:space-between}
 .pf-section-body{overflow-x:auto}
@@ -1610,8 +2459,10 @@ body.rs-chat-locked{overflow:hidden}
   .pf-stat-sub { display: none !important; }
 
   /* ── Charts ─────────────────────────────────────────────────────────── */
-  .pf-chart-wrap { height: 120px !important; padding: 8px 10px; border-radius: 8px; }
+  .pf-chart-wrap { height: 175px !important; padding: 8px 10px; border-radius: 8px; }
   .pf-chart-label { font-size: 9.5px !important; }
+  .pf-regime-legend { gap: 8px; font-size: 9px; margin-bottom: 4px; }
+  .pf-regime-legend .rl-dot { width: 8px; height: 8px; }
 
   /* ── Range buttons (1W/1M/3M/...) ───────────────────────────────────── */
   .range-btn {
@@ -1862,11 +2713,19 @@ body.rs-chat-locked{overflow:hidden}
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div class="pf-chart-label" style="margin-bottom:0" id="pf-chart-title">Portfolio P&amp;L Curve (90d)</div>
       <div style="display:flex;gap:4px">
-        <button class="range-btn active" id="btn-pnl-mode" onclick="setPnlMode('pnl')" style="font-size:10px;padding:2px 8px">P&amp;L %</button>
-        <button class="range-btn" id="btn-value-mode" onclick="setPnlMode('value')" style="font-size:10px;padding:2px 8px">Value $</button>
+        <button class="range-btn active" id="btn-range-90d"  onclick="setPnlRange('90d')"  style="font-size:10px;padding:2px 8px">90d</button>
+        <button class="range-btn"        id="btn-range-1y"   onclick="setPnlRange('1y')"   style="font-size:10px;padding:2px 8px">1y</button>
+        <button class="range-btn"        id="btn-range-life" onclick="setPnlRange('life')" style="font-size:10px;padding:2px 8px">Lifetime</button>
       </div>
     </div>
-    <canvas id="pnlChart" style="width:100%;height:130px"></canvas>
+    <div id="pf-regime-legend" class="pf-regime-legend" style="display:none">
+      <span class="rl-label">Vol Regime</span>
+      <span class="rl-item" data-state="LOW_VOL"><span class="rl-dot rl-dot-low"></span>Low Vol</span>
+      <span class="rl-item" data-state="TRANSITIONING"><span class="rl-dot rl-dot-trans"></span>Transitioning</span>
+      <span class="rl-item" data-state="HIGH_VOL"><span class="rl-dot rl-dot-high"></span>High Vol</span>
+      <span class="rl-item" data-state="CRISIS"><span class="rl-dot rl-dot-crisis"></span>Crisis</span>
+    </div>
+    <canvas id="pnlChart" style="width:100%;height:150px"></canvas>
   </div>
   <div class="pf-section">
     <div class="pf-section-header"><span>Active Positions</span><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
@@ -1886,6 +2745,7 @@ body.rs-chat-locked{overflow:hidden}
       <div class="st-tile"><div class="st-tile-label">Active Stack</div><div class="st-tile-value" id="st-active-tile">—</div><div class="st-tile-sub" id="st-active-sub">— live / — stale / — waiting</div></div>
       <div class="st-tile"><div class="st-tile-label">Inactive Stack</div><div class="st-tile-value" id="st-inactive-tile">—</div><div class="st-tile-sub">decommissioned</div></div>
       <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">awaiting approval</div></div>
+      <div class="st-tile"><div class="st-tile-label">Data</div><div class="st-tile-value" id="st-data-tile">—</div><div class="st-tile-sub" id="st-data-sub">financial parameters ingested</div><a class="st-tile-link" id="st-data-usage-link" onclick="_stOpenDataUsage()">View Data Usage →</a></div>
     </div>
 
     <!-- Section 1: Active Stack (live + stale + waiting) -->
@@ -1893,6 +2753,15 @@ body.rs-chat-locked{overflow:hidden}
       <div class="pf-section-header">
         <span>Active Stack <span class="st-sub-label">(live / stale / waiting on regime)</span></span>
         <span id="st-active-count" class="st-sub-label"></span>
+      </div>
+      <div class="st-regime-filter" id="st-regime-filter">
+        <span class="srf-label">View by Regime</span>
+        <button class="srf-btn active" data-regime="ALL"           onclick="_stSetRegimeFilter('ALL')">All</button>
+        <button class="srf-btn srf-LOW_VOL"       data-regime="LOW_VOL"       onclick="_stSetRegimeFilter('LOW_VOL')">Low Vol</button>
+        <button class="srf-btn srf-TRANSITIONING" data-regime="TRANSITIONING" onclick="_stSetRegimeFilter('TRANSITIONING')">Transitioning</button>
+        <button class="srf-btn srf-HIGH_VOL"      data-regime="HIGH_VOL"      onclick="_stSetRegimeFilter('HIGH_VOL')">High Vol</button>
+        <button class="srf-btn srf-CRISIS"        data-regime="CRISIS"        onclick="_stSetRegimeFilter('CRISIS')">Crisis</button>
+        <span class="srf-hint" id="srf-hint"></span>
       </div>
       <div class="pf-section-body"><div id="st-active-wrap"><div class="empty">Loading...</div></div></div>
     </div>
@@ -2021,6 +2890,17 @@ body.rs-chat-locked{overflow:hidden}
     </div>
   </div>
 </div><!-- #research-page -->
+
+<!-- Data usage panel (opened from the strategies page Data tile) -->
+<div class="paper-modal data-usage-modal" id="data-usage-modal">
+  <div class="pm-card du-card">
+    <div class="pm-head">
+      <h2>Data Usage</h2>
+      <button class="pm-close" onclick="_stCloseDataUsage()">close (esc)</button>
+    </div>
+    <div class="pm-body" id="data-usage-body"><div style="color:var(--muted);padding:20px;font-size:11px">Loading…</div></div>
+  </div>
+</div>
 
 </div><!-- #view-wrap -->
 
@@ -2917,10 +3797,13 @@ async function loadNewsSection(containerId, ticker) {
 }
 
 // ── Portfolio ─────────────────────────────────────────────────────────────────
-let pnlChart     = null;
-let pnlMode      = 'pnl';   // 'pnl' | 'value'
-let pnlCurveData = null;    // cached {rows, base_value}
-let valueCurveData = null;  // cached from /api/portfolio/value-curve
+let pnlChart       = null;
+let pnlRange       = '90d';   // '90d' | '1y' | 'life'
+let pnlCandlesData = null;    // [{date, open, high, low, close, pct_change, intraday}]
+let valueCurveData = null;    // /api/portfolio/value-curve?period=1A — feeds 1y view + lifetime AAR
+let lifetimeData   = null;    // /api/portfolio/value-curve?period=all
+let regime90dData  = null;    // [{date, regime}]
+let regime1yData   = null;    // [{date, regime}]
 
 function _setNavActive(which) {
   for (const k of ['market','portfolio','strategies','research']) {
@@ -3789,13 +4672,16 @@ async function _refreshRunsHist() {
 }
 
 async function loadPortfolio() {
-  const [summary, positions, history, curve, account, valCurve] = await Promise.all([
+  const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
     fetch('/api/portfolio/summary').then(r=>r.json()).catch(()=>({})),
     fetch('/api/portfolio/positions').then(r=>r.json()).catch(()=>[]),
     fetch('/api/portfolio/history').then(r=>r.json()).catch(()=>[]),
-    fetch('/api/portfolio/pnl-curve?days=90').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/portfolio/pnl-candles?days=90').then(r=>r.json()).catch(()=>[]),
     fetch('/api/portfolio/account').then(r=>r.json()).catch(()=>({})),
     fetch('/api/portfolio/value-curve?period=1A').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/portfolio/value-curve?period=all').then(r=>r.json()).catch(()=>({})),
+    fetch('/api/portfolio/regime-history?days=90').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/portfolio/regime-history?days=365').then(r=>r.json()).catch(()=>[]),
   ]);
   renderAccountRow(account);
   // Store valCurve first — renderPortfolioSummary needs it to compute
@@ -3805,43 +4691,62 @@ async function loadPortfolio() {
   renderPortfolioSummary(summary, valCurve);
   renderPositions(positions);
   renderHistory(history);
-  pnlCurveData   = curve;
-  renderChartForMode();
+  pnlCandlesData = Array.isArray(candles) ? candles : [];
+  lifetimeData   = lifeCurve;
+  regime90dData  = Array.isArray(reg90) ? reg90 : [];
+  regime1yData   = Array.isArray(reg1y) ? reg1y : [];
+  renderChartForRange();
 }
 
-function setPnlMode(mode) {
-  pnlMode = mode;
-  document.getElementById('btn-pnl-mode').classList.toggle('active', mode === 'pnl');
-  document.getElementById('btn-value-mode').classList.toggle('active', mode === 'value');
-  renderChartForMode();
+function setPnlRange(range) {
+  pnlRange = range;
+  document.getElementById('btn-range-90d').classList.toggle('active',  range === '90d');
+  document.getElementById('btn-range-1y').classList.toggle('active',   range === '1y');
+  document.getElementById('btn-range-life').classList.toggle('active', range === 'life');
+  renderChartForRange();
 }
 
-function renderChartForMode() {
-  if (pnlMode === 'value') {
-    const rows  = valueCurveData?.rows || [];
-    // Alpaca returns up to 1 year of daily points; /api/portfolio/value-curve
-    // already filters out the pre-account zero-equity entries. So the chart
-    // shows the account's actual lifetime and expands on its own as more
-    // days accumulate (no empty "pre-history" left padding).
-    const days  = rows.length;
-    const rangeLbl = days >= 230
-      ? '1 Year'
-      : days >= 105
-        ? '6 Months'
-        : days >= 42
-          ? '3 Months'
-          : days >= 15
-            ? '1 Month'
-            : days > 0
-              ? (days + (days === 1 ? ' Day' : ' Days'))
-              : '';
+function renderChartForRange() {
+  if (pnlRange === '90d') {
+    document.getElementById('pf-chart-title').textContent = 'Portfolio P&L Curve (90d) — Daily OHLC';
+    _renderRegimeLegend(regime90dData || []);
+    renderCandleChart(pnlCandlesData || [], regime90dData || []);
+  } else if (pnlRange === '1y') {
+    const rows = (valueCurveData && valueCurveData.rows) || [];
     document.getElementById('pf-chart-title').textContent =
-      'Portfolio Value' + (rangeLbl ? ' — ' + rangeLbl : '');
-    renderValueChart(rows);
+      'Portfolio Value — ' + _rangeLabel(rows.length);
+    _renderRegimeLegend(regime1yData || []);
+    renderValueChart(rows, regime1yData || []);
   } else {
-    document.getElementById('pf-chart-title').textContent = 'Portfolio P&L Curve (90d)';
-    renderPnlChart(pnlCurveData || []);
+    const rows = (lifetimeData && lifetimeData.rows) || [];
+    document.getElementById('pf-chart-title').textContent =
+      'Portfolio Value — Lifetime (' + rows.length + (rows.length === 1 ? ' day' : ' days') + ')';
+    _renderRegimeLegend([]);
+    renderValueChart(rows, []);
   }
+}
+
+// Show the regime legend only when the current view paints bands. Items
+// fade for regimes that don't occur in the visible window so the legend
+// reflects what's actually on screen.
+function _renderRegimeLegend(rows) {
+  const el = document.getElementById('pf-regime-legend');
+  if (!el) return;
+  if (!Array.isArray(rows) || rows.length === 0) { el.style.display = 'none'; return; }
+  const present = new Set(rows.map(r => r && r.regime).filter(Boolean));
+  el.style.display = 'flex';
+  for (const item of el.querySelectorAll('.rl-item')) {
+    item.classList.toggle('rl-on', present.has(item.getAttribute('data-state')));
+  }
+}
+
+function _rangeLabel(days) {
+  return days >= 230 ? '1 Year'
+       : days >= 105 ? '6 Months'
+       : days >=  42 ? '3 Months'
+       : days >=  15 ? '1 Month'
+       : days >    0 ? (days + (days === 1 ? ' Day' : ' Days'))
+       : '';
 }
 
 function renderAccountRow(a) {
@@ -4020,13 +4925,15 @@ function renderHistory(rows) {
 let strategiesData = [];
 let _stActiveJobs = {};   // strategy_id → {job_id, phase, progress, payload}
 let _stLastFailures = {}; // strategy_id → {job_id, reason}  (persisted server-side; survives reload + restart)
+let _stDataUsage = null; // {parameters, strategies_total, categories_total}
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures] = await Promise.all([
+    const [rows, jobs, failures, dataUsage] = await Promise.all([
       fetch('/api/strategies').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/active').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/recent-failures').then(r => r.json()).catch(() => []),
+      fetch('/api/data/usage').then(r => r.json()).catch(() => null),
     ]);
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
@@ -4040,6 +4947,7 @@ async function loadStrategies() {
         _stLastFailures[f.strategy_id] = { job_id: f.job_id, reason: _stFailReason(f.result || {}) };
       }
     }
+    _stDataUsage = dataUsage && Array.isArray(dataUsage.parameters) ? dataUsage : null;
   } catch {
     strategiesData = [];
     _stActiveJobs = {};
@@ -4124,11 +5032,152 @@ function _renderStrategyPage() {
   document.getElementById('st-inactive-count').textContent= inactive.length + ' strategies';
   document.getElementById('st-candidate-count').textContent = candidate.length + ' strategies';
 
+  // Data tile: count of fine-grained financial parameters ingested
+  // (open, close, implied_volatility, ebitda, …) from /api/data/usage.
+  const paramCount = _stDataUsage && _stDataUsage.parameters ? _stDataUsage.parameters.length : 0;
+  document.getElementById('st-data-tile').textContent = paramCount || '—';
+  document.getElementById('st-data-sub').textContent  = 'financial parameters ingested';
+
   _renderActiveStack(active);
   _renderInactiveStack(inactive);
   _renderCandidates(candidate);
 }
 
+// ── Data Usage (ranked horizontal bar list, modal) ────────────────────────
+function _stOpenDataUsage() {
+  const modal = document.getElementById('data-usage-modal');
+  if (!modal) return;
+  modal.classList.add('open');
+  _stRenderDataUsage();
+}
+function _stCloseDataUsage() {
+  const modal = document.getElementById('data-usage-modal');
+  if (modal) modal.classList.remove('open');
+}
+// Close on backdrop click + escape, mirroring the paper-modal pattern.
+document.addEventListener('click', (e) => {
+  const modal = document.getElementById('data-usage-modal');
+  if (modal && modal.classList.contains('open') && e.target === modal) _stCloseDataUsage();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const modal = document.getElementById('data-usage-modal');
+  if (modal && modal.classList.contains('open')) _stCloseDataUsage();
+});
+
+function _fmtHistoryLen(days) {
+  if (!days || days <= 0) return '—';
+  if (days >= 365) {
+    const y = days / 365;
+    return (y >= 10 ? y.toFixed(0) : y.toFixed(1)) + 'y';
+  }
+  if (days >= 30) return Math.round(days / 30) + 'mo';
+  return days + 'd';
+}
+
+function _stRenderDataUsage() {
+  const body = document.getElementById('data-usage-body');
+  if (!body) return;
+  const u = _stDataUsage;
+  if (!u || !u.parameters || !u.parameters.length) {
+    body.innerHTML = '<div style="padding:24px;color:var(--muted);font-size:11px">No data parameters reported by the server. Try refreshing the page.</div>';
+    return;
+  }
+  // Server already sorted by user_count desc; use the first row as the
+  // bar-scale max so empty parameters render as a thin track.
+  const params  = u.parameters;
+  const maxUsers = Math.max(1, ...params.map(p => p.user_count || 0));
+  const totalStrats = u.strategies_total || 0;
+  const usedAny = params.filter(p => (p.user_count || 0) > 0).length;
+  const knownCats = new Set(['prices','options_eod','financials','earnings','insider','macro','computed']);
+  const rowsHtml = params.map(p => {
+    const pct  = Math.round(((p.user_count || 0) / maxUsers) * 100);
+    const hist = _fmtHistoryLen(p.history_days);
+    const cat  = knownCats.has(p.category) ? p.category : 'other';
+    const ttl  = p.name + ' · ' + p.category
+               + (p.description ? '\\n' + p.description : '')
+               + (p.provider ? '\\nprovider: ' + p.provider : '')
+               + '\\nhistory: ' + hist + (p.min_date && p.max_date ? ' (' + p.min_date + ' → ' + p.max_date + ')' : '')
+               + '\\nused by ' + (p.user_count || 0) + ' / ' + totalStrats + ' strategies';
+    const empty = (p.user_count || 0) === 0;
+    return '<div class="du-row' + (empty ? ' du-zero' : '') + '" title="' + _escStr(ttl) + '">'
+         +   '<span class="du-name">' + p.name + '</span>'
+         +   '<span class="du-cat du-cat-' + cat + '">' + p.category + '</span>'
+         +   '<span class="du-history">' + hist + (p.provider ? ' · ' + p.provider : '') + '</span>'
+         +   '<span class="du-desc">' + (p.description || '') + '</span>'
+         +   '<div class="du-bar-track">'
+         +     '<div class="du-bar-fill" style="width:' + pct + '%"></div>'
+         +     (empty ? '<div class="du-bar-empty">no strategy declares this category</div>' : '')
+         +   '</div>'
+         +   '<div class="du-count">'
+         +     (p.user_count || 0)
+         +     '<small>/ ' + totalStrats + '</small>'
+         +   '</div>'
+         + '</div>';
+  }).join('');
+  const computedCount = params.filter(p => p.category === 'computed').length;
+  body.innerHTML = ''
+    + '<div class="du-wrap">'
+    +   '<div class="du-summary">'
+    +     '<div class="du-summary-top">'
+    +       '<span><b>' + params.length + '</b> financial parameters across <b>' + (u.categories_total || 0) + '</b> categories · <b>' + computedCount + '</b> computed</span>'
+    +       '<span><b>' + usedAny + '</b> declared by ≥1 strategy · <b>' + totalStrats + '</b> strategies registered</span>'
+    +     '</div>'
+    +     '<div class="du-summary-explain">Strategies declare data at the category level today; counts roll up to every column inside that category.</div>'
+    +   '</div>'
+    +   '<div class="du-list-head">'
+    +     '<span>Parameter</span><span>Category</span><span>History</span><span>Description</span><span>Strategies using</span><span>Count</span>'
+    +   '</div>'
+    +   '<div class="du-list">' + rowsHtml + '</div>'
+    + '</div>';
+}
+
+// Per-regime breakdown cell rendered for every active strategy. Shows all
+// four regimes as compact chips so the operator can see at a glance how
+// the strategy performs across the regime axis. Active regimes (declared
+// in active_in_regimes) get a blue accent; the current market regime
+// gets a small dot indicator. Cells without live trade data render as 'na'.
+//
+// Source: live trades only — live_regime_breakdown[regime] = {trades,
+// arr, adr, act, win_rate}. arr is a fraction (0.05 = 5%).
+const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
+function _regimeBreakdown(r) {
+  const breakdown = r.live_regime_breakdown || {};
+  const active    = r.active_in_regimes || [];
+  const current   = r.current_regime || null;
+  // Only show cells for regimes the strategy is declared active in.
+  // The display order follows _REGIME_AXIS so adjacent strategies line
+  // up visually when comparing across the table.
+  const visible = _REGIME_AXIS.filter(rg => active.includes(rg));
+  if (!visible.length) return '<span style="color:var(--dim)">—</span>';
+  const cells = visible.map(rg => {
+    const b      = breakdown[rg];
+    const trades = b && b.trades ? parseInt(b.trades) : 0;
+    const arrPct = (b && b.arr != null) ? parseFloat(b.arr) * 100 : null;
+    const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
+    if (current === rg) klass.push('st-rg-current');
+    if (!trades)        klass.push('st-rg-na');
+    const valTxt = arrPct != null
+      ? (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%'
+      : '—';
+    const ttl = !trades
+      ? rg + ': no live trades yet'
+      : rg + ': ARR ' + valTxt
+        + ' · ADR ' + (b.adr != null ? ((b.adr * 100 >= 0 ? '+' : '') + (b.adr * 100).toFixed(3) + '%') : '—')
+        + ' · ACT ' + (b.act != null ? b.act.toFixed(1) + 'd' : '—')
+        + ' · Win ' + (b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—')
+        + ' · ' + trades + ' trades';
+    return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}">
+              <span class="st-rg-tag">\${rg}</span>
+              <span class="st-rg-val">\${valTxt}</span>
+            </span>\`;
+  }).join('');
+  return \`<div class="st-regime-grid" title="Per-regime live ARR · only the strategy's active regimes are shown">\${cells}</div>\`;
+}
+
+// Backwards-compat shim — left in case other call sites reference it; the
+// active-stack table uses _regimeBreakdown now.
 function _regimesCell(r) {
   const regs = r.active_in_regimes || [];
   if (!regs.length) return '<span style="color:var(--dim)">—</span>';
@@ -4150,6 +5199,50 @@ function _escStr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').
 
 // ── Section 1: Active Stack ────────────────────────────────────────────────
 const _SUB_ORDER = { live: 0, stale: 1, waiting: 2 };
+
+// Persisted expansion state. Survives table re-renders triggered by
+// sort changes, polling refreshes, and approval-job updates so the
+// operator's selection isn't lost on every redraw.
+let _stExpandedSid = null;
+let _stArrChart    = null;   // active Chart.js instance for the ARR curve
+let _stFlowChart   = null;   // active Chart.js instance for the position-flow bars
+let _stArrCache    = {};     // sid → arr-curve payload (cached for the session)
+let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent expands)
+let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
+
+function _stSetRegimeFilter(rg) {
+  _stRegimeFilter = rg;
+  // Update tab visuals.
+  const filter = document.getElementById('st-regime-filter');
+  if (filter) {
+    for (const btn of filter.querySelectorAll('.srf-btn')) {
+      btn.classList.toggle('active', btn.dataset.regime === rg);
+    }
+    const hint = document.getElementById('srf-hint');
+    if (hint) hint.textContent = rg === 'ALL'
+      ? ''
+      : 'Showing live ARR / ADR / ACT / Win for ' + rg + ' trades only';
+  }
+  // Re-render the active stack with swapped metrics.
+  _renderActiveStack(strategiesData.filter(_inActiveStack));
+}
+
+function _stToggleExpand(sid) {
+  if (_stExpandedSid === sid) {
+    _stCloseExpand();
+  } else {
+    _stExpandedSid = sid;
+    _renderActiveStack(strategiesData.filter(_inActiveStack));
+    _stPaintExpand(sid);
+  }
+}
+function _stCloseExpand() {
+  if (_stArrChart)  { try { _stArrChart.destroy();  } catch (_) {} _stArrChart  = null; }
+  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
+  _stExpandedSid = null;
+  _renderActiveStack(strategiesData.filter(_inActiveStack));
+}
+
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
   if (!rows.length) {
@@ -4161,28 +5254,43 @@ function _renderActiveStack(rows) {
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
+  // ADR (Average Daily Return) = ARR / ACT, the natural decomposition of
+  // per-trade average return into a daily rate using average closing time.
+  // Filled for any strategy with closed trades. Annualization was rejected
+  // because regime-gated strategies activate with variable density across
+  // years — keeping the daily mean keeps the metric comparable.
+  //
+  // When the regime filter is set to a specific regime, the row's ARR /
+  // ADR / ACT / Win % / Closed columns swap to that regime's values from
+  // live_regime_breakdown so the operator can see how each strategy
+  // performs under one regime at a time. 'ALL' uses the cross-regime
+  // aggregates already on the row.
+  const filterRg = _stRegimeFilter && _stRegimeFilter !== 'ALL' ? _stRegimeFilter : null;
   const enriched = rows.map(r => {
-    // ADR (Average Daily Return) = avg_realized_pct / avg_days_held.
-    // The natural decomposition of per-trade average return into a
-    // daily rate using average closing time. Filled for any strategy
-    // with an avg_realized_pct (i.e. ≥1 closed trade); does not require
-    // live equity-curve coverage. Annualization was rejected because
-    // regime-gated strategies activate with variable density across
-    // years — keeping the daily mean keeps the metric comparable.
-    // ACT (Average Closing Time) = avg_days_held across closed trades.
-    // avg_realized_pct is stored as a fraction (0.05 = 5%) — same as
-    // unrealized_pnl_pct. Multiply by 100 so the column is in % units.
-    const avgRet  = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
-    const actDays = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
-    const arrPct  = avgRet != null ? avgRet * 100 : null;     // per-trade %
-    const adrPct  = (avgRet != null && actDays != null && actDays > 0)
-                    ? (avgRet * 100 / actDays) : null;        // per-day %
+    let avgRet, actDays, winRate, closedCount;
+    if (filterRg) {
+      const b = (r.live_regime_breakdown || {})[filterRg];
+      avgRet      = b && b.arr      != null ? parseFloat(b.arr)      : null;
+      actDays     = b && b.act      != null ? parseFloat(b.act)      : null;
+      winRate     = b && b.win_rate != null ? parseFloat(b.win_rate) : null;
+      closedCount = b && b.trades   != null ? parseInt(b.trades)     : 0;
+    } else {
+      avgRet      = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
+      actDays     = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
+      winRate     = r.win_rate         != null ? parseFloat(r.win_rate)         : null;
+      closedCount = r.closed_count     != null ? parseInt(r.closed_count)       : 0;
+    }
+    const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
+    const adrPct = (avgRet != null && actDays != null && actDays > 0)
+                   ? (avgRet * 100 / actDays) : null;            // per-day %
     return Object.assign({}, r, {
-      d1_total:     (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
-      _active_rank: _activeRankFor(r),
-      _arr_pct:     arrPct,
-      _adr_pct:     adrPct,
-      _act_days:    actDays,
+      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+      _active_rank:    _activeRankFor(r),
+      _arr_pct:        arrPct,
+      _adr_pct:        adrPct,
+      _act_days:       actDays,
+      _filtered_win:   winRate,
+      _filtered_closed: closedCount,
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -4199,17 +5307,28 @@ function _renderActiveStack(rows) {
     });
   }
   const { shown, footer } = _collapseRows('st-active-wrap', sorted);
-  el.innerHTML = \`<table class="db-table" style="min-width:1100px">
+  // Active strategy lookup for cross-references (similar-strategies panel).
+  const activeStrategiesById = {};
+  for (const er of enriched) activeStrategiesById[er.strategy_id] = er;
+  // Persist for the expansion-panel renderer to read without re-prop.
+  _stActiveSnapshot = activeStrategiesById;
+  const expandedSid = _stExpandedSid;
+  // Header tag on metric columns when the regime filter is non-ALL —
+  // makes it obvious which subset of trades the numbers describe.
+  const filterTag = filterRg
+    ? \` <span class="srf-col-tag srf-col-tag-\${filterRg}" title="\${filterRg} only">\${_REGIME_TAGS[filterRg]}</span>\`
+    : '';
+  el.innerHTML = \`<table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Sort: Waiting → Stale → Live (ascending)">Status</th>
-      <th>Regimes</th>
+      <th title="Per-regime LIVE ARR (mean realized P&amp;L per closed trade). Small dot = current market regime, blue border = declared in active_in_regimes">By Regime</th>
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
-      <th class="num" data-sort-key="closed_count" data-sort-type="num">Closed</th>
-      <th class="num" data-sort-key="win_rate" data-sort-type="num">Win %</th>
-      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across this strategy's closed trades.">ARR&nbsp;%</th>
-      <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate. Filled for any strategy with closed trades; un-annualized because regime-gated strategies activate with variable density across the year.">ADR&nbsp;%</th>
-      <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across this strategy's closed trades.">ACT</th>
+      <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
+      <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
+      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}.">ARR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
@@ -4231,24 +5350,369 @@ function _renderActiveStack(rows) {
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
-      return \`<tr>
-        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+      const isOpen = r.strategy_id === expandedSid;
+      const expandRow = isOpen ? \`
+        <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
+          <td colspan="12">
+            <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
+              <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
+                <div class="st-expand-head">
+                  <div class="st-expand-title">\${r.strategy_id}
+                    <small>\${_escStr(r.description || '')}</small>
+                  </div>
+                  <button class="st-expand-close" onclick="event.stopPropagation();_stCloseExpand()">Close ✕</button>
+                </div>
+                <div class="st-expand-body" id="st-expand-body-\${_escStr(r.strategy_id)}">
+                  <div class="st-arr-empty">Loading…</div>
+                </div>
+              </div>
+            </div>
+          </td>
+        </tr>\` : '';
+      // Closed/Win cells respect the regime filter so the operator sees the
+      // trade count + win rate that actually feeds the displayed ARR/ADR.
+      const closedTxt = r._filtered_closed != null ? r._filtered_closed : (r.closed_count || 0);
+      const winTxt    = r._filtered_win != null ? Math.round(r._filtered_win * 100) + '%'
+                       : (r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—');
+      const dimWhenFiltered = filterRg && (closedTxt === 0) ? 'style="color:var(--dim)"' : '';
+      return \`<tr class="st-row-expandable \${isOpen ? 'st-row-open' : ''}" data-sid="\${_escStr(r.strategy_id)}">
+        <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
+          <span class="st-chevron">▶</span>\${r.strategy_id}
+        </td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
-        <td>\${_regimesCell(r)}</td>
+        <td>\${_regimeBreakdown(r)}</td>
         <td class="num">\${r.open_count || 0}</td>
-        <td class="num">\${r.closed_count || 0}</td>
-        <td class="num">\${_fmtRate(r.win_rate)}</td>
-        <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
+        <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
+        <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
         <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
-        <td><button class="st-action-btn st-unstack-btn" onclick="stUnstack('\${r.strategy_id}')">Unstack</button></td>
-      </tr>\`;
+        <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
+      </tr>\${expandRow}\`;
     }).join('')}
   </table>\${footer}\`;
   _bindSortable('st-active-wrap', _renderActiveStack);
   _bindCollapse('st-active-wrap', _renderActiveStack);
+  // If a row is currently expanded, paint its detail panel (chart +
+  // similar strategies) and animate the shell open.
+  if (expandedSid) _stPaintExpand(expandedSid);
+}
+
+let _stActiveSnapshot = {};
+
+// Paint the expansion panel for a strategy. The panel content (regime
+// stats + similar-strategies heatmap) renders synchronously so it's
+// visible immediately. The ARR chart waits for two things in parallel:
+//   1. /api/strategies/:id/arr-curve fetch (cached after first call)
+//   2. The shell's max-height transition to *complete* — so Chart.js
+//      reads the final container height when it sizes the canvas.
+// Without #2 the canvas measured an in-flight transition height and
+// shrank on every re-render — the "moving downwards / disappearing"
+// glitch the operator reported.
+async function _stPaintExpand(sid) {
+  const shell = document.getElementById('st-expand-shell-' + sid);
+  const body  = document.getElementById('st-expand-body-' + sid);
+  if (!shell || !body) return;
+  // Defer the class flip to the next frame so the transition runs from
+  // the baseline 0 max-height.
+  requestAnimationFrame(() => shell.classList.add('st-open'));
+
+  const r = (strategiesData || []).find(x => x.strategy_id === sid);
+  if (!r) return;
+
+  // ── Live per-regime stats grid (was backtest, now live trades) ─────────
+  const breakdown = r.live_regime_breakdown || {};
+  const active    = new Set(r.active_in_regimes || []);
+  const current   = r.current_regime || null;
+  const cellsHtml = _REGIME_AXIS.map(rg => {
+    const b = breakdown[rg];
+    const has = b && (b.trades || 0) > 0;
+    const tagBg = ({
+      LOW_VOL:       'rgba(63,185,80,0.18)',
+      TRANSITIONING: 'rgba(210,153,34,0.22)',
+      HIGH_VOL:      'rgba(240,136,62,0.28)',
+      CRISIS:        'rgba(248,81,73,0.34)',
+    })[rg];
+    const dot = current === rg ? '<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--blue);margin-left:6px" title="Current market regime"></span>' : '';
+    const star = active.has(rg) ? '<span style="color:var(--blue);font-size:9px;margin-left:4px">●ACTIVE</span>' : '';
+    const head = '<div class="st-rs-head" style="background:' + tagBg + ';margin:-7px -8px 6px;padding:5px 8px;border-radius:5px 5px 0 0">'
+               + '<span>' + rg + '</span><span>' + star + dot + '</span></div>';
+    if (!has) {
+      const why = active.has(rg)
+        ? 'no closed trades under this regime yet'
+        : 'not in active_in_regimes';
+      return '<div class="st-rs-cell">' + head + '<div class="st-rs-na">' + why + '</div></div>';
+    }
+    const arrPct = b.arr * 100;
+    const adrPct = b.adr != null ? b.adr * 100 : null;
+    const winPct = b.win_rate != null ? Math.round(b.win_rate * 100) : null;
+    const inner = ''
+      + '<div class="st-rs-row"><span>ARR</span><b style="color:' + (arrPct >= 0 ? 'var(--green)' : 'var(--red)') + '">'
+      +   (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%</b></div>'
+      + '<div class="st-rs-row"><span>ADR</span><b' + (adrPct != null ? ' style="color:' + (adrPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
+      +   (adrPct != null ? ((adrPct >= 0 ? '+' : '') + adrPct.toFixed(3) + '%') : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>ACT</span><b>' + (b.act != null ? b.act.toFixed(1) + 'd' : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Win</span><b>' + (winPct != null ? winPct + '%' : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Trades</span><b>' + (b.trades || 0) + '</b></div>';
+    return '<div class="st-rs-cell">' + head + inner + '</div>';
+  }).join('');
+
+  // ── Similar strategies (overlap on at least one regime) ────────────────
+  // Heatmap cell shows live ARR % for that regime — directly comparable
+  // to the focused strategy's per-regime cells above.
+  const myRegimes = new Set(r.active_in_regimes || []);
+  const similar = Object.values(_stActiveSnapshot)
+    .filter(o => o.strategy_id !== sid)
+    .filter(o => (o.active_in_regimes || []).some(rg => myRegimes.has(rg)))
+    .sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)))
+    .slice(0, 12);
+  const similarHtml = similar.length ? similar.map(o => {
+    const cells = _REGIME_AXIS.map(rg => {
+      const b = (o.live_regime_breakdown || {})[rg];
+      if (!b || !b.trades) return '<span class="st-sm-cell empty" title="' + rg + ': no live trades">—</span>';
+      const arrPct = b.arr != null ? b.arr * 100 : null;
+      const cls = arrPct == null ? 'empty' : (arrPct > 0 ? 'pos' : arrPct < 0 ? 'neg' : '');
+      const txt = arrPct == null ? '—' : (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%';
+      const ttl = rg + ': ARR ' + txt + ' · ' + b.trades + ' trades';
+      return '<span class="st-sm-cell ' + cls + '" title="' + _escStr(ttl) + '">' + txt + '</span>';
+    }).join('');
+    return '<div class="st-similar-row" title="Open ' + o.strategy_id + '">'
+         + '<span class="st-sm-name" onclick="_stToggleExpand(\\'' + _escStr(o.strategy_id) + '\\')" style="cursor:pointer">' + o.strategy_id + '</span>'
+         + cells + '</div>';
+  }).join('') : '<div class="st-rs-na" style="font-size:10.5px;padding:8px 0">No other active strategies share these regimes.</div>';
+
+  // Render the synchronous content + a stable canvas wrapper. The wrapper
+  // has explicit height (CSS .st-arr-canvas-wrap) so Chart.js' responsive
+  // sizing has a fixed reference frame.
+  body.innerHTML = \`
+    <div class="st-expand-grid">
+      <div class="st-expand-section">
+        <div class="st-expand-section-title"><span>Live Trades by Regime</span><span style="color:var(--dim);font-size:9px">ARR · ADR · ACT · Win · Trades</span></div>
+        <div class="st-regime-stats">\${cellsHtml}</div>
+        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">live ARR % · share ≥1 regime · click to open</span></div>
+        <div class="st-similar">
+          <div class="st-similar-row" style="background:transparent">
+            <span class="st-sm-name" style="color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em">Strategy</span>
+            \${_REGIME_AXIS.map(rg => '<span class="st-sm-cell" style="background:transparent;color:var(--dim);font-size:9px">' + _REGIME_TAGS[rg] + '</span>').join('')}
+          </div>
+          \${similarHtml}
+        </div>
+      </div>
+      <div class="st-expand-section st-arr-wrap">
+        <div class="st-expand-section-title"><span>ARR over time</span><span class="st-arr-window" style="color:var(--dim);font-size:9px">30-day rolling</span></div>
+        <div class="st-arr-meta" id="st-arr-meta-\${sid}"><span style="color:var(--dim)">Loading…</span></div>
+        <div class="st-arr-canvas-wrap"><canvas id="st-arr-chart-\${sid}"></canvas></div>
+        <div class="st-flow-row">
+          <div class="st-flow-meta" id="st-flow-meta-\${sid}"><span style="color:var(--dim);font-size:9.5px;letter-spacing:.04em">Positions opened / closed per day</span><span></span></div>
+          <div class="st-flow-canvas-wrap"><canvas id="st-flow-chart-\${sid}"></canvas></div>
+        </div>
+      </div>
+    </div>\`;
+
+  // Fetch (or read cached) ARR curve. The canvas wrapper has fixed CSS
+  // height (.st-arr-canvas-wrap) so Chart.js can size correctly even
+  // while the shell's max-height transition is still running — no need
+  // to wait for transitionend.
+  let payload = _stArrCache[sid];
+  if (!payload) {
+    if (!_stArrFetching[sid]) {
+      _stArrFetching[sid] = fetch('/api/strategies/' + encodeURIComponent(sid) + '/arr-curve?window=30')
+        .then(r => r.ok ? r.json() : { rows: [] })
+        .catch(() => ({ rows: [] }));
+    }
+    payload = await _stArrFetching[sid];
+    delete _stArrFetching[sid];
+    _stArrCache[sid] = payload;
+  }
+  // If the user closed or jumped to another row in the interim, bail out.
+  if (_stExpandedSid !== sid) return;
+  _stRenderArrChart(sid, payload);
+  _stRenderFlowChart(sid, payload);
+}
+
+function _stRenderArrChart(sid, payload) {
+  const canvas = document.getElementById('st-arr-chart-' + sid);
+  const meta   = document.getElementById('st-arr-meta-' + sid);
+  if (!canvas) return;
+  if (_stArrChart) { try { _stArrChart.destroy(); } catch (_) {} _stArrChart = null; }
+  const rows = (payload && payload.rows) || [];
+  if (!rows.length) {
+    if (meta) meta.innerHTML = '<span style="color:var(--dim)">No closed trades yet — ARR curve will fill in once trades close.</span>';
+    const wrap = canvas.parentElement;
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  const wrap = canvas.parentElement;
+  if (wrap) wrap.style.display = '';
+  const labels = rows.map(r => r.date);
+  const values = rows.map(r => r.rolling_arr_pct != null ? r.rolling_arr_pct * 100 : null);
+  const regimeMap = {};
+  for (const r of rows) if (r.regime) regimeMap[r.date] = r.regime;
+  const last  = [...values].reverse().find(v => v != null);
+  const first = values.find(v => v != null);
+  if (meta) {
+    const lastTxt  = last  != null ? (last  >= 0 ? '+' : '') + last.toFixed(3) + '%' : '—';
+    const firstTxt = first != null ? (first >= 0 ? '+' : '') + first.toFixed(3) + '%' : '—';
+    meta.innerHTML = '<span>' + (payload.window_days || 30) + 'd rolling mean of realized P&amp;L per closed trade</span>'
+                   + '<span>start <b style="color:var(--text)">' + firstTxt + '</b> · latest <b style="color:var(--text)">' + lastTxt + '</b></span>';
+  }
+  const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
+  _stArrChart = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { labels, datasets: [{
+      data: values,
+      borderColor: '#58a6ff',
+      backgroundColor: 'rgba(88,166,255,0.10)',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: true,
+      tension: 0.15,
+      spanGaps: false,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      // Disable initial animation — the chart's intro slide combined with
+      // the expand transition was contributing to the perceived "drift".
+      animation: false,
+      // Debounce ResizeObserver callbacks so layout reflows during the
+      // page's other live updates don't keep nudging the canvas.
+      resizeDelay: 200,
+      interaction: { mode: 'index', intersect: false },
+      layout: { padding: { bottom: 0 } },
+      plugins: {
+        legend: { display: false },
+        regimeBands: { map: regimeMap },
+        tooltip: {
+          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
+          displayColors: false, padding: 8,
+          callbacks: {
+            label: ctx => {
+              const r = rows[ctx.dataIndex];
+              const v = ctx.parsed.y;
+              const arr = v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(3) + '%';
+              return [
+                'ARR ' + arr,
+                'trades in window: ' + (r ? r.trade_count : 0),
+                'regime: ' + (r && r.regime ? r.regime : '—'),
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0 }, grid: { color:'rgba(48,54,61,0.45)' } },
+        y: { position:'right', ticks: { color:'#484f58', font:{size:9}, callback: fmt$, maxTicksLimit: 5 },
+             grid:  { color:'rgba(48,54,61,0.45)' } }
+      }
+    }
+  });
+}
+
+// Position-flow bar chart: positions opened (green) and closed (red) per
+// day, rendered directly underneath the ARR curve. Shares x-axis dates
+// with the ARR chart so the operator can correlate trade-flow density
+// with the per-trade economics line above. Bars are grouped (not
+// stacked) so a same-day open + close shows two distinguishable bars
+// rather than a fused colour block.
+function _stRenderFlowChart(sid, payload) {
+  const canvas = document.getElementById('st-flow-chart-' + sid);
+  const meta   = document.getElementById('st-flow-meta-' + sid);
+  if (!canvas) return;
+  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
+  const rows = (payload && payload.rows) || [];
+  if (!rows.length) {
+    if (meta) meta.innerHTML = '<span style="color:var(--dim);font-size:9.5px">No trade flow yet.</span><span></span>';
+    const wrap = canvas.parentElement;
+    if (wrap) wrap.style.display = 'none';
+    return;
+  }
+  const wrap = canvas.parentElement;
+  if (wrap) wrap.style.display = '';
+  const labels = rows.map(r => r.date);
+  const opened = rows.map(r => r.opened || 0);
+  const closed = rows.map(r => r.closed || 0);
+  const totalOpened = opened.reduce((a, b) => a + b, 0);
+  const totalClosed = closed.reduce((a, b) => a + b, 0);
+  if (meta) {
+    meta.innerHTML = '<span style="font-size:9.5px;letter-spacing:.04em">Positions <span style="color:var(--green);font-weight:600">opened</span> / <span style="color:var(--red);font-weight:600">closed</span> per day</span>'
+                   + '<span style="font-size:9.5px"><b style="color:var(--green)">' + totalOpened + ' opened</b> · <b style="color:var(--red)">' + totalClosed + ' closed</b></span>';
+  }
+  // Bar geometry:
+  //   barPercentage:      1.0  → opened + closed bars within the same day
+  //                              touch with no gap
+  //   categoryPercentage: 0.5  → each day's bar pair occupies half its
+  //                              slot, leaving the other half as inter-
+  //                              day whitespace so a month of bars reads
+  //                              cleanly even at narrow chart widths
+  _stFlowChart = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'opened',
+          data: opened,
+          backgroundColor: 'rgba(63,185,80,0.95)',
+          borderWidth:     0,
+          borderRadius:    0,
+          barPercentage:      1.0,
+          categoryPercentage: 0.5,
+        },
+        {
+          label: 'closed',
+          data: closed,
+          backgroundColor: 'rgba(248,81,73,0.95)',
+          borderWidth:     0,
+          borderRadius:    0,
+          barPercentage:      1.0,
+          categoryPercentage: 0.5,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: false,
+      resizeDelay: 200,
+      interaction: { mode: 'index', intersect: false },
+      layout: { padding: { bottom: 0 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
+          displayColors: false, padding: 8,
+          callbacks: {
+            title: items => items[0]?.label || '',
+            label: ctx => {
+              const r = rows[ctx.dataIndex];
+              if (!r) return '';
+              return [
+                'opened: ' + (r.opened || 0),
+                'closed: ' + (r.closed || 0),
+              ];
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0, maxRotation: 0 },
+          grid:  { display: false },
+          border:{ color:'#30363d' },
+        },
+        y: {
+          position:'right',
+          beginAtZero: true,
+          ticks: { color:'#484f58', font:{size:9}, maxTicksLimit: 3, precision: 0 },
+          grid:  { display: false },
+          border:{ display: false },
+        },
+      },
+    },
+  });
 }
 
 // ── Section 2: Inactive Stack ──────────────────────────────────────────────
@@ -4582,7 +6046,77 @@ async function stCancelApproval(sid) {
   } catch (e) { toast('Network error: ' + e.message, 'error', 6_000); }
 }
 
-function _buildChart(labels, values, yFmt, tooltipFmt, color) {
+// ── Volatility-regime background bands ───────────────────────────────────────
+// Chart.js plugin: paints transparent vertical bands behind the dataset
+// area, one band per labelled day, coloured by regime state. Activates
+// only when the chart's options carry a regimeBands.map (label→state)
+// map). Skipped silently when the map is empty.
+const REGIME_BAND_COLORS = {
+  LOW_VOL:        'rgba(63,185,80,0.18)',
+  TRANSITIONING:  'rgba(210,153,34,0.20)',
+  HIGH_VOL:       'rgba(240,136,62,0.26)',
+  CRISIS:         'rgba(248,81,73,0.32)',
+};
+const _regimeBandsPlugin = {
+  id: 'regimeBands',
+  beforeDatasetsDraw(chart, _args, opts) {
+    const map = opts && opts.map;
+    if (!map || !chart.scales.x) return;
+    const { ctx, chartArea, scales: { x } } = chart;
+    const labels = chart.data.labels || [];
+    const N = labels.length;
+    if (!N) return;
+    // Each band extends to the midpoint between its label and its
+    // neighbours' centres, so adjacent bands always abut with no gap
+    // regardless of axis offset:
+    //   offset:true  bar charts → label slots are evenly spaced and
+    //                            non-edge midpoints land exactly at slot
+    //                            boundaries (same as the previous
+    //                            "half = width/N" math).
+    //   offset:false line charts → labels span N-1 slots so the previous
+    //                            "half = width/N" left a ~1/N-wide gap
+    //                            between every pair of bands. Using the
+    //                            actual neighbour midpoint closes that
+    //                            gap. The leftmost/rightmost bands
+    //                            extend to the chart-area edges.
+    // A 0.5px overlap on each side defeats sub-pixel anti-alias seams
+    // between adjacent same-colour fills.
+    const center = i => x.getPixelForValue(i);
+    ctx.save();
+    for (let i = 0; i < N; i++) {
+      const state = map[labels[i]];
+      if (!state) continue;
+      const color = REGIME_BAND_COLORS[state];
+      if (!color) continue;
+      const c = center(i);
+      const left = i === 0
+        ? chartArea.left
+        : (center(i - 1) + c) / 2;
+      const right = i === N - 1
+        ? chartArea.right
+        : (c + center(i + 1)) / 2;
+      ctx.fillStyle = color;
+      ctx.fillRect(
+        left  - 0.5,
+        chartArea.top,
+        (right - left) + 1,
+        chartArea.bottom - chartArea.top,
+      );
+    }
+    ctx.restore();
+  },
+};
+if (window.Chart && Chart.register) Chart.register(_regimeBandsPlugin);
+
+function _regimeMap(rows) {
+  // rows: [{date, regime}]; output: {date → state}
+  const out = {};
+  if (!Array.isArray(rows)) return out;
+  for (const r of rows) { if (r && r.date) out[r.date] = r.regime || 'NO_DATA'; }
+  return out;
+}
+
+function _buildChart(labels, values, yFmt, tooltipFmt, color, regimeMap) {
   const wrap = document.getElementById('pnlChart');
   if (!wrap) return;
   if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
@@ -4597,38 +6131,215 @@ function _buildChart(labels, values, yFmt, tooltipFmt, color) {
       responsive: true, maintainAspectRatio: false,
       interaction: { mode: 'index', intersect: false },
       plugins: { legend: { display: false },
+        regimeBands: { map: regimeMap || null },
         tooltip: { backgroundColor:'#161b22', borderColor:'#30363d', borderWidth:1,
           titleColor:'#8b949e', bodyColor:'#e6edf3',
           callbacks: { label: ctx => tooltipFmt(ctx.parsed.y) }
         }
       },
+      layout: { padding: { bottom: 0 } },
       scales: {
-        x: { ticks: { color:'#484f58', maxTicksLimit:6, font:{size:10} }, grid: { color:'#21262d' } },
+        x: { ticks: { color:'#484f58', maxTicksLimit:6, font:{size:10}, padding: 0 }, grid: { color:'#21262d' } },
         y: { position:'right', ticks: { color:'#484f58', font:{size:10}, callback: yFmt }, grid: { color:'#21262d' } }
       }
     }
   });
 }
 
-function renderPnlChart(rows) {
+// ── Candlestick (90d daily OHLC of account equity) ────────────────────────────
+// Implementation note: Chart.js core has no candlestick type, so we use
+// the standard "two-bar overlay" trick:
+//   - dataset 0 (wick): narrow centred floating bar [low, high]
+//   - dataset 1 (body): full-width floating bar [open, close], coloured
+//                       green if up, red if down, grey if flat
+// Bodies span the full category width so adjacent days touch; visual
+// definition between candles comes from the up/down colour shift. The
+// body's borderWidth is 0 so neighbouring same-direction candles merge
+// into a single block — this avoids hairline gaps that show through at
+// 1px between bars.
+const _crosshairPlugin = {
+  id: 'pfCrosshair',
+  afterDatasetsDraw(chart, _args, opts) {
+    if (!opts || !opts.enabled) return;
+    const active = chart.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0].element.x;
+    const { top, bottom } = chart.chartArea;
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.beginPath();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = 'rgba(139,148,158,0.45)';
+    ctx.lineWidth = 1;
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+    ctx.restore();
+  },
+};
+if (window.Chart && Chart.register) Chart.register(_crosshairPlugin);
+
+// Per-candle OHLC end-caps: flat horizontal serifs at the high and low
+// of each day's wick. Painted in afterDatasetsDraw so they sit on top of
+// the wick + body bars. Width is ~55% of category width — visible without
+// crowding the touching candle bodies. Drawn in a single grey hue so the
+// wick assembly reads as a unit and the body's up/down colour stays the
+// only direction signal.
+const _ohlcCapsPlugin = {
+  id: 'ohlcCaps',
+  afterDatasetsDraw(chart, _args, opts) {
+    if (!opts || !opts.enabled) return;
+    const rows = opts.data || [];
+    if (!rows.length) return;
+    const { x, y } = chart.scales;
+    if (!x || !y) return;
+    const labels = chart.data.labels || [];
+    const catW = x.width / Math.max(labels.length, 1);
+    const capHalf = Math.max(1, catW * 0.55 / 2);
+    const ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = opts.color || '#8b949e';
+    ctx.lineWidth = 1;
+    ctx.lineCap = 'butt';
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r) continue;
+      const cx = x.getPixelForValue(i);
+      const yHi = y.getPixelForValue(parseFloat(r.high));
+      const yLo = y.getPixelForValue(parseFloat(r.low));
+      ctx.beginPath();
+      ctx.moveTo(cx - capHalf, yHi + 0.5);
+      ctx.lineTo(cx + capHalf, yHi + 0.5);
+      ctx.moveTo(cx - capHalf, yLo - 0.5);
+      ctx.lineTo(cx + capHalf, yLo - 0.5);
+      ctx.stroke();
+    }
+    ctx.restore();
+  },
+};
+if (window.Chart && Chart.register) Chart.register(_ohlcCapsPlugin);
+
+function renderCandleChart(rows, regimeRows) {
+  const wrap = document.getElementById('pnlChart');
+  if (!wrap) return;
+  if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
   if (!rows || !rows.length) {
-    const wrap = document.getElementById('pnlChart');
-    if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
     if (wrap) wrap.getContext('2d').clearRect(0, 0, wrap.width, wrap.height);
     return;
   }
-  // signal_pnl.unrealized_pnl_pct is stored as a fraction (0.05 = 5%) —
-  // multiply by 100 so the chart formatter's "%" suffix lands on the
-  // correct number. Rendered as a bar chart: green for positive days,
-  // red for negative, grey for flat (|v| < 0.005%).
-  const labels = rows.map(r => String(r.pnl_date).slice(0,10));
-  const values = rows.map(r => (parseFloat(r.avg_unrealized) || 0) * 100);
-  _buildBarChart(labels, values,
-    v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%',
-    v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%');
+  const labels  = rows.map(r => r.date);
+  const wicks   = rows.map(r => [parseFloat(r.low), parseFloat(r.high)]);
+  const bodies  = rows.map(r => [parseFloat(r.open), parseFloat(r.close)]);
+  // One solid colour per candle — same hue used for both wick and body so
+  // each day reads as a single uniform mark. Direction picks the hue:
+  //   up   → green
+  //   down → red
+  //   flat → grey
+  const COLOR_UP    = 'rgb(46,160,67)';
+  const COLOR_DOWN  = 'rgb(218,54,51)';
+  const COLOR_FLAT  = 'rgb(125,133,144)';
+  const candleColor = r => {
+    const d = parseFloat(r.close) - parseFloat(r.open);
+    if (Math.abs(d) < 1e-6) return COLOR_FLAT;
+    return d >= 0 ? COLOR_UP : COLOR_DOWN;
+  };
+  const colors = rows.map(candleColor);
+  const fmt$ = v => '$' + parseFloat(v).toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0});
+  pnlChart = new Chart(wrap.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        // Wick: narrow floating bar from low → high, sharing the body's
+        // colour so the candle reads as a single solid mark.
+        {
+          label: 'wick',
+          data: wicks,
+          backgroundColor: colors,
+          borderColor:     colors,
+          borderWidth:     0,
+          barPercentage:      0.14,
+          categoryPercentage: 1.0,
+          order: 1,
+        },
+        // Body: full-width floating bar from open → close. categoryPercentage
+        // and barPercentage both 1.0 → adjacent candles touch with no gap.
+        {
+          label: 'body',
+          data: bodies,
+          backgroundColor: colors,
+          borderWidth:     0,
+          barPercentage:      1.0,
+          categoryPercentage: 1.0,
+          order: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      animation: { duration: 220 },
+      interaction: { mode: 'index', intersect: false, axis: 'x' },
+      plugins: {
+        legend: { display: false },
+        regimeBands: { map: _regimeMap(regimeRows) },
+        pfCrosshair: { enabled: true },
+        tooltip: {
+          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3', titleFont:{weight:'600'},
+          displayColors: false, padding: 10, cornerRadius: 4,
+          // Custom multi-line tooltip; only emit it once (filter wick).
+          // The candle body geometry uses continuous open/close so bars
+          // join end-to-end, but the operator wants O/C numbers in the
+          // tooltip to reflect the regular session (9:30-16:00 ET). We
+          // surface r.market_open / r.market_close when present (set on
+          // any day with session samples) and fall back to continuous
+          // open/close on weekends/holidays where no session exists.
+          filter: ctx => ctx.dataset.label === 'body',
+          callbacks: {
+            title: items => items[0]?.label || '',
+            label: ctx => {
+              const r   = rows[ctx.dataIndex];
+              if (!r) return '';
+              const pct = r.pct_change != null
+                ? ((r.pct_change >= 0 ? '+' : '') + (r.pct_change * 100).toFixed(2) + '%')
+                : '—';
+              const o = r.market_open  != null ? r.market_open  : r.open;
+              const c = r.market_close != null ? r.market_close : r.close;
+              const noSession = (r.intraday && r.market_open == null);
+              return [
+                'Δ '   + pct + (r.intraday ? '' : '  (daily mark)'),
+                'O '   + fmt$(o) + (noSession ? '  (no session)' : ''),
+                'H '   + fmt$(r.high),
+                'L '   + fmt$(r.low),
+                'C '   + fmt$(c) + (noSession ? '  (no session)' : ''),
+              ];
+            },
+          },
+        },
+      },
+      layout: { padding: { bottom: 0 } },
+      scales: {
+        x: {
+          stacked: true,
+          ticks: { color:'#484f58', maxTicksLimit:8, font:{size:10}, maxRotation:0, autoSkip:true, padding: 0 },
+          grid:  { display:false },
+          border:{ color:'#30363d' },
+        },
+        y: {
+          position:'right',
+          // 4% grace keeps wicks off the top/bottom edges.
+          grace: '4%',
+          ticks: { color:'#484f58', font:{size:10}, callback: fmt$, maxTicksLimit: 5 },
+          grid:  { color:'rgba(48,54,61,0.45)', drawTicks:false },
+          border:{ display:false },
+          beginAtZero: false,
+        },
+      },
+    },
+  });
 }
 
-function renderValueChart(rows) {
+function renderValueChart(rows, regimeRows) {
   if (!rows || !rows.length) {
     const wrap = document.getElementById('pnlChart');
     if (pnlChart) { pnlChart.destroy(); pnlChart = null; }
@@ -4638,7 +6349,7 @@ function renderValueChart(rows) {
   const labels = rows.map(r => String(r.date).slice(0,10));
   const values = rows.map(r => parseFloat(r.equity) || 0);
   const fmt$   = v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0});
-  _buildChart(labels, values, fmt$, fmt$, '#58a6ff');
+  _buildChart(labels, values, fmt$, fmt$, '#58a6ff', _regimeMap(regimeRows));
 }
 
 // ── Pipeline badge ────────────────────────────────────────────────────────────
@@ -4673,6 +6384,19 @@ if (httpServer) {
     }
     console.error('[dashboard] http server error:', err);
   });
+
+  // Pre-warm the portfolio caches so the first dashboard load doesn't pay
+  // the full 15-30s Alpaca-intraday latency. Refreshed every minute (well
+  // inside each cache's TTL) so the user never hits a cold cache while
+  // the dashboard is open. Errors are swallowed — the route handler will
+  // surface them on the next user request.
+  const warmPortfolioCache = () => {
+    _cached('candles:90', PNL_CANDLES_TTL,  () => _buildCandles(90)).catch(() => {});
+    _cached('vc:1A',      VALUE_CURVE_TTL,  () => _buildValueCurve('1A')).catch(() => {});
+    _cached('vc:all',     VALUE_CURVE_TTL,  () => _buildValueCurve('all')).catch(() => {});
+  };
+  warmPortfolioCache();
+  setInterval(warmPortfolioCache, 60_000).unref();
 }
 
 function shutdown(reason) {
