@@ -338,6 +338,51 @@ def check_regime_freshness():
     return _ok('regime_freshness', detail)
 
 
+@_check('liquidator_audit', slow=True)
+def check_liquidator_audit():
+    """When live liquidation is enabled, every state transition between
+    today's and yesterday's market_regime rows MUST produce at least one
+    alpaca_liquidations row for today. Catches silent failures of
+    src/execution/regime_liquidator.py (missed cron, broker outage, COID
+    prefix mismatch, etc.). No-op when the live env flag is unset."""
+    if os.environ.get('OPENCLAW_ALPACA_LIVE_LIQUIDATE') != '1':
+        return _ok('liquidator_audit', 'live flag off — skipped')
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        return _warn('liquidator_audit', 'POSTGRES_URI not set — skipped')
+    try:
+        import psycopg2
+        conn = psycopg2.connect(uri, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT state, updated_at::date FROM market_regime "
+            "ORDER BY updated_at DESC LIMIT 2"
+        )
+        rows = cur.fetchall()
+        if len(rows) < 2:
+            cur.close(); conn.close()
+            return _ok('liquidator_audit', 'insufficient regime history')
+        today_state, today_date = rows[0]
+        prev_state, _ = rows[1]
+        if today_state == prev_state:
+            cur.close(); conn.close()
+            return _ok('liquidator_audit', f'no transition ({today_state})')
+        cur.execute(
+            "SELECT COUNT(*) FROM alpaca_liquidations WHERE run_date = %s",
+            (today_date,),
+        )
+        n = cur.fetchone()[0]
+        cur.close(); conn.close()
+    except Exception as exc:
+        return _warn('liquidator_audit', f'query failed: {type(exc).__name__}')
+    if n == 0:
+        return _warn('liquidator_audit',
+                     f'transition {prev_state}→{today_state} on {today_date} '
+                     f'but 0 audit rows — liquidator may have failed silently')
+    return _ok('liquidator_audit',
+               f'{n} audit row(s) for {prev_state}→{today_state}')
+
+
 @_check('data_coverage', slow=True)
 def check_data_coverage():
     """Query data_coverage for staleness on critical types. Reports the

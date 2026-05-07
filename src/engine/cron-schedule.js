@@ -284,6 +284,17 @@ function start(swarm, generateId, notifyDiscord) {
             log(`ERROR: morning market-state failed — ${e.message.slice(0, 200)}`);
             return;
         }
+        // Liquidate-on-regime-change: fires only when prior_state != state
+        // in the freshly-written regime_latest.json. Default DRY-RUN; set
+        // OPENCLAW_ALPACA_LIVE_LIQUIDATE=1 to enable live broker action.
+        // Wrapped in its own try/catch so a liquidator failure doesn't
+        // mask the successful regime write or block the dashboard ping.
+        try {
+            runPython('src/execution/regime_liquidator.py');
+            log('Regime liquidator complete');
+        } catch (e) {
+            log(`Regime liquidator failed: ${e.message.slice(0, 200)}`);
+        }
         try {
             const http = require('http');
             const port = parseInt(process.env.DASHBOARD_PORT) || 3000;
