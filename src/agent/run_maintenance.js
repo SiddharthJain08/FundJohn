@@ -520,20 +520,26 @@ function runClaudeBin(prompt, { timeoutMs } = {}) {
         return reject(new Error('empty result from BotJohn'));
       }
       const costUsd = Number(parsed.total_cost_usd ?? parsed.cost_usd ?? 0) || 0;
-      // Guard: claude-bin can return success-shaped JSON when the OAuth
-      // token is expired — `result` becomes the literal API error
-      // ("Failed to authenticate. API Error: 401 ...") and cost_usd is 0.
-      // Without this guard the wrapper happily posts the error string to
-      // #general (saw this 2026-05-02 — Saturday's first scheduled run
-      // posted "Failed to authenticate" verbatim instead of triggering
-      // the 🚨 fallback). Detect by signature: 0 cost + sub-30s + the
-      // result starts with an error-like prefix.
-      const looksLikeAuthError =
-          costUsd === 0
-          && durationMs < 30_000
-          && /^(Failed to authenticate|API Error:|401\b|authentication_error|Invalid authentication credentials)/i.test(result.trim());
-      if (looksLikeAuthError) {
-        return reject(new Error(`claude-bin auth failure: ${result.trim().slice(0, 200)}`));
+      const isError = parsed.is_error === true || parsed.subtype === 'error_during_execution';
+      // Guard: claude-bin can return success-shaped JSON when something
+      // upstream failed — `result` becomes the raw API error string and
+      // cost_usd is 0 (no tokens were billed because the assistant message
+      // is synthetic). Without this guard the wrapper posts the error
+      // string verbatim to #general. Seen in production:
+      //   - 2026-05-02 OAuth expiry: "Failed to authenticate. API Error: 401"
+      //   - 2026-05-06 529 overloaded: "API Error: 529 ... overloaded_error"
+      //     where claude-bin internally retried for 225s before giving up,
+      //     so a duration gate would false-negative.
+      // Real successes always have non-zero cost (input tokens are billed
+      // at minimum), so cost===0 plus an error-prefixed result is enough —
+      // no duration gate needed. parsed.is_error is the strongest signal
+      // when claude-bin sets it; fall back to text match for older shapes.
+      const errorPrefixRe = /^(Failed to authenticate|API Error:|401\b|authentication_error|Invalid authentication credentials|Overloaded|overloaded_error)/i;
+      const looksLikeUpstreamError =
+          isError
+          || (costUsd === 0 && errorPrefixRe.test(result.trim()));
+      if (looksLikeUpstreamError) {
+        return reject(new Error(`claude-bin upstream failure: ${result.trim().slice(0, 200)}`));
       }
       resolve({ result, costUsd, durationMs, raw: stdout });
     });

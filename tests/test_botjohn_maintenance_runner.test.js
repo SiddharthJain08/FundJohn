@@ -386,12 +386,12 @@ test('main(): claude-bin auth-error JSON triggers fallback (regression for 2026-
   // claude-bin can return success-shaped JSON when OAuth is expired —
   // result is the literal "Failed to authenticate..." string and cost=0.
   // Wrapper must detect this and post 🚨 fallback, not the error string.
-  // The auth-failure detection lives inside runClaudeBin, so we exercise
-  // it by stubbing runClaudeBin to throw the same way auth detection
-  // would (since main() consumes runClaudeBin's promise rejection).
+  // The detection lives inside runClaudeBin, so we exercise it by stubbing
+  // runClaudeBin to throw the same way detection would (since main()
+  // consumes runClaudeBin's promise rejection).
   const { deps, calls } = _stubFor({
     runClaudeBin: async () => {
-      throw new Error('claude-bin auth failure: Failed to authenticate. API Error: 401 ...');
+      throw new Error('claude-bin upstream failure: Failed to authenticate. API Error: 401 ...');
     },
   });
   process.exitCode = 0;
@@ -403,6 +403,30 @@ test('main(): claude-bin auth-error JSON triggers fallback (regression for 2026-
     'fallback post must start with 🚨');
   assert.ok(calls.post[0].content.toLowerCase().includes('auth'),
     'fallback message should surface "auth" so the alert is actionable');
+  assert.equal(process.exitCode, 1);
+});
+
+test('main(): claude-bin 529 overloaded result triggers fallback (regression for 2026-05-06)', async () => {
+  // 2026-05-06 12:00 ET maintenance: claude-bin internally retried on
+  // a 529 overloaded for 225s before giving up. The synthetic assistant
+  // message was "API Error: 529 ... overloaded_error", cost=$0, but
+  // duration=225s, so the old durationMs<30s gate let it slip through
+  // and the wrapper posted the raw error string to #general. Detector
+  // must catch this regardless of duration.
+  const { deps, calls } = _stubFor({
+    runClaudeBin: async () => {
+      throw new Error('claude-bin upstream failure: API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}');
+    },
+  });
+  process.exitCode = 0;
+  const r = await runner.main(deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'wrapper_failure');
+  assert.equal(calls.post.length, 1, '529 overloaded must trigger fallback post');
+  assert.ok(calls.post[0].content.startsWith('🚨'),
+    'fallback post must start with 🚨');
+  assert.ok(calls.post[0].content.includes('529') || calls.post[0].content.toLowerCase().includes('overload'),
+    'fallback message should surface the upstream cause');
   assert.equal(process.exitCode, 1);
 });
 
