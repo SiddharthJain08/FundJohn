@@ -120,7 +120,7 @@ function _stubFor({ runClaudeBin, getWebhook, postWebhook } = {}) {
     calls,
     deps: {
       runClaudeBin: runClaudeBin || (async () => ({ result: '✅ green', costUsd: 0.05, durationMs: 12_000, raw: '{}' })),
-      getWebhook:   getWebhook   || (async () => { calls.webhook.push(['botjohn','general']); return 'https://discord.com/api/webhooks/x/y'; }),
+      getWebhook:   getWebhook   || (async (agentId, channelKey) => { calls.webhook.push([agentId, channelKey]); return 'https://discord.com/api/webhooks/x/y'; }),
       postWebhook:  postWebhook  || (async (url, content) => { calls.post.push({ url, content }); return { ok: true, status: 204, body: '' }; }),
     },
   };
@@ -372,6 +372,20 @@ test('main(): mode passed through deps overrides argv', async () => {
     'posted message must lead with Saturday template (clipped)');
 });
 
+test('main(): wrapper looks up botjohn-log webhook (not #general)', async () => {
+  // 2026-05-07: dest channel switched from #general to #botjohn-log so
+  // maintenance posts land where the operator actually watches. Both
+  // success and fallback paths must request the same channel key.
+  const stub = _stubFor({});
+  process.exitCode = 0;
+  await runner.main(stub.deps);
+  const lookups = stub.calls.webhook.map(([_, ch]) => ch);
+  assert.ok(lookups.includes('botjohn-log'),
+    `success-path webhook lookup must request 'botjohn-log', saw ${JSON.stringify(lookups)}`);
+  assert.ok(!lookups.includes('general'),
+    `wrapper must not fall back to 'general' channel key, saw ${JSON.stringify(lookups)}`);
+});
+
 test('main(): unknown mode posts no report and exits 1', async () => {
   const stub = _stubFor({});
   process.exitCode = 0;
@@ -411,7 +425,7 @@ test('main(): claude-bin 529 overloaded result triggers fallback (regression for
   // a 529 overloaded for 225s before giving up. The synthetic assistant
   // message was "API Error: 529 ... overloaded_error", cost=$0, but
   // duration=225s, so the old durationMs<30s gate let it slip through
-  // and the wrapper posted the raw error string to #general. Detector
+  // and the wrapper posted the raw error string to #botjohn-log. Detector
   // must catch this regardless of duration.
   const { deps, calls } = _stubFor({
     runClaudeBin: async () => {

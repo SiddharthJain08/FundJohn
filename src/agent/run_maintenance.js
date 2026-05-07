@@ -21,7 +21,7 @@
  * spawn, webhook lookup, Discord post, preamble clip, cost footer,
  * fallback alert) is shared. On any wrapper failure (claude-bin crash,
  * malformed JSON, empty result, webhook 5xx) we still post a fallback
- * `🚨 BotJohn maintenance run failed` line to #general so silence is
+ * `🚨 BotJohn maintenance run failed` line to #botjohn-log so silence is
  * never the failure mode.
  *
  * Run as: claudebot user (uid 1001) with .env loaded.
@@ -194,7 +194,7 @@ Saturday. The 10:00 AM saturday-brain pipeline should have completed
 (typical runtime ~1h; recent runs landed by ~11:00 ET). At 16:00 ET the
 run has been done for hours — anything still 'running' is a zombie.
 
-Your job: audit the run, report counts to #general, fix anything broken
+Your job: audit the run, report counts to #botjohn-log, fix anything broken
 SURGICALLY, and re-trigger the appropriate recovery lever DETACHED. You
 have \{\{TIMEOUT_MIN\}\} minutes wrapper budget; you cannot wait for a
 saturday-brain re-run (~1h). Sunday 12:00 ET verify run will close the
@@ -525,7 +525,7 @@ function runClaudeBin(prompt, { timeoutMs } = {}) {
       // upstream failed — `result` becomes the raw API error string and
       // cost_usd is 0 (no tokens were billed because the assistant message
       // is synthetic). Without this guard the wrapper posts the error
-      // string verbatim to #general. Seen in production:
+      // string verbatim to #botjohn-log. Seen in production:
       //   - 2026-05-02 OAuth expiry: "Failed to authenticate. API Error: 401"
       //   - 2026-05-06 529 overloaded: "API Error: 529 ... overloaded_error"
       //     where claude-bin internally retried for 225s before giving up,
@@ -653,9 +653,9 @@ async function main(deps = {}) {
 
   const content = formatReport(session.result, session.costUsd, session.durationMs, costCap);
 
-  const url = await _getWebhook('botjohn', 'general').catch(() => null);
+  const url = await _getWebhook('botjohn', 'botjohn-log').catch(() => null);
   if (!url) {
-    console.error('[run_maintenance] no #general webhook for botjohn in agent_registry — cannot post report');
+    console.error('[run_maintenance] no #botjohn-log webhook for botjohn in agent_registry — cannot post report');
     process.exitCode = 1;
     return { ok: false, reason: 'no_webhook' };
   }
@@ -665,7 +665,7 @@ async function main(deps = {}) {
     process.exitCode = 1;
     return { ok: false, reason: 'post_failed', status: r.status };
   }
-  console.log(`[run_maintenance] posted ${content.length} chars to #general (mode=${mode}, cost $${session.costUsd.toFixed(4)}, ${Math.round(session.durationMs/1000)}s)`);
+  console.log(`[run_maintenance] posted ${content.length} chars to #botjohn-log (mode=${mode}, cost $${session.costUsd.toFixed(4)}, ${Math.round(session.durationMs/1000)}s)`);
   return { ok: true, mode, costUsd: session.costUsd, durationMs: session.durationMs };
 }
 
@@ -676,7 +676,7 @@ async function postFallback(getWebhookFn, postWebhookFn, content) {
   // the silent path made it look like a hard exit; only the session jsonl
   // revealed the synthetic 401 actually fired.
   console.error(`[run_maintenance] fallback path: ${content.slice(0, 160)}`);
-  const url = await getWebhookFn('botjohn', 'general').catch((e) => { console.error(`[run_maintenance] webhook lookup failed in fallback: ${e.message}`); return null; });
+  const url = await getWebhookFn('botjohn', 'botjohn-log').catch((e) => { console.error(`[run_maintenance] webhook lookup failed in fallback: ${e.message}`); return null; });
   if (!url) {
     console.error(`[run_maintenance] FATAL: ${content} (and no webhook to alert on)`);
     process.exitCode = 1;
@@ -688,7 +688,7 @@ async function postFallback(getWebhookFn, postWebhookFn, content) {
     process.exitCode = 1;
     return { ok: false, reason: 'fallback_post_failed', status: r?.status };
   }
-  console.error(`[run_maintenance] posted fallback (${content.length} chars) to #general (status ${r.status})`);
+  console.error(`[run_maintenance] posted fallback (${content.length} chars) to #botjohn-log (status ${r.status})`);
   process.exitCode = 1;
   return { ok: false, reason: 'wrapper_failure' };
 }
