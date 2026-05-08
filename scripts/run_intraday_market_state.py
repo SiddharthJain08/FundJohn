@@ -243,10 +243,20 @@ def _confirmed_transition(history: list[dict], current_state: str,
 # ── Discord notifier ─────────────────────────────────────────────────────────
 
 def _post_to_discord(channel: str, msg: str) -> None:
-    """Reuse regime_liquidator's webhook lookup pattern. Best-effort."""
+    """Reuse regime_liquidator's webhook lookup pattern. Best-effort.
+
+    Falls back to `botjohn-log` if the requested channel doesn't have a
+    webhook registered in agent_registry. The intraday-regime channel
+    requires operator-side Discord setup (see migration 068); until
+    that's done, posts route to the existing botjohn-log webhook so
+    notifications still surface somewhere visible.
+    """
     try:
         rl = _load_regime_liquidator_module()
-        rl._post_to_discord(channel, msg)
+        ok = rl._post_to_discord(channel, msg)
+        if not ok and channel != 'botjohn-log':
+            rl._post_to_discord('botjohn-log',
+                                 f'[{channel}] {msg}')
     except Exception as e:
         logger.warning('discord post failed: %s', e)
 
