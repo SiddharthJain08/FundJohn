@@ -351,5 +351,171 @@ class TestForceOverride(unittest.TestCase):
         mock_run.assert_not_called()
 
 
+class TestForceTransitionTag(unittest.TestCase):
+    """`force_transition_tag` (introduced 2026-05-08 for intraday HMM)
+    lets callers supply their own transition key — distinct from
+    MANUAL_FORCE so daily/manual/intraday firings are all separable in
+    audit + sentinels."""
+
+    def setUp(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+    def _run_dry(self, regime, **liquidate_kwargs):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+        ]
+        with patch.object(rl, '_load_regime', return_value=regime), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            return rl.liquidate_on_regime_change(**liquidate_kwargs)
+
+    def test_tag_implies_force_override(self):
+        """Passing only force_transition_tag (without force_override=True)
+        still bypasses the same-state veto — the tag implies override."""
+        result = self._run_dry(
+            REGIME_SAME,
+            force_transition_tag='INTRADAY_HMM_TRANSITIONING_HIGH_VOL',
+        )
+        self.assertEqual(result['action'], 'dry_run')
+        self.assertEqual(result['plan']['transition'],
+                         'INTRADAY_HMM_TRANSITIONING_HIGH_VOL')
+
+    def test_tag_overrides_manual_force_default(self):
+        """When both force_override=True AND force_transition_tag are
+        passed, the tag wins (not 'MANUAL_FORCE->...')."""
+        result = self._run_dry(
+            REGIME_SAME,
+            force_override=True,
+            force_transition_tag='INTRADAY_HMM_LOW_VOL_HIGH_VOL',
+        )
+        self.assertEqual(result['plan']['transition'],
+                         'INTRADAY_HMM_LOW_VOL_HIGH_VOL')
+        # Must NOT carry the MANUAL_FORCE prefix.
+        self.assertNotIn('MANUAL_FORCE', result['plan']['transition'])
+
+    def test_tag_does_not_collide_with_manual_force_sentinel(self):
+        """A natural same-day MANUAL_FORCE sentinel must not block an
+        intraday-tagged force fire (different sentinel keys)."""
+        stub = _StubRedis()
+        # Manual force already fired today.
+        stub.store['liquidate:fired:2026-05-07:MANUAL_FORCE->TRANSITIONING'] = '1'
+
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_SAME), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change(
+                force_transition_tag='INTRADAY_HMM_TRANSITIONING_HIGH_VOL',
+            )
+        self.assertEqual(result['action'], 'dry_run',
+                         'intraday tag should not be blocked by MANUAL_FORCE sentinel')
+
+
+class TestCooldownGate(unittest.TestCase):
+    """Cooldown sentinel `liquidate:cooldown:{date}` blocks BOTH the
+    daily 9 AM cron AND any intraday/manual force-fire — supersedes the
+    transition-keyed sentinel. Set after every successful live fire."""
+
+    def setUp(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+    def test_cooldown_blocks_natural_regime_change(self):
+        """Pre-set cooldown → natural regime change returns noop."""
+        stub = _StubRedis()
+        stub.store['liquidate:cooldown:2026-05-07'] = '1'
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch('execution.regime_liquidator.subprocess.run') as mock_run:
+            result = rl.liquidate_on_regime_change()
+        self.assertEqual(result['action'], 'noop')
+        self.assertEqual(result['reason'], 'cooldown_active')
+        mock_run.assert_not_called()
+
+    def test_cooldown_blocks_force_override(self):
+        """Pre-set cooldown → force_override=True ALSO blocked. Cooldown
+        supersedes force; the operator must explicitly clear cooldown
+        to fire again within the window."""
+        stub = _StubRedis()
+        stub.store['liquidate:cooldown:2026-05-07'] = '1'
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch('execution.regime_liquidator.subprocess.run') as mock_run:
+            result = rl.liquidate_on_regime_change(force_override=True)
+        self.assertEqual(result['action'], 'noop')
+        self.assertEqual(result['reason'], 'cooldown_active')
+        mock_run.assert_not_called()
+
+    def test_cooldown_blocks_intraday_tag(self):
+        """Cooldown also supersedes force_transition_tag fires."""
+        stub = _StubRedis()
+        stub.store['liquidate:cooldown:2026-05-07'] = '1'
+        with patch.object(rl, '_load_regime', return_value=REGIME_SAME), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch('execution.regime_liquidator.subprocess.run') as mock_run:
+            result = rl.liquidate_on_regime_change(
+                force_transition_tag='INTRADAY_HMM_LOW_VOL_HIGH_VOL',
+            )
+        self.assertEqual(result['action'], 'noop')
+        self.assertEqual(result['reason'], 'cooldown_active')
+        mock_run.assert_not_called()
+
+    def test_live_fire_sets_cooldown_sentinel(self):
+        """After a successful live fire, both `liquidate:fired:...`
+        AND `liquidate:cooldown:{date}` must be set."""
+        os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
+        try:
+            stub = _StubRedis()
+            mock_conn = MagicMock()
+            mock_cur = MagicMock()
+            mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+            mock_conn.cursor.return_value = mock_cur
+            proc_seq = [
+                _mock_proc(0, json.dumps(CLOCK_OPEN)),  # market open
+                _mock_proc(0, json.dumps([OPEN_OC_PARENT])),  # order list
+                _mock_proc(0, json.dumps({'id': 'p', 'status': 'cancelled'})),  # cancel parent
+                _mock_proc(0, json.dumps({'id': 'tp', 'status': 'cancelled'})),
+                _mock_proc(0, json.dumps({'id': 'sl', 'status': 'cancelled'})),
+                _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),  # position list
+                _mock_proc(0, json.dumps({'symbol': 'AAPL', 'status': 'closed'})),
+            ]
+            with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+                 patch.object(rl, '_redis', return_value=stub), \
+                 patch.object(rl, '_post_to_discord', return_value=True), \
+                 patch('execution.regime_liquidator.time.sleep'), \
+                 patch('psycopg2.connect', return_value=mock_conn), \
+                 patch('execution.regime_liquidator.subprocess.run',
+                       side_effect=proc_seq):
+                result = rl.liquidate_on_regime_change()
+            self.assertEqual(result['action'], 'liquidated')
+            self.assertIn('liquidate:fired:2026-05-07:TRANSITIONING->HIGH_VOL',
+                          stub.store)
+            self.assertIn('liquidate:cooldown:2026-05-07', stub.store)
+        finally:
+            os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+
 if __name__ == '__main__':
     unittest.main()

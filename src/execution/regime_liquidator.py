@@ -53,6 +53,8 @@ ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
 COID_PREFIX = 'AX'
 SENTINEL_TTL = 86400  # 24h
+COOLDOWN_TTL  = 3600  # 60 min — prevents back-to-back liquidations after intraday fire
+COOLDOWN_KEY_TEMPLATE = 'liquidate:cooldown:{date}'
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -309,7 +311,8 @@ def _record_audit(conn, run_date, regime_from, regime_to,
 
 def liquidate_on_regime_change(run_date: str | None = None,
                                 force_dry_run: bool = False,
-                                force_override: bool = False) -> dict:
+                                force_override: bool = False,
+                                force_transition_tag: str | None = None) -> dict:
     """Public entry. Returns a dict describing what happened. See module
     docstring for the contract.
 
@@ -320,6 +323,18 @@ def liquidate_on_regime_change(run_date: str | None = None,
     unique transition key (`MANUAL_FORCE->{state}`) so a forced flatten
     on the same date as a natural regime change doesn't silently mask
     one another's idempotency check.
+
+    `force_transition_tag` (when set, implies force_override=True) lets
+    callers supply their own transition key — e.g. the intraday HMM
+    detector passes `INTRADAY_HMM_LOW_VOL_HIGH_VOL`. Audit + sentinel
+    use the supplied tag so daily, manual, and intraday fires are all
+    distinguishable in `alpaca_liquidations`.
+
+    Cooldown gate: `liquidate:cooldown:{date}` Redis key (TTL 60 min,
+    set after every successful live fire) blocks BOTH the daily 9 AM
+    cron and the intraday detector. Prevents back-to-back flattens on
+    whipsaws. The transition-keyed sentinel (`liquidate:fired:...`)
+    handles same-day-same-transition idempotency at 24h TTL.
     """
     regime = _load_regime()
     if regime is None:
@@ -330,14 +345,28 @@ def liquidate_on_regime_change(run_date: str | None = None,
     prior = regime.get('prior_state')
     date_str = (run_date or regime.get('date')
                 or datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+    # A non-empty force_transition_tag implies force_override; callers
+    # don't need to pass both. Mirrors the way --force on the CLI implies
+    # the override.
+    if force_transition_tag and not force_override:
+        force_override = True
     if force_override:
-        # Synthesise a transition key + audit fields. `state` is whatever
-        # the current regime is (informational); `prior` becomes the
-        # MANUAL_FORCE sentinel value. If state itself is missing we
-        # still proceed — flattening doesn't depend on the regime read.
-        prior = 'MANUAL_FORCE'
-        state = state or 'UNKNOWN'
-        transition_key = f'{prior}->{state}'
+        if force_transition_tag:
+            transition_key = force_transition_tag
+            # Surface a "from" string for audit columns; if the tag has
+            # the standard `<from>_<to>` shape we pull it apart, else we
+            # tag the whole string as the from-state.
+            prior = force_transition_tag
+            state = state or 'UNKNOWN'
+        else:
+            # Synthesise a transition key + audit fields. `state` is
+            # whatever the current regime is (informational); `prior`
+            # becomes the MANUAL_FORCE sentinel value. If state itself
+            # is missing we still proceed — flattening doesn't depend
+            # on the regime read.
+            prior = 'MANUAL_FORCE'
+            state = state or 'UNKNOWN'
+            transition_key = f'{prior}->{state}'
         sentinel_key = f'liquidate:fired:{date_str}:{transition_key}'
     else:
         if not state or not prior:
@@ -349,9 +378,16 @@ def liquidate_on_regime_change(run_date: str | None = None,
         transition_key = f'{prior}->{state}'
         sentinel_key = f'liquidate:fired:{date_str}:{transition_key}'
 
+    cooldown_key = COOLDOWN_KEY_TEMPLATE.format(date=date_str)
     rcli = _redis()
     if rcli is not None:
         try:
+            # Cooldown supersedes the per-transition sentinel — when set,
+            # NO liquidation fires regardless of transition novelty.
+            if rcli.get(cooldown_key):
+                return {'action': 'noop', 'reason': 'cooldown_active',
+                        'transition': transition_key,
+                        'cooldown_key': cooldown_key}
             if rcli.get(sentinel_key):
                 return {'action': 'already_fired', 'transition': transition_key}
         except Exception:
@@ -455,6 +491,12 @@ def liquidate_on_regime_change(run_date: str | None = None,
     if rcli is not None:
         try:
             rcli.set(sentinel_key, '1', ex=SENTINEL_TTL)
+            # Cooldown gate is set ONLY after a successful live fire.
+            # Blocks further intraday + daily fires for COOLDOWN_TTL
+            # seconds. Independent from the transition-keyed sentinel
+            # so a same-day repeat of the same transition stays
+            # idempotent past the cooldown window via the 24h SENTINEL.
+            rcli.set(cooldown_key, '1', ex=COOLDOWN_TTL)
         except Exception:
             pass
 
