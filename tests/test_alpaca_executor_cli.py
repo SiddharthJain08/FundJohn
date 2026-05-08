@@ -158,33 +158,31 @@ class TestBasePriceRetry(unittest.TestCase):
         self.assertEqual(result['stop'],   98.60)
         self.assertEqual(result['order_id'], 'snap-uuid')
 
-    def test_422_base_price_short_side_snaps_above(self):
-        """Short positions snap stop to base_price + buffer (above, not below)."""
-        sess = _mock_session(quote_status=500)
+    def test_short_uses_simple_order_class_no_bracket_flags(self):
+        """Fix #3 (2026-05-08): shorts (side=sell to open) submit as simple
+        market orders, NOT brackets. Alpaca paper rejects bracket-on-short
+        with 'bracket orders must be entry orders' when prior fills exist
+        on the symbol. The bracket flags must not appear in the argv."""
+        sess = _mock_session(quote_bid=199.95, quote_ask=200.05)
         order = {
             'ticker': 'TSLA', 'strategy_id': 'S5', 'direction': 'short',
             'pct_nav': 0.02, 'entry': 200.0, 'stop': 205.0, 't1': 180.0,
         }
-        first_err = json.dumps({
-            'status': 422,
-            'error':  'stop_loss.stop_price must be >= base_price + 0.01',
-            'base_price': '199.50',
-            'code': 42210000,
-        })
-        second_ok = json.dumps({'id': 'short-snap', 'status': 'accepted'})
+        success_stdout = json.dumps({'id': 'short-simple', 'status': 'accepted'})
         with patch.object(ae, 'in_market_hours', return_value=True), \
              patch('execution.alpaca_executor.subprocess.run',
-                   side_effect=[
-                       _mock_proc(1, '', first_err),
-                       _mock_proc(0, second_ok, ''),
-                   ]) as mock_run:
+                   return_value=_mock_proc(0, success_stdout, '')) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
                                        order=order, run_date='2026-04-28')
-        retry_argv = mock_run.call_args_list[1][0][0]
-        retry_sl   = json.loads(retry_argv[retry_argv.index('--stop-loss') + 1])
-        # 199.50 + max(0.02, 199.50*0.005) = 199.50 + 1.00 = 200.50
-        self.assertEqual(retry_sl['stop_price'], '200.50')
-        self.assertEqual(result['stop'], 200.50)
+        argv = mock_run.call_args[0][0]
+        self.assertEqual(argv[argv.index('--side') + 1], 'sell')
+        # Bracket flags MUST NOT appear — short uses simple order class.
+        self.assertNotIn('--order-class', argv)
+        self.assertNotIn('--take-profit', argv)
+        self.assertNotIn('--stop-loss',  argv)
+        self.assertEqual(result['status'], 'submitted')
+        self.assertEqual(result['order_class'], 'simple')
+        self.assertEqual(result['side'], 'sell')
 
 
 class TestDupCoidRecovery(unittest.TestCase):
@@ -361,6 +359,101 @@ class TestInMarketHours(unittest.TestCase):
             # Whatever the static fallback returns is fine; just must not throw
             result = ae.in_market_hours()
             self.assertIsInstance(result, bool)
+
+
+class TestNormalizeSymbol(unittest.TestCase):
+    def test_three_letter_exchange_suffix_blocked(self):
+        """DX-Y.NYB, GC.CME, etc. → None (futures/index quotes)."""
+        self.assertIsNone(ae._normalize_alpaca_symbol('DX-Y.NYB'))
+        self.assertIsNone(ae._normalize_alpaca_symbol('GC.CME'))
+        self.assertIsNone(ae._normalize_alpaca_symbol('NYB.COMEX'))
+
+    def test_class_share_suffix_kept(self):
+        """BRK.A, BRK.B, BF.A — single-letter dot suffixes are class shares."""
+        self.assertEqual(ae._normalize_alpaca_symbol('BRK.A'), 'BRK.A')
+        self.assertEqual(ae._normalize_alpaca_symbol('BRK.B'), 'BRK.B')
+        self.assertEqual(ae._normalize_alpaca_symbol('BF.A'),  'BF.A')
+
+
+class TestUnsupportedAssetCache(unittest.TestCase):
+    def setUp(self):
+        ae._unsupported_assets.clear()
+
+    def test_first_rejection_caches_ticker(self):
+        """A 4xx with an asset-class error message → ticker added to cache."""
+        sess = _mock_session(quote_bid=20.0, quote_ask=20.10)
+        order = {
+            'ticker': 'HOLX', 'strategy_id': 'S5', 'direction': 'long',
+            'pct_nav': 0.02, 'entry': 20.0, 'stop': 18.0, 't1': 22.0,
+        }
+        err = json.dumps({
+            'status': 422,
+            'error':  'asset HOLX is not tradable on this account',
+            'code':   42210010,
+        })
+        with patch.object(ae, 'in_market_hours', return_value=True), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(1, '', err)):
+            ae.execute_single(sess, equity=100_000.0, order=order, run_date='2026-04-28')
+        self.assertIn('HOLX', ae._unsupported_assets)
+
+    def test_second_attempt_skips_pre_cli(self):
+        """Once cached, a subsequent attempt SKIPs without shelling out."""
+        ae._unsupported_assets.add('HOLX')
+        sess = _mock_session()
+        order = {
+            'ticker': 'HOLX', 'strategy_id': 'S99', 'direction': 'long',
+            'pct_nav': 0.02, 'entry': 20.0, 'stop': 18.0, 't1': 22.0,
+        }
+        with patch('execution.alpaca_executor.subprocess.run') as mock_run:
+            result = ae.execute_single(sess, equity=100_000.0,
+                                       order=order, run_date='2026-04-28')
+        self.assertEqual(result['status'], 'SKIP')
+        self.assertIn('cached unsupported', result['reason'])
+        mock_run.assert_not_called()
+
+    def test_unrelated_4xx_does_not_cache(self):
+        """A bracket-validity 422 (stop_loss bound) is NOT an asset error;
+        the ticker should NOT be cached as unsupported."""
+        sess = _mock_session(quote_status=500)  # force pre-flight whiff
+        order = {
+            'ticker': 'AAPL', 'strategy_id': 'S5', 'direction': 'long',
+            'pct_nav': 0.02, 'entry': 100.0, 'stop': 95.0, 't1': 110.0,
+        }
+        err = json.dumps({
+            'status': 422, 'code': 42210099,
+            'error': 'qty must be a positive integer',
+        })
+        with patch.object(ae, 'in_market_hours', return_value=True), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(1, '', err)):
+            ae.execute_single(sess, equity=100_000.0, order=order, run_date='2026-04-28')
+        self.assertNotIn('AAPL', ae._unsupported_assets)
+
+
+class TestPreFlightTargetSnap(unittest.TestCase):
+    def test_target_too_close_to_base_snaps_up_for_long(self):
+        """Long: target must be >= base + 0.01. If TradeJohn's t1 is too
+        tight (close to base), the pre-flight snaps it up."""
+        # quote mid = 100.05 (bid 100.00, ask 100.10). Original target=100.02 is
+        # below base+0.01 = 100.06 → snaps to base + max(0.02, 100.05*0.005) = 100.55
+        sess = _mock_session(quote_bid=100.00, quote_ask=100.10)
+        order = {
+            'ticker': 'AAPL', 'strategy_id': 'S15', 'direction': 'long',
+            'pct_nav': 0.02, 'entry': 100.00, 'stop': 95.00,
+            't1': 100.02,    # too close to base
+        }
+        success_stdout = json.dumps({'id': 'tgt-uuid', 'status': 'accepted'})
+        with patch.object(ae, 'in_market_hours', return_value=True), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(0, success_stdout, '')) as mock_run:
+            result = ae.execute_single(sess, equity=100_000.0,
+                                       order=order, run_date='2026-04-28')
+        argv = mock_run.call_args[0][0]
+        tp_json = json.loads(argv[argv.index('--take-profit') + 1])
+        # Snapped to base 100.05 + max(0.02, 0.5%×100.05) = 100.05 + 0.50 = 100.55
+        self.assertEqual(tp_json['limit_price'], '100.55')
+        self.assertEqual(result['target'], 100.55)
 
 
 if __name__ == '__main__':

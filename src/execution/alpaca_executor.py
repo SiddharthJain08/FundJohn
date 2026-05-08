@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
-from execution.alpaca_trader import _alpaca_session, _fetch_equity, _price_str  # noqa: E402
+from execution.alpaca_trader import _alpaca_session, _fetch_equity, _fetch_account_state, _price_str  # noqa: E402
 from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 
 
@@ -48,6 +48,23 @@ from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 MAX_ORDER_PCT_NAV            = 0.05   # 5% NAV hard cap per order
 MAX_DAILY_NEW_NOTIONAL_PCT   = 0.25   # 25% NAV max in new notional per run
 MIN_EFFECTIVE_PCT            = 0.001  # drop sub-0.1% NAV orders (noise)
+# Available-NAV floor (operator policy 2026-05-08): subtract long_market_value
+# from equity before applying the daily-notional cap, with a 5%-of-equity
+# floor so the system trickles instead of halts when fully invested.
+AVAILABLE_NAV_FLOOR_PCT      = 0.05
+# Hard ceiling on cumulative new notional per cycle as a fraction of
+# RegT (overnight) buying power. Independent of the equity-based daily
+# cap; whichever is smaller wins. Protects against runaway accumulation
+# even when equity-derived sizing thinks there's headroom.
+MAX_BP_USAGE_PCT             = 0.50
+
+# Per-run in-memory cache of tickers Alpaca paper rejected as
+# untradable/unsupported (delisted, halted, asset-not-found, etc.). Keyed
+# by ticker; populated on the first 4xx with an asset-class signature so
+# subsequent attempts in the same cycle skip cleanly without wasting an
+# API roundtrip. Cleared on every main() invocation; assets get
+# relisted/unhalted between days, so persisting wouldn't be safe.
+_unsupported_assets: set[str] = set()
 
 # Alpaca CLI binary. Override with ALPACA_CLI_BIN env var if installed elsewhere.
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
@@ -191,7 +208,32 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
     if t.startswith('^'):                       return None   # indices (^VIX, ^GSPC, ^DJI, …)
     if '=' in t:                                return None   # futures/FX (NG=F, GC=F, AUDUSD=X, …)
     if t.endswith('-USD'):                      return None   # crypto tickers not in Alpaca universe
+    # Exchange-suffixed futures/indices: TICKER.NYB, .CME, .CBT, .NYM, .COMEX, etc.
+    # Class-share tickers use a single-letter suffix (BRK.A, BRK.B, BF.A) —
+    # only block ≥3-letter alpha suffixes.
+    if '.' in t:
+        suffix = t.rsplit('.', 1)[-1]
+        if suffix.isalpha() and len(suffix) >= 3:
+            return None
     return t
+
+
+def _looks_like_unsupported_asset_error(err_text: str) -> bool:
+    """Best-effort classifier for Alpaca 4xx errors that indicate the asset
+    itself isn't tradable on this account/feed (delisted, halted, asset
+    not found, not on paper feed, etc.). Returns True if the ticker
+    should be cached as unsupported for the rest of this run."""
+    s = (err_text or '').lower()
+    needles = (
+        'asset',                      # "asset not found", "invalid asset"
+        'not tradable', 'not_tradable',
+        'symbol not found', 'symbol_not_found',
+        'cannot be traded', 'cannot trade',
+        'asset is no longer tradable',
+        'security halted', 'halted',
+        'not supported',
+    )
+    return any(n in s for n in needles)
 
 
 def _run_alpaca_cli(args, timeout=30):
@@ -286,6 +328,10 @@ def execute_single(sess, equity, order, run_date):
         return {'ticker': raw_ticker, 'status': 'SKIP',
                 'reason': f'unsupported on Alpaca paper ({raw_ticker})',
                 'client_order_id': coid}
+    if ticker in _unsupported_assets:
+        return {'ticker': ticker, 'status': 'SKIP',
+                'reason': 'cached unsupported (rejected earlier this run)',
+                'client_order_id': coid}
     pct_nav = float(order.get('pct_nav') or 0.0)
     entry   = order.get('entry')
     stop    = order.get('stop')
@@ -307,6 +353,16 @@ def execute_single(sess, equity, order, run_date):
     # for off-hours we submit a plain market opg entry and skip auto-brackets.
     tif = 'day' if in_market_hours() else 'opg'
     order_class = 'bracket' if tif == 'day' else 'simple'
+    # Shorts (side='sell' to open) can't reliably ride a bracket on Alpaca
+    # paper — the parent gets rejected with "bracket orders must be entry
+    # orders" when there's any prior fill in the same symbol, and the
+    # shortable-asset universe is narrower than longs. Drop to a simple
+    # order; downstream stop/target management lives in
+    # alpaca_replace_stop.py and the strategy's own exit signals. Logged
+    # for visibility (these used to fail silently with 14+ rejections/day).
+    if side == 'sell' and order_class == 'bracket':
+        log(f'  ↓ {ticker}: short → simple order_class (bracket-on-short rejected by Alpaca paper)')
+        order_class = 'simple'
 
     # Pre-flight stop adjustment: TradeJohn's stop is computed off the
     # signal-time entry, but Alpaca validates stop_loss against the
@@ -317,8 +373,14 @@ def execute_single(sess, equity, order, run_date):
     # latest quote and snapping the stop to the validity boundary
     # rescues these orders rather than dropping them. Limited to
     # bracket day-orders — opg simple orders don't have brackets.
-    adjusted_stop_note = None
-    if tif == 'day':
+    # Bracket validity has TWO legs Alpaca enforces against base_price:
+    #   long: stop <= base - 0.01   AND   target >= base + 0.01
+    #   short: stop >= base + 0.01  AND   target <= base - 0.01
+    # We snap BOTH legs in the same quote fetch — pre-2026-05-08 we only
+    # snapped stops, which left ~11 daily rejections from tight targets
+    # (S15_iv_rv, S21_iv_hv: target close to entry → close to base).
+    adjusted_notes: list[str] = []
+    if order_class == 'bracket':
         try:
             qr = sess.get(f'{sess._base}/v2/stocks/{ticker}/quotes/latest', timeout=5)
             if qr.status_code == 200:
@@ -328,22 +390,29 @@ def execute_single(sess, equity, order, run_date):
                 # Use mid-price as the reference base; fall back to whichever side is non-zero.
                 base = ((bid + ask) / 2.0) if (bid > 0 and ask > 0) else (bid or ask)
                 if base > 0:
-                    # Long: stop must be <= base − 0.01. If TradeJohn's stop is too
-                    # high, snap to base − max(0.02, 0.5% of base) to leave a small
-                    # margin against further drift.
+                    buf = max(0.02, base * 0.005)  # snap margin: 2¢ or 0.5% of base
                     if side == 'buy':
-                        max_valid = base - 0.01
-                        if stop >= max_valid:
-                            new_stop = round(base - max(0.02, base * 0.005), 2)
-                            adjusted_stop_note = f'stop adjusted long: {stop:.2f} → {new_stop:.2f} (base={base:.2f})'
+                        # Long: stop <= base - 0.01
+                        if stop >= base - 0.01:
+                            new_stop = round(base - buf, 2)
+                            adjusted_notes.append(f'stop {stop:.2f}→{new_stop:.2f}')
                             stop = new_stop
-                    # Short: stop must be >= base + 0.01.
+                        # Long: target >= base + 0.01
+                        if target <= base + 0.01:
+                            new_target = round(base + buf, 2)
+                            adjusted_notes.append(f'target {target:.2f}→{new_target:.2f}')
+                            target = new_target
                     elif side == 'sell':
-                        min_valid = base + 0.01
-                        if stop <= min_valid:
-                            new_stop = round(base + max(0.02, base * 0.005), 2)
-                            adjusted_stop_note = f'stop adjusted short: {stop:.2f} → {new_stop:.2f} (base={base:.2f})'
+                        # Short: stop >= base + 0.01
+                        if stop <= base + 0.01:
+                            new_stop = round(base + buf, 2)
+                            adjusted_notes.append(f'stop {stop:.2f}→{new_stop:.2f}')
                             stop = new_stop
+                        # Short: target <= base - 0.01
+                        if target >= base - 0.01:
+                            new_target = round(base - buf, 2)
+                            adjusted_notes.append(f'target {target:.2f}→{new_target:.2f}')
+                            target = new_target
         except Exception as _qe:
             # Don't block submission on a quote fetch hiccup; let Alpaca's
             # own validation be the final word. Logged so we can see when
@@ -352,8 +421,8 @@ def execute_single(sess, equity, order, run_date):
             # whiffing).
             log(f'  ↯ {ticker}: pre-flight quote fetch failed ({type(_qe).__name__}: {_qe}) — submitting unsnapped')
 
-    if adjusted_stop_note:
-        log(f'  ↪ {ticker}: {adjusted_stop_note}')
+    if adjusted_notes:
+        log(f'  ↪ {ticker}: bracket snapped — {", ".join(adjusted_notes)}')
 
     try:
         ok, payload, err = _submit_order_via_cli(
@@ -416,6 +485,12 @@ def execute_single(sess, equity, order, run_date):
 
         body_text = (err.get('error') or '')[:200]
         http      = err.get('status') or 0
+        # Persist unsupported-asset signals to the per-run cache so the
+        # next signal that targets the same ticker SKIPs cleanly instead
+        # of burning another API roundtrip + log line.
+        if http and 400 <= http < 500 and _looks_like_unsupported_asset_error(body_text):
+            _unsupported_assets.add(ticker)
+            log(f'  ✕ {ticker}: cached as unsupported for the rest of this run')
         log(f'CLI rc={err.get("exit_code")} status={http} {ticker}: {body_text}')
         return {'ticker': ticker, 'status': 'error', 'http': http,
                 'body': body_text, 'client_order_id': coid,
@@ -467,14 +542,35 @@ def main():
     rth = in_market_hours()
     log(f'Market hours: {"RTH — submitting bracket day orders" if rth else "closed — submitting OPG market orders (queue for next open)"}')
 
-    sess   = _alpaca_session()
-    equity = _fetch_equity(sess)
-    log(f'Account equity ${equity:,.2f}  orders to attempt: {len(orders)}')
+    sess    = _alpaca_session()
+    account = _fetch_account_state(sess)
+    equity  = account['equity']
+    long_mv = account['long_market_value']
+    regt_bp = account['regt_buying_power']
+
+    # Fix #2 (executor side): subtract long_market_value from equity so
+    # already-deployed positions reduce headroom instead of being free.
+    # Floor at 5% of equity (operator policy 2026-05-08) so the system
+    # trickles rather than halts when fully invested.
+    available_nav = max(equity * AVAILABLE_NAV_FLOOR_PCT, equity - long_mv)
+    headroom_cap  = available_nav * MAX_DAILY_NEW_NOTIONAL_PCT
+    # Fix #1: regt_buying_power × 50% as an independent ceiling. This
+    # protects against the executor sizing against equity while ignoring
+    # actual margin headroom — pre-2026-05-08 the cap denominator was
+    # raw equity, so cumulative new notional could exceed available BP.
+    bp_cap = regt_bp * MAX_BP_USAGE_PCT
+    daily_cap_notional = min(headroom_cap, bp_cap)
+
+    # Reset per-run unsupported-asset cache.
+    _unsupported_assets.clear()
+
+    log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
+    log(f'Daily cap: min(headroom ${headroom_cap:,.0f}, bp×0.5 ${bp_cap:,.0f}) = ${daily_cap_notional:,.0f}'
+        f'  orders to attempt: {len(orders)}')
 
     submitted = []
     skipped   = []
     new_notional_total = 0.0
-    daily_cap_notional = equity * MAX_DAILY_NEW_NOTIONAL_PCT
 
     for order in orders:
         sid    = order.get('strategy_id') or 'unknown'

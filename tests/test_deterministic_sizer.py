@@ -309,3 +309,125 @@ def test_negative_kelly_vetoed():
                          _make_manifest(S_test='live'))
     assert result['total_green'] == 0
     assert result['vetoed'][0]['reason'] == 'negative_kelly'
+
+
+# ── Fix #2: available_nav (NAV minus long_market_value) ──────────────────
+
+def test_available_nav_absent_long_mv_unchanged_behavior():
+    """When portfolio.long_market_value is absent or 0, the daily cap
+    behaves identically to pre-2026-05-08: 25% of full NAV. Backward-
+    compatible default — no surprises for callers that don't populate it."""
+    signals = []
+    for i in range(30):
+        s = _make_signal()
+        s['ticker'] = f'TKR{i:02d}'
+        signals.append(s)
+    result = size_orders(_make_handoff(signals, regime_scale=1.0),
+                         _make_manifest(S_test='live'))
+    total_pct = sum(o['pct_nav'] for o in result['orders'])
+    assert total_pct == pytest.approx(MAX_DAILY_NEW_NOTIONAL_PCT, abs=1e-4)
+    assert result['available_nav'] == 1_000_000
+    assert result['long_market_value'] == 0
+
+
+def test_available_nav_clamps_cap_when_long_mv_present():
+    """portfolio.long_market_value=$500k on $1M nav → available=$500k.
+    Daily cap should be 25% of $500k = $125k, not 25% of $1M = $250k.
+    Equivalently: cap_pct = 0.25 * (500k/1M) = 0.125."""
+    signals = []
+    for i in range(30):
+        s = _make_signal()
+        s['ticker'] = f'TKR{i:02d}'
+        signals.append(s)
+    handoff = _make_handoff(signals, regime_scale=1.0, nav=1_000_000)
+    handoff['portfolio']['long_market_value'] = 500_000.0
+    result = size_orders(handoff, _make_manifest(S_test='live'))
+    total_pct = sum(o['pct_nav'] for o in result['orders'])
+    expected_cap_pct = 0.25 * (500_000 / 1_000_000)   # = 0.125
+    assert total_pct == pytest.approx(expected_cap_pct, abs=1e-4)
+    assert result['available_nav'] == 500_000
+    assert result['long_market_value'] == 500_000
+
+
+def test_available_nav_floor_at_5pct_when_fully_invested():
+    """Fully-invested account (long_mv > equity, e.g., today's paper
+    account: $101k equity / $149k long_mv): without a floor, available
+    would be negative → cap = $0 → halt all new entries. Operator policy
+    2026-05-08: floor at 5% of equity so the system trickles instead.
+
+    With 5 signals (low enough that the pro-rata scale doesn't push any
+    below MIN_EFFECTIVE_PCT), the cap clamps the total to ~1.25% of NAV
+    and survivors round-trip correctly."""
+    signals = []
+    for i in range(5):
+        s = _make_signal()
+        s['ticker'] = f'TKR{i:02d}'
+        signals.append(s)
+    handoff = _make_handoff(signals, regime_scale=1.0, nav=101_000)
+    handoff['portfolio']['long_market_value'] = 149_000.0
+    result = size_orders(handoff, _make_manifest(S_test='live'))
+    expected_cap_pct = 0.25 * 0.05    # 0.0125 — 5% floor on available_nav, ×25% cap
+    assert result['available_nav'] == pytest.approx(101_000 * 0.05, abs=1e-2)
+    assert result['daily_cap_pct'] == pytest.approx(expected_cap_pct, abs=1e-5)
+    # All 5 survive (each gets 0.0125/5 = 0.0025 ≥ MIN_EFFECTIVE_PCT 0.001)
+    assert result['total_green'] == 5
+    total_pct = sum(o['pct_nav'] for o in result['orders'])
+    assert total_pct == pytest.approx(expected_cap_pct, abs=1e-4)
+
+
+def test_available_nav_greedy_fallback_when_cap_tight():
+    """With many signals and a fully-invested account, pro-rata would push
+    every order below MIN_EFFECTIVE_PCT. The greedy-by-EV fallback then
+    takes only the highest-EV signals at meaningful sizes, exhausting the
+    cap rather than vetoing everything. This is the actual 'trickle'
+    behavior the operator policy promises (top 1-3 signals at full size)."""
+    signals = []
+    for i in range(30):
+        s = _make_signal()
+        s['ticker'] = f'TKR{i:02d}'
+        s['ev_gbm'] = 0.001 + 0.001 * i   # idx 29 is highest-EV
+        signals.append(s)
+    handoff = _make_handoff(signals, regime_scale=1.0, nav=101_000)
+    handoff['portfolio']['long_market_value'] = 149_000.0
+    result = size_orders(handoff, _make_manifest(S_test='live'))
+    # Cap = 0.25 * 0.05 = 0.0125. Per-signal full size = MAX_POSITION_PCT = 0.05.
+    # Greedy can take floor(0.0125 / 0.05) = 0 full slots, but the FIRST
+    # signal is taken partially at min(0.05, 0.0125) = 0.0125 → 1 order.
+    assert result['total_green'] == 1
+    o = result['orders'][0]
+    assert o['pct_nav'] == pytest.approx(0.0125, abs=1e-5)
+    # Highest-EV ticker is TKR29 (idx 29)
+    assert o['ticker'] == 'TKR29'
+    # Remaining 29 vetoed for cap-exhausted reason, not noise floor
+    drop_reasons = {v['reason'] for v in result['vetoed']}
+    assert 'daily_cap_greedy_dropped' in drop_reasons
+
+
+def test_available_nav_partial_invested_uses_actual():
+    """30%-invested account: long_mv $300k on $1M nav → available=$700k
+    (above the 5% floor of $50k). cap_pct = 0.25 * 0.7 = 0.175."""
+    signals = []
+    for i in range(30):
+        s = _make_signal()
+        s['ticker'] = f'TKR{i:02d}'
+        signals.append(s)
+    handoff = _make_handoff(signals, regime_scale=1.0, nav=1_000_000)
+    handoff['portfolio']['long_market_value'] = 300_000.0
+    result = size_orders(handoff, _make_manifest(S_test='live'))
+    total_pct = sum(o['pct_nav'] for o in result['orders'])
+    expected_cap_pct = 0.25 * 0.7    # 0.175
+    assert total_pct == pytest.approx(expected_cap_pct, abs=1e-4)
+
+
+def test_available_nav_metadata_in_payload():
+    """Sized payload now exposes available_nav, long_market_value,
+    daily_cap_pct so dashboards/operators can see the headroom logic."""
+    handoff = _make_handoff([_make_signal()], regime_scale=1.0, nav=200_000)
+    handoff['portfolio']['long_market_value'] = 50_000.0
+    result = size_orders(handoff, _make_manifest(S_test='live'))
+    assert 'available_nav'     in result
+    assert 'long_market_value' in result
+    assert 'daily_cap_pct'     in result
+    assert result['nav'] == 200_000
+    assert result['available_nav'] == 150_000
+    assert result['long_market_value'] == 50_000

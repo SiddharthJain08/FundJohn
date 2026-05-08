@@ -74,6 +74,15 @@ MIN_EFFECTIVE_PCT         = 0.001   # 0.1% NAV floor; below this we skip
 MAX_DAILY_NEW_NOTIONAL_PCT = 0.25   # 25% NAV daily aggregate cap
 HALF_KELLY                = 0.5     # always half-Kelly per SKILL.md
 
+# Available-NAV floor (operator-chosen 2026-05-08): the daily aggregate
+# cap is computed against `max(equity * AVAILABLE_NAV_FLOOR_PCT,
+# equity - long_market_value)`. This subtracts already-deployed long
+# market value from headroom (so a fully invested account doesn't keep
+# stacking new entries) but never collapses to absolute zero — at worst
+# the system trickles 5%-of-equity per cycle while existing brackets
+# bleed positions down. Set to 0.0 to disable the floor entirely.
+AVAILABLE_NAV_FLOOR_PCT   = 0.05
+
 # Rule allowlist for Rule A (repeat-offender veto). Only these reasons
 # carry over from prior cycles as auto-vetoes — other rejection causes
 # (e.g. data gaps) shouldn't suppress today's signal.
@@ -259,6 +268,18 @@ def size_orders(handoff: dict, manifest: dict | None = None,
     if nav is None:
         nav = float(portfolio.get('portfolio_value') or 1_000_000)
 
+    # Available NAV for new entries = equity minus already-deployed long
+    # market value, with a 5%-of-equity floor so the system trickles
+    # rather than halts when fully invested. portfolio.long_market_value
+    # is populated by trade_handoff_builder when the live Alpaca account
+    # state is available; absent or zero, available_nav == nav (current
+    # behavior, no clamp).
+    long_mv = float(portfolio.get('long_market_value') or 0.0)
+    if long_mv > 0.0 and AVAILABLE_NAV_FLOOR_PCT > 0.0:
+        available_nav = max(nav * AVAILABLE_NAV_FLOOR_PCT, nav - long_mv)
+    else:
+        available_nav = nav
+
     regime_obj = handoff.get('regime') or {}
     regime_state = regime_obj.get('state') if isinstance(regime_obj, dict) else 'TRANSITIONING'
     regime_scale = float(regime_obj.get('scale')
@@ -298,36 +319,94 @@ def size_orders(handoff: dict, manifest: dict | None = None,
     # 'below_min_effective_post_scale'. We then recompute totals; the
     # second pass is bounded since each scale-down can only reduce the
     # set, not grow it.
+    # Daily aggregate cap = MAX_DAILY_NEW_NOTIONAL_PCT of *available* NAV,
+    # not gross NAV. The cap is expressed in pct-of-NAV terms (since per-
+    # signal pct_nav is also in pct-of-NAV terms) so it scales by the
+    # ratio available_nav / nav.
+    cap_pct = MAX_DAILY_NEW_NOTIONAL_PCT * (available_nav / nav) if nav > 0 else MAX_DAILY_NEW_NOTIONAL_PCT
     raw_total = sum(float(o.get('pct_nav') or 0) for o in orders)
-    if raw_total > MAX_DAILY_NEW_NOTIONAL_PCT and raw_total > 0:
-        scale = MAX_DAILY_NEW_NOTIONAL_PCT / raw_total
-        for o in orders:
-            o['pct_nav_pre_scale'] = o['pct_nav']
-            o['pct_nav']      = round(o['pct_nav'] * scale, 6)
-            o['notional_usd'] = round(o['pct_nav'] * nav, 2)
-            o['kelly_final']  = o['pct_nav']
-        # Drop anything that fell below the noise floor or below 1 share.
-        kept: list[dict] = []
-        for o in orders:
-            if o['pct_nav'] < MIN_EFFECTIVE_PCT:
-                vetoed.append(_veto(
-                    o['ticker'], o['strategy_id'], o['direction'],
-                    'below_min_effective_post_scale', o.get('ev'),
-                    extra={'pct_nav_pre_scale': o.get('pct_nav_pre_scale'),
-                           'pct_nav_post_scale': o['pct_nav']},
-                ))
-                continue
-            shares = int(math.floor(o['pct_nav'] * nav / o['entry'])) if o['entry'] > 0 else 0
-            if shares <= 0:
-                vetoed.append(_veto(
-                    o['ticker'], o['strategy_id'], o['direction'],
-                    'below_min_share_count_post_scale', o.get('ev'),
-                    extra={'pct_nav_post_scale': o['pct_nav']},
-                ))
-                continue
-            o['shares'] = shares
-            kept.append(o)
-        orders = kept
+    if raw_total > cap_pct and raw_total > 0:
+        scale = cap_pct / raw_total
+        max_pct = max((float(o.get('pct_nav') or 0) for o in orders), default=0.0)
+        # When the pro-rata scale would push even the largest signal below
+        # the noise floor, pro-rata's "everyone gets a slice" intent breaks
+        # down — every order vetoes and the cap is unspent. Switch to
+        # greedy-by-EV: take the highest-EV signals at their pre-scale
+        # pct_nav until the cap is exhausted. This delivers the operator's
+        # "trickle top 1–3 signals" intent under the fully-invested 5%-of-
+        # equity floor (e.g. cap = $1.3k on a $101k account; ~80 raw
+        # signals each at 0.05 pct_nav would all fall below floor under
+        # pro-rata).
+        if max_pct * scale < MIN_EFFECTIVE_PCT:
+            orders.sort(key=lambda o: float(o.get('ev') or 0), reverse=True)
+            kept: list[dict] = []
+            cumulative = 0.0
+            cap_pct_with_eps = cap_pct + 1e-9
+            for o in orders:
+                pct = float(o.get('pct_nav') or 0)
+                remaining = cap_pct_with_eps - cumulative
+                if remaining < MIN_EFFECTIVE_PCT:
+                    vetoed.append(_veto(
+                        o['ticker'], o['strategy_id'], o['direction'],
+                        'daily_cap_greedy_dropped', o.get('ev'),
+                        extra={'cap_pct': round(cap_pct, 6),
+                               'cumulative_pre': round(cumulative, 6)},
+                    ))
+                    continue
+                # Take min(per-signal pct, remaining budget). Last signal
+                # taken may be partially-sized.
+                taken = min(pct, remaining)
+                if taken < MIN_EFFECTIVE_PCT:
+                    vetoed.append(_veto(
+                        o['ticker'], o['strategy_id'], o['direction'],
+                        'daily_cap_greedy_dropped', o.get('ev'),
+                        extra={'cap_pct': round(cap_pct, 6),
+                               'cumulative_pre': round(cumulative, 6)},
+                    ))
+                    continue
+                shares = int(math.floor(taken * nav / o['entry'])) if o['entry'] > 0 else 0
+                if shares <= 0:
+                    vetoed.append(_veto(
+                        o['ticker'], o['strategy_id'], o['direction'],
+                        'below_min_share_count_post_scale', o.get('ev'),
+                        extra={'pct_nav_post_scale': round(taken, 6)},
+                    ))
+                    continue
+                o['pct_nav_pre_scale'] = pct
+                o['pct_nav']      = round(taken, 6)
+                o['notional_usd'] = round(taken * nav, 2)
+                o['kelly_final']  = o['pct_nav']
+                o['shares']       = shares
+                kept.append(o)
+                cumulative += taken
+            orders = kept
+        else:
+            for o in orders:
+                o['pct_nav_pre_scale'] = o['pct_nav']
+                o['pct_nav']      = round(o['pct_nav'] * scale, 6)
+                o['notional_usd'] = round(o['pct_nav'] * nav, 2)
+                o['kelly_final']  = o['pct_nav']
+            kept2: list[dict] = []
+            for o in orders:
+                if o['pct_nav'] < MIN_EFFECTIVE_PCT:
+                    vetoed.append(_veto(
+                        o['ticker'], o['strategy_id'], o['direction'],
+                        'below_min_effective_post_scale', o.get('ev'),
+                        extra={'pct_nav_pre_scale': o.get('pct_nav_pre_scale'),
+                               'pct_nav_post_scale': o['pct_nav']},
+                    ))
+                    continue
+                shares = int(math.floor(o['pct_nav'] * nav / o['entry'])) if o['entry'] > 0 else 0
+                if shares <= 0:
+                    vetoed.append(_veto(
+                        o['ticker'], o['strategy_id'], o['direction'],
+                        'below_min_share_count_post_scale', o.get('ev'),
+                        extra={'pct_nav_post_scale': o['pct_nav']},
+                    ))
+                    continue
+                o['shares'] = shares
+                kept2.append(o)
+            orders = kept2
 
     # Rank surviving orders by EV × pct_nav descending — highest expected
     # contribution first. Decorative for dashboards; downstream
@@ -340,14 +419,17 @@ def size_orders(handoff: dict, manifest: dict | None = None,
         o['priority_rank'] = i
 
     return {
-        'cycle_date':     handoff.get('cycle_date'),
-        'regime':         regime_state,
-        'regime_scale':   regime_scale,
-        'nav':            nav,
-        'total_green':    len(orders),
-        'total_vetoed':   len(vetoed),
-        'orders':         orders,
-        'vetoed':         vetoed,
+        'cycle_date':       handoff.get('cycle_date'),
+        'regime':           regime_state,
+        'regime_scale':     regime_scale,
+        'nav':              nav,
+        'available_nav':    round(available_nav, 2),
+        'long_market_value': round(long_mv, 2),
+        'daily_cap_pct':    round(cap_pct, 6),
+        'total_green':      len(orders),
+        'total_vetoed':     len(vetoed),
+        'orders':           orders,
+        'vetoed':           vetoed,
     }
 
 

@@ -40,6 +40,50 @@ def _fetch_equity(sess):
     return PAPER_PORTFOLIO
 
 
+def _fetch_account_state(sess):
+    """Return full account snapshot used by sizing/cash gates.
+
+    Always returns a dict with every key populated (zeros on failure) so
+    callers don't need to defensively .get() each field. The shape mirrors
+    Alpaca's GET /v2/account response, narrowed to fields the executor and
+    sizer actually consume.
+    """
+    state = {
+        'equity':                PAPER_PORTFOLIO,
+        'cash':                  0.0,
+        'long_market_value':     0.0,
+        'short_market_value':    0.0,
+        'buying_power':          PAPER_PORTFOLIO,
+        'regt_buying_power':     PAPER_PORTFOLIO,
+        'daytrading_buying_power': PAPER_PORTFOLIO,
+        'initial_margin':        0.0,
+        'maintenance_margin':    0.0,
+        'multiplier':            1.0,
+        'fetched':               False,
+    }
+    try:
+        r = sess.get(f"{sess._base}/v2/account", timeout=10)
+        r.raise_for_status()
+        j = r.json()
+        for key in ('equity', 'cash', 'long_market_value', 'short_market_value',
+                    'buying_power', 'regt_buying_power', 'daytrading_buying_power',
+                    'initial_margin', 'maintenance_margin', 'multiplier'):
+            v = j.get(key)
+            if v is not None:
+                try:
+                    state[key] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        state['fetched'] = True
+        logger.info(
+            f"[Alpaca] equity=${state['equity']:,.2f} cash=${state['cash']:,.2f} "
+            f"long_mv=${state['long_market_value']:,.2f} regt_bp=${state['regt_buying_power']:,.2f}"
+        )
+    except Exception as exc:
+        logger.warning(f"[Alpaca] account fetch failed ({exc}) — using PAPER_PORTFOLIO defaults")
+    return state
+
+
 def _price_str(price):
     """Format price for Alpaca: 2dp for stocks >= $1, 4dp for sub-dollar."""
     dp = 2 if price >= 1.0 else 4

@@ -583,6 +583,26 @@ def build(run_date: str) -> dict:
 
     regime     = load_regime(uri)
     portfolio  = load_portfolio_state()
+    # Augment portfolio state with live Alpaca account snapshot if available.
+    # output/portfolio.json is manually-updated and frequently stale (the
+    # 2026-04-28 silent-failure pattern); deterministic_sizer needs accurate
+    # long_market_value to compute available_nav. Live fetch is best-effort
+    # — on failure we keep whatever portfolio.json had.
+    try:
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+        _account = _fetch_account_state(_alpaca_session())
+        if _account.get('fetched'):
+            portfolio.setdefault('portfolio_value', _account['equity'])
+            portfolio['long_market_value']   = _account['long_market_value']
+            portfolio['short_market_value']  = _account['short_market_value']
+            portfolio['cash']                = _account['cash']
+            portfolio['buying_power']        = _account['buying_power']
+            portfolio['regt_buying_power']   = _account['regt_buying_power']
+            print(f'[handoff] live Alpaca: equity=${_account["equity"]:,.0f} '
+                  f'long_mv=${_account["long_market_value"]:,.0f} '
+                  f'cash=${_account["cash"]:,.0f}')
+    except Exception as _e:
+        print(f'[handoff] live Alpaca account fetch unavailable: {_e}')
     veto       = load_veto_history(uri)
     mm_rec     = load_mastermind_rec(uri)
     y_vetoed   = load_yesterdays_vetoed(run_date)
