@@ -249,5 +249,107 @@ class TestLiveOrdering(unittest.TestCase):
         self.assertEqual(last_argv[idx + 1], 'AAPL')
 
 
+class TestForceOverride(unittest.TestCase):
+    """`--force` / force_override=True bypasses the same-state veto.
+    The audit/sentinel transition becomes MANUAL_FORCE->{state}, distinct
+    from natural regime-change firings on the same date so neither
+    masks the other's idempotency check."""
+
+    def setUp(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+    def test_force_bypasses_same_state_noop(self):
+        """Without force, REGIME_SAME → noop. With force=True, the pipeline
+        proceeds (dry-run path here, since live gate is off)."""
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_SAME), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change(force_override=True)
+        self.assertEqual(result['action'], 'dry_run',
+                         f'force should bypass same-state noop, got {result}')
+        self.assertIn('AAPL', result['plan']['oc_symbols'])
+        # The synthetic transition tag must be MANUAL_FORCE-prefixed so
+        # the audit/sentinel doesn't collide with natural regime changes.
+        self.assertTrue(result['plan']['transition'].startswith('MANUAL_FORCE->'),
+                        f'expected MANUAL_FORCE-prefixed transition, got {result["plan"]["transition"]}')
+
+    def test_force_uses_unique_sentinel_key(self):
+        """A force-fire must NOT be blocked by a sentinel set for a
+        natural same-day regime-change run, and vice versa."""
+        stub = _StubRedis()
+        # Natural change already fired today and set its sentinel.
+        stub.store['liquidate:fired:2026-05-07:TRANSITIONING->TRANSITIONING'] = '1'
+
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_SAME), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change(force_override=True)
+        # Force runs use a different sentinel and so are NOT blocked.
+        self.assertEqual(result['action'], 'dry_run')
+
+    def test_force_handles_missing_prior_state(self):
+        """force_override=True must work even if regime_latest.json has
+        no prior_state (otherwise an operator can't recover from a
+        corrupt regime file via the force path)."""
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+        regime_no_prior = {'date': '2026-05-09', 'state': 'TRANSITIONING'}
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+        ]
+        with patch.object(rl, '_load_regime', return_value=regime_no_prior), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change(force_override=True)
+        self.assertEqual(result['action'], 'dry_run')
+        self.assertEqual(result['plan']['transition'], 'MANUAL_FORCE->TRANSITIONING')
+
+    def test_no_force_same_state_still_noops(self):
+        """Regression: removing the force flag must NOT regress the
+        natural same-state veto."""
+        with patch.object(rl, '_load_regime', return_value=REGIME_SAME), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch('execution.regime_liquidator.subprocess.run') as mock_run:
+            result = rl.liquidate_on_regime_change()
+        self.assertEqual(result['action'], 'noop')
+        mock_run.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()

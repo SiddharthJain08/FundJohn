@@ -308,9 +308,19 @@ def _record_audit(conn, run_date, regime_from, regime_to,
 # ── Public entry ────────────────────────────────────────────────────────────
 
 def liquidate_on_regime_change(run_date: str | None = None,
-                                force_dry_run: bool = False) -> dict:
+                                force_dry_run: bool = False,
+                                force_override: bool = False) -> dict:
     """Public entry. Returns a dict describing what happened. See module
-    docstring for the contract."""
+    docstring for the contract.
+
+    `force_override=True` bypasses both the missing-state and same-state
+    early returns. Used for one-shot operator-initiated flattens (e.g.
+    pre-regime-transition cleanup, post-fix portfolio reset). The audit
+    rows tag `regime_from='MANUAL_FORCE'` and the Redis sentinel uses a
+    unique transition key (`MANUAL_FORCE->{state}`) so a forced flatten
+    on the same date as a natural regime change doesn't silently mask
+    one another's idempotency check.
+    """
     regime = _load_regime()
     if regime is None:
         logger.warning('[liquidate] regime_latest.json missing or corrupt — abort')
@@ -320,14 +330,24 @@ def liquidate_on_regime_change(run_date: str | None = None,
     prior = regime.get('prior_state')
     date_str = (run_date or regime.get('date')
                 or datetime.now(timezone.utc).strftime('%Y-%m-%d'))
-    if not state or not prior:
-        return {'action': 'noop', 'reason': 'missing_state_or_prior',
-                'state': state, 'prior_state': prior}
-    if state == prior:
-        return {'action': 'noop', 'state': state, 'prior_state': prior}
+    if force_override:
+        # Synthesise a transition key + audit fields. `state` is whatever
+        # the current regime is (informational); `prior` becomes the
+        # MANUAL_FORCE sentinel value. If state itself is missing we
+        # still proceed — flattening doesn't depend on the regime read.
+        prior = 'MANUAL_FORCE'
+        state = state or 'UNKNOWN'
+        transition_key = f'{prior}->{state}'
+        sentinel_key = f'liquidate:fired:{date_str}:{transition_key}'
+    else:
+        if not state or not prior:
+            return {'action': 'noop', 'reason': 'missing_state_or_prior',
+                    'state': state, 'prior_state': prior}
+        if state == prior:
+            return {'action': 'noop', 'state': state, 'prior_state': prior}
 
-    transition_key = f'{prior}->{state}'
-    sentinel_key = f'liquidate:fired:{date_str}:{transition_key}'
+        transition_key = f'{prior}->{state}'
+        sentinel_key = f'liquidate:fired:{date_str}:{transition_key}'
 
     rcli = _redis()
     if rcli is not None:
@@ -474,10 +494,15 @@ def _main():
     ap.add_argument('--date', help='Override run_date (YYYY-MM-DD)')
     ap.add_argument('--dry-run', action='store_true',
                     help='Force dry-run even if env flag is set')
+    ap.add_argument('--force', action='store_true',
+                    help='Bypass the same-state veto. Use for one-shot '
+                         'operator-initiated flattens (synthetic '
+                         'MANUAL_FORCE transition; unique sentinel key).')
     args = ap.parse_args()
 
     result = liquidate_on_regime_change(run_date=args.date,
-                                         force_dry_run=args.dry_run)
+                                         force_dry_run=args.dry_run,
+                                         force_override=args.force)
     print(json.dumps(result, default=str))
     if result.get('action') == 'error':
         sys.exit(2)
