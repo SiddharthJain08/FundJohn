@@ -21,12 +21,17 @@ DATA_DIR = ROOT / 'data' / 'master'
 
 # Map parquet filename stem → canonical column_name used in strategy data_requirements
 PARQUET_MAP = {
-    'prices':      'prices',
-    'options_eod': 'options_eod',
-    'macro':       'macro',
-    'financials':  'financials',
-    'earnings':    'earnings',
-    'insider':     'insider',
+    'prices':            'prices',
+    'options_eod':       'options_eod',
+    'macro':             'macro',
+    'financials':        'financials',
+    'earnings':          'earnings',
+    'insider':           'insider',
+    'prices_30m':        'prices_30m',
+    'vol_indices':       'vol_indices',
+    'iv_history':        'iv_history',
+    'earnings_calendar': 'earnings_calendar',
+    'intraday_features': 'intraday_features',  # 5-min HMM regime features (Stage 2)
 }
 
 # Derived columns computable from prices — inherit prices coverage
@@ -40,15 +45,20 @@ DERIVED_FROM_PRICES = [
 # from yfinance (matches the actual ingestion path in
 # src/ingestion/fetch_vol_indices.py, which writes 'source': 'yfinance').
 PROVIDERS = {
-    'prices':      'polygon',
-    'options_eod': 'polygon',     # Alpaca CLI alpha-preview returns 0 greeks; polygon stays primary
-    'macro':       'yfinance',
-    'financials':  'fmp',
-    'earnings':    'fmp',
-    'insider':     'sec_edgar',
-    'returns':     'computed',
-    'log_returns':  'computed',
-    'realized_vol': 'computed',
+    'prices':            'polygon',
+    'options_eod':       'polygon',     # Alpaca CLI alpha-preview returns 0 greeks; polygon stays primary
+    'macro':             'yfinance',
+    'financials':        'fmp',
+    'earnings':          'yfinance',  # FMP /earnings-surprises returns 404; retargeted 2026-04-30
+    'insider':           'sec_edgar',
+    'prices_30m':        'polygon',
+    'vol_indices':       'yfinance',    # FMP/Polygon return 403/NOT_AUTHORIZED on indices
+    'iv_history':        'polygon',     # derived from polygon-sourced options_eod
+    'earnings_calendar': 'yfinance',    # FMP earning_calendar bulk endpoint returns 403
+    'returns':           'computed',
+    'log_returns':       'computed',
+    'realized_vol':      'computed',
+    'intraday_features': 'polygon+alpaca',     # synthetic VIX from option chain + intraday equity bars
 }
 
 
@@ -64,8 +74,11 @@ def _stats(parquet_path: Path) -> dict:
     if row_count == 0:
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0}
 
-    # Find date column
-    date_col = next((c for c in ['date', 'Date', 'timestamp', 'Timestamp'] if c in df.columns), None)
+    # Find date column. ts_utc is added for intraday-cadence parquets
+    # (intraday_features.parquet); same coverage semantics as the daily
+    # ones — we just truncate the timestamp to a date for ledger stats.
+    date_col = next((c for c in ['date', 'Date', 'timestamp', 'Timestamp', 'ts_utc']
+                      if c in df.columns), None)
     min_date = max_date = None
     if date_col:
         try:

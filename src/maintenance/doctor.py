@@ -383,6 +383,100 @@ def check_liquidator_audit():
                f'{n} audit row(s) for {prev_state}→{today_state}')
 
 
+@_check('intraday_features_freshness')
+def check_intraday_features_freshness():
+    """During RTH, the intraday HMM tick must write a row to
+    intraday_features.parquet at least every 15 min. Stale parquet
+    means the cron is not firing or the collector is failing silently.
+
+    Outside RTH (or weekends), no-op — the cron only runs Mon-Fri 9-16
+    ET, so a stale parquet at 6 PM is expected behaviour.
+    """
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+    except Exception:
+        return _ok('intraday_features_freshness',
+                   'zoneinfo unavailable — skipped')
+    now_et = _dt.now(ZoneInfo('America/New_York'))
+    if now_et.weekday() >= 5:
+        return _ok('intraday_features_freshness', 'weekend — skipped')
+    rth_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    rth_end   = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    if now_et < rth_start or now_et > rth_end:
+        return _ok('intraday_features_freshness', 'outside RTH — skipped')
+
+    parquet = ROOT / 'data' / 'master' / 'intraday_features.parquet'
+    if not parquet.exists():
+        return _warn('intraday_features_freshness',
+                     'parquet missing — collector may not have started yet')
+    try:
+        import pandas as pd
+        df = pd.read_parquet(parquet, columns=['ts_utc'])
+    except Exception as exc:
+        return _warn('intraday_features_freshness',
+                     f'read failed: {type(exc).__name__}')
+    if df.empty:
+        return _warn('intraday_features_freshness', 'parquet empty')
+    last_ts = pd.to_datetime(df['ts_utc'], utc=True).max()
+    minutes_stale = (pd.Timestamp.now(tz='UTC') - last_ts).total_seconds() / 60.0
+    if minutes_stale > 15:
+        return _warn('intraday_features_freshness',
+                     f'last row {minutes_stale:.1f} min ago — cron not firing?')
+    return _ok('intraday_features_freshness',
+               f'last row {minutes_stale:.1f} min ago')
+
+
+@_check('intraday_hmm_calibration', slow=True)
+def check_intraday_hmm_calibration():
+    """Once a hmm_intraday_latest.pkl exists, compare the HMM's
+    training-time feature means (`model.feature_means_`) against the
+    trailing-30d feature distribution from intraday_features.parquet.
+    Warn on >50% drift on any feature — model may be stale.
+
+    No-op when no model is trained yet (bootstrap mode)."""
+    model_path = ROOT / '.agents' / 'market-state' / 'hmm_intraday_latest.pkl'
+    if not model_path.exists():
+        return _ok('intraday_hmm_calibration', 'no model yet — bootstrap mode')
+    try:
+        import pickle
+        import pandas as pd
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+        train_means = getattr(model, 'feature_means_', {}) or {}
+        feature_names = getattr(model, 'feature_names_', list(train_means.keys()))
+    except Exception as exc:
+        return _warn('intraday_hmm_calibration', f'model load failed: {exc}')
+    parquet = ROOT / 'data' / 'master' / 'intraday_features.parquet'
+    if not parquet.exists():
+        return _warn('intraday_hmm_calibration', 'parquet missing')
+    try:
+        df = pd.read_parquet(parquet)
+        df['ts_utc'] = pd.to_datetime(df['ts_utc'], utc=True)
+        cutoff = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=30)
+        recent = df[df['ts_utc'] >= cutoff]
+    except Exception as exc:
+        return _warn('intraday_hmm_calibration', f'read failed: {exc}')
+    if recent.empty:
+        return _ok('intraday_hmm_calibration', 'no recent data')
+    drifted = []
+    for col in feature_names:
+        if col not in recent.columns:
+            continue
+        train_mean = float(train_means.get(col, 0.0))
+        live_mean = float(recent[col].mean())
+        if abs(train_mean) < 1e-6:
+            continue
+        rel = abs(live_mean - train_mean) / abs(train_mean)
+        if rel > 0.5:
+            drifted.append(f'{col}: train={train_mean:.3f} live={live_mean:.3f} (Δ={rel*100:.0f}%)')
+    if drifted:
+        return _warn('intraday_hmm_calibration',
+                     '; '.join(drifted[:3]))
+    return _ok('intraday_hmm_calibration',
+               f'{len(feature_names)} features within 50% of training means')
+
+
 @_check('data_coverage', slow=True)
 def check_data_coverage():
     """Query data_coverage for staleness on critical types. Reports the

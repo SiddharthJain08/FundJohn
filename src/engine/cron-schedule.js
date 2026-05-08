@@ -308,6 +308,54 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
+    // 9:30-16:00 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
+    // Fire-and-forget detached spawn (matches the 10am pipeline pattern).
+    // Each tick: collects 9 features → appends parquet → scores HMM →
+    // hysteresis(3)/confidence(<70%)/cooldown(60min) gates → optional
+    // liquidation via regime_liquidator.py. Default-OFF (DRY-RUN) until
+    // OPENCLAW_INTRADAY_HMM_LIVE=1 is set in .env.
+    //
+    // The cron pattern '*/5 9-16' fires at 9:00, 9:05 ... 16:00. The 9:00
+    // tick will run the detector but no liquidation can occur (no model
+    // yet trained at 9 AM; the detector will load it once accumulated).
+    // The 9:30-9:25 gap is acceptable — RTH starts at 9:30, the first
+    // useful score is the 9:30 tick.
+    cron.schedule('*/5 9-16 * * 1-5', () => {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `intraday_hmm_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
+            const child = spawn(PYTHON, ['scripts/run_intraday_market_state.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+        } catch (e) {
+            log(`Intraday HMM tick spawn error: ${e.message}`);
+        }
+    }, { timezone: 'America/New_York' });
+
+    // Sunday 18:00 ET — weekly intraday HMM refit. Trains a fresh HMM
+    // on the accumulated intraday_features.parquet; the detector reads
+    // hmm_intraday_latest.pkl on its next tick. Bootstrap-safe (no-op if
+    // < 500 rows accumulated).
+    cron.schedule('0 18 * * 0', () => {
+        log('Intraday HMM weekly refit starting');
+        try {
+            const out = runPython('scripts/train_intraday_hmm.py');
+            log(`Intraday HMM refit: ${out.slice(0, 300)}`);
+        } catch (e) {
+            log(`Intraday HMM refit error: ${e.message.slice(0, 200)}`);
+        }
+    }, { timezone: 'America/New_York' });
+
+
     // Sunday 08:00 ET — weekly memory synthesis + universe sync
     // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
     // orphan-column detection no longer feeds data_deprecation_queue.)
