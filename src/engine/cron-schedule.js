@@ -355,6 +355,75 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
+    // Daily 23:55 ET — recompute per-strategy avg holding period + next_fire_date.
+    cron.schedule('55 23 * * *', () => {
+        log('cadence-recompute: spawning strategy_cadence_recompute.py');
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `strategy_cadence_recompute_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
+            const child = spawn(PYTHON, ['src/execution/strategy_cadence_recompute.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+            log(`cadence-recompute: spawned (pid ${child.pid}) → ${logPath}`);
+        } catch (e) {
+            log(`cadence-recompute spawn error: ${e.message}`);
+        }
+    }, { timezone: 'America/New_York' });
+
+    // Intraday every 5 min during RTH (9:00-16:00 ET) Mon–Fri — position circuit breaker for consolidate-mode positions.
+    cron.schedule('*/5 9-16 * * 1-5', () => {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `position_circuit_breaker_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
+            const child = spawn(PYTHON, ['src/execution/position_circuit_breaker.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+        } catch (e) {
+            log(`circuit-breaker spawn error: ${e.message}`);
+        }
+    }, { timezone: 'America/New_York' });
+
+    // Daily 21:00 UTC weekdays — parity diff report (Phase 2).
+    cron.schedule('0 21 * * 1-5', () => {
+        log('parity-diff: spawning parity_diff.py');
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `parity_diff_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
+            const child = spawn(PYTHON, ['src/execution/parity_diff.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+            log(`parity-diff: spawned (pid ${child.pid}) → ${logPath}`);
+        } catch (e) {
+            log(`parity-diff spawn error: ${e.message}`);
+        }
+    });
 
     // Sunday 08:00 ET — weekly memory synthesis + universe sync
     // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
