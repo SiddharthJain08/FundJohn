@@ -643,63 +643,39 @@ MANIFEST_REPO_ROOT_DEFAULT = '/root/openclaw'
 
 @_check('manifest_eligibility_drift')
 def check_manifest_eligibility_drift():
-    """Detect uncommitted manifest.json eligible_regimes changes vs git HEAD.
+    """Detect stale writes to the deprecated manifest.eligible_regimes field.
 
-    The risk this guards against: operator changes eligibility on an
-    *existing* strategy via the dashboard, manifest mutates, regime_gate
-    immediately reflects the change, but redeploys / new clones silently
-    revert the policy. That's a real behavior regression.
+    Phase 2A moved eligibility ownership into strategy_regime_params (DB).
+    `manifest.eligible_regimes` is no longer authoritative; its presence on
+    any strategy entry indicates either: (a) a stale code path still
+    writing it, or (b) a transitional row that hasn't been cleaned up
+    yet. Either is worth flagging until manifest is fully retired.
 
-    Scope: ONLY existing strategies (present in both HEAD and working
-    tree). New-strategy additions are a different concern (the strategy
-    isn't in production yet) and aren't flagged here.
-
-    PASS:  no eligibility delta on any existing strategy
-    WARN:  existing strategy(ies) have uncommitted eligible_regimes (DRY-RUN)
-    FAIL:  same, but LIVE flag is set
-    WARN:  git or manifest unavailable / unparseable
+    PASS:  no strategy has the field
+    WARN:  1+ strategies have the field (DRY-RUN)
+    FAIL:  1+ AND OPENCLAW_REGIME_BLENDED_LIVE=1
+    WARN:  manifest unparseable / unreadable
     """
     name = 'manifest_eligibility_drift'
     repo_root = os.environ.get('OPENCLAW_REPO_ROOT', MANIFEST_REPO_ROOT_DEFAULT)
     live = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE') == '1'
-    # 1) HEAD manifest content via `git show`.
-    try:
-        proc = subprocess.run(
-            ['git', 'show', 'HEAD:src/strategies/manifest.json'],
-            cwd=repo_root, capture_output=True, text=True, timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        return _warn(name, f'git unavailable: {exc!s}')
-    if proc.returncode != 0:
-        head_err = (proc.stderr or proc.stdout).strip().splitlines()
-        return _warn(name,
-                     f'git show HEAD failed (exit {proc.returncode}): '
-                     f'{head_err[0] if head_err else "no output"}')
-    try:
-        head = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        return _warn(name, f'HEAD manifest unparseable: {exc!s}')
-    # 2) Working tree manifest.
     wrk_path = Path(repo_root) / 'src' / 'strategies' / 'manifest.json'
     try:
         wrk = json.loads(wrk_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError) as exc:
         return _warn(name, f'working manifest unreadable: {exc!s}')
-    head_s = head.get('strategies') or {}
-    wrk_s  = wrk.get('strategies') or {}
-    drifted: list[str] = []
-    for sid in set(head_s) & set(wrk_s):
-        if head_s[sid].get('eligible_regimes') != wrk_s[sid].get('eligible_regimes'):
-            drifted.append(sid)
-    if not drifted:
-        return _ok(name, 'eligible_regimes match HEAD for all existing strategies')
-    drifted.sort()
-    preview = ', '.join(drifted[:4]) + (f' +{len(drifted)-4} more' if len(drifted) > 4 else '')
-    summary = f'{len(drifted)} existing strategy(ies) have uncommitted eligibility: {preview}'
+    strategies = wrk.get('strategies') or {}
+    stale = [sid for sid, rec in strategies.items()
+             if rec.get('eligible_regimes') is not None]
+    if not stale:
+        return _ok(name, 'no strategy carries deprecated eligible_regimes field')
+    stale.sort()
+    preview = ', '.join(stale[:4]) + (f' +{len(stale)-4} more' if len(stale) > 4 else '')
+    summary = (f'{len(stale)} strategy(ies) still carry deprecated '
+               f'eligible_regimes field: {preview}')
     if live:
-        return _fail(name,
-                     f'{summary} (LIVE mode — commit or revert before next cycle)')
-    return _warn(name, f'{summary} (DRY-RUN — commit when satisfied)')
+        return _fail(name, summary)
+    return _warn(name, summary)
 
 
 def _latest_rollup_run_at(uri: str):
