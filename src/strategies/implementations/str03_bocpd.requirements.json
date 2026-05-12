@@ -1,7 +1,5 @@
 {
-  "strategy_id": "str03_bocpd",
-  "required": [
-    "prices"
-  ],
+  "strategy_id": "S_TR03_bocpd",
+  "required": ["prices"],
   "optional": []
 }

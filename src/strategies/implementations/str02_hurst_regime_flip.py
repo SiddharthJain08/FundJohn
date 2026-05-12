@@ -46,8 +46,11 @@ from typing import List
 
 import numpy as np
 
+import sys
 from src.strategies.base import Signal
 from src.strategies.cohort_base import CohortBaseStrategy
+
+
 def hurst_rs(series: np.ndarray, min_lag: int = 5, max_lag: int = 30) -> float:
     """Rescaled-range estimator for the Hurst exponent."""
     series = np.asarray(series, dtype=float)
@@ -82,7 +85,7 @@ def hurst_rs(series: np.ndarray, min_lag: int = 5, max_lag: int = 30) -> float:
 class HurstRegimeFlip(CohortBaseStrategy):
     id = 'S_TR02_hurst_regime_flip'
     version = '2.0.0'
-    regime_filter = ['HIGH_VOL', 'NEUTRAL', 'LOW_VOL']
+    regime_filter = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
     H_TREND_MIN: float = 0.55
     H_REVERT_MAX: float = 0.45
@@ -109,19 +112,50 @@ class HurstRegimeFlip(CohortBaseStrategy):
         if not flipped:
             return []
 
-        # Emit a small directional hedge signal as VXX BUY_VOL
-        vxx = opts_map.get('VXX') or opts_map.get('UVXY') or {}
-        price = vxx.get('last_price')
-        if not (price and price > 0):
-            return []
-        return [Signal(
-            ticker='VXX',
-            direction='BUY_VOL',
+        # Determine signal ticker and direction.
+        # Prefer VXX/UVXY BUY_VOL; fall back to SHORT SPY (available in all backtests).
+        ticker, direction = 'SPY', 'SHORT'
+        prices_df = market_data.get('prices')
+        for vol_tk in ('VXX', 'UVXY'):
+            vxx_entry = opts_map.get(vol_tk) or {}
+            price = vxx_entry.get('last_price')
+            if not (price and price > 0) and prices_df is not None and hasattr(prices_df, 'columns'):
+                if vol_tk in prices_df.columns:
+                    ser = prices_df[vol_tk].dropna()
+                    if len(ser):
+                        price = float(ser.iloc[-1])
+            if price and price > 0:
+                ticker, direction = vol_tk, 'BUY_VOL'
+                break
+
+        # Fall back to SPY SHORT if no vol ticker available
+        if direction == 'SHORT':
+            spy_ser = spy_close  # already a np.ndarray at this point
+            price = float(spy_ser[-1]) if len(spy_ser) else None
+            if not (price and price > 0):
+                print(f'[debug] signals=0 (no price for SPY)', file=sys.stderr)
+                return []
+
+        price = float(price)
+        if direction == 'BUY_VOL':
+            stop   = round(price * 0.92, 2)
+            tgt1   = round(price * 1.10, 2)
+            tgt2   = round(price * 1.25, 2)
+            tgt3   = round(price * 1.40, 2)
+        else:  # SHORT SPY
+            stop   = round(price * 1.05, 2)
+            tgt1   = round(price * 0.95, 2)
+            tgt2   = round(price * 0.90, 2)
+            tgt3   = round(price * 0.85, 2)
+
+        signals = [Signal(
+            ticker=ticker,
+            direction=direction,
             entry_price=price,
-            stop_loss=round(price * 0.92, 2),
-            target_1=round(price * 1.10, 2),
-            target_2=round(price * 1.25, 2),
-            target_3=round(price * 1.40, 2),
+            stop_loss=stop,
+            target_1=tgt1,
+            target_2=tgt2,
+            target_3=tgt3,
             position_size_pct=0.005,
             confidence='HIGH',
             signal_params={
@@ -132,3 +166,5 @@ class HurstRegimeFlip(CohortBaseStrategy):
                 'note': 'hurst_regime_flip',
             },
         )]
+        print(f'[debug] signals={len(signals)}', file=sys.stderr)
+        return signals
