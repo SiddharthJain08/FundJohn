@@ -421,3 +421,30 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Regime partition wrapper (added 2026-05-12 for regime-blended sizer)
+# ───────────────────────────────────────────────────────────────────────
+from backtest.regime_performance_analyzer import (
+    compute_regime_stats, propose_eligible_regimes, ALL_REGIMES,
+)
+
+def run_backtest_with_regime_partition(trades_df, strategy_id, thresholds):
+    """Wrap an existing backtest with regime partitioning + eligibility proposal.
+
+    Args:
+      trades_df: DataFrame with columns [strategy_id, signal_date, regime_state, pnl, r_multiple]
+      strategy_id: which strategy to analyze
+      thresholds: dict from regime_eligibility_thresholds table
+                  (keys: min_sharpe, min_trade_count, min_avg_r)
+
+    Returns:
+      dict with 'regime_partition' (per-regime stats) and 'eligible_regimes_proposed' (list).
+
+    Used by Phase 1 manifest backfill and lifecycle promotion gate.
+    """
+    return {
+        'regime_partition': {r: compute_regime_stats(trades_df, strategy_id, r) for r in ALL_REGIMES},
+        'eligible_regimes_proposed': propose_eligible_regimes(trades_df, strategy_id, thresholds),
+    }
