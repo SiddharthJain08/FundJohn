@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""Safe writer for manifest.json eligible_regimes + audit trail.
+"""DB-backed operator interface for per-(strategy, regime) params.
 
-All edits go through set_eligibility(), which:
-  1. validates inputs (canonical regimes, non-empty, known strategy)
-  2. writes audit row to regime_eligibility_changes first
-  3. atomically rewrites manifest.json (tmp + rename)
-  4. on any failure, leaves manifest untouched
+Source of truth: strategy_regime_params table. Every write goes through
+set_params() which:
+  1. Validates regime + ensures >=1 field specified
+  2. Opens a transaction with SELECT ... FOR UPDATE on the existing row
+  3. Inserts an audit row to strategy_regime_param_changes
+  4. Upserts the params row
+  5. Commits, then invalidates the resolver cache
 
-The gate (`src/strategies/regime_gate.py`) re-reads manifest.json on every
-`is_eligible()` call, so changes apply on the next strategy invocation
-without a service restart.
-
-CLI:
-    python -m strategies.eligibility_manager --list
-    python -m strategies.eligibility_manager --set momentum_a LOW_VOL TRANSITIONING \
-        --actor "operator:sid" --reason "trim HIGH_VOL after 90d drawdown" \
-        --source "live_90d_sharpe=-0.6"
-    python -m strategies.eligibility_manager --audit --limit 20
+Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 
@@ -25,135 +18,176 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
-DEFAULT_MANIFEST = Path(__file__).resolve().parent / 'manifest.json'
+
+# Match the resolver's path resolution.
+_THIS = Path(__file__).resolve()
+_SRC = _THIS.parents[1]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 
 def _db_uri() -> str:
-    return (
-        os.environ.get('DATABASE_URL')
-        or os.environ.get('POSTGRES_URI')
-        or 'postgresql://openclaw:password@localhost:5432/openclaw'
-    )
+    return (os.environ.get('DATABASE_URL')
+            or os.environ.get('POSTGRES_URI')
+            or 'postgresql://openclaw:password@localhost:5432/openclaw')
 
 
-def _connect(uri: str):
+def _connect():
     import psycopg2
-    return psycopg2.connect(uri)
+    return psycopg2.connect(_db_uri())
 
 
-def _insert_audit(*, actor: str, strategy_id: str,
-                   before_regimes, after_regimes,
-                   reason: str, source: str) -> None:
-    with _connect(_db_uri()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO regime_eligibility_changes
-                  (actor, strategy_id, before_regimes, after_regimes, reason, source)
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (actor, strategy_id, before_regimes, after_regimes, reason, source))
-        conn.commit()
-
-
-def _query_audit(limit: int) -> list[dict]:
-    with _connect(_db_uri()) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT changed_at, actor, strategy_id,
-                       before_regimes, after_regimes, reason, source
-                  FROM regime_eligibility_changes
-                 ORDER BY changed_at DESC
-                 LIMIT %s
-            """, (limit,))
-            cols = [c.name for c in cur.description]
-            return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def _canonicalize(regimes: list[str]) -> list[str]:
-    """Dedupe and sort to canonical regime order. Validates entries."""
-    seen = set()
-    for r in regimes:
-        if r not in CANONICAL_REGIMES:
-            raise ValueError(f'invalid regime {r!r}; must be one of {CANONICAL_REGIMES}')
-        seen.add(r)
-    return [r for r in CANONICAL_REGIMES if r in seen]
-
-
-def _atomic_write(path: Path, data: dict) -> None:
-    """Write JSON via tmp + rename so the file is never half-written."""
-    body = json.dumps(data, indent=2) + '\n'
-    fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), prefix='.manifest.',
-                                    suffix='.tmp')
-    tmp = Path(tmp_str)
+def _invalidate_cache(strategy_id: str, regime_state: str) -> None:
+    """Best-effort: invalidate the same-process resolver cache. Cross-process
+    caches expire on TTL (30s)."""
     try:
-        with os.fdopen(fd, 'w') as f:
-            f.write(body)
-        tmp.replace(path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
+        from execution.regime_param_resolver import invalidate as _inv
+        _inv(strategy_id, regime_state)
+    except Exception as exc:
+        logger.debug('cache invalidate skipped: %s', exc)
 
 
-def set_eligibility(*, strategy_id: str, new_regimes: list[str],
-                     actor: str, reason: str, source: str,
-                     manifest_path: Path | None = None) -> dict:
-    """Update one strategy's eligible_regimes. Audits then writes.
+def _row_to_json(row) -> Optional[str]:
+    if row is None:
+        return None
+    keys = ('strategy_id', 'regime_state', 'eligible',
+            'size_scalar', 'stop_pct', 'target_pct', 'max_hold_days')
+    d = dict(zip(keys, row))
+    for k in ('size_scalar', 'stop_pct', 'target_pct'):
+        if d[k] is not None:
+            d[k] = float(d[k])
+    return json.dumps(d)
+
+
+def set_params(*,
+               strategy_id: str,
+               regime_state: str,
+               eligible: Optional[bool] = None,
+               size_scalar: Optional[float] = None,
+               stop_pct: Optional[float] = None,
+               target_pct: Optional[float] = None,
+               max_hold_days: Optional[int] = None,
+               actor: str,
+               reason: str = '',
+               source: str = 'cli') -> dict:
+    """Upsert one (strategy, regime) row. None args mean 'keep existing'.
 
     Raises:
-        KeyError: strategy_id not in manifest
-        ValueError: invalid or empty regime list
-        RuntimeError: audit insert failed (manifest unchanged)
+        ValueError: invalid regime or no fields specified.
     """
-    manifest_path = manifest_path or DEFAULT_MANIFEST
-    canonical = _canonicalize(new_regimes)
-    if not canonical:
-        raise ValueError('eligible_regimes must contain at least one valid regime')
+    if regime_state not in CANONICAL_REGIMES:
+        raise ValueError(f'invalid regime {regime_state!r}; must be one of {CANONICAL_REGIMES}')
 
-    data = json.loads(manifest_path.read_text())
-    strategies = data.setdefault('strategies', {})
-    if strategy_id not in strategies:
-        raise KeyError(strategy_id)
-    record = strategies[strategy_id]
-    before = record.get('eligible_regimes')
+    if all(v is None for v in (eligible, size_scalar, stop_pct,
+                                target_pct, max_hold_days)):
+        raise ValueError('at least one of eligible/size_scalar/stop_pct/'
+                         'target_pct/max_hold_days must be specified')
 
-    # 1) audit row first — if this fails, the manifest must not change.
-    _insert_audit(actor=actor, strategy_id=strategy_id,
-                  before_regimes=before, after_regimes=canonical,
-                  reason=reason, source=source)
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT strategy_id, regime_state, eligible,
+                       size_scalar, stop_pct, target_pct, max_hold_days
+                  FROM strategy_regime_params
+                 WHERE strategy_id = %s AND regime_state = %s
+                 FOR UPDATE
+            """, (strategy_id, regime_state))
+            before = cur.fetchone()
 
-    # 2) only mutate after audit landed.
-    record['eligible_regimes'] = canonical
-    _atomic_write(manifest_path, data)
+            if before is None:
+                merged_eligible      = True if eligible is None else eligible
+                merged_size_scalar   = size_scalar
+                merged_stop_pct      = stop_pct
+                merged_target_pct    = target_pct
+                merged_max_hold_days = max_hold_days
+            else:
+                # before = (sid, regime, eligible, size, stop, target, max_hold)
+                merged_eligible      = before[2] if eligible is None else eligible
+                merged_size_scalar   = before[3] if size_scalar is None else size_scalar
+                merged_stop_pct      = before[4] if stop_pct is None else stop_pct
+                merged_target_pct    = before[5] if target_pct is None else target_pct
+                merged_max_hold_days = before[6] if max_hold_days is None else max_hold_days
+
+            after_row = (strategy_id, regime_state, merged_eligible,
+                         merged_size_scalar, merged_stop_pct,
+                         merged_target_pct, merged_max_hold_days)
+
+            cur.execute("""
+                INSERT INTO strategy_regime_param_changes
+                    (actor, strategy_id, regime_state,
+                     before_row, after_row, reason, source)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            """, (actor, strategy_id, regime_state,
+                  _row_to_json(before), _row_to_json(after_row),
+                  reason, source))
+
+            cur.execute("""
+                INSERT INTO strategy_regime_params
+                    (strategy_id, regime_state, eligible,
+                     size_scalar, stop_pct, target_pct, max_hold_days, set_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (strategy_id, regime_state) DO UPDATE
+                   SET eligible      = EXCLUDED.eligible,
+                       size_scalar   = EXCLUDED.size_scalar,
+                       stop_pct      = EXCLUDED.stop_pct,
+                       target_pct    = EXCLUDED.target_pct,
+                       max_hold_days = EXCLUDED.max_hold_days,
+                       set_at        = NOW(),
+                       set_by        = EXCLUDED.set_by
+            """, (strategy_id, regime_state, merged_eligible,
+                  merged_size_scalar, merged_stop_pct, merged_target_pct,
+                  merged_max_hold_days, actor))
+        conn.commit()
+
+    _invalidate_cache(strategy_id, regime_state)
 
     return {
-        'strategy_id':    strategy_id,
-        'before_regimes': before,
-        'after_regimes':  canonical,
-        'audited_at':     datetime.now(timezone.utc).isoformat(),
+        'strategy_id':  strategy_id,
+        'regime_state': regime_state,
+        'before':       None if before is None else dict(zip(
+            ('strategy_id', 'regime_state', 'eligible', 'size_scalar',
+             'stop_pct', 'target_pct', 'max_hold_days'), before)),
+        'after':        dict(zip(
+            ('strategy_id', 'regime_state', 'eligible', 'size_scalar',
+             'stop_pct', 'target_pct', 'max_hold_days'), after_row)),
+        'audited_at':   datetime.now(timezone.utc).isoformat(),
     }
 
 
-def list_strategies(manifest_path: Path | None = None) -> list[dict]:
-    manifest_path = manifest_path or DEFAULT_MANIFEST
-    data = json.loads(manifest_path.read_text())
-    strategies = data.get('strategies', {}) or {}
-    out = []
-    for sid, record in strategies.items():
-        out.append({
-            'strategy_id':      sid,
-            'eligible_regimes': record.get('eligible_regimes'),  # None = no field
-        })
-    return out
+def list_rows() -> list[dict]:
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT strategy_id, regime_state, eligible,
+                       size_scalar, stop_pct, target_pct, max_hold_days
+                  FROM strategy_regime_params
+                 ORDER BY strategy_id, regime_state
+            """)
+            cols = ('strategy_id', 'regime_state', 'eligible',
+                    'size_scalar', 'stop_pct', 'target_pct', 'max_hold_days')
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def recent_audit(limit: int = 20) -> list[dict]:
-    return _query_audit(limit)
+def recent_audit(limit: int = 25) -> list[dict]:
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT changed_at, actor, strategy_id, regime_state,
+                       before_row, after_row, reason, source
+                  FROM strategy_regime_param_changes
+                 ORDER BY changed_at DESC
+                 LIMIT %s
+            """, (limit,))
+            cols = ('changed_at', 'actor', 'strategy_id', 'regime_state',
+                    'before_row', 'after_row', 'reason', 'source')
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def main():
@@ -162,34 +196,46 @@ def main():
     p = argparse.ArgumentParser()
     sub = p.add_mutually_exclusive_group(required=True)
     sub.add_argument('--list', action='store_true')
-    sub.add_argument('--set', nargs='+', metavar='STRATEGY REGIME [REGIME ...]')
+    sub.add_argument('--set', nargs=2, metavar=('STRATEGY', 'REGIME'))
     sub.add_argument('--audit', action='store_true')
+    p.add_argument('--eligible', dest='eligible_flag',
+                    action='store_const', const=True, default=None)
+    p.add_argument('--ineligible', dest='eligible_flag',
+                    action='store_const', const=False)
+    p.add_argument('--size', type=float, default=None)
+    p.add_argument('--stop', type=float, default=None)
+    p.add_argument('--target', type=float, default=None)
+    p.add_argument('--max-hold', type=int, default=None)
     p.add_argument('--actor', default='cli')
     p.add_argument('--reason', default='')
-    p.add_argument('--source', default='')
-    p.add_argument('--limit', type=int, default=20)
+    p.add_argument('--source', default='cli')
+    p.add_argument('--limit', type=int, default=25)
     args = p.parse_args()
 
     if args.list:
-        for row in list_strategies():
-            print(f"{row['strategy_id']}: {row['eligible_regimes']}")
+        for r in list_rows():
+            print(f"{r['strategy_id']:<40} {r['regime_state']:<14} "
+                  f"eligible={r['eligible']!s:<5} "
+                  f"size={r['size_scalar']} stop={r['stop_pct']} "
+                  f"target={r['target_pct']} maxhold={r['max_hold_days']}")
         return 0
     if args.audit:
-        for row in recent_audit(limit=args.limit):
-            print(f"{row['changed_at']} {row['actor']:>16}  "
-                  f"{row['strategy_id']}: {row['before_regimes']} -> {row['after_regimes']}  "
-                  f"({row.get('reason') or ''})")
+        for r in recent_audit(limit=args.limit):
+            print(f"{r['changed_at']} {r['actor']:>16}  "
+                  f"{r['strategy_id']}/{r['regime_state']}  "
+                  f"src={r['source']} reason={r['reason'] or ''}")
         return 0
     if args.set:
-        if len(args.set) < 2:
-            print('--set requires STRATEGY REGIME [REGIME ...]', file=sys.stderr)
-            return 2
-        strategy, *regimes = args.set
-        result = set_eligibility(
-            strategy_id=strategy, new_regimes=regimes,
-            actor=args.actor, reason=args.reason, source=args.source,
-        )
-        print(json.dumps(result, indent=2))
+        strategy, regime = args.set
+        result = set_params(strategy_id=strategy, regime_state=regime,
+                             eligible=args.eligible_flag,
+                             size_scalar=args.size,
+                             stop_pct=args.stop,
+                             target_pct=args.target,
+                             max_hold_days=args.max_hold,
+                             actor=args.actor, reason=args.reason,
+                             source=args.source)
+        print(json.dumps(result, indent=2, default=str))
         return 0
     return 2
 
