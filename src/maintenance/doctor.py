@@ -645,41 +645,57 @@ MANIFEST_REPO_ROOT_DEFAULT = '/root/openclaw'
 def check_manifest_eligibility_drift():
     """Detect uncommitted manifest.json eligible_regimes changes vs git HEAD.
 
-    Operator-initiated trim/expand mutates manifest.json directly. The gate
-    sees changes immediately, but if the change is never committed, redeploys
-    or new clones will silently revert. This check surfaces drift every cycle
-    until resolved.
+    The risk this guards against: operator changes eligibility on an
+    *existing* strategy via the dashboard, manifest mutates, regime_gate
+    immediately reflects the change, but redeploys / new clones silently
+    revert the policy. That's a real behavior regression.
 
-    PASS:  diff contains no eligible_regimes lines
-    WARN:  eligible_regimes lines differ from HEAD (DRY-RUN)
-    FAIL:  eligible_regimes lines differ AND LIVE flag is set
-    WARN:  git unavailable or non-repo
+    Scope: ONLY existing strategies (present in both HEAD and working
+    tree). New-strategy additions are a different concern (the strategy
+    isn't in production yet) and aren't flagged here.
+
+    PASS:  no eligibility delta on any existing strategy
+    WARN:  existing strategy(ies) have uncommitted eligible_regimes (DRY-RUN)
+    FAIL:  same, but LIVE flag is set
+    WARN:  git or manifest unavailable / unparseable
     """
     name = 'manifest_eligibility_drift'
     repo_root = os.environ.get('OPENCLAW_REPO_ROOT', MANIFEST_REPO_ROOT_DEFAULT)
     live = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE') == '1'
+    # 1) HEAD manifest content via `git show`.
     try:
         proc = subprocess.run(
-            ['git', 'diff', '--unified=0', 'HEAD',
-             '--', 'src/strategies/manifest.json'],
+            ['git', 'show', 'HEAD:src/strategies/manifest.json'],
             cwd=repo_root, capture_output=True, text=True, timeout=10,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return _warn(name, f'git unavailable: {exc!s}')
-    # `git diff` exits 0 in both no-change AND change cases; non-zero means
-    # error. Don't false-PASS by parsing empty stdout — the most common cause
-    # (`dubious ownership` for cross-user repos) prints to stderr with exit
-    # 128. Fail-loud as WARN instead.
     if proc.returncode != 0:
-        return _warn(name, f'git diff failed (exit {proc.returncode}): '
-                            f'{(proc.stderr or proc.stdout).strip().splitlines()[0] if (proc.stderr or proc.stdout).strip() else "no output"}')
-    diff_lines = [ln for ln in proc.stdout.splitlines()
-                  if ln.startswith(('+', '-'))
-                  and 'eligible_regimes' in ln
-                  and not ln.startswith(('+++', '---'))]
-    if not diff_lines:
-        return _ok(name, 'manifest eligible_regimes match HEAD')
-    summary = f'{len(diff_lines)} eligible_regimes line(s) differ from HEAD'
+        head_err = (proc.stderr or proc.stdout).strip().splitlines()
+        return _warn(name,
+                     f'git show HEAD failed (exit {proc.returncode}): '
+                     f'{head_err[0] if head_err else "no output"}')
+    try:
+        head = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        return _warn(name, f'HEAD manifest unparseable: {exc!s}')
+    # 2) Working tree manifest.
+    wrk_path = Path(repo_root) / 'src' / 'strategies' / 'manifest.json'
+    try:
+        wrk = json.loads(wrk_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _warn(name, f'working manifest unreadable: {exc!s}')
+    head_s = head.get('strategies') or {}
+    wrk_s  = wrk.get('strategies') or {}
+    drifted: list[str] = []
+    for sid in set(head_s) & set(wrk_s):
+        if head_s[sid].get('eligible_regimes') != wrk_s[sid].get('eligible_regimes'):
+            drifted.append(sid)
+    if not drifted:
+        return _ok(name, 'eligible_regimes match HEAD for all existing strategies')
+    drifted.sort()
+    preview = ', '.join(drifted[:4]) + (f' +{len(drifted)-4} more' if len(drifted) > 4 else '')
+    summary = f'{len(drifted)} existing strategy(ies) have uncommitted eligibility: {preview}'
     if live:
         return _fail(name,
                      f'{summary} (LIVE mode — commit or revert before next cycle)')
