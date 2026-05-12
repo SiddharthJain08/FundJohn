@@ -744,6 +744,61 @@ def check_regime_live_rollup_freshness():
                  f'very stale ({age_hours:.1f}h old; rollup pipeline broken)')
 
 
+PARAMS_CONSISTENCY_FAIL_THRESHOLD = 5
+
+
+def _query_consistency(sql: str, params: tuple = ()):
+    """Indirection seam so tests can stub registry + params queries."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+
+@_check('strategy_regime_params_consistency')
+def check_strategy_regime_params_consistency():
+    """Each strategy in strategy_registry × each of 4 canonical regimes must
+    have exactly one row in strategy_regime_params. Catches partial migrations
+    + orphans (rows pointing at strategies that no longer exist)."""
+    name = 'strategy_regime_params_consistency'
+    REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+    try:
+        registry_rows = _query_consistency('SELECT id FROM strategy_registry')
+        registry_ids = {r[0] for r in registry_rows} if registry_rows else set()
+        # Fall back to manifest if strategy_registry is empty (early-bootstrap envs).
+        if not registry_ids:
+            mf = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json')
+                            .read_text(encoding='utf-8'))
+            registry_ids = set(mf.get('strategies') or {})
+        param_rows = _query_consistency(
+            'SELECT strategy_id, regime_state FROM strategy_regime_params')
+        param_set = {(r[0], r[1]) for r in param_rows}
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+    expected = {(sid, r) for sid in registry_ids for r in REGIMES}
+    missing  = expected - param_set
+    orphans  = {sid for sid, _ in param_set} - registry_ids
+    if not missing and not orphans:
+        return _ok(name,
+                   f'{len(registry_ids)} strategies × 4 regimes = '
+                   f'{len(expected)} rows, all present')
+    parts = []
+    if missing:
+        first = next(iter(missing))
+        parts.append(f'{len(missing)} missing (e.g. {first[0]}/{first[1]})')
+    if orphans:
+        parts.append(f'{len(orphans)} orphan row(s): {", ".join(list(orphans)[:3])}'
+                     + (' …' if len(orphans) > 3 else ''))
+    detail = '; '.join(parts)
+    if len(missing) >= PARAMS_CONSISTENCY_FAIL_THRESHOLD:
+        return _fail(name, detail)
+    return _warn(name, detail)
+
+
 @_check('systemd_services', slow=True)
 def check_systemd_services():
     """Each expected unit must be `active` per `systemctl is-active`. Skips
