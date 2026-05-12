@@ -666,6 +666,13 @@ def check_manifest_eligibility_drift():
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return _warn(name, f'git unavailable: {exc!s}')
+    # `git diff` exits 0 in both no-change AND change cases; non-zero means
+    # error. Don't false-PASS by parsing empty stdout — the most common cause
+    # (`dubious ownership` for cross-user repos) prints to stderr with exit
+    # 128. Fail-loud as WARN instead.
+    if proc.returncode != 0:
+        return _warn(name, f'git diff failed (exit {proc.returncode}): '
+                            f'{(proc.stderr or proc.stdout).strip().splitlines()[0] if (proc.stderr or proc.stdout).strip() else "no output"}')
     diff_lines = [ln for ln in proc.stdout.splitlines()
                   if ln.startswith(('+', '-'))
                   and 'eligible_regimes' in ln

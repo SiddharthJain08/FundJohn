@@ -71,14 +71,18 @@ def test_manifest_in_sync_with_head_returns_pass(monkeypatch):
 
 
 def test_manifest_drift_returns_warn(monkeypatch):
-    """git diff shows eligible_regimes changes → WARN in DRY-RUN."""
+    """git diff shows eligible_regimes changes → WARN in DRY-RUN.
+
+    `git diff` exits 0 in both no-change and change cases; non-zero means
+    error. Diff content is in stdout.
+    """
     diff_out = (
         '+        "eligible_regimes": ["TRANSITIONING"],\n'
         '-        "eligible_regimes": ["LOW_VOL", "TRANSITIONING"],'
     )
 
     def fake_run(cmd, **kw):
-        return subprocess.CompletedProcess(cmd, 1, stdout=diff_out, stderr='')
+        return subprocess.CompletedProcess(cmd, 0, stdout=diff_out, stderr='')
     monkeypatch.setattr(subprocess, 'run', fake_run)
     monkeypatch.delenv('OPENCLAW_REGIME_BLENDED_LIVE', raising=False)
     r = doc.check_manifest_eligibility_drift()
@@ -91,7 +95,7 @@ def test_manifest_drift_in_live_returns_fail(monkeypatch):
     diff_out = '+        "eligible_regimes": ["TRANSITIONING"],'
 
     def fake_run(cmd, **kw):
-        return subprocess.CompletedProcess(cmd, 1, stdout=diff_out, stderr='')
+        return subprocess.CompletedProcess(cmd, 0, stdout=diff_out, stderr='')
     monkeypatch.setattr(subprocess, 'run', fake_run)
     r = doc.check_manifest_eligibility_drift()
     assert r['severity'] == doc.FAIL
@@ -104,3 +108,16 @@ def test_manifest_drift_git_unavailable_returns_warn(monkeypatch):
     monkeypatch.delenv('OPENCLAW_REGIME_BLENDED_LIVE', raising=False)
     r = doc.check_manifest_eligibility_drift()
     assert r['severity'] == doc.WARN
+
+
+def test_manifest_drift_git_error_returns_warn(monkeypatch):
+    """git exits non-zero (e.g. dubious ownership) — must not silently PASS."""
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(
+            cmd, 128, stdout='',
+            stderr="fatal: detected dubious ownership in repository at '/root/openclaw'")
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    monkeypatch.delenv('OPENCLAW_REGIME_BLENDED_LIVE', raising=False)
+    r = doc.check_manifest_eligibility_drift()
+    assert r['severity'] == doc.WARN
+    assert 'git diff failed' in r['detail'] or 'dubious' in r['detail'].lower()
