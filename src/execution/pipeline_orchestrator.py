@@ -41,23 +41,47 @@ LOCK_TTL        = 7200   # 2 hour lock TTL — covers worst-case collector
 COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
 COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
-# Ordered pipeline steps: key → script name (without .py)
-STEPS = [
+# ── LIVE-flag: Phase 3 cutover ────────────────────────────────────────────────
+# Operator flips OPENCLAW_REGIME_BLENDED_LIVE=1 in .env to swap submitters.
+# DO NOT flip in .env until the 30-day parity window is complete.
+# Rollback: set OPENCLAW_REGIME_BLENDED_LIVE=0 (or remove) + restart johnbot.
+# Zero data loss either way — parity_orders + alpaca_submissions persist.
+_LIVE_FLAG = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE', '0') == '1'
+
+if _LIVE_FLAG:
+    # LIVE: regime_blended_sizer_live is the production submitter.
+    # trade_parity step is dropped (scope-down decision: rollback = flip env var).
+    # trade_parity_capture is retained to keep the parity_orders mirror of
+    # production alpaca_submissions up to date for monitoring.
+    STEPS = [
+        ('collect',              'run_collector_once'),        # one cycle of collector.js
+        ('signals',              'engine'),                    # zero-LLM strategy executor
+        ('handoff',              'trade_handoff_builder'),     # structured handoff
+        ('trade',                'regime_blended_sizer_live'), # LIVE PRIMARY (real LLM confirmer)
+        ('alpaca',               'alpaca_executor'),           # submit to Alpaca
+        ('trade_parity_capture', 'trade_parity_capture'),      # mirror alpaca_submissions → parity_orders
+        ('reconcile',            'alpaca_reconcile'),          # reconcile fills
+        ('report',               'send_report'),               # post to Discord
+        ('health',               'daily_health_digest'),       # daily health digest
+    ]
+else:
+    # DRY-RUN (default, Phase 2): trade_agent_llm primary; regime_blended in parity.
     # queue_drain removed 2026-04-28: the fused-staging-approval worker now
     # backfills required columns inline at approval time, so the daily cycle
     # has nothing to drain. No replacement needed — staging approvals run
     # their own backfill against the master parquets directly.
-    ('collect',     'run_collector_once'),    # Node wrapper: one cycle of collector.js (parquet-primary)
-    ('signals',     'engine'),                # zero-LLM strategy executor → execution_signals
-    ('handoff',     'trade_handoff_builder'), # deterministic features → handoff:{date}:structured
-    ('trade',       'trade_agent_llm'),       # Deterministic sizer (LLM bypassed by default)
-    ('trade_parity','regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
-    ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
-    ('trade_parity_capture', 'trade_parity_capture'),  # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
-    ('reconcile',   'alpaca_reconcile'),      # Reconcile alpaca_submissions vs broker FILL activities
-    ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
-    ('health',      'daily_health_digest'),   # End-of-cycle: build + post daily health digest to #pipeline-feed
-]
+    STEPS = [
+        ('collect',              'run_collector_once'),           # Node wrapper: one cycle of collector.js (parquet-primary)
+        ('signals',              'engine'),                       # zero-LLM strategy executor → execution_signals
+        ('handoff',              'trade_handoff_builder'),        # deterministic features → handoff:{date}:structured
+        ('trade',                'trade_agent_llm'),              # Deterministic sizer (LLM bypassed by default)
+        ('trade_parity',         'regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
+        ('alpaca',               'alpaca_executor'),              # Auto-submit sized orders to Alpaca paper
+        ('trade_parity_capture', 'trade_parity_capture'),         # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
+        ('reconcile',            'alpaca_reconcile'),             # Reconcile alpaca_submissions vs broker FILL activities
+        ('report',               'send_report'),                  # Greenlist → #trade-signals, veto digest → #trade-reports
+        ('health',               'daily_health_digest'),          # End-of-cycle: build + post daily health digest to #pipeline-feed
+    ]
 
 # Budget check required before LLM-adjacent steps. `trade` is the only Claude
 # call in the 10am cycle now — all other steps are deterministic / zero-token.
