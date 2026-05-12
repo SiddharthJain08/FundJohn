@@ -153,8 +153,17 @@ def load_regime(uri: str = '') -> dict:
     j = json.loads(REGIME_LATEST_FILE.read_text())
     state  = j.get('state') or 'TRANSITIONING'
     stress = float(j.get('stress_score') or 0)
-    scale  = {'LOW_VOL':1.0, 'TRANSITIONING':0.55,
-              'HIGH_VOL':0.35, 'CRISIS':0.15}.get(state, 0.55)
+    # Phase 2A: resolve regime scalar via DB-backed resolver. Today the
+    # resolver returns the same Phase 1 static values for every strategy
+    # (NULL size_scalar → PHASE1_REGIME_SCALARS[state]). Once Phase 2B
+    # populates per-strategy overrides, this same call site returns the
+    # strategy-specific scalar without further code change.
+    #
+    # NB: the handoff is constructed before per-strategy iteration in
+    # this path, so we use a sentinel strategy_id = '__regime_default__'
+    # to get the regime-only fallback (no row → static default).
+    from execution.regime_param_resolver import size_scalar as _size_scalar
+    scale  = _size_scalar('__regime_default__', state)
     return {
         'state':       state,
         'stress':      stress,
