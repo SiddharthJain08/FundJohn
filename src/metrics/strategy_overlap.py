@@ -101,7 +101,7 @@ def aggregate_overlap(signals: list[dict]) -> list[dict]:
         b_count = by_strategy.get(b, 0)
         union = a_count + b_count - overlap
         out.append({
-            'strategy_a': a, 'strategy_b': b, 'regime_state': None,
+            'strategy_a': a, 'strategy_b': b, 'regime_state': 'ANY',
             'overlap_count': overlap, 'a_signal_count': a_count,
             'b_signal_count': b_count,
             'jaccard_idx': overlap / union if union > 0 else 0.0,
@@ -144,7 +144,7 @@ def latest_overlaps(top_n: int = 20, min_overlap: int = 2) -> list[dict]:
                overlap_count, a_signal_count, b_signal_count, jaccard_idx::float
           FROM strategy_signal_overlap
          WHERE computed_at = (SELECT MAX(computed_at) FROM strategy_signal_overlap)
-           AND regime_state IS NULL
+           AND regime_state = 'ANY'
            AND overlap_count >= %s
          ORDER BY jaccard_idx DESC NULLS LAST
          LIMIT %s

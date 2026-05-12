@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS strategy_signal_overlap (
     window_days     INTEGER      NOT NULL,
     strategy_a      TEXT         NOT NULL,
     strategy_b      TEXT         NOT NULL,
-    regime_state    TEXT,                          -- NULL = all-regimes aggregate
+    regime_state    TEXT         NOT NULL DEFAULT 'ANY',   -- 'ANY' = all-regimes aggregate row; specific regime label otherwise
     overlap_count   INTEGER      NOT NULL,
     a_signal_count  INTEGER      NOT NULL,
     b_signal_count  INTEGER      NOT NULL,

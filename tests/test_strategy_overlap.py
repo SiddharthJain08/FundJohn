@@ -23,9 +23,11 @@ def test_aggregate_two_strategies_same_ticker_date():
         {'strategy_id': 's2', 'signal_date': today, 'ticker': 'AAPL', 'regime_state': 'LOW_VOL'},
     ]
     rows = so.aggregate_overlap(sigs)
-    # One regime-specific row + one regime=NULL all-regimes row
+    # One regime-specific row + one regime='ANY' all-regimes row
     pair_rows = [r for r in rows if (r['strategy_a'], r['strategy_b']) == ('s1', 's2')]
     assert len(pair_rows) == 2
+    assert any(r['regime_state'] == 'ANY' for r in pair_rows)
+    assert any(r['regime_state'] == 'LOW_VOL' for r in pair_rows)
     for r in pair_rows:
         assert r['overlap_count'] == 1
         assert r['a_signal_count'] == 1

@@ -94,7 +94,7 @@ router.get('/strategy-overlap/top', async (req, res) => {
              jaccard_idx::float AS jaccard_idx
         FROM strategy_signal_overlap
        WHERE computed_at = (SELECT MAX(computed_at) FROM strategy_signal_overlap)
-         AND regime_state IS NULL
+         AND regime_state = 'ANY'
          AND overlap_count >= $1
        ORDER BY jaccard_idx DESC NULLS LAST
        LIMIT $2
