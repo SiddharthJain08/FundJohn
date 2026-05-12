@@ -1,5 +1,10 @@
 'use strict';
 
+const { spawnSync } = require('child_process');
+const path = require('path');
+
+const PYTHON = process.env.PYTHON_BIN || 'python3';
+
 /**
  * comprehensive_review.js — MasterMindJohn (Opus 4.7, 1M ctx) weekly strategy
  * review. Runs every Saturday at 18:00 ET via systemd timer.
@@ -307,6 +312,69 @@ async function _reviewOne(strategy, { dryRun, notify }) {
     markdown_body:      markdown || out.text,
     cost_usd:           out.costUsd,
   };
+
+  // Regime-eligibility drift detection (added 2026-05-12)
+  // Re-runs regime_performance_analyzer over last 90d of signal_pnl, compares
+  // proposed eligible_regimes to current value in manifest.json. Surfaces drift
+  // in memo under regime_eligibility_drift. Does NOT auto-modify manifest —
+  // operator runs scripts/update_eligible_regimes.py to apply.
+  try {
+    // Read current eligible_regimes from manifest.json (top-level field per strategy).
+    const manifestPath = path.join(OPENCLAW_DIR, 'src/strategies/manifest.json');
+    const manifest = JSON.parse(require('fs').readFileSync(manifestPath, 'utf-8'));
+    const stratRecord = (manifest.strategies || {})[strategy.id] || {};
+    const current = stratRecord.eligible_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+
+    const analyzeResult = spawnSync(PYTHON, [
+      '-c',
+      `import json, sys, os
+sys.path.insert(0, '/root/openclaw/src')
+from backtest.regime_performance_analyzer import (
+    load_signal_pnl, load_thresholds_from_db, propose_eligible_regimes,
+)
+uri = os.environ['POSTGRES_URI']
+sid = os.environ['STRATEGY_ID']
+df = load_signal_pnl(uri, days=90)
+thresh = load_thresholds_from_db(uri)
+print(json.dumps(propose_eligible_regimes(df, sid, thresh)))`,
+    ], {
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        POSTGRES_URI: process.env.POSTGRES_URI || 'postgresql://openclaw:password@localhost:5432/openclaw',
+        STRATEGY_ID: strategy.id,
+      },
+    });
+
+    if (analyzeResult.status === 0 && analyzeResult.stdout) {
+      const proposed = JSON.parse(analyzeResult.stdout.trim() || '[]');
+      const added   = proposed.filter(r => !current.includes(r));
+      const dropped = current.filter(r => !proposed.includes(r));
+
+      if (added.length || dropped.length) {
+        const drift = {
+          current,
+          proposed,
+          added,
+          dropped,
+          note: 'Operator review required — run scripts/update_eligible_regimes.py to apply.',
+        };
+        memo.regime_eligibility_drift = drift;
+        // Also append to markdown_body so drift surfaces in the Discord post.
+        memo.markdown_body +=
+          `\n\n---\n## ⚠ Regime-Eligibility Drift Detected\n` +
+          `**Current:** ${current.join(', ') || '(none)'}\n` +
+          `**Proposed (90d live data):** ${proposed.join(', ') || '(none)'}\n` +
+          (added.length   ? `**Added:** ${added.join(', ')}\n`   : '') +
+          (dropped.length ? `**Dropped:** ${dropped.join(', ')}\n` : '') +
+          `\n_${drift.note}_`;
+      }
+    } else if (analyzeResult.stderr) {
+      console.error(`[comprehensive_review] regime analyzer failed for ${strategy.id}:`, analyzeResult.stderr.slice(0, 200));
+    }
+  } catch (e) {
+    console.error(`[comprehensive_review] regime drift check failed for ${strategy.id}:`, e.message);
+  }
 
   if (dryRun) {
     log(`DRY — would persist memo (cost=$${out.costUsd.toFixed(3)})`);

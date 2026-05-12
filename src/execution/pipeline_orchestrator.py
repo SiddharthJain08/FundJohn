@@ -41,21 +41,47 @@ LOCK_TTL        = 7200   # 2 hour lock TTL — covers worst-case collector
 COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
 COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
-# Ordered pipeline steps: key → script name (without .py)
-STEPS = [
+# ── LIVE-flag: Phase 3 cutover ────────────────────────────────────────────────
+# Operator flips OPENCLAW_REGIME_BLENDED_LIVE=1 in .env to swap submitters.
+# DO NOT flip in .env until the 30-day parity window is complete.
+# Rollback: set OPENCLAW_REGIME_BLENDED_LIVE=0 (or remove) + restart johnbot.
+# Zero data loss either way — parity_orders + alpaca_submissions persist.
+_LIVE_FLAG = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE', '0') == '1'
+
+if _LIVE_FLAG:
+    # LIVE: regime_blended_sizer_live is the production submitter.
+    # trade_parity step is dropped (scope-down decision: rollback = flip env var).
+    # trade_parity_capture is retained to keep the parity_orders mirror of
+    # production alpaca_submissions up to date for monitoring.
+    STEPS = [
+        ('collect',              'run_collector_once'),        # one cycle of collector.js
+        ('signals',              'engine'),                    # zero-LLM strategy executor
+        ('handoff',              'trade_handoff_builder'),     # structured handoff
+        ('trade',                'regime_blended_sizer_live'), # LIVE PRIMARY (real LLM confirmer)
+        ('alpaca',               'alpaca_executor'),           # submit to Alpaca
+        ('trade_parity_capture', 'trade_parity_capture'),      # mirror alpaca_submissions → parity_orders
+        ('reconcile',            'alpaca_reconcile'),          # reconcile fills
+        ('report',               'send_report'),               # post to Discord
+        ('health',               'daily_health_digest'),       # daily health digest
+    ]
+else:
+    # DRY-RUN (default, Phase 2): trade_agent_llm primary; regime_blended in parity.
     # queue_drain removed 2026-04-28: the fused-staging-approval worker now
     # backfills required columns inline at approval time, so the daily cycle
     # has nothing to drain. No replacement needed — staging approvals run
     # their own backfill against the master parquets directly.
-    ('collect',     'run_collector_once'),    # Node wrapper: one cycle of collector.js (parquet-primary)
-    ('signals',     'engine'),                # zero-LLM strategy executor → execution_signals
-    ('handoff',     'trade_handoff_builder'), # deterministic features → handoff:{date}:structured
-    ('trade',       'trade_agent_llm'),       # Deterministic sizer (LLM bypassed by default)
-    ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
-    ('reconcile',   'alpaca_reconcile'),      # Reconcile alpaca_submissions vs broker FILL activities
-    ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
-    ('health',      'daily_health_digest'),   # End-of-cycle: build + post daily health digest to #pipeline-feed
-]
+    STEPS = [
+        ('collect',              'run_collector_once'),           # Node wrapper: one cycle of collector.js (parquet-primary)
+        ('signals',              'engine'),                       # zero-LLM strategy executor → execution_signals
+        ('handoff',              'trade_handoff_builder'),        # deterministic features → handoff:{date}:structured
+        ('trade',                'trade_agent_llm'),              # Deterministic sizer (LLM bypassed by default)
+        ('trade_parity',         'regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
+        ('alpaca',               'alpaca_executor'),              # Auto-submit sized orders to Alpaca paper
+        ('trade_parity_capture', 'trade_parity_capture'),         # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
+        ('reconcile',            'alpaca_reconcile'),             # Reconcile alpaca_submissions vs broker FILL activities
+        ('report',               'send_report'),                  # Greenlist → #trade-signals, veto digest → #trade-reports
+        ('health',               'daily_health_digest'),          # End-of-cycle: build + post daily health digest to #pipeline-feed
+    ]
 
 # Budget check required before LLM-adjacent steps. `trade` is the only Claude
 # call in the 10am cycle now — all other steps are deterministic / zero-token.
@@ -75,8 +101,10 @@ STEP_FAILURE_CHANNEL = {
     'collect':     'data-alerts',
     'signals':     'data-alerts',
     'handoff':     'trade-reports',
-    'trade':       'trade-reports',
-    'alpaca':      'trade-reports',
+    'trade':        'trade-reports',
+    'trade_parity': 'data-alerts',
+    'alpaca':       'trade-reports',
+    'trade_parity_capture': 'data-alerts',
     'report':      'trade-reports',
     'health':      'pipeline-feed',
 }
@@ -672,8 +700,10 @@ if __name__ == '__main__':
         'collect':     ('databot',      f'Collecting data: {run_date}',             None),
         'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
         'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
-        'trade':       ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
-        'alpaca':      ('tradedesk',    f'Submitting Alpaca orders: {run_date}',    None),
+        'trade':        ('tradedesk', f'TradeJohn signal generation: {run_date}',        None),
+        'trade_parity': ('databot',   f'Running parity DRY-RUN: {run_date}',             None),
+        'alpaca':       ('tradedesk', f'Submitting Alpaca orders: {run_date}',            None),
+        'trade_parity_capture': ('databot', f'Capturing parity production: {run_date}', None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 
@@ -806,66 +836,4 @@ if __name__ == '__main__':
         sys.exit(1)
     finally:
         release_lock(r, run_date)
-
-def refresh_earnings_calendar():
-    """
-    Refresh earnings.parquet with upcoming earnings (next 90 days).
-    Uses FMP stable/earnings-calendar endpoint.
-    Merges into data/master/earnings.parquet.
-    """
-    import asyncio, os
-    import aiohttp
-    import pandas as pd
-    from datetime import date, timedelta
-    from pathlib import Path
-
-    FMP_KEY  = os.environ.get("FMP_API_KEY", "")
-    MASTER   = Path(__file__).resolve().parent.parent.parent / "data" / "master"
-    FMP_BASE = "https://financialmodelingprep.com/stable"
-
-    if not FMP_KEY:
-        log("[earnings] FMP_API_KEY not set — skipping")
-        return
-
-    async def _fetch():
-        from_d = date.today().isoformat()
-        to_d   = (date.today() + timedelta(days=90)).isoformat()
-        url    = f"{FMP_BASE}/earnings-calendar"
-        params = {"from": from_d, "to": to_d, "apikey": FMP_KEY}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as r:
-                if r.status == 200:
-                    return await r.json()
-                log(f"[earnings] HTTP {r.status}")
-                return []
-
-    try:
-        data = asyncio.run(_fetch())
-        if not data:
-            log("[earnings] No upcoming earnings returned")
-            return
-
-        df = pd.DataFrame(data).rename(columns={
-            "symbol":           "ticker",
-            "epsActual":        "eps_actual",
-            "epsEstimated":     "eps_estimated",
-            "revenueActual":    "revenue_actual",
-            "revenueEstimated": "revenue_estimated",
-            "lastUpdated":      "last_updated",
-        })
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        df = df.dropna(subset=["date", "ticker"])
-
-        out = MASTER / "earnings.parquet"
-        if out.exists():
-            existing = pd.read_parquet(out)
-            existing["date"] = pd.to_datetime(existing["date"], errors="coerce")
-            df = pd.concat([existing, df]).drop_duplicates(subset=["ticker","date"]).sort_values(["ticker","date"])
-
-        df.to_parquet(out, index=False)
-        upcoming = df[df["date"] >= pd.Timestamp.today()]
-        log(f"[earnings] Refreshed: {len(upcoming)} upcoming events across {upcoming['ticker'].nunique()} tickers")
-
-    except Exception as e:
-        log(f"[earnings] Refresh failed: {e}")
 

@@ -145,3 +145,35 @@ Before finalizing, mentally verify: `generate_signals(pd.DataFrame())` returns `
 
 ## Inputs
 Strategy spec: {{STRATEGY_SPEC}}
+
+---
+
+## Regime-partitioned backtest requirement (added 2026-05-12)
+
+Every strategy you implement MUST include a backtest call using
+`run_backtest_with_regime_partition()` from `src/backtest/quick_backtest.py`.
+The backtest output's `regime_partition` and `eligible_regimes_proposed`
+fields are required by the lifecycle promotion gate at candidate→staging.
+
+Skeleton:
+
+```python
+from backtest.quick_backtest import run_backtest_with_regime_partition
+
+trades_df = run_my_backtest(...)  # your existing backtest function;
+                                  # must return DataFrame with columns:
+                                  # [strategy_id, signal_date, regime_state, pnl, r_multiple]
+
+result = run_backtest_with_regime_partition(
+    trades_df, strategy_id=STRATEGY_ID,
+    thresholds={'min_sharpe': 0.5, 'min_trade_count': 20, 'min_avg_r': 0.0},
+)
+# result['eligible_regimes_proposed'] flows into manifest.json at promotion.
+# result['regime_partition'] surfaces in the strategy's metadata.backtest_results.
+```
+
+**The regime_state column on each trade row** must be the regime in effect at that signal_date. Use the historical_regimes parquet (or join `execution_signals.regime_state` if backtesting on production signals) — do NOT default everything to a single regime.
+
+**If your strategy has insufficient backtest data to qualify in any regime**, the lifecycle promotion gate will block it with `requires_regime_qualification`. Iterate on parameters or extend the backtest window until at least one regime qualifies. Strategies that truly have no regime edge should be marked `archived`, not promoted.
+
+**Adding eligible_regimes manually** is also acceptable for strategies with strong research/literature support but limited backtest history. Set `record.metadata['eligible_regimes'] = ['LOW_VOL', ...]` directly in the strategy's metadata at registration time. The lifecycle gate honors explicit eligible_regimes ahead of auto-derivation.
