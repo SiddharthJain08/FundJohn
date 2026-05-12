@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-04-27T04:02:11.248Z",
+  "updated_at": "2026-05-09T14:22:22.331902+00:00",
   "strategies": {
     "S_3d_pca_characteristic_factors": {
       "state": "candidate",
@@ -214,6 +214,11 @@
           "reason": "sync-test revert",
           "metadata": {}
         }
+      ],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING",
+        "HIGH_VOL"
       ]
     },
     "S10_quality_value": {
@@ -254,7 +259,12 @@
         "class": "JTMomentum12Mo",
         "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
       },
-      "history": []
+      "history": [],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING",
+        "HIGH_VOL"
+      ]
     },
     "S23_regime_momentum": {
       "state": "live",
@@ -314,6 +324,10 @@
             "preserve_execution": true
           }
         }
+      ],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING"
       ]
     },
     "S_HV7_iv_crush_fade": {
@@ -1104,6 +1118,10 @@
           "reason": "Manual approve via dashboard",
           "metadata": {}
         }
+      ],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING"
       ]
     },
     "S_HV13_call_put_iv_spread_cohort2026": {
