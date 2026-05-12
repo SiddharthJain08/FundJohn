@@ -4002,8 +4002,8 @@ async function _rgToggle(strategy, regime, currentSet) {
     return;
   }
   const reason = prompt(
-    'Reason for changing ' + strategy + '?\n' +
-    'Before: ' + JSON.stringify([...currentSet]) + '\n' +
+    'Reason for changing ' + strategy + '?\\n' +
+    'Before: ' + JSON.stringify([...currentSet]) + '\\n' +
     'After:  ' + JSON.stringify([...next].sort()),
     ''
   );
