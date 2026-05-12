@@ -638,6 +638,45 @@ def check_regime_blended_gate_b():
 
 ROLLUP_STALE_HOURS = 26
 ROLLUP_VERY_STALE_HOURS = 72
+MANIFEST_REPO_ROOT_DEFAULT = '/root/openclaw'
+
+
+@_check('manifest_eligibility_drift')
+def check_manifest_eligibility_drift():
+    """Detect uncommitted manifest.json eligible_regimes changes vs git HEAD.
+
+    Operator-initiated trim/expand mutates manifest.json directly. The gate
+    sees changes immediately, but if the change is never committed, redeploys
+    or new clones will silently revert. This check surfaces drift every cycle
+    until resolved.
+
+    PASS:  diff contains no eligible_regimes lines
+    WARN:  eligible_regimes lines differ from HEAD (DRY-RUN)
+    FAIL:  eligible_regimes lines differ AND LIVE flag is set
+    WARN:  git unavailable or non-repo
+    """
+    name = 'manifest_eligibility_drift'
+    repo_root = os.environ.get('OPENCLAW_REPO_ROOT', MANIFEST_REPO_ROOT_DEFAULT)
+    live = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE') == '1'
+    try:
+        proc = subprocess.run(
+            ['git', 'diff', '--unified=0', 'HEAD',
+             '--', 'src/strategies/manifest.json'],
+            cwd=repo_root, capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        return _warn(name, f'git unavailable: {exc!s}')
+    diff_lines = [ln for ln in proc.stdout.splitlines()
+                  if ln.startswith(('+', '-'))
+                  and 'eligible_regimes' in ln
+                  and not ln.startswith(('+++', '---'))]
+    if not diff_lines:
+        return _ok(name, 'manifest eligible_regimes match HEAD')
+    summary = f'{len(diff_lines)} eligible_regimes line(s) differ from HEAD'
+    if live:
+        return _fail(name,
+                     f'{summary} (LIVE mode — commit or revert before next cycle)')
+    return _warn(name, f'{summary} (DRY-RUN — commit when satisfied)')
 
 
 def _latest_rollup_run_at(uri: str):
