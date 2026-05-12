@@ -724,6 +724,41 @@ PARAMS_CONSISTENCY_FAIL_THRESHOLD = 5
 PROPOSALS_AGED_WARN_DAYS = 14
 PROPOSALS_AGED_FAIL_DAYS = 30
 PROPOSALS_AGED_FAIL_COUNT = 10
+DRIFT_WARN_COUNT_THRESHOLD = 3
+DRIFT_FAIL_WARN_COUNT_THRESHOLD = 10
+
+
+def _drift_summary():
+    """Indirection seam for the drift-alerts check."""
+    sys.path.insert(0, str(ROOT / 'src'))
+    from metrics.regime_param_drift import latest_drift_summary
+    return latest_drift_summary()
+
+
+@_check('regime_param_drift_alerts')
+def check_regime_param_drift_alerts():
+    """Surface drift between live regime perf and priors/applied baselines.
+
+    PASS: 0 FAIL; WARN count < DRIFT_WARN_COUNT_THRESHOLD
+    WARN: WARN count in [DRIFT_WARN_COUNT_THRESHOLD, DRIFT_FAIL_WARN_COUNT_THRESHOLD)
+    FAIL: any FAIL severity OR WARN count >= DRIFT_FAIL_WARN_COUNT_THRESHOLD
+    WARN: query error
+    """
+    name = 'regime_param_drift_alerts'
+    try:
+        summary = _drift_summary()
+    except Exception as exc:
+        return _warn(name, f'drift query failed: {exc!s}')
+    ok = int(summary.get('OK', 0))
+    warn = int(summary.get('WARN', 0))
+    fail = int(summary.get('FAIL', 0))
+    insuf = int(summary.get('INSUFFICIENT', 0))
+    detail = (f'{ok} OK, {warn} WARN, {fail} FAIL, {insuf} insufficient-data')
+    if fail > 0 or warn >= DRIFT_FAIL_WARN_COUNT_THRESHOLD:
+        return _fail(name, detail)
+    if warn >= DRIFT_WARN_COUNT_THRESHOLD:
+        return _warn(name, detail)
+    return _ok(name, detail)
 
 
 def _query_proposals_backlog(sql: str, params: tuple = ()):
