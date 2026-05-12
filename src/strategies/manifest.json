@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-09T14:22:22.331902+00:00",
+  "updated_at": "2026-05-12T19:25:51.365Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "staging",
@@ -84,8 +84,8 @@
       ]
     },
     "S_transitioning_overbought_revert": {
-      "state": "staging",
-      "state_since": "2026-05-02T22:08:38.804Z",
+      "state": "live",
+      "state_since": "2026-05-12T19:25:49.528Z",
       "metadata": {
         "canonical_file": "S_transitioning_overbought_revert.py",
         "class": "TransitioningOverboughtRevert",
@@ -95,9 +95,9 @@
           "regime_partition": {
             "LOW_VOL": {
               "trade_count": 0,
-              "sharpe": 0.0,
-              "avg_r_multiple": 0.0,
-              "win_rate": 0.0
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
             },
             "TRANSITIONING": {
               "trade_count": 10790,
@@ -107,15 +107,15 @@
             },
             "HIGH_VOL": {
               "trade_count": 0,
-              "sharpe": 0.0,
-              "avg_r_multiple": 0.0,
-              "win_rate": 0.0
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
             },
             "CRISIS": {
               "trade_count": 0,
-              "sharpe": 0.0,
-              "avg_r_multiple": 0.0,
-              "win_rate": 0.0
+              "sharpe": 0,
+              "avg_r_multiple": 0,
+              "win_rate": 0
             }
           },
           "eligible_regimes_proposed": [],
@@ -152,12 +152,28 @@
             },
             "candidate_id": "13d84c26-437f-4a8a-bd14-a9281e07020c"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-12T19:25:33.288720+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 14.03, DD 0.7%, trades 87",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:25:49.528Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
         }
       ]
     },
     "S_reversal_momentum_transition_earnings": {
-      "state": "staging",
-      "state_since": "2026-05-02T22:08:38.804Z",
+      "state": "live",
+      "state_since": "2026-05-12T19:25:51.365Z",
       "metadata": {
         "canonical_file": "S_reversal_momentum_transition_earnings.py",
         "class": "ReversalMomentumTransitionEarnings",
@@ -193,6 +209,22 @@
             },
             "candidate_id": "5839dc1e-1dac-44d6-83a7-01ec2fa75cf4"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-12T19:25:23.393289+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.03, DD 1.1%, trades 330",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:25:51.365Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -289,14 +321,23 @@
       ]
     },
     "S_constrained_gmv_vcv_dynamics": {
-      "state": "candidate",
-      "state_since": "2026-05-02T00:00:00.000000+00:00",
+      "state": "live",
+      "state_since": "2026-05-12T19:24:52.679Z",
       "metadata": {
         "canonical_file": "S_constrained_gmv_vcv_dynamics.py",
         "class": "ConstrainedGMVVCVDynamics",
         "description": "Constrained long-only GMV with EWMA volatility dynamics: asset-level position caps substitute VCV shrinkage while EWMA time-series vol is retained on diagonal."
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:24:52.679Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        }
+      ]
     },
     "S_intl_momentum_attention_regime": {
       "state": "live",
@@ -334,10 +375,6 @@
           "reason": "Manual approve via dashboard",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_crisp_signal_aware_hrp": {
@@ -409,8 +446,8 @@
       ]
     },
     "S_price_earnings_momentum_drift": {
-      "state": "candidate",
-      "state_since": "2026-04-27T03:30:26.384532+00:00",
+      "state": "live",
+      "state_since": "2026-05-12T19:24:47.152Z",
       "metadata": {
         "canonical_file": "s_price_earnings_momentum_drift.py",
         "class": "S_price_earnings_momentum_drift",
@@ -453,6 +490,14 @@
           "timestamp": "2026-04-27T03:30:26.384532+00:00",
           "actor": "auto_backtest",
           "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:24:47.152Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
           "metadata": {}
         }
       ]
@@ -572,11 +617,6 @@
           "reason": "sync-test revert",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING",
-        "HIGH_VOL"
       ]
     },
     "S10_quality_value": {
@@ -617,12 +657,7 @@
         "class": "JTMomentum12Mo",
         "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
       },
-      "history": [],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING",
-        "HIGH_VOL"
-      ]
+      "history": []
     },
     "S23_regime_momentum": {
       "state": "live",
@@ -682,10 +717,6 @@
             "preserve_execution": true
           }
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_HV7_iv_crush_fade": {
@@ -1508,10 +1539,6 @@
           "reason": "Manual approve via dashboard",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_HV13_call_put_iv_spread_cohort2026": {
@@ -2315,8 +2342,8 @@
       ]
     },
     "S_ivol_mispricing_asymmetry": {
-      "state": "candidate",
-      "state_since": "2026-04-27T02:56:07.804646+00:00",
+      "state": "live",
+      "state_since": "2026-05-12T19:24:49.128Z",
       "metadata": {
         "canonical_file": "s_ivol_mispricing_asymmetry.py",
         "class": "IvolMispricingAsymmetry",
@@ -2337,6 +2364,14 @@
           "timestamp": "2026-04-27T02:56:07.804646+00:00",
           "actor": "migration:fused_approval",
           "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:24:49.128Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
           "metadata": {}
         }
       ]
@@ -2522,8 +2557,8 @@
       ]
     },
     "S_bankruptcy_risk_anomaly": {
-      "state": "candidate",
-      "state_since": "2026-04-27T03:39:12.355575+00:00",
+      "state": "live",
+      "state_since": "2026-05-12T19:24:54.260Z",
       "metadata": {
         "canonical_file": "s_bankruptcy_risk_anomaly.py",
         "class": "S_bankruptcy_risk_anomaly",
@@ -2565,6 +2600,14 @@
           "timestamp": "2026-04-27T03:39:12.355575+00:00",
           "actor": "auto_backtest",
           "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-12T19:24:54.260Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
           "metadata": {}
         }
       ]

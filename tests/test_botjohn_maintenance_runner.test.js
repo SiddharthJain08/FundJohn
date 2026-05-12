@@ -372,18 +372,41 @@ test('main(): mode passed through deps overrides argv', async () => {
     'posted message must lead with Saturday template (clipped)');
 });
 
-test('main(): wrapper looks up botjohn-log webhook (not #general)', async () => {
+test('main(): all three modes look up botjohn-log webhook (not #general)', async () => {
   // 2026-05-07: dest channel switched from #general to #botjohn-log so
-  // maintenance posts land where the operator actually watches. Both
-  // success and fallback paths must request the same channel key.
-  const stub = _stubFor({});
+  // maintenance posts land where the operator actually watches. The
+  // single shared webhook lookup in main() means every mode (daily,
+  // saturday, saturday-verify) must request the same channel key — and
+  // the fallback path must too.
+  for (const mode of ['daily', 'saturday', 'saturday-verify']) {
+    const result = mode === 'saturday'        ? '✅ **Saturday research — 2026-05-02**\nbody'
+                 : mode === 'saturday-verify' ? '✅ **Saturday verify — 2026-05-03**\nbody'
+                 :                              '✅ **Daily maintenance — 2026-05-06**\nbody';
+    const stub = _stubFor({
+      runClaudeBin: async () => ({ result, costUsd: 0.10, durationMs: 5_000, raw: '{}' }),
+    });
+    process.exitCode = 0;
+    await runner.main({ ...stub.deps, mode });
+    const lookups = stub.calls.webhook.map(([_, ch]) => ch);
+    assert.ok(lookups.includes('botjohn-log'),
+      `mode=${mode}: webhook lookup must request 'botjohn-log', saw ${JSON.stringify(lookups)}`);
+    assert.ok(!lookups.includes('general'),
+      `mode=${mode}: wrapper must not fall back to 'general' channel key, saw ${JSON.stringify(lookups)}`);
+  }
+});
+
+test('main(): fallback path also looks up botjohn-log', async () => {
+  // postFallback shares the same getWebhookFn as the success path, but
+  // pin it down with an explicit assertion so a future change to the
+  // fallback signature can't silently re-introduce #general.
+  const stub = _stubFor({
+    runClaudeBin: async () => { throw new Error('claude-bin upstream failure: forced for test'); },
+  });
   process.exitCode = 0;
   await runner.main(stub.deps);
   const lookups = stub.calls.webhook.map(([_, ch]) => ch);
   assert.ok(lookups.includes('botjohn-log'),
-    `success-path webhook lookup must request 'botjohn-log', saw ${JSON.stringify(lookups)}`);
-  assert.ok(!lookups.includes('general'),
-    `wrapper must not fall back to 'general' channel key, saw ${JSON.stringify(lookups)}`);
+    `fallback path webhook lookup must request 'botjohn-log', saw ${JSON.stringify(lookups)}`);
 });
 
 test('main(): unknown mode posts no report and exits 1', async () => {
