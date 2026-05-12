@@ -704,6 +704,7 @@ app.get('/api/strategies', async (req, res) => {
         is_stale:           isStale,
         regime_active:      regimeActive,
         active_in_regimes:  activeRegimes,
+        eligible_regimes:   Array.isArray(rec.eligible_regimes) ? rec.eligible_regimes : null,
         current_regime:     currentRegime,
         description:        rec.metadata?.description || '',
         state_since:        rec.state_since || null,
@@ -755,6 +756,7 @@ app.get('/api/strategies', async (req, res) => {
         is_stale:           false,
         regime_active:      true,
         active_in_regimes:  [],
+        eligible_regimes:   null,
         current_regime:     currentRegime,
         description:        '',
         state_since:        null,
@@ -1891,17 +1893,6 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
-#rg-grid td{padding:6px 8px;border:1px solid var(--border2);cursor:pointer;text-align:center;min-width:130px;line-height:1.3;vertical-align:middle}
-#rg-grid td.rg-name{cursor:default;text-align:left;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);min-width:auto;white-space:nowrap}
-#rg-grid td.rg-eligible{background:rgba(60,160,90,0.18);color:#9fdfae}
-#rg-grid td.rg-ineligible{background:rgba(170,80,80,0.18);color:#e8a8a8;opacity:0.75}
-#rg-grid td.rg-no-data{background:transparent;color:var(--muted);opacity:0.55}
-#rg-grid td:hover:not(.rg-name){outline:1px solid var(--blue)}
-#rg-grid td .rg-pnl{display:block;font-size:10px;opacity:0.85;margin-top:2px}
-#rg-grid th{font-weight:600;font-size:11px;color:var(--muted)}
-#rg-audit td{padding:5px 8px;border-bottom:1px solid var(--border2);vertical-align:top}
-#rg-audit td:nth-child(1){color:var(--muted);font-size:10px;white-space:nowrap}
-#rg-audit td:nth-child(4){font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}
 #research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden}
 .rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -2208,6 +2199,9 @@ body.rs-chat-locked{overflow:hidden}
 .st-regime-cell .st-rg-val{font-size:10px;font-weight:700;margin-top:1px}
 .st-regime-cell.st-rg-na .st-rg-val{opacity:0.55;font-weight:500}
 .st-regime-cell.st-rg-current::after{content:'';position:absolute;top:1px;right:2px;width:5px;height:5px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px var(--blue)}
+.st-regime-cell.st-rg-ineligible{opacity:0.32;filter:grayscale(1);text-decoration:line-through;text-decoration-thickness:1px}
+.st-regime-cell.st-rg-editable{cursor:pointer;transition:transform .08s ease, box-shadow .08s ease}
+.st-regime-cell.st-rg-editable:hover{transform:translateY(-1px);box-shadow:0 0 0 1.5px var(--blue);opacity:1;filter:none}
 .st-rg-LOW_VOL      {color:#fff;background:var(--green)}
 .st-rg-TRANSITIONING{color:#000;background:var(--yellow)}
 .st-rg-HIGH_VOL     {color:#fff;background:var(--orange)}
@@ -2671,7 +2665,6 @@ body.rs-chat-locked{overflow:hidden}
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
   <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
   <button class="nav-btn" id="nav-research" onclick="showResearch()">Research</button>
-  <button class="nav-btn" id="nav-regime" onclick="showRegime()">Regime</button>
   <span id="pipeline-badge">Loading pipeline...</span>
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
@@ -2905,51 +2898,6 @@ body.rs-chat-locked{overflow:hidden}
     </div>
   </div>
 </div><!-- #research-page -->
-
-<!-- ── Regime eligibility page ────────────────────────────────────────────── -->
-<div id="regime-page" style="display:none;padding:20px 24px;overflow-y:auto;background:var(--bg);position:absolute;inset:48px 0 0 0">
-  <header style="margin-bottom:16px">
-    <h2 style="margin:0 0 6px 0;font-size:16px;color:var(--text)">Regime Eligibility — Live Metrics</h2>
-    <p style="margin:0;color:var(--muted);font-size:12px;max-width:900px">
-      Operator-driven trim/expand of <code>eligible_regimes</code> based on
-      live per-strategy×regime PnL (rollup nightly). Click a cell to toggle
-      eligibility. Changes apply on the next strategy cycle —
-      <code>regime_gate</code> re-reads <code>manifest.json</code> on every call.
-      <strong>Remember to commit the manifest</strong> after edits — the
-      <code>manifest_eligibility_drift</code> doctor check WARNs until you do.
-    </p>
-    <div id="rg-status" style="padding:6px 0;font-size:11px;color:var(--muted)"></div>
-  </header>
-
-  <table id="rg-grid" style="border-collapse:collapse;width:100%;max-width:1100px;font-size:12px">
-    <thead>
-      <tr style="text-align:left">
-        <th style="padding:8px 10px;border-bottom:1px solid var(--border2)">Strategy</th>
-        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">LOW_VOL</th>
-        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">TRANSITIONING</th>
-        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">HIGH_VOL</th>
-        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">CRISIS</th>
-      </tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-
-  <section style="margin-top:30px;max-width:1100px">
-    <h3 style="margin:0 0 8px 0;font-size:13px;color:var(--text)">Recent eligibility changes</h3>
-    <table id="rg-audit" style="border-collapse:collapse;width:100%;font-size:11px;color:var(--text)">
-      <thead>
-        <tr style="text-align:left;color:var(--muted)">
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">When</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Actor</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Before → After</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Reason</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </section>
-</div><!-- #regime-page -->
 
 <!-- Data usage panel (opened from the strategies page Data tile) -->
 <div class="paper-modal data-usage-modal" id="data-usage-modal">
@@ -3879,8 +3827,6 @@ function _hideAllPages() {
   if (st) st.style.display = 'none';
   const rp = document.getElementById('research-page');
   if (rp) rp.style.display = 'none';
-  const rg = document.getElementById('regime-page');
-  if (rg) rg.style.display = 'none';
 }
 
 function showMarket() {
@@ -3904,138 +3850,6 @@ async function showStrategies() {
   await loadStrategies();
 }
 
-// ── Regime eligibility page ───────────────────────────────────────────────────
-const _RG_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
-
-async function showRegime() {
-  _hideAllPages();
-  document.getElementById('regime-page').style.display = 'block';
-  _setNavActive('regime');
-  await _rgLoad();
-}
-
-async function _rgLoad() {
-  const status = document.getElementById('rg-status');
-  status.textContent = 'Loading…';
-  try {
-    const r = await fetch('/api/regime-eligibility');
-    if (!r.ok) throw new Error('GET failed: ' + r.status);
-    const data = await r.json();
-    _rgRenderGrid(data.strategies || []);
-    const ar = await fetch('/api/regime-eligibility/audit?limit=25');
-    if (ar.ok) _rgRenderAudit(await ar.json());
-    const withMetrics = (data.strategies || []).filter(s => s.metrics && Object.keys(s.metrics).length).length;
-    status.textContent =
-      (data.strategies || []).length + ' strategies · ' + withMetrics +
-      ' with live metrics · click a cell to toggle eligibility';
-  } catch (err) {
-    status.textContent = 'Load failed: ' + err.message;
-  }
-}
-
-function _rgFmtCell(td, isEligible, m) {
-  if (!m || !m.trade_count) {
-    td.className = 'rg-no-data';
-    td.innerHTML = (isEligible ? '✓' : '✗') + ' <span class="rg-pnl">no closed trades</span>';
-    return;
-  }
-  td.className = isEligible ? 'rg-eligible' : 'rg-ineligible';
-  const winRate = ((m.win_count / m.trade_count) * 100).toFixed(0);
-  const avg = m.avg_pnl_pct != null ? m.avg_pnl_pct.toFixed(2) : '?';
-  const sh = m.sharpe_proxy != null ? m.sharpe_proxy.toFixed(2) : '?';
-  td.innerHTML = (isEligible ? '✓' : '✗') +
-    '<span class="rg-pnl">' + m.trade_count + 't · ' + winRate + '%w · avg ' + avg + '%<br>Sh ' + sh + '</span>';
-}
-
-function _rgRenderGrid(strategies) {
-  const tbody = document.querySelector('#rg-grid tbody');
-  tbody.innerHTML = '';
-  const sorted = [...strategies].sort((a, b) => a.strategy_id.localeCompare(b.strategy_id));
-  for (const s of sorted) {
-    const tr = document.createElement('tr');
-    const name = document.createElement('td');
-    name.className = 'rg-name';
-    name.textContent = s.strategy_id;
-    tr.appendChild(name);
-    const eligible = new Set(s.eligible_regimes || _RG_REGIMES); // null = all
-    for (const regime of _RG_REGIMES) {
-      const td = document.createElement('td');
-      const isEligible = eligible.has(regime);
-      const rm = s.metrics && s.metrics[regime];
-      const m = rm ? (rm[90] || rm[0] || rm[30]) : null;
-      _rgFmtCell(td, isEligible, m);
-      td.onclick = () => _rgToggle(s.strategy_id, regime, eligible);
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-  }
-}
-
-function _rgRenderAudit(rows) {
-  const tbody = document.querySelector('#rg-audit tbody');
-  tbody.innerHTML = '';
-  if (!rows.length) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="5" style="color:var(--muted);padding:10px">No eligibility changes recorded yet.</td>';
-    tbody.appendChild(tr);
-    return;
-  }
-  for (const row of rows) {
-    const tr = document.createElement('tr');
-    const when = row.changed_at ? new Date(row.changed_at).toLocaleString() : '';
-    tr.innerHTML =
-      '<td>' + when + '</td>' +
-      '<td>' + (row.actor || '') + '</td>' +
-      '<td>' + (row.strategy_id || '') + '</td>' +
-      '<td>' + JSON.stringify(row.before_regimes) + ' → ' + JSON.stringify(row.after_regimes) + '</td>' +
-      '<td>' + (row.reason || '') + '</td>';
-    tbody.appendChild(tr);
-  }
-}
-
-async function _rgToggle(strategy, regime, currentSet) {
-  const next = new Set(currentSet);
-  if (next.has(regime)) next.delete(regime);
-  else next.add(regime);
-  if (next.size === 0) {
-    alert('Strategy must be eligible in at least one regime.');
-    return;
-  }
-  const reason = prompt(
-    'Reason for changing ' + strategy + '?\\n' +
-    'Before: ' + JSON.stringify([...currentSet]) + '\\n' +
-    'After:  ' + JSON.stringify([...next].sort()),
-    ''
-  );
-  if (reason === null) return; // cancelled
-  let actor = window.localStorage.getItem('rg_operator');
-  if (!actor) {
-    actor = prompt('Operator name (saved for session):', '');
-    if (!actor) return;
-    window.localStorage.setItem('rg_operator', actor);
-  }
-  const status = document.getElementById('rg-status');
-  status.textContent = 'Updating ' + strategy + '…';
-  try {
-    const res = await fetch('/api/regime-eligibility/' + encodeURIComponent(strategy), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        regimes: [...next],
-        actor: 'operator:' + actor,
-        reason,
-        source: 'dashboard',
-      }),
-    });
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      throw new Error(e.error || res.statusText);
-    }
-    await _rgLoad();
-  } catch (err) {
-    status.textContent = 'Update failed: ' + err.message;
-  }
-}
 
 // ── Research page ─────────────────────────────────────────────────────────────
 let _researchState = {
@@ -5339,36 +5153,51 @@ const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
 function _regimeBreakdown(r) {
   const breakdown = r.live_regime_breakdown || {};
-  const active    = r.active_in_regimes || [];
+  // Eligibility source-of-truth = manifest.eligible_regimes (what
+  // regime_gate.is_eligible() actually enforces). Fall back to
+  // active_in_regimes from strategy_registry when manifest has no field
+  // (legacy strategies — gate treats those as eligible-everywhere).
+  const eligible = Array.isArray(r.eligible_regimes)
+    ? r.eligible_regimes
+    : (r.active_in_regimes && r.active_in_regimes.length ? r.active_in_regimes : _REGIME_AXIS);
   const current   = r.current_regime || null;
-  // Only show cells for regimes the strategy is declared active in.
-  // The display order follows _REGIME_AXIS so adjacent strategies line
-  // up visually when comparing across the table.
-  const visible = _REGIME_AXIS.filter(rg => active.includes(rg));
-  if (!visible.length) return '<span style="color:var(--dim)">—</span>';
-  const cells = visible.map(rg => {
+  const sid       = r.strategy_id;
+  const editable  = r.state === 'live';
+  const cells = _REGIME_AXIS.map(rg => {
+    const isEligible = eligible.includes(rg);
     const b      = breakdown[rg];
     const trades = b && b.trades ? parseInt(b.trades) : 0;
     const arrPct = (b && b.arr != null) ? parseFloat(b.arr) * 100 : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (!trades)        klass.push('st-rg-na');
+    if (!isEligible)    klass.push('st-rg-ineligible');
+    if (editable)       klass.push('st-rg-editable');
     const valTxt = arrPct != null
       ? (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%'
       : '—';
-    const ttl = !trades
-      ? rg + ': no live trades yet'
-      : rg + ': ARR ' + valTxt
+    const statsLine = !trades
+      ? 'no live trades'
+      : 'ARR ' + valTxt
         + ' · ADR ' + (b.adr != null ? ((b.adr * 100 >= 0 ? '+' : '') + (b.adr * 100).toFixed(3) + '%') : '—')
         + ' · ACT ' + (b.act != null ? b.act.toFixed(1) + 'd' : '—')
         + ' · Win ' + (b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—')
         + ' · ' + trades + ' trades';
-    return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}">
+    const eligLine = isEligible ? 'eligible' : 'NOT eligible';
+    const editHint = editable ? ' · click to toggle' : '';
+    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint;
+    const onclick = editable
+      ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\`
+      : '';
+    return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}"\${onclick}>
               <span class="st-rg-tag">\${rg}</span>
               <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
   }).join('');
-  return \`<div class="st-regime-grid" title="Per-regime live ARR · only the strategy's active regimes are shown">\${cells}</div>\`;
+  const gridTitle = editable
+    ? 'Per-regime live ARR · click a regime to toggle eligibility'
+    : "Per-regime live ARR · operator toggle available only for state='live'";
+  return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
 // Backwards-compat shim — left in case other call sites reference it; the
@@ -5429,6 +5258,64 @@ function _stToggleExpand(sid) {
     _stExpandedSid = sid;
     _renderActiveStack(strategiesData.filter(_inActiveStack));
     _stPaintExpand(sid);
+  }
+}
+
+// Click on a regime cell → toggle eligibility for a live strategy. Stops
+// propagation so the row-expand handler doesn't also fire. Writes through
+// the existing /api/regime-eligibility endpoint (audit + atomic manifest
+// rewrite); regime_gate picks up the change on the next is_eligible() call
+// with no service restart.
+async function _stToggleRegimeEligibility(event, sid, regime) {
+  if (event && event.stopPropagation) event.stopPropagation();
+  const row = (strategiesData || []).find(r => r.strategy_id === sid);
+  if (!row) return;
+  if (row.state !== 'live') {
+    alert("Eligibility editing is restricted to state='live' strategies.");
+    return;
+  }
+  const _ALL = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+  const current = Array.isArray(row.eligible_regimes)
+    ? row.eligible_regimes.slice()
+    : _ALL.slice();
+  const next = new Set(current);
+  if (next.has(regime)) next.delete(regime);
+  else next.add(regime);
+  if (next.size === 0) {
+    alert('Strategy must remain eligible in at least one regime. Trim a different regime first, or expand another before removing this one.');
+    return;
+  }
+  const reason = prompt(
+    'Reason for changing ' + sid + ' eligibility?\\n' +
+    'Before: ' + JSON.stringify(current) + '\\n' +
+    'After:  ' + JSON.stringify([...next]),
+    ''
+  );
+  if (reason === null) return;
+  let actor = window.localStorage.getItem('rg_operator');
+  if (!actor) {
+    actor = prompt('Operator name (saved for the session):', '');
+    if (!actor) return;
+    window.localStorage.setItem('rg_operator', actor);
+  }
+  try {
+    const res = await fetch('/api/regime-eligibility/' + encodeURIComponent(sid), {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        regimes: [...next],
+        actor:   'operator:' + actor,
+        reason,
+        source:  'strategies-page',
+      }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || res.statusText);
+    }
+    await loadStrategies(); // refresh the row, including its eligibility marks
+  } catch (err) {
+    alert('Eligibility update failed: ' + err.message);
   }
 }
 function _stCloseExpand() {
