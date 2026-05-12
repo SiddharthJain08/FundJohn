@@ -261,6 +261,101 @@ def _decide(*, proposal_id, actor, reason, source, overrides, terminal_status):
     }
 
 
+def _current_size_scalar(strategy_id: str, regime_state: str):
+    """Indirection seam: returns the current size_scalar from
+    strategy_regime_params (or None if no row). Used by auto_approve for
+    the bounded-delta gate."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT size_scalar
+                  FROM strategy_regime_params
+                 WHERE strategy_id = %s AND regime_state = %s
+            """, (strategy_id, regime_state))
+            row = cur.fetchone()
+    return row[0] if row else None
+
+
+def auto_approve(*, proposal_id: int) -> dict:
+    """Auto-approve a pending proposal if it meets all rails. No-op otherwise.
+
+    Env-gated by OPENCLAW_PROPOSAL_AUTOAPPROVE=1 (default OFF). When enabled,
+    bounded by:
+      OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE (default 0.85)
+      OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA (default 0.20)
+      OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA (default 0.01)
+
+    Returns one of:
+      {'status': 'approved', ...}        — auto-approved
+      {'status': 'skipped', 'reason': ...} — failed a rail OR feature disabled
+    Raises:
+      KeyError if proposal_id doesn't exist.
+      ValueError if proposal not pending.
+    """
+    enabled = os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE') == '1'
+    if not enabled:
+        return {'id': proposal_id, 'status': 'skipped',
+                'reason': 'auto-approval feature disabled (OPENCLAW_PROPOSAL_AUTOAPPROVE != 1)'}
+
+    min_conf  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.85'))
+    max_size  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA', '0.20'))
+    max_stop  = float(os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA', '0.01'))
+
+    # Load proposal without locking (peek). The actual approve below re-locks.
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, strategy_id, regime_state, status,
+                       proposed_eligible, proposed_size_scalar,
+                       proposed_stop_pct, proposed_target_pct,
+                       proposed_max_hold_days,
+                       confidence, reasoning, memo_id
+                  FROM strategy_regime_param_proposals
+                 WHERE id = %s
+            """, (proposal_id,))
+            row = cur.fetchone()
+    if row is None:
+        raise KeyError(f'proposal {proposal_id} not found')
+    prop = dict(zip(_PENDING_COLS, row))
+    if prop['status'] != 'pending':
+        raise ValueError(f'proposal {proposal_id} is not pending (status={prop["status"]!r})')
+
+    # Rail 1: confidence
+    conf = prop['confidence']
+    if conf is None or float(conf) < min_conf:
+        return {'id': proposal_id, 'status': 'skipped',
+                'reason': f'confidence {conf} below threshold {min_conf}'}
+
+    # Rail 2: size_scalar delta (only checked if proposing a size change)
+    if prop['proposed_size_scalar'] is not None:
+        current_size = _current_size_scalar(prop['strategy_id'], prop['regime_state'])
+        current_size_f = float(current_size) if current_size is not None else 0.0
+        proposed_size_f = float(prop['proposed_size_scalar'])
+        if abs(proposed_size_f - current_size_f) > max_size:
+            return {'id': proposal_id, 'status': 'skipped',
+                    'reason': f'size delta |{proposed_size_f}-{current_size_f}| > {max_size}'}
+
+    # Rail 3: stop_pct delta (only checked if proposing a stop change)
+    if prop['proposed_stop_pct'] is not None:
+        # Without a current_stop snapshot we treat the absolute proposed stop
+        # as the delta (worst-case bound). Conservative.
+        proposed_stop_f = abs(float(prop['proposed_stop_pct']))
+        if proposed_stop_f > max_stop:
+            return {'id': proposal_id, 'status': 'skipped',
+                    'reason': f'stop_pct |{proposed_stop_f}| > {max_stop}'}
+
+    # All rails passed → route through the normal approve path. Use an
+    # actor tag that clearly identifies this as auto-approval for audit.
+    auto_actor = 'auto-approval'
+    auto_reason = (
+        f'auto-approved: confidence={conf:.2f} >= {min_conf}, '
+        f'rails (size_delta<={max_size}, stop<={max_stop}) all passed'
+    )
+    return _decide(proposal_id=proposal_id, actor=auto_actor,
+                    reason=auto_reason, source='auto-approval',
+                    overrides=None, terminal_status='approved')
+
+
 def list_proposals(*, status: str = 'pending', limit: int = 50,
                    strategy_id: Optional[str] = None) -> list[dict]:
     sql = """
