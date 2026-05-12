@@ -53,6 +53,7 @@ STEPS = [
     ('trade',       'trade_agent_llm'),       # Deterministic sizer (LLM bypassed by default)
     ('trade_parity','regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
     ('alpaca',      'alpaca_executor'),       # Auto-submit sized orders to Alpaca paper
+    ('trade_parity_capture', 'trade_parity_capture'),  # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
     ('reconcile',   'alpaca_reconcile'),      # Reconcile alpaca_submissions vs broker FILL activities
     ('report',      'send_report'),           # Greenlist → #trade-signals, veto digest → #trade-reports
     ('health',      'daily_health_digest'),   # End-of-cycle: build + post daily health digest to #pipeline-feed
@@ -79,6 +80,7 @@ STEP_FAILURE_CHANNEL = {
     'trade':        'trade-reports',
     'trade_parity': 'data-alerts',
     'alpaca':       'trade-reports',
+    'trade_parity_capture': 'data-alerts',
     'report':      'trade-reports',
     'health':      'pipeline-feed',
 }
@@ -677,6 +679,7 @@ if __name__ == '__main__':
         'trade':        ('tradedesk', f'TradeJohn signal generation: {run_date}',        None),
         'trade_parity': ('databot',   f'Running parity DRY-RUN: {run_date}',             None),
         'alpaca':       ('tradedesk', f'Submitting Alpaca orders: {run_date}',            None),
+        'trade_parity_capture': ('databot', f'Capturing parity production: {run_date}', None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 
