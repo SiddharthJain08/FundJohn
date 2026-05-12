@@ -2762,6 +2762,27 @@ body.rs-chat-locked{overflow:hidden}
       <div class="st-tile"><div class="st-tile-label">Data</div><div class="st-tile-value" id="st-data-tile">—</div><div class="st-tile-sub" id="st-data-sub">financial parameters ingested</div><a class="st-tile-link" id="st-data-usage-link" onclick="_stOpenDataUsage()">View Data Usage →</a></div>
     </div>
 
+    <!-- Phase 2B — Mastermind proposals panel (collapsed if none pending) -->
+    <div class="pf-section" id="rp-section" style="display:none">
+      <div class="pf-section-header">
+        <span>📋 Pending Regime Proposals <span class="st-sub-label" id="rp-count">—</span></span>
+        <span class="st-sub-label">from MastermindJohn Saturday review</span>
+      </div>
+      <table id="rp-table" style="border-collapse:collapse;width:100%;font-size:12px">
+        <thead>
+          <tr style="text-align:left;color:var(--muted);font-size:11px">
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Regime</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Proposed</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Conf</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Reasoning</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Decide</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
     <!-- Section 1: Active Stack (live + stale + waiting) -->
     <div class="pf-section">
       <div class="pf-section-header">
@@ -4944,12 +4965,14 @@ let _stDataUsage = null; // {parameters, strategies_total, categories_total}
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals] = await Promise.all([
       fetch('/api/strategies').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/active').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/recent-failures').then(r => r.json()).catch(() => []),
       fetch('/api/data/usage').then(r => r.json()).catch(() => null),
+      fetch('/api/regime-proposals?status=pending').then(r => r.json()).catch(() => ({ proposals: [] })),
     ]);
+    _rpRender(proposals?.proposals || []);
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
     for (const j of (Array.isArray(jobs) ? jobs : [])) {
@@ -5272,6 +5295,71 @@ function _stToggleExpand(sid) {
 // the existing /api/regime-eligibility endpoint (audit + atomic manifest
 // rewrite); regime_gate picks up the change on the next is_eligible() call
 // with no service restart.
+// Phase 2B — render pending Mastermind proposals
+function _rpRender(proposals) {
+  const section = document.getElementById('rp-section');
+  const tbody = document.querySelector('#rp-table tbody');
+  const countEl = document.getElementById('rp-count');
+  if (!section || !tbody) return;
+  if (!proposals.length) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  countEl.textContent = '(' + proposals.length + ' awaiting decision)';
+  tbody.innerHTML = '';
+  for (const p of proposals) {
+    const tr = document.createElement('tr');
+    const proposedBits = [];
+    if (p.proposed_eligible !== null && p.proposed_eligible !== undefined) proposedBits.push('elig=' + p.proposed_eligible);
+    if (p.proposed_size_scalar !== null) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
+    if (p.proposed_stop_pct !== null) proposedBits.push('stop=' + Number(p.proposed_stop_pct).toFixed(3));
+    if (p.proposed_target_pct !== null) proposedBits.push('target=' + Number(p.proposed_target_pct).toFixed(3));
+    if (p.proposed_max_hold_days !== null) proposedBits.push('hold=' + p.proposed_max_hold_days + 'd');
+    const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '?';
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + p.strategy_id + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + p.regime_state + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + proposedBits.join(' · ') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
+        '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
+        '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
+      '</td>';
+    tbody.appendChild(tr);
+  }
+  // Wire buttons
+  for (const btn of tbody.querySelectorAll('.rp-btn')) {
+    btn.onclick = () => _rpDecide(btn.dataset.id, btn.dataset.action);
+  }
+}
+
+async function _rpDecide(id, action) {
+  let actor = window.localStorage.getItem('rg_operator');
+  if (!actor) {
+    actor = prompt('Operator name (saved for the session):', '');
+    if (!actor) return;
+    window.localStorage.setItem('rg_operator', actor);
+  }
+  const reason = prompt('Reason for ' + action + ' of proposal #' + id + '?', '');
+  if (reason === null) return;
+  try {
+    const res = await fetch('/api/regime-proposals/' + encodeURIComponent(id) + '/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor: 'operator:' + actor, reason }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || res.statusText);
+    }
+    await loadStrategies();
+  } catch (err) {
+    alert('Proposal ' + action + ' failed: ' + err.message);
+  }
+}
+
 async function _stToggleRegimeEligibility(event, sid, regime) {
   if (event && event.stopPropagation) event.stopPropagation();
   const row = (strategiesData || []).find(r => r.strategy_id === sid);
