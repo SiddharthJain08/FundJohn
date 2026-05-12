@@ -1,73 +1,51 @@
 """Per-strategy regime-eligibility gate.
 
 Called by `engine.run_strategies()` immediately before invoking each
-strategy's `compute_signals()`. If the current regime isn't in the
-strategy's `eligible_regimes` field in manifest.json, the strategy is
-skipped for the day (no signals generated).
+strategy's `compute_signals()`. Source of truth: the
+`strategy_regime_params` table via `execution.regime_param_resolver`.
 
-Backward compat: a strategy missing `eligible_regimes` (or with a
-malformed value) defaults to all-four regimes — the gate returns True.
-However, if the runtime regime_state passed in is itself unknown
-(e.g., a typo upstream), the gate returns False — this is the safer
-default for invalid input.
+Backward compat: if the resolver returns no row for a (strategy, regime)
+pair — typically a freshly-added strategy not yet seeded — the gate
+returns True ("eligible everywhere"). This matches Phase 1 manifest
+semantics where a strategy without an `eligible_regimes` field was
+treated as eligible in every regime.
 
-Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §9
+Failure semantics: if the resolver raises (DB unavailable), the gate
+fails-open (returns True). Skipping a strategy because of an infrastructure
+hiccup would be worse than running it; the doctor check
+`strategy_regime_params_consistency` + cycle preflight surfaces the
+underlying problem.
+
+Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 
-import json
 import logging
+import sys
 from pathlib import Path
+
+# Ensure src/ is importable when this module is run/imported from various
+# entry points.
+_THIS_FILE = Path(__file__).resolve()
+_SRC = _THIS_FILE.parents[1]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from execution.regime_param_resolver import is_eligible as _resolver_is_eligible  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 ALL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
-MANIFEST_PATH = Path(__file__).resolve().parent / 'manifest.json'
-
-
-def _load_manifest() -> dict:
-    try:
-        with open(MANIFEST_PATH) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logger.error('regime_gate: manifest unreadable (%s); defaulting all strategies eligible', e)
-        return {'strategies': {}}
 
 
 def is_eligible(strategy_id: str, regime_state: str) -> bool:
     """True if strategy_id should compute signals under current regime."""
-    manifest = _load_manifest()
-    strategies = manifest.get('strategies', {}) or {}
-    record = strategies.get(strategy_id)
-
-    if record is None:
-        # unknown strategy — backward compat default (all regimes eligible)
-        if regime_state not in ALL_REGIMES:
-            logger.warning('regime_gate: unknown regime_state=%r; defaulting eligible', regime_state)
-        return True
-
-    eligible = record.get('eligible_regimes')
-    if eligible is None:
-        # missing field — backward compat default (all regimes eligible)
-        if regime_state not in ALL_REGIMES:
-            logger.warning('regime_gate: unknown regime_state=%r; defaulting eligible', regime_state)
-        return True
-
-    if not isinstance(eligible, list):
-        logger.warning('regime_gate: %s has malformed eligible_regimes=%r; defaulting eligible',
-                       strategy_id, eligible)
-        if regime_state not in ALL_REGIMES:
-            logger.warning('regime_gate: unknown regime_state=%r; defaulting eligible', regime_state)
-        return True
-
-    # If regime_state is not valid (not in ALL_REGIMES), reject it even if it's in eligible list
     if regime_state not in ALL_REGIMES:
-        logger.warning('regime_gate: unknown regime_state=%r; rejecting', regime_state)
+        logger.warning('regime_gate: unknown regime_state=%r; rejecting',
+                       regime_state)
         return False
-
-    # Validate each entry in eligible list; warn on typos but don't fail the whole list.
-    for r in eligible:
-        if r not in ALL_REGIMES:
-            logger.warning('regime_gate: %s has invalid regime %r in eligible_regimes', strategy_id, r)
-
-    return regime_state in eligible
+    try:
+        return _resolver_is_eligible(strategy_id, regime_state)
+    except Exception as exc:
+        logger.error('regime_gate: resolver failed (%s); failing OPEN', exc)
+        return True
