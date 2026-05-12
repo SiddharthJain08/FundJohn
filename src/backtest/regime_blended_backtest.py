@@ -76,14 +76,20 @@ def _db_uri() -> str:
     )
 
 
-def load_latest_backtests(uri: str) -> tuple[pd.DataFrame, str]:
-    """Load strategy_regime_backtests rows for the latest run_id."""
+def load_latest_backtests(uri: str):
+    """Load strategy_regime_backtests rows for the latest run_id.
+
+    Returns (df, run_id, run_at). run_at is a UTC-aware datetime; empty DF + ''
+    + None when the table has no rows.
+    """
     import psycopg2
     with psycopg2.connect(uri) as conn:
-        # Latest run_id = max(run_at)
+        # Latest run_id = max(run_at). Capture timestamp in the same query so
+        # the doctor / preflight don't need a separate freshness round-trip.
         latest_sql = """
-            SELECT run_id::text FROM strategy_regime_backtests
-            ORDER BY run_at DESC LIMIT 1
+            SELECT run_id::text, run_at
+              FROM strategy_regime_backtests
+             ORDER BY run_at DESC LIMIT 1
         """
         rows_sql = """
             SELECT strategy_id, regime_state,
@@ -96,10 +102,10 @@ def load_latest_backtests(uri: str) -> tuple[pd.DataFrame, str]:
             cur.execute(latest_sql)
             latest = cur.fetchone()
             if not latest:
-                return pd.DataFrame(), ''
-            run_id = latest[0]
+                return pd.DataFrame(), '', None
+            run_id, run_at = latest[0], latest[1]
         df = pd.read_sql(rows_sql, conn, params=(run_id,))
-    return df, run_id
+    return df, run_id, run_at
 
 
 def regime_day_frequency(parquet_path: Path) -> dict[str, float]:
@@ -180,7 +186,7 @@ def aggregate_across_regimes(per_regime: dict[str, dict],
 
 def run_walkforward(uri: str, manifest_path: Path, regime_parquet: Path) -> dict:
     """End-to-end: load latest backtests + manifest + regime weights → compare."""
-    df, run_id = load_latest_backtests(uri)
+    df, run_id, run_at = load_latest_backtests(uri)
     if df.empty:
         return {'error': 'strategy_regime_backtests has no rows — run backfill first'}
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
@@ -202,6 +208,7 @@ def run_walkforward(uri: str, manifest_path: Path, regime_parquet: Path) -> dict
     return {
         'source':           'strategy_regime_backtests',
         'run_id':           run_id,
+        'run_at':           run_at.isoformat() if run_at else None,
         'strategy_count':   int(df['strategy_id'].nunique()),
         'regime_day_frequency': {r: round(day_freq[r], 4) for r in CANONICAL_REGIMES},
         'blended':          blended,

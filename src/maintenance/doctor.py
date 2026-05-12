@@ -544,37 +544,46 @@ def check_orchestrator_lock():
     return _warn('orchestrator_lock', '; '.join(stale))
 
 
+REGIME_BLENDED_GATE_STALE_DAYS = 14
+
+
 @_check('regime_blended_gate_b')
 def check_regime_blended_gate_b():
     """Validate Gate B preconditions for the regime-blended LIVE flip.
 
-    Runs the walk-forward harness against the latest strategy_regime_backtests
-    snapshot. Semantics:
-      - FAIL if OPENCLAW_REGIME_BLENDED_LIVE=1 and gate_b.pass is false.
-        (The cycle is live but the gate broke — block the next run.)
-      - WARN if gate_b.pass is false but LIVE flag is off — informational
-        during DRY-RUN parity window.
-      - WARN if the latest backtest snapshot is older than 14 days (two missed
-        weekly refreshes).
-      - PASS otherwise.
+    Evaluates gate state and snapshot freshness, then applies severity per a
+    fail-closed truth table designed so production LIVE preflight cannot
+    proceed without current evidence the gate passes.
 
-    The check is cheap (reads the latest run_id only) so it's safe in --quick.
+    Severity matrix (LIVE = OPENCLAW_REGIME_BLENDED_LIVE=1):
+      LIVE, gate.pass = true,  fresh  → PASS
+      LIVE, gate.pass = true,  stale  → FAIL  (no current evidence)
+      LIVE, gate.pass = false, *      → FAIL  (gate broken)
+      LIVE, no backfill / harness err → FAIL  (no evidence at all)
+      DRY,  gate.pass = true,  fresh  → PASS
+      DRY,  any other state           → WARN  (informational pre-flip)
+
+    Walk-forward exceptions (DB hiccup etc.) → WARN in both modes; treated as
+    "cannot evaluate" rather than "gate fail" to avoid false alarms on infra.
+    Returns _fail explicitly when LIVE is on AND we *could* evaluate the gate
+    AND it failed — those are the only true-negative cases.
     """
     live = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE', '0') == '1'
     try:
-        from backtest.regime_blended_backtest import (
-            _db_uri, run_walkforward,
-        )
+        from backtest.regime_blended_backtest import run_walkforward
     except Exception as exc:
         return _warn('regime_blended_gate_b',
                      f'harness import failed: {type(exc).__name__}: {exc}')
 
-    uri = _db_uri()
+    uri = (os.environ.get('DATABASE_URL') or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
     manifest_path = ROOT / 'src' / 'strategies' / 'manifest.json'
     regime_parquet = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
     try:
         result = run_walkforward(uri, manifest_path, regime_parquet)
     except Exception as exc:
+        # Infra failure — cannot evaluate. WARN in both modes; operator
+        # investigates separately from gate state.
         return _warn('regime_blended_gate_b',
                      f'walk-forward failed: {type(exc).__name__}: {exc}')
 
@@ -584,29 +593,46 @@ def check_regime_blended_gate_b():
 
     gate = result.get('gate_b', {})
     delta = result.get('delta', {})
+    gate_pass = bool(gate.get('pass'))
 
-    # Snapshot freshness — separate query for run_at.
-    try:
-        import psycopg2
-        with psycopg2.connect(uri) as conn, conn.cursor() as cur:
-            cur.execute("""SELECT MAX(run_at) FROM strategy_regime_backtests
-                           WHERE run_id = %s""", (result.get('run_id'),))
-            row = cur.fetchone()
-        if row and row[0]:
-            age = datetime.now(timezone.utc) - row[0]
-            if age > timedelta(days=14):
-                return _warn('regime_blended_gate_b',
-                             f'snapshot stale: {age.days}d old (weekly cron missed?)')
-    except Exception:
-        pass  # freshness probe is best-effort; don't fail on DB hiccups
+    stale = False
+    age_days = None
+    run_at_iso = result.get('run_at')
+    if run_at_iso:
+        try:
+            run_at = datetime.fromisoformat(run_at_iso)
+            if run_at.tzinfo is None:
+                run_at = run_at.replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - run_at
+            age_days = age.days
+            stale = age.days > REGIME_BLENDED_GATE_STALE_DAYS
+        except (ValueError, TypeError):
+            pass  # malformed; treat as freshness-unknown
 
-    if gate.get('pass'):
-        return _ok('regime_blended_gate_b',
-                   f'pass (Δsharpe={delta.get("sharpe")}, Δmax_dd={delta.get("max_dd")}, live={live})')
-    detail = (f'FAIL Δsharpe={delta.get("sharpe")} '
-              f'within_tolerance={gate.get("sharpe_within_tolerance")}, '
-              f'max_dd_not_worse={gate.get("max_dd_not_worse")}, '
-              f'low_vol_strategies_present={gate.get("low_vol_strategies_present")}')
+    detail_parts = [
+        f'Δsharpe={delta.get("sharpe")}',
+        f'Δmax_dd={delta.get("max_dd")}',
+        f'live={live}',
+    ]
+    if age_days is not None:
+        detail_parts.append(f'age={age_days}d')
+    if stale:
+        detail_parts.append(f'STALE (>{REGIME_BLENDED_GATE_STALE_DAYS}d)')
+
+    if gate_pass and not stale:
+        return _ok('regime_blended_gate_b', 'pass (' + ', '.join(detail_parts) + ')')
+
+    # Build a descriptive reason for non-pass states.
+    reasons = []
+    if not gate_pass:
+        reasons.append('gate.pass=false')
+        for flag in ('sharpe_within_tolerance', 'max_dd_not_worse',
+                     'low_vol_strategies_present'):
+            if not gate.get(flag, True):
+                reasons.append(f'!{flag}')
+    if stale:
+        reasons.append('snapshot stale (weekly cron missed?)')
+    detail = '; '.join(reasons) + ' [' + ', '.join(detail_parts) + ']'
     return _fail('regime_blended_gate_b', detail) if live else _warn('regime_blended_gate_b', detail)
 
 

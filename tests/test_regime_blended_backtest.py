@@ -161,7 +161,9 @@ def test_gate_b_passes_within_tolerance_when_dd_unchanged(monkeypatch, tmp_path)
     regime_path = tmp_path / 'regimes.parquet'  # missing → falls back to uniform 0.25
 
     import backtest.regime_blended_backtest as mod
-    monkeypatch.setattr(mod, 'load_latest_backtests', lambda uri: (df, 'test-run'))
+    from datetime import datetime, timezone
+    monkeypatch.setattr(mod, 'load_latest_backtests',
+                        lambda uri: (df, 'test-run', datetime.now(timezone.utc)))
     result = mod.run_walkforward('not-used', manifest_path, regime_path)
 
     # Filter regression is < tolerance (LOW_VOL drop is 2.0 → 1.5, weighted 0.25 → -0.125 Sharpe)
