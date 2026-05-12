@@ -200,3 +200,35 @@ Each step lands on `main` independently. The full pipeline only "activates" once
 | Approved proposal references stale current_row (operator made an out-of-band change since proposal) | `approve` uses CURRENT row from strategy_regime_params (not the proposal's snapshot); proposal's `current_row` is informational only |
 | Operator rejects without a reason | API accepts empty reason but logs a WARN; CLI/dashboard prompt for one |
 | Mastermind cost: per-strategy prompts grow by ~30% for the regime data | Acceptable — cost is fixed weekly, not per-cycle; budget already accommodates Opus comprehensive-review |
+
+---
+
+## Implementation complete — 2026-05-12
+
+Phase 2B shipped in 8 commits same session as Phase 2A:
+
+- `b798554` Migration 078 (`strategy_regime_param_proposals`)
+- `254de99` `proposal_manager.py` — approve/reject/modify/insert/supersede (8 tests)
+- `8af1dc4` `comprehensive_review.js` extension: prompt template adds `regime_recommendations`, defensive parser, auto-supersede on new proposal for same (strategy, regime), one proposal per valid entry. Memo markdown auto-references the proposal queue.
+- `2ff6b64` `/api/regime-proposals` endpoints (GET list, POST approve/reject/modify)
+- `adfd115` Dashboard pending-proposals panel above the Active Stack; Approve/Reject buttons; auto-hides when empty
+- `81787ba` Doctor `regime_proposals_backlog` check (6 tests; PASS / WARN / FAIL thresholds at 14d / 30d / count=10)
+- This commit (docs)
+
+**E2E smoke verified 2026-05-12T21:10 UTC:**
+- Manually-seeded proposal for `momentum_12_1 / HIGH_VOL` (eligible→true, size_scalar→0.35)
+- `POST /api/regime-proposals/1/approve` ran the full chain: SELECT FOR UPDATE → eligibility_manager.set_params → mark approved with applied_row snapshot
+- `strategy_regime_params` reflected: eligible=true, size_scalar=0.35, set_by='operator:plan-task7-smoke'
+- `regime_gate.is_eligible('momentum_12_1', 'HIGH_VOL')` → True; resolver `size_scalar` → 0.35
+- Audit chain: proposal status flipped to 'approved', applied_row JSONB persisted
+
+**41 plan tests pass; 20 doctor checks (19 pass + 1 expected WARN on manifest_eligibility_drift).**
+
+**Operational note:** No real Mastermind run has fired with the new prompt yet — that happens next Saturday at 18:00 ET. Operator can seed test proposals via `python3 -m strategies.proposal_manager` or via `proposal_manager.insert_proposal()` for ad-hoc reviews.
+
+**Followups (Phase 2C / cleanup):**
+- Drift detection: live regime perf vs Mastermind-set baseline; alert on divergence.
+- Literature priors: optional `expected_*` columns on `strategy_regime_params` that proposer can target; drift alarm if live diverges.
+- Auto-approval rules: confidence threshold + bounded delta; bypass operator for clearly-good proposals.
+- `manifest.eligible_regimes` field deletion (post-2A stable).
+- `eligibility_manager.set_params` sentinel to explicitly reset a populated column back to NULL (needed if operator wants to "undo" a Phase 2B-approved scalar back to Phase 1 default).

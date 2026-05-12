@@ -104,6 +104,18 @@ rather than list-set. `manifest.eligible_regimes` is deprecated — the
 doctor check `manifest_eligibility_drift` WARNs as long as any strategy
 still has the field on disk. A follow-up spec removes the field entirely.
 
+**Phase 2B** (2026-05-12) adds MastermindJohn-emitted proposals. Every
+Saturday at 18:00 ET, the comprehensive-review run includes a
+`regime_recommendations` JSON block per strategy; valid entries land in
+`strategy_regime_param_proposals` with `status='pending'`. The dashboard
+shows a "Pending Regime Proposals" panel above the Active Stack with
+Approve / Reject buttons. CLI: `python3 -m strategies.proposal_manager
+--list` / `--approve <id>` / `--reject <id> --reason '...'` / `--modify
+<id> [--size N] [--stop N] ...`. Approving routes through the same
+`eligibility_manager.set_params` transaction that operator-direct edits
+use. The doctor check `regime_proposals_backlog` WARNs at 14-day-old
+pending, FAILs at 30-day-old or ≥10 aged-warn pending — review hygiene.
+
 **Phase 1 git config note (still relevant for any legacy paths)**: if you
 ever see `Could not access 'HEAD'` or `dubious ownership` errors from
 git-based doctor checks running under systemd:
