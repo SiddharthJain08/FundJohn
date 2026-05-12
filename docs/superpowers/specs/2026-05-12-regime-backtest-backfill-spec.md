@@ -288,3 +288,34 @@ gate_b.pass                      = TRUE
 2. **Gate A:** 30-day clean parity in HIGH_VOL/CRISIS still structurally unsatisfiable inside the 30-day window. Revisit when parity data accumulates or regime conditions shift.
 3. **Sharpe scale revisit:** if auto_backtest σ-annualization is fixed downstream, the 0.25 tolerance constant needs proportional adjustment.
 4. **Harness DD model upgrade (optional):** replacing worst-strategy-per-regime DD with compounded portfolio DD would make the `max_dd_not_worse` guard constraining. Not needed for the current Path C/B decision.
+
+---
+
+## Phase G — Pivot from backfill gate to live metrics
+
+After Phase F we concluded the backfill Gate B is a regression smoke test, not a validator: most strategies have 0 trades in HIGH_VOL / CRISIS in the 10y window, so per-regime statistical power is unavailable there. The validation pivot is:
+
+  → **`docs/superpowers/plans/2026-05-12-regime-live-metrics-and-operator-trim.md`** (executed 2026-05-12)
+
+### What landed
+- **Migration 074** — `strategy_regime_live_pnl_rollup` (append-only nightly snapshots)
+- **Migration 075** — `regime_eligibility_changes` (append-only audit trail)
+- **`src/metrics/regime_live_pnl.py`** — rollup compute (windows 30 / 90 / all-time) + CLI
+- **`docs/openclaw-regime-live-pnl.{service,timer}`** — nightly 02:30 ET timer (installed at `/etc/systemd/system/openclaw-regime-live-pnl.*`)
+- **`src/strategies/eligibility_manager.py`** — safe manifest writer (audit-before-write, atomic tmp+rename, canonical regime order, empty-list rejection)
+- **`src/channels/api/routes_regime_eligibility.js`** — `/api/regime-eligibility` (GET list, POST set, GET audit)
+- **johnbot dashboard** — new "Regime" tab with strategy × regime grid + click-to-toggle + audit panel
+- **Doctor:** two new checks — `regime_live_rollup_freshness` (26h / 72h thresholds) and `manifest_eligibility_drift` (vs git HEAD; FAILs in LIVE)
+- **Tests:** 25 new (7 rollup, 8 eligibility manager, 10 doctor)
+- **Runbook:** `docs/runbooks/regime-eligibility-operator-runbook.md`
+
+### Operational discovery
+The `manifest_eligibility_drift` check needs `git config --system --add safe.directory /root/openclaw` so systemd ExecStartPre (which doesn't set HOME) can read the repo. Captured in the runbook.
+
+### Scope deliberately left for Phase 2 (learned sizer)
+- Monte Carlo validation harness
+- Literature-prior comparison + drift alerts vs priors
+- Automatic eligibility flipping (Phase 1 stays operator-gated)
+
+### What this changes for the LIVE flip
+The backfill Gate B is now framed as a **regression smoke test** (catches structural pathology in LOW_VOL); the actual validation path is operator trim/expand from accumulating live metrics. The open follow-ups #2 (Gate A unsatisfiability) and #3 (Sharpe scale) above remain as Phase F concerns, but they no longer block confidence in the eligibility filter — that confidence now comes from live evidence + operator judgment, not backfill statistics.
