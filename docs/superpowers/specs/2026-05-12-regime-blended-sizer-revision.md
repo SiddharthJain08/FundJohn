@@ -119,3 +119,9 @@ After applying corrections 1-5 and Tasks 11.5-11.7:
 - Strategy creation pipeline (regime_performance_analyzer is good)
 - Saturday review refresh design
 - Walk-forward backtest harness
+
+---
+
+## 2026-05-12 — Phase 3 gate dropped; operator-driven flip
+
+Operator decision: the "30 trading days of clean parity in HIGH_VOL/CRISIS" gate referenced in this revision is no longer the gating condition for the LIVE flip. The operator monitors live behavior themselves and flips `OPENCLAW_REGIME_BLENDED_LIVE=1` when ready, without an automated readiness signal. Rationale + full procedure documented in the addendum on `2026-05-11-regime-blended-position-sizing-design.md`. `parity_diff` continues running as audit-trail/bug-tripwire, decoupled from any countdown.

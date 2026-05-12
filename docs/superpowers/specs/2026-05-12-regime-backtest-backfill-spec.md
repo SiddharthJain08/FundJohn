@@ -319,3 +319,21 @@ The `manifest_eligibility_drift` check needs `git config --system --add safe.dir
 
 ### What this changes for the LIVE flip
 The backfill Gate B is now framed as a **regression smoke test** (catches structural pathology in LOW_VOL); the actual validation path is operator trim/expand from accumulating live metrics. The open follow-ups #2 (Gate A unsatisfiability) and #3 (Sharpe scale) above remain as Phase F concerns, but they no longer block confidence in the eligibility filter — that confidence now comes from live evidence + operator judgment, not backfill statistics.
+
+---
+
+## Phase H — Operator-driven LIVE flip; calendar gate dropped (2026-05-12)
+
+**Policy update:** Per operator decision 2026-05-12, the 30-day DRY-RUN parity calendar gate referenced throughout Phase F (open follow-up #2: "Gate A 30-day clean parity unsatisfiable") is no longer gating the LIVE flip. The operator flips `OPENCLAW_REGIME_BLENDED_LIVE=1` when satisfied with monitoring; no automated readiness signal.
+
+**What changes vs Phase F open follow-ups:**
+- ~~#2 Gate A unsatisfiability~~ — moot; no calendar gate.
+- #1 Manifest commit decision for the 5 momentum strategies — **resolved 2026-05-12**: operator made decisions via the new strategies-page UI (3 to `[LOW_VOL, TRANSITIONING, HIGH_VOL]`, 2 to `[LOW_VOL, TRANSITIONING]`). 4 committed in `2e7aeb4`; `momentum_12_1`'s eligibility committed as part of the larger 18-new-strategy bundle in `743b5e2`.
+- #3 Sharpe scale revisit — still optional, unchanged.
+- #4 Harness DD model upgrade — still optional, unchanged.
+
+**Doctor `manifest_eligibility_drift` refactored** (`6ce7360`) to JSON-level state-aware comparison: only flags operator changes to *existing-strategy* eligibility (the real LIVE-flip risk), not new-strategy additions. Currently PASS for all 98 strategies.
+
+**`parity_diff` retained** as audit-trail / bug-tripwire (would catch a code regression that proposes 800% NAV on one ticker), decoupled from any countdown.
+
+Full addendum and updated LIVE flip procedure: `2026-05-11-regime-blended-position-sizing-design.md`.

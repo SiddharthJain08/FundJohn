@@ -446,3 +446,26 @@ End-to-end checks that gate each phase:
 | Token-budget blowout in TradeJohn confirmer | 25K input cap with lowest-conviction-ticker dropping; per-call cost ceiling enforced |
 | Circuit-breaker false positives in fast markets | -2% NAV threshold tunable per regime; circuit breaker only checks consolidate-mode positions |
 | `signal_pnl` exit-time stats biased early on (before 30 closed trades / strategy) | Static `EXPECTED_HOLDING_PERIODS` fallback; bootstrap-daily for absent strategies |
+
+---
+
+## Addendum — 2026-05-12: dropped 30-day DRY-RUN gate; operator-driven flip
+
+**Policy update (supersedes Phase 3 gate language above):** Per operator decision 2026-05-12, the 30-day DRY-RUN parity calendar gate is dropped from the rollout plan. The operator monitors system + performance themselves and flips `OPENCLAW_REGIME_BLENDED_LIVE=1` when ready — no automated readiness gate, no calendar countdown.
+
+**Why:** The 30-day window was a calendar gate, not an evidence gate. Validating "the new sizer matches `trade_agent_llm` within 1%" was always weak — `trade_agent_llm` itself is non-deterministic and has its own failure modes, so "matches the imperfect baseline" doesn't validate the new sizer specifically. Better to let the operator's qualitative judgment, doctor preflight, and live ARR/PnL be the gate.
+
+**What stays running:**
+- `parity_diff` (21:00 UTC weekdays) — kept as an audit trail and bug tripwire. If a code regression makes the new sizer propose 800% NAV in one ticker, the diff catches it. Decoupled from any wait.
+- Doctor checks `regime_blended_gate_b`, `regime_live_rollup_freshness`, `manifest_eligibility_drift` — informational, not blocking the flip.
+- All circuit-breaker and risk-cap logic — unchanged.
+
+**Where the operator UI lives:** Live eligibility editing folded into the strategies page (clickable regime cells on `state='live'` rows). The original separate Regime tab was removed (commit `5f51f1b`) as it duplicated data already on the strategies page.
+
+**LIVE flip procedure (replaces Phase 3 gate above):**
+1. `OPENCLAW_REGIME_BLENDED_LIVE=1` in `/root/openclaw/.env`
+2. `systemctl restart johnbot.service`
+3. Watch next 14:00 UTC cycle in `#botjohn-log`
+4. Rollback: flip back to `0`, restart.
+
+Original Phase 3 gate language preserved above for historical record.
