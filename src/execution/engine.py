@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from strategies.registry import get_approved_strategies
+from strategies.regime_gate import is_eligible
 
 logging.basicConfig(
     level=logging.INFO,
@@ -574,6 +575,9 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     results = {}
     for strat in strategies:
         try:
+            if not is_eligible(strat.id, regime):
+                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, regime)
+                continue
             signals = strat.generate_signals(prices, regime, universe, aux_data)
             results[strat.id] = signals or []
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
