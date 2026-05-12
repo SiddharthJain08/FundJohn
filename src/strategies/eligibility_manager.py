@@ -26,6 +26,24 @@ logger = logging.getLogger(__name__)
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
+# Sentinel marking "explicitly reset this column to SQL NULL".
+# Passing None means "keep existing"; passing NULL_SENTINEL means "set to NULL".
+# Phase 2C addition — needed so operators / proposal approvals can roll back a
+# populated size_scalar/stop_pct/target_pct/max_hold_days to Phase 1 defaults.
+NULL_SENTINEL = '__NULL__'
+
+
+def _resolve_value(caller_value, existing_value):
+    """Three-state resolver for nullable columns:
+       caller_value is None        → keep existing
+       caller_value is NULL_SENTINEL → reset to NULL
+       otherwise                    → use caller value"""
+    if caller_value is None:
+        return existing_value
+    if caller_value == NULL_SENTINEL:
+        return None
+    return caller_value
+
 # Match the resolver's path resolution.
 _THIS = Path(__file__).resolve()
 _SRC = _THIS.parents[1]
@@ -88,7 +106,8 @@ def set_params(*,
     if all(v is None for v in (eligible, size_scalar, stop_pct,
                                 target_pct, max_hold_days)):
         raise ValueError('at least one of eligible/size_scalar/stop_pct/'
-                         'target_pct/max_hold_days must be specified')
+                         'target_pct/max_hold_days must be specified '
+                         "(use NULL_SENTINEL '__NULL__' to reset a column to NULL)")
 
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -102,18 +121,20 @@ def set_params(*,
             before = cur.fetchone()
 
             if before is None:
+                # eligible defaults True for first-set (NULL_SENTINEL not
+                # meaningful for boolean column).
                 merged_eligible      = True if eligible is None else eligible
-                merged_size_scalar   = size_scalar
-                merged_stop_pct      = stop_pct
-                merged_target_pct    = target_pct
-                merged_max_hold_days = max_hold_days
+                merged_size_scalar   = _resolve_value(size_scalar, None)
+                merged_stop_pct      = _resolve_value(stop_pct, None)
+                merged_target_pct    = _resolve_value(target_pct, None)
+                merged_max_hold_days = _resolve_value(max_hold_days, None)
             else:
                 # before = (sid, regime, eligible, size, stop, target, max_hold)
                 merged_eligible      = before[2] if eligible is None else eligible
-                merged_size_scalar   = before[3] if size_scalar is None else size_scalar
-                merged_stop_pct      = before[4] if stop_pct is None else stop_pct
-                merged_target_pct    = before[5] if target_pct is None else target_pct
-                merged_max_hold_days = before[6] if max_hold_days is None else max_hold_days
+                merged_size_scalar   = _resolve_value(size_scalar,    before[3])
+                merged_stop_pct      = _resolve_value(stop_pct,       before[4])
+                merged_target_pct    = _resolve_value(target_pct,     before[5])
+                merged_max_hold_days = _resolve_value(max_hold_days,  before[6])
 
             after_row = (strategy_id, regime_state, merged_eligible,
                          merged_size_scalar, merged_stop_pct,
