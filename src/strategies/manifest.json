@@ -21,8 +21,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)"
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "financials"
@@ -61,9 +61,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -134,8 +134,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
                 "vol_indices: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -190,9 +190,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-03-31; needs ≥ 2024-12-14)"
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-03-31; needs \u2265 2024-12-14)"
               ],
               "missing_columns": [
                 "earnings"
@@ -247,10 +247,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "log_returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "log_returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -298,9 +298,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)"
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)"
               ],
               "missing_columns": [
                 "financials"
@@ -375,10 +375,6 @@
           "reason": "Manual approve via dashboard",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_crisp_signal_aware_hrp": {
@@ -387,7 +383,7 @@
       "metadata": {
         "canonical_file": "S_crisp_signal_aware_hrp.py",
         "class": "CrispSignalAwareHRP",
-        "description": "CRISP shrinkage (P_γ·w=μ) with 12-1 month momentum alpha, all-regime allocation"
+        "description": "CRISP shrinkage (P_\u03b3\u00b7w=\u03bc) with 12-1 month momentum alpha, all-regime allocation"
       },
       "history": []
     },
@@ -397,7 +393,7 @@
       "metadata": {
         "canonical_file": "S_vp_macd_index_sensitivity.py",
         "class": "VPMACDIndexSensitivity",
-        "description": "VP-MACD with volume-volatility-intraday-weighted price input and λ-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)"
+        "description": "VP-MACD with volume-volatility-intraday-weighted price input and \u03bb-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)"
       },
       "history": []
     },
@@ -407,7 +403,7 @@
       "metadata": {
         "canonical_file": "S_3d_pca_characteristic_factors.py",
         "class": "ThreeDPCACharacteristicFactors",
-        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly — Lettau (2024)"
+        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly \u2014 Lettau (2024)"
       },
       "history": [
         {
@@ -420,8 +416,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -468,9 +464,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-08-07→2026-02-19; needs ≥ 2024-12-08)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-08-07\u21922026-02-19; needs \u2265 2024-12-08)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "earnings"
@@ -576,7 +572,7 @@
       "metadata": {
         "canonical_file": "s5_max_pain.py",
         "class": "MaxPainGravity",
-        "description": "Max-pain gravity — options-derived price attractor signal"
+        "description": "Max-pain gravity \u2014 options-derived price attractor signal"
       },
       "history": []
     },
@@ -621,11 +617,6 @@
           "reason": "sync-test revert",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING",
-        "HIGH_VOL"
       ]
     },
     "S10_quality_value": {
@@ -644,7 +635,7 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal — SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
       },
       "history": []
     },
@@ -654,7 +645,7 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage — implied vs realised volatility"
+        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility"
       },
       "history": []
     },
@@ -664,14 +655,9 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum — custom implementation"
+        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation"
       },
-      "history": [],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING",
-        "HIGH_VOL"
-      ]
+      "history": []
     },
     "S23_regime_momentum": {
       "state": "live",
@@ -679,7 +665,7 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching"
+        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching"
       },
       "history": [
         {
@@ -717,7 +703,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 — successor candidate to S9"
+        "description": "Dual-momentum v2 \u2014 successor candidate to S9"
       },
       "history": [
         {
@@ -725,16 +711,12 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
           }
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_HV7_iv_crush_fade": {
@@ -770,7 +752,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -792,7 +774,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -822,7 +804,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-22T17:31:05.162573+00:00",
           "actor": "manual:dashboard",
-          "reason": "Revert: staging shouldn't have been directly approvable — awaiting data import gate",
+          "reason": "Revert: staging shouldn't have been directly approvable \u2014 awaiting data import gate",
           "metadata": {}
         }
       ]
@@ -944,7 +926,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -985,7 +967,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1026,7 +1008,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-27T04:02:11.214Z",
           "actor": "manual:operator",
-          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
+          "reason": "Regress for re-approval \u2014 no implementation file; needs re-coding via fused approval",
           "metadata": {}
         },
         {
@@ -1088,7 +1070,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1129,7 +1111,7 @@
       "metadata": {
         "canonical_file": "S_tr_01_vvix_early_warning.py",
         "class": "VVIXEarlyWarning",
-        "description": "VVIX-conditioned VIX-spike early warning — SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
+        "description": "VVIX-conditioned VIX-spike early warning \u2014 SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
       },
       "history": [
         {
@@ -1148,7 +1130,7 @@
       "metadata": {
         "canonical_file": "S_tr_02_hurst_regime_flip.py",
         "class": "HurstRegimeFlip",
-        "description": "Hurst R/S regime flip — LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
+        "description": "Hurst R/S regime flip \u2014 LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
       },
       "history": [
         {
@@ -1156,7 +1138,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1170,7 +1152,7 @@
       "metadata": {
         "canonical_file": "S_tr_06_eod_reversal.py",
         "class": "EODCrossSectionalReversal",
-        "description": "Cross-sectional EOD return reversal — ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
+        "description": "Cross-sectional EOD return reversal \u2014 ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
       },
       "history": [
         {
@@ -1178,7 +1160,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1211,7 +1193,7 @@
       "metadata": {
         "canonical_file": "S_tr_03_bocpd_change_point.py",
         "class": "BOCPDChangePoint",
-        "description": "BOCPD change-point detection (Adams & MacKay 2007) — trade post-break direction in TRANSITIONING regime"
+        "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime"
       },
       "history": [
         {
@@ -1219,7 +1201,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1241,7 +1223,7 @@
           "to_state": "paper",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was already firing this strategy, promoting through paper",
+          "reason": "Reconcile \u2014 pipeline was already firing this strategy, promoting through paper",
           "metadata": {}
         },
         {
@@ -1249,7 +1231,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1263,7 +1245,7 @@
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
-        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box → SHORT high-vol outliers"
+        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers"
       },
       "history": [
         {
@@ -1271,7 +1253,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1339,7 +1321,7 @@
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
-        "description": "Alpha191 factor matrix + LASSO selection → LONG top-decile SHORT bottom-decile"
+        "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile"
       },
       "history": [
         {
@@ -1477,7 +1459,7 @@
       "metadata": {
         "canonical_file": "S21_iv_hv_spread.py",
         "class": "IVHVSpread",
-        "description": "IV/HV Spread Vol Arb — sell expensive IV, buy cheap IV vs realized vol"
+        "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol"
       },
       "history": []
     },
@@ -1487,7 +1469,7 @@
       "metadata": {
         "canonical_file": "S22_quality_momentum.py",
         "class": "S22QualityMomentum",
-        "description": "Quality-Filtered Momentum — top-N JT momentum gated by gross-margin quality screen"
+        "description": "Quality-Filtered Momentum \u2014 top-N JT momentum gated by gross-margin quality screen"
       },
       "history": [
         {
@@ -1503,7 +1485,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-27T04:02:11.248Z",
           "actor": "manual:operator",
-          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
+          "reason": "Regress for re-approval \u2014 no implementation file; needs re-coding via fused approval",
           "metadata": {}
         },
         {
@@ -1530,7 +1512,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual Momentum (12-1mo skip, Top 7) — cross-asset momentum rotation"
+        "description": "Dual Momentum (12-1mo skip, Top 7) \u2014 cross-asset momentum rotation"
       },
       "history": [
         {
@@ -1557,10 +1539,6 @@
           "reason": "Manual approve via dashboard",
           "metadata": {}
         }
-      ],
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING"
       ]
     },
     "S_HV13_call_put_iv_spread_cohort2026": {
@@ -2288,7 +2266,7 @@
       "metadata": {
         "canonical_file": "S_cross_sectional_price_momentum.py",
         "class": "CrossSectionalPriceMomentum",
-        "description": "J&T cross-sectional momentum — LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)"
+        "description": "J&T cross-sectional momentum \u2014 LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)"
       },
       "history": [
         {
@@ -2468,7 +2446,7 @@
       "metadata": {
         "canonical_file": "S_fama_french_five_factor.py",
         "class": "FamaFrenchFiveFactor",
-        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile — Fama & French (2015)"
+        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile \u2014 Fama & French (2015)"
       },
       "history": []
     },
@@ -2507,7 +2485,7 @@
       "metadata": {
         "canonical_file": "S_long_term_price_reversal.py",
         "class": "LongTermPriceReversal",
-        "description": "LONG 36-month prior losers, SHORT prior winners — behavioral overreaction reversal (De Bondt & Thaler 1985)"
+        "description": "LONG 36-month prior losers, SHORT prior winners \u2014 behavioral overreaction reversal (De Bondt & Thaler 1985)"
       },
       "history": [
         {
@@ -2549,8 +2527,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -2597,8 +2575,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2022-11-13)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "financials"
@@ -2654,7 +2632,7 @@
               "tier": "B",
               "reasons": [
                 "macro: reachable but not backfilled (providers alpha_vantage)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "macro"
@@ -2688,7 +2666,7 @@
       "metadata": {
         "canonical_file": "S_industry_momentum_moskowitz.py",
         "class": "IndustryMomentumMoskowitz",
-        "description": "Industry-level momentum drives the majority of individual stock momentum — buying stocks from past winning industries and shorting stocks from past losing industries earns significant risk-adjusted returns because slow information diffusion causes industry return continuation."
+        "description": "Industry-level momentum drives the majority of individual stock momentum \u2014 buying stocks from past winning industries and shorting stocks from past losing industries earns significant risk-adjusted returns because slow information diffusion causes industry return continuation."
       },
       "history": [
         {
@@ -2701,9 +2679,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -2785,10 +2763,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "options_eod: backfilled but insufficient (2026-04-08\u21922026-04-21; needs \u2265 2024-12-08)"
               ],
               "missing_columns": [
                 "options_eod"
@@ -2822,7 +2800,7 @@
       "metadata": {
         "canonical_file": "S_vix_conditioned_short_reversal.py",
         "class": "VixConditionedShortReversal",
-        "description": "Short-term reversal scaled by VIX/median-VIX — liquidity-provision risk premium is elevated when market makers are constrained (Nagel 2012)"
+        "description": "Short-term reversal scaled by VIX/median-VIX \u2014 liquidity-provision risk premium is elevated when market makers are constrained (Nagel 2012)"
       },
       "history": []
     },
@@ -2832,7 +2810,7 @@
       "metadata": {
         "canonical_file": "S_q_theory_investment_growth.py",
         "class": "QTheoryInvestmentGrowth",
-        "description": "LONG low-IGR / SHORT high-IGR quintiles — Q-theory rational discount-rate explanation for value premium (Xing 2007)"
+        "description": "LONG low-IGR / SHORT high-IGR quintiles \u2014 Q-theory rational discount-rate explanation for value premium (Xing 2007)"
       },
       "history": [
         {
@@ -2845,8 +2823,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2022-11-13)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "financials"
@@ -2893,8 +2871,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
                 "macro: reachable but not backfilled (providers alpha_vantage)"
               ],
               "missing_columns": [
@@ -2950,10 +2928,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "financials: backfilled (2023-06-30→2026-02-28, providers fmp/yahoo)"
+                "options_eod: backfilled but insufficient (2026-04-08\u21922026-04-21; needs \u2265 2024-12-08)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled (2023-06-30\u21922026-02-28, providers fmp/yahoo)"
               ],
               "missing_columns": [
                 "options_eod"
@@ -3088,35 +3066,35 @@
       "original_file": "implementations/decommissioned/dual_momentum.py",
       "replaced_by": "S9_dual_momentum",
       "canonical_file": "s09_dual_momentum.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "quality_value_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/quality_value.py",
       "replaced_by": "S10_quality_value",
       "canonical_file": "s10_quality_value.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "insider_cluster_buy_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/insider_cluster_buy.py",
       "replaced_by": "S12_insider",
       "canonical_file": "s12_insider.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "iv_rv_arb_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/iv_rv_arb.py",
       "replaced_by": "S15_iv_rv_arb",
       "canonical_file": "s15_iv_rv_arb.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "max_pain_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/max_pain.py",
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "S_renko_kagi_pairs_spread": {
       "state": "candidate",
@@ -3154,7 +3132,7 @@
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
         "class": "PairsTradingMinDistance",
-        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2σ, exit at zero-crossing."
+        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing."
       },
       "history": []
     },
@@ -3174,7 +3152,7 @@
       "metadata": {
         "canonical_file": "S_bankruptcy_risk_anomaly.py",
         "class": "BankruptcyRiskAnomaly",
-        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score — Dichev (1998)"
+        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score \u2014 Dichev (1998)"
       },
       "history": []
     },
@@ -3184,7 +3162,7 @@
       "metadata": {
         "canonical_file": "S_fear_index_return_prediction.py",
         "class": "FearIndexReturnPrediction",
-        "description": "LONG when VIX z-score (252d) > 1.5 — fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
+        "description": "LONG when VIX z-score (252d) > 1.5 \u2014 fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
       },
       "history": []
     },
