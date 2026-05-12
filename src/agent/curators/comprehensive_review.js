@@ -205,7 +205,22 @@ lines of exactly '---':
       "action":             "hold" | "size_up" | "size_down" | "widen_stops" | "tighten_stops" | "shorten_hold" | "lengthen_hold" | "deprecate" | "monitor_only",
       "confidence":         <0.0 - 1.0>,
       "reasoning_one_line": "<tight justification, < 200 chars>"
-    }
+    },
+    "regime_recommendations": [
+      {
+        "regime_state":       "LOW_VOL" | "TRANSITIONING" | "HIGH_VOL" | "CRISIS",
+        "eligible":           true | false | null,    // null = no eligibility change recommended
+        "size_scalar":        <number 0..2> | null,    // null = no scalar change
+        "stop_pct":           <number> | null,
+        "target_pct":         <number> | null,
+        "max_hold_days":      <integer> | null,
+        "confidence":         <0.0 - 1.0>,
+        "reasoning_one_line": "<tight justification, < 200 chars>"
+      }
+      // ... up to 4 entries; emit one per regime where evidence supports a change
+      // SKIP entirely (do not emit an entry) for regimes with no actionable evidence
+      // The operator approves/rejects each entry via the dashboard
+    ]
   }
   \`\`\`
 
@@ -394,6 +409,75 @@ print(json.dumps(propose_eligible_regimes(df, sid, thresh)))`,
   );
   const memoId = rows[0].id;
   log(`persisted memo ${memoId.slice(0, 8)} (cost=$${out.costUsd.toFixed(3)})`);
+
+  // Phase 2B: write regime_recommendations to strategy_regime_param_proposals.
+  // Each valid entry → one proposal row. Pre-supersedes any still-pending
+  // proposal for the same (strategy_id, regime_state). Malformed entries
+  // (wrong regime name, non-numeric size_scalar, etc.) are dropped + logged.
+  const regimeRecs = Array.isArray(json?.regime_recommendations)
+    ? json.regime_recommendations : [];
+  let proposalCount = 0;
+  if (regimeRecs.length) {
+    const REGIMES = new Set(['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']);
+    const runId = `mastermind:review-${new Date().toISOString().slice(0, 10)}`;
+    for (const rec of regimeRecs) {
+      const regime = rec?.regime_state;
+      if (!REGIMES.has(regime)) {
+        log(`dropped malformed regime_recommendation: ${JSON.stringify(rec).slice(0, 120)}`);
+        continue;
+      }
+      // Defensive: at least one of the proposed fields must be non-null,
+      // otherwise the entry is informational only — skip.
+      const fields = ['eligible', 'size_scalar', 'stop_pct', 'target_pct', 'max_hold_days'];
+      if (fields.every(f => rec[f] === null || rec[f] === undefined)) {
+        continue;
+      }
+      const insertResult = spawnSync(PYTHON, [
+        '-c',
+        `import json, sys, os
+sys.path.insert(0, '/root/openclaw/src')
+from strategies.proposal_manager import supersede_pending, insert_proposal
+payload = json.loads(os.environ['PAYLOAD'])
+supersede_pending(payload['strategy_id'], payload['regime_state'], payload['proposer'])
+pid = insert_proposal(**payload)
+print(pid)`,
+      ], {
+        encoding: 'utf-8',
+        env: {
+          ...process.env,
+          POSTGRES_URI: process.env.POSTGRES_URI || 'postgresql://openclaw:password@localhost:5432/openclaw',
+          PAYLOAD: JSON.stringify({
+            proposer:              runId,
+            strategy_id:           strategy.id,
+            regime_state:          regime,
+            current_row:           null,
+            proposed_eligible:     typeof rec.eligible === 'boolean' ? rec.eligible : null,
+            proposed_size_scalar:  typeof rec.size_scalar === 'number' ? rec.size_scalar : null,
+            proposed_stop_pct:     typeof rec.stop_pct === 'number' ? rec.stop_pct : null,
+            proposed_target_pct:   typeof rec.target_pct === 'number' ? rec.target_pct : null,
+            proposed_max_hold_days: Number.isInteger(rec.max_hold_days) ? rec.max_hold_days : null,
+            confidence:            typeof rec.confidence === 'number' ? rec.confidence : null,
+            reasoning:             String(rec.reasoning_one_line || '').slice(0, 500),
+            memo_id:               memoId,
+          }),
+        },
+      });
+      if (insertResult.status === 0) {
+        proposalCount++;
+      } else {
+        log(`proposal insert failed for ${regime}: ${(insertResult.stderr || '').slice(0, 200)}`);
+      }
+    }
+    if (proposalCount) {
+      log(`wrote ${proposalCount} regime proposal(s) for operator approval`);
+      memo.markdown_body += `\n\n---\n**${proposalCount} regime parameter proposal(s) awaiting operator approval** — review at /api/regime-proposals or run \`python3 -m strategies.proposal_manager --list\`.`;
+      // Update memo body in DB to include the proposal note.
+      await _query(
+        `UPDATE strategy_memos SET markdown_body = $1 WHERE id = $2`,
+        [memo.markdown_body, memoId],
+      );
+    }
+  }
 
   const header = `# **${strategy.id}** — weekly review (${new Date().toISOString().slice(0, 10)})\n`;
   const footer = `\n\n_cost: $${out.costUsd.toFixed(3)} · memo id \`${memoId.slice(0, 8)}\`_`;
