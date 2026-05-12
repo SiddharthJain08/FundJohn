@@ -190,6 +190,37 @@ class LifecycleStateMachine:
 
     # ── transitions ──────────────────────────────────────────────────────────
 
+    def validate_regime_eligibility_present(self, strategy_id: str) -> Tuple[bool, str]:
+        """Block candidate→staging if eligible_regimes is missing or empty.
+
+        Auto-derives from backtest_results.eligible_regimes_proposed if available;
+        otherwise raises requires_regime_qualification.
+
+        Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
+        §"Strategy creation pipeline changes – A. PaperHunter → StrategyCoder → Promotion"
+        """
+        record = self._records.get(strategy_id)
+        if not record:
+            return False, f'unknown strategy {strategy_id}'
+
+        metadata = record.metadata or {}
+        eligible = metadata.get('eligible_regimes')
+        if eligible:  # Non-empty list
+            return True, ''
+
+        # No explicit eligible_regimes — try auto-derive from backtest_results
+        backtest_results = metadata.get('backtest_results')
+        if not backtest_results:
+            return False, 'requires_regime_qualification: no backtest_results in metadata'
+
+        proposed = backtest_results.get('eligible_regimes_proposed', [])
+        if not proposed:
+            return False, 'requires_regime_qualification: no regime qualifies under thresholds'
+
+        # Mutate metadata to write the derived eligibility
+        record.metadata['eligible_regimes'] = proposed
+        return True, ''
+
     def can_transition(
         self,
         strategy_id: str,
@@ -236,6 +267,14 @@ class LifecycleStateMachine:
                     f"candidate→live blocked: max_drawdown {drawdown:.2%} > "
                     f"limit {CANDIDATE_TO_LIVE_MAX_DRAWDOWN:.0%}"
                 )
+
+        # Guard: candidate → staging requires regime eligibility
+        # Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
+        # §"Strategy creation pipeline changes"
+        if key == (StrategyState.CANDIDATE, StrategyState.STAGING):
+            ok, reason = self.validate_regime_eligibility_present(strategy_id)
+            if not ok:
+                return False, reason
 
         return True, VALID_TRANSITIONS[key]
 
