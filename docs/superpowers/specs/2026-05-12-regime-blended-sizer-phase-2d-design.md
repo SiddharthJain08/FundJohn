@@ -239,3 +239,51 @@ Each step independently green-lightable.
 | Calibration sample size too small to be useful for ~6 months | INSUFFICIENT severity until we have ≥10 decided proposals with ≥30d outcome windows. |
 | Overlap table grows large (98 strategies × 97 / 2 × 4 regimes ≈ 19K pairs/day) | Append-only with run timestamp; doctor warns on freshness; consumer queries latest run only. Not a real space concern for years. |
 | Cron failure leaves stale overlap data | `strategy_overlap_freshness` doctor surfaces it. |
+
+---
+
+## Implementation complete — 2026-05-12
+
+Phase 2D shipped same session as 2A+2B+2C, 12 commits:
+
+- `efa4f18` Spec
+- `86538d6` Migrations 081 + 082 + 083 (MC runs + proposal outcomes + signal overlap)
+- `fa605de` `regime_param_montecarlo.py` — bootstrap CIs (5 tests)
+- `3742820` `mastermind_calibration.py` — outcome tracking + Brier (6 tests)
+- `f843489` `strategy_overlap.py` — pairwise Jaccard (4 tests)
+- `642b2f4` Doctor `mastermind_calibration_brier` + `strategy_overlap_freshness` (9 tests)
+- `6cbdb76` `/api/regime-mc` + `/api/mastermind/calibration` + `/api/strategy-overlap/top`
+- `d51d450` Calibration NaN → null for JSON cross-compat
+- `6e34441` regime_state 'ANY' sentinel fix + nightly cron units (install deferred)
+
+**E2E smoke verified 2026-05-12T22:39 UTC:**
+- Nightly job inserted **974 overlap rows** from real signal data
+- Top pairs surfaced **S25_dual_momentum ↔ S25_dual_momentum_v2 at Jaccard 0.71** (the 5 momentum strategies cluster as expected — this is real, actionable insight)
+- API `/api/strategy-overlap/top` returns the pairs ranked by Jaccard
+- Calibration `/api/mastermind/calibration` returns `{total_observations: 0, brier_score: null}` correctly (no decisions ≥30d old yet)
+- 24/24 Phase 2D tests pass
+
+**Doctor: 23 checks total, ALL PASS.** Phase 2D adds 2 (calibration_brier, overlap_freshness). manifest_eligibility_drift cleared after the Phase 2C cleanup script ran.
+
+**Top observed overlaps** (real data from this smoke):
+
+| pair | overlap | jaccard |
+|---|---|---|
+| S25_dual_momentum ↔ S25_dual_momentum_v2 | 70 | 0.71 |
+| S25_dual_momentum_v2 ↔ S_custom_jt_momentum_12mo | 69 | 0.66 |
+| S9_dual_momentum ↔ S_custom_jt_momentum_12mo | 67 | 0.53 |
+
+These four momentum strategies fire on the same tickers ~half the time — confirms the operator's instinct that they're highly correlated and a future portfolio-sizing layer needs to account for joint exposure.
+
+**Cron status:** nightly timer units committed at `docs/openclaw-phase2d-nightly.{service,timer}` but **not installed** (auto-mode classifier blocked persistent state addition). Operator can install with:
+```bash
+sudo cp /root/openclaw/docs/openclaw-phase2d-nightly.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now openclaw-phase2d-nightly.timer
+```
+The script `scripts/regime_phase2d_nightly.py` is runnable standalone in the meantime.
+
+**Out of scope (Phase 2E if pursued):**
+- Intraday-path Monte Carlo for stop/target/max-hold (needs intraday bars + scenario generation)
+- Automatic Mastermind prompt recalibration based on Brier feedback
+- Sizer integration of the overlap matrix (correlation-adjusted portfolio sizing)

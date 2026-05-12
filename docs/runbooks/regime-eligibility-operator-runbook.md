@@ -148,6 +148,29 @@ removes the deprecated `eligible_regimes` field from `manifest.json` for
 strategies fully covered in `strategy_regime_params`. Run once to clear
 the `manifest_eligibility_drift` WARN. Reviewable before execution.
 
+**Phase 2D** (2026-05-12) adds three decision-support tools:
+
+- **Bootstrap MC for size_scalar proposals** — `python3 -m
+  metrics.regime_param_montecarlo --strategy <id> --regime <regime>
+  --current 1.0 --proposed 0.7` returns 5/50/95-percentile Sharpe, mean
+  PnL, and max-DD under the proposed scalar via bootstrap resampling of
+  realized PnL × the size ratio. Linear-scaling caveat documented;
+  results persist to `strategy_regime_mc_runs`. API: `POST
+  /api/regime-mc/:strategy/:regime`.
+- **Mastermind confidence calibration** — `python3 -m
+  metrics.mastermind_calibration --backfill 90 --report` computes
+  per-proposal post-decision Sharpe vs pre, classifies `direction_match`,
+  reports Brier score + per-confidence-bucket match rates. Doctor check
+  `mastermind_calibration_brier` PASS/WARN/FAIL at 0.10 / 0.20 thresholds
+  (requires ≥10 samples).
+- **Strategy signal overlap** — `python3 -m metrics.strategy_overlap
+  --compute --window 90` populates pairwise Jaccard for strategies
+  firing on same `(date, ticker, regime)`; `--top 20` lists most-overlapping
+  pairs. API: `GET /api/strategy-overlap/top`. Nightly cron in
+  `scripts/regime_phase2d_nightly.py` (systemd unit at
+  `docs/openclaw-phase2d-nightly.{service,timer}` — install if not
+  already enabled). Doctor: `strategy_overlap_freshness`.
+
 **Phase 1 git config note (still relevant for any legacy paths)**: if you
 ever see `Could not access 'HEAD'` or `dubious ownership` errors from
 git-based doctor checks running under systemd:
