@@ -1,0 +1,5 @@
+{
+  "strategy_id": "momentum_12_1",
+  "required": ["prices"],
+  "optional": []
+}

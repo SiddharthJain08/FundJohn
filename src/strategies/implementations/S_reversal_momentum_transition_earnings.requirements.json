@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_reversal_momentum_transition_earnings",
+  "required": ["prices", "earnings"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S22_quality_momentum",
+  "required": ["prices"],
+  "optional": ["financials"]
+}

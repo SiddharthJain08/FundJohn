@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_btc_gold_dual_momentum_rotation",
+  "required": ["prices"],
+  "optional": []
+}

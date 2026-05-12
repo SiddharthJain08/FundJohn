@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_path_dependent_vol_pdv",
+  "required": ["prices", "options_eod"],
+  "optional": ["macro"]
+}

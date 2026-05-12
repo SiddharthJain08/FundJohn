@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_macro_risk_momentum_ip_beta",
+  "required": ["prices", "macro"],
+  "optional": []
+}

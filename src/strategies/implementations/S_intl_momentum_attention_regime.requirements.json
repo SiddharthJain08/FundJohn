@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_intl_momentum_attention_regime",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

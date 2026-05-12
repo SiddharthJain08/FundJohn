@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ap_tree_cross_section_sdf",
+  "required": ["prices", "financials"],
+  "optional": ["earnings"]
+}

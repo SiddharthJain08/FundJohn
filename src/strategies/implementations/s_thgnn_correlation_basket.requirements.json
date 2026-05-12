@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_thgnn_correlation_basket",
+  "required": ["prices", "macro"],
+  "optional": ["financials"]
+}

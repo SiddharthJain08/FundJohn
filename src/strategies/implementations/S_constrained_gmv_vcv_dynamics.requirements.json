@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_constrained_gmv_vcv_dynamics",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

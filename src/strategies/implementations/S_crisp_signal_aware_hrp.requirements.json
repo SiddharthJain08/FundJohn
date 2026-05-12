@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_crisp_signal_aware_hrp",
+  "required": ["prices"],
+  "optional": []
+}

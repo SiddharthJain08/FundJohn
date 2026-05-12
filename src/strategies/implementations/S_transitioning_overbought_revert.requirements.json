@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_transitioning_overbought_revert",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

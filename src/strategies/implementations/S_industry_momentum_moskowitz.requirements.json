@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_industry_momentum_moskowitz",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_vix_conditioned_short_reversal",
+  "required": ["prices", "macro"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_vp_macd_index_sensitivity",
+  "required": ["prices"],
+  "optional": []
+}

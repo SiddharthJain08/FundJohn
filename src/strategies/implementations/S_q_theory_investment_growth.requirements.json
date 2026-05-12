@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_q_theory_investment_growth",
+  "required": ["prices", "financials"],
+  "optional": []
+}
