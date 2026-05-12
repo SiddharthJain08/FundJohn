@@ -64,6 +64,12 @@ def test_correlation_matrix_default_when_no_overlap_dates():
     assert matrix['B']['A'] == cm.SPARSE_DEFAULT
 
 
+def test_sparse_default_is_near_zero_after_v2():
+    """Phase 2G-v2: SPARSE_DEFAULT lowered from 0.3 to 0.05 so unknown
+    pairs don't stack to dominate the portfolio variance."""
+    assert cm.SPARSE_DEFAULT <= 0.10
+
+
 def test_blend_mixes_two_matrices():
     sigma_pnl = {'A': {'A': 1.0, 'B': 0.4}, 'B': {'A': 0.4, 'B': 1.0}}
     sigma_overlap = {'A': {'A': 1.0, 'B': 0.8}, 'B': {'A': 0.8, 'B': 1.0}}

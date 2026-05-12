@@ -86,27 +86,51 @@ def _portfolio_kelly_phi(sigma_p_sq: float, sigma_ind_sq: float) -> float:
     return min(1.0, raw)
 
 
+TOP_N_FOR_CORRELATION = 20   # Phase 2G-v2: only build matrix among the
+                              # largest TOP_N orders by |notional|; smaller
+                              # orders bypass adjustment (phi=1.0). Avoids
+                              # the N² SPARSE_DEFAULT stacking that produced
+                              # phi=0.218 on a 104-order portfolio.
+
+
 def adjust(orders: list[dict],
-           sigma: dict[str, dict[str, float]]) -> tuple[list[dict], list[dict]]:
+           sigma: dict[str, dict[str, float]],
+           top_n: int = TOP_N_FOR_CORRELATION) -> tuple[list[dict], list[dict]]:
     """Returns (adjusted_orders, per_ticker_log).
 
-    adjusted_orders: same shape as input but with qty + notional_usd scaled
-                     by phi. Other fields preserved.
-    per_ticker_log:  list of {ticker, direction, production_qty,
-                              production_notional, phi, adjusted_qty,
-                              adjusted_notional} dicts for audit / persist.
+    Phase 2G-v2: orders are partitioned into top-N (by |notional|) +
+    rest. The portfolio-Kelly phi is computed from the top-N portfolio
+    variance and applied to those orders. The rest pass through unchanged
+    (phi=1.0) — they're small enough that whatever correlation they have
+    with the rest of the book doesn't move overall risk meaningfully.
+
+    adjusted_orders: same shape as input but with qty + notional_usd
+                     scaled by phi for orders in the top-N. Order is
+                     preserved.
+    per_ticker_log:  one row per order including the phi applied (1.0
+                     for orders outside the top-N).
     """
     if not orders:
         return [], []
-    sigma_p_sq, sigma_ind_sq = _portfolio_variance(orders, sigma)
-    phi = _portfolio_kelly_phi(sigma_p_sq, sigma_ind_sq)
+    # Partition: top-N by |notional|, rest passes through.
+    indexed = list(enumerate(orders))
+    indexed.sort(key=lambda x: abs(float(x[1].get('notional_usd') or 0)), reverse=True)
+    top_idx = {i for i, _ in indexed[:top_n]}
+    top_orders = [orders[i] for i in sorted(top_idx)]
+
+    if top_orders:
+        sigma_p_sq, sigma_ind_sq = _portfolio_variance(top_orders, sigma)
+        phi_top = _portfolio_kelly_phi(sigma_p_sq, sigma_ind_sq)
+    else:
+        phi_top = 1.0
 
     adjusted: list[dict] = []
     log: list[dict] = []
-    for o in orders:
+    for i, o in enumerate(orders):
+        in_top = i in top_idx
+        phi = phi_top if in_top else 1.0
         adj_qty = (o.get('qty') or 0) * phi
         adj_notional = (o.get('notional_usd') or 0) * phi
-        # Round qty DOWN to whole shares (conservative)
         adj_qty_floor = math.floor(adj_qty) if adj_qty >= 0 else math.ceil(adj_qty)
         adj_o = dict(o)
         adj_o['qty'] = adj_qty_floor
@@ -119,6 +143,7 @@ def adjust(orders: list[dict],
             'production_qty':      o.get('qty'),
             'production_notional': o.get('notional_usd'),
             'phi':                 phi,
+            'in_top_n':            in_top,
             'adjusted_qty':        adj_qty_floor,
             'adjusted_notional':   adj_notional,
         })

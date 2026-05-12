@@ -99,3 +99,33 @@ def test_single_order_unchanged():
     assert log[0]['phi'] == 1.0
     assert adjusted[0]['notional_usd'] == 10000
     assert adjusted[0]['qty'] == 100
+
+
+def test_top_n_cap_excludes_small_orders():
+    """Phase 2G-v2: only the top-N orders by |notional| participate in
+    the correlation matrix; smaller orders pass through with phi=1.0."""
+    # Two big LONG orders (correlated → phi < 1) + a tiny LONG that
+    # would also be correlated; with top_n=2 the tiny order bypasses.
+    orders = [
+        {'ticker': 'A', 'qty': 100, 'notional_usd': 50000, 'direction': 'LONG'},
+        {'ticker': 'B', 'qty': 100, 'notional_usd': 50000, 'direction': 'LONG'},
+        {'ticker': 'C', 'qty': 1,   'notional_usd': 100,   'direction': 'LONG'},  # tiny
+    ]
+    sigma = {
+        'A': {'A': 1.0, 'B': 0.95, 'C': 0.95},
+        'B': {'A': 0.95, 'B': 1.0, 'C': 0.95},
+        'C': {'A': 0.95, 'B': 0.95, 'C': 1.0},
+    }
+    adjusted, log = ca.adjust(orders, sigma, top_n=2)
+    by_ticker = {entry['ticker']: entry for entry in log}
+    # A and B are in top-2 → phi < 1
+    assert by_ticker['A']['phi'] < 1.0
+    assert by_ticker['B']['phi'] < 1.0
+    assert by_ticker['A']['in_top_n'] is True
+    assert by_ticker['B']['in_top_n'] is True
+    # C is out → phi = 1.0, notional unchanged
+    assert by_ticker['C']['phi'] == 1.0
+    assert by_ticker['C']['in_top_n'] is False
+    c_adj = next(a for a in adjusted if a['ticker'] == 'C')
+    assert c_adj['notional_usd'] == 100
+    assert c_adj['qty'] == 1

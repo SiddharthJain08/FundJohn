@@ -27,7 +27,14 @@ from pathlib import Path
 from typing import Optional
 
 MAX_OFF_DIAGONAL = 0.95   # clip Pearson to ±0.95 to avoid singular matrices
-SPARSE_DEFAULT   = 0.3    # used when pair has <2 paired observations
+# Phase 2G-v2 (2026-05-12): SPARSE_DEFAULT lowered from 0.3 → 0.05 after
+# first-cycle smoke produced phi=0.218 across 104 tickers. With most pairs
+# lacking joint realized-PnL history in the 90-day window, a 0.3 baseline
+# stacked across thousands of pair entries inflated portfolio variance
+# 30× above independent. 0.05 treats unknown pairs as essentially
+# uncorrelated (the math's null hypothesis); pairs WITH data still
+# produce real Pearson values clipped at ±0.95.
+SPARSE_DEFAULT   = 0.05
 DEFAULT_WINDOW_DAYS = 90
 DEFAULT_BLEND_ALPHA = 0.6   # weight on PnL correlation; (1-alpha) on overlap
 
