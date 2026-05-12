@@ -488,31 +488,49 @@ def liquidate_on_regime_change(run_date: str | None = None,
 
     conn.close()
 
-    if rcli is not None:
+    n_cancel_ok = sum(1 for r in cancel_results.values() if r.get('ok'))
+    n_close_ok = sum(1 for r in close_results if r.get('ok'))
+    n_close_err = len(close_results) - n_close_ok
+    # A run is "successful enough" to record the sentinel + cooldown only
+    # when at least one close succeeded, or when there was nothing to
+    # close (already flat). If every close errored, we treat the run as
+    # failed and do NOT seal the sentinel/cooldown — that way the next
+    # cron tick (or operator retry) can attempt again instead of being
+    # silently masked. Without this, May 9 2026's CLI-flag regression
+    # marked `liquidated` despite zero successful closes.
+    fire_succeeded = (n_close_ok > 0) or (len(close_results) == 0)
+
+    if rcli is not None and fire_succeeded:
         try:
             rcli.set(sentinel_key, '1', ex=SENTINEL_TTL)
-            # Cooldown gate is set ONLY after a successful live fire.
-            # Blocks further intraday + daily fires for COOLDOWN_TTL
-            # seconds. Independent from the transition-keyed sentinel
-            # so a same-day repeat of the same transition stays
-            # idempotent past the cooldown window via the 24h SENTINEL.
             rcli.set(cooldown_key, '1', ex=COOLDOWN_TTL)
         except Exception:
             pass
 
-    n_cancel_ok = sum(1 for r in cancel_results.values() if r.get('ok'))
-    n_close_ok = sum(1 for r in close_results if r.get('ok'))
-    n_close_err = len(close_results) - n_close_ok
     closed_syms = ", ".join(r["symbol"] for r in close_results if r["ok"])[:200]
-    summary = (
-        f':rotating_light: **Regime liquidation** {prior} → {state}\n'
-        f'• Cancelled: {n_cancel_ok}/{len(cancel_results)} orders\n'
-        f'• Closed:    {n_close_ok}/{len(close_results)} symbols ({closed_syms})\n'
-        f'• Errors:    {n_close_err}'
-    )
+    if not fire_succeeded:
+        summary = (
+            f':x: **Regime liquidation FAILED** {prior} → {state}\n'
+            f'• Cancelled: {n_cancel_ok}/{len(cancel_results)} orders\n'
+            f'• Closed:    {n_close_ok}/{len(close_results)} symbols\n'
+            f'• Errors:    {n_close_err} (sentinel + cooldown NOT set — retry-eligible)'
+        )
+    else:
+        summary = (
+            f':rotating_light: **Regime liquidation** {prior} → {state}\n'
+            f'• Cancelled: {n_cancel_ok}/{len(cancel_results)} orders\n'
+            f'• Closed:    {n_close_ok}/{len(close_results)} symbols ({closed_syms})\n'
+            f'• Errors:    {n_close_err}'
+        )
     _post_to_discord('trade-reports', summary)
 
-    return {'action': 'liquidated', 'transition': transition_key,
+    if not fire_succeeded:
+        action = 'failed'
+    elif n_close_err > 0:
+        action = 'liquidated_partial'
+    else:
+        action = 'liquidated'
+    return {'action': action, 'transition': transition_key,
             'cancel_results': cancel_results,
             'close_results': close_results, 'live': True}
 
@@ -548,7 +566,9 @@ def _main():
     print(json.dumps(result, default=str))
     if result.get('action') == 'error':
         sys.exit(2)
-    if result.get('action') == 'liquidated':
+    if result.get('action') == 'failed':
+        sys.exit(1)
+    if result.get('action') in ('liquidated', 'liquidated_partial'):
         bad = sum(1 for r in result.get('close_results', []) if not r.get('ok'))
         if bad:
             sys.exit(1)
