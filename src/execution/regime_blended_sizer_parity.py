@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 import psycopg2, psycopg2.extras
 from execution.regime_blended_sizer import size_positions
+from execution.handoff import read_handoff
 
 def _fetch_account_state_safe():
     """Best-effort account fetch; returns sane defaults if Alpaca call fails (DRY-RUN)."""
@@ -31,49 +32,77 @@ def main():
     ap.add_argument('--date', default=date.today().isoformat())
     args = ap.parse_args()
     run_date = date.fromisoformat(args.date)
+    run_date_str = run_date.isoformat()
 
-    uri = os.environ['POSTGRES_URI']
-    conn = psycopg2.connect(uri)
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Load the handoff written by trade_handoff_builder for this cycle.
+    # The handoff contains the same signal set the production trade step saw,
+    # with enriched fields like p_t1, entry, stop, t1 already computed.
+    handoff = read_handoff(run_date_str, 'structured')
+    if handoff is None:
+        print(f'[trade_parity] no handoff for {run_date_str}; nothing to do')
+        return
 
-    # Load same signal set the production trade step saw.
-    # Sub-task C (Path 1): extract p_t1 + strategy_memo_mult from signal_params JSONB.
-    # Also alias target_1 twice: as take_profit_1 (for _independent_path / consolidator
-    # bracket) and as t1 (for enrich_with_kelly which checks 't1 in s' first).
-    cur.execute("""
-      SELECT id AS signal_id, strategy_id, ticker, direction,
-             entry_price, stop_loss,
-             target_1 AS take_profit_1,
-             target_1 AS t1,
-             COALESCE((signal_params->>'p_t1')::float, 0.0) AS p_t1,
-             COALESCE((signal_params->>'strategy_memo_mult')::float, 1.0) AS strategy_memo_mult,
-             signal_params,
-             regime_state
-        FROM execution_signals
-       WHERE signal_date = %s
-    """, (run_date,))
-    signals = [dict(r) for r in cur.fetchall()]
-    # ticker_consolidator.py expects direction as numeric +1/-1 (not string).
-    # enrich_with_kelly now handles numeric directions (+1→LONG, -1→SHORT).
-    _DIR_MAP = {'LONG': 1, 'BUY': 1, 'BUY_VOL': 1,
-                'SHORT': -1, 'SELL': -1, 'SELL_VOL': -1}
-    for s in signals:
-        raw_dir = (s.get('direction') or 'LONG').upper()
-        s['direction'] = _DIR_MAP.get(raw_dir, 1)
-    print(f'[trade_parity] loaded {len(signals)} signals for {run_date}')
+    # Extract signals and regime from the handoff.
+    signals = handoff.get('signals', [])
+    print(f'[trade_parity] loaded {len(signals)} signals from handoff for {run_date_str}')
 
     if not signals:
-        print('[trade_parity] no signals; nothing to do')
-        conn.close(); return
+        print('[trade_parity] no signals in handoff; nothing to do')
+        return
 
-    # Current regime from market_regime table.
-    cur.execute("SELECT state FROM market_regime ORDER BY updated_at DESC LIMIT 1")
-    row = cur.fetchone()
-    if not row:
-        print('[trade_parity] no market_regime row; aborting')
-        conn.close(); return
-    regime = {'state': row['state']}
-    print(f'[trade_parity] current regime: {regime["state"]}')
+    # Prepare signals for size_positions: map direction to numeric (+1/-1),
+    # add signal_id, and rename handoff field names to match consolidator expectations.
+    # Handoff uses: entry, stop, t1, t2 — consolidator expects: entry_price, stop_loss, take_profit_1, t1, t2
+    # ticker_consolidator.py expects direction as numeric +1/-1 (not string).
+    _DIR_MAP = {'LONG': 1, 'BUY': 1, 'BUY_VOL': 1,
+                'SHORT': -1, 'SELL': -1, 'SELL_VOL': -1}
+    for i, s in enumerate(signals):
+        raw_dir = (s.get('direction') or 'LONG').upper()
+        s['direction'] = _DIR_MAP.get(raw_dir, 1)
+        # Map handoff field names to consolidator field names.
+        if 'entry' in s and 'entry_price' not in s:
+            s['entry_price'] = s['entry']
+        if 'stop' in s and 'stop_loss' not in s:
+            s['stop_loss'] = s['stop']
+        if 't1' in s:
+            # t1 is used by enrich_with_kelly, but consolidator bracket builder needs take_profit_1.
+            if 'take_profit_1' not in s:
+                s['take_profit_1'] = s['t1']
+        # Assign a temporary signal_id based on array index (used for tracking).
+        s['signal_id'] = str(i)
+
+    # Regime comes from the handoff. Fall back to live market_regime if missing.
+    regime_state = handoff.get('regime', {}).get('state')
+    if not regime_state:
+        uri = os.environ.get('POSTGRES_URI')
+        if not uri:
+            print('[trade_parity] no POSTGRES_URI and handoff has no regime; aborting')
+            return
+        try:
+            conn_tmp = psycopg2.connect(uri)
+            cur_tmp = conn_tmp.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            cur_tmp.execute("SELECT state FROM market_regime ORDER BY updated_at DESC LIMIT 1")
+            row = cur_tmp.fetchone()
+            conn_tmp.close()
+            if not row:
+                print('[trade_parity] no regime state available; aborting')
+                return
+            regime_state = row['state']
+        except Exception as e:
+            print(f'[trade_parity] regime fallback failed: {e}; aborting')
+            return
+
+    regime = {'state': regime_state}
+    print(f'[trade_parity] regime: {regime_state}')
+
+    # Connect to database for regime params and strategy state.
+    uri = os.environ.get('POSTGRES_URI')
+    if not uri:
+        print('[trade_parity] POSTGRES_URI not set; aborting')
+        return
+
+    conn = psycopg2.connect(uri)
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     # Regime sizing params for current regime.
     cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state = %s", (regime['state'],))
@@ -118,23 +147,21 @@ def main():
     print(f'[trade_parity] generated {len(orders)} orders')
 
     # Write to parity_orders only — DO NOT submit.
-    # Sub-task B: contributing_signal_ids is now UUID[] (migration 070 fixed the column).
-    # Pass UUIDs directly with ::uuid[] cast; remove the old bracket_json stashing workaround.
+    # Note: handoff signals don't have real UUID signal_ids (they're computed from handoff
+    # structure, not fetched from execution_signals table), so we omit contributing_signal_ids.
     inserted = 0
     for o in orders:
         cur.execute("""
           INSERT INTO parity_orders
             (signal_date, ticker, source, qty, notional_usd, bracket_json, contributing_signal_ids)
           VALUES (%s, %s, 'regime_blended', %s, %s, %s, %s::uuid[])
-        """, (run_date, o['ticker'], o['qty'], o['notional_usd'],
+        """, (run_date_str, o['ticker'], o['qty'], o['notional_usd'],
               json.dumps(o['bracket']),
-              [str(c['contributing_signal_id'])
-               for c in o['contributions']
-               if c.get('contributing_signal_id')]))
+              []))  # No UUID signal_ids from handoff-sourced signals
         inserted += 1
     conn.commit()
     conn.close()
-    print(f'[trade_parity] wrote {inserted} parity orders for {run_date}')
+    print(f'[trade_parity] wrote {inserted} parity orders for {run_date_str}')
 
 if __name__ == '__main__':
     main()
