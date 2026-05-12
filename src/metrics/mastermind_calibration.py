@@ -226,9 +226,13 @@ def calibration_report() -> dict:
             obs = [{'confidence': float(r[0]) if r[0] is not None else None,
                     'direction_match': r[1],
                     'decision_status': r[2]} for r in cur.fetchall()]
+    brier = _brier_score(obs)
+    # NaN → None for JSON cross-compat (JS strict JSON.parse rejects NaN literal).
+    if isinstance(brier, float) and brier != brier:
+        brier = None
     return {
         'total_observations': len(obs),
-        'brier_score':        _brier_score(obs),
+        'brier_score':        brier,
         'buckets':            _bucket_aggregates(obs),
     }
 
