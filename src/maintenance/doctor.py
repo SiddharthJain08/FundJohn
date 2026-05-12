@@ -544,6 +544,72 @@ def check_orchestrator_lock():
     return _warn('orchestrator_lock', '; '.join(stale))
 
 
+@_check('regime_blended_gate_b')
+def check_regime_blended_gate_b():
+    """Validate Gate B preconditions for the regime-blended LIVE flip.
+
+    Runs the walk-forward harness against the latest strategy_regime_backtests
+    snapshot. Semantics:
+      - FAIL if OPENCLAW_REGIME_BLENDED_LIVE=1 and gate_b.pass is false.
+        (The cycle is live but the gate broke — block the next run.)
+      - WARN if gate_b.pass is false but LIVE flag is off — informational
+        during DRY-RUN parity window.
+      - WARN if the latest backtest snapshot is older than 14 days (two missed
+        weekly refreshes).
+      - PASS otherwise.
+
+    The check is cheap (reads the latest run_id only) so it's safe in --quick.
+    """
+    live = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE', '0') == '1'
+    try:
+        from backtest.regime_blended_backtest import (
+            _db_uri, run_walkforward,
+        )
+    except Exception as exc:
+        return _warn('regime_blended_gate_b',
+                     f'harness import failed: {type(exc).__name__}: {exc}')
+
+    uri = _db_uri()
+    manifest_path = ROOT / 'src' / 'strategies' / 'manifest.json'
+    regime_parquet = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
+    try:
+        result = run_walkforward(uri, manifest_path, regime_parquet)
+    except Exception as exc:
+        return _warn('regime_blended_gate_b',
+                     f'walk-forward failed: {type(exc).__name__}: {exc}')
+
+    if result.get('error'):
+        msg = f'no backtests yet: {result["error"]}'
+        return _fail('regime_blended_gate_b', msg) if live else _warn('regime_blended_gate_b', msg)
+
+    gate = result.get('gate_b', {})
+    delta = result.get('delta', {})
+
+    # Snapshot freshness — separate query for run_at.
+    try:
+        import psycopg2
+        with psycopg2.connect(uri) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT MAX(run_at) FROM strategy_regime_backtests
+                           WHERE run_id = %s""", (result.get('run_id'),))
+            row = cur.fetchone()
+        if row and row[0]:
+            age = datetime.now(timezone.utc) - row[0]
+            if age > timedelta(days=14):
+                return _warn('regime_blended_gate_b',
+                             f'snapshot stale: {age.days}d old (weekly cron missed?)')
+    except Exception:
+        pass  # freshness probe is best-effort; don't fail on DB hiccups
+
+    if gate.get('pass'):
+        return _ok('regime_blended_gate_b',
+                   f'pass (Δsharpe={delta.get("sharpe")}, Δmax_dd={delta.get("max_dd")}, live={live})')
+    detail = (f'FAIL Δsharpe={delta.get("sharpe")} '
+              f'within_tolerance={gate.get("sharpe_within_tolerance")}, '
+              f'max_dd_not_worse={gate.get("max_dd_not_worse")}, '
+              f'low_vol_strategies_present={gate.get("low_vol_strategies_present")}')
+    return _fail('regime_blended_gate_b', detail) if live else _warn('regime_blended_gate_b', detail)
+
+
 @_check('systemd_services', slow=True)
 def check_systemd_services():
     """Each expected unit must be `active` per `systemctl is-active`. Skips
