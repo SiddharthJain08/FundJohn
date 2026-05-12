@@ -1730,6 +1730,9 @@ app.use('/api/regime-eligibility', require('./routes_regime_eligibility'));
 // Phase 2A — per-(strategy, regime) parameter table
 app.use('/api/regime-params', require('./routes_regime_params'));
 
+// Phase 2B — Mastermind proposal queue
+app.use('/api/regime-proposals', require('./routes_regime_proposals'));
+
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
 
