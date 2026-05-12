@@ -18,9 +18,44 @@ from execution.tradejohn_confirmer import confirm as default_confirmer
 
 logger = logging.getLogger(__name__)
 
+MAX_DAILY_NEW_NOTIONAL_PCT = 0.25  # Aggregate cap: total new notional ≤ 25% of available NAV
+AVAILABLE_NAV_FLOOR_PCT = 0.05     # Floor: even when fully invested, allocate ≥5% NAV
+
 CONSOLIDATE_REGIMES = ('LOW_VOL', 'TRANSITIONING')
 INDEPENDENT_REGIMES = ('HIGH_VOL', 'CRISIS')
 HIGH_VOL_FALLBACK_TARGET_PCT = 0.01  # 1% NAV when strategy missing from sizing recs
+
+def _apply_aggregate_cap(orders: list[dict], account_state: dict) -> list[dict]:
+    """Cap total notional at MAX_DAILY_NEW_NOTIONAL_PCT × available_nav.
+
+    available_nav = max(NAV × 5%, NAV - long_market_value).
+    If sum(order.notional) ≤ cap, return orders unchanged.
+    Otherwise scale every order's qty + notional by (cap / total_notional).
+    Mutates each order dict in place AND returns the (same) list.
+    """
+    if not orders:
+        return orders
+    nav = float(account_state.get('equity', 0))
+    if nav <= 0:
+        return orders
+    long_mv = float(account_state.get('long_market_value', 0))
+    available_nav = max(nav * AVAILABLE_NAV_FLOOR_PCT, nav - long_mv)
+    cap = MAX_DAILY_NEW_NOTIONAL_PCT * available_nav
+
+    total = sum(abs(o['notional_usd']) for o in orders)
+    if total <= cap or cap <= 0:
+        return orders
+
+    scale = cap / total
+    logger.info('regime_blended_sizer: aggregate cap binding — scaling %d orders by %.4f '
+                '(total=$%.0f → cap=$%.0f, NAV=$%.0f, long_mv=$%.0f, available_nav=$%.0f)',
+                len(orders), scale, total, cap, nav, long_mv, available_nav)
+    for o in orders:
+        o['notional_usd'] = o['notional_usd'] * scale
+        o['qty'] = o['qty'] * scale
+        o['cap_scale_applied'] = scale
+    return orders
+
 
 def _select_mode(regime_state: str) -> str:
     if regime_state in CONSOLIDATE_REGIMES:
@@ -59,9 +94,11 @@ def size_positions(
     passed = enrich_with_kelly(passed)
 
     if mode == 'consolidate':
-        return _consolidate_path(passed, account_state, regime_params, confirmer or default_confirmer)
+        orders = _consolidate_path(passed, account_state, regime_params, confirmer or default_confirmer)
     else:
-        return _independent_path(passed, account_state, regime_params)
+        orders = _independent_path(passed, account_state, regime_params)
+
+    return _apply_aggregate_cap(orders, account_state)
 
 def _consolidate_path(signals, account_state, params, confirmer):
     regt_bp = float(account_state['regt_buying_power'])
