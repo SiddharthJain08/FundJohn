@@ -636,6 +636,52 @@ def check_regime_blended_gate_b():
     return _fail('regime_blended_gate_b', detail) if live else _warn('regime_blended_gate_b', detail)
 
 
+ROLLUP_STALE_HOURS = 26
+ROLLUP_VERY_STALE_HOURS = 72
+
+
+def _latest_rollup_run_at(uri: str):
+    """Return MAX(run_at) from strategy_regime_live_pnl_rollup or None."""
+    import psycopg2
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT MAX(run_at) FROM strategy_regime_live_pnl_rollup'
+            )
+            row = cur.fetchone()
+    return row[0] if row else None
+
+
+@_check('regime_live_rollup_freshness')
+def check_regime_live_rollup_freshness():
+    """Validate that the nightly regime live PnL rollup ran recently.
+
+    PASS:  rollup within last 26h (one nightly fire + 2h headroom)
+    WARN:  26h - 72h (one missed run; operator should investigate)
+    FAIL:  > 72h or table empty (rollup pipeline broken)
+    WARN:  db error reaching rollup table
+    """
+    name = 'regime_live_rollup_freshness'
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    try:
+        latest = _latest_rollup_run_at(uri)
+    except Exception as exc:
+        return _warn(name, f'rollup query failed: {exc!s}')
+    if latest is None:
+        return _fail(name, 'rollup table empty — has the timer ever run?')
+    age = datetime.now(timezone.utc) - latest
+    age_hours = age.total_seconds() / 3600.0
+    if age_hours <= ROLLUP_STALE_HOURS:
+        return _ok(name, f'fresh ({age_hours:.1f}h old)')
+    if age_hours <= ROLLUP_VERY_STALE_HOURS:
+        return _warn(name,
+                     f'stale ({age_hours:.1f}h old; nightly may have failed)')
+    return _fail(name,
+                 f'very stale ({age_hours:.1f}h old; rollup pipeline broken)')
+
+
 @_check('systemd_services', slow=True)
 def check_systemd_services():
     """Each expected unit must be `active` per `systemctl is-active`. Skips
