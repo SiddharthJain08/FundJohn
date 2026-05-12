@@ -339,6 +339,92 @@ async function runVolIndices() {
   }
 }
 
+// ── Daily-collection wrappers for the 4 ingest scripts that staging-approval
+// also backfills via the yfinance/polygon dispatchers. Each phase is non-fatal
+// (matches runVolIndices): a script failure logs a [WARN] and continues. ──
+
+const ROOT_DIR = require('path').resolve(__dirname, '..', '..');
+
+async function _runIngestPhase(emoji, label, scriptArgs, dataset, timeoutMs = 5 * 60 * 1000) {
+  const { execFile } = require('child_process');
+  const { promisify } = require('util');
+  const execFileP = promisify(execFile);
+  const start = Date.now();
+  notify(`${emoji} ${label}`);
+  try {
+    const { stdout } = await execFileP('python3', scriptArgs, {
+      cwd: ROOT_DIR, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024,
+    });
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    const tail = stdout.trim().split('\n').slice(-2).join(' ').slice(0, 200);
+    notify(`✅ ${label} complete in ${elapsed}s — ${tail}`);
+    await store.logRun(null, dataset, 'success', 0, null, Date.now() - start, 0);
+  } catch (err) {
+    notify(`[WARN] ${label} failed: ${(err.message || '').slice(0, 200)}`);
+    await store.logRun(null, dataset, 'error', 0, (err.message || '').slice(0, 500), Date.now() - start, 0);
+  }
+}
+
+// vol_indices.parquet (wide-format vix/vvix/vix9d_close) — distinct from the
+// long-format VIX/VIX3M/VVIX rows in macro.parquet that runVolIndices() refreshes.
+async function runVolIndicesWide() {
+  return _runIngestPhase(
+    '📊', 'Vol indices (wide-format)',
+    ['src/ingestion/ingest_vol_indices.py'],
+    'vol_indices', 60_000,
+  );
+}
+
+// 30-minute equity bars for the top-250 universe.
+async function run30mPrices() {
+  return _runIngestPhase(
+    '⏱️', '30m prices (top-250)',
+    ['src/ingestion/ingest_prices_30m.py'],
+    'prices_30m', 5 * 60_000,
+  );
+}
+
+// Per-ticker ATM-30d/90d IV history derived from options_eod.parquet.
+// Guard: only run daily once the parquet has ≥ 30 days of history. The first
+// run is performed by staging-approval backfill, which builds the seed
+// history; daily collection just appends yesterday's slice on top.
+async function runIvHistory() {
+  const fs = require('fs');
+  const path = require('path');
+  const ivPath = path.join(ROOT_DIR, 'data', 'master', 'iv_history.parquet');
+  if (!fs.existsSync(ivPath)) {
+    notify('⏭️  iv_history skipped — no seed parquet (run staging-approval first)');
+    return;
+  }
+  // Cheap depth probe — count distinct dates without loading all columns.
+  let distinctDays = 0;
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('python3', ['-c',
+      "import pandas as pd, sys; df = pd.read_parquet('" + ivPath + "', columns=['date']); print(df['date'].astype(str).nunique())",
+    ], { timeout: 30_000 }).toString().trim();
+    distinctDays = parseInt(out, 10) || 0;
+  } catch (_) {}
+  if (distinctDays < 30) {
+    notify(`⏭️  iv_history skipped — only ${distinctDays} day(s) of seed history; needs ≥ 30`);
+    return;
+  }
+  return _runIngestPhase(
+    '📐', 'iv_history (incremental)',
+    ['src/ingestion/ingest_iv_history.py'],
+    'iv_history', 5 * 60_000,
+  );
+}
+
+// Forward earnings calendar via per-ticker yfinance fan-out (1s throttle).
+async function runEarningsCalendar() {
+  return _runIngestPhase(
+    '📅', 'Earnings calendar (yfinance, 1s throttle)',
+    ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
+    'earnings_calendar', 15 * 60_000,
+  );
+}
+
 // ── Phase 2: Historical prices — gap-aware, never re-fetches known data ────────
 
 async function runHistoricalPrices(daysBack = 3650, tickers = null) {
@@ -1626,6 +1712,14 @@ async function runDailyCollection() {
     await runVolIndices();
   }
 
+  // Phase 1c: Wide-format vol_indices.parquet — yfinance ^VIX/^VVIX/^VIX9D
+  // pulled into a date-indexed wide frame (vix_close, vvix_close,
+  // vix9d_close). Distinct from macro.parquet (long-format) — strategies
+  // str01_vvix_early_warning et al read this file directly. Default-on.
+  if (cfg.collect_vol_indices_wide !== 'false') {
+    await runVolIndicesWide();
+  }
+
   // Phase 2a: S&P 100 equity prices — only tickers with gaps (yfinance fallback if Polygon 403)
   const priceEquityNeeded = gaps?.prices.tickers.filter(t => equityTickers.includes(t)) ?? equityTickers;
   const priceMarketNeeded = gaps?.prices.tickers.filter(t => marketTickers.includes(t)) ?? marketTickers;
@@ -1642,6 +1736,13 @@ async function runDailyCollection() {
     notify('✅ Prices (market): all current — skipped');
   }
 
+  // Phase 2c: 30-minute equity bars (top-250 by avg_dollar_volume_30d)
+  // via Polygon REST aggregates. ~1-2 min wall-clock at 4 calls/sec.
+  // Strategies str04 (intraday SPY) + str06 (EOD reversal) read this file.
+  if (cfg.collect_prices_30m !== 'false') {
+    await run30mPrices();
+  }
+
   // Phase 3: Options — only tickers without today's data
   const optionsNeeded = gaps?.options.tickers ?? optionsTickers;
   if (cfg.collect_options !== 'false' && optionsNeeded.length > 0) {
@@ -1649,6 +1750,14 @@ async function runDailyCollection() {
   } else if (optionsNeeded.length === 0) {
     notify('✅ Options: all current — skipped');
     if (_alertPost) _alertPost('✅ **Phase 3 complete** — all tickers already covered');
+  }
+
+  // Phase 3b: iv_history derivation — depends on fresh options_eod, so runs
+  // immediately after Phase 3. Skipped automatically until iv_history.parquet
+  // has ≥ 30 days of seed history (the staging-approval backfill builds the
+  // seed; daily collection just appends yesterday's slice).
+  if (cfg.collect_iv_history !== 'false') {
+    await runIvHistory();
   }
 
   // Phase 4: Fundamentals — only stale tickers, budget-aware
@@ -1659,6 +1768,14 @@ async function runDailyCollection() {
     notify(`💰 Fundamentals skipped — budget ${budgetStatus.mode}`);
   } else if (fundNeeded.length === 0) {
     notify('✅ Fundamentals: all current — skipped');
+  }
+
+  // Phase 4b: Forward earnings calendar via per-ticker yfinance fan-out
+  // (1s throttle to avoid yfinance rate limits). Runs after fundamentals
+  // because they hit the same provider universe in opposite directions
+  // (FMP fundamentals + yfinance calendar).
+  if (cfg.collect_earnings_calendar !== 'false') {
+    await runEarningsCalendar();
   }
 
   // Phase 6: News — skipped in YELLOW/RED

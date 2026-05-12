@@ -20,9 +20,11 @@ Schema (long-format):
 
 Data source
 -----------
-FMP Starter tier provides `earning_calendar?from=&to=&apikey=`
-returning all scheduled earnings in the window.  We keep only the
-*next* event per ticker (earliest forward date ≥ today).
+Yahoo Finance per-ticker `Ticker.calendar` API. The FMP `earning_calendar`
+bulk endpoint returns 403 on the current plan tier, so we fan out across
+the active universe (read from prices.parquet) and call yfinance once
+per ticker to retrieve the next upcoming earnings date and consensus
+estimates. Slower than a single bulk call but uses no paid API quota.
 
 Usage
 -----
@@ -35,95 +37,121 @@ Author: Claude / FundJohn research, 2026-04-23.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-from datetime import date, timedelta
+import time as _time
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-import requests
 
 DATA_DIR = Path("/root/openclaw/data/master")
 OUT_PATH = DATA_DIR / "earnings_calendar.parquet"
+PRICES_PATH = DATA_DIR / "prices.parquet"
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
+
+def _load_universe(universe_file: str | None) -> list[str]:
+    if universe_file and Path(universe_file).exists():
+        with open(universe_file) as f:
+            return sorted({ln.strip() for ln in f
+                           if ln.strip() and not ln.startswith('#')})
+    if PRICES_PATH.exists():
+        df = pd.read_parquet(PRICES_PATH, columns=['ticker'])
+        return sorted(df['ticker'].astype(str).unique().tolist())
+    return []
 
 
-def fmp_earnings_window(api_key: str, from_d: str, to_d: str) -> pd.DataFrame:
-    """Pull the full earnings calendar for the window (≤ 90d per FMP limit)."""
-    url = f"{FMP_BASE}/earning_calendar"
-    params = {'from': from_d, 'to': to_d, 'apikey': api_key}
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    js = r.json() or []
-    if not js:
+def _earliest_future_date(raw, today: date) -> date | None:
+    """yfinance returns 'Earnings Date' as either a single date or a list of
+    candidate dates (often two — bmo/amc rumors). Return the earliest
+    forward-looking date, or None if all are in the past."""
+    if raw is None:
+        return None
+    candidates = raw if isinstance(raw, (list, tuple)) else [raw]
+    fwd = []
+    for c in candidates:
+        try:
+            d = c.date() if hasattr(c, 'date') else pd.to_datetime(c).date()
+        except Exception:
+            continue
+        if d >= today:
+            fwd.append(d)
+    return min(fwd) if fwd else None
+
+
+def yfinance_calendar(tickers: list[str], today: date,
+                      throttle_s: float = 0.25) -> pd.DataFrame:
+    """Per-ticker Ticker(t).calendar fan-out. Slow but quota-free."""
+    try:
+        import yfinance as yf
+    except ImportError as e:
+        print(f"  yfinance import failed: {e}", file=sys.stderr)
         return pd.DataFrame()
-    df = pd.DataFrame(js)
-    df = df.rename(columns={
-        'symbol':        'ticker',
-        'date':          'next_earnings_date',
-        'epsEstimated':  'eps_estimate',
-        'revenueEstimated': 'revenue_estimate',
-        'fiscalDateEnding': 'fiscal_period',
-    })
-    df['next_earnings_date'] = pd.to_datetime(df['next_earnings_date']).dt.date
-    keep = ['ticker', 'next_earnings_date', 'time',
-            'eps_estimate', 'revenue_estimate', 'fiscal_period']
-    return df[[c for c in keep if c in df.columns]].reset_index(drop=True)
+
+    rows: list[dict] = []
+    failed = 0
+    for i, t in enumerate(tickers, 1):
+        try:
+            cal = yf.Ticker(t).calendar
+        except Exception as e:
+            failed += 1
+            if failed <= 5:
+                print(f"  [yf] {t} failed: {e}", file=sys.stderr)
+            continue
+        if not cal:
+            continue
+        nxt = _earliest_future_date(cal.get('Earnings Date'), today)
+        if not nxt:
+            continue
+        rows.append({
+            'ticker':            t,
+            'next_earnings_date': nxt,
+            'time':              '',  # yfinance doesn't expose bmo/amc
+            'eps_estimate':      cal.get('Earnings Average'),
+            'revenue_estimate':  cal.get('Revenue Average'),
+            'fiscal_period':     None,
+        })
+        if i % 100 == 0:
+            print(f"  [yf] progress: {i}/{len(tickers)} tickers, {len(rows)} with upcoming earnings")
+        if throttle_s > 0:
+            _time.sleep(throttle_s)
+
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    return df.sort_values(['ticker', 'next_earnings_date']).reset_index(drop=True)
 
 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--window', type=int, default=14,
-                   help='± days around today to pull (default 14)')
+                   help='± days around today (kept for CLI compat; yfinance returns one '
+                        'forward date per ticker regardless)')
     p.add_argument('--universe-file', default=None,
-                   help='Optional txt file with tickers to retain (default = all)')
+                   help='Optional txt file with tickers to retain (default = prices.parquet universe)')
+    p.add_argument('--throttle', type=float, default=0.25,
+                   help='Seconds to sleep between yfinance ticker calls (default 0.25)')
+    p.add_argument('--limit', type=int, default=None,
+                   help='Cap how many tickers to fetch (debug aid)')
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args()
 
-    api_key = os.environ.get('FMP_API_KEY')
-    if not api_key:
-        print("ERROR: FMP_API_KEY environment variable not set.", file=sys.stderr)
-        sys.exit(2)
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     today = date.today()
-    from_d = (today - timedelta(days=args.window)).isoformat()
-    to_d = (today + timedelta(days=args.window)).isoformat()
-    print(f"earnings_calendar ingest — window {from_d} → {to_d}")
 
-    df = fmp_earnings_window(api_key, from_d, to_d)
-    print(f"  raw rows        : {len(df):,}")
+    universe = _load_universe(args.universe_file)
+    if args.limit:
+        universe = universe[:args.limit]
+    print(f"earnings_calendar ingest — yfinance per-ticker, universe size {len(universe)}")
 
-    if args.universe_file and Path(args.universe_file).exists():
-        with open(args.universe_file) as f:
-            universe = {ln.strip() for ln in f if ln.strip()
-                        and not ln.startswith('#')}
-        df = df[df['ticker'].isin(universe)]
-        print(f"  universe-filtered : {len(df):,}")
-
-    # For each ticker, keep only the *next* upcoming event ≥ today
-    upcoming = df[df['next_earnings_date'] >= today].copy()
-    upcoming = upcoming.sort_values(['ticker', 'next_earnings_date'])
-    upcoming = upcoming.drop_duplicates(subset=['ticker'], keep='first')
-
-    # And a past-event table so S-HV17 can compute historical-move baselines
-    historical = df[df['next_earnings_date'] < today].copy()
-    print(f"  upcoming events : {len(upcoming):,}")
-    print(f"  trailing events : {len(historical):,}")
+    df = yfinance_calendar(universe, today, throttle_s=args.throttle)
+    print(f"  upcoming events : {len(df):,}")
 
     if args.dry_run:
         print("  --dry-run: not writing")
         return
 
-    # The forward table is the operational calendar
-    upcoming.to_parquet(OUT_PATH, index=False)
-    print(f"  wrote upcoming → {OUT_PATH}")
-
-    # Optional trailing file for post-event analysis
-    trail_path = DATA_DIR / "earnings_calendar_trailing.parquet"
-    historical.to_parquet(trail_path, index=False)
-    print(f"  wrote trailing → {trail_path}")
+    df.to_parquet(OUT_PATH, index=False)
+    print(f"  wrote → {OUT_PATH}")
 
 
 if __name__ == "__main__":

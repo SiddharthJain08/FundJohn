@@ -44,9 +44,6 @@ FINANCIALS_COLUMNS = {'financials', 'financial_ratios', 'key_metrics',
                       'roe', 'roic', 'debt_equity_ratio', 'p_fcf_ratio',
                       'ev_ebitda', 'ev_revenue'}
 
-EARNINGS_COLUMNS   = {'earnings', 'earnings_surprise_pct',
-                      'earnings_calendar', 'earnings_date'}
-
 INSIDER_COLUMNS    = {'insider', 'insider_transactions',
                       'cluster_buy_score', 'form_4'}
 
@@ -57,13 +54,11 @@ MIN_BACKFILL_CALLS = 0.05  # seconds between ticker calls (soft throttle)
 def backfill(column_name: str, from_date: date, to_date: date) -> int:
     if column_name in FINANCIALS_COLUMNS:
         return _backfill_financials(from_date, to_date)
-    if column_name in EARNINGS_COLUMNS:
-        return _backfill_earnings(from_date, to_date)
     if column_name in INSIDER_COLUMNS:
         return _backfill_insider(from_date, to_date)
     raise NotImplementedError(
         f'fmp backfiller has no handler for column={column_name!r}. '
-        f'Known columns: {sorted(FINANCIALS_COLUMNS | EARNINGS_COLUMNS | INSIDER_COLUMNS)}'
+        f'Known columns: {sorted(FINANCIALS_COLUMNS | INSIDER_COLUMNS)}'
     )
 
 
@@ -169,60 +164,6 @@ def _backfill_financials(from_date: date, to_date: date) -> int:
     delta = total - row_count(FUNDAMENTALS_PATH) + len(rows_out)  # approximate new rows
     print(f'  [fmp] financials merged — {len(rows_out)} rows written, total={total}, failed={failed}')
     return len(rows_out)
-
-
-def _backfill_earnings(from_date: date, to_date: date) -> int:
-    """Pull earnings surprises per universe ticker for the given window.
-    Merges into data/master/earnings.parquet (ticker, date, actualEPS,
-    estimatedEPS, surprise_pct)."""
-    import fmp as fmp_tool
-    import pandas as pd
-    from data.parquet_store import MASTER_DIR, append_dedup
-
-    earn_path = MASTER_DIR / 'earnings.parquet'
-    tickers   = _active_universe()
-    # FMP /earnings-surprises returns up to 'limit' most-recent surprises.
-    # Each quarter is one row, so limit maps 1:1 to quarters.
-    quarters  = _quarters_for(from_date, to_date)
-    print(f'  [fmp] backfilling earnings surprises: {len(tickers)} tickers × {quarters} quarters')
-
-    rows = []
-    failed = 0
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            surprises = fmp_tool.get_earnings_calendar(ticker, limit=quarters)
-        except Exception as e:
-            failed += 1
-            if failed <= 5:
-                print(f'  [fmp] {ticker}: {e}')
-            continue
-        for s in surprises or []:
-            d = s.get('date')
-            if not d:
-                continue
-            actual = _f(s.get('actualEarningResult') or s.get('actual'))
-            estim  = _f(s.get('estimatedEarning')   or s.get('estimated'))
-            surp   = None
-            if actual is not None and estim is not None and estim != 0:
-                surp = (actual - estim) / abs(estim)
-            rows.append({
-                'ticker':         ticker,
-                'date':           d,
-                'actual_eps':     actual,
-                'estimated_eps':  estim,
-                'surprise_pct':   surp,
-            })
-        time.sleep(MIN_BACKFILL_CALLS)
-        if i % 50 == 0:
-            print(f'  [fmp] progress: {i}/{len(tickers)} tickers, {len(rows)} surprises so far')
-
-    if not rows:
-        print(f'  [fmp] no earnings rows fetched (failed={failed})')
-        return 0
-    df = pd.DataFrame(rows)
-    total = append_dedup(earn_path, df, ['ticker', 'date'], mode='replace')
-    print(f'  [fmp] earnings merged — {len(rows)} rows written, total={total}, failed={failed}')
-    return len(rows)
 
 
 def _backfill_insider(from_date: date, to_date: date) -> int:

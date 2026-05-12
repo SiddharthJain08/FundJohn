@@ -17,14 +17,12 @@ Schema (long-format, one row per date):
     vvix_close (float)     — CBOE VVIX (vol-of-vol on VIX)
     vix9d_close (float)    — CBOE VIX9D (9-day variant)
 
-Data sources (priority order)
------------------------------
-1. FMP Starter `historical-price-full` endpoint for index tickers:
-       ^VIX      ^VVIX      ^VIX9D
-   The Starter tier DOES return indices at the daily level.
-2. Fallback to Polygon `v2/aggs/ticker/I:VIX/range/1/day/...` if FMP
-   fails for a given index (Polygon indexes plan not guaranteed; we
-   just flag FMP failure in the log instead of hard-failing).
+Data source
+-----------
+Yahoo Finance (yfinance) — the FMP `historical-price-full` and Polygon
+`I:VIX` index endpoints both return 403/NOT_AUTHORIZED on the current
+plan tier. yfinance returns daily OHLCV for ^VIX/^VVIX/^VIX9D without
+auth and is what backfill_vix.py + fetch_vol_indices.py use elsewhere.
 
 Usage
 -----
@@ -37,15 +35,11 @@ Author: Claude / FundJohn research, 2026-04-23.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
-import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
-import requests
 
 DATA_DIR = Path("/root/openclaw/data/master")
 OUT_PATH = DATA_DIR / "vol_indices.parquet"
@@ -56,23 +50,38 @@ INDEX_TICKERS = {
     'vix9d_close': '^VIX9D',
 }
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
-
-def fmp_historical(symbol: str, api_key: str,
-                   start: str, end: str) -> pd.DataFrame:
-    """Pull daily close history for a symbol from FMP historical-price-full."""
-    url = f"{FMP_BASE}/historical-price-full/{symbol}"
-    params = {'from': start, 'to': end, 'apikey': api_key}
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    js = r.json()
-    hist = js.get('historical') or []
-    if not hist:
+def yfinance_historical(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Pull daily Close for a symbol from yfinance. Returns DataFrame with
+    columns ['date', 'close']. Empty DataFrame on failure."""
+    try:
+        import yfinance as yf
+    except ImportError as e:
+        print(f"  yfinance import failed: {e}", file=sys.stderr)
         return pd.DataFrame(columns=['date', 'close'])
-    df = pd.DataFrame(hist)
-    df['date'] = pd.to_datetime(df['date']).dt.date
-    return df[['date', 'close']].sort_values('date').reset_index(drop=True)
+    try:
+        # auto_adjust=False keeps Close as the raw closing value (matches
+        # what FMP and the existing macro.parquet VIX rows record).
+        df = yf.download(symbol, start=start, end=end, progress=False,
+                         auto_adjust=False, threads=False)
+    except Exception as e:
+        print(f"  yfinance download failed for {symbol}: {e}", file=sys.stderr)
+        return pd.DataFrame(columns=['date', 'close'])
+    if df is None or df.empty:
+        return pd.DataFrame(columns=['date', 'close'])
+    # yfinance returns a MultiIndex (field, ticker) when one symbol passed —
+    # flatten by selecting Close column for the symbol.
+    if isinstance(df.columns, pd.MultiIndex):
+        if ('Close', symbol) in df.columns:
+            close = df[('Close', symbol)]
+        else:
+            close = df.xs('Close', axis=1, level=0).iloc[:, 0]
+    else:
+        close = df['Close']
+    out = close.reset_index()
+    out.columns = ['date', 'close']
+    out['date'] = pd.to_datetime(out['date']).dt.date
+    return out.dropna(subset=['close']).reset_index(drop=True)
 
 
 def load_existing() -> pd.DataFrame:
@@ -90,11 +99,6 @@ def main():
     p.add_argument('--dry-run', action='store_true')
     args = p.parse_args()
 
-    api_key = os.environ.get('FMP_API_KEY')
-    if not api_key:
-        print("ERROR: FMP_API_KEY environment variable not set.", file=sys.stderr)
-        sys.exit(2)
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing = pd.DataFrame() if args.rebuild else load_existing()
     from_d = args.from_date
@@ -109,13 +113,8 @@ def main():
     frames = {}
     for col, sym in INDEX_TICKERS.items():
         print(f"  pulling {sym:8s} → {col}")
-        try:
-            df = fmp_historical(sym, api_key, from_d, to_d)
-        except Exception as exc:                     # pragma: no cover
-            print(f"  FMP failed for {sym}: {exc}", file=sys.stderr)
-            df = pd.DataFrame(columns=['date', 'close'])
+        df = yfinance_historical(sym, from_d, to_d)
         frames[col] = df.rename(columns={'close': col}).set_index('date')
-        time.sleep(0.3)
 
     out = pd.concat(frames.values(), axis=1, join='outer').reset_index()
     out = out.sort_values('date').reset_index(drop=True)

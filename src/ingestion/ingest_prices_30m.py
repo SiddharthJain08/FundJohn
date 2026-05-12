@@ -72,29 +72,49 @@ def _default_universe() -> List[str]:
 
 
 def _polygon_30m_bars(ticker: str, api_key: str,
-                      start: str, end: str) -> pd.DataFrame:
-    """One Polygon 30-minute aggregate pull.  Returns [] on 4xx/404."""
+                      start: str, end: str,
+                      max_retries: int = 3) -> pd.DataFrame:
+    """One Polygon 30-minute aggregate pull. Returns [] on 404 (no data).
+
+    On 429 the function honours `Retry-After` (or 60s default) and retries
+    up to `max_retries` times. The previous behavior of silently returning
+    empty on 429 caused fetches to claim "no new data pulled" while
+    actually being throttled — see prices_30m incident 2026-04-30."""
     url = (f"{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/30/minute/"
            f"{start}/{end}")
     params = {'adjusted': 'true', 'sort': 'asc', 'limit': 50000, 'apiKey': api_key}
-    r = requests.get(url, params=params, timeout=30)
-    if r.status_code in (404, 429):
-        return pd.DataFrame()
-    r.raise_for_status()
+    for attempt in range(max_retries):
+        r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 404:
+            return pd.DataFrame()
+        if r.status_code == 429:
+            wait = int(r.headers.get('Retry-After', '60'))
+            wait = min(max(wait, 5), 120)
+            print(f"  [WARN] 429 for {ticker} — retrying in {wait}s (attempt {attempt + 1}/{max_retries})", file=sys.stderr)
+            time.sleep(wait)
+            continue
+        r.raise_for_status()
+        break
+    else:
+        # Exhausted retries — surface as exception so the caller logs it.
+        raise RuntimeError(f"Polygon 429 for {ticker} after {max_retries} retries")
     js = r.json()
     if 'results' not in js or not js['results']:
         return pd.DataFrame()
     df = pd.DataFrame(js['results'])
-    # Polygon timestamps are ms since epoch UTC.  Convert to ET, drop tz.
-    df['datetime'] = (pd.to_datetime(df['t'], unit='ms', utc=True)
-                        .dt.tz_convert('US/Eastern').dt.tz_localize(None))
+    # Polygon timestamps are ms since epoch UTC. Keep the datetime column
+    # as tz-aware UTC to match the existing parquet schema (datetime64[us,
+    # UTC]) — concat-ing tz-naive ET with tz-aware UTC NaTs the new rows.
+    df['datetime'] = pd.to_datetime(df['t'], unit='ms', utc=True)
     df = df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low',
                             'c': 'close', 'v': 'volume',
                             'vw': 'vwap', 'n': 'transactions'})
     df['ticker'] = ticker
-    # Regular session only: 09:30 – 16:00 ET
-    df = df[(df['datetime'].dt.time >= pd.Timestamp('09:30').time()) &
-            (df['datetime'].dt.time <= pd.Timestamp('16:00').time())]
+    # Regular session only: 09:30 – 16:00 ET. Compute the ET projection
+    # locally for filtering, but keep the stored datetime as UTC.
+    et = df['datetime'].dt.tz_convert('America/New_York')
+    df = df[(et.dt.time >= pd.Timestamp('09:30').time()) &
+            (et.dt.time <= pd.Timestamp('16:00').time())]
     cols = ['ticker', 'datetime', 'open', 'high', 'low', 'close',
             'volume', 'vwap', 'transactions']
     return df[[c for c in cols if c in df.columns]].reset_index(drop=True)
@@ -156,23 +176,46 @@ def main():
                 frames.append(df)
         except Exception as exc:                     # pragma: no cover
             failures.append((ticker, str(exc)))
+            # Surface the first few failures so a systematic problem (auth,
+            # tzdata, rate-limit) doesn't masquerade as "no new data pulled".
+            if len(failures) <= 3:
+                print(f"  [WARN] {ticker}: {str(exc)[:200]}", file=sys.stderr)
         if idx % 50 == 0:
             print(f"  ..{idx}/{len(universe)}  elapsed={time.time()-t0:.1f}s")
-        time.sleep(0.25)                              # Polygon ≈ 4 rps
+        time.sleep(1.0)                               # 1 rps stays under the
+                                                       # Massive Options Starter
+                                                       # per-minute cap; faster
+                                                       # rates trigger silent 429s.
 
     if not frames:
-        print("  no new data pulled")
+        print(f"  no new data pulled (failures={len(failures)}/{len(universe)})")
+        if failures:
+            print(f"  first failure: {failures[0][0]} → {failures[0][1][:200]}", file=sys.stderr)
         return
 
     new_df = pd.concat(frames, ignore_index=True)
     print(f"  new rows        : {len(new_df):,}")
 
     if not existing.empty:
+        # Both sides must be tz-aware UTC to merge cleanly. Existing parquet
+        # already stores datetime64[us, UTC]; new rows are produced tz-aware
+        # UTC by _polygon_30m_bars. utc=True in the coerce normalizes both
+        # tz-naive and tz-aware inputs to tz-aware UTC.
+        existing['datetime'] = pd.to_datetime(existing['datetime'], errors='coerce', utc=True)
+        new_df['datetime']   = pd.to_datetime(new_df['datetime'],   errors='coerce', utc=True)
         combined = pd.concat([existing, new_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=['ticker', 'datetime'],
                                             keep='last')
     else:
         combined = new_df
+    combined['datetime'] = pd.to_datetime(combined['datetime'], errors='coerce', utc=True)
+    # Drop rows with NaT datetimes — they are write corruption from earlier
+    # tz-mismatch merges, not valid market data. This is a corruption fix,
+    # not a data-axis truncation: invalid rows have no semantic content.
+    nat_dropped = combined['datetime'].isna().sum()
+    if nat_dropped:
+        combined = combined.dropna(subset=['datetime'])
+        print(f"  dropped {nat_dropped} NaT rows (corrupted dtype from prior tz-naive writes)")
     combined = combined.sort_values(['ticker', 'datetime']).reset_index(drop=True)
 
     print(f"  rows total      : {len(combined):,}")
