@@ -37,18 +37,24 @@ def main():
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
     # Load same signal set the production trade step saw.
+    # Sub-task C (Path 1): extract p_t1 + strategy_memo_mult from signal_params JSONB.
+    # Also alias target_1 twice: as take_profit_1 (for _independent_path / consolidator
+    # bracket) and as t1 (for enrich_with_kelly which checks 't1 in s' first).
     cur.execute("""
       SELECT id AS signal_id, strategy_id, ticker, direction,
              entry_price, stop_loss,
              target_1 AS take_profit_1,
-             COALESCE((signal_params->>'kelly_p')::float, 0.0) AS kelly_p,
+             target_1 AS t1,
+             COALESCE((signal_params->>'p_t1')::float, 0.0) AS p_t1,
              COALESCE((signal_params->>'strategy_memo_mult')::float, 1.0) AS strategy_memo_mult,
-             COALESCE((signal_params->>'target_pct_nav')::float, NULL) AS target_pct_nav
+             signal_params,
+             regime_state
         FROM execution_signals
        WHERE signal_date = %s
     """, (run_date,))
     signals = [dict(r) for r in cur.fetchall()]
     # ticker_consolidator.py expects direction as numeric +1/-1 (not string).
+    # enrich_with_kelly now handles numeric directions (+1→LONG, -1→SHORT).
     _DIR_MAP = {'LONG': 1, 'BUY': 1, 'BUY_VOL': 1,
                 'SHORT': -1, 'SELL': -1, 'SELL_VOL': -1}
     for s in signals:
@@ -79,6 +85,21 @@ def main():
     cur.execute("SELECT * FROM strategy_state")
     strategy_state = {r['strategy_id']: dict(r) for r in cur.fetchall()}
 
+    # Sub-task D: Fetch latest recommended_size_pct per strategy for HIGH_VOL/CRISIS
+    # independent-mode sizing. recommended_size_pct is stored as a decimal fraction
+    # (e.g. 0.02 = 2%), not as a percentage integer — do NOT divide by 100.
+    cur.execute("""
+      SELECT DISTINCT ON (strategy_id) strategy_id, recommended_size_pct
+        FROM strategy_sizing_recommendations
+       ORDER BY strategy_id, rec_date DESC
+    """)
+    target_by_strategy = {r['strategy_id']: float(r['recommended_size_pct'])
+                          for r in cur.fetchall() if r['recommended_size_pct'] is not None}
+
+    # Inject target_pct_nav into each signal (used by _independent_path).
+    for sig in signals:
+        sig['target_pct_nav'] = target_by_strategy.get(sig['strategy_id'])
+
     account = _fetch_account_state_safe()
 
     # In DRY-RUN, skip the LLM call (would cost real tokens) — pass a stub confirmer
@@ -97,25 +118,19 @@ def main():
     print(f'[trade_parity] generated {len(orders)} orders')
 
     # Write to parity_orders only — DO NOT submit.
-    # contributing_signal_ids is bigint[] but signal IDs are UUIDs; store them
-    # in bracket_json['contributing_signal_ids'] as strings instead of trying
-    # to cast UUIDs to bigint (which would fail). Leave the column NULL.
+    # Sub-task B: contributing_signal_ids is now UUID[] (migration 070 fixed the column).
+    # Pass UUIDs directly with ::uuid[] cast; remove the old bracket_json stashing workaround.
     inserted = 0
     for o in orders:
-        bracket_with_contributions = {
-            **o['bracket'],
-            'contributing_signal_ids': [
-                str(c['contributing_signal_id'])
-                for c in o['contributions']
-                if c.get('contributing_signal_id')
-            ],
-        }
         cur.execute("""
           INSERT INTO parity_orders
             (signal_date, ticker, source, qty, notional_usd, bracket_json, contributing_signal_ids)
-          VALUES (%s, %s, 'regime_blended', %s, %s, %s, NULL)
+          VALUES (%s, %s, 'regime_blended', %s, %s, %s, %s::uuid[])
         """, (run_date, o['ticker'], o['qty'], o['notional_usd'],
-              json.dumps(bracket_with_contributions)))
+              json.dumps(o['bracket']),
+              [str(c['contributing_signal_id'])
+               for c in o['contributions']
+               if c.get('contributing_signal_id')]))
         inserted += 1
     conn.commit()
     conn.close()

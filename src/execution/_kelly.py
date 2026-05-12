@@ -23,6 +23,11 @@ def reward_to_risk(direction: str, entry: float, stop: float, t1: float) -> floa
     SHORT / SELL / SELL_VOL: stop must be > entry > t1; R = (entry - t1) / (stop - entry)
     Also accepts BUY_* and SELL_* prefixes.
     """
+    # Accept numeric direction (+1 = LONG, -1 = SHORT) as well as string.
+    if direction == 1:
+        direction = 'LONG'
+    elif direction == -1:
+        direction = 'SHORT'
     d = (direction or '').upper()
 
     # Check if it's a LONG direction (exact match or BUY prefix)

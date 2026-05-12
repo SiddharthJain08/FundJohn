@@ -24,13 +24,20 @@ def test_select_mode_unknown_defaults_independent():
     assert _select_mode('UNKNOWN') == 'independent'
 
 def _sig(sid, ticker='AAPL', direction=1, kelly_p=0.4, memo_mult=1.0,
-         entry=100, stop=95, t1=110, target_pct_nav=0.05):
+         entry=100, stop=95, t1=110, target_pct_nav=0.05, p_t1=None):
+    # p_t1: probability of hitting t1. Derived from kelly_p if not given.
+    # With R=(t1-entry)/(entry-stop)=2, kelly=(3p-1)/2 → p=(2*kelly+1)/3.
+    if p_t1 is None:
+        p_t1 = (2.0 * kelly_p + 1.0) / 3.0
     return {
         'signal_id': hash((sid, ticker, direction)),
         'strategy_id': sid, 'ticker': ticker, 'direction': direction,
         'kelly_p': kelly_p, 'strategy_memo_mult': memo_mult,
         'target_pct_nav': target_pct_nav,
-        'entry_price': entry, 'stop_loss': stop, 'take_profit_1': t1,
+        'entry_price': entry, 'stop_loss': stop,
+        'take_profit_1': t1,   # used by _independent_path and ticker_consolidator bracket
+        'target_1': t1,        # used by enrich_with_kelly (falls back from 't1')
+        'p_t1': p_t1,          # required by enrich_with_kelly to compute kelly_p
     }
 
 def _account(equity=100_000, regt_bp=400_000):

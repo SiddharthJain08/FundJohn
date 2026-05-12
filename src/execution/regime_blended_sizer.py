@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from execution._kelly import enrich_with_kelly
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.ticker_consolidator import consolidate
 from execution.tradejohn_confirmer import confirm as default_confirmer
@@ -53,6 +54,9 @@ def size_positions(
 
     if not passed:
         return []
+
+    # 2. Kelly enrichment — computes kelly_p from bracket geometry + p_t1.
+    passed = enrich_with_kelly(passed)
 
     if mode == 'consolidate':
         return _consolidate_path(passed, account_state, regime_params, confirmer or default_confirmer)
