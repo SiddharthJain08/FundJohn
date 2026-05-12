@@ -1733,6 +1733,9 @@ app.use('/api/regime-params', require('./routes_regime_params'));
 // Phase 2B — Mastermind proposal queue
 app.use('/api/regime-proposals', require('./routes_regime_proposals'));
 
+// Phase 2C — drift detection + priors
+app.use('/api', require('./routes_regime_drift'));
+
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
 
