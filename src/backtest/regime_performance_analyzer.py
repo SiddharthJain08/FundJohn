@@ -68,17 +68,27 @@ def load_thresholds_from_db(uri: str) -> dict:
         return {name: float(val) for name, val in cur.fetchall()}
 
 def load_signal_pnl(uri: str, days: int = 730) -> pd.DataFrame:
-    """Load live signal_pnl with regime tag for each closed trade."""
+    """Load live signal_pnl with regime tag for each closed trade.
+
+    Maps real signal_pnl columns to the analyzer's expected DataFrame shape:
+      - pnl ← realized_pnl_pct (signed % return; works for win-rate and Sharpe)
+      - r_multiple ← realized_pnl_pct (proxy; same column drives both metrics
+        until a true R-multiple column is added in a future migration)
+      - signal_date ← execution_signals.signal_date (joined via signal_id)
+      - regime_state ← execution_signals.regime_state (defaults UNKNOWN if NULL)
+      - closed_at gates: only include trades that have actually closed
+    """
     import psycopg2
     sql = """
-        SELECT sp.strategy_id, sp.signal_date::date AS signal_date,
+        SELECT sp.strategy_id,
+               es.signal_date::date AS signal_date,
                COALESCE(es.regime_state, 'UNKNOWN') AS regime_state,
-               sp.pnl, sp.r_multiple
+               sp.realized_pnl_pct AS pnl,
+               sp.realized_pnl_pct AS r_multiple
           FROM signal_pnl sp
-          LEFT JOIN execution_signals es
-            ON es.id = sp.signal_id
-         WHERE sp.exit_ts IS NOT NULL
-           AND sp.signal_date >= CURRENT_DATE - INTERVAL '%s days'
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE sp.closed_at IS NOT NULL
+           AND es.signal_date >= CURRENT_DATE - INTERVAL '%s days'
     """ % days
     with psycopg2.connect(uri) as conn:
         return pd.read_sql(sql, conn)
