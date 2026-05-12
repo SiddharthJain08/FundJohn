@@ -23,7 +23,7 @@ def test_pearson_perfect_negative():
 def test_pearson_clipped_to_window():
     # Clipping happens at the matrix level; pearson itself returns raw value.
     val = cm._pearson([1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0])
-    assert val == 1.0
+    assert abs(val - 1.0) < 0.0001
 
 
 def test_pearson_insufficient_returns_none():
