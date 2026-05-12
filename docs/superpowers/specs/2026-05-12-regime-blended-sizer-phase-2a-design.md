@@ -330,3 +330,28 @@ everything after is observability/cleanup.
 - **Stop / target / max-hold** — bracket-order parameters today set strategy-wide;
   Phase 2A enables per-regime override; default behavior unchanged until Phase 2B
   populates.
+
+---
+
+## Implementation complete — 2026-05-12
+
+Phase 2A shipped in 12 commits across this session. Final state:
+
+- Migrations 076 (params) + 077 (audit) applied; 392 rows seeded from manifest.
+- `src/execution/regime_param_resolver.py` — read API + 30s in-process cache with explicit invalidate hook. 8 tests.
+- `scripts/seed_strategy_regime_params.py` — idempotent seed (392 rows on first run, 0 on re-run). 5 tests.
+- `src/strategies/regime_gate.py` — reads via resolver; backward-compat True for missing rows; fails OPEN on resolver error. 4 tests.
+- `src/execution/trade_handoff_builder.py` — `scale` dict replaced with `_size_scalar('__regime_default__', state)` resolver call; Phase 1 default behavior preserved via PHASE1_REGIME_SCALARS.
+- `src/strategies/eligibility_manager.py` — DB transaction (SELECT FOR UPDATE → audit insert → upsert) + cache invalidate. Old manifest-write tests deleted. 4 tests.
+- `src/channels/api/routes_regime_params.js` (new) + `routes_regime_eligibility.js` (back-compat shim) — both mount + smoke verified.
+- Dashboard regime cells POST to `/api/regime-params/:strategy/:regime` directly.
+- Doctor: new `strategy_regime_params_consistency` (PASSes at 392 rows); `manifest_eligibility_drift` repurposed to flag deprecated-field writes (currently WARNs at 5 — the originally-committed eligibility lines on those strategies' manifest entries).
+
+Total new tests: 8 + 5 + 4 + 4 + 5 + 5 (revised drift) + 4 (lifecycle preservation, pre-existing) = 35 tests across the relevant suites; 40 passing in the smoke run.
+
+Final E2E: CLI toggle of `S_intl_momentum_attention_regime` flips gate result True ↔ False; manifest unchanged; audit trail (8 rows so far) captures every smoke + plan-task write.
+
+Followup specs:
+- **Phase 2B**: extend MastermindJohn comprehensive-review to emit per-(strategy, regime) proposals; proposal table; dashboard approval workflow. Will populate the four currently-NULL numeric columns (size_scalar, stop_pct, target_pct, max_hold_days).
+- **Phase 2C**: drift detection vs literature priors; Monte Carlo validation harness.
+- **Cleanup spec (post-2B stable)**: remove `manifest.eligible_regimes` field entirely; `lifecycle.py.StrategyRecord` drops the attribute; doctor's `manifest_eligibility_drift` retires.

@@ -24,29 +24,36 @@ check surfaces a stale rollup.
    name (saved to localStorage for the session).
 4. Verify the new audit row appears in the table below the grid.
 
-**Via CLI:**
+**Via CLI** (Phase 2A — per-(strategy, regime), not list-set):
 ```bash
 cd /root/openclaw && PYTHONPATH=/root/openclaw/src \
     python3 -m strategies.eligibility_manager \
-    --set <strategy_id> LOW_VOL TRANSITIONING \
-    --actor "operator:<name>" \
-    --reason "trim HIGH_VOL after -0.6 Sh over 90d" \
-    --source "live_90d"
+    --set <strategy_id> <regime> [--eligible | --ineligible] \
+    [--size <float>] [--stop <float>] [--target <float>] [--max-hold <int>] \
+    --actor 'operator:<name>' --reason '<reason>'
 ```
+
+`<regime>` is one of `LOW_VOL`, `TRANSITIONING`, `HIGH_VOL`, `CRISIS`. You
+can set just eligibility, just one numeric param, or any combination. NULL
+values are inherited from the prior row. Each invocation writes ONE
+strategy × regime row.
 
 ## After acting
 
-1. **Commit the manifest change** so it survives redeploys and new clones:
-   ```bash
-   cd /root/openclaw && git add src/strategies/manifest.json
-   git commit -m "config: trim <strategy> eligible_regimes per live metrics"
-   ```
-   The `manifest_eligibility_drift` doctor check WARNs in DRY-RUN and **FAILs
-   in LIVE** until you commit.
+1. **No manifest commit needed.** Phase 2A moved eligibility into the
+   `strategy_regime_params` DB table; every CLI/dashboard write commits
+   atomically inside a single Postgres transaction with an audit row in
+   `strategy_regime_param_changes`. The doctor check
+   `strategy_regime_params_consistency` PASSes when all 98×4 = 392 rows are
+   present; `manifest_eligibility_drift` WARNs whenever any strategy
+   *still* carries the deprecated `eligible_regimes` field on disk
+   (cleanup spec will remove the field entirely).
 
-2. **Watch the next cycle.** `regime_gate` re-reads `manifest.json` on every
-   `is_eligible()` call, so changes take effect immediately. Verify no
-   signals fire from the trimmed regime by:
+2. **Watch the next cycle.** `regime_gate.is_eligible` queries the resolver,
+   which has a 30s in-process cache + explicit invalidate on every write.
+   So within the same johnbot process the change is visible immediately;
+   cross-process consumers (cron, separate Python invocations) see the
+   change within 30s. Verify by:
    ```bash
    docker exec openclaw-postgres psql -U openclaw -d openclaw -c "
      SELECT strategy_id, regime_state, signal_date
@@ -88,12 +95,18 @@ cd /root/openclaw && PYTHONPATH=/root/openclaw/src \
 | **1 — current** | regime_blended_sizer scalars + manifest eligibility | **this runbook (operator trim/expand from live metrics)** |
 | 2 — future | Scalars + eligibility derived from rolling live-perf distribution | Monte Carlo + drift vs literature priors |
 
-## Operational setup notes (one-time)
+## Operational setup notes
 
-If the `manifest_eligibility_drift` doctor check fails with `Could not
-access 'HEAD'` or `dubious ownership` errors:
+**Phase 2A** (2026-05-12) moved eligibility from `manifest.json` into the
+`strategy_regime_params` DB table. The dashboard regime cells now POST to
+`/api/regime-params/:strategy/:regime`; the CLI is per-(strategy, regime)
+rather than list-set. `manifest.eligible_regimes` is deprecated — the
+doctor check `manifest_eligibility_drift` WARNs as long as any strategy
+still has the field on disk. A follow-up spec removes the field entirely.
+
+**Phase 1 git config note (still relevant for any legacy paths)**: if you
+ever see `Could not access 'HEAD'` or `dubious ownership` errors from
+git-based doctor checks running under systemd:
 ```bash
 git config --system --add safe.directory /root/openclaw
 ```
-This makes `safe.directory` available to all users (root, claudebot,
-systemd-spawned ExecStartPre) regardless of HOME.
