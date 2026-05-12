@@ -100,11 +100,16 @@ class StrategyRecord:
     state_since: str
     history:     List[TransitionEvent] = field(default_factory=list)
     metadata:    dict                  = field(default_factory=dict)
-    # Top-level field (NOT under metadata) — read by regime_gate.is_eligible()
-    # and the dashboard's operator-trim UI. Must be preserved across the
-    # round-trip from_manifest → to_dict so lifecycle promotions don't silently
-    # strip operator eligibility decisions. None = "no field set" (regime_gate
-    # treats this as eligible-everywhere for backward compat).
+    # Phase 2C cleanup (2026-05-12): `eligible_regimes` was a top-level
+    # manifest field carrying per-strategy regime-eligibility lists.
+    # Phase 2A moved that data into strategy_regime_params (DB); the field
+    # is no longer authoritative. The field is preserved as inert
+    # round-trip carry-over below (read on load, written on save) so any
+    # lingering manifest writes survive until the cleanup script
+    # `scripts/cleanup_manifest_eligibility_field.py` is run. After that
+    # script removes the field from manifest.json, both the dataclass
+    # attribute and the from_manifest/to_dict plumbing can be deleted in
+    # a follow-up commit.
     eligible_regimes: Optional[List[str]] = None
 
 
