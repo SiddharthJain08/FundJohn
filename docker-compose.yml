@@ -13,7 +13,7 @@ services:
       POSTGRES_USER: openclaw
       POSTGRES_PASSWORD: password
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./src/database/migrations:/docker-entrypoint-initdb.d
@@ -23,7 +23,7 @@ services:
     image: redis:7-alpine
     container_name: openclaw-redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
