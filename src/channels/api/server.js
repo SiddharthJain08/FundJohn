@@ -1736,6 +1736,9 @@ app.use('/api/regime-proposals', require('./routes_regime_proposals'));
 // Phase 2C — drift detection + priors
 app.use('/api', require('./routes_regime_drift'));
 
+// Phase 2D — bootstrap MC + calibration + overlap
+app.use('/api', require('./routes_regime_2d'));
+
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
 
