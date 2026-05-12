@@ -53,6 +53,9 @@ if _LIVE_FLAG:
     # trade_parity step is dropped (scope-down decision: rollback = flip env var).
     # trade_parity_capture is retained to keep the parity_orders mirror of
     # production alpaca_submissions up to date for monitoring.
+    # Phase 2G sidecar (correlation_adjusted_sidecar) runs AFTER the parity
+    # capture so it can read parity_orders[source='regime_blended']; the
+    # sidecar exits 0 even on error (non-fatal to the cycle).
     STEPS = [
         ('collect',              'run_collector_once'),        # one cycle of collector.js
         ('signals',              'engine'),                    # zero-LLM strategy executor
@@ -60,6 +63,7 @@ if _LIVE_FLAG:
         ('trade',                'regime_blended_sizer_live'), # LIVE PRIMARY (real LLM confirmer)
         ('alpaca',               'alpaca_executor'),           # submit to Alpaca
         ('trade_parity_capture', 'trade_parity_capture'),      # mirror alpaca_submissions → parity_orders
+        ('correlation_sidecar',  'correlation_adjusted_sidecar'), # Phase 2G DRY-RUN sidecar (non-fatal)
         ('reconcile',            'alpaca_reconcile'),          # reconcile fills
         ('report',               'send_report'),               # post to Discord
         ('health',               'daily_health_digest'),       # daily health digest
@@ -105,6 +109,7 @@ STEP_FAILURE_CHANNEL = {
     'trade_parity': 'data-alerts',
     'alpaca':       'trade-reports',
     'trade_parity_capture': 'data-alerts',
+    'correlation_sidecar':   'data-alerts',
     'report':      'trade-reports',
     'health':      'pipeline-feed',
 }
@@ -704,6 +709,7 @@ if __name__ == '__main__':
         'trade_parity': ('databot',   f'Running parity DRY-RUN: {run_date}',             None),
         'alpaca':       ('tradedesk', f'Submitting Alpaca orders: {run_date}',            None),
         'trade_parity_capture': ('databot', f'Capturing parity production: {run_date}', None),
+        'correlation_sidecar':   ('databot', f'2G correlation sidecar: {run_date}',     None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 
