@@ -1727,6 +1727,9 @@ app.use('/api/research', require('./routes_research'));
 // ── Regime eligibility (operator trim/expand) ─────────────────────────────────
 app.use('/api/regime-eligibility', require('./routes_regime_eligibility'));
 
+// Phase 2A — per-(strategy, regime) parameter table
+app.use('/api/regime-params', require('./routes_regime_params'));
+
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
 

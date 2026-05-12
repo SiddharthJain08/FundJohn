@@ -1,19 +1,14 @@
 'use strict';
 
 /**
- * /api/regime-eligibility/* routes — operator trim/expand surface.
+ * Back-compat shim for Phase 1 /api/regime-eligibility/* clients. Translates
+ * the old "set eligible_regimes to this list" semantics into a series of
+ * per-regime upserts on strategy_regime_params via the new endpoint logic.
  *
- * GET  /                      list strategies, current eligibility, latest rollup metrics
- * POST /:strategy             update one strategy (validates, audits, atomic write)
- * GET  /audit?limit=N         recent eligibility changes
- *
- * Reads go straight to Postgres (rollup) + manifest.json (eligibility).
- * Writes shell out to the Python eligibility_manager so the
- * audit-before-write + atomic-replace logic lives in one canonical place.
+ * Keeps old callers (CLI scripts, dashboard cells from before the Phase 2A
+ * rewrite if any are still cached) working without code changes.
  */
-
 const express = require('express');
-const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { query } = require('../../database/postgres');
@@ -21,7 +16,6 @@ const { query } = require('../../database/postgres');
 const router = express.Router();
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-const MANIFEST_PATH = path.join(REPO_ROOT, 'src', 'strategies', 'manifest.json');
 const PY_BIN = process.env.PYTHON_BIN || '/usr/bin/python3';
 const PY_ENV = {
   ...process.env,
@@ -29,85 +23,50 @@ const PY_ENV = {
     ? `${path.join(REPO_ROOT, 'src')}:${process.env.PYTHONPATH}`
     : path.join(REPO_ROOT, 'src'),
 };
-
+const REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 
 function runPython(args, { timeoutMs = 15_000 } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(PY_BIN, args, { cwd: REPO_ROOT, env: PY_ENV });
-    let stdout = '';
-    let stderr = '';
-    const timer = setTimeout(() => {
-      try { proc.kill('SIGKILL'); } catch (_) { /* ignore */ }
-      reject(new Error(`python timeout after ${timeoutMs}ms`));
-    }, timeoutMs);
+    let stdout = '', stderr = '';
+    const t = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} reject(new Error(`python timeout after ${timeoutMs}ms`)); }, timeoutMs);
     proc.stdout.on('data', (c) => { stdout += c; });
     proc.stderr.on('data', (c) => { stderr += c; });
-    proc.on('error', (err) => { clearTimeout(timer); reject(err); });
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) return resolve(stdout);
-      reject(new Error(`python exit ${code}: ${stderr || stdout}`));
-    });
+    proc.on('error', (e) => { clearTimeout(t); reject(e); });
+    proc.on('close', (code) => { clearTimeout(t); code === 0 ? resolve(stdout) : reject(new Error(`python exit ${code}: ${stderr || stdout}`)); });
   });
 }
 
-
-function loadManifest() {
-  const raw = fs.readFileSync(MANIFEST_PATH, 'utf8');
-  const data = JSON.parse(raw);
-  const strategies = data.strategies || {};
-  return Object.entries(strategies).map(([strategy_id, record]) => ({
-    strategy_id,
-    eligible_regimes: record && Array.isArray(record.eligible_regimes)
-      ? record.eligible_regimes
-      : null,
-  }));
-}
-
-
-async function loadLatestRollup() {
-  const sql = `
-    SELECT strategy_id, regime_state, window_days,
-           trade_count, win_count,
-           total_pnl_pct::float AS total_pnl_pct,
-           avg_pnl_pct::float   AS avg_pnl_pct,
-           stdev_pnl_pct::float AS stdev_pnl_pct,
-           sharpe_proxy::float  AS sharpe_proxy,
-           max_dd_proxy::float  AS max_dd_proxy,
-           avg_hold_days::float AS avg_hold_days,
-           last_signal_at
-      FROM strategy_regime_live_pnl_rollup
-     WHERE run_at = (SELECT MAX(run_at) FROM strategy_regime_live_pnl_rollup)
-  `;
-  const result = await query(sql);
-  return result.rows;
-}
-
-
 router.get('/', async (req, res) => {
+  // Return a /api/regime-eligibility-shaped payload synthesized from the DB.
   try {
-    const strategies = loadManifest();
-    const metrics = await loadLatestRollup();
-    const byStrategy = {};
-    for (const m of metrics) {
-      byStrategy[m.strategy_id] = byStrategy[m.strategy_id] || {};
-      byStrategy[m.strategy_id][m.regime_state] = byStrategy[m.strategy_id][m.regime_state] || {};
-      byStrategy[m.strategy_id][m.regime_state][m.window_days] = m;
+    const fs = require('fs');
+    const mfPath = path.join(REPO_ROOT, 'src/strategies/manifest.json');
+    const manifest = JSON.parse(fs.readFileSync(mfPath, 'utf8'));
+    const result = await query(`
+      SELECT strategy_id, regime_state, eligible
+        FROM strategy_regime_params
+    `);
+    const byStrat = {};
+    for (const row of result.rows) {
+      byStrat[row.strategy_id] = byStrat[row.strategy_id] || new Set();
+      if (row.eligible) byStrat[row.strategy_id].add(row.regime_state);
     }
-    res.json({
-      strategies: strategies.map((s) => ({
-        ...s,
-        metrics: byStrategy[s.strategy_id] || {},
-      })),
-    });
-  } catch (err) {
-    console.error('[regime-eligibility] GET / failed:', err.message);
-    res.status(500).json({ error: err.message });
+    const strategies = Object.entries(manifest.strategies || {}).map(([sid]) => ({
+      strategy_id:      sid,
+      eligible_regimes: byStrat[sid]
+        ? [...byStrat[sid]].filter(r => REGIMES.includes(r))
+                            .sort((a, b) => REGIMES.indexOf(a) - REGIMES.indexOf(b))
+        : null,
+      metrics: {},
+    }));
+    res.json({ strategies });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-
-router.post('/:strategy', async (req, res) => {
+router.post('/:strategy', express.json(), async (req, res) => {
   const { strategy } = req.params;
   const { regimes, actor, reason, source } = req.body || {};
   if (!Array.isArray(regimes) || regimes.length === 0) {
@@ -116,57 +75,55 @@ router.post('/:strategy', async (req, res) => {
   if (typeof actor !== 'string' || !actor.trim()) {
     return res.status(400).json({ error: 'actor required' });
   }
-  // Validate strategy/regime tokens before shelling out — defense in depth.
   if (!/^[A-Za-z0-9_:.-]+$/.test(strategy)) {
     return res.status(400).json({ error: 'invalid strategy id' });
   }
   for (const r of regimes) {
-    if (typeof r !== 'string' || !/^[A-Z_]+$/.test(r)) {
-      return res.status(400).json({ error: `invalid regime token: ${r}` });
+    if (!REGIMES.includes(r)) return res.status(400).json({ error: `invalid regime: ${r}` });
+  }
+  const errors = [];
+  for (const regime of REGIMES) {
+    const eligibleFlag = regimes.includes(regime) ? '--eligible' : '--ineligible';
+    const args = ['-m', 'strategies.eligibility_manager',
+                  '--set', strategy, regime, eligibleFlag,
+                  '--actor', actor, '--reason', reason || '',
+                  '--source', source || 'shim'];
+    try { await runPython(args); }
+    catch (err) {
+      const msg = err.message || String(err);
+      if (/KeyError/.test(msg)) return res.status(404).json({ error: 'unknown strategy' });
+      if (/ValueError/.test(msg)) {
+        const m = msg.match(/ValueError:\s*([^\n]+)/);
+        return res.status(400).json({ error: m ? m[1].trim() : 'invalid input' });
+      }
+      errors.push(msg);
     }
   }
-  try {
-    const args = [
-      '-m', 'strategies.eligibility_manager',
-      '--set', strategy, ...regimes,
-      '--actor', actor,
-      '--reason', reason || '',
-      '--source', source || '',
-    ];
-    const out = await runPython(args);
-    res.json(JSON.parse(out));
-  } catch (err) {
-    const msg = err.message || String(err);
-    if (/KeyError/.test(msg)) {
-      return res.status(404).json({ error: 'unknown strategy' });
-    }
-    if (/ValueError/.test(msg)) {
-      // Strip the python traceback — keep just the ValueError message.
-      const m = msg.match(/ValueError:\s*([^\n]+)/);
-      return res.status(400).json({ error: m ? m[1].trim() : 'invalid input' });
-    }
-    console.error('[regime-eligibility] POST failed:', msg);
-    res.status(500).json({ error: msg });
-  }
+  if (errors.length) return res.status(500).json({ error: errors.join('; ') });
+  res.json({
+    strategy_id:   strategy,
+    after_regimes: regimes,
+    note: 'Phase 1 shim wrote to DB via /api/regime-params; ' +
+          'old /api/regime-eligibility surface preserved.',
+  });
 });
-
 
 router.get('/audit', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
   try {
     const result = await query(`
       SELECT changed_at, actor, strategy_id,
-             before_regimes, after_regimes, reason, source
-        FROM regime_eligibility_changes
+             before_row->'eligible' AS before_eligible,
+             after_row->'eligible'  AS after_eligible,
+             regime_state, reason, source
+        FROM strategy_regime_param_changes
        ORDER BY changed_at DESC
        LIMIT $1
     `, [limit]);
     res.json(result.rows);
-  } catch (err) {
-    console.error('[regime-eligibility] audit failed:', err.message);
-    res.status(500).json({ error: err.message });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
-
 
 module.exports = router;
