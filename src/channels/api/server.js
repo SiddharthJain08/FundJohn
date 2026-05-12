@@ -5302,16 +5302,22 @@ async function _stToggleRegimeEligibility(event, sid, regime) {
     window.localStorage.setItem('rg_operator', actor);
   }
   try {
-    const res = await fetch('/api/regime-eligibility/' + encodeURIComponent(sid), {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        regimes: [...next],
-        actor:   'operator:' + actor,
-        reason,
-        source:  'strategies-page',
-      }),
-    });
+    // Phase 2A: POST to per-regime endpoint instead of the legacy list-set
+    // endpoint. We only need to flip the cell the operator clicked.
+    const eligibleAfter = next.has(regime);
+    const res = await fetch(
+      '/api/regime-params/' + encodeURIComponent(sid) + '/' + encodeURIComponent(regime),
+      {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          eligible: eligibleAfter,
+          actor:    'operator:' + actor,
+          reason,
+          source:   'strategies-page',
+        }),
+      },
+    );
     if (!res.ok) {
       const e = await res.json().catch(() => ({}));
       throw new Error(e.error || res.statusText);
