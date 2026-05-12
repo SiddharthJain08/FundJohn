@@ -116,6 +116,38 @@ Approve / Reject buttons. CLI: `python3 -m strategies.proposal_manager
 use. The doctor check `regime_proposals_backlog` WARNs at 14-day-old
 pending, FAILs at 30-day-old or ≥10 aged-warn pending — review hygiene.
 
+**Phase 2C** (2026-05-12) adds three operator-side capabilities:
+
+- **Literature priors** — populate per-(strategy, regime) expected Sharpe /
+  win-rate via `python3 -m strategies.priors_manager --set <strategy>
+  <regime> --sharpe N --win-rate N --source 'paper citation'`. Drift
+  detector compares live performance against these.
+- **Drift detection** — `python3 -m metrics.regime_param_drift` lists
+  current drift signals (severity OK/WARN/FAIL/INSUFFICIENT). Dashboard
+  cells show a colored dot in the top-left for WARN (yellow) / FAIL
+  (red). API: `GET /api/regime-drift` and `GET /api/regime-drift/summary`.
+  Doctor check `regime_param_drift_alerts` PASSes/WARNs/FAILs on aggregate
+  alert counts.
+- **Auto-approval (OFF by default)** — high-confidence, bounded-delta
+  proposals can auto-approve without operator click. Enable with
+  `OPENCLAW_PROPOSAL_AUTOAPPROVE=1`; tune via `…MIN_CONFIDENCE` (0.85),
+  `…MAX_SIZE_DELTA` (0.20), `…MAX_STOP_DELTA` (0.01). When enabled,
+  `proposal_manager.auto_approve(proposal_id)` is a no-op for proposals
+  failing any rail.
+
+**NULL-reset sentinel** — to roll back a populated `size_scalar` (or
+stop/target/max-hold) back to NULL (Phase 1 default), pass the literal
+string `'__NULL__'` in place of a number:
+```bash
+python3 -m strategies.eligibility_manager --set momentum_12_1 HIGH_VOL --size __NULL__ \
+    --actor 'operator:<name>' --reason 'revert to Phase 1 default'
+```
+
+**Cleanup script** — `scripts/cleanup_manifest_eligibility_field.py`
+removes the deprecated `eligible_regimes` field from `manifest.json` for
+strategies fully covered in `strategy_regime_params`. Run once to clear
+the `manifest_eligibility_drift` WARN. Reviewable before execution.
+
 **Phase 1 git config note (still relevant for any legacy paths)**: if you
 ever see `Could not access 'HEAD'` or `dubious ownership` errors from
 git-based doctor checks running under systemd:

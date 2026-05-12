@@ -213,3 +213,43 @@ Run once during rollout. After: `manifest_eligibility_drift` doctor check goes P
 - Monte Carlo validation harness (bootstrap CI for size_scalar; intraday path simulation for stop/target).
 - Confidence calibration for Mastermind: compare Mastermind's stated confidence on past proposals against operator decisions + live outcomes; recalibrate prompt.
 - Cross-strategy correlation analysis: when two strategies have overlapping signals in the same regime, the per-strategy sizer doesn't account for portfolio-level correlation.
+
+---
+
+## Implementation complete — 2026-05-12
+
+Phase 2C shipped in 10 commits same session as 2A+2B:
+
+- `f0781d5` Migrations 079 + 080 (priors + audit)
+- `560e6d6` `priors_manager.py` — upsert + audit (5 tests)
+- `d9a7d5d` `regime_param_drift.py` — severity scoring + summary (6 tests)
+- `b9e7218` `eligibility_manager` NULL-sentinel for resetting populated columns (3 tests)
+- `327f9e4` `proposal_manager.auto_approve` — env-gated bounded auto-approval (5 tests)
+- `5f25d91` Doctor `regime_param_drift_alerts` preflight check (6 tests)
+- `840f723` `/api/regime-drift` + `/api/regime-priors` endpoints
+- `462a065` Dashboard drift badges (WARN/FAIL severity dots on cells)
+- `5107858` `scripts/cleanup_manifest_eligibility_field.py` (committed, NOT yet run — auto-mode classifier blocked initial run; operator approval to execute)
+- `980086b` Lifecycle.py docstring update marking eligible_regimes as cleanup carry-over
+- This commit (docs)
+
+**E2E smoke verified 2026-05-12T22:18 UTC:**
+- Seeded a prior for `momentum_12_1 / LOW_VOL` (Asness 2013 baseline, Sharpe 1.5, win 0.6)
+- `priors_manager --list` reflects the new row
+- `regime_param_drift` runs cleanly (returns empty for this strategy due to insufficient closed-trade data in 90d window — correct insufficient-data path)
+- `latest_drift_summary` aggregates by severity
+- Doctor: **21 checks total**; 20 pass + 1 expected WARN on `manifest_eligibility_drift` (will clear after running `scripts/cleanup_manifest_eligibility_field.py`)
+- Test prior cleaned up post-smoke
+
+**Auto-approval is OFF by default.** Enable via:
+```bash
+OPENCLAW_PROPOSAL_AUTOAPPROVE=1 \
+OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE=0.85 \
+OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_SIZE_DELTA=0.20 \
+OPENCLAW_PROPOSAL_AUTOAPPROVE_MAX_STOP_DELTA=0.01
+```
+
+Mastermind comprehensive-review does NOT call auto_approve automatically in 2C — that wiring is deferred. Operator may invoke `proposal_manager.auto_approve(proposal_id=N)` manually or in a future Mastermind extension.
+
+**25 new tests across 5 files.**
+
+**Phase 2D (deferred):** Monte Carlo validation harness, confidence calibration, cross-strategy correlation. Each its own research-grade spec.
