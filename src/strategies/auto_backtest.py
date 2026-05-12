@@ -468,8 +468,22 @@ def run_backtest(filepath: str) -> dict:
     import inspect as _inspect
     from strategies.base import BaseStrategy, Signal
 
-    def _is_strategy_class(obj):
+    def _is_strategy_class(obj, module_name=None):
         if not _inspect.isclass(obj) or obj.__name__ == 'BaseStrategy':
+            return False
+        # Skip abstract classes — when an implementation imports a base like
+        # `CohortBaseStrategy` (subclass of BaseStrategy with @abstractmethod
+        # placeholders), inspect.getmembers returns the import too. Picking
+        # it would instantiate an abstract class and crash every regime
+        # window. The concrete subclass is non-abstract.
+        if _inspect.isabstract(obj):
+            return False
+        # Skip classes that came in via `from x import Y` — only consider
+        # classes defined in the file being backtested. Without this guard
+        # the alphabetically-first imported subclass-of-BaseStrategy wins
+        # over the actual implementation when both share the module-import
+        # namespace (e.g. cohort_base imported into shv17_*.py).
+        if module_name and getattr(obj, '__module__', None) != module_name:
             return False
         try:
             if issubclass(obj, BaseStrategy):
@@ -501,7 +515,9 @@ def run_backtest(filepath: str) -> dict:
             return {'error': f'Import error: {e}', 'windows': [],
                     'regime_breakdown': {}, 'method': 'v2_regime_stratified'}
 
-    classes = [obj for _, obj in _inspect.getmembers(module, _inspect.isclass) if _is_strategy_class(obj)]
+    mod_for_filter = getattr(module, '__name__', module_name)
+    classes = [obj for _, obj in _inspect.getmembers(module, _inspect.isclass)
+               if _is_strategy_class(obj, mod_for_filter)]
     if not classes:
         return {'error': 'No strategy class found', 'windows': [],
                 'regime_breakdown': {}, 'method': 'v2_regime_stratified'}

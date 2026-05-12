@@ -34,11 +34,13 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent.parent
 AGG_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 EARNINGS_PATH = ROOT / 'data' / 'master' / 'earnings.parquet'
+VOL_INDICES_PATH = ROOT / 'data' / 'master' / 'vol_indices.parquet'
 
 log = logging.getLogger(__name__)
 
 _AGG_DF: Optional[pd.DataFrame] = None
 _EARNINGS_DF: Optional[pd.DataFrame] = None
+_VOL_INDICES_DF: Optional[pd.DataFrame] = None
 
 
 def _load_panel() -> pd.DataFrame:
@@ -138,14 +140,55 @@ def _day_slice(date_str: str) -> dict[str, dict]:
     return out
 
 
+def _load_vol_indices() -> pd.DataFrame:
+    global _VOL_INDICES_DF
+    if _VOL_INDICES_DF is not None:
+        return _VOL_INDICES_DF
+    if not VOL_INDICES_PATH.exists():
+        _VOL_INDICES_DF = pd.DataFrame()
+        return _VOL_INDICES_DF
+    df = pd.read_parquet(VOL_INDICES_PATH)
+    df['date'] = pd.to_datetime(df['date'])
+    _VOL_INDICES_DF = df.sort_values('date').reset_index(drop=True)
+    return _VOL_INDICES_DF
+
+
+def _vol_indices_slice(date_str: str) -> dict:
+    """Return {vix_close, vvix_close, vix9d_close} for a given date.
+    Falls back to most recent prior date when the requested date isn't a
+    market session (weekends, holidays). Returns {} if the parquet is empty
+    or the date is before the earliest available row."""
+    df = _load_vol_indices()
+    if df.empty:
+        return {}
+    ts = pd.to_datetime(date_str)
+    prior = df[df['date'] <= ts]
+    if prior.empty:
+        return {}
+    row = prior.iloc[-1]
+    out = {}
+    for col in ('vix_close', 'vvix_close', 'vix9d_close'):
+        if col in df.columns:
+            v = row.get(col)
+            if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                out[col] = float(v)
+    return out
+
+
 def load_aux_data(date: str | pd.Timestamp) -> dict:
     """Return aux_data dict for a given trading date.
 
     date: 'YYYY-MM-DD' or pandas Timestamp.
-    Returns: {'options': {ticker: {...fields...}}}.
+    Returns: {
+        'options': {ticker: {...fields...}},
+        'vol_indices': {vix_close, vvix_close, vix9d_close},
+    }
     """
     date_str = str(date)[:10]
-    return {'options': _day_slice(date_str)}
+    return {
+        'options':     _day_slice(date_str),
+        'vol_indices': _vol_indices_slice(date_str),
+    }
 
 
 def available_dates() -> list[str]:
