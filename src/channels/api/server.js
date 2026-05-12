@@ -4968,14 +4968,16 @@ let _stDataUsage = null; // {parameters, strategies_total, categories_total}
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp] = await Promise.all([
       fetch('/api/strategies').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/active').then(r => r.json()).catch(() => []),
       fetch('/api/approvals/recent-failures').then(r => r.json()).catch(() => []),
       fetch('/api/data/usage').then(r => r.json()).catch(() => null),
       fetch('/api/regime-proposals?status=pending').then(r => r.json()).catch(() => ({ proposals: [] })),
+      fetch('/api/regime-drift').then(r => r.json()).catch(() => ({ signals: [] })),
     ]);
     _rpRender(proposals?.proposals || []);
+    _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
     for (const j of (Array.isArray(jobs) ? jobs : [])) {
@@ -5217,11 +5219,20 @@ function _regimeBreakdown(r) {
         + ' · ' + trades + ' trades';
     const eligLine = isEligible ? 'eligible' : 'NOT eligible';
     const editHint = editable ? ' · click to toggle' : '';
-    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint;
+    // Phase 2C drift badge — dot in top-left when drift signal present.
+    const driftSig = _rdDriftFor(sid, rg);
+    const driftBadge = driftSig && (driftSig.severity === 'WARN' || driftSig.severity === 'FAIL')
+      ? \`<span class="st-rg-drift" style="position:absolute;top:1px;left:2px;width:5px;height:5px;border-radius:50%;background:\${driftSig.severity === 'FAIL' ? '#f85149' : '#d29922'}"></span>\`
+      : '';
+    const driftTtl = driftSig
+      ? \` · drift=\${driftSig.severity} (\${driftSig.reason || ''})\`
+      : '';
+    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint + driftTtl;
     const onclick = editable
       ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\`
       : '';
     return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}"\${onclick}>
+              \${driftBadge}
               <span class="st-rg-tag">\${rg}</span>
               <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
@@ -5298,6 +5309,20 @@ function _stToggleExpand(sid) {
 // the existing /api/regime-eligibility endpoint (audit + atomic manifest
 // rewrite); regime_gate picks up the change on the next is_eligible() call
 // with no service restart.
+// Phase 2C — drift signal index (populated on every loadStrategies pass)
+let _rdSignals = {};   // { 'strategy_id|regime': drift_signal_obj }
+
+function _rdIndex(signals) {
+  _rdSignals = {};
+  for (const s of (signals || [])) {
+    _rdSignals[s.strategy_id + '|' + s.regime_state] = s;
+  }
+}
+
+function _rdDriftFor(strategyId, regime) {
+  return _rdSignals[strategyId + '|' + regime] || null;
+}
+
 // Phase 2B — render pending Mastermind proposals
 function _rpRender(proposals) {
   const section = document.getElementById('rp-section');
