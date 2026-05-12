@@ -137,9 +137,14 @@ router.post('/:strategy', async (req, res) => {
     res.json(JSON.parse(out));
   } catch (err) {
     const msg = err.message || String(err);
-    // KeyError from the python module surfaces as "exit 1: ... KeyError"
-    if (/KeyError/.test(msg)) return res.status(404).json({ error: 'unknown strategy' });
-    if (/ValueError/.test(msg)) return res.status(400).json({ error: msg });
+    if (/KeyError/.test(msg)) {
+      return res.status(404).json({ error: 'unknown strategy' });
+    }
+    if (/ValueError/.test(msg)) {
+      // Strip the python traceback — keep just the ValueError message.
+      const m = msg.match(/ValueError:\s*([^\n]+)/);
+      return res.status(400).json({ error: m ? m[1].trim() : 'invalid input' });
+    }
     console.error('[regime-eligibility] POST failed:', msg);
     res.status(500).json({ error: msg });
   }
