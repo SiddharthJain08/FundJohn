@@ -1891,6 +1891,17 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
+#rg-grid td{padding:6px 8px;border:1px solid var(--border2);cursor:pointer;text-align:center;min-width:130px;line-height:1.3;vertical-align:middle}
+#rg-grid td.rg-name{cursor:default;text-align:left;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--text);min-width:auto;white-space:nowrap}
+#rg-grid td.rg-eligible{background:rgba(60,160,90,0.18);color:#9fdfae}
+#rg-grid td.rg-ineligible{background:rgba(170,80,80,0.18);color:#e8a8a8;opacity:0.75}
+#rg-grid td.rg-no-data{background:transparent;color:var(--muted);opacity:0.55}
+#rg-grid td:hover:not(.rg-name){outline:1px solid var(--blue)}
+#rg-grid td .rg-pnl{display:block;font-size:10px;opacity:0.85;margin-top:2px}
+#rg-grid th{font-weight:600;font-size:11px;color:var(--muted)}
+#rg-audit td{padding:5px 8px;border-bottom:1px solid var(--border2);vertical-align:top}
+#rg-audit td:nth-child(1){color:var(--muted);font-size:10px;white-space:nowrap}
+#rg-audit td:nth-child(4){font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}
 #research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden}
 .rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -2660,6 +2671,7 @@ body.rs-chat-locked{overflow:hidden}
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
   <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
   <button class="nav-btn" id="nav-research" onclick="showResearch()">Research</button>
+  <button class="nav-btn" id="nav-regime" onclick="showRegime()">Regime</button>
   <span id="pipeline-badge">Loading pipeline...</span>
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
@@ -2893,6 +2905,51 @@ body.rs-chat-locked{overflow:hidden}
     </div>
   </div>
 </div><!-- #research-page -->
+
+<!-- ── Regime eligibility page ────────────────────────────────────────────── -->
+<div id="regime-page" style="display:none;padding:20px 24px;overflow-y:auto;background:var(--bg);position:absolute;inset:48px 0 0 0">
+  <header style="margin-bottom:16px">
+    <h2 style="margin:0 0 6px 0;font-size:16px;color:var(--text)">Regime Eligibility — Live Metrics</h2>
+    <p style="margin:0;color:var(--muted);font-size:12px;max-width:900px">
+      Operator-driven trim/expand of <code>eligible_regimes</code> based on
+      live per-strategy×regime PnL (rollup nightly). Click a cell to toggle
+      eligibility. Changes apply on the next strategy cycle —
+      <code>regime_gate</code> re-reads <code>manifest.json</code> on every call.
+      <strong>Remember to commit the manifest</strong> after edits — the
+      <code>manifest_eligibility_drift</code> doctor check WARNs until you do.
+    </p>
+    <div id="rg-status" style="padding:6px 0;font-size:11px;color:var(--muted)"></div>
+  </header>
+
+  <table id="rg-grid" style="border-collapse:collapse;width:100%;max-width:1100px;font-size:12px">
+    <thead>
+      <tr style="text-align:left">
+        <th style="padding:8px 10px;border-bottom:1px solid var(--border2)">Strategy</th>
+        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">LOW_VOL</th>
+        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">TRANSITIONING</th>
+        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">HIGH_VOL</th>
+        <th style="padding:8px 10px;border-bottom:1px solid var(--border2);text-align:center">CRISIS</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <section style="margin-top:30px;max-width:1100px">
+    <h3 style="margin:0 0 8px 0;font-size:13px;color:var(--text)">Recent eligibility changes</h3>
+    <table id="rg-audit" style="border-collapse:collapse;width:100%;font-size:11px;color:var(--text)">
+      <thead>
+        <tr style="text-align:left;color:var(--muted)">
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">When</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Actor</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Before → After</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Reason</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</div><!-- #regime-page -->
 
 <!-- Data usage panel (opened from the strategies page Data tile) -->
 <div class="paper-modal data-usage-modal" id="data-usage-modal">
@@ -3822,6 +3879,8 @@ function _hideAllPages() {
   if (st) st.style.display = 'none';
   const rp = document.getElementById('research-page');
   if (rp) rp.style.display = 'none';
+  const rg = document.getElementById('regime-page');
+  if (rg) rg.style.display = 'none';
 }
 
 function showMarket() {
@@ -3843,6 +3902,139 @@ async function showStrategies() {
   document.getElementById('strategies-page').style.display = 'block';
   _setNavActive('strategies');
   await loadStrategies();
+}
+
+// ── Regime eligibility page ───────────────────────────────────────────────────
+const _RG_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+
+async function showRegime() {
+  _hideAllPages();
+  document.getElementById('regime-page').style.display = 'block';
+  _setNavActive('regime');
+  await _rgLoad();
+}
+
+async function _rgLoad() {
+  const status = document.getElementById('rg-status');
+  status.textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/regime-eligibility');
+    if (!r.ok) throw new Error('GET failed: ' + r.status);
+    const data = await r.json();
+    _rgRenderGrid(data.strategies || []);
+    const ar = await fetch('/api/regime-eligibility/audit?limit=25');
+    if (ar.ok) _rgRenderAudit(await ar.json());
+    const withMetrics = (data.strategies || []).filter(s => s.metrics && Object.keys(s.metrics).length).length;
+    status.textContent =
+      (data.strategies || []).length + ' strategies · ' + withMetrics +
+      ' with live metrics · click a cell to toggle eligibility';
+  } catch (err) {
+    status.textContent = 'Load failed: ' + err.message;
+  }
+}
+
+function _rgFmtCell(td, isEligible, m) {
+  if (!m || !m.trade_count) {
+    td.className = 'rg-no-data';
+    td.innerHTML = (isEligible ? '✓' : '✗') + ' <span class="rg-pnl">no closed trades</span>';
+    return;
+  }
+  td.className = isEligible ? 'rg-eligible' : 'rg-ineligible';
+  const winRate = ((m.win_count / m.trade_count) * 100).toFixed(0);
+  const avg = m.avg_pnl_pct != null ? m.avg_pnl_pct.toFixed(2) : '?';
+  const sh = m.sharpe_proxy != null ? m.sharpe_proxy.toFixed(2) : '?';
+  td.innerHTML = (isEligible ? '✓' : '✗') +
+    '<span class="rg-pnl">' + m.trade_count + 't · ' + winRate + '%w · avg ' + avg + '%<br>Sh ' + sh + '</span>';
+}
+
+function _rgRenderGrid(strategies) {
+  const tbody = document.querySelector('#rg-grid tbody');
+  tbody.innerHTML = '';
+  const sorted = [...strategies].sort((a, b) => a.strategy_id.localeCompare(b.strategy_id));
+  for (const s of sorted) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    name.className = 'rg-name';
+    name.textContent = s.strategy_id;
+    tr.appendChild(name);
+    const eligible = new Set(s.eligible_regimes || _RG_REGIMES); // null = all
+    for (const regime of _RG_REGIMES) {
+      const td = document.createElement('td');
+      const isEligible = eligible.has(regime);
+      const rm = s.metrics && s.metrics[regime];
+      const m = rm ? (rm[90] || rm[0] || rm[30]) : null;
+      _rgFmtCell(td, isEligible, m);
+      td.onclick = () => _rgToggle(s.strategy_id, regime, eligible);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+function _rgRenderAudit(rows) {
+  const tbody = document.querySelector('#rg-audit tbody');
+  tbody.innerHTML = '';
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="5" style="color:var(--muted);padding:10px">No eligibility changes recorded yet.</td>';
+    tbody.appendChild(tr);
+    return;
+  }
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    const when = row.changed_at ? new Date(row.changed_at).toLocaleString() : '';
+    tr.innerHTML =
+      '<td>' + when + '</td>' +
+      '<td>' + (row.actor || '') + '</td>' +
+      '<td>' + (row.strategy_id || '') + '</td>' +
+      '<td>' + JSON.stringify(row.before_regimes) + ' → ' + JSON.stringify(row.after_regimes) + '</td>' +
+      '<td>' + (row.reason || '') + '</td>';
+    tbody.appendChild(tr);
+  }
+}
+
+async function _rgToggle(strategy, regime, currentSet) {
+  const next = new Set(currentSet);
+  if (next.has(regime)) next.delete(regime);
+  else next.add(regime);
+  if (next.size === 0) {
+    alert('Strategy must be eligible in at least one regime.');
+    return;
+  }
+  const reason = prompt(
+    'Reason for changing ' + strategy + '?\n' +
+    'Before: ' + JSON.stringify([...currentSet]) + '\n' +
+    'After:  ' + JSON.stringify([...next].sort()),
+    ''
+  );
+  if (reason === null) return; // cancelled
+  let actor = window.localStorage.getItem('rg_operator');
+  if (!actor) {
+    actor = prompt('Operator name (saved for session):', '');
+    if (!actor) return;
+    window.localStorage.setItem('rg_operator', actor);
+  }
+  const status = document.getElementById('rg-status');
+  status.textContent = 'Updating ' + strategy + '…';
+  try {
+    const res = await fetch('/api/regime-eligibility/' + encodeURIComponent(strategy), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        regimes: [...next],
+        actor: 'operator:' + actor,
+        reason,
+        source: 'dashboard',
+      }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(e.error || res.statusText);
+    }
+    await _rgLoad();
+  } catch (err) {
+    status.textContent = 'Update failed: ' + err.message;
+  }
 }
 
 // ── Research page ─────────────────────────────────────────────────────────────
