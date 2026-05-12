@@ -721,6 +721,63 @@ def check_regime_live_rollup_freshness():
 
 
 PARAMS_CONSISTENCY_FAIL_THRESHOLD = 5
+PROPOSALS_AGED_WARN_DAYS = 14
+PROPOSALS_AGED_FAIL_DAYS = 30
+PROPOSALS_AGED_FAIL_COUNT = 10
+
+
+def _query_proposals_backlog(sql: str, params: tuple = ()):
+    """Indirection seam for the proposals backlog check."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+
+@_check('regime_proposals_backlog')
+def check_regime_proposals_backlog():
+    """Operator review hygiene: pending proposals shouldn't stagnate.
+
+    PASS:  0 pending, or all pending < PROPOSALS_AGED_WARN_DAYS old
+    WARN:  1..(PROPOSALS_AGED_FAIL_COUNT-1) pending older than WARN_DAYS,
+           AND none older than FAIL_DAYS
+    FAIL:  >= PROPOSALS_AGED_FAIL_COUNT aged-warn proposals, OR any older than FAIL_DAYS
+    WARN:  db error
+    """
+    name = 'regime_proposals_backlog'
+    try:
+        rows = _query_proposals_backlog("""
+            SELECT proposed_at
+              FROM strategy_regime_param_proposals
+             WHERE status = 'pending'
+        """)
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+
+    now = datetime.now(timezone.utc)
+    total = len(rows)
+    aged_warn = 0   # >= WARN_DAYS old
+    aged_fail = 0   # >= FAIL_DAYS old
+    for (proposed_at,) in rows:
+        if proposed_at is None:
+            continue
+        age_days = (now - proposed_at).total_seconds() / 86400.0
+        if age_days >= PROPOSALS_AGED_FAIL_DAYS:
+            aged_fail += 1
+        if age_days >= PROPOSALS_AGED_WARN_DAYS:
+            aged_warn += 1
+    if aged_fail > 0 or aged_warn >= PROPOSALS_AGED_FAIL_COUNT:
+        return _fail(name,
+                     f'{total} pending; {aged_warn} aged >={PROPOSALS_AGED_WARN_DAYS}d; '
+                     f'{aged_fail} aged >={PROPOSALS_AGED_FAIL_DAYS}d — review backlog')
+    if aged_warn > 0:
+        return _warn(name,
+                     f'{total} pending; {aged_warn} aged >={PROPOSALS_AGED_WARN_DAYS}d')
+    return _ok(name, f'{total} pending; none aged >={PROPOSALS_AGED_WARN_DAYS}d')
 
 
 def _query_consistency(sql: str, params: tuple = ()):
