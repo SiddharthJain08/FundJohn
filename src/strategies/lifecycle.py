@@ -100,6 +100,12 @@ class StrategyRecord:
     state_since: str
     history:     List[TransitionEvent] = field(default_factory=list)
     metadata:    dict                  = field(default_factory=dict)
+    # Top-level field (NOT under metadata) — read by regime_gate.is_eligible()
+    # and the dashboard's operator-trim UI. Must be preserved across the
+    # round-trip from_manifest → to_dict so lifecycle promotions don't silently
+    # strip operator eligibility decisions. None = "no field set" (regime_gate
+    # treats this as eligible-everywhere for backward compat).
+    eligible_regimes: Optional[List[str]] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +154,7 @@ class LifecycleStateMachine:
                 state_since=rec["state_since"],
                 history=history,
                 metadata=rec.get("metadata", {}),
+                eligible_regimes=rec.get("eligible_regimes"),
             )
         return cls(records, data.get("decommissioned", {}))
 
@@ -424,7 +431,7 @@ class LifecycleStateMachine:
     def to_dict(self) -> dict:
         strategies = {}
         for sid, rec in self._records.items():
-            strategies[sid] = {
+            entry = {
                 "state":       rec.state.value,
                 "state_since": rec.state_since,
                 "metadata":    rec.metadata,
@@ -440,6 +447,12 @@ class LifecycleStateMachine:
                     for e in rec.history
                 ],
             }
+            # Preserve top-level eligible_regimes across the round-trip. If
+            # we omit None entries the round-trip is a no-op for legacy
+            # strategies that never had the field.
+            if rec.eligible_regimes is not None:
+                entry["eligible_regimes"] = rec.eligible_regimes
+            strategies[sid] = entry
         return {
             "schema_version":  "1.0",
             "updated_at":      datetime.now(timezone.utc).isoformat(),
