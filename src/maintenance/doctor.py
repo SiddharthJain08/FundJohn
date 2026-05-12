@@ -726,6 +726,69 @@ PROPOSALS_AGED_FAIL_DAYS = 30
 PROPOSALS_AGED_FAIL_COUNT = 10
 DRIFT_WARN_COUNT_THRESHOLD = 3
 DRIFT_FAIL_WARN_COUNT_THRESHOLD = 10
+CALIBRATION_BRIER_WARN  = 0.10
+CALIBRATION_BRIER_FAIL  = 0.20
+CALIBRATION_MIN_SAMPLES = 10
+OVERLAP_FRESH_HOURS     = 26
+OVERLAP_VERY_STALE_HOURS = 72
+
+
+def _calibration_report():
+    sys.path.insert(0, str(ROOT / 'src'))
+    from metrics.mastermind_calibration import calibration_report
+    return calibration_report()
+
+
+@_check('mastermind_calibration_brier')
+def check_mastermind_calibration_brier():
+    """PASS if Brier < CALIBRATION_BRIER_WARN with >= CALIBRATION_MIN_SAMPLES."""
+    name = 'mastermind_calibration_brier'
+    try:
+        rep = _calibration_report()
+    except Exception as exc:
+        return _warn(name, f'calibration query failed: {exc!s}')
+    n = int(rep.get('total_observations') or 0)
+    brier = rep.get('brier_score')
+    if n < CALIBRATION_MIN_SAMPLES:
+        return _ok(name, f'insufficient data ({n}/{CALIBRATION_MIN_SAMPLES} samples)')
+    if brier is None or (isinstance(brier, float) and brier != brier):  # NaN check
+        return _warn(name, 'Brier could not be computed despite samples')
+    if brier >= CALIBRATION_BRIER_FAIL:
+        return _fail(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_FAIL} (n={n})')
+    if brier >= CALIBRATION_BRIER_WARN:
+        return _warn(name, f'Brier {brier:.3f} >= {CALIBRATION_BRIER_WARN} (n={n})')
+    return _ok(name, f'Brier {brier:.3f} (n={n})')
+
+
+def _latest_overlap_run_at():
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(computed_at) FROM strategy_signal_overlap")
+            r = cur.fetchone()
+    return r[0] if r else None
+
+
+@_check('strategy_overlap_freshness')
+def check_strategy_overlap_freshness():
+    """Nightly overlap cron freshness."""
+    name = 'strategy_overlap_freshness'
+    try:
+        latest = _latest_overlap_run_at()
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+    if latest is None:
+        return _ok(name, 'overlap table empty (cron not yet enabled)')
+    age = datetime.now(timezone.utc) - latest
+    h = age.total_seconds() / 3600.0
+    if h <= OVERLAP_FRESH_HOURS:
+        return _ok(name, f'fresh ({h:.1f}h old)')
+    if h <= OVERLAP_VERY_STALE_HOURS:
+        return _warn(name, f'stale ({h:.1f}h old)')
+    return _fail(name, f'very stale ({h:.1f}h old)')
 
 
 def _drift_summary():
