@@ -2786,10 +2786,42 @@ body.rs-chat-locked{overflow:hidden}
             <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Proposed</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Conf</th>
             <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Reasoning</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Decide</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Decide / MC</th>
           </tr>
         </thead>
         <tbody></tbody>
+      </table>
+    </div>
+
+    <!-- Phase 2F — Mastermind calibration addenda (always visible; compact when empty) -->
+    <div class="pf-section" id="ad-section">
+      <div class="pf-section-header">
+        <span>📝 Calibration Addenda <span class="st-sub-label" id="ad-count">—</span></span>
+        <span class="st-sub-label" style="display:flex;align-items:center;gap:8px">
+          <span>prepended to next Saturday Mastermind prompt</span>
+          <button id="ad-add-btn" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">+ Add</button>
+        </span>
+      </div>
+      <div id="ad-add-form" style="display:none;padding:8px;border:1px solid var(--border2);border-radius:4px;margin-bottom:6px;background:var(--bg2,#f8f8f8)">
+        <textarea id="ad-add-text" placeholder="Addendum text (will be prepended verbatim to next Mastermind prompt)" rows="3" style="width:100%;font-size:12px;font-family:inherit;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box"></textarea>
+        <input id="ad-add-rationale" type="text" placeholder="Rationale (operator-facing audit string)" style="width:100%;font-size:12px;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box;margin-top:5px"/>
+        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:5px">
+          <button id="ad-add-cancel" style="padding:3px 9px;font-size:11px;background:var(--bg2,#ccc);color:var(--fg,#000);border:1px solid var(--border2);border-radius:3px;cursor:pointer">Cancel</button>
+          <button id="ad-add-save" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">Save (active)</button>
+        </div>
+      </div>
+      <table id="ad-table" style="border-collapse:collapse;width:100%;font-size:12px">
+        <thead>
+          <tr style="text-align:left;color:var(--muted);font-size:11px">
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Status</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Source</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Addendum</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Rationale</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Created</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Decide</th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="6" style="padding:8px;color:var(--muted);font-size:11px">Loading…</td></tr></tbody>
       </table>
     </div>
 
@@ -4984,6 +5016,8 @@ async function loadStrategies() {
       fetch('/api/regime-drift').then(r => r.json()).catch(() => ({ signals: [] })),
     ]);
     _rpRender(proposals?.proposals || []);
+    _adLoad();              // Phase 2F — calibration addenda panel
+    _adWireForm();          // idempotent
     _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
@@ -5359,15 +5393,205 @@ function _rpRender(proposals) {
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
+        (_rpProposalHasPolicyFields(p)
+          ? '<button class="rp-pathmc-btn" data-id="' + p.id + '" style="padding:3px 8px;font-size:11px;background:#555;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Path-MC</button>'
+          : '') +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
       '</td>';
     tbody.appendChild(tr);
+    // Stash proposal data on Path-MC button if present
+    const pathBtn = tr.querySelector('.rp-pathmc-btn');
+    if (pathBtn) pathBtn._proposalData = p;
   }
   // Wire buttons
   for (const btn of tbody.querySelectorAll('.rp-btn')) {
     btn.onclick = () => _rpDecide(btn.dataset.id, btn.dataset.action);
   }
+  for (const btn of tbody.querySelectorAll('.rp-pathmc-btn')) {
+    btn.onclick = () => _rpRunPathMC(btn.dataset.id, btn);
+  }
+}
+
+// Phase 2E — inline path-MC button on proposal rows
+function _rpProposalHasPolicyFields(p) {
+  return p.proposed_stop_pct != null || p.proposed_target_pct != null || p.proposed_max_hold_days != null;
+}
+
+async function _rpRunPathMC(id, btn) {
+  const row = btn.closest('tr');
+  if (!row) return;
+  const p = btn._proposalData;
+  if (!p) return;
+  btn.disabled = true; btn.textContent = '…';
+  // Surface a placeholder cell for the result if not already present
+  let outRow = row.nextElementSibling;
+  if (!outRow || !outRow.classList.contains('rp-mc-out-' + id)) {
+    outRow = document.createElement('tr');
+    outRow.className = 'rp-mc-out-' + id;
+    outRow.innerHTML = '<td colspan="6" class="rp-mc-cell" style="padding:6px 12px;background:var(--bg2,#fafafa);border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">Running path-MC…</td>';
+    row.parentNode.insertBefore(outRow, row.nextSibling);
+  }
+  const out = outRow.querySelector('.rp-mc-cell');
+  const body = {
+    current_size:           Number(p.current_size_scalar ?? 1.0),
+    proposed_size:          Number(p.proposed_size_scalar ?? p.current_size_scalar ?? 1.0),
+    proposed_stop_pct:      Number(p.proposed_stop_pct ?? 0.05),
+    proposed_target_pct:    Number(p.proposed_target_pct ?? 0.10),
+    proposed_max_hold_days: Number(p.proposed_max_hold_days ?? 5),
+    n_iter: 500, seed: 42, proposal_id: Number(p.id),
+  };
+  try {
+    const res = await fetch('/api/regime-mc-intraday/' + encodeURIComponent(p.strategy_id) + '/' + encodeURIComponent(p.regime_state), {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+    });
+    const j = await res.json();
+    if (!res.ok || j.status !== 'OK') {
+      out.textContent = 'Path-MC: ' + (j.note || j.error || ('status=' + (j.status || res.status)));
+      btn.disabled = false; btn.textContent = 'Path-MC';
+      return;
+    }
+    const fmt = (v, d=2) => (v == null ? '—' : Number(v).toFixed(d));
+    const pct = (v) => (v == null ? '—' : (Number(v) * 100).toFixed(1) + '%');
+    const diff = j.linear_mc_diff || {};
+    const sharpeDelta = diff.sharpe_p50_delta;
+    const ddDelta = diff.max_dd_p95_delta;
+    const diffBadge = (sharpeDelta != null && Math.abs(sharpeDelta) > 0.3)
+      ? ' <span style="background:#a04040;color:white;padding:1px 5px;border-radius:3px;font-size:10px">size assumption matters</span>'
+      : '';
+    out.innerHTML =
+      '<b>Path-MC</b> (n=' + j.n_bootstrap_iter + ', source=' + j.path_source + ', trades=' + j.n_trades_sampled + ')' + diffBadge +
+      ' &nbsp; Sharpe[' + fmt(j.sharpe_p05) + ', ' + fmt(j.sharpe_p50) + ', ' + fmt(j.sharpe_p95) + ']' +
+      ' &nbsp; MaxDD[' + pct(j.max_dd_p05) + ', ' + pct(j.max_dd_p50) + ', ' + pct(j.max_dd_p95) + ']' +
+      ' &nbsp; stop=' + pct(j.stop_hit_rate) +
+      ' · target=' + pct(j.target_hit_rate) +
+      ' · max-hold=' + pct(j.max_hold_hit_rate) +
+      (sharpeDelta != null
+         ? '<br><span style="color:var(--muted)">vs linear MC: Δsharpe_p50=' + fmt(sharpeDelta) + (ddDelta != null ? ' · Δmax_dd_p95=' + pct(ddDelta) : '') + '</span>'
+         : '');
+    btn.textContent = 'Re-run';
+    btn.disabled = false;
+  } catch (e) {
+    out.textContent = 'Path-MC failed: ' + e.message;
+    btn.disabled = false; btn.textContent = 'Path-MC';
+  }
+}
+
+// Phase 2F — render addenda panel
+function _adFormatTs(s) {
+  if (!s) return '—';
+  return String(s).slice(0, 16).replace('T', ' ');
+}
+
+function _adStatusBadge(status) {
+  const colors = { pending: '#b08800', active: '#2ea043', expired: '#777',
+                    rejected: '#a04040', superseded: '#555' };
+  return '<span style="background:' + (colors[status] || '#888') + ';color:white;padding:1px 6px;border-radius:3px;font-size:10px">' + status + '</span>';
+}
+
+function _adRender(addenda) {
+  const section = document.getElementById('ad-section');
+  const tbody = document.querySelector('#ad-table tbody');
+  const countEl = document.getElementById('ad-count');
+  if (!section || !tbody) return;
+  // Filter to relevant (pending + active); historical states shown if asked
+  const visible = addenda.filter(a => a.status === 'pending' || a.status === 'active');
+  countEl.textContent = visible.length
+    ? '(' + visible.length + ' affecting next Mastermind run)'
+    : '(none active)';
+  tbody.innerHTML = '';
+  if (!visible.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:8px;color:var(--muted);font-size:11px">No active addenda. Use + Add to author one, or wait for the bias detector to emit (currently dormant pending ≥10 outcomes/bucket).</td></tr>';
+    return;
+  }
+  for (const a of visible) {
+    const tr = document.createElement('tr');
+    const decideBtns = a.status === 'pending'
+      ? ('<button class="ad-btn" data-id="' + a.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
+         '<button class="ad-btn" data-id="' + a.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>')
+      : ('<button class="ad-btn" data-id="' + a.id + '" data-action="expire" style="padding:3px 8px;font-size:11px;background:#777;color:white;border:none;border-radius:3px;cursor:pointer">Expire</button>');
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + _adStatusBadge(a.status) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + (a.source || '—') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;max-width:380px;word-break:break-word">' + (a.addendum_text || '') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted);max-width:200px;word-break:break-word">' + (a.rationale || '') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + _adFormatTs(a.created_at) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' + decideBtns + '</td>';
+    tbody.appendChild(tr);
+  }
+  for (const btn of tbody.querySelectorAll('.ad-btn')) {
+    btn.onclick = () => _adDecide(btn.dataset.id, btn.dataset.action);
+  }
+}
+
+async function _adLoad() {
+  try {
+    const res = await fetch('/api/recalibration/addenda?status=all');
+    const j = await res.json();
+    _adRender(Array.isArray(j.addenda) ? j.addenda : []);
+  } catch (e) {
+    _adRender([]);
+  }
+}
+
+async function _adDecide(id, action) {
+  let actor = window.localStorage.getItem('rg_operator');
+  if (!actor) {
+    actor = prompt('Operator name (saved for the session):', '');
+    if (!actor) return;
+    window.localStorage.setItem('rg_operator', actor);
+  }
+  const reason = prompt('Reason for ' + action + ' of addendum #' + id + '?', '');
+  if (reason === null) return;
+  try {
+    const res = await fetch('/api/recalibration/addenda/' + encodeURIComponent(id) + '/' + encodeURIComponent(action), {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ decided_by: actor, reason }),
+    });
+    const j = await res.json();
+    if (!res.ok || j.status !== 'OK') throw new Error(j.error || j.status || res.statusText);
+    await _adLoad();
+  } catch (e) {
+    alert('Addendum ' + action + ' failed: ' + e.message);
+  }
+}
+
+async function _adAddSave() {
+  const text = (document.getElementById('ad-add-text').value || '').trim();
+  const rationale = (document.getElementById('ad-add-rationale').value || '').trim();
+  if (!text) { alert('Addendum text is required.'); return; }
+  let actor = window.localStorage.getItem('rg_operator');
+  if (!actor) {
+    actor = prompt('Operator name (saved for the session):', '');
+    if (!actor) return;
+    window.localStorage.setItem('rg_operator', actor);
+  }
+  try {
+    const res = await fetch('/api/recalibration/addenda', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ addendum_text: text, rationale, decided_by: actor }),
+    });
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || res.statusText);
+    document.getElementById('ad-add-text').value = '';
+    document.getElementById('ad-add-rationale').value = '';
+    document.getElementById('ad-add-form').style.display = 'none';
+    await _adLoad();
+  } catch (e) {
+    alert('Addendum save failed: ' + e.message);
+  }
+}
+
+function _adWireForm() {
+  const btn = document.getElementById('ad-add-btn');
+  const form = document.getElementById('ad-add-form');
+  const cancel = document.getElementById('ad-add-cancel');
+  const save = document.getElementById('ad-add-save');
+  if (!btn || !form || !cancel || !save || btn._wired) return;
+  btn._wired = true;
+  btn.onclick = () => { form.style.display = form.style.display === 'none' ? '' : 'none'; };
+  cancel.onclick = () => { form.style.display = 'none'; };
+  save.onclick = () => _adAddSave();
 }
 
 async function _rpDecide(id, action) {
