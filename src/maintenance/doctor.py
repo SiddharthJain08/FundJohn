@@ -731,6 +731,9 @@ CALIBRATION_BRIER_FAIL  = 0.20
 CALIBRATION_MIN_SAMPLES = 10
 OVERLAP_FRESH_HOURS     = 26
 OVERLAP_VERY_STALE_HOURS = 72
+INTRADAY_MC_FRESH_HOURS    = 26
+INTRADAY_MC_VERY_STALE_HOURS = 72
+INTRADAY_MC_PENDING_STALE_DAYS = 7
 
 
 def _calibration_report():
@@ -770,6 +773,64 @@ def _latest_overlap_run_at():
             cur.execute("SELECT MAX(computed_at) FROM strategy_signal_overlap")
             r = cur.fetchone()
     return r[0] if r else None
+
+
+def _latest_intraday_mc_run_at():
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(run_at) FROM strategy_regime_intraday_mc_runs")
+            r = cur.fetchone()
+    return r[0] if r else None
+
+
+def _count_pending_proposals_without_intraday_mc(days_old: int):
+    """Count pending Phase 2B proposals older than `days_old` that have no
+    corresponding row in strategy_regime_intraday_mc_runs. Pending proposals
+    without path-MC support are decision-blocking after the freshness window."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT count(*)
+                  FROM strategy_regime_param_proposals p
+             LEFT JOIN strategy_regime_intraday_mc_runs r ON r.proposal_id = p.id
+                 WHERE p.status = 'pending'
+                   AND p.proposed_at < NOW() - (%s::int * INTERVAL '1 day')
+                   AND r.id IS NULL
+            """, (days_old,))
+            return int(cur.fetchone()[0])
+
+
+@_check('intraday_mc_freshness')
+def check_intraday_mc_freshness():
+    """Phase 2E: PASS if a path-MC ran within 26h, WARN if 26-72h, FAIL if
+    stale > 72h OR if there's any pending proposal aged > 7d without a
+    path-MC row (path-MC was needed for the decision but never ran)."""
+    name = 'intraday_mc_freshness'
+    try:
+        latest = _latest_intraday_mc_run_at()
+        stale_pending = _count_pending_proposals_without_intraday_mc(
+            INTRADAY_MC_PENDING_STALE_DAYS)
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+    if stale_pending > 0:
+        return _fail(name, f'{stale_pending} pending proposals aged >{INTRADAY_MC_PENDING_STALE_DAYS}d without intraday MC')
+    if latest is None:
+        return _ok(name, 'intraday MC table empty (no proposals yet)')
+    age = datetime.now(timezone.utc) - latest
+    h = age.total_seconds() / 3600.0
+    if h <= INTRADAY_MC_FRESH_HOURS:
+        return _ok(name, f'fresh ({h:.1f}h old)')
+    if h <= INTRADAY_MC_VERY_STALE_HOURS:
+        return _warn(name, f'stale ({h:.1f}h old)')
+    return _fail(name, f'very stale ({h:.1f}h old)')
 
 
 @_check('strategy_overlap_freshness')

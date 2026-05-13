@@ -105,4 +105,57 @@ router.get('/strategy-overlap/top', async (req, res) => {
   }
 });
 
+// POST /api/regime-mc-intraday/:strategy/:regime — Phase 2E path-MC
+// body: { current_size, proposed_size, proposed_stop_pct, proposed_target_pct,
+//         proposed_max_hold_days, n_iter?, window_days?, seed?, proposal_id? }
+// Response: full path-MC result + linear_mc_diff if a 2D run exists for the
+// same proposal_id (max_dd_p95 + sharpe_p50 deltas).
+router.post('/regime-mc-intraday/:strategy/:regime', async (req, res) => {
+  const { strategy, regime } = req.params;
+  const body = req.body || {};
+  if (!REGIMES.includes(regime)) return res.status(400).json({ error: 'invalid regime' });
+  if (!/^[A-Za-z0-9_:.-]+$/.test(strategy)) return res.status(400).json({ error: 'invalid strategy id' });
+  const required = ['current_size', 'proposed_size', 'proposed_stop_pct',
+                     'proposed_target_pct', 'proposed_max_hold_days'];
+  for (const k of required) {
+    if (typeof body[k] !== 'number') return res.status(400).json({ error: `${k} required (number)` });
+  }
+  const args = ['-m', 'metrics.intraday_path_montecarlo',
+                '--strategy', strategy, '--regime', regime,
+                '--current', String(body.current_size),
+                '--proposed', String(body.proposed_size),
+                '--stop-pct', String(body.proposed_stop_pct),
+                '--target-pct', String(body.proposed_target_pct),
+                '--max-hold-days', String(body.proposed_max_hold_days)];
+  if (typeof body.n_iter === 'number') args.push('--n-iter', String(body.n_iter));
+  if (typeof body.window_days === 'number') args.push('--window-days', String(body.window_days));
+  if (typeof body.seed === 'number') args.push('--seed', String(body.seed));
+  if (typeof body.proposal_id === 'number') args.push('--proposal-id', String(body.proposal_id));
+  try {
+    const out = await runPython(args, { timeoutMs: 60_000 });
+    const result = JSON.parse(out);
+    if (typeof body.proposal_id === 'number') {
+      try {
+        const linear = await query(`
+          SELECT sharpe_p50::float AS sharpe_p50, max_dd_p95::float AS max_dd_p95
+            FROM strategy_regime_mc_runs
+           WHERE proposal_id = $1
+           ORDER BY run_at DESC LIMIT 1`, [body.proposal_id]);
+        if (linear.rows.length) {
+          const L = linear.rows[0];
+          result.linear_mc_diff = {
+            sharpe_p50_delta: (result.sharpe_p50 ?? null) === null || L.sharpe_p50 === null
+              ? null : (result.sharpe_p50 - L.sharpe_p50),
+            max_dd_p95_delta: (result.max_dd_p95 ?? null) === null || L.max_dd_p95 === null
+              ? null : (result.max_dd_p95 - L.max_dd_p95),
+          };
+        }
+      } catch (_) { /* linear_mc_diff is best-effort */ }
+    }
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 module.exports = router;
