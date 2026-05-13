@@ -83,9 +83,8 @@ def main():
 
     # Imports that may fail in non-prod environments — keep them lazy.
     try:
-        from execution.alpaca_trader import _fetch_account_state, get_positions
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state, get_positions
         from execution.regime_liquidator import _close_symbol, _post_to_discord, _market_is_open
-        import requests
     except ImportError as e:
         print(f'[circuit_breaker] missing dependency ({e}); aborting')
         conn.close()
@@ -96,7 +95,9 @@ def main():
         conn.close()
         return
 
-    sess = requests.Session()
+    # _alpaca_session() attaches auth headers + sess._base — required by
+    # alpaca_trader.{_fetch_account_state, get_positions}.
+    sess = _alpaca_session()
     try:
         account = _fetch_account_state(sess)
         nav = float(account['equity'])

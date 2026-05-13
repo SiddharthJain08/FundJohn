@@ -341,12 +341,14 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
-    // Sunday 18:00 ET — weekly intraday HMM refit. Trains a fresh HMM
-    // on the accumulated intraday_features.parquet; the detector reads
+    // Daily 18:00 ET — intraday HMM refit attempt. Trains a fresh HMM on
+    // the accumulated intraday_features.parquet; the detector reads
     // hmm_intraday_latest.pkl on its next tick. Bootstrap-safe (no-op if
-    // < 500 rows accumulated).
-    cron.schedule('0 18 * * 0', () => {
-        log('Intraday HMM weekly refit starting');
+    // < 500 rows accumulated). Daily (not weekly) so the model arrives
+    // within 24h of crossing the training threshold rather than waiting
+    // up to a week for the next Sunday.
+    cron.schedule('0 18 * * *', () => {
+        log('Intraday HMM refit starting');
         try {
             const out = runPython('scripts/train_intraday_hmm.py');
             log(`Intraday HMM refit: ${out.slice(0, 300)}`);

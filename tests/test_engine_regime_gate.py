@@ -37,3 +37,20 @@ def test_ineligible_strategy_skipped(monkeypatch):
     result = run_strategies([s], prices=None, regime='LOW_VOL', universe=[], aux_data={})
     assert s.generate_signals_calls == 0
     assert 'S1' not in result
+
+
+def test_gate_receives_string_when_regime_is_dict(monkeypatch):
+    """Regression: 2026-05-13 zero-signal cycle. run_strategies was passing
+    the full regime dict from load_regime() to is_eligible(), which expects
+    a state string. The strict DB-backed resolver then rejected every
+    strategy with 'unknown regime_state'."""
+    seen = []
+    monkeypatch.setattr(
+        'execution.engine.is_eligible',
+        lambda sid, regime: (seen.append(regime), True)[1],
+    )
+    s = _FakeStrategy('S1')
+    regime_dict = {'state': 'TRANSITIONING', 'vix_level': 17.99, 'active_strategies': ['S1']}
+    run_strategies([s], prices=None, regime=regime_dict, universe=[], aux_data={})
+    assert seen == ['TRANSITIONING'], f'gate received {seen!r}, expected ["TRANSITIONING"]'
+    assert s.generate_signals_calls == 1

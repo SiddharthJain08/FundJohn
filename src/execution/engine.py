@@ -572,11 +572,14 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
     """
+    # regime is the full dict from load_regime(); the eligibility gate takes
+    # the regime-state string. Strategies still get the full dict.
+    regime_state_str = regime['state'] if isinstance(regime, dict) else regime
     results = {}
     for strat in strategies:
         try:
-            if not is_eligible(strat.id, regime):
-                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, regime)
+            if not is_eligible(strat.id, regime_state_str):
+                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, regime_state_str)
                 continue
             signals = strat.generate_signals(prices, regime, universe, aux_data)
             results[strat.id] = signals or []

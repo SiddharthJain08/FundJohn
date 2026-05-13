@@ -17,11 +17,15 @@ from execution.regime_blended_sizer import size_positions
 from execution.handoff import read_handoff
 
 def _fetch_account_state_safe():
-    """Best-effort account fetch; returns sane defaults if Alpaca call fails (DRY-RUN)."""
+    """Best-effort account fetch; returns sane defaults if Alpaca call fails (DRY-RUN).
+
+    Uses _alpaca_session() (which attaches sess._base + auth headers) rather
+    than a bare requests.Session() — the latter triggers
+    'Session has no attribute _base' inside _fetch_account_state.
+    """
     try:
-        from execution.alpaca_trader import _fetch_account_state
-        import requests
-        return _fetch_account_state(requests.Session())
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+        return _fetch_account_state(_alpaca_session())
     except Exception as e:
         print(f'[trade_parity] account fetch failed ({e}); using $100k default for DRY-RUN', file=sys.stderr)
         return {'equity': 100_000.0, 'regt_buying_power': 400_000.0,

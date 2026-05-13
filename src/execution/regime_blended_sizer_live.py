@@ -190,11 +190,12 @@ def main():
 
     conn.close()
 
-    # Account snapshot — same path as parity wrapper.
+    # Account snapshot — same path as parity wrapper. _alpaca_session()
+    # attaches auth headers + sess._base required by _fetch_account_state;
+    # a bare requests.Session() yields 'Session has no attribute _base'.
     try:
-        from execution.alpaca_trader import _fetch_account_state
-        import requests
-        account = _fetch_account_state(requests.Session())
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+        account = _fetch_account_state(_alpaca_session())
     except Exception as e:
         print(f'[regime_blended_sizer_live] account fetch failed ({e}); using defaults',
               file=sys.stderr)
