@@ -71,13 +71,26 @@ class NonStationarityAdaptiveSelection(BaseStrategy):
         size_per = round(scale * self.SIZE_PER, 4)
         signals: List[Signal] = []
 
+        def _stops_clean(stops: dict) -> bool:
+            """All four price levels must be finite — handoff/sizer crash on NaN."""
+            return all(
+                v is not None and np.isfinite(float(v))
+                for v in (stops.get('stop'), stops.get('t1'),
+                          stops.get('t2'), stops.get('t3'))
+            )
+
         for ticker in longs[:25]:
-            cp = float(current_prices.get(ticker, 0) or 0)
-            if cp <= 0:
+            cp_raw = current_prices.get(ticker)
+            if cp_raw is None or pd.isna(cp_raw):
+                continue
+            cp = float(cp_raw)
+            if not np.isfinite(cp) or cp <= 0:
                 continue
             stops = self.compute_stops_and_targets(
                 prices_sub[ticker].dropna(), 'LONG', cp, regime_state=regime_state
             )
+            if not _stops_clean(stops):
+                continue
             signals.append(Signal(
                 ticker=ticker,
                 direction='LONG',
@@ -92,12 +105,17 @@ class NonStationarityAdaptiveSelection(BaseStrategy):
             ))
 
         for ticker in shorts[:25]:
-            cp = float(current_prices.get(ticker, 0) or 0)
-            if cp <= 0:
+            cp_raw = current_prices.get(ticker)
+            if cp_raw is None or pd.isna(cp_raw):
+                continue
+            cp = float(cp_raw)
+            if not np.isfinite(cp) or cp <= 0:
                 continue
             stops = self.compute_stops_and_targets(
                 prices_sub[ticker].dropna(), 'SHORT', cp, regime_state=regime_state
             )
+            if not _stops_clean(stops):
+                continue
             signals.append(Signal(
                 ticker=ticker,
                 direction='SHORT',

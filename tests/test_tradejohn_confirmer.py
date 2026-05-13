@@ -80,3 +80,36 @@ def test_confirm_runner_generic_error_fails_open(caplog):
 def test_confirm_empty_proposals_returns_empty():
     out = confirm([], runner=lambda *a, **kw: '{}')
     assert out == {}
+
+
+def test_parse_response_unwraps_claude_bin_result_envelope():
+    """claude-bin --output-format json wraps in {result: '...'}. We must
+    unwrap that, then re-parse the inner string as JSON."""
+    inner = '{"AAPL": {"action": "approve", "multiplier": 1.0, "rationale": "x"}}'
+    raw = json.dumps({'type': 'result', 'subtype': 'success', 'result': inner})
+    out = _parse_response(raw, ['AAPL'])
+    assert out['AAPL']['action'] == 'approve'
+
+
+def test_parse_response_extracts_json_from_markdown_fences():
+    """Models sometimes wrap JSON in ```json ... ``` blocks despite the
+    prompt asking for bare JSON. Regression for 2026-05-13 live cycle."""
+    inner = (
+        'Analysis: nothing concerning here.\n\n```json\n'
+        '{"WBD": {"action": "approve", "multiplier": 1.0, "rationale": "ok"}}\n'
+        '```\n'
+    )
+    raw = json.dumps({'result': inner})
+    out = _parse_response(raw, ['WBD'])
+    assert out['WBD']['action'] == 'approve'
+
+
+def test_parse_response_extracts_json_when_prose_precedes():
+    """Even without fences, find the first {...} object after prose."""
+    inner = (
+        'No context provided. Defaulting to approve based on rubric.\n'
+        '{"AVB": {"action": "approve", "multiplier": 1.0, "rationale": "ok"}}'
+    )
+    raw = json.dumps({'result': inner})
+    out = _parse_response(raw, ['AVB'])
+    assert out['AVB']['action'] == 'approve'

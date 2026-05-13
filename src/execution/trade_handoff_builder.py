@@ -463,6 +463,16 @@ def compute_features(sig: dict, px: pd.DataFrame, spy_returns: pd.Series, run_da
 
     if ticker not in px.columns or entry is None or stop is None or t1 is None:
         return None
+    # Defensive: legacy rows from broken strategies may have NaN price levels
+    # (entry/stop/t1 stored as NaN numeric). int() of derived expressions then
+    # raises 'cannot convert float NaN to integer'. Reject early.
+    try:
+        if (not math.isfinite(float(entry))
+                or not math.isfinite(float(stop))
+                or not math.isfinite(float(t1))):
+            return None
+    except (TypeError, ValueError):
+        return None
     ts = px[ticker].dropna()
     if len(ts) < 63:
         return None

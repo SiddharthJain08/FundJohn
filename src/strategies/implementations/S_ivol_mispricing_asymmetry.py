@@ -110,16 +110,23 @@ class IvolMispricingAsymmetry(BaseStrategy):
         ivol_rank = ivol_series.rank(pct=True)
 
         # ── Step 2: composite mispricing score (MISP) ─────────────────────
-        # Use available proxies from financials; degrade gracefully if absent
-        fin = aux.get('financials', pd.DataFrame())
+        # Use available proxies from financials; degrade gracefully if absent.
+        # engine.load_aux_data() yields a {ticker: {field: value}} dict; legacy
+        # callers may pass a DataFrame. Normalize to DataFrame indexed by ticker.
+        fin_raw = aux.get('financials')
+        if isinstance(fin_raw, dict):
+            fin_latest = pd.DataFrame.from_dict(fin_raw, orient='index') if fin_raw else pd.DataFrame()
+        elif isinstance(fin_raw, pd.DataFrame) and not fin_raw.empty:
+            fin_latest = (
+                fin_raw.sort_index().groupby(level='ticker').last()
+                if 'ticker' in fin_raw.index.names
+                else fin_raw
+            )
+        else:
+            fin_latest = pd.DataFrame()
         misp_components: list[pd.Series] = []
 
-        if fin is not None and not fin.empty:
-            fin_latest = (
-                fin.sort_index().groupby(level='ticker').last()
-                if 'ticker' in fin.index.names
-                else fin
-            )
+        if not fin_latest.empty:
             def _col_rank(col):
                 if col in fin_latest.columns:
                     s = fin_latest[col].reindex(tickers)

@@ -27,12 +27,14 @@ LIVE_FLAG_ENV = 'OPENCLAW_REGIME_BLENDED_LIVE'
 def should_fire_breaker(position: dict, nav: float, threshold_pct: float) -> tuple[bool, float]:
     """Return (fire?, unrealized_pnl_pct_nav).
 
-    Position dict expects: ticker, qty (signed), avg_entry_price, mark.
+    Position dict shape comes from alpaca_trader.get_positions():
+      symbol, qty (signed), avg_entry_price, current_price, unrealized_plpc, side,
+      market_value. Legacy callers may pass {ticker, mark, ...} — accept both.
     Fires only on LOSS exceeding |threshold_pct| of NAV (positive moves don't fire).
     """
     qty = float(position['qty'])
     entry = float(position['avg_entry_price'])
-    mark = float(position['mark'])
+    mark = float(position.get('current_price', position.get('mark', 0)))
     unrealized = (mark - entry) * qty
     ratio = unrealized / nav if nav > 0 else 0.0
     return (abs(ratio) > threshold_pct and ratio < 0), ratio
@@ -117,20 +119,22 @@ def main():
     fired = 0
 
     for pos in positions:
+        # alpaca_trader.get_positions() returns 'symbol' not 'ticker'.
+        ticker = pos.get('symbol') or pos.get('ticker')
         fire, ratio = should_fire_breaker(pos, nav, threshold_pct)
         if not fire:
             continue
-        msg = format_breaker_message(pos['ticker'], ratio, threshold_pct, pos['qty'])
+        msg = format_breaker_message(ticker, ratio, threshold_pct, pos['qty'])
         if live:
             try:
-                ok, payload = _close_symbol(pos['ticker'], pos['qty'], market_open=True)
+                ok, payload = _close_symbol(ticker, pos['qty'], market_open=True)
             except Exception as e:
                 ok, payload = False, {'error': str(e)}
             cur.execute("""
               INSERT INTO circuit_breaker_fires
                 (ts_utc, ticker, unrealized_pnl_pct_nav, threshold_pct, position_qty, close_result_json)
               VALUES (%s, %s, %s, %s, %s, %s)
-            """, (datetime.now(timezone.utc), pos['ticker'], ratio, threshold_pct, pos['qty'],
+            """, (datetime.now(timezone.utc), ticker, ratio, threshold_pct, pos['qty'],
                   json.dumps(payload)))
             conn.commit()
             try:
@@ -144,7 +148,7 @@ def main():
               INSERT INTO circuit_breaker_fires
                 (ts_utc, ticker, unrealized_pnl_pct_nav, threshold_pct, position_qty, close_result_json)
               VALUES (%s, %s, %s, %s, %s, %s)
-            """, (datetime.now(timezone.utc), pos['ticker'], ratio, threshold_pct, pos['qty'],
+            """, (datetime.now(timezone.utc), ticker, ratio, threshold_pct, pos['qty'],
                   json.dumps({'dry_run': True, 'message': msg})))
             conn.commit()
             fired += 1
