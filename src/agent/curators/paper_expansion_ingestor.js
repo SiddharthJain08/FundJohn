@@ -52,9 +52,11 @@ async function _gatherContext() {
               FROM research_corpus
              WHERE ingested_at >= NOW() - INTERVAL '60 days'
              GROUP BY venue, source ORDER BY n DESC LIMIT 30`),
-    _query(`SELECT queries_used, sources_discovered, papers_imported, run_date
+    _query(`SELECT queries_used, sources_discovered, papers_imported,
+                    papers_imported_post_phase2, run_date
               FROM paper_source_expansions
-             ORDER BY run_date DESC LIMIT 3`),
+             WHERE status='completed'
+             ORDER BY run_date DESC LIMIT 8`),
     _query(`SELECT COUNT(*)::int AS corpus_size,
                    MAX(ingested_at) AS last_ingest
               FROM research_corpus`),
@@ -72,10 +74,25 @@ async function _gatherContext() {
   // enough to surface themes without exploding token cost.
   const vaultResultNotes   = _vaultIndex(`${WORKSPACE}/results/strategies`, 8, 400);
 
+  // Compute the EXCLUDE list — every domain Opus has already discovered in
+  // the last 8 weekly runs. The prompt was previously rediscovering AQR /
+  // FED / SSRN every week and dedup ate it silently downstream. Now we
+  // tell Opus explicitly: don't propose these again.
+  const seenDomains = new Set();
+  for (const row of recentCorpusVenues || []) {
+    for (const src of (row.sources_discovered || [])) {
+      const d = (src?.domain || '').trim().toLowerCase();
+      if (d) seenDomains.add(d);
+    }
+  }
+  const excludeDomains = Array.from(seenDomains).sort();
+
   return {
     portfolio_strategies: strategies,
     recent_memo_themes:   recentMemoThemes,
     recent_corpus_venues: portfolio,   // note: positional arg reorder
+    previous_expansion_runs: recentCorpusVenues,
+    exclude_domains:      excludeDomains,
     corpus_freshness:     lastExpansion,
     vault_strategy_notes: vaultStrategyNotes,
     vault_result_notes:   vaultResultNotes,
@@ -209,6 +226,10 @@ do bulk ingestion using the feed_urls you provide. Your role is feed
 Context follows below.`;
 
 function buildPrompt(ctx) {
+  const excludeDomains = ctx.exclude_domains || [];
+  const excludeBlock = excludeDomains.length
+    ? `\n--- EXCLUDE_DOMAINS (already in our corpus from prior expansion runs — DO NOT re-propose) ---\n${excludeDomains.join('\n')}\n`
+    : '';
   return `${EXPANSION_PROMPT_PREAMBLE}
 
 --- PORTFOLIO STRATEGIES ---
@@ -220,6 +241,9 @@ ${JSON.stringify(ctx.recent_memo_themes || [], null, 2)}
 --- RECENT CORPUS VENUES (last 60d) ---
 ${JSON.stringify(ctx.recent_corpus_venues || [], null, 2)}
 
+--- PREVIOUS EXPANSION RUNS (last 8) ---
+${JSON.stringify(ctx.previous_expansion_runs || [], null, 2)}
+${excludeBlock}
 --- CORPUS FRESHNESS ---
 ${JSON.stringify(ctx.corpus_freshness || {}, null, 2)}
 
@@ -228,6 +252,12 @@ ${JSON.stringify(ctx.vault_strategy_notes || [], null, 2)}
 
 --- VAULT RESULT NOTES (most-recent in workspaces/default/results/strategies/) ---
 ${JSON.stringify(ctx.vault_result_notes || [], null, 2)}
+
+**HARD CONSTRAINT — do not propose any feed whose registrable domain
+appears in EXCLUDE_DOMAINS above.** Recurring weekly rediscovery of
+AQR / Fed / SSRN was burning $4/run with zero net new sources. If
+your strongest themes lead you back to excluded domains, *change theme*
+and surface 2-4 less-explored adjacent areas instead.
 
 Begin. Think step-by-step in your natural reply, run your searches and
 fetches, and end with the fenced JSON block.`;
@@ -300,13 +330,42 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
   const papers = Array.isArray(parsed?.papers) ? parsed.papers : [];
   const queries = Array.isArray(parsed?.queries_used) ? parsed.queries_used : [];
   const sources = Array.isArray(parsed?.sources_discovered) ? parsed.sources_discovered : [];
-  notify(`Opus returned: ${papers.length} papers, ${queries.length} queries, ${sources.length} sources`);
+
+  // Audit: how many of the "newly discovered" sources are actually domains
+  // we've seen in prior expansion runs? Pre-EXCLUDE_DOMAINS this number was
+  // frequently 100% (Opus rediscovering AQR/Fed/SSRN). Post-fix we expect
+  // this to trend toward 0; a non-zero number despite the EXCLUDE_DOMAINS
+  // directive means Opus is ignoring the constraint and operator should
+  // tighten the prompt.
+  const excludeSet = new Set((ctx.exclude_domains || []).map(d => d.toLowerCase()));
+  const sourcesAlreadySeen = sources.filter(s => {
+    const d = (s?.domain || '').trim().toLowerCase();
+    return d && excludeSet.has(d);
+  }).length;
+
+  notify(`Opus returned: ${papers.length} papers, ${queries.length} queries, ${sources.length} sources (${sourcesAlreadySeen} already-seen)`);
 
   let imported = 0, skipped = 0;
   if (!dryRun && papers.length) {
     const ins = await _insertPapers(papers, notify);
     imported = ins.imported; skipped = ins.skipped;
   }
+
+  // Operator-facing summary written to paper_source_expansions.notes.
+  // Composes the right metric (most ingest happens via Phase 2, not here)
+  // so the audit doesn't read "$4 → 0 imports" anymore.
+  const newSources = sources.length - sourcesAlreadySeen;
+  const noteParts = [
+    `${sources.length} sources discovered (${newSources} new, ${sourcesAlreadySeen} already-seen)`,
+    `${papers.length} inline papers (Phase 1 — main ingest happens via expanded_sources.py Phase 2)`,
+  ];
+  if (newSources === 0 && sources.length > 0) {
+    noteParts.push('WARNING: all sources were already-seen — operator should tighten EXCLUDE_DOMAINS directive or review Opus prompt steering');
+  }
+  if (sources.length === 0) {
+    noteParts.push('WARNING: zero sources discovered — Opus may be stuck on themes or the EXCLUDE_DOMAINS list is exhausting the natural pool');
+  }
+  const notesLine = noteParts.join(' | ');
 
   const duration = Math.round((Date.now() - tStart) / 1000);
   if (!dryRun) {
@@ -315,16 +374,19 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
           SET status='completed', completed_at=NOW(),
               queries_used=$1, sources_discovered=$2::jsonb,
               papers_imported=$3, papers_skipped_dup=$4,
-              duration_seconds=$5, cost_usd=$6
-        WHERE id=$7`,
+              duration_seconds=$5, cost_usd=$6,
+              sources_already_seen=$7, notes=$8
+        WHERE id=$9`,
       [queries, JSON.stringify(sources), imported, skipped,
-       duration, out.costUsd, expansionId]
+       duration, out.costUsd, sourcesAlreadySeen, notesLine, expansionId]
     );
   }
   notify(`done — imported=${imported} skipped=${skipped} cost=$${out.costUsd.toFixed(2)} ${duration}s`);
   return {
     expansion_id: expansionId,
     imported, skipped,
+    sources_already_seen: sourcesAlreadySeen,
+    new_sources: newSources,
     queries_used: queries,
     sources_discovered: sources,
     duration_seconds: duration,

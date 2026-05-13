@@ -148,16 +148,32 @@ async function _sweep({ sinceIso, allTime, expansionId, dryRun }, notify) {
                    [...windowArgs, '--max-per-cat', '200', '--no-legacy'], notify);
   await _runPython('src/ingestion/openalex_discovery.py',
                    [...windowArgs, '--limit-per-venue', '500'], notify);
+
+  // Snapshot corpus before Phase 2 so we can attribute its delta to the
+  // expansion's discovered feeds (Tier-2 fix 2026-05-13 — without this,
+  // paper_source_expansions.papers_imported reads as 0 for every run since
+  // the 2026-04-25 prompt reframe, misleading the operator).
+  let phase2Delta = 0;
   if (expansionId) {
+    const preP2 = await _query(`SELECT COUNT(*)::int AS n FROM research_corpus`);
     await _runPython('src/ingestion/expanded_sources.py',
                      ['--expansion-id', expansionId, '--max-per-source', '100'], notify);
+    const postP2 = await _query(`SELECT COUNT(*)::int AS n FROM research_corpus`);
+    phase2Delta = Math.max(0, postP2.rows[0].n - preP2.rows[0].n);
+    await _query(
+      `UPDATE paper_source_expansions
+          SET papers_imported_post_phase2=$1
+        WHERE id=$2`,
+      [phase2Delta, expansionId],
+    );
+    notify(`sweep: phase2 attributed +${phase2Delta} new corpus rows to expansion ${expansionId.slice(0, 8)}`);
   }
 
   const afterQ = await _query(`SELECT COUNT(*)::int AS n FROM research_corpus`);
   const after = afterQ.rows[0].n;
   const ingested = Math.max(0, after - before);
-  notify(`sweep: corpus ${before} → ${after} (+${ingested})`);
-  return { ingested, corpusSize: after };
+  notify(`sweep: corpus ${before} → ${after} (+${ingested}; expansion attributed +${phase2Delta})`);
+  return { ingested, corpusSize: after, phase2Delta };
 }
 
 // ── Phase 3: corpus rating with implementability axis ───────────────────────

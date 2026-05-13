@@ -182,11 +182,19 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
   if (!dryRun) {
     posted = await _postToDiscord('position-recommendations', digest);
     if (posted) {
-      await _query(
-        `UPDATE strategy_sizing_recommendations
-            SET posted_to_discord = TRUE
-          WHERE rec_date = CURRENT_DATE`
-      );
+      // Mark exactly the rows we just inserted as posted (NOT
+      // `WHERE rec_date = CURRENT_DATE` — that misses rows inserted
+      // before midnight when the curator crosses a date boundary, and
+      // on retry re-posts duplicates to #position-recommendations).
+      const ids = persisted.map(r => r.rec_id).filter(Boolean);
+      if (ids.length) {
+        await _query(
+          `UPDATE strategy_sizing_recommendations
+              SET posted_to_discord = TRUE
+            WHERE id = ANY($1::uuid[])`,
+          [ids],
+        );
+      }
     }
   }
 

@@ -316,6 +316,48 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
   try {
     switch (cmd) {
+      case 'help': {
+        // Surface the full Discord command menu so operators don't have
+        // to grep source. Groups by category. Flash + relay commands
+        // are both listed; freeform PTC mention (`!john <anything>`)
+        // routes to main.js if not a slash-command.
+        await notify(
+          `**🦞 BotJohn Commands**\n\n` +
+          `**Data / Pricing**\n` +
+          `\`!john /chart AAPL\` — generate price chart\n` +
+          `\`!john /fetch AAPL [days]\` — backfill price history\n` +
+          `\`!john /fill [tickers|--force]\` — full universe fill\n` +
+          `\`!john /data [ticker]\` — show stored data coverage\n` +
+          `\`!john /data-status\` — pipeline health snapshot\n` +
+          `\`!john /data-roi\` — provider cost-vs-rows-ingested ROI\n` +
+          `\`!john /data-demand\` — what strategies need data\n\n` +
+          `**Strategy / Research**\n` +
+          `\`!john /approve <strategy_id>\` — approve research candidate\n` +
+          `\`!john /reject <strategy_id>\` — reject candidate\n` +
+          `\`!john /strategy-report <id>\` — lifetime memo summary\n` +
+          `\`!john /curator status|run|sample|promote|recurate|calib\` — Mastermind ops\n` +
+          `\`!john /hit-rate [strategy]\` — closed-trade hit rate\n\n` +
+          `**Trade / Execution**\n` +
+          `\`!john /trade\` — current trade plan\n` +
+          `\`!john /sigma-gate <ticker>\` — sigma gate state\n` +
+          `\`!john /signals\` — today's signals (relay)\n` +
+          `\`!john /engine-status\` / \`/engine-run\` — engine ops (relay)\n` +
+          `\`!john /pipeline status\` — daily cycle status\n\n` +
+          `**Slash-Commands (relay)**\n` +
+          `\`/approve-strategy\`, \`/strategy-review\`, \`/pause-strategy\`,\n` +
+          `\`/adjust-strategy\`, \`/strategy-versions\`, \`/approve-dataset\`\n\n` +
+          `**Health / Ops**\n` +
+          `\`!john /health\` — system health\n` +
+          `\`!john /agents\` — agent registry\n` +
+          `\`!john /git\` — repo state\n` +
+          `\`!john /diligence <ticker>\` or \`/run\` — diligence flow\n\n` +
+          `**Freeform**\n` +
+          `\`!john <any question>\` — routes to PTC subagent (Sonnet 4.6)\n\n` +
+          `_Dashboard: http://69.62.68.201/_`
+        );
+        break;
+      }
+
       case 'chart': {
         const ticker = args[0]?.toUpperCase();
         if (!ticker) { await notify('Usage: `!john /chart AAPL`'); break; }

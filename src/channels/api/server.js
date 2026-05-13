@@ -1760,6 +1760,10 @@ function getDashboardHtml() {
   --bg:#0d1117;--panel:#161b22;--border:#30363d;--border2:#21262d;
   --text:#e6edf3;--muted:#8b949e;--dim:#484f58;
   --blue:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--purple:#bc8cff;--orange:#f0883e;
+  /* Aliases used by Phase 2F Add-Addenda form (and any future inline forms).
+     Without these, the form's var(--bg2,#f8f8f8) fallback fires light-gray
+     on dark theme → unreadable. */
+  --bg2:#161b22;--fg:#e6edf3;--accent:#3fb950;
 }
 html,body{height:100%;overflow:hidden}
 body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',monospace;font-size:13px;display:flex;flex-direction:column}
@@ -3499,8 +3503,8 @@ async function loadRegime() {
   const el = document.getElementById('regime-panel');
   if (!el) return;
 
-  const d = await fetch('/api/regime').then(r => r.json())
-    .catch(() => ({ available: false, state: 'NO_DATA' }));
+  const d = await _safeFetch('/api/regime', { available: false, state: 'NO_DATA' },
+                              { critical: true, label: 'regime' });
 
   if (!d.available) {
     el.innerHTML = \`<div class="regime-panel-header">Volatility Regime</div>
@@ -4752,17 +4756,36 @@ async function _refreshRunsHist() {
   }).join('');
 }
 
+// _safeFetch: wraps fetch+JSON parse with toast-on-failure for critical
+// endpoints. Returns the fallback value on any error (network, non-2xx,
+// JSON parse). Pass critical:true to also surface a red toast — operator
+// otherwise reads an empty placeholder as "no data" instead of "fetch broke".
+async function _safeFetch(url, fallback, opts = {}) {
+  const { critical = false, label = url } = opts;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
+    return await r.json();
+  } catch (e) {
+    console.warn('[fetch failed]', label, e.message);
+    if (critical) {
+      try { toast('Failed: ' + label + ' — ' + e.message, 'error', 6000); } catch (_) {}
+    }
+    return fallback;
+  }
+}
+
 async function loadPortfolio() {
   const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
-    fetch('/api/portfolio/summary').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/portfolio/positions').then(r=>r.json()).catch(()=>[]),
-    fetch('/api/portfolio/history').then(r=>r.json()).catch(()=>[]),
-    fetch('/api/portfolio/pnl-candles?days=90').then(r=>r.json()).catch(()=>[]),
-    fetch('/api/portfolio/account').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/portfolio/value-curve?period=1A').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/portfolio/value-curve?period=all').then(r=>r.json()).catch(()=>({})),
-    fetch('/api/portfolio/regime-history?days=90').then(r=>r.json()).catch(()=>[]),
-    fetch('/api/portfolio/regime-history?days=365').then(r=>r.json()).catch(()=>[]),
+    _safeFetch('/api/portfolio/summary',           {}, { label: 'portfolio summary' }),
+    _safeFetch('/api/portfolio/positions',         [], { critical: true, label: 'portfolio positions' }),
+    _safeFetch('/api/portfolio/history',           [], { label: 'portfolio history' }),
+    _safeFetch('/api/portfolio/pnl-candles?days=90', [], { label: 'pnl candles' }),
+    _safeFetch('/api/portfolio/account',           {}, { critical: true, label: 'portfolio account' }),
+    _safeFetch('/api/portfolio/value-curve?period=1A', {}, { label: 'value curve 1y' }),
+    _safeFetch('/api/portfolio/value-curve?period=all', {}, { label: 'value curve all' }),
+    _safeFetch('/api/portfolio/regime-history?days=90', [], { label: 'regime history 90d' }),
+    _safeFetch('/api/portfolio/regime-history?days=365', [], { label: 'regime history 1y' }),
   ]);
   renderAccountRow(account);
   // Store valCurve first — renderPortfolioSummary needs it to compute
@@ -5011,12 +5034,12 @@ let _stDataUsage = null; // {parameters, strategies_total, categories_total}
 async function loadStrategies() {
   try {
     const [rows, jobs, failures, dataUsage, proposals, driftResp] = await Promise.all([
-      fetch('/api/strategies').then(r => r.json()).catch(() => []),
-      fetch('/api/approvals/active').then(r => r.json()).catch(() => []),
-      fetch('/api/approvals/recent-failures').then(r => r.json()).catch(() => []),
-      fetch('/api/data/usage').then(r => r.json()).catch(() => null),
-      fetch('/api/regime-proposals?status=pending').then(r => r.json()).catch(() => ({ proposals: [] })),
-      fetch('/api/regime-drift').then(r => r.json()).catch(() => ({ signals: [] })),
+      _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
+      _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
+      _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
+      _safeFetch('/api/data/usage',                  null, { label: 'data usage' }),
+      _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
+      _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
     ]);
     _rpRender(proposals?.proposals || []);
     _addendaLoad();              // Phase 2F — calibration addenda panel

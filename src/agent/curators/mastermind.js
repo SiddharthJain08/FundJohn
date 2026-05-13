@@ -44,7 +44,13 @@ const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..'
 const NODE_CLI     = path.join(OPENCLAW_DIR, 'src/agent/run-subagent-cli.js');
 const WORKSPACE    = path.join(OPENCLAW_DIR, 'workspaces/default');
 
-const DEFAULT_BATCH_SIZE      = 100;
+// 2026-05-13: bumped from 100 → 250 to drain the 3,360-paper unrated
+// backlog. At ~100/run the backlog was growing weekly against new arxiv/
+// openalex ingestion. Cost per Saturday run scales ~2.5× but ROI is
+// real: every unrated paper is a potentially-missed strategy idea.
+// Watch first 2-3 runs at 250 for cost + latency; override via the
+// `--batch-size` CLI arg or env if needed.
+const DEFAULT_BATCH_SIZE      = parseInt(process.env.MASTERMIND_CORPUS_BATCH_SIZE || '250', 10);
 const HIGH_CONFIDENCE_THRESH  = 0.75;
 const HARD_PROMOTE_CAP        = 600;
 

@@ -65,6 +65,11 @@ function formatTrade(ticker, direction, entryLow, entryHigh, stop, target1, size
 async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, generateId }) {
     // Lazy-load agentPersonas to avoid circular dep — bot.js requires relay.js at top level
     const agentPersonas = (() => { try { return require('./agent-personas'); } catch { return null; } })();
+    // Shared pool with try-finally release semantics (src/database/postgres.js).
+    // Before: each case did `new Pool() → query → pool.end()` but `.end()`
+    // never ran if relay.reply() threw → connection exhaustion. Single
+    // shared pool means we can't leak even on reply-throws.
+    const { query: pgQuery } = require('../../database/postgres');
     // 2026-05-02: ResearchDesk persona retired; mastermind owns both channels.
     const rdPost   = (msg) => agentPersonas?.post('mastermind', 'research-feed', msg).catch(() => {});
     const memoPost = (msg) => agentPersonas?.post('mastermind', 'strategy-memos', msg).catch(() => {});
@@ -73,9 +78,7 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
 
     switch (cmd) {
         case '/research reports': {
-            const { Pool } = require('pg');
-            const p        = new Pool({ connectionString: process.env.POSTGRES_URI });
-            const reports  = await p.query(
+            const reports = await pgQuery(
                 `SELECT sr.id, sh.name, sr.status, br.sharpe_ratio, br.annualized_return_pct, sr.created_at
                  FROM strategy_reports sr
                  JOIN strategy_hypotheses sh ON sr.hypothesis_id = sh.id
@@ -112,9 +115,7 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
             // /approve-strategy {strategy_id}
             const stratId = args[1];
             if (!stratId) { await relay.reply('Usage: /approve-strategy {strategy_id}'); break; }
-            const { Pool: P2 } = require('pg');
-            const p2 = new P2({ connectionString: process.env.POSTGRES_URI });
-            const res = await p2.query(
+            const res = await pgQuery(
                 `UPDATE strategy_registry SET status='approved', approved_by='operator', approved_at=NOW()
                  WHERE id=$1 RETURNING id, name`,
                 [stratId]
@@ -124,19 +125,15 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
             } else {
                 await relay.reply(`✅ Strategy **${res.rows[0].name}** (\`${stratId}\`) approved and active.`);
             }
-            await p2.end();
             break;
         }
 
         case '/strategy-review': {
             // List pending strategies
-            const { Pool: P3 } = require('pg');
-            const p3 = new P3({ connectionString: process.env.POSTGRES_URI });
-            const pending = await p3.query(
+            const pending = await pgQuery(
                 `SELECT id, name, tier, backtest_sharpe, backtest_return_pct, status, created_at
                  FROM strategy_registry WHERE status != 'deprecated' ORDER BY status, tier, created_at DESC`
             );
-            await p3.end();
             if (pending.rows.length === 0) {
                 await relay.reply('No strategies in registry.');
             } else {
@@ -151,9 +148,7 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
         case '/signals': {
             // /signals [date] — show today's signals or a specific date
             const targetDate = args[1] || new Date().toISOString().slice(0, 10);
-            const { Pool: P4 } = require('pg');
-            const p4 = new P4({ connectionString: process.env.POSTGRES_URI });
-            const sigs = await p4.query(
+            const sigs = await pgQuery(
                 `SELECT es.ticker, es.direction, es.strategy_id, es.position_size_pct,
                         es.entry_price, es.stop_loss, es.target_1, es.regime_state,
                         es.confidence, es.status
@@ -162,7 +157,6 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
                  ORDER BY es.strategy_id, es.ticker`,
                 [workspace.id, targetDate]
             );
-            await p4.end();
             if (sigs.rows.length === 0) {
                 await relay.reply(`No signals for ${targetDate}.`);
             } else {
@@ -217,13 +211,10 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
         case '/pause-strategy': {
             const stratId = args[1];
             if (!stratId) { await relay.reply('Usage: /pause-strategy {strategy_id}'); break; }
-            const { Pool: P5 } = require('pg');
-            const p5 = new P5({ connectionString: process.env.POSTGRES_URI });
-            await p5.query(
+            await pgQuery(
                 "UPDATE strategy_registry SET status='paused' WHERE id=$1",
                 [stratId]
             );
-            await p5.end();
             await relay.reply(`⏸️ Strategy **${stratId}** paused. Execution engine will skip it on next run. Resume with \`/approve-strategy ${stratId}\`.`);
             break;
         }
@@ -331,16 +322,12 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
                 break;
             }
 
-            const { Pool: DPool } = require('pg');
-            const dp = new DPool({ connectionString: process.env.POSTGRES_URI });
-
             // Create the data_tasks row
-            const taskResult = await dp.query(
+            const taskResult = await pgQuery(
                 `INSERT INTO data_tasks (workspace_id, description, status, requested_by)
                  VALUES ($1, $2, 'queued', $3) RETURNING id`,
                 [workspace.id, description, relay.userId || 'operator']
             );
-            await dp.end();
 
             const taskId = taskResult.rows[0].id;
 
@@ -372,13 +359,10 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
 
         // ── Data task status ───────────────────────────────────────────────
         case '/data-status': {
-            const { Pool: DS2 } = require('pg');
-            const ds2 = new DS2({ connectionString: process.env.POSTGRES_URI });
-            const tasks = await ds2.query(
+            const tasks = await pgQuery(
                 `SELECT id, description, status, rows_added, queued_at, completed_at
                  FROM data_tasks ORDER BY queued_at DESC LIMIT 10`
             );
-            await ds2.end();
 
             if (tasks.rows.length === 0) {
                 await relay.reply('No data tasks on record.');
