@@ -2793,24 +2793,27 @@ body.rs-chat-locked{overflow:hidden}
       </table>
     </div>
 
-    <!-- Phase 2F — Mastermind calibration addenda (always visible; compact when empty) -->
-    <div class="pf-section" id="ad-section">
+    <!-- Phase 2F — Mastermind calibration addenda (always visible; compact when empty).
+         IDs use 'addenda-' prefix instead of 'ad-' because ad-blockers (uBlock,
+         AdBlock, Brave shields) match id="ad-*" as advertisement containers
+         and apply display:none !important cosmetic filters. -->
+    <div class="pf-section" id="addenda-section">
       <div class="pf-section-header">
-        <span>📝 Calibration Addenda <span class="st-sub-label" id="ad-count">—</span></span>
+        <span>📝 Calibration Addenda <span class="st-sub-label" id="addenda-count">—</span></span>
         <span class="st-sub-label" style="display:flex;align-items:center;gap:8px">
           <span>prepended to next Saturday Mastermind prompt</span>
-          <button id="ad-add-btn" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">+ Add</button>
+          <button id="addenda-add-btn" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">+ Add</button>
         </span>
       </div>
-      <div id="ad-add-form" style="display:none;padding:8px;border:1px solid var(--border2);border-radius:4px;margin-bottom:6px;background:var(--bg2,#f8f8f8)">
-        <textarea id="ad-add-text" placeholder="Addendum text (will be prepended verbatim to next Mastermind prompt)" rows="3" style="width:100%;font-size:12px;font-family:inherit;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box"></textarea>
-        <input id="ad-add-rationale" type="text" placeholder="Rationale (operator-facing audit string)" style="width:100%;font-size:12px;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box;margin-top:5px"/>
+      <div id="addenda-add-form" style="display:none;padding:8px;border:1px solid var(--border2);border-radius:4px;margin-bottom:6px;background:var(--bg2,#f8f8f8)">
+        <textarea id="addenda-add-text" placeholder="Addendum text (will be prepended verbatim to next Mastermind prompt)" rows="3" style="width:100%;font-size:12px;font-family:inherit;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box"></textarea>
+        <input id="addenda-add-rationale" type="text" placeholder="Rationale (operator-facing audit string)" style="width:100%;font-size:12px;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box;margin-top:5px"/>
         <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:5px">
-          <button id="ad-add-cancel" style="padding:3px 9px;font-size:11px;background:var(--bg2,#ccc);color:var(--fg,#000);border:1px solid var(--border2);border-radius:3px;cursor:pointer">Cancel</button>
-          <button id="ad-add-save" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">Save (active)</button>
+          <button id="addenda-add-cancel" style="padding:3px 9px;font-size:11px;background:var(--bg2,#ccc);color:var(--fg,#000);border:1px solid var(--border2);border-radius:3px;cursor:pointer">Cancel</button>
+          <button id="addenda-add-save" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">Save (active)</button>
         </div>
       </div>
-      <table id="ad-table" style="border-collapse:collapse;width:100%;font-size:12px">
+      <table id="addenda-table" style="border-collapse:collapse;width:100%;font-size:12px">
         <thead>
           <tr style="text-align:left;color:var(--muted);font-size:11px">
             <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Status</th>
@@ -5016,8 +5019,8 @@ async function loadStrategies() {
       fetch('/api/regime-drift').then(r => r.json()).catch(() => ({ signals: [] })),
     ]);
     _rpRender(proposals?.proposals || []);
-    _adLoad();              // Phase 2F — calibration addenda panel
-    _adWireForm();          // idempotent
+    _addendaLoad();              // Phase 2F — calibration addenda panel
+    _addendaWireForm();          // idempotent
     _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
@@ -5478,21 +5481,21 @@ async function _rpRunPathMC(id, btn) {
 }
 
 // Phase 2F — render addenda panel
-function _adFormatTs(s) {
+function _addendaFormatTs(s) {
   if (!s) return '—';
   return String(s).slice(0, 16).replace('T', ' ');
 }
 
-function _adStatusBadge(status) {
+function _addendaStatusBadge(status) {
   const colors = { pending: '#b08800', active: '#2ea043', expired: '#777',
                     rejected: '#a04040', superseded: '#555' };
   return '<span style="background:' + (colors[status] || '#888') + ';color:white;padding:1px 6px;border-radius:3px;font-size:10px">' + status + '</span>';
 }
 
-function _adRender(addenda) {
-  const section = document.getElementById('ad-section');
-  const tbody = document.querySelector('#ad-table tbody');
-  const countEl = document.getElementById('ad-count');
+function _addendaRender(addenda) {
+  const section = document.getElementById('addenda-section');
+  const tbody = document.querySelector('#addenda-table tbody');
+  const countEl = document.getElementById('addenda-count');
   if (!section || !tbody) return;
   // Filter to relevant (pending + active); historical states shown if asked
   const visible = addenda.filter(a => a.status === 'pending' || a.status === 'active');
@@ -5507,34 +5510,34 @@ function _adRender(addenda) {
   for (const a of visible) {
     const tr = document.createElement('tr');
     const decideBtns = a.status === 'pending'
-      ? ('<button class="ad-btn" data-id="' + a.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
-         '<button class="ad-btn" data-id="' + a.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>')
-      : ('<button class="ad-btn" data-id="' + a.id + '" data-action="expire" style="padding:3px 8px;font-size:11px;background:#777;color:white;border:none;border-radius:3px;cursor:pointer">Expire</button>');
+      ? ('<button class="addenda-btn" data-id="' + a.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
+         '<button class="addenda-btn" data-id="' + a.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>')
+      : ('<button class="addenda-btn" data-id="' + a.id + '" data-action="expire" style="padding:3px 8px;font-size:11px;background:#777;color:white;border:none;border-radius:3px;cursor:pointer">Expire</button>');
     tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + _adStatusBadge(a.status) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + _addendaStatusBadge(a.status) + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + (a.source || '—') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;max-width:380px;word-break:break-word">' + (a.addendum_text || '') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted);max-width:200px;word-break:break-word">' + (a.rationale || '') + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + _adFormatTs(a.created_at) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + _addendaFormatTs(a.created_at) + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' + decideBtns + '</td>';
     tbody.appendChild(tr);
   }
-  for (const btn of tbody.querySelectorAll('.ad-btn')) {
-    btn.onclick = () => _adDecide(btn.dataset.id, btn.dataset.action);
+  for (const btn of tbody.querySelectorAll('.addenda-btn')) {
+    btn.onclick = () => _addendaDecide(btn.dataset.id, btn.dataset.action);
   }
 }
 
-async function _adLoad() {
+async function _addendaLoad() {
   try {
     const res = await fetch('/api/recalibration/addenda?status=all');
     const j = await res.json();
-    _adRender(Array.isArray(j.addenda) ? j.addenda : []);
+    _addendaRender(Array.isArray(j.addenda) ? j.addenda : []);
   } catch (e) {
-    _adRender([]);
+    _addendaRender([]);
   }
 }
 
-async function _adDecide(id, action) {
+async function _addendaDecide(id, action) {
   let actor = window.localStorage.getItem('rg_operator');
   if (!actor) {
     actor = prompt('Operator name (saved for the session):', '');
@@ -5550,15 +5553,15 @@ async function _adDecide(id, action) {
     });
     const j = await res.json();
     if (!res.ok || j.status !== 'OK') throw new Error(j.error || j.status || res.statusText);
-    await _adLoad();
+    await _addendaLoad();
   } catch (e) {
     alert('Addendum ' + action + ' failed: ' + e.message);
   }
 }
 
-async function _adAddSave() {
-  const text = (document.getElementById('ad-add-text').value || '').trim();
-  const rationale = (document.getElementById('ad-add-rationale').value || '').trim();
+async function _addendaAddSave() {
+  const text = (document.getElementById('addenda-add-text').value || '').trim();
+  const rationale = (document.getElementById('addenda-add-rationale').value || '').trim();
   if (!text) { alert('Addendum text is required.'); return; }
   let actor = window.localStorage.getItem('rg_operator');
   if (!actor) {
@@ -5573,25 +5576,25 @@ async function _adAddSave() {
     });
     const j = await res.json();
     if (!res.ok) throw new Error(j.error || res.statusText);
-    document.getElementById('ad-add-text').value = '';
-    document.getElementById('ad-add-rationale').value = '';
-    document.getElementById('ad-add-form').style.display = 'none';
-    await _adLoad();
+    document.getElementById('addenda-add-text').value = '';
+    document.getElementById('addenda-add-rationale').value = '';
+    document.getElementById('addenda-add-form').style.display = 'none';
+    await _addendaLoad();
   } catch (e) {
     alert('Addendum save failed: ' + e.message);
   }
 }
 
-function _adWireForm() {
-  const btn = document.getElementById('ad-add-btn');
-  const form = document.getElementById('ad-add-form');
-  const cancel = document.getElementById('ad-add-cancel');
-  const save = document.getElementById('ad-add-save');
+function _addendaWireForm() {
+  const btn = document.getElementById('addenda-add-btn');
+  const form = document.getElementById('addenda-add-form');
+  const cancel = document.getElementById('addenda-add-cancel');
+  const save = document.getElementById('addenda-add-save');
   if (!btn || !form || !cancel || !save || btn._wired) return;
   btn._wired = true;
   btn.onclick = () => { form.style.display = form.style.display === 'none' ? '' : 'none'; };
   cancel.onclick = () => { form.style.display = 'none'; };
-  save.onclick = () => _adAddSave();
+  save.onclick = () => _addendaAddSave();
 }
 
 async function _rpDecide(id, action) {
