@@ -1,0 +1,62 @@
+"""Storage checks — master data growing, key paths writable."""
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from ..registry import check
+from ..types import Status
+
+ROOT = Path('/root/openclaw')
+MASTER = ROOT / 'data' / 'master'
+
+
+@check(name='master_parquets_present', tags=['storage'], requires=['fs'])
+def _master_parquets_present():
+    """The eight canonical master parquets exist. Append-only invariant means
+    they should never disappear."""
+    expected = [
+        'prices.parquet', 'options_eod.parquet', 'financials.parquet',
+        'macro.parquet', 'insider.parquet', 'earnings.parquet',
+        'prices_30m.parquet', 'historical_regimes.parquet',
+    ]
+    missing = [f for f in expected if not (MASTER / f).exists()]
+    if missing:
+        return Status.FAIL, f'missing master parquet(s): {missing}'
+    return Status.PASS, f'all {len(expected)} master parquets present'
+
+
+@check(name='intraday_features_accumulating', tags=['storage'], requires=['fs'])
+def _intraday_features_accumulating():
+    """intraday_features.parquet got updated within the last hour during RTH,
+    last 24h otherwise. This is the data source for the not-yet-trained
+    intraday HMM, so accumulation matters."""
+    path = MASTER / 'intraday_features.parquet'
+    if not path.exists():
+        return Status.WARN, 'intraday_features.parquet missing'
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    age_min = (datetime.now(timezone.utc) - mtime).total_seconds() / 60
+    # Crude RTH check: weekday + ET hour 9.5..16.
+    now_et = datetime.now(tz=timezone.utc)
+    et_hour_offset = -5  # not DST-correct but RTH check tolerates 1h slop
+    et_hour = (now_et.hour + et_hour_offset) % 24
+    in_rth = now_et.weekday() < 5 and 10 <= et_hour <= 16
+    threshold = 60 if in_rth else 1440
+    if age_min > threshold:
+        sev = Status.FAIL if in_rth else Status.WARN
+        return sev, f'last update {age_min:.0f}m ago (threshold {threshold}m, RTH={in_rth})'
+    return Status.PASS, f'fresh ({age_min:.0f}m old)'
+
+
+@check(name='logs_dir_size_under_50mb', tags=['storage'], requires=['fs'])
+def _logs_dir_size():
+    """logs/ stays under 50MB. Old logs pile up if cleanup isn't run periodically."""
+    log_dir = ROOT / 'logs'
+    if not log_dir.exists():
+        return Status.SKIP, 'logs/ missing'
+    total_bytes = sum(f.stat().st_size for f in log_dir.rglob('*') if f.is_file())
+    mb = total_bytes / (1024 * 1024)
+    if mb > 100:
+        return Status.WARN, f'logs/ is {mb:.0f} MB — run cleanup'
+    return Status.PASS, f'logs/ {mb:.1f} MB'

@@ -117,16 +117,24 @@ a weekday. The 10:00 AM ET pipeline cycle should already have completed.
 
 ## Your job, in order
 
-1. Health check:
+1. Preflight check (fast, sub-second per check):
        python3 src/maintenance/doctor.py --json
    Parse the JSON. Note exit code (0 pass / 1 warn / 2 fail) and any
    check with status "warn" or "fail".
 
-2. Digest:
-       node src/pipeline/daily_health_digest.js --dry-run
-   Cross-reference with doctor's findings.
+2. System probes (deeper post-cycle health — verifies pipeline ran,
+   signals are clean, broker session works, regime gate admits strategies,
+   strategies are importable, agents are reachable):
+       python3 -m system_checks --json
+   Parse the JSON. Same exit-code convention as doctor. Each check has
+   a `name`, `status`, `tags`, and `detail`. Failing checks should be
+   investigated before greenlight.
 
-3. If anything is off, investigate:
+3. Digest:
+       node src/pipeline/daily_health_digest.js --dry-run
+   Cross-reference with doctor + system_checks findings.
+
+4. If anything is off, investigate:
    - tail -200 logs/pipeline_orchestrator_{{TODAY_ISO}}.log
    - Postgres queries via $POSTGRES_URI:
        SELECT count(*), max(generated_at) FROM execution_signals
@@ -137,16 +145,22 @@ a weekday. The 10:00 AM ET pipeline cycle should already have completed.
          ORDER BY updated_at DESC LIMIT 1;
        SELECT * FROM daily_signal_summary
          WHERE run_date = '{{TODAY_ISO}}';
+   - Run a specific system_check for finer-grained diagnostics:
+       python3 -m system_checks --check <name> --json
 
-4. Fix and re-run (only if a real failure is found):
+5. Fix and re-run (only if a real failure is found):
    - Apply code fixes directly. You have full filesystem write access.
    - Commit with \`[botjohn-maint] <reason>\` and \`git push\`.
    - Re-trigger the cycle SYNCHRONOUSLY:
          python3 scripts/run_pipeline.py --force-resume --date {{TODAY_ISO}}
      Wait for it to finish (5–10 min). Capture the result. Do not loop.
+   - When you fix a class of bug that should not recur, add a new
+     check under src/system_checks/checks/ so future maintenance
+     catches the regression. See src/system_checks/README.md for the
+     contract.
 
-5. Idempotency: if doctor green + digest healthy + DB row counts plausible,
-   green-light it. Don't manufacture work.
+6. Idempotency: if doctor green + system_checks green + digest healthy
+   + DB row counts plausible, green-light it. Don't manufacture work.
 
 ## Output format — REQUIRED
 

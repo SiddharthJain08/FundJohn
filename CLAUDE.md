@@ -73,7 +73,8 @@ The cycle and paper-hunt flows run through LangGraph.js:
 - `docs/strategy-review.{service,timer}` — Saturday 18:00 ET comprehensive review
 - `docs/position-recs.{service,timer}` — Saturday 19:00 ET sizing recs
 - `docs/paper-expansion.{service,timer}` — Sunday 08:00 ET paper expansion ingestion
-- `src/agent/run_maintenance.js` — Daily 12:00 ET (Mon-Fri) BotJohn maintenance driver: doctor + digest + investigate + fix + post to #general
+- `src/system_checks/` — runnable diagnostic probes for live state. Tagged by domain (`pipeline`, `broker`, `regime`, `strategies`, `agents`, `storage`). `python3 -m system_checks [--tag X] [--check NAME] [--json]`. See `src/system_checks/README.md` for the contract. Distinct from `tests/` (pytest unit tests) and `src/maintenance/doctor.py` (sub-second preflight). When fixing a bug class that shouldn't recur, add a regression check here.
+- `src/agent/run_maintenance.js` — Daily 12:00 ET (Mon-Fri) BotJohn maintenance driver: doctor + system_checks + digest + investigate + fix + post to #general
 - `docs/botjohn-maintenance.{service,timer}` — Mon-Fri 12:00 ET maintenance run (installed at `/etc/systemd/system/openclaw-botjohn-maintenance.*`)
 - `docs/botjohn-saturday-maintenance.{service,timer}` — Sat 16:00 ET research-pipeline audit + surgical recovery (installed at `/etc/systemd/system/openclaw-botjohn-saturday-maintenance.*`)
 - `docs/botjohn-saturday-verify.{service,timer}` — Sun 12:00 ET read-only verification of any Saturday recovery (installed at `/etc/systemd/system/openclaw-botjohn-saturday-verify.*`)
