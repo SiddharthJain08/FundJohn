@@ -614,25 +614,54 @@ def main():
         for s in skipped[:10]:
             log(f'  SKIP {s["ticker"]}: {s["reason"]}')
 
-    # Soft-fail on partial: when orders were requested but we couldn't submit
-    # all of them, surface it to the operator explicitly. We still return 0
-    # so the pipeline's `report` step runs and posts the full picture to
-    # Discord — partial is an observability concern, not a pipeline abort.
-    if submitted and skipped:
-        _alert_partial(run_date, len(submitted), len(orders), skipped)
+    # Post a submission summary to #trade-reports whenever any orders were
+    # requested — success, partial, or all-reject. Operator wants visibility
+    # on every cycle that touched the broker, not just the partial-failure
+    # case the old _alert_partial covered.
+    if submitted or skipped:
+        _post_executor_summary(run_date, submitted, skipped, new_notional_total)
 
 
-def _alert_partial(run_date, n_ok, n_total, skipped):
-    """One line to #trade-reports when some orders didn't make it in.
-    Uses the DataBot REST API (same pattern as send_report.py)."""
+def _post_executor_summary(run_date, submitted, skipped, notional):
+    """Post a one-message summary of the cycle's broker submissions to
+    #trade-reports. Always fires when at least one order was attempted —
+    no-op when nothing was attempted (the report step covers that)."""
     import requests as _rq
-    token = os.environ.get('DATABOT_TOKEN') or os.environ.get('BOT_TOKEN', '')
+    token = (os.environ.get('DISCORD_BOT_TOKEN')
+             or os.environ.get('DATABOT_TOKEN')
+             or os.environ.get('BOT_TOKEN', ''))
     if not token:
+        log('Discord post skipped: no DISCORD_BOT_TOKEN/DATABOT_TOKEN/BOT_TOKEN in env')
         return
+    n_ok = len(submitted)
+    n_skip = len(skipped)
+    n_total = n_ok + n_skip
+    # Status emoji: ✅ all-ok, ⚠️ partial, 🛑 all-reject
+    emoji = '✅' if n_skip == 0 else ('🛑' if n_ok == 0 else '⚠️')
+    lines = [
+        f'{emoji} **Alpaca submissions — {run_date}** — {n_ok}/{n_total} '
+        f'orders in · new notional ${notional:,.0f}',
+    ]
+    if submitted:
+        sample = ', '.join(
+            f'{s.get("ticker","?")}x{s.get("qty","?")}'
+            for s in submitted[:8]
+        )
+        suffix = ' …' if len(submitted) > 8 else ''
+        lines.append(f'• submitted: {sample}{suffix}')
+    if skipped:
+        reasons = ', '.join(
+            f"{s['ticker']}({(s['reason'] or 'unknown')[:40]})"
+            for s in skipped[:8]
+        )
+        suffix = ' …' if len(skipped) > 8 else ''
+        lines.append(f'• rejected:  {reasons}{suffix}')
+    msg = '\n'.join(lines)[:1900]
     headers = {'Authorization': f'Bot {token}'}
     try:
         r = _rq.get('https://discord.com/api/v10/users/@me/guilds', headers=headers, timeout=5)
         if not r.ok:
+            log(f'Discord guild lookup failed: {r.status_code}')
             return
         cid = None
         for g in r.json():
@@ -646,15 +675,17 @@ def _alert_partial(run_date, n_ok, n_total, skipped):
             if cid:
                 break
         if not cid:
+            log('Discord post skipped: #trade-reports not found in any visible guild')
             return
-        reasons = ', '.join(f"{s['ticker']}({(s['reason'] or 'unknown')[:40]})" for s in skipped[:8])
-        msg = (f'⚠️ **Alpaca partial submit — {run_date}** — {n_ok}/{n_total} orders in; '
-               f'{n_total - n_ok} skipped: {reasons}{" …" if len(skipped) > 8 else ""}')
-        _rq.post(f'https://discord.com/api/v10/channels/{cid}/messages',
-                 headers={**headers, 'Content-Type': 'application/json'},
-                 json={'content': msg[:1900]}, timeout=5)
+        post = _rq.post(
+            f'https://discord.com/api/v10/channels/{cid}/messages',
+            headers={**headers, 'Content-Type': 'application/json'},
+            json={'content': msg}, timeout=5,
+        )
+        if not post.ok:
+            log(f'Discord post failed: {post.status_code} {post.text[:200]}')
     except Exception as e:
-        log(f'partial-submit alert failed: {e}')
+        log(f'executor-summary post failed: {e}')
 
 
 if __name__ == '__main__':

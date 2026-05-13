@@ -121,7 +121,10 @@ def _post_webhook_with_file(webhook_url: str, content: str, file_name: str, file
 
 def _fmt_greenlist(run_date: str, sized: dict) -> str:
     orders = sized.get('orders') or []
-    regime = sized.get('regime') or '?'
+    # `regime` in sized handoff is the full dict {state, stress, scale, vix_level, ...}
+    # but the Discord message only wants the state string.
+    regime_raw = sized.get('regime') or '?'
+    regime = regime_raw.get('state', '?') if isinstance(regime_raw, dict) else regime_raw
     if not orders:
         return (f'✅ **{run_date}** — no actionable signals today '
                 f'(regime={regime}). All signals failed the Kelly/EV gate.')
