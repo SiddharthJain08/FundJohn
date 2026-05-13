@@ -18,11 +18,11 @@ flag (`active=false`) on a metadata row, never a `DELETE`.
 
 ## System Overview
 Autonomous quant PM system + hardcoded data pipeline:
-- **BotJohn** (claude-opus-4-6): Orchestrator and portfolio manager
-- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 6-step 10am daily cycle — collect → signals → handoff → trade → alpaca → report. (queue_drain removed 2026-04-28; fused-staging-approval handles inline column backfills.)
-- **TradeJohn** (claude-sonnet-4-6): Signal selection + Kelly sizing. Reads the structured handoff from `trade_handoff_builder.py`; emits sized bracket orders. Single LLM step in the cycle.
-- **PaperHunter** (claude-haiku-4-5): Per-paper extraction + 4 rejection gates
-- **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation
+- **BotJohn** (claude-opus-4-7): Orchestrator and portfolio manager (this agent — Claude Code).
+- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 10-step daily cycle (10:00 ET) — `collect → signals → handoff → trade → alpaca → trade_parity_capture → correlation_sidecar → reconcile → report → health`. `trade` = `regime_blended_sizer_live.py` (LIVE production sizer; OPENCLAW_REGIME_BLENDED_LIVE=1 since 2026-05-12). `correlation_sidecar` = Phase 2G portfolio-Kelly sidecar (non-fatal). `health` = `daily_health_digest.js`. (queue_drain removed 2026-04-28; legacy single TradeJohn LLM step replaced by formula sizer + per-ticker confirmer.)
+- **TradeJohn confirmer** (claude-sonnet-4-6): Per-ticker approve/veto/scale confirmer inside `regime_blended_sizer_live.py`. Runs only in LOW_VOL/TRANSITIONING regimes. Fail-open on LLM error. Invoked via `claude-bin --print --output-format json --model sonnet --max-budget-usd 0.50`.
+- **PaperHunter** (claude-sonnet-4-6, upgraded from Haiku 2026-04-23): Per-paper extraction + 4 rejection gates.
+- **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation.
 - **MastermindJohn** (claude-opus-4-7, 1M ctx): Opus orchestrator with four weekly modes.
   - `mode=corpus` (Sat 10:00 ET via `openclaw-mastermind-corpus.service`/`.timer`) — rates the full `research_corpus` in batched calls and promotes high-confidence picks to `research_candidates`.
   - `mode=comprehensive-review` (Sat 18:00 ET via `openclaw-strategy-review.service`/`.timer`) — deep per-strategy lifetime review: every closed trade, counterfactual tuning of size / stop / target / max-hold for greater profitability. Writes to `strategy_memos`; posts each memo to `#strategy-memos`.
