@@ -1737,7 +1737,11 @@ app.use('/api/regime-proposals', require('./routes_regime_proposals'));
 app.use('/api', require('./routes_regime_drift'));
 
 // Phase 2D — bootstrap MC + calibration + overlap
+// Phase 2E intraday-path MC also lives in routes_regime_2d.js
 app.use('/api', require('./routes_regime_2d'));
+
+// Phase 2F — Mastermind prompt recalibration loop
+app.use('/api', require('./routes_recalibration'));
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));

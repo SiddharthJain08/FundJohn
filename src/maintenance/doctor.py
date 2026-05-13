@@ -734,6 +734,9 @@ OVERLAP_VERY_STALE_HOURS = 72
 INTRADAY_MC_FRESH_HOURS    = 26
 INTRADAY_MC_VERY_STALE_HOURS = 72
 INTRADAY_MC_PENDING_STALE_DAYS = 7
+ADDENDA_PENDING_STALE_DAYS = 30
+ADDENDA_EXPIRED_BUT_ACTIVE_WARN = 1
+ADDENDA_EXPIRED_BUT_ACTIVE_FAIL = 3
 
 
 def _calibration_report():
@@ -850,6 +853,51 @@ def check_strategy_overlap_freshness():
     if h <= OVERLAP_VERY_STALE_HOURS:
         return _warn(name, f'stale ({h:.1f}h old)')
     return _fail(name, f'very stale ({h:.1f}h old)')
+
+
+def _query_addenda_health():
+    """Indirection seam for mastermind_addendum_health: counts of
+    (expired_but_status_active, pending_aged_over_threshold)."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                  count(*) FILTER (WHERE status='active'
+                                     AND valid_until IS NOT NULL
+                                     AND valid_until <= NOW()) AS expired_but_active,
+                  count(*) FILTER (WHERE status='pending'
+                                     AND created_at < NOW() - (%s::int * INTERVAL '1 day')) AS stale_pending,
+                  count(*) FILTER (WHERE status='active') AS total_active
+                FROM mastermind_prompt_addenda
+            """, (ADDENDA_PENDING_STALE_DAYS,))
+            r = cur.fetchone()
+    return {'expired_but_active': int(r[0]),
+            'stale_pending': int(r[1]),
+            'total_active': int(r[2])}
+
+
+@_check('mastermind_addendum_health')
+def check_mastermind_addendum_health():
+    """Phase 2F: PASS unless addenda lifecycle is rotting.
+    WARN: 1-2 expired-but-active OR any stale pending.
+    FAIL: >=3 expired-but-active OR >=3 stale pending."""
+    name = 'mastermind_addendum_health'
+    try:
+        h = _query_addenda_health()
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+    detail = (f"{h['total_active']} active, "
+              f"{h['expired_but_active']} expired-but-active, "
+              f"{h['stale_pending']} stale-pending")
+    if h['expired_but_active'] >= ADDENDA_EXPIRED_BUT_ACTIVE_FAIL or h['stale_pending'] >= 3:
+        return _fail(name, detail)
+    if h['expired_but_active'] >= ADDENDA_EXPIRED_BUT_ACTIVE_WARN or h['stale_pending'] >= 1:
+        return _warn(name, detail)
+    return _ok(name, detail)
 
 
 def _drift_summary():

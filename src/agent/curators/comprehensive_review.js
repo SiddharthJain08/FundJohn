@@ -240,8 +240,34 @@ Memo content must:
 No hedge language. Every claim must cite a number from the data.
 `;
 
-function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
-  return `${MEMO_SYSTEM_PREAMBLE}
+function loadActiveCalibrationAddenda() {
+  /* Phase 2F: prepended to the strategy-memo prompt. Failures here must
+   * not break the review — Mastermind keeps running with no addenda. */
+  try {
+    const result = spawnSync(PYTHON,
+      ['-m', 'agent.mastermind_recalibration', '--list-active'],
+      { cwd: OPENCLAW_DIR, encoding: 'utf8',
+        env: { ...process.env, PYTHONPATH:
+          process.env.PYTHONPATH
+            ? `${OPENCLAW_DIR}/src:${process.env.PYTHONPATH}`
+            : `${OPENCLAW_DIR}/src` } });
+    if (result.status !== 0) return [];
+    const parsed = JSON.parse(result.stdout || '{"addenda":[]}');
+    return Array.isArray(parsed.addenda) ? parsed.addenda : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function buildAddendaPrefix(addenda) {
+  if (!addenda || !addenda.length) return '';
+  const lines = addenda.map(a => `- ${a.addendum_text}`).join('\n');
+  return `## Calibration addenda (operator-approved, applied to this run):\n${lines}\n\n`;
+}
+
+function buildStrategyPrompt(strategy, tradePack, counterfactuals, addenda) {
+  const addendaPrefix = buildAddendaPrefix(addenda || []);
+  return `${addendaPrefix}${MEMO_SYSTEM_PREAMBLE}
 
 Strategy: ${strategy.id} (${strategy.name})
 Status: ${strategy.status}
@@ -292,7 +318,7 @@ async function _postToDiscord(channelName, text) {
   return false;
 }
 
-async function _reviewOne(strategy, { dryRun, notify }) {
+async function _reviewOne(strategy, { dryRun, notify, addenda = [] }) {
   const log = (m) => { notify?.(`${strategy.id}: ${m}`); };
   const tradePack = await _buildTradePack(strategy.id);
   if (!tradePack.signals.length && !tradePack.pnl.length) {
@@ -301,7 +327,7 @@ async function _reviewOne(strategy, { dryRun, notify }) {
   }
 
   const counterfactuals = _counterfactuals(tradePack.pnl);
-  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals);
+  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals, addenda);
   log(`prompting Opus (signals=${tradePack.signals.length} pnl=${tradePack.pnl.length})`);
 
   const out = await runOneShot({
@@ -491,11 +517,12 @@ print(pid)`,
 
 async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {}) {
   const strategies = await _fetchStrategies(strategyIds);
-  notify(`${strategies.length} strategies to review`);
+  const addenda = loadActiveCalibrationAddenda();
+  notify(`${strategies.length} strategies to review (calibration addenda: ${addenda.length})`);
   const results = [];
   let totalCost = 0;
   for (const s of strategies) {
-    const r = await _reviewOne(s, { dryRun, notify });
+    const r = await _reviewOne(s, { dryRun, notify, addenda });
     results.push(r);
     if (r.cost_usd) totalCost += Number(r.cost_usd);
   }
@@ -503,9 +530,10 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
     strategiesReviewed: results.filter(r => r.memo_id).length,
     strategiesSkipped:  results.filter(r => r.skipped).length,
     errors:             results.filter(r => r.error).length,
+    addendaApplied:     addenda.map(a => a.id),
     costUsd:            totalCost,
     results,
   };
 }
 
-module.exports = { run };
+module.exports = { run, loadActiveCalibrationAddenda, buildAddendaPrefix };
