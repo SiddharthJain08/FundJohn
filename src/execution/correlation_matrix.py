@@ -38,6 +38,17 @@ SPARSE_DEFAULT   = 0.05
 DEFAULT_WINDOW_DAYS = 90
 DEFAULT_BLEND_ALPHA = 0.6   # weight on PnL correlation; (1-alpha) on overlap
 
+# Phase 2H (2026-05-13): per-regime correlation matrices + state-probability blend.
+# Defaults are env-overridable; documented in
+# docs/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2h-design.md
+REGIME_STATES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+CRISIS_CORRELATION_PRIOR = float(os.environ.get('OPENCLAW_CRISIS_CORRELATION_PRIOR', '0.7'))
+# Phase 2H coverage gate: regimes with > 0 trades among requested tickers
+# get classified 'real' — Pearson + SPARSE_DEFAULT handles within-regime
+# sparsity at the pair level. The 'fallback_global' / 'stress_prior'
+# branches fire only when *zero* trades exist in a regime.
+CRISIS_FALLBACK_USES_STRESS_PRIOR = True   # off => CRISIS-with-no-data behaves like other-with-no-data
+
 
 def _db_uri() -> str:
     return (os.environ.get('DATABASE_URL')
@@ -203,6 +214,206 @@ def effective_correlation(tickers: list[str],
     sigma_pnl     = correlation_pnl(tickers, window_days=window_days)
     sigma_overlap = _load_strategy_overlap_for_tickers(tickers, window_days=window_days)
     return blend(sigma_pnl, sigma_overlap, alpha=alpha)
+
+
+# ─── Phase 2H — per-regime correlation matrices ────────────────────────── #
+
+def _load_pnls_by_regime_ticker_date(tickers: list[str], window_days: int
+                                       ) -> dict[str, dict[str, dict[str, float]]]:
+    """Returns {regime_state: {ticker: {date: pnl_pct}}}. One slice per regime."""
+    if not tickers:
+        return {r: {t: {} for t in tickers} for r in REGIME_STATES}
+    sql = """
+        SELECT es.regime_state, es.ticker, es.signal_date::text AS signal_date,
+               sp.realized_pnl_pct::float AS realized_pnl_pct
+          FROM signal_pnl sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE es.ticker = ANY(%s::text[])
+           AND sp.realized_pnl_pct IS NOT NULL
+           AND sp.closed_at >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+           AND es.regime_state = ANY(%s::text[])
+    """
+    out: dict[str, dict[str, dict[str, float]]] = {
+        r: {t: {} for t in tickers} for r in REGIME_STATES}
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (list(tickers), window_days, list(REGIME_STATES)))
+            for regime, ticker, sig_date, pnl in cur.fetchall():
+                if regime not in out or ticker not in out[regime]:
+                    continue
+                slot = out[regime][ticker]
+                if sig_date in slot:
+                    slot[sig_date] = (slot[sig_date] + float(pnl)) / 2.0
+                else:
+                    slot[sig_date] = float(pnl)
+    return out
+
+
+def _trade_counts_by_regime(tickers: list[str], window_days: int) -> dict[str, int]:
+    """Returns {regime_state: total_trade_count} for sparsity classification."""
+    if not tickers:
+        return {r: 0 for r in REGIME_STATES}
+    sql = """
+        SELECT es.regime_state, count(*)
+          FROM signal_pnl sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE es.ticker = ANY(%s::text[])
+           AND sp.realized_pnl_pct IS NOT NULL
+           AND sp.closed_at >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+      GROUP BY es.regime_state
+    """
+    out = {r: 0 for r in REGIME_STATES}
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (list(tickers), window_days))
+            for regime, n in cur.fetchall():
+                if regime in out:
+                    out[regime] = int(n)
+    return out
+
+
+def correlation_from_pnl_by_regime(tickers: list[str],
+                                     window_days: int = DEFAULT_WINDOW_DAYS
+                                     ) -> dict[str, dict[str, dict[str, float]]]:
+    """One Pearson correlation matrix per regime, from that regime's slice
+    of realized PnL. Diagonals 1.0, off-diagonals clipped, sparse pairs
+    get SPARSE_DEFAULT."""
+    by_regime = _load_pnls_by_regime_ticker_date(tickers, window_days)
+    return {r: correlation_from_pnl(by_regime[r], tickers) for r in REGIME_STATES}
+
+
+def crisis_stress_prior(tickers: list[str],
+                          rho: Optional[float] = None
+                          ) -> dict[str, dict[str, float]]:
+    """Flat-off-diagonal correlation matrix used when CRISIS has no realized
+    data. rho defaults to CRISIS_CORRELATION_PRIOR (env-overridable).
+    Clipped at MAX_OFF_DIAGONAL."""
+    r = float(rho) if rho is not None else CRISIS_CORRELATION_PRIOR
+    r = max(-MAX_OFF_DIAGONAL, min(MAX_OFF_DIAGONAL, r))
+    out: dict[str, dict[str, float]] = {t: {} for t in tickers}
+    for ti in tickers:
+        for tj in tickers:
+            out[ti][tj] = 1.0 if ti == tj else r
+    return out
+
+
+def current_state_probabilities() -> dict[str, float]:
+    """Reads market_regime.state_probabilities for the latest row.
+    Returns dict over the 4 regimes summing to 1.0. Missing regimes
+    default to 0.0. If no row exists, returns full weight on the single
+    `state` column (HMM fallback)."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT state, regime_data
+                  FROM market_regime
+                 ORDER BY id DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+    out = {r: 0.0 for r in REGIME_STATES}
+    if not row:
+        return out
+    state, data = row
+    if isinstance(data, dict):
+        probs = data.get('state_probabilities') or {}
+        for r in REGIME_STATES:
+            if r in probs:
+                try:
+                    out[r] = float(probs[r])
+                except (TypeError, ValueError):
+                    pass
+    total = sum(out.values())
+    if total <= 0:
+        # No state_probabilities — fall back to hard one-hot on `state`
+        if state in out:
+            out[state] = 1.0
+        return out
+    return {r: out[r] / total for r in REGIME_STATES}
+
+
+def _per_regime_matrices_with_coverage(tickers: list[str],
+                                         window_days: int,
+                                         alpha: float
+                                         ) -> tuple[dict[str, dict[str, dict[str, float]]],
+                                                     dict[str, str]]:
+    """Returns ({regime: matrix}, {regime: classification}).
+
+    Classification ∈ {'real', 'fallback_global', 'stress_prior'}:
+      'real'            — n_trades_in_regime > 0 for the requested tickers.
+                          Per-regime Pearson runs; pair-level sparsity is
+                          handled by SPARSE_DEFAULT (same as the global path).
+      'fallback_global' — n_trades_in_regime == 0 AND regime != CRISIS.
+                          Use the global 2G blended matrix.
+      'stress_prior'    — n_trades_in_regime == 0 AND regime == CRISIS.
+                          Use crisis_stress_prior (flat off-diagonal at
+                          CRISIS_CORRELATION_PRIOR). Operator-selected
+                          option from the 2H scope question.
+    """
+    counts = _trade_counts_by_regime(tickers, window_days)
+    global_matrix: Optional[dict[str, dict[str, float]]] = None
+    stress_matrix: Optional[dict[str, dict[str, float]]] = None
+    by_regime_pnls: Optional[dict[str, dict[str, dict[str, float]]]] = None
+
+    coverage: dict[str, str] = {}
+    matrices: dict[str, dict[str, dict[str, float]]] = {}
+    for r in REGIME_STATES:
+        n = counts.get(r, 0)
+        if n > 0:
+            if by_regime_pnls is None:
+                by_regime_pnls = _load_pnls_by_regime_ticker_date(tickers, window_days)
+            matrices[r] = correlation_from_pnl(by_regime_pnls[r], tickers)
+            coverage[r] = 'real'
+        elif r == 'CRISIS' and CRISIS_FALLBACK_USES_STRESS_PRIOR:
+            if stress_matrix is None:
+                stress_matrix = crisis_stress_prior(tickers)
+            matrices[r] = stress_matrix
+            coverage[r] = 'stress_prior'
+        else:
+            if global_matrix is None:
+                global_matrix = effective_correlation(
+                    tickers, window_days=window_days, alpha=alpha)
+            matrices[r] = global_matrix
+            coverage[r] = 'fallback_global'
+    return matrices, coverage
+
+
+def blended_correlation_by_state(tickers: list[str],
+                                   window_days: int = DEFAULT_WINDOW_DAYS,
+                                   alpha: float = DEFAULT_BLEND_ALPHA
+                                   ) -> tuple[dict[str, dict[str, float]],
+                                               dict[str, float],
+                                               dict[str, str]]:
+    """End-to-end: builds per-regime matrices with coverage classification,
+    reads current state probabilities, returns the convex-combination
+    correlation matrix used by the 2H sidecar.
+
+    Returns (sigma_eff, blend_weights, coverage).
+      sigma_eff[i][j] = sum_r p(r) · sigma_r[i][j]   (off-diagonal)
+      sigma_eff[i][i] = 1.0
+    """
+    if not tickers:
+        probs = current_state_probabilities()
+        return {}, probs, {r: 'no_orders' for r in REGIME_STATES}
+
+    matrices, coverage = _per_regime_matrices_with_coverage(
+        tickers, window_days=window_days, alpha=alpha)
+    probs = current_state_probabilities()
+
+    out: dict[str, dict[str, float]] = {t: {} for t in tickers}
+    for ti in tickers:
+        for tj in tickers:
+            if ti == tj:
+                out[ti][tj] = 1.0
+                continue
+            acc = 0.0
+            for r in REGIME_STATES:
+                w = probs.get(r, 0.0)
+                if w <= 0:
+                    continue
+                acc += w * matrices[r].get(ti, {}).get(tj, SPARSE_DEFAULT)
+            out[ti][tj] = max(-MAX_OFF_DIAGONAL,
+                                min(MAX_OFF_DIAGONAL, acc))
+    return out, probs, coverage
 
 
 def main():

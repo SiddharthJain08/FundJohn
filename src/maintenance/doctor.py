@@ -737,6 +737,7 @@ INTRADAY_MC_PENDING_STALE_DAYS = 7
 ADDENDA_PENDING_STALE_DAYS = 30
 ADDENDA_EXPIRED_BUT_ACTIVE_WARN = 1
 ADDENDA_EXPIRED_BUT_ACTIVE_FAIL = 3
+REGIME_CORR_CRISIS_PROB_HIGH_THRESHOLD = 0.30
 
 
 def _calibration_report():
@@ -861,6 +862,58 @@ def check_strategy_overlap_freshness():
     if h <= OVERLAP_VERY_STALE_HOURS:
         return _warn(name, f'stale ({h:.1f}h old)')
     return _fail(name, f'very stale ({h:.1f}h old)')
+
+
+def _query_latest_regime_coverage():
+    """Reads the most recent correlation_adjustments row's regime_coverage +
+    regime_blend_weights. Used by regime_correlation_coverage doctor check
+    (Phase 2H). Returns (coverage_dict, weights_dict) or (None, None) if
+    no rows or pre-2H rows (NULL columns)."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT regime_coverage, regime_blend_weights
+                  FROM correlation_adjustments
+                 WHERE regime_coverage IS NOT NULL
+                 ORDER BY computed_at DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+    if not row:
+        return None, None
+    return row[0], row[1]
+
+
+@_check('regime_correlation_coverage')
+def check_regime_correlation_coverage():
+    """Phase 2H: surface which regimes are using real data vs fallbacks.
+    PASS  — every regime is 'real', or no 2H rows yet (pre-rollout)
+    WARN  — any regime is 'fallback_global' or 'stress_prior' with low p(CRISIS)
+    FAIL  — coverage[CRISIS] == 'stress_prior' AND blend_weights[CRISIS] >
+            REGIME_CORR_CRISIS_PROB_HIGH_THRESHOLD (made-up correlation +
+            high crisis probability = operator decision needed)."""
+    name = 'regime_correlation_coverage'
+    try:
+        coverage, weights = _query_latest_regime_coverage()
+    except Exception as exc:
+        return _warn(name, f'query failed: {exc!s}')
+    if coverage is None:
+        return _ok(name, 'no 2H rows yet (pre-rollout or no cycles since)')
+    if not isinstance(coverage, dict) or not isinstance(weights, dict):
+        return _warn(name, 'coverage/weights payload not parseable')
+    crisis_cov = coverage.get('CRISIS')
+    crisis_prob = float(weights.get('CRISIS') or 0.0)
+    if crisis_cov == 'stress_prior' and crisis_prob > REGIME_CORR_CRISIS_PROB_HIGH_THRESHOLD:
+        return _fail(name,
+                     f'CRISIS stress_prior + p(CRISIS)={crisis_prob:.2f} > {REGIME_CORR_CRISIS_PROB_HIGH_THRESHOLD} — review prior')
+    fallbacks = [k for k, v in coverage.items() if v != 'real']
+    if not fallbacks:
+        return _ok(name, 'all regimes: real')
+    summary = ', '.join(f'{k}={coverage[k]}' for k in fallbacks)
+    return _warn(name, summary)
 
 
 def _query_addenda_health():

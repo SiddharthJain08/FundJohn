@@ -153,18 +153,28 @@ def adjust(orders: list[dict],
 def apply_and_persist(orders: list[dict], cycle_id: Optional[str] = None,
                        window_days: int = 90,
                        alpha: float = 0.6) -> dict:
-    """End-to-end: build correlation matrix from production orders'
-    tickers, compute adjustment, persist to correlation_adjustments."""
-    from execution.correlation_matrix import effective_correlation
+    """End-to-end: build per-regime correlation matrices, blend by current
+    HMM state probabilities, compute adjustment, persist to
+    correlation_adjustments with full audit trail (Phase 2H).
+
+    Phase 2H change vs 2G: uses `blended_correlation_by_state` which
+    returns the state-prob-weighted correlation matrix + the per-regime
+    coverage classification. The audit columns capture which regimes
+    contributed and at what weight.
+    """
+    from execution.correlation_matrix import blended_correlation_by_state
     tickers = sorted({o['ticker'] for o in orders if o.get('ticker')})
     if not tickers:
         return {'status': 'no_orders', 'adjustments': []}
-    sigma = effective_correlation(tickers, window_days=window_days, alpha=alpha)
+    sigma, blend_weights, coverage = blended_correlation_by_state(
+        tickers, window_days=window_days, alpha=alpha)
     adjusted, log = adjust(orders, sigma)
 
     # Persist rows (one per order log entry)
     inserted = 0
     if log:
+        weights_json  = json.dumps(blend_weights, default=str)
+        coverage_json = json.dumps(coverage, default=str)
         with _connect() as conn:
             with conn.cursor() as cur:
                 for entry in log:
@@ -175,24 +185,29 @@ def apply_and_persist(orders: list[dict], cycle_id: Optional[str] = None,
                         INSERT INTO correlation_adjustments
                             (cycle_id, ticker, production_qty, production_notional,
                              direction, portfolio_kelly_phi,
-                             adjusted_qty, adjusted_notional, correlation_input)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                             adjusted_qty, adjusted_notional, correlation_input,
+                             regime_blend_weights, regime_coverage)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                                %s::jsonb, %s::jsonb)
                     """, (cycle_id, entry['ticker'],
                           entry['production_qty'], entry['production_notional'],
                           entry['direction'], entry['phi'],
                           entry['adjusted_qty'], entry['adjusted_notional'],
-                          json.dumps(sigma_slice, default=str)))
+                          json.dumps(sigma_slice, default=str),
+                          weights_json, coverage_json))
                     inserted += 1
             conn.commit()
 
     return {
-        'status':           'OK',
-        'cycle_id':         cycle_id,
-        'n_tickers':        len(tickers),
-        'n_orders':         len(orders),
-        'phi':              log[0]['phi'] if log else 1.0,
-        'inserted':         inserted,
-        'adjustments':      log,
+        'status':                'OK',
+        'cycle_id':              cycle_id,
+        'n_tickers':             len(tickers),
+        'n_orders':              len(orders),
+        'phi':                   log[0]['phi'] if log else 1.0,
+        'inserted':              inserted,
+        'regime_blend_weights':  blend_weights,
+        'regime_coverage':       coverage,
+        'adjustments':           log,
     }
 
 
