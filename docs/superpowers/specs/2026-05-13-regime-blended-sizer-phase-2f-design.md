@@ -177,15 +177,13 @@ Each Opus invocation also logs `addenda_ids_active` to `strategy_memos.metadata`
 
 ---
 
-## 9.5 Deferred from this rollout
+## 9.5 Deferred — now shipped 2026-05-13
 
 - **Per-memo `addenda_ids_active` write to `strategy_memos.metadata`.**
-  The 2F run-level summary returns `addendaApplied: [id, ...]` and the
-  `mastermind_addendum_health` doctor check covers lifecycle hygiene, but
-  the per-strategy-memo audit row that ties memo `X` to addenda `[1, 7]`
-  is not yet wired. Acceptable for the operator-approval workflow today
-  (active set is small; ambiguity is low). Worth doing if/when there are
-  ≥3 concurrent active addenda and a memo's outputs surprise the operator.
+  Shipped via migration 087 (adds `metadata` JSONB to `strategy_memos`)
+  and `comprehensive_review.js` now writes `{addenda_ids_active: [int]}`
+  on every memo insert. GIN index on `(metadata -> 'addenda_ids_active')`
+  supports queries like "which memos were generated under addendum 7?".
 
 ## 10. Out of scope (future)
 

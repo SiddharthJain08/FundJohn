@@ -319,6 +319,9 @@ async function _postToDiscord(channelName, text) {
 }
 
 async function _reviewOne(strategy, { dryRun, notify, addenda = [] }) {
+  const addendaIdsActive = (Array.isArray(addenda) ? addenda : [])
+    .map(a => Number(a?.id))
+    .filter(n => Number.isFinite(n));
   const log = (m) => { notify?.(`${strategy.id}: ${m}`); };
   const tradePack = await _buildTradePack(strategy.id);
   if (!tradePack.signals.length && !tradePack.pnl.length) {
@@ -422,16 +425,22 @@ print(json.dumps(propose_eligible_regimes(df, sid, thresh)))`,
     return { strategy_id: strategy.id, dry_run: true, memo };
   }
 
+  // Phase 2F per-memo audit: pin which calibration addenda were prepended to
+  // this run's Opus prompt. metadata is the durable trail; the run-level
+  // summary just aggregates.
+  const memoMetadata = { addenda_ids_active: addendaIdsActive };
+
   const { rows } = await _query(
     `INSERT INTO strategy_memos
        (strategy_id, lifetime_summary, parameter_analysis,
-        recommendations, markdown_body, cost_usd)
-     VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5, $6)
+        recommendations, markdown_body, cost_usd, metadata)
+     VALUES ($1, $2::jsonb, $3::jsonb, $4::jsonb, $5, $6, $7::jsonb)
      RETURNING id`,
     [memo.strategy_id, JSON.stringify(memo.lifetime_summary),
      JSON.stringify(memo.parameter_analysis),
      JSON.stringify(memo.recommendations),
-     memo.markdown_body, memo.cost_usd],
+     memo.markdown_body, memo.cost_usd,
+     JSON.stringify(memoMetadata)],
   );
   const memoId = rows[0].id;
   log(`persisted memo ${memoId.slice(0, 8)} (cost=$${out.costUsd.toFixed(3)})`);
