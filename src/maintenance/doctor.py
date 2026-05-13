@@ -792,8 +792,13 @@ def _latest_intraday_mc_run_at():
 
 def _count_pending_proposals_without_intraday_mc(days_old: int):
     """Count pending Phase 2B proposals older than `days_old` that have no
-    corresponding row in strategy_regime_intraday_mc_runs. Pending proposals
-    without path-MC support are decision-blocking after the freshness window."""
+    corresponding row in strategy_regime_intraday_mc_runs AND that touch a
+    field where path-MC is decision-relevant.
+
+    Path-MC only matters when the proposal changes stop_pct / target_pct /
+    max_hold_days. Pure size-scalar proposals get full value from linear MC
+    (Phase 2D), so they don't gate on this freshness check — otherwise the
+    check would spuriously FAIL on size-only proposals once 2B is exercised."""
     import psycopg2
     uri = (os.environ.get('DATABASE_URL')
            or os.environ.get('POSTGRES_URI')
@@ -807,6 +812,9 @@ def _count_pending_proposals_without_intraday_mc(days_old: int):
                  WHERE p.status = 'pending'
                    AND p.proposed_at < NOW() - (%s::int * INTERVAL '1 day')
                    AND r.id IS NULL
+                   AND (p.proposed_stop_pct IS NOT NULL
+                        OR p.proposed_target_pct IS NOT NULL
+                        OR p.proposed_max_hold_days IS NOT NULL)
             """, (days_old,))
             return int(cur.fetchone()[0])
 

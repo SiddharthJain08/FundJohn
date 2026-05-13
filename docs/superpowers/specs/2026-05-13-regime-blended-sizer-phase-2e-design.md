@@ -138,7 +138,10 @@ On proposal-expand: side-by-side panel showing linear-MC CI bars and path-MC CI 
 
 - **PASS**: every pending proposal has a path-MC row within 26h
 - **WARN**: stale 26-72h
-- **FAIL**: stale >72h OR no rows for a pending proposal older than 7d
+- **FAIL**: stale >72h OR a pending proposal older than 7d that touches
+  `proposed_stop_pct` / `proposed_target_pct` / `proposed_max_hold_days`
+  has no path-MC row. Pure size-scalar proposals are *not* gated by this
+  check — linear MC (Phase 2D) is sufficient decision support for them.
 
 Runs piggyback on the nightly Phase 2D cron.
 

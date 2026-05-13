@@ -166,6 +166,27 @@ def test_run_path_mc_size_scaling_linear_inside_no_clip():
         assert 1.7 < ratio < 2.3
 
 
+def test_apply_policy_filters_nan_returns_in_engine(monkeypatch):
+    """Regression for the BRK-B incident (2026-05-13 smoke): when a path
+    generator emits NaN returns (e.g. NaN closes in parquet), the MC engine
+    must classify them as no_gen iterations and not poison the bootstrap."""
+    class NanGen:
+        def sample_path(self, n_bars, rng):
+            return [float('nan')] * n_bars
+
+    monkeypatch.setattr(ipm, '_gen_for_ticker',
+                          lambda t, window_days=90: (NanGen(), 'gbm'))
+    pool = [{'ticker': 'AAPL', 'direction': 'LONG'}] * 20
+    result = ipm.run_path_mc(
+        strategy_id='S_test', regime_state='LOW_VOL',
+        current_size=1.0, proposed_size=1.0,
+        proposed_stop_pct=0.02, proposed_target_pct=0.05,
+        proposed_max_hold_days=5,
+        n_iter=50, trade_pool=pool, seed=7)
+    # All paths are NaN → all classified no_gen → INSUFFICIENT (not crashed)
+    assert result['status'] == 'INSUFFICIENT'
+
+
 def test_path_mc_no_gen_fallthrough():
     """Pool with only an unknown ticker → no_gen_rate=1.0, INSUFFICIENT."""
     pool = [{'ticker': 'ZZZ_FAKE_TICKER_XYZ', 'direction': 'LONG'}] * 20
