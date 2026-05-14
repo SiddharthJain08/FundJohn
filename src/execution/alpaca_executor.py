@@ -342,7 +342,18 @@ def execute_single(sess, equity, order, run_date):
         return {'ticker': ticker, 'status': 'SKIP', 'reason': 'missing levels',
                 'client_order_id': coid}
 
-    entry, stop, target = float(entry), float(stop), float(target)
+    import math as _math
+    try:
+        entry, stop, target = float(entry), float(stop), float(target)
+    except (TypeError, ValueError):
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-numeric levels',
+                'client_order_id': coid}
+    if not (_math.isfinite(entry) and _math.isfinite(stop) and _math.isfinite(target)):
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-finite levels (NaN/inf)',
+                'client_order_id': coid}
+    if entry <= 0:
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-positive entry',
+                'client_order_id': coid}
 
     pct_nav = max(MIN_EFFECTIVE_PCT, min(pct_nav, MAX_ORDER_PCT_NAV))
     notional = equity * pct_nav

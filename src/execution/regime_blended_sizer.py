@@ -51,9 +51,16 @@ def _apply_aggregate_cap(orders: list[dict], account_state: dict) -> list[dict]:
     logger.info('regime_blended_sizer: aggregate cap binding — scaling %d orders by %.4f '
                 '(total=$%.0f → cap=$%.0f, NAV=$%.0f, long_mv=$%.0f, available_nav=$%.0f)',
                 len(orders), scale, total, cap, nav, long_mv, available_nav)
+    # Field-tolerant scaling: consolidate/independent paths emit `qty`
+    # (legacy); sharpe_cadence path emits `pct_nav`/`kelly_final`/`target_usd`
+    # without `qty` (shares are derived downstream from notional/quote).
+    # Scale whatever is present.
+    SCALABLE = ('notional_usd', 'qty', 'shares', 'pct_nav', 'kelly_final',
+                'target_usd', 'current_usd')
     for o in orders:
-        o['notional_usd'] = o['notional_usd'] * scale
-        o['qty'] = o['qty'] * scale
+        for k in SCALABLE:
+            if k in o and isinstance(o[k], (int, float)) and o[k] is not None:
+                o[k] = o[k] * scale
         o['cap_scale_applied'] = scale
     return orders
 
@@ -198,7 +205,8 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
             with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute('''
                     SELECT DISTINCT ON (strategy_id, ticker)
-                           strategy_id, ticker, direction, signal_date
+                           strategy_id, ticker, direction, signal_date,
+                           entry_price, stop_loss, target_1, target_2
                     FROM execution_signals
                     WHERE status = 'open'
                       AND strategy_id = ANY(%s)
@@ -219,7 +227,9 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
         if age > cad + 2:        # 2-day weekend buffer
             continue
         out.append({'strategy_id': sid, 'ticker': r['ticker'],
-                    'direction': r['direction'], 'signal_date': r['signal_date']})
+                    'direction': r['direction'], 'signal_date': r['signal_date'],
+                    'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
+                    'target_1': r['target_1'], 'target_2': r['target_2']})
     return out
 
 
@@ -307,7 +317,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # Aggregate ticker_weight across signalling strategies.
     from collections import defaultdict
     ticker_w = defaultdict(float)
-    ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': []})
+    ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
     for s in active:
         sid = s.get('strategy_id')
         tkr = s.get('ticker')
@@ -319,6 +329,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         ticker_w[tkr] += weight_by_strat[sid] * d
         ticker_meta[tkr]['strategies'].append(sid)
         ticker_meta[tkr]['directions'].append(d)
+        # Direction-leader bracket pick (Phase 1 spec #6): the largest-weight
+        # contribution in the *winning* direction wins. We keep every
+        # (direction, weight, bracket) tuple here; final selection happens
+        # after ticker_w sign is known.
+        ticker_meta[tkr]['brackets'].append({
+            'direction':  d,
+            'weight':     weight_by_strat[sid],
+            'entry':      s.get('entry_price'),
+            'stop':       s.get('stop_loss'),
+            't1':         s.get('target_1'),
+            't2':         s.get('target_2'),
+        })
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
@@ -422,22 +444,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if a == 'cancel':
             delta_usd.pop(tkr)
 
-    # Emit orders for the deltas only. entry/stop/t1/t2 are filled downstream
-    # when the executor fetches the current quote; we only commit
-    # delta-notional + direction here.
+    # Emit orders for the deltas. entry/stop/t1/t2 are picked from the
+    # winning-direction contributor's signal bracket (direction-leader
+    # rule, mirrors _consolidate_path). Orders whose direction has no
+    # matching contributor (e.g. orphan-closes) get no bracket and will
+    # be filtered by the live wrapper.
     orders = []
     for tkr, usd in delta_usd.items():
+        dir_sign = 1 if usd >= 0 else -1
+        bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
         orders.append({
             'ticker':                  tkr,
             'strategy_id':             '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120],
-            'direction':               'long' if usd >= 0 else 'short',
+            'direction':               'long' if dir_sign > 0 else 'short',
             'notional_usd':            abs(usd),
             'pct_nav':                 abs(usd) / nav,
             'shares':                  0,
-            'entry':                   None,
-            'stop':                    None,
-            't1':                      None,
-            't2':                      None,
+            'entry':                   bracket.get('entry'),
+            'stop':                    bracket.get('stop'),
+            't1':                      bracket.get('t1'),
+            't2':                      bracket.get('t2'),
             'kelly_final':             abs(usd) / nav,
             'ev':                      0.0,
             'p_t1':                    0.5,
@@ -447,6 +473,35 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'contributing_strategies': ticker_meta[tkr]['strategies'],
         })
     return orders
+
+
+def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
+    """Direction-leader bracket pick. From the contributing-signal pool,
+    keep entries with matching direction, then pick the largest-weight
+    bracket whose entry/stop/t1 are all populated *and finite* (NaN
+    rejected — some strategies write Decimal('NaN') into execution_signals
+    when their entry/stop math degenerates). Returns an empty dict if no
+    usable bracket exists.
+    """
+    import math
+    def _finite(x) -> bool:
+        if x is None:
+            return False
+        try:
+            return math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+
+    if not candidates:
+        return {}
+    aligned = [b for b in candidates if b.get('direction') == dir_sign]
+    usable  = [b for b in aligned
+               if _finite(b.get('entry')) and _finite(b.get('stop'))
+               and _finite(b.get('t1'))]
+    if not usable:
+        return {}
+    usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
+    return usable[0]
 
 def _consolidate_path(signals, account_state, params, confirmer):
     regt_bp = float(account_state['regt_buying_power'])

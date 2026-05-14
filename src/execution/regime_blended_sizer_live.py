@@ -16,9 +16,18 @@ and strategy_id for the already_executed() idempotency check.
 
 Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §"Phase 3"
 """
-import argparse, json, os, sys
+import argparse, json, math, os, sys
 from datetime import date
 from pathlib import Path
+
+
+def _finite(x) -> bool:
+    if x is None:
+        return False
+    try:
+        return math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -57,41 +66,67 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
     }
 
     nav = max(equity, 1.0)  # guard against zero-division
+    dropped_no_bracket = 0
 
     for o in orders:
-        dir_int = o['direction']
-        dir_str = 'long' if dir_int > 0 else 'short'
+        # Direction: legacy consolidate/independent paths emit int (+1/-1);
+        # sharpe_cadence path emits 'long'/'short' string.
+        raw_dir = o.get('direction')
+        if isinstance(raw_dir, (int, float)):
+            dir_str = 'long' if raw_dir > 0 else 'short'
+        else:
+            dir_str = str(raw_dir or 'long').lower()
 
-        entry       = float(o['bracket']['entry_price'])
-        notional    = abs(float(o['notional_usd']))
-        pct_nav     = round(notional / nav, 6)
-        shares_raw  = abs(float(o['qty']))
-        shares      = max(1, int(shares_raw)) if shares_raw >= 0.5 else 0
+        # Bracket: legacy paths nest under o['bracket']; sharpe_cadence
+        # exposes entry/stop/t1/t2 at the top level.
+        bracket = o.get('bracket') or {}
+        entry_raw = bracket.get('entry_price') if bracket else o.get('entry')
+        stop_raw  = bracket.get('stop_loss')   if bracket else o.get('stop')
+        t1_raw    = bracket.get('take_profit_1') if bracket else o.get('t1')
+        t2_raw    = bracket.get('take_profit_2') if bracket else o.get('t2')
+        if not (_finite(entry_raw) and _finite(stop_raw) and _finite(t1_raw)):
+            dropped_no_bracket += 1
+            continue
+
+        entry      = float(entry_raw)
+        notional   = abs(float(o['notional_usd']))
+        pct_nav    = round(notional / nav, 6)
+        # Shares: legacy paths put a signed float in `qty`; sharpe_cadence
+        # carries `shares=0` (compute from notional/entry here).
+        if 'qty' in o and o['qty'] is not None:
+            shares_raw = abs(float(o['qty']))
+        else:
+            shares_raw = (notional / entry) if entry > 0 else 0
+        shares = max(1, int(shares_raw)) if shares_raw >= 0.5 else 0
 
         # strategy_id: for consolidate-mode orders, contributions may have
         # multiple strategies. Use the first contributing strategy_id so
         # alpaca_executor's already_executed() check works correctly.
         # Downstream attribution uses the full contributing_strategies list.
-        contributions = o.get('contributions', [])
-        strategy_id = (contributions[0].get('strategy_id')
-                       if contributions else 'unknown')
+        contributions = o.get('contributions') or []
+        if contributions:
+            strategy_id = contributions[0].get('strategy_id') or 'unknown'
+        else:
+            # sharpe_cadence path carries strategy_id at top level (joined IDs)
+            strategy_id = o.get('strategy_id') or 'unknown'
 
         order = {
             'ticker':                  o['ticker'],
             'strategy_id':             strategy_id,
             'direction':               dir_str,
             'entry':                   entry,
-            'stop':                    float(o['bracket']['stop_loss']),
-            't1':                      float(o['bracket']['take_profit_1']),
-            't2':                      None,   # regime_blended_sizer does not produce t2
+            'stop':                    float(stop_raw),
+            't1':                      float(t1_raw),
+            't2':                      float(t2_raw) if t2_raw is not None else None,
             'pct_nav':                 pct_nav,
             'shares':                  shares,
             'notional_usd':            round(float(o['notional_usd']), 2),
             'kelly_final':             pct_nav,  # best proxy; not a true Kelly calculation
-            'ev':                      None,     # not propagated through consolidator path
-            'p_t1':                    None,     # not propagated through consolidator path
+            'ev':                      o.get('ev'),
+            'p_t1':                    o.get('p_t1'),
             'source_mode':             o.get('source_mode'),
-            'contributing_strategies': [c.get('strategy_id') for c in contributions],
+            'contributing_strategies': (o.get('contributing_strategies')
+                                        or [c.get('strategy_id') for c in contributions]),
             'contributions':           contributions,
         }
 
@@ -100,6 +135,11 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             order['tradejohn_decision'] = o['tradejohn_decision']
 
         payload['orders'].append(order)
+
+    if dropped_no_bracket:
+        print(f'[regime_blended_sizer_live] dropped {dropped_no_bracket} order(s) '
+              f'missing entry/stop/t1 (orphan-close or stale active-window signal)',
+              file=sys.stderr)
 
     return payload
 
