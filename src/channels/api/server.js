@@ -1189,7 +1189,25 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // Broadcast SSE so the dashboard refreshes even without polling.
   try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: now }); } catch (_) {}
 
-  res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now });
+  // Strategy-weights rebuild: any transition that adds or removes the
+  // strategy from the active stack (live/monitoring) invalidates the
+  // current strategy_weights_by_regime snapshot. Fire-and-forget — the
+  // response doesn't block on the ~5s python invocation; the next
+  // pipeline cycle reads the refreshed table.
+  const ACTIVE = new Set(['live', 'monitoring']);
+  const stackChanged = ACTIVE.has(fromState) !== ACTIVE.has(toState);
+  if (stackChanged) {
+    const { spawn } = require('child_process');
+    const path = require('path');
+    const rootDir = path.join(__dirname, '../../..');
+    const child = spawn('/usr/bin/python3', ['-m', 'execution.strategy_weights', '--rebuild', '--trigger=lifecycle_change'],
+      { cwd: rootDir, env: { ...process.env, PYTHONPATH: 'src' }, detached: true, stdio: 'ignore' });
+    child.unref();
+    console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState + ')');
+  }
+
+  res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now,
+             weights_rebuild_triggered: stackChanged });
 });
 
 // ── Approval dispatcher ──────────────────────────────────────────────────────
