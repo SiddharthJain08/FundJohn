@@ -213,36 +213,6 @@ class TestSharpeCadenceShape:
         assert payload['orders'] == []  # silently dropped (logged to stderr)
 
 
-class TestAggregateCapFieldTolerance:
-    """Regression: _apply_aggregate_cap must scale field-tolerantly so
-    that sharpe_cadence orders (no `qty`) don't KeyError. Today's
-    2026-05-14 pipeline crash was: o['qty'] * scale → KeyError 'qty'."""
-
-    def test_cap_scales_sharpe_cadence_orders_without_qty(self):
-        from execution.regime_blended_sizer import _apply_aggregate_cap
-        # 10 sharpe_cadence orders @ $10k each = $100k total, cap @ 25% × $100k NAV = $25k → scale=0.25.
-        orders = [_sharpe_cadence_order(ticker=f'T{i}', notional=10_000.0)
-                  for i in range(10)]
-        account = {'equity': 100_000.0, 'long_market_value': 0.0}
-        out = _apply_aggregate_cap(orders, account)
-        total = sum(abs(o['notional_usd']) for o in out)
-        assert total <= 25_000.5, f'total ${total:.0f} exceeds cap'
-        for o in out:
-            assert o['cap_scale_applied'] == pytest.approx(0.25, rel=1e-5)
-            # pct_nav and kelly_final must also be scaled to match notional
-            assert o['pct_nav'] == pytest.approx(0.025, rel=1e-5)
-            assert o['kelly_final'] == pytest.approx(0.025, rel=1e-5)
-            # `qty` is absent on sharpe_cadence orders; must not be added
-            assert 'qty' not in o
-
-    def test_cap_still_scales_legacy_qty_when_present(self):
-        """Don't regress consolidate/independent path scaling."""
-        from execution.regime_blended_sizer import _apply_aggregate_cap
-        orders = [_make_order(ticker=f'T{i}', qty=200.0, notional=20_000.0)
-                  for i in range(10)]
-        account = {'equity': 100_000.0, 'long_market_value': 0.0}
-        out = _apply_aggregate_cap(orders, account)
-        # cap = 25k vs total = 200k → scale = 0.125
-        for o in out:
-            assert o['qty'] == pytest.approx(25.0, rel=1e-5)
-            assert o['notional_usd'] == pytest.approx(2_500.0, rel=1e-5)
+# Legacy aggregate-cap tests removed 2026-05-14 — _apply_aggregate_cap
+# was deleted with the cap drop. Sizer's per-ticker cap + sharpe_cadence
+# normalization is the new authority; no aggregate-scale step remains.
