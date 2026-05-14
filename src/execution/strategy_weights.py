@@ -114,7 +114,21 @@ def _load_active_strategies(conn) -> list[dict]:
 
 
 def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
-    """Most-recent per-(strategy, regime) row from strategy_regime_backtests."""
+    """Most-recent per-(strategy, regime) row from strategy_regime_backtests,
+    with a strategy_registry fallback for strategies absent from the
+    per-regime table.
+
+    Two-tier source:
+      1. strategy_regime_backtests — per-(strategy, regime) sharpe from the
+         regime-partitioned backtester. Preferred.
+      2. strategy_registry.backtest_sharpe — single overall sharpe across
+         the strategy's entire backtest history. Applied to every regime
+         the strategy is declared eligible for (strategy_regime_params).
+         Used only for strategies absent from tier 1, so promoted
+         strategies that haven't been regime-partition-backtested yet
+         still get a sharpe and aren't auto-demoted out of the active
+         stack the moment they're promoted.
+    """
     if not strategy_ids:
         return {}
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -126,11 +140,30 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
         ORDER BY strategy_id, regime_state, run_at DESC NULLS LAST
     ''', (strategy_ids,))
     out = {}
+    seen_strats = set()
     for r in cur:
         out[(r['strategy_id'], r['regime_state'])] = {
             'bt_sharpe': float(r['sharpe']) if r['sharpe'] is not None else None,
             'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
         }
+        seen_strats.add(r['strategy_id'])
+
+    missing = [s for s in strategy_ids if s not in seen_strats]
+    if missing:
+        cur.execute('''
+            SELECT srp.strategy_id, srp.regime_state,
+                   sr.backtest_sharpe, sr.backtest_trade_count
+            FROM strategy_regime_params srp
+            JOIN strategy_registry sr ON sr.id = srp.strategy_id
+            WHERE srp.strategy_id = ANY(%s)
+              AND srp.eligible = TRUE
+              AND sr.backtest_sharpe IS NOT NULL
+        ''', (missing,))
+        for r in cur:
+            out[(r['strategy_id'], r['regime_state'])] = {
+                'bt_sharpe': float(r['backtest_sharpe']),
+                'bt_n':      int(r['backtest_trade_count']) if r['backtest_trade_count'] is not None else None,
+            }
     return out
 
 
