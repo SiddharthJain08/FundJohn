@@ -63,9 +63,11 @@ All visible tiles sum to 100 % of total book exposure. The raw notional remains 
 
 Each tile is divided into:
 
-- **Hero zone** (top, centered): ticker symbol + live unrealized P&L %.
+- **Hero zone** (top, centered): ticker symbol on row 1, live unrealized pct return + actual dollar P&L on row 2 (pct on left, dollars on right, same line, centered as a pair).
   - Ticker: 14 px bold, letter-spacing 0.08 em, line-height 1.1.
-  - P&L %: 13 px bold, tabular-nums, signed and with `%` suffix (`+0.84%` / `-0.32%`). Source: size-weighted `net_pnl` from open-position aggregation (the existing field, multiplied by 100).
+  - Pct return: 13 px bold, tabular-nums, signed with `%` suffix (`+0.84%` / `-0.32%`). Source: size-weighted `net_pnl` from open-position aggregation (existing field, multiplied by 100).
+  - Dollar P&L: 12 px bold, tabular-nums, signed with `$` prefix and compact-k notation (`+$234`, `-$1.2k`, `+$12.4k`). Source: `ticker_contrib_pct × account.equity` — i.e. `Σ(unrealized_pnl_pct × position_size_pct) × NAV` across the ticker's open signals. NAV comes from the existing `/api/portfolio/account` payload (already in `loadPortfolio`'s fetch set, threaded into `renderPositions` as a new arg).
+  - Both values share the same green/red color as the tile background gradient — visually anchored to the same signal.
   - The user explicitly chose live pct return for this slot, *not* Sharpe — the tile reports current book state, the Sharpe lives in the expanded alpha-bars view.
 - **Footer strip** (bottom, dark): size % (left) · days (right), 9 px, letter-spacing 0.04 em, `background: rgba(0,0,0,0.32)`, top border 1 px subtle.
 
@@ -122,8 +124,8 @@ The new endpoint is on-demand (called only when the user expands a tile or table
 |---|---|
 | `_buildHeatmapHtml` | tile content uses option C layout (`.pf-tile-hero` + `.pf-tile-strip`); size % normalized; color from `_pnlColor(live_pct_return)` unchanged. |
 | `_buildAlphaBarsHtml` | new signature `(group, alphaData)` where `alphaData` is the response from `/api/portfolio/ticker-alpha/:ticker`. Bars show `alpha(t, s)`, sorted desc. Header shows `ticker · N strategies · alpha sum = X.XX (= live Sharpe)`. |
-| `renderPositions` / `renderHistory` | on tile/row click, fetch `/api/portfolio/ticker-alpha/:ticker` lazily, cache in module-level `_alphaCache[ticker]`, then re-render. |
-| `loadPortfolio` | drop the `/api/portfolio/strategy-sharpe` fetch. |
+| `renderPositions` / `renderHistory` | new signature accepts `(rows, accountEquity)` so the renderer can compute tile dollar P&L. On tile/row click, fetch `/api/portfolio/ticker-alpha/:ticker` lazily, cache in module-level `_alphaCache[ticker]`, then re-render. |
+| `loadPortfolio` | drop the `/api/portfolio/strategy-sharpe` fetch; pass `account.equity` into `renderPositions` and `renderHistory`. |
 
 CSS additions: `.pf-tile-hero`, `.pf-tile-strip`. CSS rule for the "= live Sharpe" badge.
 
