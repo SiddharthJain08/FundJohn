@@ -357,7 +357,16 @@ def execute_single(sess, equity, order, run_date):
 
     pct_nav = max(MIN_EFFECTIVE_PCT, min(pct_nav, MAX_ORDER_PCT_NAV))
     notional = equity * pct_nav
-    qty = max(1, int(notional / entry))
+    # Honest rounding: floor to whole shares, skip when the planned notional
+    # can't buy a full share at the entry price. The old `max(1, int(...))`
+    # floor silently breached the aggregate cap whenever a high-priced ticker
+    # (entry > planned notional) forced a 1-share buy — e.g. 2026-05-14
+    # cycle filled $48k against a $24k plan because of 55 such 1-share blow-ups.
+    qty = int(notional / entry)
+    if qty < 1:
+        return {'ticker': ticker, 'status': 'SKIP',
+                'reason': f'sub-share size (planned ${notional:.0f} < entry ${entry:.2f})',
+                'client_order_id': coid}
     # In-hours: execute immediately ('day' TIF). Off-hours: queue for next open
     # ('opg' TIF) so the nightly pipeline still produces live bracket orders.
     # Note: Alpaca rejects bracket orders with order_class='bracket' + TIF='opg';
