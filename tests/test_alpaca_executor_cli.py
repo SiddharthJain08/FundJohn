@@ -148,14 +148,19 @@ class TestBasePriceRetry(unittest.TestCase):
                                        order=order, run_date='2026-04-28')
 
         self.assertEqual(mock_run.call_count, 2,
-                         'expected initial submit + one snap-retry')
-        # The retry's --stop-loss should be 99.10 - max(0.02, 99.10*0.005) = 98.60
+                         'expected initial submit + one recompute-retry')
+        # 2026-05-14: retry now uses ratio-preserving recompute, not absolute snap.
+        # Signal stop_pct = (100-95)/100 = 5%; new stop = base × (1 - 0.05) = 94.145 → 94.14
+        # Signal target_pct = (110-100)/100 = 10%; new target = base × (1 + 0.10) = 109.01
         retry_argv = mock_run.call_args_list[1][0][0]
         retry_sl   = json.loads(retry_argv[retry_argv.index('--stop-loss') + 1])
-        self.assertEqual(retry_sl['stop_price'], '98.60')
-        # Result reflects the snapped stop
+        retry_tp   = json.loads(retry_argv[retry_argv.index('--take-profit') + 1])
+        self.assertEqual(retry_sl['stop_price'],     '94.14')
+        self.assertEqual(retry_tp['limit_price'],   '109.01')
+        # Result reflects the recomputed levels
         self.assertEqual(result['status'], 'submitted')
-        self.assertEqual(result['stop'],   98.60)
+        self.assertAlmostEqual(result['stop'],   94.14, places=2)
+        self.assertAlmostEqual(result['target'], 109.01, places=2)
         self.assertEqual(result['order_id'], 'snap-uuid')
 
     def test_short_uses_simple_order_class_no_bracket_flags(self):
@@ -216,14 +221,16 @@ class TestDupCoidRecovery(unittest.TestCase):
         self.assertEqual(result['order_id'], 'existing-order')
 
 
-class TestPctNavCap(unittest.TestCase):
-    def test_pct_nav_capped_to_max_order_pct(self):
-        """pct_nav=0.07 should be CAPPED to MAX_ORDER_PCT_NAV=0.05.
-        execute_single still calls the CLI but with the clamped sizing."""
+class TestPctNavPassthrough(unittest.TestCase):
+    def test_pct_nav_not_clamped(self):
+        """2026-05-14: MAX_ORDER_PCT_NAV cap was dropped per operator decision.
+        pct_nav now flows through unchanged; high-conviction orders express
+        the sizer's full allocation. Quoted entry=100.05 (mid of 100/100.10
+        from _mock_session), so qty = floor((100_000 × 0.07) / 100.05) = 69."""
         sess = _mock_session()
         order = {
             'ticker':      'AAPL', 'strategy_id': 'S5', 'direction': 'long',
-            'pct_nav':     0.07,            # above 5% cap
+            'pct_nav':     0.07,
             'entry':       100.00,
             'stop':         90.00,
             't1':          110.00,
@@ -235,12 +242,11 @@ class TestPctNavCap(unittest.TestCase):
             result = ae.execute_single(sess, equity=100_000.0,
                                        order=order, run_date='2026-04-28')
 
-        # qty = floor((100_000 * 0.05) / 100.00) = floor(50)  = 50
-        self.assertEqual(result['qty'],      50)
-        self.assertEqual(result['notional'], 100_000 * 0.05)
-        # Verify the CLI was called with --qty 50 (proves cap was applied)
-        argv = mock_run.call_args[0][0]
-        self.assertEqual(argv[argv.index('--qty') + 1], '50')
+        # No cap: qty derived from raw pct_nav=0.07. Pre-flight recompute
+        # has already re-anchored entry to base (100.05); qty computed
+        # before recompute uses signal-time entry (100.00) → 70 shares.
+        self.assertEqual(result['qty'],      70)
+        self.assertAlmostEqual(result['notional'], 100_000 * 0.07, places=2)
 
 
 class TestPreCliSkips(unittest.TestCase):
