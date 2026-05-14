@@ -2499,6 +2499,8 @@ body.rs-chat-locked{overflow:hidden}
 .ab-fill.neg{right:50%;background:linear-gradient(270deg,rgba(248,81,73,0.55),rgba(248,81,73,0.95))}
 .ab-value{width:64px;flex-shrink:0;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
 .bars-row td.bars-cell{padding:0!important;background:rgba(13,17,23,0.4)}
+.ab-badge{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:10px;font-size:9px;font-weight:600;letter-spacing:.05em;background:rgba(63,185,80,0.16);color:var(--green);border:1px solid rgba(63,185,80,0.35)}
+.ab-badge-warn{background:rgba(248,81,73,0.16);color:var(--red);border-color:rgba(248,81,73,0.35)}
 .ab-row.ab-unranked{opacity:0.55}
 .ab-row.ab-unranked .ab-label{font-style:italic}
 .ab-track.muted{background:rgba(48,54,61,0.15)}
@@ -4980,9 +4982,6 @@ const _alphaInflight = {};
 // Account equity for tile dollar-P&L computation. Cached at module
 // scope so re-renders triggered by sort/expand don't need it re-passed.
 let _navCache = null;
-// Stub kept until _buildAlphaBarsHtml is rewritten in Task 6 — without it
-// the prior renderer's references to _sharpeData would throw at click time.
-const _sharpeData = { portfolio_sharpe: null, strategies: {} };
 
 async function loadPortfolio() {
   const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
@@ -5323,67 +5322,73 @@ function _pnlColor(pct) {
 // Ratios can exceed 1.0 when a strategy's standalone Sharpe is higher
 // than the consolidated portfolio (common when other strategies drag
 // down the pooled denominator).
+// On-demand fetcher for per-ticker Sharpe decomposition. De-dupes
+// concurrent clicks; caches indefinitely (session-level) so a re-expand
+// is instant.
+function _fetchTickerAlpha(ticker, onReady) {
+  if (_alphaCache[ticker]) { onReady(_alphaCache[ticker]); return; }
+  if (_alphaInflight[ticker]) { _alphaInflight[ticker].then(onReady); return; }
+  _alphaInflight[ticker] = fetch('/api/portfolio/ticker-alpha/' + encodeURIComponent(ticker))
+    .then(r => r.json())
+    .then(p => { _alphaCache[ticker] = p; delete _alphaInflight[ticker]; return p; })
+    .catch(_ => { delete _alphaInflight[ticker]; return { live_sharpe: null, strategies: [], reason: 'fetch_error' }; });
+  _alphaInflight[ticker].then(onReady);
+}
+
+// Vertical stack of horizontal alpha-contribution bars — one per strategy
+// that's traded the ticker. By design Σ alpha = ticker live Sharpe. The
+// "= live Sharpe" badge in the header proves the invariant holds.
 function _buildAlphaBarsHtml(group) {
-  const portSharpe = _sharpeData && _sharpeData.portfolio_sharpe;
-  const stratMap   = (_sharpeData && _sharpeData.strategies) || {};
-  // Unique strategies present on this ticker, paired with their
-  // standalone Sharpe (if known) and direction (from any held signal).
-  const seen = new Map();
-  for (const s of group.signals) {
-    if (!s.strategy_id || seen.has(s.strategy_id)) continue;
-    const entry = stratMap[s.strategy_id];
-    seen.set(s.strategy_id, {
-      strategy_id: s.strategy_id,
-      dir_norm: s.dir_norm,
-      sharpe:    entry ? entry.sharpe : null,
-      n_trades:  entry ? entry.n      : 0,
-    });
+  const alpha = _alphaCache[group.ticker];
+  if (!alpha) {
+    return \`<div class="alpha-bars empty">Loading alpha decomposition for <b>\${group.ticker}</b>…</div>\`;
   }
-  const all = [...seen.values()];
-  // Split: strategies with Sharpe data vs. those without (< 5 closed trades).
-  const ranked  = all.filter(s => s.sharpe != null && isFinite(s.sharpe) && portSharpe);
-  const unranked = all.filter(s => !(s.sharpe != null && isFinite(s.sharpe) && portSharpe));
-  // Ratio = strategy_sharpe / portfolio_sharpe — signed.
-  for (const s of ranked) s.ratio = s.sharpe / portSharpe;
-  ranked.sort((a, b) => b.ratio - a.ratio);
-
-  if (!ranked.length && !unranked.length) {
-    return \`<div class="alpha-bars empty">No strategy detail for <b>\${group.ticker}</b>.</div>\`;
+  if (alpha.live_sharpe == null) {
+    const reasonText = alpha.reason === 'insufficient_days'
+      ? \`<b>\${group.ticker}</b> has \${alpha.days} distinct closed-trade day\${alpha.days === 1 ? '' : 's'} — need ≥ 2 to compute a live Sharpe.\`
+      : alpha.reason === 'zero_variance'
+        ? \`<b>\${group.ticker}</b> closed-trade returns have zero variance — Sharpe undefined.\`
+        : \`Live Sharpe unavailable for <b>\${group.ticker}</b>\${alpha.reason ? ' (' + alpha.reason + ')' : ''}.\`;
+    return \`<div class="alpha-bars empty">\${reasonText}</div>\`;
   }
+  const strategies = alpha.strategies || [];
+  if (!strategies.length) {
+    return \`<div class="alpha-bars empty">No per-strategy contributions for <b>\${group.ticker}</b>.</div>\`;
+  }
+  const sum     = strategies.reduce((s, x) => s + (x.alpha || 0), 0);
+  const maxAbs  = Math.max(...strategies.map(s => Math.abs(s.alpha || 0))) || 1;
+  const matches = Math.abs(sum - alpha.live_sharpe) < 1e-6;
 
-  const maxAbs = ranked.length ? Math.max(...ranked.map(s => Math.abs(s.ratio))) : 1;
-  const rankedBars = ranked.map(s => {
-    const ratio = s.ratio;
-    const widthPct = (Math.abs(ratio) / maxAbs) * 50;
-    const sign = ratio >= 0 ? 'pos' : 'neg';
-    const cls = ratio >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    const dirClass = _dirCls(s.dir_norm);
-    const overOne = Math.abs(ratio) > 1 ? ' over-one' : '';
+  const rows = strategies.map(s => {
+    const a = s.alpha;
+    const widthPct = (Math.abs(a) / maxAbs) * 50;
+    const sign = a >= 0 ? 'pos' : 'neg';
+    const cls  = a >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+    const dirNorm = _normalizeDir(s.dir);
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${s.strategy_id} · standalone Sharpe \${s.sharpe.toFixed(3)} · \${s.n_trades} closed trades">\${s.strategy_id}</div>
-      <div class="ab-dir \${dirClass}">\${s.dir_norm || ''}</div>
-      <div class="ab-track\${overOne}">
+      <div class="ab-label" title="\${s.strategy_id} · \${s.n_trades} closed trade\${s.n_trades === 1 ? '' : 's'} on \${group.ticker}">\${s.strategy_id}</div>
+      <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm || ''}</div>
+      <div class="ab-track">
         <div class="ab-zero"></div>
         <div class="ab-fill \${sign}" style="width:\${widthPct.toFixed(2)}%"></div>
       </div>
-      <div class="ab-value \${cls}">\${ratio.toFixed(2)}×</div>
+      <div class="ab-value \${cls}">\${(a >= 0 ? '+' : '') + a.toFixed(3)}</div>
     </div>\`;
   }).join('');
-  const unrankedRows = unranked.map(s => \`<div class="ab-row ab-unranked">
-      <div class="ab-label" title="\${s.strategy_id} · \${s.n_trades} closed (need ≥5)">\${s.strategy_id}</div>
-      <div class="ab-dir \${_dirCls(s.dir_norm)}">\${s.dir_norm || ''}</div>
-      <div class="ab-track muted"><div class="ab-zero"></div></div>
-      <div class="ab-value muted" title="Insufficient closed trades for Sharpe">n/a</div>
-    </div>\`).join('');
 
-  const portTxt   = portSharpe != null ? portSharpe.toFixed(3) : 'n/a';
-  const totalStrats = all.length;
+  const sumCls    = sum >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+  const sumTxt    = (sum >= 0 ? '+' : '') + sum.toFixed(3);
+  const sharpeTxt = (alpha.live_sharpe >= 0 ? '+' : '') + alpha.live_sharpe.toFixed(3);
+  const badge     = matches
+    ? \`<span class="ab-badge">= live Sharpe \${sharpeTxt}</span>\`
+    : \`<span class="ab-badge ab-badge-warn">≠ live Sharpe \${sharpeTxt} (Δ \${(sum - alpha.live_sharpe).toFixed(4)})</span>\`;
+
   return \`<div class="alpha-bars">
     <div class="ab-title">
       <span class="ab-ticker">\${group.ticker}</span>
-      <span class="ab-meta">\${totalStrats} strateg\${totalStrats === 1 ? 'y' : 'ies'} · alpha = Sharpe<sub>strat</sub> / Sharpe<sub>port</sub> · Sharpe<sub>port</sub> = \${portTxt}</span>
+      <span class="ab-meta">\${strategies.length} strateg\${strategies.length === 1 ? 'y' : 'ies'} · alpha sum = <span class="\${sumCls}">\${sumTxt}</span> \${badge}</span>
     </div>
-    <div class="ab-bars">\${rankedBars}\${unrankedRows}</div>
+    <div class="ab-bars">\${rows}</div>
   </div>\`;
 }
 
@@ -5474,13 +5479,25 @@ function renderPositions(rows) {
   el.innerHTML = controls + heatmap + bars;
 
   // Click handlers — wire up tiles + expand toggle. Tile click toggles
-  // selection; clicking the already-selected tile collapses it.
+  // selection; clicking the already-selected tile collapses it. On open,
+  // kick off the per-ticker alpha fetch; re-render when the response
+  // lands so the bars panel hydrates without a full reload.
   el.querySelectorAll('.pf-tile').forEach(tile => {
     tile.addEventListener('click', () => {
       const tk = tile.dataset.ticker;
       const cur = _heatmapSelected['pf-positions'];
-      _heatmapSelected['pf-positions'] = (cur === tk) ? null : tk;
+      if (cur === tk) {
+        _heatmapSelected['pf-positions'] = null;
+        renderPositions(_rawDataCache['pf-positions']);
+        return;
+      }
+      _heatmapSelected['pf-positions'] = tk;
       renderPositions(_rawDataCache['pf-positions']);
+      _fetchTickerAlpha(tk, () => {
+        if (_heatmapSelected['pf-positions'] === tk) {
+          renderPositions(_rawDataCache['pf-positions']);
+        }
+      });
     });
   });
   const toggle = el.querySelector('#pf-hm-toggle');
@@ -5560,7 +5577,15 @@ function _bindGroupClicks(tableId, renderFn) {
     tr.style.cursor = 'pointer';
     tr.addEventListener('click', () => {
       const tk = tr.dataset.ticker;
-      if (tk) _toggleExpanded(tableId, tk, renderFn);
+      if (!tk) return;
+      _toggleExpanded(tableId, tk, renderFn);
+      // If the row is now expanded, kick off the alpha fetch and re-render
+      // when the response lands. _isExpanded is checked *after* the toggle.
+      if (_isExpanded(tableId, tk)) {
+        _fetchTickerAlpha(tk, () => {
+          if (_isExpanded(tableId, tk)) renderFn(_rawDataCache[tableId] || []);
+        });
+      }
     });
   });
 }
