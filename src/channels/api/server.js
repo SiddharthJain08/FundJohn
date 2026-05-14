@@ -278,6 +278,7 @@ app.get('/api/portfolio/history', async (req, res) => {
     if (sid) { params.push(sid); where += ` AND es.strategy_id = $${params.length}`; }
     const result = await dbQuery(`
       SELECT es.strategy_id, es.ticker, es.direction, es.entry_price,
+             es.position_size_pct,
              sp.closed_price, sp.realized_pnl_pct, sp.days_held,
              sp.close_reason, sp.closed_at, sp.signal_id::text
       FROM signal_pnl sp
@@ -2324,6 +2325,25 @@ body.rs-chat-locked{overflow:hidden}
 .pf-section-body{overflow-x:auto}
 .pf-pnl-pos{color:var(--green)}.pf-pnl-neg{color:var(--red)}.pf-pnl-flat{color:var(--muted)}
 .dir-long{color:var(--green);font-weight:600}.dir-short{color:var(--red);font-weight:600}
+.dir-mixed{color:var(--yellow);font-weight:600;font-size:9.5px;letter-spacing:.04em}
+/* ── Ticker-grouped tables (positions + history) ──────────────────────────
+ * Parent row carries chevron + ticker name (drillable). Sub-rows are
+ * indented strategy detail, dimmer background. Click anywhere on the
+ * parent to toggle — the ticker text itself stops propagation so the
+ * Market drill-in still works. */
+.db-table.grouped tbody.tk-group{}
+.db-table.grouped tr.ticker-row{background:var(--panel)}
+.db-table.grouped tr.ticker-row:hover{background:rgba(88,166,255,0.06)}
+.db-table.grouped tr.ticker-row.expanded{background:rgba(88,166,255,0.05);border-left:2px solid var(--blue)}
+.db-table.grouped tr.ticker-row .chev{display:inline-block;width:11px;color:var(--muted);font-size:10px;margin-right:4px;transition:transform .15s}
+.db-table.grouped tr.ticker-row.expanded .chev{color:var(--blue)}
+.db-table.grouped tr.ticker-row .tk-name{font-weight:700;color:var(--blue);cursor:pointer;letter-spacing:.02em}
+.db-table.grouped tr.ticker-row .tk-name:hover{text-decoration:underline}
+.db-table.grouped tr.strat-row{background:rgba(13,17,23,0.4);font-size:10px}
+.db-table.grouped tr.strat-row td{padding-top:3px;padding-bottom:3px;border-bottom:1px dotted rgba(48,54,61,0.5)}
+.db-table.grouped tr.strat-row .strat-name{color:var(--muted);font-family:inherit;font-size:9.5px;letter-spacing:.01em;display:inline-block;max-width:118px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
+.db-table.grouped tr.strat-row:last-child td{border-bottom:1px solid var(--border2)}
+.wl-badge{display:inline-block;font-size:8.5px;font-weight:600;color:var(--dim);margin-left:4px;letter-spacing:.03em}
 /* ── Regime Panel ── */
 .regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
 .regime-panel-header{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
@@ -2574,11 +2594,15 @@ body.rs-chat-locked{overflow:hidden}
     font-size: 10px;
   }
   .db-table th:first-child { z-index: 5; }
-  /* Pf-positions has a 2-char Strategy column (already short) — give it
-   * 60px instead of 78 so Ticker (col 2) gets more room. */
+  /* Pf-positions / pf-history: first column is the ticker rollup row,
+   * which carries the chevron + ticker name (parent) or "↳ strategy"
+   * (sub-row). Give it more room than the default 78px since strategy
+   * IDs can be long (S_robust_minimum_variance_hedge). */
   #pf-positions .db-table th:first-child,
-  #pf-positions .db-table td:first-child {
-    width: 60px !important; max-width: 60px !important; min-width: 60px !important;
+  #pf-positions .db-table td:first-child,
+  #pf-history   .db-table th:first-child,
+  #pf-history   .db-table td:first-child {
+    width: 130px !important; max-width: 130px !important; min-width: 130px !important;
   }
 
   /* ── Table buttons — compact ───────────────────────────────────────── */
@@ -2596,16 +2620,22 @@ body.rs-chat-locked{overflow:hidden}
   #st-active-wrap .db-table th:nth-child(11),
   #st-active-wrap .db-table td:nth-child(11) { display: none; }
 
-  /* Active positions: Strategy | Ticker | Dir | Entry | Current | P&L% | Size% | Days | Stop | Status
-   * Hide: 4 (Entry), 9 (Stop). */
+  /* Active positions: Ticker | # | Dir | Entry | Current | P&L% | Contrib% | Size% | Days
+   * On phones: hide Entry (4) and Days (9). Keep the contribution column —
+   * it's the most informative cell in the rollup. */
   #pf-positions .db-table th:nth-child(4),
   #pf-positions .db-table td:nth-child(4),
   #pf-positions .db-table th:nth-child(9),
   #pf-positions .db-table td:nth-child(9) { display: none; }
 
-  /* Closed history — hide far-right columns. */
-  #pf-history .db-table th:nth-child(n+8),
-  #pf-history .db-table td:nth-child(n+8) { display: none; }
+  /* Closed history: Ticker | # | Dir | Entry | Close | P&L% | Contrib% | Days | Closed
+   * On phones: hide Entry (4), Days (8), Closed (9) — same density logic. */
+  #pf-history .db-table th:nth-child(4),
+  #pf-history .db-table td:nth-child(4),
+  #pf-history .db-table th:nth-child(8),
+  #pf-history .db-table td:nth-child(8),
+  #pf-history .db-table th:nth-child(9),
+  #pf-history .db-table td:nth-child(9) { display: none; }
 
   /* ── Research page ─────────────────────────────────────────────────── *
    * Desktop uses CSS Grid with 1.4fr/1fr columns and the chat spanning
@@ -4935,87 +4965,297 @@ function renderPortfolioSummary(s, valCurve) {
   }
 }
 
+// ── Positions / History — grouped by ticker ────────────────────────────────
+// Tables aggregate at the *ticker* level: one parent row per ticker with
+// rollup metrics, click-to-expand reveals per-strategy sub-rows including
+// signed contribution (+ winners, − losers).
+//
+// Contribution % = pnl_pct × size_pct, expressed as % of NAV. This is the
+// honest "what this strategy added to (or subtracted from) the book" — it's
+// size-weighted P&L. A 5% position up 10% contributes +0.50% to NAV.
+//
+// Direction normalization: six raw values exist in the DB
+//   LONG / BUY / BUY_VOL   → LONG-side
+//   SHORT / SELL / SELL_VOL → SHORT-side
+// Net Dir at the ticker level is LONG, SHORT, or MIXED.
+function _normalizeDir(d) {
+  const u = String(d == null ? '' : d).toUpperCase();
+  if (u === 'LONG' || u === 'BUY' || u === 'BUY_VOL') return 'LONG';
+  if (u === 'SHORT' || u === 'SELL' || u === 'SELL_VOL') return 'SHORT';
+  return u;
+}
+
+// Expansion state — preserved across re-renders (sort, collapse) so toggling
+// a column header doesn't fold the user's open tickers back up.
+//   { tableId: Set<ticker> }
+const _expandedTickers = {};
+function _isExpanded(tableId, ticker) {
+  const s = _expandedTickers[tableId];
+  return !!(s && s.has(ticker));
+}
+function _toggleExpanded(tableId, ticker, renderFn) {
+  let s = _expandedTickers[tableId];
+  if (!s) { s = new Set(); _expandedTickers[tableId] = s; }
+  if (s.has(ticker)) s.delete(ticker); else s.add(ticker);
+  renderFn(_tableDataCache[tableId] || []);
+}
+
+// Group raw signal rows by ticker. \`mode\` is 'open' or 'closed' — picks the
+// P&L column and the close-side field. Returns array of group objects with
+// rollup keys (ticker, n, net_dir, net_pnl, contrib_pct, total_size_pct,
+// avg_entry, current/close, avg_days, last_closed) and a \`signals\` array of
+// the underlying rows (each augmented with \`dir_norm\` and \`contrib_pct\`).
+function _groupByTicker(rows, mode) {
+  const isOpen = mode === 'open';
+  const pnlKey = isOpen ? 'unrealized_pnl_pct' : 'realized_pnl_pct';
+  const priceKey = isOpen ? 'current_price' : 'closed_price';
+  const map = new Map();
+  for (const r of rows) {
+    const tk = r.ticker || '—';
+    let g = map.get(tk);
+    if (!g) { g = { ticker: tk, signals: [] }; map.set(tk, g); }
+    g.signals.push(r);
+  }
+  const groups = [];
+  for (const g of map.values()) {
+    let wEntrySum = 0, wEntryDen = 0;     // size-weighted entry
+    let priceSum = 0, priceN = 0;          // mean price (current/close)
+    let totalSize = 0;
+    let contribSum = 0;                    // Σ pnl × size  (NAV-fraction)
+    let sizeWPnlSum = 0;                   // Σ pnl × size  (same — net %)
+    let pnlSizeDen = 0;                    // Σ size, restricted to rows where pnl exists
+    let daysSum = 0, daysN = 0;
+    let wins = 0;
+    let lastClosed = null;
+    const dirs = new Set();
+    for (const s of g.signals) {
+      const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) : null;
+      const en = s.entry_price != null ? parseFloat(s.entry_price) : null;
+      const px = s[priceKey] != null ? parseFloat(s[priceKey]) : null;
+      const pn = s[pnlKey] != null ? parseFloat(s[pnlKey]) : null;
+      const dh = s.days_held != null ? parseFloat(s.days_held) : null;
+      const dn = _normalizeDir(s.direction);
+      if (dn) dirs.add(dn);
+      s.dir_norm = dn;
+      if (sz != null && isFinite(sz)) totalSize += sz;
+      if (sz != null && en != null && isFinite(sz) && isFinite(en)) {
+        wEntrySum += en * sz; wEntryDen += sz;
+      }
+      if (px != null && isFinite(px)) { priceSum += px; priceN += 1; }
+      if (sz != null && pn != null && isFinite(sz) && isFinite(pn)) {
+        const c = pn * sz;
+        contribSum += c;
+        sizeWPnlSum += c;
+        pnlSizeDen += sz;
+        s.contrib_pct = c;
+      } else {
+        s.contrib_pct = null;
+      }
+      if (dh != null && isFinite(dh)) { daysSum += dh; daysN += 1; }
+      if (!isOpen && pn != null && isFinite(pn) && pn > 0) wins += 1;
+      if (!isOpen && s.closed_at) {
+        const t = new Date(s.closed_at).getTime();
+        if (!isNaN(t) && (lastClosed == null || t > lastClosed)) lastClosed = t;
+      }
+    }
+    g.n = g.signals.length;
+    g.net_dir = dirs.size === 0 ? '—' : (dirs.size === 1 ? [...dirs][0] : 'MIXED');
+    g.avg_entry = wEntryDen > 0 ? wEntrySum / wEntryDen : null;
+    g.price = priceN > 0 ? priceSum / priceN : null;
+    g.total_size_pct = totalSize;
+    g.contrib_pct = sizeWPnlSum;
+    g.net_pnl = pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null; // size-weighted mean pnl, restricted to rows with both size + pnl
+    g.avg_days = daysN > 0 ? daysSum / daysN : null;
+    g.wins = wins;
+    g.losses = isOpen ? null : (g.n - wins);
+    g.last_closed = lastClosed;
+    // Pre-sort sub-rows: largest size first (so the heaviest contributor
+    // shows up under the chevron). Sub-row order doesn't bind to parent
+    // sort — sort is at the ticker level only.
+    g.signals.sort((a, b) => {
+      const sa = a.position_size_pct != null ? parseFloat(a.position_size_pct) : -1;
+      const sb = b.position_size_pct != null ? parseFloat(b.position_size_pct) : -1;
+      return sb - sa;
+    });
+    groups.push(g);
+  }
+  return groups;
+}
+
+function _dirCls(d) {
+  if (d === 'LONG')  return 'dir-long';
+  if (d === 'SHORT') return 'dir-short';
+  if (d === 'MIXED') return 'dir-mixed';
+  return '';
+}
+function _fmtPct(p, withSign) {
+  if (p == null || !isFinite(p)) return '—';
+  const s = (withSign && p > 0 ? '+' : '') + p.toFixed(2) + '%';
+  return s;
+}
+
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
-  document.getElementById('pf-pos-count').textContent = rows.length ? rows.length + ' open' : '';
-  if (!rows.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
-  const sorted = _applySort('pf-positions', rows);
+  const groups = _groupByTicker(rows, 'open');
+  document.getElementById('pf-pos-count').textContent =
+    rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
+  if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  // Default sort: largest contribution magnitude first — biggest winners +
+  // biggest losers float to the top, both interesting to the operator. On
+  // a fresh-signal day (PnL not yet marked) contrib is 0 across the board,
+  // so the secondary key bubbles largest exposures up instead of falling
+  // back to insertion order.
+  if (!_sortState['pf-positions'] || !_sortState['pf-positions'].key) {
+    groups.sort((a, b) => {
+      const c = Math.abs(b.contrib_pct || 0) - Math.abs(a.contrib_pct || 0);
+      if (c !== 0) return c;
+      return (b.total_size_pct || 0) - (a.total_size_pct || 0);
+    });
+  }
+  const sorted = _applySort('pf-positions', groups);
   const { shown, footer } = _collapseRows('pf-positions', sorted);
-  el.innerHTML = \`<table class="db-table" style="min-width:700px">
-    <tr>
-      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+  const headers = \`<thead><tr>
       <th data-sort-key="ticker" data-sort-type="str">Ticker</th>
-      <th data-sort-key="direction" data-sort-type="str">Dir</th>
-      <th class="num" data-sort-key="entry_price" data-sort-type="num">Entry</th>
-      <th class="num" data-sort-key="current_price" data-sort-type="num">Current</th>
-      <th class="num" data-sort-key="unrealized_pnl_pct" data-sort-type="num">P&amp;L %</th>
-      <th class="num" data-sort-key="position_size_pct" data-sort-type="num">Size %</th>
-      <th class="num" data-sort-key="days_held" data-sort-type="num">Days</th>
-      <th class="num" data-sort-key="stop_loss" data-sort-type="num">Stop</th>
-      <th data-sort-key="status" data-sort-type="str">Status</th>
-    </tr>
-    \${shown.map(r => {
-      const pnl = r.unrealized_pnl_pct != null ? parseFloat(r.unrealized_pnl_pct) * 100 : null;
-      const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
-      const pnlClsName = pnlCls(pnl);
-      const dir = (r.direction || '').toUpperCase();
-      return \`<tr>
-        <td>\${r.strategy_id || '—'}</td>
-        <td style="font-weight:600;cursor:pointer;color:var(--blue)" onclick="showMarket();selectTicker('\${r.ticker}')">\${r.ticker}</td>
-        <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
-        <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
-        <td class="num">\${r.current_price != null ? '$' + parseFloat(r.current_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlClsName}">\${pnlTxt}</td>
-        <td class="num">\${r.position_size_pct != null ? (parseFloat(r.position_size_pct) * 100).toFixed(1) + '%' : '—'}</td>
-        <td class="num">\${r.days_held ?? '—'}</td>
-        <td class="num">\${r.stop_loss != null ? '$' + parseFloat(r.stop_loss).toFixed(2) : '—'}</td>
-        <td>\${r.status || '—'}</td>
+      <th class="num" data-sort-key="n" data-sort-type="num">#</th>
+      <th data-sort-key="net_dir" data-sort-type="str">Dir</th>
+      <th class="num" data-sort-key="avg_entry" data-sort-type="num">Entry</th>
+      <th class="num" data-sort-key="price" data-sort-type="num">Current</th>
+      <th class="num" data-sort-key="net_pnl" data-sort-type="num">P&amp;L %</th>
+      <th class="num" data-sort-key="contrib_pct" data-sort-type="num" title="Contribution to NAV = Σ(P&amp;L% × Size%). Signed.">Contrib %</th>
+      <th class="num" data-sort-key="total_size_pct" data-sort-type="num">Size %</th>
+      <th class="num" data-sort-key="avg_days" data-sort-type="num">Days</th>
+    </tr></thead>\`;
+  const body = shown.map(g => {
+    const expanded = _isExpanded('pf-positions', g.ticker);
+    const netPnl = g.net_pnl != null ? g.net_pnl * 100 : null;
+    const contrib = g.contrib_pct != null ? g.contrib_pct * 100 : null;
+    const chev = expanded ? '▾' : '▸';
+    const parent = \`<tr class="ticker-row \${expanded ? 'expanded' : ''}" data-ticker="\${g.ticker}">
+        <td class="tk-cell">
+          <span class="chev">\${chev}</span>
+          <span class="tk-name" onclick="event.stopPropagation();showMarket();selectTicker('\${g.ticker}')">\${g.ticker}</span>
+        </td>
+        <td class="num">\${g.n}</td>
+        <td class="\${_dirCls(g.net_dir)}">\${g.net_dir}</td>
+        <td class="num">\${g.avg_entry != null ? '$' + g.avg_entry.toFixed(2) : '—'}</td>
+        <td class="num">\${g.price != null ? '$' + g.price.toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls(netPnl)}">\${_fmtPct(netPnl, true)}</td>
+        <td class="num \${pnlCls(contrib)}">\${_fmtPct(contrib, true)}</td>
+        <td class="num">\${(g.total_size_pct * 100).toFixed(1)}%</td>
+        <td class="num">\${g.avg_days != null ? g.avg_days.toFixed(0) : '—'}</td>
       </tr>\`;
-    }).join('')}
-  </table>\${footer}\`;
+    const children = g.signals.map(s => {
+      const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) * 100 : null;
+      const pn = s.unrealized_pnl_pct != null ? parseFloat(s.unrealized_pnl_pct) * 100 : null;
+      const ct = s.contrib_pct != null ? s.contrib_pct * 100 : null;
+      // Stop + target are per-signal and don't aggregate at the ticker
+      // level — surface them on hover so the operator can read risk
+      // controls without rewiring the column layout.
+      const stop = s.stop_loss != null ? '$' + parseFloat(s.stop_loss).toFixed(2) : '—';
+      const tgt  = s.target_1   != null ? '$' + parseFloat(s.target_1).toFixed(2)   : '—';
+      const riskTitle = \`Stop: \${stop} · Target: \${tgt}\`;
+      return \`<tr class="strat-row" style="display:\${expanded ? 'table-row' : 'none'}" title="\${riskTitle}">
+        <td class="tk-cell"><span class="strat-name" title="\${s.strategy_id || ''}">↳ \${s.strategy_id || '—'}</span></td>
+        <td class="num"></td>
+        <td class="\${_dirCls(s.dir_norm)}">\${s.dir_norm || '—'}</td>
+        <td class="num">\${s.entry_price != null ? '$' + parseFloat(s.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${s.current_price != null ? '$' + parseFloat(s.current_price).toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls(pn)}">\${_fmtPct(pn, true)}</td>
+        <td class="num \${pnlCls(ct)}">\${_fmtPct(ct, true)}</td>
+        <td class="num">\${sz != null ? sz.toFixed(1) + '%' : '—'}</td>
+        <td class="num">\${s.days_held ?? '—'}</td>
+      </tr>\`;
+    }).join('');
+    return \`<tbody class="tk-group">\${parent}\${children}</tbody>\`;
+  }).join('');
+  el.innerHTML = \`<table class="db-table grouped" style="min-width:680px">\${headers}\${body}</table>\${footer}\`;
+  _bindGroupClicks('pf-positions', renderPositions);
   _bindSortable('pf-positions', renderPositions);
   _bindCollapse('pf-positions', renderPositions);
 }
 
 function renderHistory(rows) {
   const el = document.getElementById('pf-history');
-  document.getElementById('pf-hist-count').textContent = rows.length ? rows.length + ' trades' : '';
-  if (!rows.length) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
-  const sorted = _applySort('pf-history', rows);
+  const groups = _groupByTicker(rows, 'closed');
+  document.getElementById('pf-hist-count').textContent =
+    rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} trade\${rows.length === 1 ? '' : 's'}\` : '';
+  if (!groups.length) { el.innerHTML = '<div class="empty">No closed trades yet</div>'; return; }
+  if (!_sortState['pf-history'] || !_sortState['pf-history'].key) {
+    groups.sort((a, b) => (b.last_closed || 0) - (a.last_closed || 0));
+  }
+  const sorted = _applySort('pf-history', groups);
   const { shown, footer } = _collapseRows('pf-history', sorted);
-  el.innerHTML = \`<table class="db-table" style="min-width:680px">
-    <tr>
-      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
+  const headers = \`<thead><tr>
       <th data-sort-key="ticker" data-sort-type="str">Ticker</th>
-      <th data-sort-key="direction" data-sort-type="str">Dir</th>
-      <th class="num" data-sort-key="entry_price" data-sort-type="num">Entry</th>
-      <th class="num" data-sort-key="closed_price" data-sort-type="num">Close</th>
-      <th class="num" data-sort-key="realized_pnl_pct" data-sort-type="num">P&amp;L %</th>
-      <th class="num" data-sort-key="days_held" data-sort-type="num">Days</th>
-      <th data-sort-key="close_reason" data-sort-type="str">Reason</th>
-      <th data-sort-key="closed_at" data-sort-type="date">Closed</th>
-    </tr>
-    \${shown.map(r => {
-      const pnl = r.realized_pnl_pct != null ? parseFloat(r.realized_pnl_pct) * 100 : null;
-      const pnlTxt = pnl != null ? (pnl > 0 ? '+' : '') + pnl.toFixed(2) + '%' : '—';
-      const pnlClsName = pnlCls(pnl);
-      const dir = (r.direction || '').toUpperCase();
-      const closedAt = r.closed_at ? new Date(r.closed_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
-      return \`<tr>
-        <td>\${r.strategy_id || '—'}</td>
-        <td style="font-weight:600;cursor:pointer;color:var(--blue)" onclick="showMarket();selectTicker('\${r.ticker}')">\${r.ticker}</td>
-        <td class="\${dir === 'LONG' ? 'dir-long' : 'dir-short'}">\${dir}</td>
-        <td class="num">\${r.entry_price != null ? '$' + parseFloat(r.entry_price).toFixed(2) : '—'}</td>
-        <td class="num">\${r.closed_price != null ? '$' + parseFloat(r.closed_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlClsName}">\${pnlTxt}</td>
-        <td class="num">\${r.days_held ?? '—'}</td>
-        <td style="color:var(--muted)">\${r.close_reason || '—'}</td>
-        <td style="color:var(--dim)">\${closedAt}</td>
+      <th class="num" data-sort-key="n" data-sort-type="num">#</th>
+      <th data-sort-key="net_dir" data-sort-type="str">Dir</th>
+      <th class="num" data-sort-key="avg_entry" data-sort-type="num">Entry</th>
+      <th class="num" data-sort-key="price" data-sort-type="num">Close</th>
+      <th class="num" data-sort-key="net_pnl" data-sort-type="num">P&amp;L %</th>
+      <th class="num" data-sort-key="contrib_pct" data-sort-type="num" title="Contribution to NAV = Σ(P&amp;L% × Size%). Signed.">Contrib %</th>
+      <th class="num" data-sort-key="avg_days" data-sort-type="num">Days</th>
+      <th data-sort-key="last_closed" data-sort-type="num">Closed</th>
+    </tr></thead>\`;
+  const body = shown.map(g => {
+    const expanded = _isExpanded('pf-history', g.ticker);
+    const netPnl = g.net_pnl != null ? g.net_pnl * 100 : null;
+    const contrib = g.contrib_pct != null ? g.contrib_pct * 100 : null;
+    const chev = expanded ? '▾' : '▸';
+    const lc = g.last_closed ? new Date(g.last_closed).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
+    const wlBadge = g.n > 0 ? \`<span class="wl-badge" title="\${g.wins}W / \${g.losses}L">\${g.wins}W·\${g.losses}L</span>\` : '';
+    const parent = \`<tr class="ticker-row \${expanded ? 'expanded' : ''}" data-ticker="\${g.ticker}">
+        <td class="tk-cell">
+          <span class="chev">\${chev}</span>
+          <span class="tk-name" onclick="event.stopPropagation();showMarket();selectTicker('\${g.ticker}')">\${g.ticker}</span>
+        </td>
+        <td class="num">\${g.n} \${wlBadge}</td>
+        <td class="\${_dirCls(g.net_dir)}">\${g.net_dir}</td>
+        <td class="num">\${g.avg_entry != null ? '$' + g.avg_entry.toFixed(2) : '—'}</td>
+        <td class="num">\${g.price != null ? '$' + g.price.toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls(netPnl)}">\${_fmtPct(netPnl, true)}</td>
+        <td class="num \${pnlCls(contrib)}">\${_fmtPct(contrib, true)}</td>
+        <td class="num">\${g.avg_days != null ? g.avg_days.toFixed(0) : '—'}</td>
+        <td style="color:var(--dim)">\${lc}</td>
       </tr>\`;
-    }).join('')}
-  </table>\${footer}\`;
+    const children = g.signals.map(s => {
+      const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) * 100 : null;
+      const pn = s.realized_pnl_pct != null ? parseFloat(s.realized_pnl_pct) * 100 : null;
+      const ct = s.contrib_pct != null ? s.contrib_pct * 100 : null;
+      const cl = s.closed_at ? new Date(s.closed_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
+      const reasonAttr = s.close_reason ? \` title="\${(s.close_reason).replace(/"/g,'&quot;')}"\` : '';
+      return \`<tr class="strat-row" style="display:\${expanded ? 'table-row' : 'none'}"\${reasonAttr}>
+        <td class="tk-cell"><span class="strat-name" title="\${s.strategy_id || ''}">↳ \${s.strategy_id || '—'}</span></td>
+        <td class="num"></td>
+        <td class="\${_dirCls(s.dir_norm)}">\${s.dir_norm || '—'}</td>
+        <td class="num">\${s.entry_price != null ? '$' + parseFloat(s.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${s.closed_price != null ? '$' + parseFloat(s.closed_price).toFixed(2) : '—'}</td>
+        <td class="num \${pnlCls(pn)}">\${_fmtPct(pn, true)}</td>
+        <td class="num \${pnlCls(ct)}">\${_fmtPct(ct, true)}</td>
+        <td class="num">\${s.days_held ?? '—'}</td>
+        <td style="color:var(--dim)">\${cl}</td>
+      </tr>\`;
+    }).join('');
+    return \`<tbody class="tk-group">\${parent}\${children}</tbody>\`;
+  }).join('');
+  el.innerHTML = \`<table class="db-table grouped" style="min-width:680px">\${headers}\${body}</table>\${footer}\`;
+  _bindGroupClicks('pf-history', renderHistory);
   _bindSortable('pf-history', renderHistory);
   _bindCollapse('pf-history', renderHistory);
+}
+
+// Click a ticker row → toggle its child strat-rows. The click target is the
+// chevron + ticker name area only — clicking the ticker text itself drills
+// into the Market view (stopPropagation guards that).
+function _bindGroupClicks(tableId, renderFn) {
+  const host = document.getElementById(tableId);
+  if (!host) return;
+  host.querySelectorAll('tr.ticker-row').forEach(tr => {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', () => {
+      const tk = tr.dataset.ticker;
+      if (tk) _toggleExpanded(tableId, tk, renderFn);
+    });
+  });
 }
 
 // ── Strategies page ─────────────────────────────────────────────────────────
