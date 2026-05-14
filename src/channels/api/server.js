@@ -238,12 +238,12 @@ app.get('/api/db/cycles', async (req, res) => {
 
 app.get('/api/portfolio/positions', async (req, res) => {
   try {
-    // Cap to recent open signals. execution_signals.status='open' currently
-    // matches ~4.6k rows because stale paper signals from prior cycles never
-    // get flipped to 'closed' — that returned a 1.66 MB JSON payload that
-    // dominated the portfolio page's perceived load time. The dashboard
-    // collapses to 10 visible rows by default, so restricting to the most
-    // recent 500 (within 90d) is more than the UI can ever surface.
+    // No LIMIT: the prior cap of 500 (by signal_date DESC) was squeezing
+    // out 4000+ older positions with real marked PnL in favor of today's
+    // freshly-opened zero-PnL signals, which left the heatmap uniformly
+    // grey + days_held=0 everywhere. Now the client receives every open
+    // signal in the recent window (~5500 rows / ~1MB) and the ticker
+    // rollups carry meaningful color + days_held.
     const result = await dbQuery(`
       SELECT es.id, es.strategy_id, es.ticker, es.direction,
              es.entry_price, es.stop_loss, es.target_1, es.position_size_pct,
@@ -258,7 +258,6 @@ app.get('/api/portfolio/positions', async (req, res) => {
       WHERE es.status = 'open'
         AND es.signal_date >= CURRENT_DATE - INTERVAL '90 days'
       ORDER BY es.signal_date DESC
-      LIMIT 500
     `);
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -285,9 +284,73 @@ app.get('/api/portfolio/history', async (req, res) => {
       JOIN execution_signals es ON es.id = sp.signal_id
       ${where}
       ORDER BY sp.closed_at DESC, sp.signal_id DESC
-      LIMIT 500
     `, params);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Per-strategy + portfolio Sharpe — used by the alpha-bar chart on the
+// portfolio page. Sharpe is computed at trade-grain (each closed trade =
+// one return observation): Sharpe = mean(pnl_pct) / stddev(pnl_pct). We
+// deliberately skip annualization (no √252 factor) because the alpha bar
+// chart displays the *ratio* strategy_sharpe / portfolio_sharpe — the
+// annualization factor would cancel out anyway.
+//
+// The ratio answers "how risk-efficient is this strategy compared to the
+// consolidated portfolio?" — it can exceed 1.0 when a strategy's
+// standalone performance beats the pooled book (other strategies' losses
+// drag the portfolio denominator down).
+//
+// Strategies need ≥ 5 closed trades to get a Sharpe — fewer is too
+// noisy. Cached for 5 minutes in process memory.
+let _sharpeCache = { ts: 0, payload: null };
+const _SHARPE_TTL_MS = 5 * 60 * 1000;
+app.get('/api/portfolio/strategy-sharpe', async (req, res) => {
+  try {
+    const now = Date.now();
+    if (_sharpeCache.payload && now - _sharpeCache.ts < _SHARPE_TTL_MS) {
+      return res.json(_sharpeCache.payload);
+    }
+    // Per-strategy Sharpe (trade-grain): mu / sigma over closed trades.
+    const stratRes = await dbQuery(`
+      SELECT strategy_id,
+             COUNT(*)::int AS n,
+             AVG(pnl_pct)::float AS mu,
+             STDDEV_SAMP(pnl_pct)::float AS sigma
+      FROM signal_performance
+      WHERE status = 'closed' AND pnl_pct IS NOT NULL
+      GROUP BY strategy_id
+      HAVING COUNT(*) >= 5
+    `);
+    // Portfolio Sharpe — pool every closed trade across all strategies.
+    const portRes = await dbQuery(`
+      SELECT COUNT(*)::int AS n,
+             AVG(pnl_pct)::float AS mu,
+             STDDEV_SAMP(pnl_pct)::float AS sigma
+      FROM signal_performance WHERE status = 'closed' AND pnl_pct IS NOT NULL
+    `);
+    const port = portRes.rows[0] || {};
+    const portfolio_sharpe = (port.sigma && port.sigma > 0)
+      ? (port.mu / port.sigma)
+      : null;
+    const strategies = {};
+    for (const r of stratRes.rows) {
+      const sigma = parseFloat(r.sigma);
+      if (sigma && sigma > 0) {
+        strategies[r.strategy_id] = {
+          sharpe: parseFloat(r.mu) / sigma,
+          n: r.n,
+        };
+      }
+    }
+    const payload = {
+      portfolio_sharpe,
+      portfolio_n: port.n || 0,
+      strategies,
+      computed_at: new Date().toISOString(),
+    };
+    _sharpeCache = { ts: now, payload };
+    res.json(payload);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2385,6 +2448,11 @@ body.rs-chat-locked{overflow:hidden}
 .ab-fill.neg{right:50%;background:linear-gradient(270deg,rgba(248,81,73,0.55),rgba(248,81,73,0.95))}
 .ab-value{width:64px;flex-shrink:0;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
 .bars-row td.bars-cell{padding:0!important;background:rgba(13,17,23,0.4)}
+.ab-row.ab-unranked{opacity:0.55}
+.ab-row.ab-unranked .ab-label{font-style:italic}
+.ab-track.muted{background:rgba(48,54,61,0.15)}
+.ab-value.muted{color:var(--dim);font-weight:400;font-style:italic}
+.ab-track.over-one{box-shadow:inset 0 0 0 1px rgba(88,166,255,0.35)}
 /* ── Regime Panel ── */
 .regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
 .regime-panel-header{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
@@ -4854,8 +4922,11 @@ async function _safeFetch(url, fallback, opts = {}) {
   }
 }
 
+// Cached Sharpe data — lives in module-level scope so the alpha-bar
+// renderer can use it without threading it through every call site.
+let _sharpeData = { portfolio_sharpe: null, strategies: {} };
 async function loadPortfolio() {
-  const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
+  const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y, sharpe] = await Promise.all([
     _safeFetch('/api/portfolio/summary',           {}, { label: 'portfolio summary' }),
     _safeFetch('/api/portfolio/positions',         [], { critical: true, label: 'portfolio positions' }),
     _safeFetch('/api/portfolio/history',           [], { label: 'portfolio history' }),
@@ -4865,11 +4936,10 @@ async function loadPortfolio() {
     _safeFetch('/api/portfolio/value-curve?period=all', {}, { label: 'value curve all' }),
     _safeFetch('/api/portfolio/regime-history?days=90', [], { label: 'regime history 90d' }),
     _safeFetch('/api/portfolio/regime-history?days=365', [], { label: 'regime history 1y' }),
+    _safeFetch('/api/portfolio/strategy-sharpe', { portfolio_sharpe: null, strategies: {} }, { label: 'strategy sharpe' }),
   ]);
+  _sharpeData = sharpe || { portfolio_sharpe: null, strategies: {} };
   renderAccountRow(account);
-  // Store valCurve first — renderPortfolioSummary needs it to compute
-  // the portfolio-level Avg Annualized Realized P&L from the equity
-  // curve (base_value → latest equity), not per-trade averages.
   valueCurveData = valCurve;
   renderPortfolioSummary(summary, valCurve);
   renderPositions(positions);
@@ -5163,42 +5233,75 @@ function _pnlColor(pct) {
   return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
 }
 
-// Vertical stack of horizontal contribution bars — one per strategy that
-// holds the ticker. Bars are centered on a zero-line: positive contribs
-// extend right (green), negative extend left (red). Length proportional
-// to |contrib| relative to the max-abs in this group. The label on the
-// left is the strategy id; the value on the right is signed contribution %.
+// Vertical stack of horizontal alpha-contribution bars — one per strategy
+// that holds the ticker. Bar value = strategy_sharpe / portfolio_sharpe
+// (the ratio "how risk-efficient is this strategy vs the consolidated
+// book"). Bars are centered on a zero-line and extend right when ratio
+// > 0, left when ratio < 0; length scaled to max |ratio| in this group.
+// Ratios can exceed 1.0 when a strategy's standalone Sharpe is higher
+// than the consolidated portfolio (common when other strategies drag
+// down the pooled denominator).
 function _buildAlphaBarsHtml(group) {
-  const candidates = group.signals
-    .filter(s => s.contrib_pct != null && isFinite(s.contrib_pct))
-    .slice()
-    .sort((a, b) => (b.contrib_pct - a.contrib_pct));
-  if (!candidates.length) {
-    return \`<div class="alpha-bars empty">No contribution data for <b>\${group.ticker}</b> yet — \${group.n} signal\${group.n === 1 ? '' : 's'} pending mark-to-market.</div>\`;
+  const portSharpe = _sharpeData && _sharpeData.portfolio_sharpe;
+  const stratMap   = (_sharpeData && _sharpeData.strategies) || {};
+  // Unique strategies present on this ticker, paired with their
+  // standalone Sharpe (if known) and direction (from any held signal).
+  const seen = new Map();
+  for (const s of group.signals) {
+    if (!s.strategy_id || seen.has(s.strategy_id)) continue;
+    const entry = stratMap[s.strategy_id];
+    seen.set(s.strategy_id, {
+      strategy_id: s.strategy_id,
+      dir_norm: s.dir_norm,
+      sharpe:    entry ? entry.sharpe : null,
+      n_trades:  entry ? entry.n      : 0,
+    });
   }
-  const maxAbs = Math.max(...candidates.map(s => Math.abs(s.contrib_pct))) || 1;
-  const total  = candidates.reduce((s, x) => s + x.contrib_pct, 0) * 100;
-  const bars = candidates.map(s => {
-    const ct = s.contrib_pct * 100;
-    const widthPct = (Math.abs(s.contrib_pct) / maxAbs) * 50;
-    const sign = s.contrib_pct >= 0 ? 'pos' : 'neg';
+  const all = [...seen.values()];
+  // Split: strategies with Sharpe data vs. those without (< 5 closed trades).
+  const ranked  = all.filter(s => s.sharpe != null && isFinite(s.sharpe) && portSharpe);
+  const unranked = all.filter(s => !(s.sharpe != null && isFinite(s.sharpe) && portSharpe));
+  // Ratio = strategy_sharpe / portfolio_sharpe — signed.
+  for (const s of ranked) s.ratio = s.sharpe / portSharpe;
+  ranked.sort((a, b) => b.ratio - a.ratio);
+
+  if (!ranked.length && !unranked.length) {
+    return \`<div class="alpha-bars empty">No strategy detail for <b>\${group.ticker}</b>.</div>\`;
+  }
+
+  const maxAbs = ranked.length ? Math.max(...ranked.map(s => Math.abs(s.ratio))) : 1;
+  const rankedBars = ranked.map(s => {
+    const ratio = s.ratio;
+    const widthPct = (Math.abs(ratio) / maxAbs) * 50;
+    const sign = ratio >= 0 ? 'pos' : 'neg';
+    const cls = ratio >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     const dirClass = _dirCls(s.dir_norm);
+    const overOne = Math.abs(ratio) > 1 ? ' over-one' : '';
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${s.strategy_id || ''}">\${s.strategy_id || '—'}</div>
+      <div class="ab-label" title="\${s.strategy_id} · standalone Sharpe \${s.sharpe.toFixed(3)} · \${s.n_trades} closed trades">\${s.strategy_id}</div>
       <div class="ab-dir \${dirClass}">\${s.dir_norm || ''}</div>
-      <div class="ab-track">
+      <div class="ab-track\${overOne}">
         <div class="ab-zero"></div>
         <div class="ab-fill \${sign}" style="width:\${widthPct.toFixed(2)}%"></div>
       </div>
-      <div class="ab-value \${pnlCls(ct)}">\${_fmtPct(ct, true)}</div>
+      <div class="ab-value \${cls}">\${ratio.toFixed(2)}×</div>
     </div>\`;
   }).join('');
+  const unrankedRows = unranked.map(s => \`<div class="ab-row ab-unranked">
+      <div class="ab-label" title="\${s.strategy_id} · \${s.n_trades} closed (need ≥5)">\${s.strategy_id}</div>
+      <div class="ab-dir \${_dirCls(s.dir_norm)}">\${s.dir_norm || ''}</div>
+      <div class="ab-track muted"><div class="ab-zero"></div></div>
+      <div class="ab-value muted" title="Insufficient closed trades for Sharpe">n/a</div>
+    </div>\`).join('');
+
+  const portTxt   = portSharpe != null ? portSharpe.toFixed(3) : 'n/a';
+  const totalStrats = all.length;
   return \`<div class="alpha-bars">
     <div class="ab-title">
       <span class="ab-ticker">\${group.ticker}</span>
-      <span class="ab-meta">\${candidates.length} strateg\${candidates.length === 1 ? 'y' : 'ies'} · Σ <span class="\${pnlCls(total)}">\${_fmtPct(total, true)}</span> of NAV</span>
+      <span class="ab-meta">\${totalStrats} strateg\${totalStrats === 1 ? 'y' : 'ies'} · alpha = Sharpe<sub>strat</sub> / Sharpe<sub>port</sub> · Sharpe<sub>port</sub> = \${portTxt}</span>
     </div>
-    <div class="ab-bars">\${bars}</div>
+    <div class="ab-bars">\${rankedBars}\${unrankedRows}</div>
   </div>\`;
 }
 
