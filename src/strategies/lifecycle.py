@@ -66,8 +66,14 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
     (StrategyState.PAPER,      StrategyState.ARCHIVED):    "archive legacy paper row",
     (StrategyState.LIVE,       StrategyState.MONITORING):  "escalate to monitoring",
     (StrategyState.LIVE,       StrategyState.DEPRECATED):  "demote from live",
+    # Auto-demote on universally-negative Sharpe (see auto_demote_negative_sharpe).
+    # Bypasses the usual MONITORING intermediate — the engine demoted us
+    # because every eligible regime is unprofitable; MasterMind weekly
+    # review decides if the strategy can earn its way back.
+    (StrategyState.LIVE,       StrategyState.CANDIDATE):   "auto-demote: negative Sharpe across all eligible regimes",
     (StrategyState.MONITORING, StrategyState.LIVE):        "restore confidence, back to live",
     (StrategyState.MONITORING, StrategyState.DEPRECATED):  "demote from monitoring",
+    (StrategyState.MONITORING, StrategyState.CANDIDATE):   "auto-demote: negative Sharpe across all eligible regimes",
     (StrategyState.DEPRECATED, StrategyState.ARCHIVED):    "archive after review period",
 }
 
@@ -512,3 +518,48 @@ class LifecycleStateMachine:
 
         _ml.with_manifest_lock(p, _merge, actor="lifecycle.save_manifest")
         logger.info("Manifest saved to %s", p)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Module-level helper: auto-demote strategies that are negative across every
+# eligible regime. Called by execution.strategy_weights.rebuild() after a
+# fresh weights computation. Demotion target: candidate (back to research).
+# ─────────────────────────────────────────────────────────────────────────────
+def auto_demote_negative_sharpe(
+    reason: str = "auto_demote_negative_sharpe",
+    actor:  str = "strategy_weights_engine",
+    manifest_path: str | None = None,
+) -> list[str]:
+    """Demote any live/monitoring strategy whose effective_sharpe ≤ 0 across
+    EVERY regime in its eligible_regimes list. Returns the list of demoted
+    strategy_ids. A strategy with at least one positive-Sharpe eligible
+    regime stays live (excluded from the bad regimes via weight=0 rows).
+    """
+    # Lazy import to avoid a cycle at module load (strategy_weights imports
+    # from this module too).
+    import sys as _sys
+    _THIS_FILE = Path(__file__).resolve()
+    _SRC = _THIS_FILE.parents[1]
+    if str(_SRC) not in _sys.path:
+        _sys.path.insert(0, str(_SRC))
+    from execution.strategy_weights import find_negative_across_all_eligible
+
+    targets = find_negative_across_all_eligible()
+    if not targets:
+        return []
+
+    path = manifest_path or str(_THIS_FILE.parent / "manifest.json")
+    lsm = LifecycleStateMachine.from_manifest(path)
+    demoted: list[str] = []
+    for sid in targets:
+        try:
+            lsm.transition(sid, StrategyState.CANDIDATE, actor=actor, reason=reason)
+            demoted.append(sid)
+        except LifecycleError as e:
+            logger.warning("auto_demote: %s — lifecycle blocked: %s", sid, e)
+        except Exception as e:
+            logger.warning("auto_demote: %s — error: %s", sid, e)
+    if demoted:
+        lsm.save_manifest(path)
+        logger.info("auto_demote: demoted %d strategies: %s", len(demoted), demoted)
+    return demoted

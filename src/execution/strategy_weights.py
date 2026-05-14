@@ -291,16 +291,34 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             for R, entries in per_regime_positives.items():
                 print(f'  {R}: {len(entries)} strategies, Σ weight = 1.0 (by construction)')
 
-        # Auto-demote (delayed import to avoid cycle at module load)
-        try:
-            from strategies.lifecycle import auto_demote_negative_sharpe
-            demoted = auto_demote_negative_sharpe(reason=f'auto_demote_after_{trigger}')
-            if demoted and verbose:
-                print(f'auto-demoted {len(demoted)} strategies: {demoted}')
-        except ImportError:
-            pass
-        except Exception as e:
-            logger.warning('auto_demote chain failed: %s', e)
+        # Auto-demote chain — gated by env flag so the first sweep is
+        # operator-initiated, not implicit. Set OPENCLAW_AUTO_DEMOTE=1 in
+        # the weekly cron's environment (or for a manual --rebuild) once
+        # the operator has reviewed which strategies the engine would
+        # demote (python3 -m execution.strategy_weights --show-negative).
+        if os.environ.get('OPENCLAW_AUTO_DEMOTE') == '1':
+            try:
+                from strategies.lifecycle import auto_demote_negative_sharpe
+                demoted = auto_demote_negative_sharpe(reason=f'auto_demote_after_{trigger}')
+                if demoted and verbose:
+                    print(f'auto-demoted {len(demoted)} strategies: {demoted}')
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning('auto_demote chain failed: %s', e)
+        elif verbose:
+            # Dry-run signal so the operator sees what *would* happen
+            from collections import Counter
+            try:
+                candidates = find_negative_across_all_eligible()
+                if candidates:
+                    print(f'auto_demote dry-run: {len(candidates)} candidate strategies for demotion (set OPENCLAW_AUTO_DEMOTE=1 to apply)')
+                    for sid in candidates[:10]:
+                        print(f'  - {sid}')
+                    if len(candidates) > 10:
+                        print(f'  ... and {len(candidates) - 10} more')
+            except Exception:
+                pass
 
         return rows
     finally:
