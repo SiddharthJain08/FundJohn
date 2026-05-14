@@ -267,9 +267,13 @@ def _close_symbol(symbol: str, qty: float,
     qty_str = str(int(abs_qty)) if float(abs_qty).is_integer() else f'{abs_qty}'
     side = 'sell' if qty > 0 else 'buy'
     coid = f'AXLIQ_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}_{symbol}'[:128]
+    # Alpaca CLI flag is `--symbol` for `order submit` (`--symbol-or-asset-id`
+    # only exists on `position close`). 2026-05-14 fix: the closed-market
+    # path was rejected wholesale with "unknown flag: --symbol-or-asset-id"
+    # before this rename.
     ok, payload, err = _run_cli(
         ['order', 'submit',
-         '--symbol-or-asset-id', symbol,
+         '--symbol', symbol,
          '--side', side,
          '--qty', qty_str,
          '--type', 'market',
