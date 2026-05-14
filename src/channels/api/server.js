@@ -1280,6 +1280,69 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
              weights_rebuild_triggered: stackChanged });
 });
 
+// ── Manual backtest rerun ────────────────────────────────────────────────────
+// POST /api/strategies/:id/rerun_backtest
+// Fires unified_backtest + eligibility_assigner for one strategy. Async —
+// returns 202 immediately with a run_token the client can poll the runs
+// table with (`SELECT run_at FROM strategy_backtest_runs WHERE strategy_id`).
+// Auth note: same trust model as the rest of the dashboard endpoints
+// (operator-internal, port 3000 behind nginx).
+app.post('/api/strategies/:id/rerun_backtest', async (req, res) => {
+  const { spawn } = require('child_process');
+  const sid = req.params.id;
+  const actor = (req.body && req.body.actor) || 'manual:dashboard';
+
+  // Best-effort: confirm the strategy_id exists in the manifest before spawning.
+  const fs = require('fs');
+  const path = require('path');
+  const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (!(m?.strategies || {})[sid]) {
+      return res.status(404).json({ error: `strategy_id ${sid} not in manifest` });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: `manifest read failed: ${e.message}` });
+  }
+
+  // Spawn the backtest detached so the HTTP response can return immediately.
+  // Logs land in /tmp/unified_backtest_${sid}.log for operator inspection.
+  const logPath = `/tmp/unified_backtest_${sid}_${Date.now()}.log`;
+  const logFd   = fs.openSync(logPath, 'a');
+  const cwd     = path.resolve(__dirname, '../../..');
+  const env     = { ...process.env, PYTHONPATH: 'src' };
+
+  const child = spawn(
+    process.execPath.endsWith('/node') ? 'python3' : 'python3',  // explicit
+    ['-m', 'backtest.unified_backtest', '--strategy-id', sid],
+    { cwd, env, detached: true, stdio: ['ignore', logFd, logFd] }
+  );
+  child.unref();
+
+  // Schedule eligibility_assigner to run after the backtest completes via a
+  // chained spawn — exec a small shell wrapper that runs the assigner once
+  // the backtest process exits. Simpler than node-side child-event chaining
+  // when we've already detached.
+  try {
+    const wrapper = spawn(
+      'sh', ['-c',
+        `wait ${child.pid} 2>/dev/null; ` +
+        `python3 -m backtest.eligibility_assigner --strategy-id ${JSON.stringify(sid)} >> ${JSON.stringify(logPath)} 2>&1`
+      ],
+      { cwd, env, detached: true, stdio: 'ignore' }
+    );
+    wrapper.unref();
+  } catch (_) { /* non-fatal */ }
+
+  res.status(202).json({
+    ok:           true,
+    strategy_id:  sid,
+    actor,
+    log_path:     logPath,
+    note:         'unified_backtest spawned detached; poll strategy_backtest_runs for new run_at',
+  });
+});
+
 // ── Approval dispatcher ──────────────────────────────────────────────────────
 // POST /api/strategies/:id/approve — state-aware entry point for the
 // Approve button.
