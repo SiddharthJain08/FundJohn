@@ -31,11 +31,19 @@ def filter_by_cadence(
     signals: list[dict],
     strategy_state: dict[str, dict],
     today: date,
+    force_all: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """Return (passed_signals, skipped_records).
 
     skipped records have shape {strategy_id, ticker, reason, context}.
+
+    When force_all=True, the cadence gate is bypassed entirely — every
+    signal passes regardless of last_fire / next_fire. Used on day-1
+    of a new regime so every eligible strategy gets a fresh read.
     """
+    if force_all:
+        return list(signals), []
+
     passed = []
     skipped = []
     for sig in signals:

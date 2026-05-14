@@ -504,6 +504,12 @@ def liquidate_on_regime_change(run_date: str | None = None,
         try:
             rcli.set(sentinel_key, '1', ex=SENTINEL_TTL)
             rcli.set(cooldown_key, '1', ex=COOLDOWN_TTL)
+            # Day-1-of-regime force-fire flag: the new
+            # OPENCLAW_SHARPE_CADENCE_SIZER path consumes this in the
+            # next cycle to bypass the cadence gate, ensuring every
+            # eligible strategy fires fresh under the new regime.
+            rcli.set('regime:transition:fresh', state or 'UNKNOWN', ex=24 * 3600)
+            logger.info('[liquidate] set regime:transition:fresh ttl=24h state=%s', state)
         except Exception:
             pass
 
