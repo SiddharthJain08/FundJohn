@@ -107,33 +107,81 @@ class TestAggregateMetrics(unittest.TestCase):
         m = ub.aggregate_metrics([])
         self.assertEqual(m['total_trades'], 0)
         self.assertIsNone(m['sharpe'])
+        self.assertEqual(m['max_dd_pct'], 0.0)
 
-    def test_consistent_winner(self):
-        trades = [{'pnl_pct': 0.05, 'holding_days': 5}] * 100
+    def test_zero_holding_days_excluded_from_portfolio_curve(self):
+        # Degenerate trades with holding_days=0 are dropped from portfolio
+        # marking; hit_rate / total_trades still reflect them.
+        trades = [{'pnl_pct': 0.05, 'holding_days': 0,
+                   'entry_date': '2024-01-02'}] * 10
+        m = ub.aggregate_metrics(trades)
+        self.assertEqual(m['total_trades'], 10)
+        self.assertEqual(m['max_dd_pct'], 0.0)
+
+    def test_consistent_winner_portfolio(self):
+        """All trades win the same pct on overlapping dates → daily-marked
+        portfolio compounds steadily, no drawdown."""
+        trades = [{'pnl_pct': 0.05, 'holding_days': 5,
+                   'entry_date': '2024-01-02'}] * 100
         m = ub.aggregate_metrics(trades)
         self.assertEqual(m['total_trades'], 100)
         self.assertGreater(m['return_pct'], 0)
-        # Zero variance → sharpe None
-        self.assertIsNone(m['sharpe'])
         self.assertEqual(m['hit_rate'], 1.0)
+        # Steady winners → near-zero drawdown
+        self.assertLess(m['max_dd_pct'], 0.1)
+        # Zero-variance daily returns (all trades contribute same per-day) → None sharpe
+        self.assertIsNone(m['sharpe'])
 
-    def test_hit_rate_and_drawdown(self):
-        # 6 wins of +10%, 4 losses of -5%; expected hit_rate = 0.6
-        trades = ([{'pnl_pct': 0.10, 'holding_days': 5}] * 6 +
-                  [{'pnl_pct': -0.05, 'holding_days': 5}] * 4)
+    def test_portfolio_drawdown_realistic(self):
+        """When losing trades cluster in time vs winners spread out, the
+        portfolio shows a real drawdown — not a 99% cumprod artifact."""
+        # 100 winners spread across Jan, 100 losers spread across Feb,
+        # 100 winners across March.
+        trades = []
+        for d in range(2, 30):
+            trades.append({'pnl_pct': 0.02, 'holding_days': 3,
+                           'entry_date': f'2024-01-{d:02d}'})
+        for d in range(2, 28):
+            trades.append({'pnl_pct': -0.05, 'holding_days': 3,
+                           'entry_date': f'2024-02-{d:02d}'})
+        for d in range(2, 30):
+            trades.append({'pnl_pct': 0.02, 'holding_days': 3,
+                           'entry_date': f'2024-03-{d:02d}'})
         m = ub.aggregate_metrics(trades)
-        self.assertAlmostEqual(m['hit_rate'], 0.6)
-        self.assertGreater(m['return_pct'], 0)
+        # Should show a real drawdown bounded below the 99% cumprod artifact.
+        # ~28 consecutive days of -1.67%/day compounds to ~38% drawdown,
+        # which is the right portfolio answer for this contrived scenario.
+        self.assertGreater(m['max_dd_pct'], 0.5)
+        self.assertLess(m['max_dd_pct'], 60.0,
+                        'portfolio max_dd should be bounded, not 99%+ cumprod artifact')
+
+    def test_no_99pct_drawdown_on_parallel_trades(self):
+        """Regression: 2000 trades firing on the same date with mixed wins/losses
+        should NOT compound to a 99% drawdown like the old cumprod did."""
+        trades = []
+        # 1000 mild winners + 1000 mild losers, all on the same entry date
+        for _ in range(1000):
+            trades.append({'pnl_pct': 0.03, 'holding_days': 5,
+                           'entry_date': '2024-01-02'})
+        for _ in range(1000):
+            trades.append({'pnl_pct': -0.03, 'holding_days': 5,
+                           'entry_date': '2024-01-02'})
+        m = ub.aggregate_metrics(trades)
+        # Equal-weight portfolio of equal +/- trades on same date ≈ flat
+        self.assertLess(m['max_dd_pct'], 1.0,
+                        'parallel +/-3% trades should net ~flat, not 99% drawdown')
 
 
 class TestAggregatePerRegime(unittest.TestCase):
     def test_groups_trades_by_entry_regime(self):
         trades = [
-            {'pnl_pct': 0.05, 'holding_days': 5, 'entry_regime': 'LOW_VOL'},
-            {'pnl_pct': 0.10, 'holding_days': 5, 'entry_regime': 'LOW_VOL'},
-            {'pnl_pct': -0.03, 'holding_days': 5, 'entry_regime': 'CRISIS'},
+            {'pnl_pct': 0.05, 'holding_days': 5, 'entry_regime': 'LOW_VOL',
+             'entry_date': '2024-01-02'},
+            {'pnl_pct': 0.10, 'holding_days': 5, 'entry_regime': 'LOW_VOL',
+             'entry_date': '2024-01-03'},
+            {'pnl_pct': -0.03, 'holding_days': 5, 'entry_regime': 'CRISIS',
+             'entry_date': '2024-02-01'},
         ]
-        # Mock regime series with enough days
         regimes = pd.Series({pd.Timestamp(f'2024-01-{d:02d}'): 'LOW_VOL' for d in range(2, 30)})
         regimes.loc[pd.Timestamp('2024-02-01')] = 'CRISIS'
         by_regime = ub.aggregate_per_regime(trades, regimes)
@@ -142,7 +190,8 @@ class TestAggregatePerRegime(unittest.TestCase):
 
     def test_low_sample_regime_nulls_sharpe(self):
         # 3 trades in CRISIS → trade_count < 5 → sharpe forced to None
-        trades = [{'pnl_pct': 0.05, 'holding_days': 5, 'entry_regime': 'CRISIS'}] * 3
+        trades = [{'pnl_pct': 0.05, 'holding_days': 5, 'entry_regime': 'CRISIS',
+                   'entry_date': '2024-01-02'}] * 3
         regimes = pd.Series({pd.Timestamp('2024-01-02'): 'CRISIS'})
         out = ub.aggregate_per_regime(trades, regimes)
         self.assertIsNone(out['CRISIS']['sharpe'])

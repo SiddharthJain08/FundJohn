@@ -255,37 +255,98 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
 
 # ── Metric aggregation ───────────────────────────────────────────────────────
 
+def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Timestamp]]:
+    """Build an equal-weighted daily portfolio return series.
+
+    Methodology: each trade's total pnl_pct is distributed evenly across its
+    holding_days as a per-day return contribution. On any given day, the
+    portfolio return is the *equal-weighted average* of all trades that are
+    open on that day (this is the marked-to-market view of a portfolio that
+    rebalances daily to equal weight across currently-active positions).
+
+    Returns (daily_returns_array, sorted_dates_list). Empty arrays for
+    trades that have zero holding_days (degenerate same-day exits).
+    """
+    if not trades:
+        return np.array([]), []
+    daily_pnls: dict[pd.Timestamp, list[float]] = {}
+    for t in trades:
+        hold = int(t.get('holding_days') or 0)
+        if hold <= 0:
+            continue
+        per_day = float(t['pnl_pct']) / hold
+        start = pd.Timestamp(t['entry_date'])
+        # Distribute over `hold` calendar days starting the day after entry.
+        # Bracket-walk's holding_days counts trading days, but for portfolio
+        # marking calendar-day spacing is close enough and avoids
+        # re-computing trading-day calendars here. Drawdown shape is
+        # insensitive to this small approximation.
+        for i in range(1, hold + 1):
+            d = start + pd.Timedelta(days=i)
+            daily_pnls.setdefault(d, []).append(per_day)
+    if not daily_pnls:
+        return np.array([]), []
+    sorted_dates = sorted(daily_pnls.keys())
+    daily_returns = np.array([
+        sum(daily_pnls[d]) / len(daily_pnls[d])  # equal-weight across active trades
+        for d in sorted_dates
+    ])
+    return daily_returns, sorted_dates
+
+
 def aggregate_metrics(trades: list[dict]) -> dict:
-    """Total-level aggregate: sharpe, max_dd_pct, return_pct, hit_rate, avg_holding."""
+    """Total-level aggregate built from an equal-weight daily portfolio
+    equity curve (Fix A, 2026-05-14). Replaces the prior cumulative-product
+    of sequential trade pnls which produced spurious 99% drawdowns whenever
+    many trades fired in parallel.
+
+    Sharpe, max_dd, and return_pct all derive from the daily portfolio
+    return series; hit_rate and avg_pnl_pct stay per-trade for interpretability.
+    """
     if not trades:
         return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
-                'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None}
+                'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
+                'avg_pnl_pct': 0.0}
+
     pnl = np.array([t['pnl_pct'] for t in trades], dtype=float)
-    # Treat each trade as a single-period observation. Annualize by typical
-    # holding period to keep cross-strategy comparability.
     avg_hold = float(np.mean([t['holding_days'] for t in trades]) or 1.0)
-    periods_per_year = TRADING_DAYS_PER_YEAR / max(avg_hold, 1.0)
     mean_pnl = float(pnl.mean())
-    std_pnl  = float(pnl.std(ddof=1)) if len(pnl) > 1 else 0.0
-    if std_pnl < 1e-9:
-        sharpe = None
-    else:
-        sharpe = (mean_pnl - RISK_FREE_DAILY * avg_hold) / std_pnl * math.sqrt(periods_per_year)
-    # Equity-curve max drawdown from the cumulative-product return path
-    eq = (1.0 + pnl).cumprod()
+    hit_rate = float((pnl > 0).mean())
+
+    # Portfolio metrics from daily-marked equity curve.
+    daily_returns, _dates = _portfolio_daily_returns(trades)
+    if len(daily_returns) == 0:
+        return {
+            'sharpe':           None,
+            'max_dd_pct':       0.0,
+            'return_pct':       0.0,
+            'total_trades':     len(trades),
+            'hit_rate':         round(hit_rate, 4),
+            'avg_holding_days': round(avg_hold, 2),
+            'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
+        }
+
+    eq = np.cumprod(1.0 + daily_returns)
     roll_max = np.maximum.accumulate(eq)
     dd = (eq - roll_max) / roll_max
-    max_dd = float(abs(dd.min())) if len(dd) else 0.0
+    max_dd = float(abs(dd.min()))
     return_pct = float((eq[-1] - 1.0) * 100.0)
-    hit_rate = float((pnl > 0).mean())
+
+    std_dr = float(daily_returns.std(ddof=1)) if len(daily_returns) > 1 else 0.0
+    if std_dr < 1e-9:
+        sharpe = None
+    else:
+        sharpe = float((daily_returns.mean() - RISK_FREE_DAILY) / std_dr *
+                       math.sqrt(TRADING_DAYS_PER_YEAR))
+
     return {
-        'sharpe':            None if sharpe is None else round(sharpe, 4),
-        'max_dd_pct':        round(max_dd * 100.0, 4),
-        'return_pct':        round(return_pct, 4),
-        'total_trades':      len(trades),
-        'hit_rate':          round(hit_rate, 4),
-        'avg_holding_days':  round(avg_hold, 2),
-        'avg_pnl_pct':       round(mean_pnl * 100.0, 4),
+        'sharpe':           None if sharpe is None else round(sharpe, 4),
+        'max_dd_pct':       round(max_dd * 100.0, 4),
+        'return_pct':       round(return_pct, 4),
+        'total_trades':     len(trades),
+        'hit_rate':         round(hit_rate, 4),
+        'avg_holding_days': round(avg_hold, 2),
+        'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
     }
 
 
