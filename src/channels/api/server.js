@@ -4989,6 +4989,14 @@ function _normalizeDir(d) {
 // a column header doesn't fold the user's open tickers back up.
 //   { tableId: Set<ticker> }
 const _expandedTickers = {};
+
+// Raw signal rows, cached separately from _tableDataCache (which holds the
+// *grouped* array for sort/collapse). On any re-render triggered by
+// _bindSortable / _bindCollapse / _bindGroupClicks, the renderer needs the
+// raw rows back — feeding groups through _groupByTicker a second time
+// would silently produce empty rollups (the metrics-vanish + no-children
+// bug from the first ship).
+const _rawDataCache = {};
 function _isExpanded(tableId, ticker) {
   const s = _expandedTickers[tableId];
   return !!(s && s.has(ticker));
@@ -4997,7 +5005,7 @@ function _toggleExpanded(tableId, ticker, renderFn) {
   let s = _expandedTickers[tableId];
   if (!s) { s = new Set(); _expandedTickers[tableId] = s; }
   if (s.has(ticker)) s.delete(ticker); else s.add(ticker);
-  renderFn(_tableDataCache[tableId] || []);
+  renderFn(_rawDataCache[tableId] || []);
 }
 
 // Group raw signal rows by ticker. \`mode\` is 'open' or 'closed' — picks the
@@ -5096,6 +5104,13 @@ function _fmtPct(p, withSign) {
 
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
+  // Normalize: if a re-render fed groups back in (via _applySort cache),
+  // flatten to raw signal rows before re-grouping. Then store the raw
+  // form so sort/collapse/expand callbacks can pass it back next time.
+  if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
+    rows = rows.flatMap(g => g.signals);
+  }
+  _rawDataCache['pf-positions'] = rows;
   const groups = _groupByTicker(rows, 'open');
   document.getElementById('pf-pos-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
@@ -5176,6 +5191,10 @@ function renderPositions(rows) {
 
 function renderHistory(rows) {
   const el = document.getElementById('pf-history');
+  if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
+    rows = rows.flatMap(g => g.signals);
+  }
+  _rawDataCache['pf-history'] = rows;
   const groups = _groupByTicker(rows, 'closed');
   document.getElementById('pf-hist-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} trade\${rows.length === 1 ? '' : 's'}\` : '';
