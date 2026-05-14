@@ -397,6 +397,37 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
   }
 });
 
+// Lambda — daily notional deployed as multiple of NAV. Operator-tunable
+// from the Portfolio page slider. Sizer reads pipeline_config on every
+// cycle so a slider change takes effect on the next pipeline tick.
+// Range [0.10, 3.50] (default 2.0) anchored to current effective leverage.
+app.get('/api/config/lambda', async (req, res) => {
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'");
+    const row = r.rows[0];
+    res.json({
+      value:      row ? parseFloat(row.value) : 2.0,
+      min:        0.10, max: 3.50,
+      updated_at: row ? row.updated_at : null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/lambda', async (req, res) => {
+  const v = parseFloat(req.body && req.body.value);
+  if (!isFinite(v) || v < 0.10 || v > 3.50) {
+    return res.status(400).json({ error: 'value must be a number in [0.10, 3.50]' });
+  }
+  try {
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('position_sizing_lambda', $1, 'Daily notional deployed = lambda × NAV. Range [0.10, 3.50]. Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(v)]);
+    res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
     const [openRes, closedRes] = await Promise.all([
@@ -2463,6 +2494,12 @@ body.rs-chat-locked{overflow:hidden}
 .pf-heatmap-controls .pf-hm-info{flex:1}
 .pf-heatmap-controls .pf-hm-btn{background:transparent;border:1px solid var(--border);color:var(--blue);padding:3px 12px;border-radius:4px;font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .12s}
 .pf-heatmap-controls .pf-hm-btn:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
+.pf-lambda-control{display:flex;align-items:center;gap:8px;font-family:'SF Mono',monospace}
+.pf-lambda-control .pf-lambda-label{color:var(--muted);font-weight:600;font-size:11px}
+.pf-lambda-control input[type=range]{width:120px;height:4px;-webkit-appearance:none;background:var(--border2);border-radius:2px;outline:none;cursor:pointer}
+.pf-lambda-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0;box-shadow:0 0 0 1px rgba(88,166,255,0.4)}
+.pf-lambda-control input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0}
+.pf-lambda-control .pf-lambda-value{color:var(--blue);font-weight:700;font-size:11px;min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
 .pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
 .pf-heatmap.expanded{max-height:570px;overflow-y:auto}
 .pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
@@ -4982,6 +5019,10 @@ const _alphaInflight = {};
 // Account equity for tile dollar-P&L computation. Cached at module
 // scope so re-renders triggered by sort/expand don't need it re-passed.
 let _navCache = null;
+// Lambda — fetched on portfolio load + updated on slider drag. Sizer
+// reads this server-side from pipeline_config; the dashboard value is
+// purely cosmetic + the source of the PUT.
+let _lambdaCache = 2.0;
 
 async function loadPortfolio() {
   const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
@@ -4998,6 +5039,12 @@ async function loadPortfolio() {
   if (account && account.equity != null && isFinite(parseFloat(account.equity))) {
     _navCache = parseFloat(account.equity);
   }
+  // Pull lambda separately — small payload, fire-and-forget. Default 2.0
+  // if the endpoint hiccups.
+  try {
+    const lr = await fetch('/api/config/lambda').then(r => r.json());
+    if (lr && isFinite(parseFloat(lr.value))) _lambdaCache = parseFloat(lr.value);
+  } catch (_) { /* keep cached value */ }
   renderAccountRow(account);
   valueCurveData = valCurve;
   renderPortfolioSummary(summary, valCurve);
@@ -5471,6 +5518,11 @@ function renderPositions(rows) {
 
   const controls = \`<div class="pf-heatmap-controls">
     <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
+    <div class="pf-lambda-control" title="λ = total notional deployed each day as a multiple of NAV. Range 0.10–3.50.">
+      <span class="pf-lambda-label">λ</span>
+      <input type="range" id="pf-lambda-slider" min="0.10" max="3.50" step="0.05" value="\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}" />
+      <span class="pf-lambda-value" id="pf-lambda-value">\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}×</span>
+    </div>
     <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
   </div>\`;
   const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
@@ -5505,6 +5557,35 @@ function renderPositions(rows) {
     _heatmapExpanded['pf-positions'] = !expanded;
     renderPositions(_rawDataCache['pf-positions']);
   });
+
+  // Lambda slider — drag debounced 400ms; mirrors live to the readout.
+  // PUT lands in pipeline_config, next pipeline tick reads the new value.
+  const slider = el.querySelector('#pf-lambda-slider');
+  const readout = el.querySelector('#pf-lambda-value');
+  if (slider && readout) {
+    let timer = null;
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      readout.textContent = v.toFixed(2) + 'x';
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/config/lambda', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: v }),
+          });
+          if (r.ok) {
+            _lambdaCache = v;
+            toast('λ saved: ' + v.toFixed(2) + 'x — next cycle picks up the new value', 'ok', 4000);
+          } else {
+            toast('λ update failed', 'error', 4000);
+          }
+        } catch (e) {
+          toast('λ update error: ' + e.message, 'error', 4000);
+        }
+      }, 400);
+    });
+  }
 }
 
 function renderHistory(rows) {
