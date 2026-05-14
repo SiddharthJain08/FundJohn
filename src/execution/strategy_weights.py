@@ -341,12 +341,24 @@ def load_current(regime_state: str) -> list[dict]:
 
 
 def find_negative_across_all_eligible(conn=None) -> list[str]:
-    """Strategies whose effective_sharpe ≤ 0 across EVERY eligible regime.
+    """Strategies whose effective_sharpe ≤ 0 across EVERY eligible regime
+    AND that have ZERO closed positions to date.
 
-    These are demoted to candidate by auto_demote_negative_sharpe in
-    src/strategies/lifecycle.py. A strategy positive in any one of its
-    eligible regimes stays live (just excluded from the bad regimes via
-    weight = 0 rows that this engine simply doesn't write).
+    Two requirements:
+      1. No positive-Sharpe row in the current strategy_weights_by_regime
+         snapshot — the strategy has no regime where the formula would
+         deploy it.
+      2. No closed signals in signal_performance — the strategy has no
+         real-world track record. Strategies WITH closed positions
+         (positive or negative) stay live regardless of Sharpe; their
+         disposition is for MasterMind's weekly review + the operator
+         to decide, not the hardcoded engine.
+
+    Auto-demoted strategies are moved live→candidate via
+    auto_demote_negative_sharpe in src/strategies/lifecycle.py. A strategy
+    positive in any one of its eligible regimes stays live (excluded
+    only from the bad regimes via weight = 0 rows the engine doesn't
+    write).
     """
     own = conn is None
     if own:
@@ -358,12 +370,21 @@ def find_negative_across_all_eligible(conn=None) -> list[str]:
         if not active_ids:
             return []
         cur = conn.cursor()
+        # Set A: strategies with at least one positive-Sharpe regime
         cur.execute('''
             SELECT DISTINCT strategy_id FROM strategy_weights_by_regime
             WHERE is_current AND strategy_id = ANY(%s)
         ''', (active_ids,))
         with_any_positive = {r[0] for r in cur}
-        return [s for s in active_ids if s not in with_any_positive]
+        # Set B: strategies that have any closed signal
+        cur.execute('''
+            SELECT DISTINCT strategy_id FROM signal_performance
+            WHERE status = 'closed' AND strategy_id = ANY(%s)
+        ''', (active_ids,))
+        with_closed_history = {r[0] for r in cur}
+        # Demote-eligible = active AND (not in A) AND (not in B)
+        return [s for s in active_ids
+                if s not in with_any_positive and s not in with_closed_history]
     finally:
         if own:
             conn.close()
