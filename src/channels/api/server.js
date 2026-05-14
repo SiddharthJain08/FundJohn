@@ -347,43 +347,72 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
     }
     const live_sharpe = mu_combined / sigma;
 
-    // Per-strategy contribution: mean of that strategy's daily PnL on the
-    // ticker / SHARED ticker sigma. Means add linearly so Σ alpha = sharpe.
+    // Per-strategy pct-return + RATIO alpha:
+    //   alpha(s) = mean_pnl_pct(s on ticker) / mean_pnl_pct(ticker)
+    // Bigger than 1 when the strategy's average return on this ticker
+    // beats the ticker's own average across all strategies; less than 1
+    // when it lags. Per operator: this replaces the Sharpe-decomposition
+    // alpha for the active-positions matrix. live_sharpe is still
+    // returned in the payload as reference but not used by the bar
+    // renderer.
     const stratRes = await dbQuery(`
       SELECT es.strategy_id,
              es.direction,
-             SUM(sp.pnl_pct)::float AS sum_pnl,
-             COUNT(*)::int           AS n_trades
+             AVG(sp.pnl_pct)::float AS mean_pct,
+             COUNT(*)::int          AS n_trades
       FROM signal_performance sp
       JOIN execution_signals es ON es.id = sp.signal_id
       WHERE sp.status = 'closed' AND es.ticker = $1
       GROUP BY es.strategy_id, es.direction
     `, [ticker]);
-    // A strategy may hold both LONG and SHORT on the same ticker; roll up
-    // their contributions and tag the row with whichever direction had
-    // more trades (operator-visible).
+    // Ticker-level reference: mean(pnl_pct) over every closed trade.
+    const tickerStatsRes = await dbQuery(`
+      SELECT AVG(sp.pnl_pct)::float AS mean_pct, COUNT(*)::int AS n
+      FROM signal_performance sp
+      JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.status = 'closed' AND es.ticker = $1
+    `, [ticker]);
+    const ticker_mean_pct = parseFloat(tickerStatsRes.rows[0]?.mean_pct ?? 0);
+    const ticker_n        = parseInt(tickerStatsRes.rows[0]?.n ?? 0);
+
+    // A strategy can hold both LONG and SHORT on the same ticker. Roll up
+    // both groups: weighted average of mean_pct by trade count, sum n,
+    // dominant direction wins for display.
     const byStrat = new Map();
     for (const r of stratRes.rows) {
-      const mean_strat = parseFloat(r.sum_pnl) / days;
-      const alpha      = mean_strat / sigma;
+      const meanPct = parseFloat(r.mean_pct);
+      const n       = parseInt(r.n_trades);
       const cur = byStrat.get(r.strategy_id);
       if (!cur) {
         byStrat.set(r.strategy_id, {
-          strategy_id: r.strategy_id, alpha, dir: r.direction,
-          n_trades: r.n_trades, _domN: r.n_trades,
+          strategy_id: r.strategy_id,
+          mean_pct: meanPct, n_trades: n, dir: r.direction,
+          _wsum: meanPct * n, _domN: n,
         });
       } else {
-        cur.alpha += alpha;
-        cur.n_trades += r.n_trades;
-        if (r.n_trades > cur._domN) { cur.dir = r.direction; cur._domN = r.n_trades; }
+        cur._wsum    += meanPct * n;
+        cur.n_trades += n;
+        cur.mean_pct = cur._wsum / cur.n_trades;
+        if (n > cur._domN) { cur.dir = r.direction; cur._domN = n; }
       }
     }
-    const strategies = [...byStrat.values()]
-      .map(s => ({ strategy_id: s.strategy_id, alpha: s.alpha, dir: s.dir, n_trades: s.n_trades }))
-      .sort((a, b) => b.alpha - a.alpha);
+    const strategies = [...byStrat.values()].map(s => {
+      const alpha = (ticker_mean_pct !== 0 && isFinite(ticker_mean_pct))
+        ? s.mean_pct / ticker_mean_pct
+        : null;
+      return {
+        strategy_id: s.strategy_id,
+        mean_pct:    s.mean_pct,
+        n_trades:    s.n_trades,
+        dir:         s.dir,
+        alpha:       alpha,
+      };
+    }).sort((a, b) => (b.alpha ?? -Infinity) - (a.alpha ?? -Infinity));
 
     const payload = {
-      ticker, live_sharpe, days, strategies,
+      ticker, live_sharpe, days,
+      ticker_mean_pct, ticker_n,
+      strategies,
       computed_at: new Date().toISOString(),
     };
     if (_tickerAlphaCache.size >= _TICKER_ALPHA_CAP) {
@@ -5383,57 +5412,61 @@ function _fetchTickerAlpha(ticker, onReady) {
 }
 
 // Vertical stack of horizontal alpha-contribution bars — one per strategy
-// that's traded the ticker. By design Σ alpha = ticker live Sharpe. The
-// "= live Sharpe" badge in the header proves the invariant holds.
+// that's traded the ticker. Alpha is the RATIO of the strategy's average
+// pct return on this ticker to the ticker's overall average pct return.
+// alpha > 1 = strategy outperforms the ticker's baseline; < 1 = lags.
+// Sign is preserved: a strategy with avg_pct of opposite sign to the
+// ticker yields negative alpha (drag).
 function _buildAlphaBarsHtml(group) {
   const alpha = _alphaCache[group.ticker];
   if (!alpha) {
-    return \`<div class="alpha-bars empty">Loading alpha decomposition for <b>\${group.ticker}</b>…</div>\`;
-  }
-  if (alpha.live_sharpe == null) {
-    const reasonText = alpha.reason === 'insufficient_days'
-      ? \`<b>\${group.ticker}</b> has \${alpha.days} distinct closed-trade day\${alpha.days === 1 ? '' : 's'} — need ≥ 2 to compute a live Sharpe.\`
-      : alpha.reason === 'zero_variance'
-        ? \`<b>\${group.ticker}</b> closed-trade returns have zero variance — Sharpe undefined.\`
-        : \`Live Sharpe unavailable for <b>\${group.ticker}</b>\${alpha.reason ? ' (' + alpha.reason + ')' : ''}.\`;
-    return \`<div class="alpha-bars empty">\${reasonText}</div>\`;
+    return \`<div class="alpha-bars empty">Loading alpha for <b>\${group.ticker}</b>…</div>\`;
   }
   const strategies = alpha.strategies || [];
   if (!strategies.length) {
-    return \`<div class="alpha-bars empty">No per-strategy contributions for <b>\${group.ticker}</b>.</div>\`;
+    const reason = alpha.reason === 'insufficient_days'
+      ? \`<b>\${group.ticker}</b> has only \${alpha.days} closed-trade day(s) — need closed trades to compute pct-return alpha.\`
+      : \`No closed trades on <b>\${group.ticker}</b> yet.\`;
+    return \`<div class="alpha-bars empty">\${reason}</div>\`;
   }
-  const sum     = strategies.reduce((s, x) => s + (x.alpha || 0), 0);
-  const maxAbs  = Math.max(...strategies.map(s => Math.abs(s.alpha || 0))) || 1;
-  const matches = Math.abs(sum - alpha.live_sharpe) < 1e-6;
+  const ticker_pct = alpha.ticker_mean_pct;
+  if (!ticker_pct || !isFinite(ticker_pct)) {
+    return \`<div class="alpha-bars empty">Ticker <b>\${group.ticker}</b> has zero average pct return — alpha undefined.</div>\`;
+  }
 
-  const rows = strategies.map(s => {
-    const a = s.alpha;
-    const widthPct = (Math.abs(a) / maxAbs) * 50;
-    const sign = a >= 0 ? 'pos' : 'neg';
-    const cls  = a >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+  // Bars are scaled to the max |alpha| in this group. Centered on the
+  // 1.0× line: bar extends right when alpha > 1, left when alpha < 1.
+  const ranked = strategies.filter(s => s.alpha != null && isFinite(s.alpha));
+  const maxDist = Math.max(...ranked.map(s => Math.abs((s.alpha ?? 1) - 1))) || 1;
+
+  const rows = ranked.map(s => {
+    const a       = s.alpha;
+    const dist    = a - 1;
+    const widthPct = (Math.abs(dist) / maxDist) * 50;
+    const sign    = dist >= 0 ? 'pos' : 'neg';
+    const valCls  = a >= 1 ? 'pf-pnl-pos' : (a >= 0 ? 'pf-pnl-flat' : 'pf-pnl-neg');
     const dirNorm = _normalizeDir(s.dir);
+    const sPct    = (s.mean_pct * 100).toFixed(2) + '%';
+    const aTxt    = a.toFixed(2) + '×';
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${s.strategy_id} · \${s.n_trades} closed trade\${s.n_trades === 1 ? '' : 's'} on \${group.ticker}">\${s.strategy_id}</div>
+      <div class="ab-label" title="\${s.strategy_id} · avg \${sPct} over \${s.n_trades} closed trade\${s.n_trades === 1 ? '' : 's'}">\${s.strategy_id}</div>
       <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm || ''}</div>
       <div class="ab-track">
         <div class="ab-zero"></div>
         <div class="ab-fill \${sign}" style="width:\${widthPct.toFixed(2)}%"></div>
       </div>
-      <div class="ab-value \${cls}">\${(a >= 0 ? '+' : '') + a.toFixed(3)}</div>
+      <div class="ab-value \${valCls}">\${aTxt}</div>
     </div>\`;
   }).join('');
 
-  const sumCls    = sum >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-  const sumTxt    = (sum >= 0 ? '+' : '') + sum.toFixed(3);
-  const sharpeTxt = (alpha.live_sharpe >= 0 ? '+' : '') + alpha.live_sharpe.toFixed(3);
-  const badge     = matches
-    ? \`<span class="ab-badge">= live Sharpe \${sharpeTxt}</span>\`
-    : \`<span class="ab-badge ab-badge-warn">≠ live Sharpe \${sharpeTxt} (Δ \${(sum - alpha.live_sharpe).toFixed(4)})</span>\`;
+  const tickerPctTxt = (ticker_pct >= 0 ? '+' : '') + (ticker_pct * 100).toFixed(2) + '%';
+  const tickerPctCls = ticker_pct >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+  const badge = \`<span class="ab-badge">ticker avg = <span class="\${tickerPctCls}">\${tickerPctTxt}</span></span>\`;
 
   return \`<div class="alpha-bars">
     <div class="ab-title">
       <span class="ab-ticker">\${group.ticker}</span>
-      <span class="ab-meta">\${strategies.length} strateg\${strategies.length === 1 ? 'y' : 'ies'} · alpha sum = <span class="\${sumCls}">\${sumTxt}</span> \${badge}</span>
+      <span class="ab-meta">\${ranked.length} strateg\${ranked.length === 1 ? 'y' : 'ies'} · alpha = strategy avg / ticker avg · \${badge}</span>
     </div>
     <div class="ab-bars">\${rows}</div>
   </div>\`;
