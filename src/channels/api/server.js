@@ -2344,6 +2344,47 @@ body.rs-chat-locked{overflow:hidden}
 .db-table.grouped tr.strat-row .strat-name{color:var(--muted);font-family:inherit;font-size:9.5px;letter-spacing:.01em;display:inline-block;max-width:118px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 .db-table.grouped tr.strat-row:last-child td{border-bottom:1px solid var(--border2)}
 .wl-badge{display:inline-block;font-size:8.5px;font-weight:600;color:var(--dim);margin-left:4px;letter-spacing:.03em}
+
+/* ── Positions heatmap (slice-and-dice) ────────────────────────────────────
+ * Default layout: top-12 tickers in 3-4 rows, container ~280px tall. The
+ * "Show all" button on the section header flips _heatmapExpanded which
+ * renders all 260 tickers in adaptive rows of 12 inside a taller, scrollable
+ * container. Tile area encodes total_size_pct; tile background encodes
+ * net_pnl (red↔green at ±5%). Click any tile → inline alpha-bars panel
+ * appears below the heatmap; click the selected tile again to close.
+ */
+.pf-heatmap-controls{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--border2);background:rgba(13,17,23,0.35);font-size:10px;color:var(--muted);letter-spacing:.02em}
+.pf-heatmap-controls .pf-hm-info{flex:1}
+.pf-heatmap-controls .pf-hm-btn{background:transparent;border:1px solid var(--border);color:var(--blue);padding:3px 12px;border-radius:4px;font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .12s}
+.pf-heatmap-controls .pf-hm-btn:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
+.pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
+.pf-heatmap.expanded{max-height:570px;overflow-y:auto}
+.pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
+.pf-tile{position:relative;border:1px solid var(--border2);border-radius:4px;padding:5px 7px;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;min-width:0;transition:transform .1s,border-color .12s,box-shadow .12s;color:#fff}
+.pf-tile:hover{border-color:var(--blue);transform:scale(1.02);z-index:3;box-shadow:0 4px 12px rgba(0,0,0,0.5)}
+.pf-tile.selected{border-color:var(--blue);border-width:2px;padding:4px 6px;box-shadow:0 0 0 1px var(--blue),0 4px 12px rgba(88,166,255,0.25);z-index:4}
+.pf-tile .tk-symbol{font-weight:700;font-size:11.5px;letter-spacing:.04em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.6);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pf-tile .tk-pnl{font-size:10.5px;font-weight:600;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.5)}
+.pf-tile .tk-meta{font-size:9px;color:rgba(255,255,255,0.7);line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.4)}
+
+/* ── Alpha contribution bars ─────────────────────────────────────────────── */
+.alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
+.alpha-bars.empty{color:var(--dim);font-size:11px;padding:14px;text-align:center}
+.alpha-bars.empty b{color:var(--text);font-weight:600}
+.ab-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;padding-bottom:6px;border-bottom:1px dotted var(--border2)}
+.ab-title .ab-ticker{font-size:14px;font-weight:700;color:var(--blue);letter-spacing:.05em}
+.ab-title .ab-meta{font-size:10px;color:var(--muted);letter-spacing:.02em}
+.ab-bars{display:flex;flex-direction:column;gap:3px}
+.ab-row{display:flex;align-items:center;gap:8px;padding:1px 0;font-size:10.5px;min-height:18px}
+.ab-label{width:240px;flex-shrink:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;letter-spacing:.01em}
+.ab-dir{width:42px;flex-shrink:0;font-size:9px;letter-spacing:.04em;text-align:center}
+.ab-track{flex:1;position:relative;height:14px;background:rgba(48,54,61,0.35);border-radius:2px;min-width:120px}
+.ab-zero{position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(255,255,255,0.22)}
+.ab-fill{position:absolute;top:1px;bottom:1px;border-radius:2px;transition:width .3s ease}
+.ab-fill.pos{left:50%;background:linear-gradient(90deg,rgba(63,185,80,0.55),rgba(63,185,80,0.95))}
+.ab-fill.neg{right:50%;background:linear-gradient(270deg,rgba(248,81,73,0.55),rgba(248,81,73,0.95))}
+.ab-value{width:64px;flex-shrink:0;text-align:right;font-weight:600;font-variant-numeric:tabular-nums}
+.bars-row td.bars-cell{padding:0!important;background:rgba(13,17,23,0.4)}
 /* ── Regime Panel ── */
 .regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
 .regime-panel-header{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
@@ -3061,6 +3102,14 @@ async function loadMarket() {
   refreshPipeline();
   setInterval(refreshPipeline, 60000);
   setInterval(loadMarket, 300000);
+  // Portfolio fallback refresh: SSE market_update already retriggers
+  // loadPortfolio on intraday PnL marks, but if the EventSource hiccups
+  // the heatmap can go stale. Re-poll every 60s while the page is open
+  // so unrealized P&L + days-held keep drifting forward.
+  setInterval(() => {
+    const pp = document.getElementById('portfolio-page');
+    if (pp && pp.style.display === 'block') loadPortfolio();
+  }, 60_000);
 
   // SSE with auto-reconnect. EventSource has a built-in retry but it won't
   // resubscribe cleanly after the process behind /events restarts; we
@@ -5102,11 +5151,104 @@ function _fmtPct(p, withSign) {
   return s;
 }
 
+// Tile background color for the heatmap. \`pct\` is a P&L percent already
+// multiplied to its display scale (e.g. 1.5 for +1.5%). Anchored at ±5%
+// for full saturation; values beyond that just stay at peak intensity.
+// Returns an rgba() so the tile keeps a dark base on zero, gradient-fades
+// to green for winners and red for losers.
+function _pnlColor(pct) {
+  if (pct == null || !isFinite(pct) || pct === 0) return 'rgba(48,54,61,0.55)';
+  const t = Math.max(-1, Math.min(1, pct / 5));
+  if (t > 0) return 'rgba(63,185,80,'  + (0.18 + 0.72 * t).toFixed(2) + ')';
+  return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
+}
+
+// Vertical stack of horizontal contribution bars — one per strategy that
+// holds the ticker. Bars are centered on a zero-line: positive contribs
+// extend right (green), negative extend left (red). Length proportional
+// to |contrib| relative to the max-abs in this group. The label on the
+// left is the strategy id; the value on the right is signed contribution %.
+function _buildAlphaBarsHtml(group) {
+  const candidates = group.signals
+    .filter(s => s.contrib_pct != null && isFinite(s.contrib_pct))
+    .slice()
+    .sort((a, b) => (b.contrib_pct - a.contrib_pct));
+  if (!candidates.length) {
+    return \`<div class="alpha-bars empty">No contribution data for <b>\${group.ticker}</b> yet — \${group.n} signal\${group.n === 1 ? '' : 's'} pending mark-to-market.</div>\`;
+  }
+  const maxAbs = Math.max(...candidates.map(s => Math.abs(s.contrib_pct))) || 1;
+  const total  = candidates.reduce((s, x) => s + x.contrib_pct, 0) * 100;
+  const bars = candidates.map(s => {
+    const ct = s.contrib_pct * 100;
+    const widthPct = (Math.abs(s.contrib_pct) / maxAbs) * 50;
+    const sign = s.contrib_pct >= 0 ? 'pos' : 'neg';
+    const dirClass = _dirCls(s.dir_norm);
+    return \`<div class="ab-row">
+      <div class="ab-label" title="\${s.strategy_id || ''}">\${s.strategy_id || '—'}</div>
+      <div class="ab-dir \${dirClass}">\${s.dir_norm || ''}</div>
+      <div class="ab-track">
+        <div class="ab-zero"></div>
+        <div class="ab-fill \${sign}" style="width:\${widthPct.toFixed(2)}%"></div>
+      </div>
+      <div class="ab-value \${pnlCls(ct)}">\${_fmtPct(ct, true)}</div>
+    </div>\`;
+  }).join('');
+  return \`<div class="alpha-bars">
+    <div class="ab-title">
+      <span class="ab-ticker">\${group.ticker}</span>
+      <span class="ab-meta">\${candidates.length} strateg\${candidates.length === 1 ? 'y' : 'ies'} · Σ <span class="\${pnlCls(total)}">\${_fmtPct(total, true)}</span> of NAV</span>
+    </div>
+    <div class="ab-bars">\${bars}</div>
+  </div>\`;
+}
+
+// Slice-and-dice heatmap layout. Tiles sized by total_size_pct, packed
+// into rows. Each row's height ∝ its share of total size; each tile's
+// width ∝ its share of its row. Color encodes net_pnl. Click a tile to
+// reveal the per-strategy contribution bars below.
+//
+// Two display modes: compact (top 12, 3×4) and expanded (all tickers,
+// adaptive rows of ~12). The compact view fits in the section without
+// scrolling; expanded grows the container and lets the small-cap tail
+// be visible.
+const _heatmapSelected = {};   // { tableId: ticker | null }
+const _heatmapExpanded = {};   // { tableId: bool }
+
+function _buildHeatmapHtml(groups, selectedTicker, expanded) {
+  const sorted = [...groups].sort((a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0));
+  const containerHeight = expanded ? 560 : 280;
+  const tilesPerRow     = expanded ? 12 : 4;
+  const shown           = expanded ? sorted : sorted.slice(0, 12);
+  const overall = shown.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
+  let rowsHtml = '';
+  for (let i = 0; i < shown.length; i += tilesPerRow) {
+    const slice  = shown.slice(i, i + tilesPerRow);
+    const rowSum = slice.reduce((s, g) => s + (g.total_size_pct || 0), 0);
+    if (rowSum <= 0) continue;
+    const rowHeight = Math.max(36, (rowSum / overall) * containerHeight);
+    const tiles = slice.map(g => {
+      const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
+      const size = (g.total_size_pct || 0) * 100;
+      const widthPct = ((g.total_size_pct || 0) / rowSum) * 100;
+      const isSelected = g.ticker === selectedTicker;
+      const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+      const tip = \`\${g.ticker} · size \${size.toFixed(1)}% · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      return \`<div class="pf-tile \${isSelected ? 'selected' : ''}"
+                   data-ticker="\${g.ticker}"
+                   style="flex-basis:\${widthPct.toFixed(3)}%; background:\${_pnlColor(pnl)};"
+                   title="\${tip}">
+        <div class="tk-symbol">\${g.ticker}</div>
+        <div class="tk-pnl">\${pnl != null ? _fmtPct(pnl, true) : '—'}</div>
+        <div class="tk-meta">\${(size).toFixed(1)}% · \${days}</div>
+      </div>\`;
+    }).join('');
+    rowsHtml += \`<div class="pf-heatmap-row" style="height:\${rowHeight.toFixed(0)}px">\${tiles}</div>\`;
+  }
+  return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${rowsHtml}</div>\`;
+}
+
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
-  // Normalize: if a re-render fed groups back in (via _applySort cache),
-  // flatten to raw signal rows before re-grouping. Then store the raw
-  // form so sort/collapse/expand callbacks can pass it back next time.
   if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
     rows = rows.flatMap(g => g.signals);
   }
@@ -5115,78 +5257,38 @@ function renderPositions(rows) {
   document.getElementById('pf-pos-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
   if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
-  // Default sort: largest contribution magnitude first — biggest winners +
-  // biggest losers float to the top, both interesting to the operator. On
-  // a fresh-signal day (PnL not yet marked) contrib is 0 across the board,
-  // so the secondary key bubbles largest exposures up instead of falling
-  // back to insertion order.
-  if (!_sortState['pf-positions'] || !_sortState['pf-positions'].key) {
-    groups.sort((a, b) => {
-      const c = Math.abs(b.contrib_pct || 0) - Math.abs(a.contrib_pct || 0);
-      if (c !== 0) return c;
-      return (b.total_size_pct || 0) - (a.total_size_pct || 0);
+  const expanded = !!_heatmapExpanded['pf-positions'];
+  const selectedTicker = _heatmapSelected['pf-positions'] || null;
+  // Re-validate selection — if the operator's previously-selected ticker
+  // dropped out of the recent slice (closed, fell past the 90d window),
+  // clear it instead of rendering a stale bar chart.
+  const selectedGroup = selectedTicker ? groups.find(g => g.ticker === selectedTicker) : null;
+  if (!selectedGroup) _heatmapSelected['pf-positions'] = null;
+
+  const controls = \`<div class="pf-heatmap-controls">
+    <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
+    <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
+  </div>\`;
+  const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded);
+  const bars = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
+
+  el.innerHTML = controls + heatmap + bars;
+
+  // Click handlers — wire up tiles + expand toggle. Tile click toggles
+  // selection; clicking the already-selected tile collapses it.
+  el.querySelectorAll('.pf-tile').forEach(tile => {
+    tile.addEventListener('click', () => {
+      const tk = tile.dataset.ticker;
+      const cur = _heatmapSelected['pf-positions'];
+      _heatmapSelected['pf-positions'] = (cur === tk) ? null : tk;
+      renderPositions(_rawDataCache['pf-positions']);
     });
-  }
-  const sorted = _applySort('pf-positions', groups);
-  const { shown, footer } = _collapseRows('pf-positions', sorted);
-  const headers = \`<thead><tr>
-      <th data-sort-key="ticker" data-sort-type="str">Ticker</th>
-      <th class="num" data-sort-key="n" data-sort-type="num">#</th>
-      <th data-sort-key="net_dir" data-sort-type="str">Dir</th>
-      <th class="num" data-sort-key="avg_entry" data-sort-type="num">Entry</th>
-      <th class="num" data-sort-key="price" data-sort-type="num">Current</th>
-      <th class="num" data-sort-key="net_pnl" data-sort-type="num">P&amp;L %</th>
-      <th class="num" data-sort-key="contrib_pct" data-sort-type="num" title="Contribution to NAV = Σ(P&amp;L% × Size%). Signed.">Contrib %</th>
-      <th class="num" data-sort-key="total_size_pct" data-sort-type="num">Size %</th>
-      <th class="num" data-sort-key="avg_days" data-sort-type="num">Days</th>
-    </tr></thead>\`;
-  const body = shown.map(g => {
-    const expanded = _isExpanded('pf-positions', g.ticker);
-    const netPnl = g.net_pnl != null ? g.net_pnl * 100 : null;
-    const contrib = g.contrib_pct != null ? g.contrib_pct * 100 : null;
-    const chev = expanded ? '▾' : '▸';
-    const parent = \`<tr class="ticker-row \${expanded ? 'expanded' : ''}" data-ticker="\${g.ticker}">
-        <td class="tk-cell">
-          <span class="chev">\${chev}</span>
-          <span class="tk-name" onclick="event.stopPropagation();showMarket();selectTicker('\${g.ticker}')">\${g.ticker}</span>
-        </td>
-        <td class="num">\${g.n}</td>
-        <td class="\${_dirCls(g.net_dir)}">\${g.net_dir}</td>
-        <td class="num">\${g.avg_entry != null ? '$' + g.avg_entry.toFixed(2) : '—'}</td>
-        <td class="num">\${g.price != null ? '$' + g.price.toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls(netPnl)}">\${_fmtPct(netPnl, true)}</td>
-        <td class="num \${pnlCls(contrib)}">\${_fmtPct(contrib, true)}</td>
-        <td class="num">\${(g.total_size_pct * 100).toFixed(1)}%</td>
-        <td class="num">\${g.avg_days != null ? g.avg_days.toFixed(0) : '—'}</td>
-      </tr>\`;
-    const children = g.signals.map(s => {
-      const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) * 100 : null;
-      const pn = s.unrealized_pnl_pct != null ? parseFloat(s.unrealized_pnl_pct) * 100 : null;
-      const ct = s.contrib_pct != null ? s.contrib_pct * 100 : null;
-      // Stop + target are per-signal and don't aggregate at the ticker
-      // level — surface them on hover so the operator can read risk
-      // controls without rewiring the column layout.
-      const stop = s.stop_loss != null ? '$' + parseFloat(s.stop_loss).toFixed(2) : '—';
-      const tgt  = s.target_1   != null ? '$' + parseFloat(s.target_1).toFixed(2)   : '—';
-      const riskTitle = \`Stop: \${stop} · Target: \${tgt}\`;
-      return \`<tr class="strat-row" style="display:\${expanded ? 'table-row' : 'none'}" title="\${riskTitle}">
-        <td class="tk-cell"><span class="strat-name" title="\${s.strategy_id || ''}">↳ \${s.strategy_id || '—'}</span></td>
-        <td class="num"></td>
-        <td class="\${_dirCls(s.dir_norm)}">\${s.dir_norm || '—'}</td>
-        <td class="num">\${s.entry_price != null ? '$' + parseFloat(s.entry_price).toFixed(2) : '—'}</td>
-        <td class="num">\${s.current_price != null ? '$' + parseFloat(s.current_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls(pn)}">\${_fmtPct(pn, true)}</td>
-        <td class="num \${pnlCls(ct)}">\${_fmtPct(ct, true)}</td>
-        <td class="num">\${sz != null ? sz.toFixed(1) + '%' : '—'}</td>
-        <td class="num">\${s.days_held ?? '—'}</td>
-      </tr>\`;
-    }).join('');
-    return \`<tbody class="tk-group">\${parent}\${children}</tbody>\`;
-  }).join('');
-  el.innerHTML = \`<table class="db-table grouped" style="min-width:680px">\${headers}\${body}</table>\${footer}\`;
-  _bindGroupClicks('pf-positions', renderPositions);
-  _bindSortable('pf-positions', renderPositions);
-  _bindCollapse('pf-positions', renderPositions);
+  });
+  const toggle = el.querySelector('#pf-hm-toggle');
+  if (toggle) toggle.addEventListener('click', () => {
+    _heatmapExpanded['pf-positions'] = !expanded;
+    renderPositions(_rawDataCache['pf-positions']);
+  });
 }
 
 function renderHistory(rows) {
@@ -5236,25 +5338,12 @@ function renderHistory(rows) {
         <td class="num">\${g.avg_days != null ? g.avg_days.toFixed(0) : '—'}</td>
         <td style="color:var(--dim)">\${lc}</td>
       </tr>\`;
-    const children = g.signals.map(s => {
-      const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) * 100 : null;
-      const pn = s.realized_pnl_pct != null ? parseFloat(s.realized_pnl_pct) * 100 : null;
-      const ct = s.contrib_pct != null ? s.contrib_pct * 100 : null;
-      const cl = s.closed_at ? new Date(s.closed_at).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : '—';
-      const reasonAttr = s.close_reason ? \` title="\${(s.close_reason).replace(/"/g,'&quot;')}"\` : '';
-      return \`<tr class="strat-row" style="display:\${expanded ? 'table-row' : 'none'}"\${reasonAttr}>
-        <td class="tk-cell"><span class="strat-name" title="\${s.strategy_id || ''}">↳ \${s.strategy_id || '—'}</span></td>
-        <td class="num"></td>
-        <td class="\${_dirCls(s.dir_norm)}">\${s.dir_norm || '—'}</td>
-        <td class="num">\${s.entry_price != null ? '$' + parseFloat(s.entry_price).toFixed(2) : '—'}</td>
-        <td class="num">\${s.closed_price != null ? '$' + parseFloat(s.closed_price).toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls(pn)}">\${_fmtPct(pn, true)}</td>
-        <td class="num \${pnlCls(ct)}">\${_fmtPct(ct, true)}</td>
-        <td class="num">\${s.days_held ?? '—'}</td>
-        <td style="color:var(--dim)">\${cl}</td>
-      </tr>\`;
-    }).join('');
-    return \`<tbody class="tk-group">\${parent}\${children}</tbody>\`;
+    // Expanded sub-row: inline alpha-bar chart inside a 9-column-span cell.
+    // Replaces the older per-strategy detail table.
+    const barsCell = expanded
+      ? \`<tr class="bars-row"><td colspan="9" class="bars-cell">\${_buildAlphaBarsHtml(g)}</td></tr>\`
+      : '';
+    return \`<tbody class="tk-group">\${parent}\${barsCell}</tbody>\`;
   }).join('');
   el.innerHTML = \`<table class="db-table grouped" style="min-width:680px">\${headers}\${body}</table>\${footer}\`;
   _bindGroupClicks('pf-history', renderHistory);
