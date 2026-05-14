@@ -314,72 +314,28 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         return []
     scale = (lam * nav) / gross
 
-    PER_TICKER_CAP = 0.25 * nav
-    MIN_TRADE_USD  = 25.0
-    final_usd: dict[str, float] = {}
-    # Track excess by SIDE so long-cap-excess stays on the long side
-    # (and same for shorts). Mixing the two would flip a short-side
-    # cap into an additional long allocation — bug we hit in v1.
-    long_excess  = 0.0
-    short_excess = 0.0  # held as a positive magnitude
-    for tkr, w in ticker_w.items():
-        usd = w * scale
-        if abs(usd) < MIN_TRADE_USD:
-            # Sub-threshold tickers donate their (signed) notional to
-            # their side's redistribution pool.
-            if usd > 0: long_excess  += usd
-            else:        short_excess += -usd
-            continue
-        if abs(usd) > PER_TICKER_CAP:
-            sign = 1 if usd > 0 else -1
-            excess = abs(usd) - PER_TICKER_CAP
-            if sign > 0: long_excess  += excess
-            else:        short_excess += excess
-            usd = sign * PER_TICKER_CAP
-        final_usd[tkr] = usd
+    # Pure formulation (2026-05-14): target_usd = ticker_w × (λ × NAV / Σ|ticker_w|).
+    # High-conviction tickers (sum of contributing strategy weights × direction)
+    # get proportionally more allocation; no per-ticker cap, no min-trade floor,
+    # no redistribute pool. The operator explicitly accepts the concentration
+    # trade-off in exchange for honest expression of conviction.
+    target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
 
-    # Bucket-aware redistribution. Long-excess is spread proportionally
-    # across long survivors (those with usd > 0) by |usd|; same for
-    # shorts. One pass — newly-capped tickers stay capped.
-    def _redistribute_side(pool: float, side: int):
-        if pool <= 0.01:
-            return
-        survivors = [t for t, v in final_usd.items() if (v > 0) == (side > 0)]
-        total_abs = sum(abs(final_usd[t]) for t in survivors)
-        if total_abs <= 0:
-            return
-        for t in survivors:
-            share = pool * (abs(final_usd[t]) / total_abs)
-            final_usd[t] += side * share
-            if abs(final_usd[t]) > PER_TICKER_CAP:
-                final_usd[t] = side * PER_TICKER_CAP
-    _redistribute_side(long_excess,  +1)
-    _redistribute_side(short_excess, -1)
-
-    # ── Fix B: rebalance against current broker positions ────────────
-    # final_usd[tkr] is now the TARGET notional for each ticker (signed).
-    # To avoid stacking new orders on top of yesterday's positions, we
-    # compute the order DELTA = target - current. Tickers held but no
-    # longer in target → close orders (delta = -current). Daily PV
-    # consumption stays at λ × NAV instead of drifting.
+    # Rebalance against current broker positions: delta = target − current.
+    # Tickers held but no longer in target → close (delta = −current).
     broker = _load_broker_positions_usd()
-    target_usd = dict(final_usd)
     delta_usd: dict[str, float] = {}
-    # Targets present today → emit delta vs current
     for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        delta = target - current
-        if abs(delta) >= MIN_TRADE_USD:
+        delta = target - broker.get(tkr, 0.0)
+        if delta != 0.0:
             delta_usd[tkr] = delta
-    # Tickers we hold but no longer want → close them (delta = -current)
     for tkr, current in broker.items():
-        if tkr in target_usd:
+        if tkr in target_usd or current == 0.0:
             continue
-        if abs(current) >= MIN_TRADE_USD:
-            delta_usd[tkr] = -current
-            # Synthesise minimal meta so TradeJohn + downstream payload can index it
-            if tkr not in ticker_meta:
-                ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0]}
+        delta_usd[tkr] = -current
+        if tkr not in ticker_meta:
+            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
+                                'brackets': []}
     logger.info('regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, deltas=%d',
                 len(target_usd), len(broker), len(delta_usd))
 

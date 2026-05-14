@@ -5,10 +5,12 @@ trade_agent_llm.py and submits bracket orders to Alpaca paper.
 
 Safety gates (in order, any failure → skip):
   1. daily_signal_summary → same quality gate as the trade step.
-  2. Per-order NAV cap  — MAX_ORDER_PCT_NAV.
-  3. Daily total cap    — MAX_DAILY_NEW_NOTIONAL_PCT applied across the run.
-  4. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
+  2. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
      alpaca_order_id in position_recommendations.
+
+Note: all per-order and daily aggregate notional caps were dropped 2026-05-14.
+The sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
+formulation is the single source of deployment policy.
 
 Time-in-force: 'day' if currently in regular trading hours, 'opg'
 (market-on-open, next session) otherwise. This means the nightly 21:30
@@ -45,16 +47,14 @@ from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 
 
 # ── Safety knobs ────────────────────────────────────────────────────────────
-MAX_ORDER_PCT_NAV            = 0.05   # 5% NAV hard cap per order
-# 2026-05-14: Operator dropped the legacy daily-aggregate cap
-# (MAX_DAILY_NEW_NOTIONAL_PCT) + per-order minimum (MIN_EFFECTIVE_PCT) so
-# the new sharpe_cadence sizer's λ×NAV gross + 25%/ticker + $25 minimum is
-# the single source of deployment policy. The executor now only enforces
-# per-order MAX (above) and the RegT-buying-power ceiling (below).
-# Hard ceiling on cumulative new notional per cycle as a fraction of
-# RegT (overnight) buying power. Protects against runaway accumulation
-# even when sizer thinks there's headroom.
-MAX_BP_USAGE_PCT             = 0.50
+# 2026-05-14: All executor-side clamps removed by operator decision —
+# MAX_ORDER_PCT_NAV (5% per-order), MAX_DAILY_NEW_NOTIONAL_PCT (25% daily
+# aggregate), MIN_EFFECTIVE_PCT (0.1% per-order floor), MAX_BP_USAGE_PCT
+# (50% regt_bp backstop). The sharpe_cadence sizer's pure
+# target_usd = ticker_w × (λ × NAV / Σ|ticker_w|) formulation is the
+# single source of deployment policy. High-conviction tickers (multi-strategy
+# agreement) deserve the larger allocation the formula assigns; any cap here
+# would distort relative-conviction expression.
 
 # Per-run in-memory cache of tickers Alpaca paper rejected as
 # untradable/unsupported (delisted, halted, asset-not-found, etc.). Keyed
@@ -353,7 +353,6 @@ def execute_single(sess, equity, order, run_date):
         return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-positive entry',
                 'client_order_id': coid}
 
-    pct_nav = min(pct_nav, MAX_ORDER_PCT_NAV)
     notional = equity * pct_nav
     qty = max(1, int(notional / entry))
     # In-hours: execute immediately ('day' TIF). Off-hours: queue for next open
@@ -557,17 +556,11 @@ def main():
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
 
-    # RegT-buying-power ceiling as a final backstop against runaway
-    # accumulation. The legacy equity-based daily cap (25% × available_nav)
-    # was retired 2026-05-14 in favour of the sizer's own λ×NAV policy.
-    bp_cap = regt_bp * MAX_BP_USAGE_PCT
-
     # Reset per-run unsupported-asset cache.
     _unsupported_assets.clear()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
-    log(f'BP backstop: regt_bp × {MAX_BP_USAGE_PCT:.0%} = ${bp_cap:,.0f}  '
-        f'orders to attempt: {len(orders)}')
+    log(f'orders to attempt: {len(orders)} (pure sizer output — no executor-side cap)')
 
     submitted = []
     skipped   = []
@@ -581,13 +574,8 @@ def main():
             skipped.append({'ticker': ticker, 'reason': 'already executed'})
             continue
 
-        pct_nav = min(float(order.get('pct_nav') or 0.0), MAX_ORDER_PCT_NAV)
+        pct_nav = float(order.get('pct_nav') or 0.0)
         projected = equity * pct_nav
-        # BP-backstop only: cap cumulative new notional at MAX_BP_USAGE_PCT
-        # of regt_buying_power. The sizer already governs deployment policy.
-        if new_notional_total + projected > bp_cap:
-            skipped.append({'ticker': ticker, 'reason': f'BP backstop reached (${new_notional_total:,.0f} + ${projected:,.0f} > ${bp_cap:,.0f})'})
-            continue
 
         if args.dry_run:
             log(f'DRY {ticker} {sid}  would submit {pct_nav*100:.2f}% NAV (~${projected:,.0f})')
