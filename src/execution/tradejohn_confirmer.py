@@ -28,7 +28,7 @@ CLAUDE_BIN = '/usr/local/bin/claude-bin'
 # under $0.50.
 DEFAULT_MAX_BUDGET_USD = 0.50
 DEFAULT_MODEL = 'sonnet'
-FAIL_OPEN_DEFAULT = {'action': 'approve', 'multiplier': 1.0, 'rationale': 'fail_open_default'}
+FAIL_OPEN_DEFAULT = {'action': 'keep', 'rationale': 'fail_open_default'}
 
 def _build_prompt(proposals: list[dict]) -> str:
     """Compose the per-cycle prompt from the static template + per-ticker proposals."""
@@ -102,17 +102,17 @@ def _parse_response(raw: str, expected_tickers: list[str]) -> dict[str, dict]:
             logger.warning('tradejohn_confirmer: ticker %s missing or malformed; fail-open', ticker)
             out[ticker] = dict(FAIL_OPEN_DEFAULT)
             continue
-        action = entry.get('action', 'approve')
-        if action not in ('approve', 'veto', 'scale'):
-            logger.warning('tradejohn_confirmer: ticker %s invalid action %r; fail-open', ticker, action)
+        action = entry.get('action', 'keep')
+        # Legacy compat: prior schema used approve|veto|scale. Map to the
+        # new keep|cancel set so an older confirmer call site keeps working.
+        if action == 'approve': action = 'keep'
+        elif action == 'veto':  action = 'cancel'
+        elif action == 'scale': action = 'keep'  # we no longer adjust size
+        if action not in ('keep', 'cancel'):
+            logger.warning('tradejohn_confirmer: ticker %s invalid action %r; fail-open to keep', ticker, action)
             out[ticker] = dict(FAIL_OPEN_DEFAULT)
             continue
-        try:
-            multiplier = float(entry.get('multiplier', 1.0))
-            multiplier = max(0.0, min(2.0, multiplier))  # clamp to [0, 2]
-        except (TypeError, ValueError):
-            multiplier = 1.0
-        out[ticker] = {'action': action, 'multiplier': multiplier,
+        out[ticker] = {'action': action,
                        'rationale': str(entry.get('rationale', ''))[:500]}
     return out
 
