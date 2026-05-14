@@ -9,6 +9,7 @@ Mode dispatch (binary, by regime state):
 """
 from __future__ import annotations
 import logging
+import os
 from datetime import date
 
 from execution._kelly import enrich_with_kelly
@@ -161,22 +162,126 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
-def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
-    """Sharpe × cadence × direction sizer.
+def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
+                                cadence_by_strat: dict[str, int]):
+    """Pull every open signal still within its strategy's cadence window.
 
-    1. Look up per-(strategy, regime) daily_weight from
-       strategy_weights_by_regime via execution.strategy_weights.load_current.
-    2. For each ticker, sum daily_weight × direction across signalling
-       strategies. ticker_weight is signed.
-    3. Normalize so Σ |position_usd| = λ × NAV exactly.
-    4. Apply per-ticker 25% NAV cap + $25 minimum trade threshold;
-       redistribute excess proportionally across surviving tickers.
-    5. Pass surviving tickers through TradeJohn (keep/cancel only).
-    6. Emit orders in the deterministic_sizer / trade_agent_llm payload
-       shape: list of {ticker, strategy_id, direction, notional_usd,
-       pct_nav, shares (filled downstream), entry/stop/t1/t2 (filled
-       downstream), kelly_final, ev, p_t1, source_mode='sharpe_cadence',
-       contributing_strategies}.
+    "Information staying relevant in the period" per design spec: a
+    monthly strategy's signal contributes for ~21 trading days; a weekly
+    strategy's for 5; a daily strategy's for 1. We aggregate across the
+    window, not just today's emissions.
+
+    For each (strategy, ticker) pair we keep the **most recent** open
+    signal — if a strategy re-fires earlier than expected, the latest
+    direction supersedes the prior one.
+
+    Returns list of {strategy_id, ticker, direction} dicts ready for
+    the ticker_weight aggregation loop.
+    """
+    import psycopg2
+    import psycopg2.extras
+    from datetime import date as _date, timedelta as _timedelta
+
+    if not weight_by_strat:
+        return []
+
+    today = _date.today()
+    # Earliest signal_date that could still be active: today - max cadence
+    max_cad = max(cadence_by_strat.get(s, 1) for s in weight_by_strat) if cadence_by_strat else 1
+    # +2 calendar-day buffer to absorb weekend gaps when cadence is small
+    earliest = today - _timedelta(days=max_cad + 7)
+
+    sids = list(weight_by_strat.keys())
+    out = []
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute('''
+                    SELECT DISTINCT ON (strategy_id, ticker)
+                           strategy_id, ticker, direction, signal_date
+                    FROM execution_signals
+                    WHERE status = 'open'
+                      AND strategy_id = ANY(%s)
+                      AND signal_date >= %s
+                    ORDER BY strategy_id, ticker, signal_date DESC
+                ''', (sids, earliest))
+                rows = cur.fetchall()
+    except Exception as e:
+        logger.warning('sharpe_cadence: active-window fetch failed (%s); falling back to today-only', e)
+        return []
+    # Per-strategy cadence filter: drop signals older than the strategy's
+    # own window. The SQL query above used max_cad as a coarse upper
+    # bound; here we tighten per strategy.
+    for r in rows:
+        sid = r['strategy_id']
+        cad = cadence_by_strat.get(sid, 1)
+        age = (today - r['signal_date']).days
+        if age > cad + 2:        # 2-day weekend buffer
+            continue
+        out.append({'strategy_id': sid, 'ticker': r['ticker'],
+                    'direction': r['direction'], 'signal_date': r['signal_date']})
+    return out
+
+
+def _load_broker_positions_usd():
+    """Read current broker positions as {ticker: signed_market_value_usd}.
+
+    Positive = long, negative = short. Returns empty dict on any failure
+    (fail-safe: the sizer then behaves as if book is flat — emits target
+    orders, executor's idempotency catches duplicates).
+    """
+    import subprocess
+    import json as _json
+    try:
+        env = {**os.environ}
+        # Alpaca CLI auto-detects ALPACA_API_KEY/SECRET via env.
+        proc = subprocess.run(['/root/go/bin/alpaca', 'position', 'list'],
+                              capture_output=True, env=env, timeout=15)
+        if proc.returncode != 0:
+            logger.warning('sharpe_cadence: broker position fetch failed (%s)', proc.stderr.decode()[:200])
+            return {}
+        positions = _json.loads(proc.stdout)
+        out = {}
+        for p in positions:
+            try:
+                qty = float(p.get('qty', 0))
+                mkt = float(p.get('market_value', 0))
+                if qty == 0:
+                    continue
+                # market_value is signed (negative for shorts); use that.
+                out[p['symbol']] = mkt
+            except (TypeError, ValueError):
+                continue
+        return out
+    except Exception as e:
+        logger.warning('sharpe_cadence: broker fetch error (%s)', e)
+        return {}
+
+
+def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
+    """Sharpe × cadence × direction sizer with cadence-window aggregation
+    AND broker-position netting.
+
+    Steps:
+      1. Pull per-(strategy, regime) daily_weight from
+         strategy_weights_by_regime (load_current).
+      2. Pull every still-relevant open signal from the DB (any open
+         signal whose age is within its strategy's cadence_days). Latest
+         signal per (strategy, ticker) wins.
+      3. For each ticker, sum daily_weight × direction → ticker_weight.
+      4. Normalize so Σ |target_usd| = λ × NAV exactly.
+      5. Apply per-ticker 25% NAV cap + $25 minimum, bucket-aware
+         redistribute (long-pool, short-pool stay separate).
+      6. **Rebalance step**: read broker positions; the order_delta for
+         each ticker = target_usd − current_position_usd. Tickers held
+         but no longer signalled → emit close orders. This keeps daily
+         PV consumption = λ × NAV instead of stacking.
+      7. TradeJohn keep|cancel on the surviving deltas.
+      8. Emit orders in the deterministic_sizer payload shape.
+
+    The `signals` parameter (today's emissions) is now ignored in favour
+    of the DB query — anything emitted today is already persisted to
+    execution_signals by the signals step earlier in the pipeline.
     """
     from execution import strategy_weights as _sw
 
@@ -185,16 +290,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     if not rows:
         logger.info('regime_blended_sizer.sharpe_cadence: no current weights for %s', regime_state)
         return []
-    weight_by_strat = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
     lam = _load_lambda()
 
-    # Aggregate ticker_weight across signalling strategies. A strategy not
-    # in weight_by_strat is excluded (sharpe ≤ 0 in this regime, or not
-    # active). Its signals are dropped.
+    # Fix A: aggregate across cadence-window, not today-only.
+    active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
+    if not active:
+        # Fallback: use today's `signals` parameter (e.g. force_all day-1
+        # of regime, before signals are persisted)
+        active = signals or []
+        logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
+    else:
+        logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
+
+    # Aggregate ticker_weight across signalling strategies.
     from collections import defaultdict
     ticker_w = defaultdict(float)
     ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': []})
-    for s in signals:
+    for s in active:
         sid = s.get('strategy_id')
         tkr = s.get('ticker')
         if not sid or not tkr or sid not in weight_by_strat:
@@ -257,32 +371,62 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _redistribute_side(long_excess,  +1)
     _redistribute_side(short_excess, -1)
 
-    # TradeJohn keep/cancel (news veto only — never adjusts size).
+    # ── Fix B: rebalance against current broker positions ────────────
+    # final_usd[tkr] is now the TARGET notional for each ticker (signed).
+    # To avoid stacking new orders on top of yesterday's positions, we
+    # compute the order DELTA = target - current. Tickers held but no
+    # longer in target → close orders (delta = -current). Daily PV
+    # consumption stays at λ × NAV instead of drifting.
+    broker = _load_broker_positions_usd()
+    target_usd = dict(final_usd)
+    delta_usd: dict[str, float] = {}
+    # Targets present today → emit delta vs current
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        delta = target - current
+        if abs(delta) >= MIN_TRADE_USD:
+            delta_usd[tkr] = delta
+    # Tickers we hold but no longer want → close them (delta = -current)
+    for tkr, current in broker.items():
+        if tkr in target_usd:
+            continue
+        if abs(current) >= MIN_TRADE_USD:
+            delta_usd[tkr] = -current
+            # Synthesise minimal meta so TradeJohn + downstream payload can index it
+            if tkr not in ticker_meta:
+                ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0]}
+    logger.info('regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, deltas=%d',
+                len(target_usd), len(broker), len(delta_usd))
+
+    # TradeJohn keep|cancel (news veto only — never adjusts size).
+    # Operates on DELTAS now, not targets; cancels mean "leave the
+    # current position alone for this cycle".
     proposals = [{
         'ticker': tkr,
         'preliminary_size_usd': usd,
         'direction': 1 if usd >= 0 else -1,
-        'contributions': [{'strategy_id': sid, 'attribution_weight': 1.0 / len(ticker_meta[tkr]['strategies'])}
+        'contributions': [{'strategy_id': sid, 'attribution_weight': 1.0 / max(1, len(ticker_meta[tkr]['strategies']))}
                           for sid in ticker_meta[tkr]['strategies']],
         'bracket': {'entry_price': None, 'stop_loss': None, 'take_profit_1': None},
         'context': {'news_headlines': [], '30d_veto_history_for_ticker': 0,
                     'sector': '', 'hv30d': None},
-    } for tkr, usd in final_usd.items()]
+    } for tkr, usd in delta_usd.items()]
     actions = {}
     if confirmer:
         try:
             actions = confirmer(proposals) or {}
         except Exception as e:
             logger.warning('regime_blended_sizer.sharpe_cadence: confirmer failed (%s); keeping all', e)
-    for tkr in list(final_usd.keys()):
+    for tkr in list(delta_usd.keys()):
         a = (actions.get(tkr) or {}).get('action', 'keep')
         if a == 'cancel':
-            final_usd.pop(tkr)
+            delta_usd.pop(tkr)
 
-    # Emit orders. entry/stop/t1/t2 are filled downstream when the executor
-    # fetches the current quote; we only commit notional + direction here.
+    # Emit orders for the deltas only. entry/stop/t1/t2 are filled downstream
+    # when the executor fetches the current quote; we only commit
+    # delta-notional + direction here.
     orders = []
-    for tkr, usd in final_usd.items():
+    for tkr, usd in delta_usd.items():
         orders.append({
             'ticker':                  tkr,
             'strategy_id':             '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120],
@@ -298,6 +442,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'ev':                      0.0,
             'p_t1':                    0.5,
             'source_mode':             'sharpe_cadence',
+            'target_usd':              target_usd.get(tkr, 0.0),  # audit: what we wanted
+            'current_usd':             broker.get(tkr, 0.0),       # audit: what we had
             'contributing_strategies': ticker_meta[tkr]['strategies'],
         })
     return orders

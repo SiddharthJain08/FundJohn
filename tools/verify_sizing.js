@@ -77,21 +77,39 @@ const BASE = process.env.OPENCLAW_HOME || '/root/openclaw';
     const sized = JSON.parse(fs.readFileSync(file, 'utf8'));
     const orders = sized.orders || [];
     const nav = sized.account_equity || sized.equity || sized.nav || sized.account?.equity || 100000;
-    const sumUsd = orders.reduce((s, o) => s + (o.notional_usd || 0), 0);
     const lamRow = await pool.query("SELECT value FROM pipeline_config WHERE key='position_sizing_lambda'");
     const lam = parseFloat(lamRow.rows[0]?.value || 2.0);
+
+    // With Fix B (broker netting) in _sharpe_cadence_path, orders.notional_usd
+    // is now the DELTA against current broker positions. The λ invariant
+    // applies to the TARGET (orders[*].target_usd if present), not the
+    // delta sum. We also report the delta sum for transparency.
+    const isSharpeCadence = orders.length > 0 && orders[0].source_mode === 'sharpe_cadence';
+    const sumTarget = orders.reduce((s, o) => s + Math.abs(o.target_usd || 0), 0);
+    const sumDelta  = orders.reduce((s, o) => s + (o.notional_usd || 0), 0);
     const expected = lam * nav;
-    const diff = Math.abs(sumUsd - expected);
-    const ok1 = diff < 1.0;
+
     console.log(`\n=== lambda invariant (handoff: ${path.basename(file)}) ===`);
-    console.log(`  Σ usd       = $${sumUsd.toFixed(0)}`);
-    console.log(`  λ × NAV     = $${expected.toFixed(0)} (λ=${lam}, NAV=$${nav})`);
-    console.log(`  Δ           = $${diff.toFixed(2)}  ${ok1 ? 'PASS' : 'FAIL'}`);
-    if (!ok1) exit = 1;
-    const maxOrder = orders.length ? Math.max(...orders.map(o => o.notional_usd || 0)) : 0;
+    if (isSharpeCadence && sumTarget > 0) {
+      const diff = Math.abs(sumTarget - expected);
+      const ok = diff < 1.0;
+      console.log(`  Σ |target_usd| = $${sumTarget.toFixed(0)}  (post-rebalance position target)`);
+      console.log(`  λ × NAV        = $${expected.toFixed(0)} (λ=${lam}, NAV=$${nav})`);
+      console.log(`  Δ              = $${diff.toFixed(2)}  ${ok ? 'PASS' : 'FAIL'}`);
+      console.log(`  Σ |delta_usd|  = $${sumDelta.toFixed(0)}  (gross order flow this cycle, informational)`);
+      if (!ok) exit = 1;
+    } else {
+      const diff = Math.abs(sumDelta - expected);
+      const ok = diff < 1.0;
+      console.log(`  Σ usd       = $${sumDelta.toFixed(0)}`);
+      console.log(`  λ × NAV     = $${expected.toFixed(0)} (λ=${lam}, NAV=$${nav})`);
+      console.log(`  Δ           = $${diff.toFixed(2)}  ${ok ? 'PASS' : 'FAIL'}`);
+      if (!ok) exit = 1;
+    }
+    const maxOrder = orders.length ? Math.max(...orders.map(o => Math.abs(o.target_usd || o.notional_usd || 0))) : 0;
     const cap = 0.25 * nav;
     const ok2 = maxOrder <= cap + 1;
-    console.log(`  max order   = $${maxOrder.toFixed(0)}  cap=$${cap.toFixed(0)}  ${ok2 ? 'PASS' : 'FAIL'}`);
+    console.log(`  max ticker  = $${maxOrder.toFixed(0)}  cap=$${cap.toFixed(0)}  ${ok2 ? 'PASS' : 'FAIL'}`);
     if (!ok2) exit = 1;
   }
 
