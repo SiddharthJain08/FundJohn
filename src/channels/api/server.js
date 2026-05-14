@@ -2466,12 +2466,20 @@ body.rs-chat-locked{overflow:hidden}
 .pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
 .pf-heatmap.expanded{max-height:570px;overflow-y:auto}
 .pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
-.pf-tile{position:relative;border:1px solid var(--border2);border-radius:4px;padding:5px 7px;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;justify-content:space-between;min-width:0;transition:transform .1s,border-color .12s,box-shadow .12s;color:#fff}
-.pf-tile:hover{border-color:var(--blue);transform:scale(1.02);z-index:3;box-shadow:0 4px 12px rgba(0,0,0,0.5)}
-.pf-tile.selected{border-color:var(--blue);border-width:2px;padding:4px 6px;box-shadow:0 0 0 1px var(--blue),0 4px 12px rgba(88,166,255,0.25);z-index:4}
-.pf-tile .tk-symbol{font-weight:700;font-size:11.5px;letter-spacing:.04em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.6);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pf-tile .tk-pnl{font-size:10.5px;font-weight:600;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.5)}
-.pf-tile .tk-meta{font-size:9px;color:rgba(255,255,255,0.7);line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.4)}
+/* Heatmap tile — option C: centered hero + dark footer strip. Hero is
+ * ticker (big) + pct return / $ P&L (second line, centered as a pair).
+ * Strip pins to bottom with size % left, days right. Size % is normalized
+ * share-of-book (sums to 100% across the recent universe). */
+.pf-tile{position:relative;border:1px solid rgba(255,255,255,0.06);border-radius:6px;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;min-width:0;color:#fff;transition:transform .12s,border-color .12s,box-shadow .12s;box-shadow:0 1px 3px rgba(0,0,0,0.35)}
+.pf-tile:hover{border-color:rgba(88,166,255,0.6);transform:translateY(-1px);z-index:3;box-shadow:0 6px 14px rgba(0,0,0,0.6)}
+.pf-tile.selected{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 6px 14px rgba(88,166,255,0.25);z-index:4}
+.pf-tile-hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 6px 4px;text-align:center;gap:3px;min-height:0}
+.pf-tile-hero .tk-symbol{font-weight:800;font-size:14px;letter-spacing:.08em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.pf-tile-hero .tk-row{display:flex;align-items:baseline;gap:8px;line-height:1.1}
+.pf-tile-hero .tk-pnl{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
+.pf-tile-hero .tk-dollar{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;opacity:0.92;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
+.pf-tile-strip{display:flex;justify-content:space-between;align-items:center;padding:3px 8px;font-size:9.5px;font-weight:500;letter-spacing:.04em;background:rgba(0,0,0,0.32);border-top:1px solid rgba(255,255,255,0.07);color:rgba(255,255,255,0.85);flex-shrink:0}
+.pf-tile-strip span{font-variant-numeric:tabular-nums}
 
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
 .alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
@@ -5267,10 +5275,32 @@ function _dirCls(d) {
   if (d === 'MIXED') return 'dir-mixed';
   return '';
 }
-function _fmtPct(p, withSign) {
+// Signed percent formatter — input is already in display percent units
+// (e.g. 0.84 → "+0.84%"). Distinct from the older _fmtPct(v) defined
+// later in this file which multiplies by 100 internally; the two would
+// collide (later function wins via JS hoisting) so this one carries a
+// unique name.
+function _fmtPctSigned(p, withSign) {
   if (p == null || !isFinite(p)) return '—';
   const s = (withSign && p > 0 ? '+' : '') + p.toFixed(2) + '%';
   return s;
+}
+
+// Compact dollar formatter with optional sign. Examples:
+//   _fmtDollar(234)         → "$234"
+//   _fmtDollar(234, true)   → "+$234"
+//   _fmtDollar(-1234)       → "-$1.2k"
+//   _fmtDollar(12345, true) → "+$12.3k"
+//   _fmtDollar(2345000)     → "$2.3M"
+function _fmtDollar(v, withSign) {
+  if (v == null || !isFinite(v)) return '';
+  const sign = withSign ? (v > 0 ? '+' : (v < 0 ? '-' : '')) : (v < 0 ? '-' : '');
+  const abs = Math.abs(v);
+  let body;
+  if (abs >= 1e6)      body = (abs / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  else if (abs >= 1e3) body = (abs / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+  else                 body = Math.round(abs).toString();
+  return sign + '$' + body;
 }
 
 // Tile background color for the heatmap. \`pct\` is a P&L percent already
@@ -5369,32 +5399,46 @@ function _buildAlphaBarsHtml(group) {
 const _heatmapSelected = {};   // { tableId: ticker | null }
 const _heatmapExpanded = {};   // { tableId: bool }
 
-function _buildHeatmapHtml(groups, selectedTicker, expanded) {
+function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const sorted = [...groups].sort((a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0));
   const containerHeight = expanded ? 560 : 280;
   const tilesPerRow     = expanded ? 12 : 4;
   const shown           = expanded ? sorted : sorted.slice(0, 12);
-  const overall = shown.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
+  // Size denominator: full universe of tickers, not just the visible slice.
+  // Compact view → share-of-book stays stable when the operator expands.
+  const sizeDenom = sorted.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
+  const overall   = shown.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
   let rowsHtml = '';
   for (let i = 0; i < shown.length; i += tilesPerRow) {
     const slice  = shown.slice(i, i + tilesPerRow);
     const rowSum = slice.reduce((s, g) => s + (g.total_size_pct || 0), 0);
     if (rowSum <= 0) continue;
-    const rowHeight = Math.max(36, (rowSum / overall) * containerHeight);
+    const rowHeight = Math.max(56, (rowSum / overall) * containerHeight);
     const tiles = slice.map(g => {
       const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
-      const size = (g.total_size_pct || 0) * 100;
+      const sharePct    = ((g.total_size_pct || 0) / sizeDenom) * 100;
+      const rawNotional = (g.total_size_pct || 0) * 100;
+      const dollarPnl   = (nav && isFinite(nav) && g.contrib_pct != null)
+                            ? g.contrib_pct * nav : null;
       const widthPct = ((g.total_size_pct || 0) / rowSum) * 100;
-      const isSelected = g.ticker === selectedTicker;
-      const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
-      const tip = \`\${g.ticker} · size \${size.toFixed(1)}% · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
-      return \`<div class="pf-tile \${isSelected ? 'selected' : ''}"
+      const isSel    = g.ticker === selectedTicker;
+      const days     = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      return \`<div class="pf-tile \${isSel ? 'selected' : ''}"
                    data-ticker="\${g.ticker}"
                    style="flex-basis:\${widthPct.toFixed(3)}%; background:\${_pnlColor(pnl)};"
                    title="\${tip}">
-        <div class="tk-symbol">\${g.ticker}</div>
-        <div class="tk-pnl">\${pnl != null ? _fmtPct(pnl, true) : '—'}</div>
-        <div class="tk-meta">\${(size).toFixed(1)}% · \${days}</div>
+        <div class="pf-tile-hero">
+          <div class="tk-symbol">\${g.ticker}</div>
+          <div class="tk-row">
+            <span class="tk-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+            \${dollarPnl != null ? '<span class="tk-dollar">' + _fmtDollar(dollarPnl, true) + '</span>' : ''}
+          </div>
+        </div>
+        <div class="pf-tile-strip">
+          <span>\${sharePct.toFixed(1)}%</span>
+          <span>\${days}</span>
+        </div>
       </div>\`;
     }).join('');
     rowsHtml += \`<div class="pf-heatmap-row" style="height:\${rowHeight.toFixed(0)}px">\${tiles}</div>\`;
@@ -5424,7 +5468,7 @@ function renderPositions(rows) {
     <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
     <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
   </div>\`;
-  const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded);
+  const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
   const bars = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
 
   el.innerHTML = controls + heatmap + bars;
@@ -5488,8 +5532,8 @@ function renderHistory(rows) {
         <td class="\${_dirCls(g.net_dir)}">\${g.net_dir}</td>
         <td class="num">\${g.avg_entry != null ? '$' + g.avg_entry.toFixed(2) : '—'}</td>
         <td class="num">\${g.price != null ? '$' + g.price.toFixed(2) : '—'}</td>
-        <td class="num \${pnlCls(netPnl)}">\${_fmtPct(netPnl, true)}</td>
-        <td class="num \${pnlCls(contrib)}">\${_fmtPct(contrib, true)}</td>
+        <td class="num \${pnlCls(netPnl)}">\${_fmtPctSigned(netPnl, true)}</td>
+        <td class="num \${pnlCls(contrib)}">\${_fmtPctSigned(contrib, true)}</td>
         <td class="num">\${g.avg_days != null ? g.avg_days.toFixed(0) : '—'}</td>
         <td style="color:var(--dim)">\${lc}</td>
       </tr>\`;
