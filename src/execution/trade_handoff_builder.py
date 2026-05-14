@@ -399,6 +399,32 @@ def load_yesterdays_performance_outliers(uri: str, run_date: str) -> tuple[list[
     return overperformers, underperformers
 
 
+def load_tradable_universe(uri: str) -> set[str]:
+    """Return the set of symbols Alpaca currently reports tradable + active.
+
+    Populated by src/maintenance/refresh_tradable_universe.py (daily timer).
+    Returns an empty set on any failure — the caller treats empty as
+    "fail-open" and skips the tradability filter, so a missing universe
+    table can't halt trading. Staleness is surfaced separately by the
+    universe_freshness system_check.
+    """
+    if not uri:
+        return set()
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT symbol FROM alpaca_tradable_universe
+               WHERE tradable = TRUE AND status = 'active'"""
+        )
+        out = {r[0] for r in cur.fetchall()}
+        conn.close()
+        return out
+    except Exception as e:
+        print(f'[handoff] load_tradable_universe failed ({type(e).__name__}: {e})')
+        return set()
+
+
 def load_mastermind_rec(uri: str) -> dict | None:
     """Latest strategy_sizing_recommendations (derived from the Saturday
     comprehensive_review memos) — per-strategy sizing / stop / target /
@@ -651,17 +677,38 @@ def build(run_date: str) -> dict:
             except Exception as e:
                 print(f'[handoff] {sig.get("ticker")}/{sig.get("strategy_id")}: {e}')
 
+    # Load the Alpaca-tradable universe so signals on delisted / halted /
+    # unsupported tickers (FX, indexes, crypto, OTC) are dropped at the
+    # handoff boundary instead of burning Alpaca submissions. Populated
+    # by src/maintenance/refresh_tradable_universe.py — empty set means
+    # the refresher hasn't run yet or DB is down; in that case we skip the
+    # filter (fail-open) so a missing universe table can't halt trading.
+    tradable_symbols = load_tradable_universe(uri)
+
     # Pre-filter: split enriched into green-for-TradeJohn vs prefiltered.
     # The prefiltered list flows through to #trade-reports via send_report
     # so the operator still sees what got dropped and why.
     green: list[dict] = []
     prefiltered: list[dict] = []
     for f in enriched:
+        # Tradability gate first — cheapest, no downstream value in
+        # scoring an untradable ticker.
+        ticker = f.get('ticker')
+        if tradable_symbols and ticker not in tradable_symbols:
+            prefiltered.append({
+                'ticker':      ticker,
+                'strategy_id': f.get('strategy_id'),
+                'direction':   f.get('direction'),
+                'reason':      'untradable_at_alpaca',
+                'ev':          f.get('ev_gbm'),
+                'p_t1':        f.get('p_t1'),
+            })
+            continue
         ev = f.get('ev_gbm')
         p  = f.get('p_t1')
         if ev is None or ev < MIN_EV_GBM:
             prefiltered.append({
-                'ticker':      f.get('ticker'),
+                'ticker':      ticker,
                 'strategy_id': f.get('strategy_id'),
                 'direction':   f.get('direction'),
                 'reason':      'prefilter_negative_ev' if (ev is not None and ev < 0) else 'prefilter_low_ev',
@@ -671,7 +718,7 @@ def build(run_date: str) -> dict:
             continue
         if p is None or p < MIN_P_T1:
             prefiltered.append({
-                'ticker':      f.get('ticker'),
+                'ticker':      ticker,
                 'strategy_id': f.get('strategy_id'),
                 'direction':   f.get('direction'),
                 'reason':      'prefilter_low_pt1',
@@ -680,8 +727,10 @@ def build(run_date: str) -> dict:
             })
             continue
         green.append(f)
+    untradable_n = sum(1 for p in prefiltered if p.get('reason') == 'untradable_at_alpaca')
     print(f'[handoff] prefilter: {len(green)} green / {len(prefiltered)} filtered '
-          f'(min_ev={MIN_EV_GBM}, min_p_t1={MIN_P_T1})')
+          f'(min_ev={MIN_EV_GBM}, min_p_t1={MIN_P_T1}, untradable={untradable_n}, '
+          f'universe_size={len(tradable_symbols) or "FAIL-OPEN"})')
 
     # ── Attach per-signal d-1 outlier context + per-strategy aggregates ────────
     # TradeJohn operates on today's green signals; he only needs the d-1

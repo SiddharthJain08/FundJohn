@@ -7,3 +7,4 @@ from . import regime     # noqa: F401
 from . import strategies # noqa: F401
 from . import agents     # noqa: F401
 from . import storage    # noqa: F401
+from . import universe   # noqa: F401
