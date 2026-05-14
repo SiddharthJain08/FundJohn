@@ -783,6 +783,54 @@ app.get('/api/strategies', async (req, res) => {
     `)).rows;
     const srById = Object.fromEntries(srRows.map(r => [r.id, r]));
 
+    // Unified-backtest (2026-05-14) is the canonical source-of-truth for
+    // backtest metrics. We read the latest primary_window=true run per
+    // strategy and the per-regime breakdown, then merge into a {sharpe,
+    // max_dd_pct, return_pct, trade_count, regime_breakdown} map keyed by
+    // strategy_id. Strategies that haven't been backfilled yet fall back
+    // to strategy_registry's legacy columns (which still get populated by
+    // auto_backtest until the research-orch migration in phase 2.3).
+    const ubtRunRows = (await dbQuery(`
+      SELECT DISTINCT ON (strategy_id)
+             strategy_id, total_sharpe, total_max_dd_pct, total_return_pct,
+             total_trades, run_at
+      FROM strategy_backtest_runs
+      WHERE primary_window = TRUE
+      ORDER BY strategy_id, run_at DESC
+    `).catch(() => ({ rows: [] }))).rows;
+    const ubtRegimeRows = (await dbQuery(`
+      SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
+             br.max_dd_pct, br.return_pct, br.hit_rate
+      FROM strategy_backtest_regimes br
+      JOIN (
+        SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+        FROM strategy_backtest_runs WHERE primary_window = TRUE
+        ORDER BY strategy_id, run_at DESC
+      ) r ON r.run_id = br.run_id
+    `).catch(() => ({ rows: [] }))).rows;
+    const unifiedBacktest = {};
+    for (const r of ubtRunRows) {
+      unifiedBacktest[r.strategy_id] = {
+        sharpe:      r.total_sharpe,
+        return_pct:  r.total_return_pct,
+        max_dd_pct:  r.total_max_dd_pct,
+        trade_count: r.total_trades,
+        run_at:      r.run_at,
+        regime_breakdown: {},
+      };
+    }
+    for (const r of ubtRegimeRows) {
+      const entry = unifiedBacktest[r.strategy_id];
+      if (!entry) continue;
+      entry.regime_breakdown[r.regime_state] = {
+        sharpe:      r.sharpe,
+        max_dd:      r.max_dd_pct != null ? r.max_dd_pct / 100 : null,  // breakdown JSON uses fraction
+        total_return_pct: r.return_pct,
+        trade_count: r.trade_count,
+        hit_rate:    r.hit_rate,
+      };
+    }
+
     // Resolve which `data_requirements_planned` columns are NOT known to any
     // provider/collector. These rows would be rejected by the staging worker
     // with `error: 'unsupported_source'`. We surface them on staging rows as
@@ -924,11 +972,14 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:           sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        // Unified backtest (2026-05-14) is canonical; fall back to legacy
+        // strategy_registry columns for strategies not yet backfilled.
+        backtest_sharpe:           unifiedBacktest[sid]?.sharpe           ?? sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       unifiedBacktest[sid]?.return_pct       ?? sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      unifiedBacktest[sid]?.trade_count      ?? sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_run_at:           unifiedBacktest[sid]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
@@ -976,11 +1027,14 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:           sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        // Unified backtest (2026-05-14) is canonical; fall back to legacy
+        // strategy_registry columns for strategies not yet backfilled.
+        backtest_sharpe:           unifiedBacktest[s.strategy_id]?.sharpe           ?? sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       unifiedBacktest[s.strategy_id]?.return_pct       ?? sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[s.strategy_id]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      unifiedBacktest[s.strategy_id]?.trade_count      ?? sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_run_at:           unifiedBacktest[s.strategy_id]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
@@ -1081,16 +1135,32 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // operator-gated promotion step.
   const failedGates = [];
   if (tKey === 'candidate:live' && !force) {
-    let sr = {};
+    // Read unified backtest first (canonical 2026-05-14); legacy
+    // strategy_registry as fallback for strategies not yet backfilled.
+    let sharpe = NaN, maxDd = NaN;
     try {
-      const srRes = await dbQuery(
-        `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
+      const ubt = await dbQuery(
+        `SELECT total_sharpe, total_max_dd_pct FROM strategy_backtest_runs
+          WHERE strategy_id = $1 AND primary_window = TRUE
+          ORDER BY run_at DESC LIMIT 1`,
         [sid]
       );
-      sr = srRes.rows[0] || {};
+      if (ubt.rows[0]) {
+        sharpe = parseFloat(ubt.rows[0].total_sharpe);
+        maxDd  = parseFloat(ubt.rows[0].total_max_dd_pct);
+      }
     } catch (_) {}
-    const sharpe = parseFloat(sr.backtest_sharpe);
-    const maxDd  = parseFloat(sr.backtest_max_dd_pct);
+    if (isNaN(sharpe) || isNaN(maxDd)) {
+      try {
+        const srRes = await dbQuery(
+          `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
+          [sid]
+        );
+        const sr = srRes.rows[0] || {};
+        if (isNaN(sharpe)) sharpe = parseFloat(sr.backtest_sharpe);
+        if (isNaN(maxDd))  maxDd  = parseFloat(sr.backtest_max_dd_pct);
+      } catch (_) {}
+    }
     if (!isNaN(sharpe) && sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
     if (!isNaN(maxDd)  && maxDd  > CANDIDATE_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
     if (failedGates.length > 0) {
