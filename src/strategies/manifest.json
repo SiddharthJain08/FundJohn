@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-14T04:34:27.931281+00:00",
+  "updated_at": "2026-05-14T23:22:06.099616Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "staging",
@@ -84,8 +84,8 @@
       ]
     },
     "S_transitioning_overbought_revert": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.685131+00:00",
+      "state": "live",
+      "state_since": "2026-05-14T14:00:17.853Z",
       "metadata": {
         "canonical_file": "S_transitioning_overbought_revert.py",
         "class": "TransitioningOverboughtRevert",
@@ -121,7 +121,10 @@
           "eligible_regimes_proposed": [],
           "gate_result": "fail",
           "failure_reason": "Sharpe -0.087 below min_sharpe 0.5 in TRANSITIONING; avg_r -0.25 below min_avg_r 0.0. RSI overbought momentum continuation dominates mean reversion across all parameter variations (RSI 70/75/80/85) and all regimes."
-        }
+        },
+        "eligible_regimes": [
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -176,16 +179,45 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_manual",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-14T13:53:18.257Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-14T13:53:18.891693+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-14T14:00:17.853Z",
+          "actor": "manual:repromote-after-bt-fallback-fix",
+          "reason": "Re-promote after _load_backtest_sharpe fallback to strategy_registry. Auto-demote bounced this earlier because strategy_regime_backtests had no rows.",
+          "metadata": {}
         }
       ]
     },
     "S_reversal_momentum_transition_earnings": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.696953+00:00",
+      "state": "live",
+      "state_since": "2026-05-14T14:00:19.908Z",
       "metadata": {
         "canonical_file": "S_reversal_momentum_transition_earnings.py",
         "class": "ReversalMomentumTransitionEarnings",
-        "description": "Stock returns exhibit short-horizon reversals that gradually transition to momentum, driven by noise-trader demand and active investor underreaction; earnings announcements attenuate reversals, and the reversal-momentum tradeoff varies predictably with noise trading intensity acr"
+        "description": "Stock returns exhibit short-horizon reversals that gradually transition to momentum, driven by noise-trader demand and active investor underreaction; earnings announcements attenuate reversals, and the reversal-momentum tradeoff varies predictably with noise trading intensity acr",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -240,6 +272,30 @@
           "timestamp": "2026-05-14T04:34:27.696953+00:00",
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_manual",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-14T13:53:26.535Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-14T13:53:27.115731+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-14T14:00:19.908Z",
+          "actor": "manual:repromote-after-bt-fallback-fix",
+          "reason": "Re-promote after _load_backtest_sharpe fallback to strategy_registry. Auto-demote bounced this earlier because strategy_regime_backtests had no rows.",
           "metadata": {}
         }
       ]
@@ -301,7 +357,13 @@
       "metadata": {
         "canonical_file": "S_ptree_panel_tangency.py",
         "class": "PTreePanelTangency",
-        "description": "Panel Trees (P-Trees) recursively partition the broad equity cross-section on financial characteristics to construct mean-variance efficient test assets whose tangency portfolio significantly advances the efficient frontier beyond standard factor-sorted portfolios, generating alp"
+        "description": "Panel Trees (P-Trees) recursively partition the broad equity cross-section on financial characteristics to construct mean-variance efficient test assets whose tangency portfolio significantly advances the efficient frontier beyond standard factor-sorted portfolios, generating alp",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -338,7 +400,7 @@
     },
     "S_constrained_gmv_vcv_dynamics": {
       "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.710245+00:00",
+      "state_since": "2026-05-14T05:23:21.360200+00:00",
       "metadata": {
         "canonical_file": "S_constrained_gmv_vcv_dynamics.py",
         "class": "ConstrainedGMVVCVDynamics",
@@ -360,16 +422,40 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_manual",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-14T05:23:20.728Z",
+          "actor": "test:smoke",
+          "reason": "smoke test rebuild on stack-entry",
+          "metadata": {
+            "override": true,
+            "failed_gates": []
+          }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-14T05:23:21.360200+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
         }
       ]
     },
     "S_intl_momentum_attention_regime": {
       "state": "live",
-      "state_since": "2026-05-03T21:51:15.110Z",
+      "state_since": "2026-05-14T05:22:44.675584Z",
       "metadata": {
         "canonical_file": "S_intl_momentum_attention_regime.py",
         "class": "IntlMomentumAttentionRegime",
-        "description": "12-1m momentum top/bottom quintile filtered by up-market and low realized-vol"
+        "description": "12-1m momentum top/bottom quintile filtered by up-market and low realized-vol",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -378,6 +464,38 @@
           "timestamp": "2026-05-03T21:51:15.110Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "monitoring",
+          "timestamp": "2026-05-14T05:22:23.258Z",
+          "actor": "test:smoke",
+          "reason": "verify rebuild on live\u2192mon",
+          "metadata": {}
+        },
+        {
+          "from_state": "monitoring",
+          "to_state": "live",
+          "timestamp": "2026-05-14T05:22:31.495Z",
+          "actor": "test:smoke",
+          "reason": "restore",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-14T05:22:39.632Z",
+          "actor": "test:smoke",
+          "reason": "test stack-leave triggers rebuild",
+          "metadata": {}
+        },
+        {
+          "from_state": "deprecated",
+          "to_state": "live",
+          "timestamp": "2026-05-14T05:22:44.675634Z",
+          "actor": "test:smoke",
+          "reason": "restore post-test",
           "metadata": {}
         }
       ]
@@ -388,7 +506,13 @@
       "metadata": {
         "canonical_file": "momentum_12_1.py",
         "class": "Momentum12_1",
-        "description": "12m momentum (skip 1m) long top-10 ranked names"
+        "description": "12m momentum (skip 1m) long top-10 ranked names",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -427,7 +551,13 @@
       "metadata": {
         "canonical_file": "S_3d_pca_characteristic_factors.py",
         "class": "ThreeDPCACharacteristicFactors",
-        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly \u2014 Lettau (2024)"
+        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly \u2014 Lettau (2024)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -623,7 +753,13 @@
       "metadata": {
         "canonical_file": "s09_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum cross-asset rotation"
+        "description": "Dual-momentum cross-asset rotation",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -714,7 +850,13 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation"
+        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": []
     },
@@ -724,7 +866,12 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching"
+        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -743,7 +890,11 @@
       "metadata": {
         "canonical_file": "S24_52wk_high_proximity.py",
         "class": "FiftyTwoWeekHighProximityStrategy",
-        "description": "52-week high proximity breakout signal"
+        "description": "52-week high proximity breakout signal",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -762,7 +913,13 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 \u2014 successor candidate to S9"
+        "description": "Dual-momentum v2 \u2014 successor candidate to S9",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -811,7 +968,12 @@
       "metadata": {
         "canonical_file": "shv8_gamma_theta_carry.py",
         "class": "GammaThetaCarry",
-        "description": "Gamma-Theta Carry  BUY_VOL when gamma/|theta| >= 1.5 ATM (theta now live in chain)"
+        "description": "Gamma-Theta Carry  BUY_VOL when gamma/|theta| >= 1.5 ATM (theta now live in chain)",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -833,7 +995,10 @@
       "metadata": {
         "canonical_file": "shv9_rv_momentum_div.py",
         "class": "RVMomentumDivergence",
-        "description": "RV Momentum Divergence  price/RV divergence signals (Bollerslev 2009)"
+        "description": "RV Momentum Divergence  price/RV divergence signals (Bollerslev 2009)",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -936,7 +1101,10 @@
       "metadata": {
         "canonical_file": "shv13_call_put_iv_spread.py",
         "class": "CallPutIVSpread",
-        "description": "ATM call IV - put IV spread signal (Cremers & Weinbaum 2010 JFQA)"
+        "description": "ATM call IV - put IV spread signal (Cremers & Weinbaum 2010 JFQA)",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
       },
       "history": [
         {
@@ -1042,7 +1210,13 @@
       "metadata": {
         "canonical_file": "shv19_iv_surface_tilt.py",
         "class": "IVSurfaceTilt",
-        "description": "Vega*OI-weighted IV surface centroid tilt signal (Carr & Wu 2009 JFE)"
+        "description": "Vega*OI-weighted IV surface centroid tilt signal (Carr & Wu 2009 JFE)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1064,7 +1238,10 @@
       "metadata": {
         "canonical_file": "shv20_iv_dispersion_reversion.py",
         "class": "IVDispersionReversion",
-        "description": "Cross-section iv_rank z-score mean reversion (Driessen et al 2009 JoF; Goyal & Saretto 2009 JFE)"
+        "description": "Cross-section iv_rank z-score mean reversion (Driessen et al 2009 JoF; Goyal & Saretto 2009 JFE)",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1118,7 +1295,12 @@
       "metadata": {
         "canonical_file": "S_markov_frontier_regimes.py",
         "class": "MarkovFrontierRegimes",
-        "description": "Monthly Markov frontier: cluster EF parabola coefficients, regime-weighted tangency E[w]"
+        "description": "Monthly Markov frontier: cluster EF parabola coefficients, regime-weighted tangency E[w]",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1183,7 +1365,13 @@
       "metadata": {
         "canonical_file": "S_epistemic_rank_gate.py",
         "class": "EpistemicRankGate",
-        "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate"
+        "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1237,7 +1425,13 @@
       "metadata": {
         "canonical_file": "S_tr_02_hurst_regime_flip.py",
         "class": "HurstRegimeFlip",
-        "description": "Hurst R/S regime flip \u2014 LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime"
+        "description": "Hurst R/S regime flip \u2014 LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1259,7 +1453,13 @@
       "metadata": {
         "canonical_file": "S_tr_06_eod_reversal.py",
         "class": "EODCrossSectionalReversal",
-        "description": "Cross-sectional EOD return reversal \u2014 ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)"
+        "description": "Cross-sectional EOD return reversal \u2014 ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1308,7 +1508,11 @@
       "metadata": {
         "canonical_file": "S_tr_03_bocpd_change_point.py",
         "class": "BOCPDChangePoint",
-        "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime"
+        "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1360,7 +1564,11 @@
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
-        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers"
+        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1452,7 +1660,12 @@
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
-        "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile"
+        "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1482,7 +1695,13 @@
       "metadata": {
         "canonical_file": "S_barbell_trend_horizon.py",
         "class": "BarbellTrendHorizon",
-        "description": "Multi-horizon momentum barbell with adaptive Bayesian horizon weights: LONG top-decile, SHORT bottom-decile"
+        "description": "Multi-horizon momentum barbell with adaptive Bayesian horizon weights: LONG top-decile, SHORT bottom-decile",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1509,7 +1728,12 @@
       "metadata": {
         "canonical_file": "S_nonstationarity_adaptive_selection.py",
         "class": "NonStationarityAdaptiveSelection",
-        "description": "Tournament-select momentum windows validated on rolling nonstationary windows; rank LONG/SHORT"
+        "description": "Tournament-select momentum windows validated on rolling nonstationary windows; rank LONG/SHORT",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1571,7 +1795,13 @@
       "metadata": {
         "canonical_file": "S_sparse_basis_pursuit_sdf.py",
         "class": "SparseBasisPursuitSDF",
-        "description": "Sparse SDF estimation: rank-composite of price factors selects ~32 nonzero positions (approx L1 basis pursuit), monthly rebalance"
+        "description": "Sparse SDF estimation: rank-composite of price factors selects ~32 nonzero positions (approx L1 basis pursuit), monthly rebalance",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1598,7 +1828,11 @@
       "metadata": {
         "canonical_file": "S21_iv_hv_spread.py",
         "class": "IVHVSpread",
-        "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol"
+        "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": []
     },
@@ -1608,7 +1842,13 @@
       "metadata": {
         "canonical_file": "S22_quality_momentum.py",
         "class": "S22QualityMomentum",
-        "description": "Quality-Filtered Momentum \u2014 top-N JT momentum gated by gross-margin quality screen"
+        "description": "Quality-Filtered Momentum \u2014 top-N JT momentum gated by gross-margin quality screen",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1651,7 +1891,13 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual Momentum (12-1mo skip, Top 7) \u2014 cross-asset momentum rotation"
+        "description": "Dual Momentum (12-1mo skip, Top 7) \u2014 cross-asset momentum rotation",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -1780,7 +2026,10 @@
             "live_drawdown_pct_trigger": 12,
             "live_drawdown_period_days": 90
           }
-        }
+        },
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
       },
       "history": [
         {
@@ -2386,7 +2635,10 @@
       "metadata": {
         "canonical_file": "low_volatility_us.py",
         "class": "LowVolatilityUS",
-        "description": "Rank stocks asc by 252d realized vol; select lowest-volatility decile; equal-weight"
+        "description": "Rank stocks asc by 252d realized vol; select lowest-volatility decile; equal-weight",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2405,7 +2657,13 @@
       "metadata": {
         "canonical_file": "S_cross_sectional_price_momentum.py",
         "class": "CrossSectionalPriceMomentum",
-        "description": "J&T cross-sectional momentum \u2014 LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)"
+        "description": "J&T cross-sectional momentum \u2014 LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2459,7 +2717,11 @@
       "metadata": {
         "canonical_file": "S_pairs_trading_jump_diffusion_intraday.py",
         "class": "PairsTradingJumpDiffusionIntraday",
-        "description": "OU+jump-diffusion pairs: rank by kappa, trade individualized z-score entry/exit thresholds"
+        "description": "OU+jump-diffusion pairs: rank by kappa, trade individualized z-score entry/exit thresholds",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2486,7 +2748,11 @@
       "metadata": {
         "canonical_file": "s_ivol_mispricing_asymmetry.py",
         "class": "IvolMispricingAsymmetry",
-        "description": "Arbitrage asymmetry IVOL puzzle: long underpriced, short overpriced high-IVOL stocks"
+        "description": "Arbitrage asymmetry IVOL puzzle: long underpriced, short overpriced high-IVOL stocks",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2539,7 +2805,13 @@
       "metadata": {
         "canonical_file": "S_extreme_intraday_reversal_nasdaq.py",
         "class": "ExtremeIntradayReversalNasdaq",
-        "description": "Contrarian mean-reversion after extreme intraday moves in liquid stocks (Zawadowski et al. 2006)"
+        "description": "Contrarian mean-reversion after extreme intraday moves in liquid stocks (Zawadowski et al. 2006)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2613,7 +2885,13 @@
       "metadata": {
         "canonical_file": "S_ma_tsmom_crossover.py",
         "class": "MATSMOMCrossover",
-        "description": "MA crossover generates earlier trend signals than TSMOM; vol-scaled sizing (Marshall et al. 2016)."
+        "description": "MA crossover generates earlier trend signals than TSMOM; vol-scaled sizing (Marshall et al. 2016).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -2632,7 +2910,12 @@
       "metadata": {
         "canonical_file": "S_long_term_price_reversal.py",
         "class": "LongTermPriceReversal",
-        "description": "LONG 36-month prior losers, SHORT prior winners \u2014 behavioral overreaction reversal (De Bondt & Thaler 1985)"
+        "description": "LONG 36-month prior losers, SHORT prior winners \u2014 behavioral overreaction reversal (De Bondt & Thaler 1985)",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -3013,7 +3296,12 @@
       "metadata": {
         "canonical_file": "s_macro_risk_momentum_ip_beta.py",
         "class": "S_macro_risk_momentum_ip_beta",
-        "description": "Price momentum winners carry temporarily higher loadings on industrial production growth than losers, so momentum profits represent compensation for macroeconomic risk rather than a persistent mispricing anomaly."
+        "description": "Price momentum winners carry temporarily higher loadings on industrial production growth than losers, so momentum profits represent compensation for macroeconomic risk rather than a persistent mispricing anomaly.",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -3165,7 +3453,11 @@
       "state_since": "2026-05-03T21:51:21.224Z",
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
-        "class": "PairsTradingMinDistance"
+        "class": "PairsTradingMinDistance",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -3218,7 +3510,13 @@
       "state_since": "2026-05-09T14:22:22.331027+00:00",
       "metadata": {
         "canonical_file": "S_btc_gold_dual_momentum_rotation.py",
-        "class": "BtcGoldDualMomentumRotation"
+        "class": "BtcGoldDualMomentumRotation",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": []
     }
