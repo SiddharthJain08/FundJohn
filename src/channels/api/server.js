@@ -289,69 +289,112 @@ app.get('/api/portfolio/history', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Per-strategy + portfolio Sharpe — used by the alpha-bar chart on the
-// portfolio page. Sharpe is computed at trade-grain (each closed trade =
-// one return observation): Sharpe = mean(pnl_pct) / stddev(pnl_pct). We
-// deliberately skip annualization (no √252 factor) because the alpha bar
-// chart displays the *ratio* strategy_sharpe / portfolio_sharpe — the
-// annualization factor would cancel out anyway.
+// Per-ticker Sharpe decomposition. Returns the ticker's live Sharpe and
+// each strategy's signed alpha contribution. By construction the alphas
+// sum to the ticker Sharpe — see
+// docs/superpowers/specs/2026-05-14-dashboard-heatmap-sharpe-design.md.
 //
-// The ratio answers "how risk-efficient is this strategy compared to the
-// consolidated portfolio?" — it can exceed 1.0 when a strategy's
-// standalone performance beats the pooled book (other strategies' losses
-// drag the portfolio denominator down).
+//   alpha(s) = mean_d(strategy_s_daily_pnl_on_ticker)
+//            / std_d(combined_ticker_daily_pnl)
+//   ticker_sharpe = mean_d(combined) / std_d(combined)
+//   Σ alpha(s) = mean(Σ strats) / std(combined) = ticker_sharpe ✓
 //
-// Strategies need ≥ 5 closed trades to get a Sharpe — fewer is too
-// noisy. Cached for 5 minutes in process memory.
-let _sharpeCache = { ts: 0, payload: null };
-const _SHARPE_TTL_MS = 5 * 60 * 1000;
-app.get('/api/portfolio/strategy-sharpe', async (req, res) => {
+// Tickers with fewer than 2 distinct closed-trade days return
+// live_sharpe=null + reason='insufficient_days' — the client renders a
+// fallback message in the alpha-bars panel. Soft 5-min LRU cache.
+const _tickerAlphaCache = new Map();   // ticker → { ts, payload }
+const _TICKER_ALPHA_TTL_MS = 5 * 60 * 1000;
+const _TICKER_ALPHA_CAP    = 256;
+
+app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
+  const ticker = String(req.params.ticker || '').trim().toUpperCase();
+  if (!ticker) return res.status(400).json({ error: 'ticker required' });
   try {
     const now = Date.now();
-    if (_sharpeCache.payload && now - _sharpeCache.ts < _SHARPE_TTL_MS) {
-      return res.json(_sharpeCache.payload);
+    const hit = _tickerAlphaCache.get(ticker);
+    if (hit && now - hit.ts < _TICKER_ALPHA_TTL_MS) return res.json(hit.payload);
+
+    // Daily combined PnL on this ticker — drives both ticker_sharpe and
+    // the shared sigma denominator used for every strategy's alpha.
+    const combinedRes = await dbQuery(`
+      SELECT sp.closed_at AS d, SUM(sp.pnl_pct) AS day_pnl
+      FROM signal_performance sp
+      JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.status = 'closed' AND es.ticker = $1
+      GROUP BY sp.closed_at
+      ORDER BY sp.closed_at
+    `, [ticker]);
+    const series = combinedRes.rows.map(r => parseFloat(r.day_pnl));
+    const days   = series.length;
+    if (days < 2) {
+      const payload = {
+        ticker, live_sharpe: null, days, reason: 'insufficient_days',
+        strategies: [], computed_at: new Date().toISOString(),
+      };
+      _tickerAlphaCache.set(ticker, { ts: now, payload });
+      return res.json(payload);
     }
-    // Per-strategy Sharpe (trade-grain): mu / sigma over closed trades.
+    const mu_combined = series.reduce((s, x) => s + x, 0) / days;
+    const variance    = series.reduce((s, x) => s + (x - mu_combined) ** 2, 0) / (days - 1);
+    const sigma       = Math.sqrt(variance);
+    if (!(sigma > 0)) {
+      const payload = {
+        ticker, live_sharpe: null, days, reason: 'zero_variance',
+        strategies: [], computed_at: new Date().toISOString(),
+      };
+      _tickerAlphaCache.set(ticker, { ts: now, payload });
+      return res.json(payload);
+    }
+    const live_sharpe = mu_combined / sigma;
+
+    // Per-strategy contribution: mean of that strategy's daily PnL on the
+    // ticker / SHARED ticker sigma. Means add linearly so Σ alpha = sharpe.
     const stratRes = await dbQuery(`
-      SELECT strategy_id,
-             COUNT(*)::int AS n,
-             AVG(pnl_pct)::float AS mu,
-             STDDEV_SAMP(pnl_pct)::float AS sigma
-      FROM signal_performance
-      WHERE status = 'closed' AND pnl_pct IS NOT NULL
-      GROUP BY strategy_id
-      HAVING COUNT(*) >= 5
-    `);
-    // Portfolio Sharpe — pool every closed trade across all strategies.
-    const portRes = await dbQuery(`
-      SELECT COUNT(*)::int AS n,
-             AVG(pnl_pct)::float AS mu,
-             STDDEV_SAMP(pnl_pct)::float AS sigma
-      FROM signal_performance WHERE status = 'closed' AND pnl_pct IS NOT NULL
-    `);
-    const port = portRes.rows[0] || {};
-    const portfolio_sharpe = (port.sigma && port.sigma > 0)
-      ? (port.mu / port.sigma)
-      : null;
-    const strategies = {};
+      SELECT es.strategy_id,
+             es.direction,
+             SUM(sp.pnl_pct)::float AS sum_pnl,
+             COUNT(*)::int           AS n_trades
+      FROM signal_performance sp
+      JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.status = 'closed' AND es.ticker = $1
+      GROUP BY es.strategy_id, es.direction
+    `, [ticker]);
+    // A strategy may hold both LONG and SHORT on the same ticker; roll up
+    // their contributions and tag the row with whichever direction had
+    // more trades (operator-visible).
+    const byStrat = new Map();
     for (const r of stratRes.rows) {
-      const sigma = parseFloat(r.sigma);
-      if (sigma && sigma > 0) {
-        strategies[r.strategy_id] = {
-          sharpe: parseFloat(r.mu) / sigma,
-          n: r.n,
-        };
+      const mean_strat = parseFloat(r.sum_pnl) / days;
+      const alpha      = mean_strat / sigma;
+      const cur = byStrat.get(r.strategy_id);
+      if (!cur) {
+        byStrat.set(r.strategy_id, {
+          strategy_id: r.strategy_id, alpha, dir: r.direction,
+          n_trades: r.n_trades, _domN: r.n_trades,
+        });
+      } else {
+        cur.alpha += alpha;
+        cur.n_trades += r.n_trades;
+        if (r.n_trades > cur._domN) { cur.dir = r.direction; cur._domN = r.n_trades; }
       }
     }
+    const strategies = [...byStrat.values()]
+      .map(s => ({ strategy_id: s.strategy_id, alpha: s.alpha, dir: s.dir, n_trades: s.n_trades }))
+      .sort((a, b) => b.alpha - a.alpha);
+
     const payload = {
-      portfolio_sharpe,
-      portfolio_n: port.n || 0,
-      strategies,
+      ticker, live_sharpe, days, strategies,
       computed_at: new Date().toISOString(),
     };
-    _sharpeCache = { ts: now, payload };
+    if (_tickerAlphaCache.size >= _TICKER_ALPHA_CAP) {
+      const oldestKey = _tickerAlphaCache.keys().next().value;
+      _tickerAlphaCache.delete(oldestKey);
+    }
+    _tickerAlphaCache.set(ticker, { ts: now, payload });
     res.json(payload);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/portfolio/summary', async (req, res) => {
@@ -4922,11 +4965,19 @@ async function _safeFetch(url, fallback, opts = {}) {
   }
 }
 
-// Cached Sharpe data — lives in module-level scope so the alpha-bar
-// renderer can use it without threading it through every call site.
-let _sharpeData = { portfolio_sharpe: null, strategies: {} };
+// Per-ticker alpha decomposition cache — populated lazily on tile click
+// via _fetchTickerAlpha. The alpha bars renderer reads from here.
+const _alphaCache    = {};
+const _alphaInflight = {};
+// Account equity for tile dollar-P&L computation. Cached at module
+// scope so re-renders triggered by sort/expand don't need it re-passed.
+let _navCache = null;
+// Stub kept until _buildAlphaBarsHtml is rewritten in Task 6 — without it
+// the prior renderer's references to _sharpeData would throw at click time.
+const _sharpeData = { portfolio_sharpe: null, strategies: {} };
+
 async function loadPortfolio() {
-  const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y, sharpe] = await Promise.all([
+  const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
     _safeFetch('/api/portfolio/summary',           {}, { label: 'portfolio summary' }),
     _safeFetch('/api/portfolio/positions',         [], { critical: true, label: 'portfolio positions' }),
     _safeFetch('/api/portfolio/history',           [], { label: 'portfolio history' }),
@@ -4936,9 +4987,10 @@ async function loadPortfolio() {
     _safeFetch('/api/portfolio/value-curve?period=all', {}, { label: 'value curve all' }),
     _safeFetch('/api/portfolio/regime-history?days=90', [], { label: 'regime history 90d' }),
     _safeFetch('/api/portfolio/regime-history?days=365', [], { label: 'regime history 1y' }),
-    _safeFetch('/api/portfolio/strategy-sharpe', { portfolio_sharpe: null, strategies: {} }, { label: 'strategy sharpe' }),
   ]);
-  _sharpeData = sharpe || { portfolio_sharpe: null, strategies: {} };
+  if (account && account.equity != null && isFinite(parseFloat(account.equity))) {
+    _navCache = parseFloat(account.equity);
+  }
   renderAccountRow(account);
   valueCurveData = valCurve;
   renderPortfolioSummary(summary, valCurve);
