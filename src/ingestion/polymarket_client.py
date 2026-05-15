@@ -6,8 +6,15 @@ MasterMind to evaluate as features."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 import urllib.parse
 import urllib.request
+
+# Same import dance as arxiv_discovery.py / openalex_discovery.py — bypass the
+# broken src/ingestion/__init__.py and load _http_retry as a top-level module.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _http_retry import fetch_with_retry  # noqa: E402
 
 
 class PolymarketClient:
@@ -23,10 +30,10 @@ class PolymarketClient:
             f"{self.GAMMA_BASE}/markets?{qs}",
             headers={"User-Agent": "OpenClaw-FundJohn/1.0 (+research)"},
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            if r.status != 200:
-                raise RuntimeError(f"Polymarket status {r.status}")
-            raw = json.loads(r.read())
+        body = fetch_with_retry(req, timeout=int(self.timeout), label='polymarket')
+        if body is None:
+            raise RuntimeError("Polymarket fetch failed after retries")
+        raw = json.loads(body)
 
         out = []
         for m in raw:

@@ -8,9 +8,25 @@ from unittest.mock import patch
 import json
 
 
+# Pre-load _http_retry the same way arxiv_discovery.py does, so polymarket_client's
+# `from _http_retry import fetch_with_retry` resolves without tripping
+# src.ingestion.__init__.
+_INGESTION_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "ingestion"
+sys.path.insert(0, str(_INGESTION_DIR))
+# Only load _http_retry once across the test session — the sibling dbnomics
+# test file may have loaded it already, and a second module instance would
+# break `patch("_http_retry.urlopen")` for whichever file ran first.
+if "_http_retry" not in sys.modules:
+    _retry_spec = importlib.util.spec_from_file_location(
+        "_http_retry", _INGESTION_DIR / "_http_retry.py",
+    )
+    _http_retry = importlib.util.module_from_spec(_retry_spec)
+    sys.modules["_http_retry"] = _http_retry
+    _retry_spec.loader.exec_module(_http_retry)
+
 _spec = importlib.util.spec_from_file_location(
     "polymarket_client",
-    pathlib.Path(__file__).resolve().parents[1] / "src" / "ingestion" / "polymarket_client.py",
+    _INGESTION_DIR / "polymarket_client.py",
 )
 polymarket_client = importlib.util.module_from_spec(_spec)
 sys.modules["polymarket_client"] = polymarket_client
@@ -30,7 +46,9 @@ def _markets_fixture():
 
 def test_list_active_markets_parses_outcomes():
     payload = json.dumps(_markets_fixture()).encode()
-    with patch("urllib.request.urlopen") as mock_open:
+    # _http_retry.py does `from urllib.request import urlopen`, so the mock
+    # has to target its local binding, not the original urllib.request.urlopen.
+    with patch("_http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         markets = PolymarketClient().list_active_markets(limit=10)

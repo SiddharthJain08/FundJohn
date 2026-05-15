@@ -11,9 +11,25 @@ from unittest.mock import patch
 import json
 
 
+# Pre-load _http_retry the same way arxiv_discovery.py does, so dbnomics_client's
+# `from _http_retry import fetch_with_retry` resolves without tripping
+# src.ingestion.__init__.
+_INGESTION_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "ingestion"
+sys.path.insert(0, str(_INGESTION_DIR))
+# Only load _http_retry once across the test session — the sibling polymarket
+# test file may have loaded it already, and a second module instance would
+# break `patch("_http_retry.urlopen")` for whichever file ran first.
+if "_http_retry" not in sys.modules:
+    _retry_spec = importlib.util.spec_from_file_location(
+        "_http_retry", _INGESTION_DIR / "_http_retry.py",
+    )
+    _http_retry = importlib.util.module_from_spec(_retry_spec)
+    sys.modules["_http_retry"] = _http_retry
+    _retry_spec.loader.exec_module(_http_retry)
+
 _spec = importlib.util.spec_from_file_location(
     "dbnomics_client",
-    pathlib.Path(__file__).resolve().parents[1] / "src" / "ingestion" / "dbnomics_client.py",
+    _INGESTION_DIR / "dbnomics_client.py",
 )
 dbnomics_client = importlib.util.module_from_spec(_spec)
 sys.modules["dbnomics_client"] = dbnomics_client
@@ -39,7 +55,9 @@ def _fixture():
 
 def test_get_series_parses_observations():
     payload = json.dumps(_fixture()).encode()
-    with patch("urllib.request.urlopen") as mock_open:
+    # _http_retry.py does `from urllib.request import urlopen`, so the mock
+    # has to target its local binding, not the original urllib.request.urlopen.
+    with patch("_http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         c = DBnomicsClient()
@@ -54,7 +72,9 @@ def test_get_series_handles_null_values():
     fx = _fixture()
     fx["series"]["docs"][0]["value"] = [3.1, None, 3.0]
     payload = json.dumps(fx).encode()
-    with patch("urllib.request.urlopen") as mock_open:
+    # _http_retry.py does `from urllib.request import urlopen`, so the mock
+    # has to target its local binding, not the original urllib.request.urlopen.
+    with patch("_http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         obs = DBnomicsClient().get_series("IMF/IFS/M.US.PCPI_PC_PP_PT")
