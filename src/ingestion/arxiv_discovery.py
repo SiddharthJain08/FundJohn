@@ -28,8 +28,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _http_retry import fetch_with_retry  # local import to avoid src.ingestion package __init__
 
 ARXIV_API  = 'http://export.arxiv.org/api/query'
-# Expanded set vs. pre-curator version (was ST/PM/TR only).
-CATEGORIES          = ['q-fin.ST', 'q-fin.PM', 'q-fin.TR', 'q-fin.CP', 'q-fin.GN', 'q-fin.RM']
+# Expanded 2026-05-15: added cs.LG/AI/CL + stat.ML so PaperHunter sees ML-for-finance
+# and applied-stats papers that q-fin authors increasingly cross-list under, not q-fin.
+CATEGORIES          = [
+    'q-fin.ST', 'q-fin.PM', 'q-fin.TR', 'q-fin.CP', 'q-fin.GN', 'q-fin.RM',
+    'cs.LG', 'cs.AI', 'cs.CL', 'stat.ML',
+]
 MAX_RESULTS_DEFAULT = 200  # per category
 
 # ── Legacy keyword heuristic (kept only to keep research_candidates populated

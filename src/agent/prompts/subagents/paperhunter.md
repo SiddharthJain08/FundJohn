@@ -202,3 +202,14 @@ spot-checked more carefully than papers with full-PDF extraction.
 - Output ONLY the raw JSON object. Zero prose, zero markdown.
 - If `rejection_reason_if_any` is not null, the object may omit all other fields except `candidate_id` and `source_url`.
 - **Do NOT emit `fetch_failed`.** That rejection reason is reserved for the wrapper layer (when WebFetch genuinely throws). If your only content is the injected abstract, that's still a valid extraction source — proceed.
+
+## arXiv harvest surface (as of 2026-05-15)
+
+PaperHunter sees abstracts harvested from these arXiv categories nightly:
+
+- **q-fin.ST / PM / TR / CP / GN / RM** — quantitative finance proper
+- **cs.LG / cs.AI / cs.CL** — ML, AI, NLP papers that may apply to alpha discovery
+- **stat.ML** — statistical-ML papers (factor methods, regularization, causal inference)
+
+Volume implication: roughly 3-5x the prior arXiv-only flow. Triage aggressively; an
+ML paper without an explicit financial application or backtest should be downscored.
