@@ -11,7 +11,8 @@ import numpy as np
 
 
 def clean_factor(series: pd.Series, winsor_pct: float = 0.01) -> pd.Series:
-    """Winsorize at winsor_pct/2 each tail then z-score."""
+    """Winsorize at winsor_pct/2 each tail then z-score.  Pure pandas/numpy fallback
+    so this works even if AlphaPurify's API surface changes underneath."""
     s = series.astype(float).copy()
     lo, hi = s.quantile(winsor_pct / 2), s.quantile(1 - winsor_pct / 2)
     s = s.clip(lower=lo, upper=hi)
