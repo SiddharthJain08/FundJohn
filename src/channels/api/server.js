@@ -8,7 +8,7 @@ const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
-const { groupByStrategy } = require('./positions_grouped');
+const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -245,25 +245,65 @@ app.get('/api/portfolio/positions', async (req, res) => {
     // grey + days_held=0 everywhere. Now the client receives every open
     // signal in the recent window (~5500 rows / ~1MB) and the ticker
     // rollups carry meaningful color + days_held.
+    //
+    // Two LATERAL JOINs: `sp` = most recent mark, `sp_prev` = the mark
+    // immediately before that. We deliberately use rank-by-pnl_date rather
+    // than `pnl_date < CURRENT_DATE` so that on stale-data days (pipeline
+    // hasn't written today's row yet) `sp` falls back to the last available
+    // mark and `sp_prev` is still the one before — which is exactly the
+    // "two most recent marks" delta an operator wants on those days.
     const result = await dbQuery(`
       SELECT es.id, es.strategy_id, es.ticker, es.direction,
              es.entry_price, es.stop_loss, es.target_1, es.position_size_pct,
              es.signal_date, es.status,
              sp.close_price AS current_price,
-             sp.unrealized_pnl_pct, sp.days_held
+             sp.unrealized_pnl_pct, sp.days_held,
+             sp_prev.unrealized_pnl_pct AS prev_pnl_pct,
+             sp_prev.close_price        AS prev_close
       FROM execution_signals es
       LEFT JOIN LATERAL (
-        SELECT close_price, unrealized_pnl_pct, days_held
+        SELECT close_price, unrealized_pnl_pct, days_held, pnl_date
         FROM signal_pnl WHERE signal_id = es.id ORDER BY pnl_date DESC LIMIT 1
       ) sp ON true
+      LEFT JOIN LATERAL (
+        SELECT close_price, unrealized_pnl_pct
+        FROM signal_pnl
+        WHERE signal_id = es.id AND pnl_date < sp.pnl_date
+        ORDER BY pnl_date DESC LIMIT 1
+      ) sp_prev ON true
       WHERE es.status = 'open'
         AND es.signal_date >= CURRENT_DATE - INTERVAL '90 days'
       ORDER BY es.signal_date DESC
     `);
+
+    // NAV via Alpaca CLI account.equity. One round-trip per request; this
+    // endpoint is render-driven, not hot-loop. If Alpaca is unreachable the
+    // rows still ship with day_pnl_usd=null and the dashboard's em-dash
+    // fallback fires — preferable to wedging the entire positions list on
+    // a degraded broker leg.
+    let nav = null;
+    try {
+      const a = await runAlpaca(['account', 'get'], { timeout: 10_000 });
+      if (a.ok && a.payload && a.payload.equity != null) {
+        const eq = parseFloat(a.payload.equity);
+        if (Number.isFinite(eq) && eq > 0) nav = eq;
+      }
+    } catch (_) { /* nav stays null → day_pnl_usd renders as em-dash */ }
+
+    const enriched = result.rows.map(r => ({
+      ...r,
+      day_pnl_usd: computeDayPnlUsd({
+        today_pnl_pct:     r.unrealized_pnl_pct,
+        prev_pnl_pct:      r.prev_pnl_pct,
+        position_size_pct: r.position_size_pct,
+        nav,
+      }),
+    }));
+
     if (req.query.group_by === 'strategy') {
-      return res.json({ groups: groupByStrategy(result.rows) });
+      return res.json({ groups: groupByStrategy(enriched) });
     }
-    res.json(result.rows);
+    res.json(enriched);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -5771,9 +5811,10 @@ function _groupByStrategyClient(rows) {
 // "By strategy" view of the active positions table (Phase 1E — concept lifted
 // from achannarasappa/ticker AssetGroup primitive). Renders a section header
 // per strategy_id with a per-row table beneath it. Subtotal is the sum of
-// day_pnl_usd; rows lacking that field contribute 0 (the production schema
-// today carries unrealized_pnl_pct, not day_pnl_usd, so subtotals will read
-// as '—' until day_pnl_usd lands on the row — that's by design, not a bug).
+// day_pnl_usd, computed server-side via positions_grouped#computeDayPnlUsd
+// (Phase 1 follow-up #11) — rows whose mark history is too short or whose
+// position_size_pct is NaN ship as null and route through the em-dash
+// fallback so a brand-new position does not fake a real $0 print.
 function _renderPositionsByStrategy(el, rows) {
   const groups = _groupByStrategyClient(rows);
   const countEl = document.getElementById('pf-pos-count');
@@ -5787,13 +5828,15 @@ function _renderPositionsByStrategy(el, rows) {
       <th>Ticker</th><th>Dir</th>
       <th class="num">Entry</th><th class="num">Current</th>
       <th class="num">Size %</th><th class="num">P&amp;L %</th>
+      <th class="num">Day $</th>
       <th class="num">Days</th>
     </tr></thead>\`;
   const html = groups.map(g => {
     // Em-dash when EVERY row has missing day_pnl_usd — matches the rest of the
     // dashboard's missing-data convention so the operator doesn't misread a
-    // silent zero as a real flat-pnl day. Otherwise route through _fmtDollar
-    // so k/M scaling kicks in once day_pnl_usd is wired up.
+    // silent zero as a real flat-pnl day. With the server-side computation in
+    // place this only fires when an entire strategy has only fresh-today
+    // positions (no prev mark) or the NAV fetch failed.
     const allMissing = g.positions.every(r =>
       r.day_pnl_usd == null || Number.isNaN(Number(r.day_pnl_usd))
     );
@@ -5804,6 +5847,8 @@ function _renderPositionsByStrategy(el, rows) {
       </div>\`;
     const body = g.positions.map(p => {
       const pnl = p.unrealized_pnl_pct != null ? Number(p.unrealized_pnl_pct) * 100 : null;
+      const dayUsd = p.day_pnl_usd == null || Number.isNaN(Number(p.day_pnl_usd))
+        ? null : Number(p.day_pnl_usd);
       return \`<tr>
         <td><span class="tk-name" style="color:var(--blue);cursor:pointer" onclick="showMarket();selectTicker('\${p.ticker}')">\${p.ticker}</span></td>
         <td class="\${_dirCls(p.direction)}">\${p.direction || '—'}</td>
@@ -5811,6 +5856,7 @@ function _renderPositionsByStrategy(el, rows) {
         <td class="num">\${p.current_price != null ? '$' + Number(p.current_price).toFixed(2) : '—'}</td>
         <td class="num">\${p.position_size_pct != null ? (Number(p.position_size_pct) * 100).toFixed(2) + '%' : '—'}</td>
         <td class="num \${pnlCls(pnl)}">\${_fmtPctSigned(pnl, true)}</td>
+        <td class="num \${dayUsd == null ? '' : pnlCls(dayUsd)}">\${dayUsd == null ? '—' : _fmtDollar(dayUsd, true)}</td>
         <td class="num">\${p.days_held != null ? p.days_held : '—'}</td>
       </tr>\`;
     }).join('');
