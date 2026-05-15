@@ -16,10 +16,13 @@ forever and let strategies opt into whichever subset they need; it is
 NOT to optimize storage by pruning. Any future "deprecation" must be a
 flag (`active=false`) on a metadata row, never a `DELETE`.
 
+## Recent Changes
+- **2026-05-15: Phase 1 of fincept-imports master plan complete** (branch `feat/fincept-imports-phase1`). Seven sub-projects merged: arXiv expansion (cs.LG/AI/CL/stat.ML categories for PaperHunter), backtest oracles (kernc/backtesting.py contract reproduced clean-room), FinanceToolkit + AlphaPurify + FinBERT + PyPortfolioOpt installed, DBnomics + Polymarket spike clients (migration 094), dashboard group-by-strategy positions view, PyPortfolioOpt HRP shadow alt-sizer (migration 095/096, default-OFF gate `OPENCLAW_PYPORTFOLIOOPT_SHADOW=1`, wired into pipeline_orchestrator between `report` and `health` as non-fatal sidecar). FinBERT-Tone service live on `127.0.0.1:7872` (`finbert-sentiment.service`). Plan: `docs/superpowers/plans/2026-05-15-fincept-imports-master-plan.md`.
+
 ## System Overview
 Autonomous quant PM system + hardcoded data pipeline:
 - **BotJohn** (claude-opus-4-7): Orchestrator and portfolio manager (this agent — Claude Code).
-- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 10-step daily cycle (10:00 ET) — `collect → signals → handoff → trade → alpaca → trade_parity_capture → correlation_sidecar → reconcile → report → health`. `trade` = `regime_blended_sizer_live.py` (LIVE production sizer; OPENCLAW_REGIME_BLENDED_LIVE=1 since 2026-05-12). `correlation_sidecar` = Phase 2G portfolio-Kelly sidecar (non-fatal). `health` = `daily_health_digest.js`. (queue_drain removed 2026-04-28; legacy single TradeJohn LLM step replaced by formula sizer + per-ticker confirmer.)
+- **DataPipeline** (hardcoded, src/execution/pipeline_orchestrator.py): 11-step daily cycle (10:00 ET) — `collect → signals → handoff → trade → alpaca → trade_parity_capture → correlation_sidecar → reconcile → report → pyportfolioopt_shadow → health`. `trade` = `regime_blended_sizer_live.py` (LIVE production sizer; OPENCLAW_REGIME_BLENDED_LIVE=1 since 2026-05-12). `correlation_sidecar` = Phase 2G portfolio-Kelly sidecar (non-fatal). `health` = `daily_health_digest.js`. (queue_drain removed 2026-04-28; legacy single TradeJohn LLM step replaced by formula sizer + per-ticker confirmer.)
 - **TradeJohn confirmer** (claude-sonnet-4-6): Per-ticker approve/veto/scale confirmer inside `regime_blended_sizer_live.py`. Runs only in LOW_VOL/TRANSITIONING regimes. Fail-open on LLM error. Invoked via `claude-bin --print --output-format json --model sonnet --max-budget-usd 0.50`.
 - **PaperHunter** (claude-sonnet-4-6, upgraded from Haiku 2026-04-23): Per-paper extraction + 4 rejection gates.
 - **StrategyCoder** (claude-sonnet-4-6): On-demand strategy implementation.
