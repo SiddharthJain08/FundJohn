@@ -65,7 +65,13 @@ def _file_map() -> dict[str, Path]:
     """Cached map of normalized filename → Path for all implementation files."""
     global _FILE_MAP
     if _FILE_MAP is None:
-        _FILE_MAP = {_norm(p.name): p for p in IMPLEMENTATIONS_DIR.glob('*.py')}
+        # Skip __init__.py and underscore-prefixed files (templates / reference examples;
+        # see src/strategies/implementations/_template_example.py — Phase 2E).
+        _FILE_MAP = {
+            _norm(p.name): p
+            for p in IMPLEMENTATIONS_DIR.glob('*.py')
+            if p.name != '__init__.py' and not p.name.startswith('_')
+        }
     return _FILE_MAP
 
 
