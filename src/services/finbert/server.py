@@ -26,6 +26,10 @@ _model = BertForSequenceClassification.from_pretrained(MODEL_NAME).eval()
 # Verified against the model's config.id2label:
 #   {0: "Neutral", 1: "Positive", 2: "Negative"}
 _LABELS = ["Neutral", "Positive", "Negative"]
+# Startup guard: fail loudly if HuggingFace ever republishes the model with a
+# different label order (silent feature corruption is the worst-case here).
+assert _model.config.id2label == {0: "Neutral", 1: "Positive", 2: "Negative"}, \
+    f"FinBERT label drift: id2label={_model.config.id2label}"
 
 
 class ScoreReq(BaseModel):

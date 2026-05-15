@@ -25,5 +25,6 @@ class FinbertClient:
             headers={"content-type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            assert r.status == 200, f"FinBERT service status {r.status}"
+            if r.status != 200:
+                raise RuntimeError(f"FinBERT service status {r.status}")
             return json.loads(r.read())

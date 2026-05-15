@@ -11,8 +11,9 @@ ExecStart=/usr/local/bin/uvicorn src.services.finbert.server:app --host 127.0.0.
 Restart=on-failure
 RestartSec=5
 
-# Ensure HF cache is found in claudebot's home (model pre-warmed there)
-Environment="HOME=/home/claudebot"
+# Targeted HF cache path (more robust than HOME= because it survives a home-dir move
+# and only affects HuggingFace lookup, not other dotfile-based deps).
+Environment="HF_HOME=/home/claudebot/.cache/huggingface"
 Environment="PATH=/usr/local/bin:/usr/bin:/bin"
 
 StandardOutput=journal
