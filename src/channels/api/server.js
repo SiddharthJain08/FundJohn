@@ -5747,24 +5747,35 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${rowsHtml}</div>\`;
 }
 
-// "By strategy" view of the active positions table (Phase 1E — concept lifted
-// from achannarasappa/ticker AssetGroup primitive). Renders a section header
-// per strategy_id with a per-row table beneath it. Subtotal is the sum of
-// day_pnl_usd; rows lacking that field contribute 0 (the production schema
-// today carries unrealized_pnl_pct, not day_pnl_usd, so subtotals will read
-// as $0 until day_pnl_usd lands on the row — that's by design, not a bug).
-function _renderPositionsByStrategy(el, rows) {
+// Browser-side mirror of src/channels/api/positions_grouped.js#groupByStrategy.
+// The Node-side helper still serves /api/portfolio/positions?group_by=strategy
+// and the unit tests; this client-side twin exists so DOM renderers can share
+// the same bucketing/subtotal contract without duplicating it inline. Keep
+// the two in lock-step: null/missing strategy_id collapses to '(unattributed)',
+// subtotal sums Number(r.day_pnl_usd) || 0, input order preserved per group.
+function _groupByStrategyClient(rows) {
   const buckets = new Map();
   for (const r of rows) {
     const key = r.strategy_id || '(unattributed)';
     if (!buckets.has(key)) buckets.set(key, []);
     buckets.get(key).push(r);
   }
-  const groups = [];
+  const out = [];
   for (const [strategy_id, positions] of buckets) {
-    const subtotal = positions.reduce((s, p) => s + (Number(p.day_pnl_usd) || 0), 0);
-    groups.push({ strategy_id, positions, subtotal_day_pnl_usd: subtotal });
+    const subtotal = positions.reduce((s, r) => s + (Number(r.day_pnl_usd) || 0), 0);
+    out.push({ strategy_id, positions, subtotal_day_pnl_usd: subtotal });
   }
+  return out;
+}
+
+// "By strategy" view of the active positions table (Phase 1E — concept lifted
+// from achannarasappa/ticker AssetGroup primitive). Renders a section header
+// per strategy_id with a per-row table beneath it. Subtotal is the sum of
+// day_pnl_usd; rows lacking that field contribute 0 (the production schema
+// today carries unrealized_pnl_pct, not day_pnl_usd, so subtotals will read
+// as '—' until day_pnl_usd lands on the row — that's by design, not a bug).
+function _renderPositionsByStrategy(el, rows) {
+  const groups = _groupByStrategyClient(rows);
   const countEl = document.getElementById('pf-pos-count');
   if (countEl) {
     countEl.textContent = rows.length
@@ -5779,9 +5790,14 @@ function _renderPositionsByStrategy(el, rows) {
       <th class="num">Days</th>
     </tr></thead>\`;
   const html = groups.map(g => {
-    const subFmt = g.subtotal_day_pnl_usd >= 0
-      ? '+$' + g.subtotal_day_pnl_usd.toFixed(2)
-      : '-$' + Math.abs(g.subtotal_day_pnl_usd).toFixed(2);
+    // Em-dash when EVERY row has missing day_pnl_usd — matches the rest of the
+    // dashboard's missing-data convention so the operator doesn't misread a
+    // silent zero as a real flat-pnl day. Otherwise route through _fmtDollar
+    // so k/M scaling kicks in once day_pnl_usd is wired up.
+    const allMissing = g.positions.every(r =>
+      r.day_pnl_usd == null || Number.isNaN(Number(r.day_pnl_usd))
+    );
+    const subFmt = allMissing ? '—' : _fmtDollar(g.subtotal_day_pnl_usd, true);
     const header = \`<div class="pf-strategy-group-header">
         <span class="pf-sg-name">\${g.strategy_id}</span>
         <span class="pf-sg-meta">\${g.positions.length} position\${g.positions.length === 1 ? '' : 's'} · day P&amp;L \${subFmt}</span>
