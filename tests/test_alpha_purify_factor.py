@@ -19,3 +19,29 @@ def test_clean_and_ic_on_synthetic_alpha():
 
     ic = ic_against_returns(cleaned, pd.Series(forward_ret))
     assert ic > 0.10
+
+
+def test_ic_returns_nan_on_small_sample():
+    """n=10 is below the 20-threshold; ic should return NaN, not a noisy number."""
+    import numpy as np
+    import pandas as pd
+    from src.services.alpha_purify_factor import ic_against_returns
+    rng = np.random.default_rng(0)
+    factor = pd.Series(rng.normal(size=10))
+    forward_ret = pd.Series(rng.normal(size=10))
+    result = ic_against_returns(factor, forward_ret)
+    assert pd.isna(result), f"expected NaN for n=10, got {result}"
+
+
+def test_ic_raises_on_index_mismatch():
+    """Mismatched indices should raise loudly, not silently return NaN."""
+    import numpy as np
+    import pandas as pd
+    import pytest
+    from src.services.alpha_purify_factor import ic_against_returns
+    rng = np.random.default_rng(0)
+    factor = pd.Series(rng.normal(size=50), index=pd.RangeIndex(50))
+    forward_ret = pd.Series(rng.normal(size=50),
+                            index=pd.date_range("2026-01-01", periods=50, freq="D"))
+    with pytest.raises(ValueError, match="index mismatch"):
+        ic_against_returns(factor, forward_ret)

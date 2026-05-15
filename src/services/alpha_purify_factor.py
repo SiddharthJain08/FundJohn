@@ -21,8 +21,20 @@ def clean_factor(series: pd.Series, winsor_pct: float = 0.01) -> pd.Series:
 
 
 def ic_against_returns(factor: pd.Series, forward_ret: pd.Series) -> float:
-    """Spearman rank-IC. Drops NaN pairs."""
+    """Spearman rank-IC. Drops NaN pairs.
+
+    Returns NaN when fewer than 20 aligned observations remain — Spearman IC
+    on n<20 has ~95% CI of roughly ±0.50, well within the noise floor of any
+    realistic alpha. Callers should treat NaN as 'insufficient data',
+    not 'zero IC'."""
+    if not factor.index.equals(forward_ret.index):
+        raise ValueError(
+            f"alpha_purify_factor.ic_against_returns: index mismatch — "
+            f"factor.index ({factor.index.dtype}, len={len(factor)}) does not "
+            f"equal forward_ret.index ({forward_ret.index.dtype}, len={len(forward_ret)}). "
+            f"Reindex both to the same axis before calling."
+        )
     aligned = pd.concat([factor, forward_ret], axis=1).dropna()
-    if len(aligned) < 5:
+    if len(aligned) < 20:
         return float("nan")
     return float(aligned.corr(method="spearman").iloc[0, 1])
