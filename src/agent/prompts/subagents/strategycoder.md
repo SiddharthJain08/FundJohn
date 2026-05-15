@@ -177,3 +177,32 @@ result = run_backtest_with_regime_partition(
 **If your strategy has insufficient backtest data to qualify in any regime**, the lifecycle promotion gate will block it with `requires_regime_qualification`. Iterate on parameters or extend the backtest window until at least one regime qualifies. Strategies that truly have no regime edge should be marked `archived`, not promoted.
 
 **Adding eligible_regimes manually** is also acceptable for strategies with strong research/literature support but limited backtest history. Set `record.metadata['eligible_regimes'] = ['LOW_VOL', ...]` directly in the strategy's metadata at registration time. The lifecycle gate honors explicit eligible_regimes ahead of auto-derivation.
+
+---
+
+## Strategy template (as of 2026-05-15)
+
+**Scope**: this section governs *backtest-friendly scratchpad code* and code-gen
+of standalone, event-loop-style strategies for research/exploration. The
+production trade pipeline still consumes `BaseStrategy.generate_signals(...)`
+returning `List[Signal]` — see Artifacts 1–4 above. The two contracts coexist;
+do not migrate existing `src/strategies/implementations/` files to the new ABC.
+
+For new event-loop-style strategies, prefer the `StrategyTemplate` ABC at
+`src/strategies/strategy_template_base.py`. See
+`src/strategies/implementations/_template_example.py` for a canonical
+SMA-crossover example with the Alpaca fee model. The leading underscore in
+the filename is the convention — generators (`generate_sidecars.py`,
+`generate_signatures.py`, `scripts/generate_missing_requirements.py`) skip
+underscore-prefixed files so the template doesn't pollute the live registry.
+
+The template enforces:
+- `init()` declares indicators via `self.I(fn, *series)` — runs once
+- `next()` runs per bar; place orders via `self.buy(qty)` / `self.sell(qty)`
+- Orders fill at next bar's open (no look-ahead by construction)
+- Commission is a callable `fn(size, price) -> float` — pass `alpaca_fee`
+  from the example for production-shaped fee modeling
+- `close_at_eod=True` flattens at end-of-data (good for intraday strategies)
+
+Existing strategies under `src/strategies/implementations/` use the older
+`BaseStrategy` contract; do NOT migrate them as part of new-strategy work.

@@ -65,7 +65,9 @@ def load_existing(json_path: Path) -> dict | None:
 
 
 def process(dry_run: bool) -> int:
-    impls = sorted(p for p in IMPL_DIR.glob('*.py') if p.stem != '__init__')
+    # Skip __init__.py and underscore-prefixed files (templates / reference examples;
+    # see src/strategies/implementations/_template_example.py — Phase 2E).
+    impls = sorted(p for p in IMPL_DIR.glob('*.py') if p.stem != '__init__' and not p.name.startswith('_'))
     missing = [p for p in impls if not (p.with_suffix('.requirements.json')).exists()]
     if not missing:
         print(f'[gen_reqs] no missing requirements.json — {len(impls)} strategies are already covered.')

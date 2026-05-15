@@ -58,7 +58,9 @@ def detect_datasets(source: str) -> tuple[list[str], list[str]]:
 
 def main() -> None:
     py_files = sorted(IMPL_DIR.glob('*.py'))
-    py_files = [f for f in py_files if f.name != '__init__.py']
+    # Skip __init__.py and underscore-prefixed files (templates / reference examples;
+    # see src/strategies/implementations/_template_example.py — Phase 2E).
+    py_files = [f for f in py_files if f.name != '__init__.py' and not f.name.startswith('_')]
 
     written = 0
     for path in py_files:
