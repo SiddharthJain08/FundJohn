@@ -1,21 +1,20 @@
 """Phase 2C — Jaccard headline dedup, isolated pure-function tests."""
 from datetime import datetime, timedelta, timezone
 
+from src.research.headline_dedup import dedup_within_window, jaccard, tokenize
+
 
 def test_tokenize_lowercases_and_drops_stopwords():
-    from src.research.headline_dedup import tokenize
     toks = tokenize("Apple Beats Earnings, the Stock Soars")
     assert toks == {"apple", "beats", "earnings", "stock", "soars"}
 
 
 def test_jaccard_identical_is_one_disjoint_is_zero():
-    from src.research.headline_dedup import jaccard
     assert jaccard({"a", "b"}, {"a", "b"}) == 1.0
     assert jaccard({"a"}, {"b"}) == 0.0
 
 
 def test_dedup_within_window_drops_near_duplicate_inside_24h():
-    from src.research.headline_dedup import dedup_within_window
     now = datetime.now(tz=timezone.utc)
     items = [
         {"id": "a", "title": "Apple beats Q1 earnings, raises guidance",  "source": "reuters",  "ts": now},
@@ -27,7 +26,6 @@ def test_dedup_within_window_drops_near_duplicate_inside_24h():
 
 
 def test_dedup_keeps_duplicate_outside_window():
-    from src.research.headline_dedup import dedup_within_window
     now = datetime.now(tz=timezone.utc)
     items = [
         {"id": "a", "title": "Apple beats Q1 earnings, raises guidance", "source": "reuters",  "ts": now},
@@ -46,7 +44,6 @@ def test_same_category_threshold_tightens_dedup():
       intersect = 7, union = 9, jaccard = 7/9 ≈ 0.778
       → 0.778 >= 0.75 (default fires → dedup)
       → 0.778 <  0.80 (same-cat does NOT fire → keep both)"""
-    from src.research.headline_dedup import dedup_within_window
     now = datetime.now(tz=timezone.utc)
     items = [
         {"id": "a",
@@ -72,7 +69,6 @@ def test_same_category_threshold_tightens_dedup():
 def test_dedup_handles_naive_datetimes():
     """Caller passes naive datetime — function normalizes to UTC at the boundary,
     does not crash, and does not mutate the caller's input."""
-    from src.research.headline_dedup import dedup_within_window
     now_naive = datetime(2026, 5, 15, 12, 0, 0)  # no tzinfo
     items = [
         {"id": "a", "title": "Apple beats Q1 earnings", "source": "reuters", "ts": now_naive},
@@ -89,8 +85,6 @@ def test_dedup_handles_naive_datetimes():
 def test_signed_percentages_do_not_collapse():
     """'Apple +5%' and 'Apple -5%' should NOT dedup (a beat and a miss
     are not the same headline)."""
-    from src.research.headline_dedup import dedup_within_window, tokenize
-
     a_toks = tokenize("Apple +5%")
     b_toks = tokenize("Apple -5%")
     assert a_toks != b_toks, f"signed percentages collapsed: {a_toks} == {b_toks}"
@@ -109,7 +103,6 @@ def test_cjk_headlines_do_not_all_collapse():
     """CJK headlines tokenize to a single CJK substring each — distinct ones
     must not dedup against each other (the old [a-z0-9]+ regex would have
     produced empty sets and collapsed them all)."""
-    from src.research.headline_dedup import dedup_within_window
     now = datetime.now(tz=timezone.utc)
     items = [
         {"id": "toyota", "title": "トヨタ自動車の決算発表",  "source": "nikkei",  "ts": now},

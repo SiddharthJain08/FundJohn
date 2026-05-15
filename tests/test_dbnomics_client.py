@@ -1,40 +1,8 @@
 """Phase 1F — DBnomics client tests with recorded fixtures (no network)."""
-# NOTE: src/ingestion/__init__.py has a long-standing import error
-# (`fetch_polygon_universe` not exported by pipeline.py — pre-dates this branch,
-# see beea4cd on main). Mirror the importlib workaround used in
-# tests/test_arxiv_discovery_categories.py to load the client module directly
-# without tripping the unrelated package-init bug.
-import importlib.util
-import pathlib
-import sys
-from unittest.mock import patch
 import json
+from unittest.mock import patch
 
-
-# Pre-load _http_retry the same way arxiv_discovery.py does, so dbnomics_client's
-# `from _http_retry import fetch_with_retry` resolves without tripping
-# src.ingestion.__init__.
-_INGESTION_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "ingestion"
-sys.path.insert(0, str(_INGESTION_DIR))
-# Only load _http_retry once across the test session — the sibling polymarket
-# test file may have loaded it already, and a second module instance would
-# break `patch("_http_retry.urlopen")` for whichever file ran first.
-if "_http_retry" not in sys.modules:
-    _retry_spec = importlib.util.spec_from_file_location(
-        "_http_retry", _INGESTION_DIR / "_http_retry.py",
-    )
-    _http_retry = importlib.util.module_from_spec(_retry_spec)
-    sys.modules["_http_retry"] = _http_retry
-    _retry_spec.loader.exec_module(_http_retry)
-
-_spec = importlib.util.spec_from_file_location(
-    "dbnomics_client",
-    _INGESTION_DIR / "dbnomics_client.py",
-)
-dbnomics_client = importlib.util.module_from_spec(_spec)
-sys.modules["dbnomics_client"] = dbnomics_client
-_spec.loader.exec_module(dbnomics_client)
-DBnomicsClient = dbnomics_client.DBnomicsClient
+from src.ingestion.dbnomics_client import DBnomicsClient
 
 
 def _fixture():
