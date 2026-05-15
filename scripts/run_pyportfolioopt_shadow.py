@@ -84,9 +84,9 @@ def _persist(conn, run_date: str, result: dict, notes: str) -> None:
     cur.execute(
         """INSERT INTO pyportfolioopt_shadow_runs
              (run_date, method, handoff_signals_n, equity_usd, weights,
-              target_dollars, live_dollars, diff_dollars,
+              target_dollars, live_dollars, diff_dollars, diff_weights,
               diversification_ratio, expected_vol_pct, notes)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
            ON CONFLICT (run_date, method) DO UPDATE SET
              handoff_signals_n=EXCLUDED.handoff_signals_n,
              equity_usd=EXCLUDED.equity_usd,
@@ -94,6 +94,7 @@ def _persist(conn, run_date: str, result: dict, notes: str) -> None:
              target_dollars=EXCLUDED.target_dollars,
              live_dollars=EXCLUDED.live_dollars,
              diff_dollars=EXCLUDED.diff_dollars,
+             diff_weights=EXCLUDED.diff_weights,
              diversification_ratio=EXCLUDED.diversification_ratio,
              expected_vol_pct=EXCLUDED.expected_vol_pct,
              notes=EXCLUDED.notes,
@@ -101,6 +102,7 @@ def _persist(conn, run_date: str, result: dict, notes: str) -> None:
         (run_date, result["method"], result["handoff_signals_n"], result["equity_usd"],
          json.dumps(result["weights"]), json.dumps(result["target_dollars"]),
          json.dumps(result["live_dollars"]), json.dumps(result["diff_dollars"]),
+         json.dumps(result["diff_weights"]),
          result["diversification_ratio"], result["expected_vol_pct"], notes),
     )
     conn.commit()
@@ -171,14 +173,19 @@ def main() -> int:
     finally:
         conn.close()
 
-    diffs = sorted(result["diff_dollars"].items(), key=lambda kv: abs(kv[1]), reverse=True)[:3]
+    dollar_diffs = sorted(result["diff_dollars"].items(),
+                          key=lambda kv: abs(kv[1]), reverse=True)[:3]
+    weight_diffs = sorted(result["diff_weights"].items(),
+                          key=lambda kv: abs(kv[1]), reverse=True)[:3]
     div = result["diversification_ratio"]
     div_str = f"{div:.2f}" if div is not None else "n/a"
     msg = (
         f"[PyPortfolioOpt-shadow] {run_date} HRP allocation; "
         f"div_ratio={div_str}, "
         f"expected_vol={result['expected_vol_pct']:.1f}%; "
-        f"top diffs vs live: " + ", ".join(f"{t} ${d:+,.0f}" for t, d in diffs)
+        f"top weight diffs: " + ", ".join(f"{t} {w:+.3f}" for t, w in weight_diffs)
+        + " | top dollar diffs (placeholder equity): "
+        + ", ".join(f"{t} ${d:+,.0f}" for t, d in dollar_diffs)
         + f" | {notes}"
     )
     print(msg)

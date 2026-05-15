@@ -55,6 +55,18 @@ def shadow_run(
     target_dollars = {tkr: equity * w for tkr, w in weights.items()}
     diff = compute_diff(target_dollars, live_dollars)
 
+    # Weight-space diff (target_weights - live_weights) — equity-independent,
+    # so it stays meaningful even when the handoff carries placeholder equity
+    # (today: $1M nominal vs live ~$100k actual).  Guard against the all-zero
+    # live case so a degenerate zero-deployment day doesn't divide-by-zero.
+    target_weights = dict(weights)  # HRP output already sums to 1
+    live_total = sum(live_dollars.values())
+    if live_total > 0:
+        live_weights = {t: d / live_total for t, d in live_dollars.items()}
+    else:
+        live_weights = {t: 0.0 for t in live_dollars}
+    diff_weights = compute_diff(target_weights, live_weights)
+
     # Volatility / diversification stats — annualised.  Guard against the
     # single-asset edge case (port_vol == 0 -> div_ratio undefined).
     asset_vols = returns.std() * (252 ** 0.5)
@@ -71,6 +83,7 @@ def shadow_run(
         "target_dollars":        target_dollars,
         "live_dollars":          live_dollars,
         "diff_dollars":          diff,
+        "diff_weights":          diff_weights,
         "diversification_ratio": div_ratio,
         "expected_vol_pct":      port_vol * 100,
     }

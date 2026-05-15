@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import runpy
 import sys
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -45,10 +46,21 @@ def main() -> int:
     if args.force:
         argv.append("--force")
     sys.argv = argv
+    # CRITICAL: this wrapper must never abort the cycle. The shadow sizer is
+    # a non-production sidecar; any crash (psycopg2 failure, malformed handoff,
+    # ValueError, etc.) must not kill the next orchestrator step or skip
+    # mark_completed(). Mirrors correlation_adjusted_sidecar.py.
     try:
         runpy.run_path(str(SHADOW_SCRIPT), run_name="__main__")
     except SystemExit as e:
+        # Preserve the script's own exit code (e.g. its main() returns 0 even
+        # on skip-paths; an explicit sys.exit(2) would still propagate).
         return int(e.code or 0)
+    except Exception as exc:
+        print(f"[PyPortfolioOpt-shadow] WARN: shadow sizer failed (non-fatal): {exc!s}",
+              file=sys.stderr)
+        traceback.print_exc()
+        return 0
     return 0
 
 
