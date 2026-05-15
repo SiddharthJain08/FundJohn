@@ -30,19 +30,24 @@ class PolymarketClient:
 
         out = []
         for m in raw:
-            prices_raw = m.get("outcomePrices") or ["0", "0"]
+            prices_raw = m.get("outcomePrices")
             # Gamma API may return outcomePrices as a JSON-encoded string,
             # e.g. '["0.62", "0.38"]', instead of a real list. Normalize.
             if isinstance(prices_raw, str):
                 try:
                     prices_raw = json.loads(prices_raw)
                 except (ValueError, TypeError):
-                    prices_raw = ["0", "0"]
-            try:
-                yes = float(prices_raw[0])
-                no = float(prices_raw[1])
-            except (ValueError, IndexError, TypeError):
+                    prices_raw = None
+            if prices_raw is None:
+                # Honest-missing rather than silent zero — a real "0% probability"
+                # market would still ship explicit "0" strings, never a missing key.
                 yes = no = None
+            else:
+                try:
+                    yes = float(prices_raw[0])
+                    no = float(prices_raw[1])
+                except (ValueError, IndexError, TypeError):
+                    yes = no = None
             out.append({
                 "market_id":      m.get("id"),
                 "question":       m.get("question"),
