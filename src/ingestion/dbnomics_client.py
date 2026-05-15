@@ -8,15 +8,10 @@ Example: 'IMF/IFS/M.US.PCPI_PC_PP_PT' (US monthly CPI YoY %)."""
 from __future__ import annotations
 
 import json
-import os
-import sys
 import urllib.parse
 import urllib.request
 
-# Same import dance as arxiv_discovery.py / openalex_discovery.py — bypass the
-# broken src/ingestion/__init__.py and load _http_retry as a top-level module.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from _http_retry import fetch_with_retry  # noqa: E402
+from src.ingestion._http_retry import fetch_with_retry
 
 
 class DBnomicsClient:

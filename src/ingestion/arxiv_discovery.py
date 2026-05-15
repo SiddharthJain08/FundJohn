@@ -21,11 +21,12 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from _http_retry import fetch_with_retry  # local import to avoid src.ingestion package __init__
+try:
+    from src.ingestion._http_retry import fetch_with_retry
+except ImportError:
+    # Script-mode fallback: when invoked as `python3 src/ingestion/arxiv_discovery.py`,
+    # Python sets sys.path[0] to the script's directory so the bare name resolves.
+    from _http_retry import fetch_with_retry  # noqa: E402
 
 ARXIV_API  = 'http://export.arxiv.org/api/query'
 # Expanded 2026-05-15: added cs.LG/AI/CL + stat.ML so PaperHunter sees ML-for-finance

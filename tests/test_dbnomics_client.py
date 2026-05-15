@@ -25,7 +25,7 @@ def test_get_series_parses_observations():
     payload = json.dumps(_fixture()).encode()
     # _http_retry.py does `from urllib.request import urlopen`, so the mock
     # has to target its local binding, not the original urllib.request.urlopen.
-    with patch("_http_retry.urlopen") as mock_open:
+    with patch("src.ingestion._http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         c = DBnomicsClient()
@@ -42,7 +42,7 @@ def test_get_series_handles_null_values():
     payload = json.dumps(fx).encode()
     # _http_retry.py does `from urllib.request import urlopen`, so the mock
     # has to target its local binding, not the original urllib.request.urlopen.
-    with patch("_http_retry.urlopen") as mock_open:
+    with patch("src.ingestion._http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         obs = DBnomicsClient().get_series("IMF/IFS/M.US.PCPI_PC_PP_PT")

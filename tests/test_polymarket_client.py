@@ -19,7 +19,7 @@ def test_list_active_markets_parses_outcomes():
     payload = json.dumps(_markets_fixture()).encode()
     # _http_retry.py does `from urllib.request import urlopen`, so the mock
     # has to target its local binding, not the original urllib.request.urlopen.
-    with patch("_http_retry.urlopen") as mock_open:
+    with patch("src.ingestion._http_retry.urlopen") as mock_open:
         mock_open.return_value.__enter__.return_value.read.return_value = payload
         mock_open.return_value.__enter__.return_value.status = 200
         markets = PolymarketClient().list_active_markets(limit=10)
