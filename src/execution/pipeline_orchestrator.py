@@ -66,6 +66,7 @@ if _LIVE_FLAG:
         ('correlation_sidecar',  'correlation_adjusted_sidecar'), # Phase 2G DRY-RUN sidecar (non-fatal)
         ('reconcile',            'alpaca_reconcile'),          # reconcile fills
         ('report',               'send_report'),               # post to Discord
+        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # Phase 1G shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
         ('health',               'daily_health_digest'),       # daily health digest
     ]
 else:
@@ -84,6 +85,7 @@ else:
         ('trade_parity_capture', 'trade_parity_capture'),         # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
         ('reconcile',            'alpaca_reconcile'),             # Reconcile alpaca_submissions vs broker FILL activities
         ('report',               'send_report'),                  # Greenlist → #trade-signals, veto digest → #trade-reports
+        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),        # Phase 1G shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
         ('health',               'daily_health_digest'),          # End-of-cycle: build + post daily health digest to #pipeline-feed
     ]
 
