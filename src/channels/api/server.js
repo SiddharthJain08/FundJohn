@@ -8,6 +8,7 @@ const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
+const { groupByStrategy } = require('./positions_grouped');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -259,6 +260,9 @@ app.get('/api/portfolio/positions', async (req, res) => {
         AND es.signal_date >= CURRENT_DATE - INTERVAL '90 days'
       ORDER BY es.signal_date DESC
     `);
+    if (req.query.group_by === 'strategy') {
+      return res.json({ groups: groupByStrategy(result.rows) });
+    }
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2697,6 +2701,9 @@ body.rs-chat-locked{overflow:hidden}
 .db-table.grouped tr.strat-row .strat-name{color:var(--muted);font-family:inherit;font-size:9.5px;letter-spacing:.01em;display:inline-block;max-width:118px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 .db-table.grouped tr.strat-row:last-child td{border-bottom:1px solid var(--border2)}
 .wl-badge{display:inline-block;font-size:8.5px;font-weight:600;color:var(--dim);margin-left:4px;letter-spacing:.03em}
+.pf-strategy-group-header{padding:8px 12px;background:rgba(88,166,255,0.06);border-top:1px solid var(--border2);border-bottom:1px solid var(--border2);font-size:11px;font-weight:600;color:var(--text);display:flex;justify-content:space-between;align-items:center;letter-spacing:.02em}
+.pf-strategy-group-header .pf-sg-name{color:var(--blue)}
+.pf-strategy-group-header .pf-sg-meta{color:var(--muted);font-weight:400;font-size:10px}
 
 /* ── Positions heatmap (slice-and-dice) ────────────────────────────────────
  * Default layout: top-12 tickers in 3-4 rows, container ~280px tall. The
@@ -3201,7 +3208,7 @@ body.rs-chat-locked{overflow:hidden}
     <canvas id="pnlChart" style="width:100%;height:150px"></canvas>
   </div>
   <div class="pf-section">
-    <div class="pf-section-header"><span>Active Positions</span><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-header"><span>Active Positions</span><span style="display:flex;align-items:center;gap:10px"><select id="pf-pos-group-toggle" style="font-size:10px;background:var(--bg);color:var(--text);border:1px solid var(--border2);border-radius:3px;padding:2px 6px"><option value="">Flat</option><option value="strategy">By strategy</option></select><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></span></div>
     <div class="pf-section-body"><div id="pf-positions"><div class="empty">Loading...</div></div></div>
   </div>
   <div class="pf-section">
@@ -5740,12 +5747,77 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${rowsHtml}</div>\`;
 }
 
+// "By strategy" view of the active positions table (Phase 1E — concept lifted
+// from achannarasappa/ticker AssetGroup primitive). Renders a section header
+// per strategy_id with a per-row table beneath it. Subtotal is the sum of
+// day_pnl_usd; rows lacking that field contribute 0 (the production schema
+// today carries unrealized_pnl_pct, not day_pnl_usd, so subtotals will read
+// as $0 until day_pnl_usd lands on the row — that's by design, not a bug).
+function _renderPositionsByStrategy(el, rows) {
+  const buckets = new Map();
+  for (const r of rows) {
+    const key = r.strategy_id || '(unattributed)';
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  const groups = [];
+  for (const [strategy_id, positions] of buckets) {
+    const subtotal = positions.reduce((s, p) => s + (Number(p.day_pnl_usd) || 0), 0);
+    groups.push({ strategy_id, positions, subtotal_day_pnl_usd: subtotal });
+  }
+  const countEl = document.getElementById('pf-pos-count');
+  if (countEl) {
+    countEl.textContent = rows.length
+      ? \`\${groups.length} \${groups.length === 1 ? 'strategy' : 'strategies'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\`
+      : '';
+  }
+  if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  const headers = \`<thead><tr>
+      <th>Ticker</th><th>Dir</th>
+      <th class="num">Entry</th><th class="num">Current</th>
+      <th class="num">Size %</th><th class="num">P&amp;L %</th>
+      <th class="num">Days</th>
+    </tr></thead>\`;
+  const html = groups.map(g => {
+    const subFmt = g.subtotal_day_pnl_usd >= 0
+      ? '+$' + g.subtotal_day_pnl_usd.toFixed(2)
+      : '-$' + Math.abs(g.subtotal_day_pnl_usd).toFixed(2);
+    const header = \`<div class="pf-strategy-group-header">
+        <span class="pf-sg-name">\${g.strategy_id}</span>
+        <span class="pf-sg-meta">\${g.positions.length} position\${g.positions.length === 1 ? '' : 's'} · day P&amp;L \${subFmt}</span>
+      </div>\`;
+    const body = g.positions.map(p => {
+      const pnl = p.unrealized_pnl_pct != null ? Number(p.unrealized_pnl_pct) * 100 : null;
+      return \`<tr>
+        <td><span class="tk-name" style="color:var(--blue);cursor:pointer" onclick="showMarket();selectTicker('\${p.ticker}')">\${p.ticker}</span></td>
+        <td class="\${_dirCls(p.direction)}">\${p.direction || '—'}</td>
+        <td class="num">\${p.entry_price != null ? '$' + Number(p.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${p.current_price != null ? '$' + Number(p.current_price).toFixed(2) : '—'}</td>
+        <td class="num">\${p.position_size_pct != null ? (Number(p.position_size_pct) * 100).toFixed(2) + '%' : '—'}</td>
+        <td class="num \${pnlCls(pnl)}">\${_fmtPctSigned(pnl, true)}</td>
+        <td class="num">\${p.days_held != null ? p.days_held : '—'}</td>
+      </tr>\`;
+    }).join('');
+    return header + \`<table class="db-table" style="min-width:560px">\${headers}<tbody>\${body}</tbody></table>\`;
+  }).join('');
+  el.innerHTML = html;
+}
+
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
   if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
     rows = rows.flatMap(g => g.signals);
   }
   _rawDataCache['pf-positions'] = rows;
+  const toggle = document.getElementById('pf-pos-group-toggle');
+  // Wire the toggle once — onchange just re-renders from the cache.
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('change', () => renderPositions(_rawDataCache['pf-positions'] || []));
+  }
+  if (toggle && toggle.value === 'strategy') {
+    return _renderPositionsByStrategy(el, rows);
+  }
   const groups = _groupByTicker(rows, 'open');
   document.getElementById('pf-pos-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
