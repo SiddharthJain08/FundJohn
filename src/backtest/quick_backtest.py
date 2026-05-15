@@ -454,7 +454,9 @@ def run_single_bracket(prices, entry: float, stop: float, target: float, qty: in
     """Test-oracle entry: simulate one long bracket through `prices` (OHLCV df).
     Used by tests/test_backtest_oracles.py. Returns dict with keys:
       fill_price (float|None), exit_price (float|None), exit_reason ('stop'|'target'|'eod'|None),
-      bars_held (int)."""
+      bars_held (int).
+
+    qty is accepted for spec symmetry; this oracle returns prices only, not P&L. It is echoed in the return dict so callers can correlate inputs to outputs."""
     fill_price = None
     fill_idx = None
     for i, row in enumerate(prices.itertuples()):
@@ -463,24 +465,24 @@ def run_single_bracket(prices, entry: float, stop: float, target: float, qty: in
             fill_idx = i
             break
     if fill_idx is None:
-        return {"fill_price": None, "exit_price": None, "exit_reason": None, "bars_held": 0}
+        return {"fill_price": None, "exit_price": None, "exit_reason": None, "bars_held": 0, "qty": qty}
 
     for j in range(fill_idx + 1, len(prices)):
         bar = prices.iloc[j]
         # Gap through stop at open: exit at open, not stop (no slippage protection)
         if bar.open <= stop:
             return {"fill_price": fill_price, "exit_price": float(bar.open),
-                    "exit_reason": "stop", "bars_held": j - fill_idx}
+                    "exit_reason": "stop", "bars_held": j - fill_idx, "qty": qty}
         stop_hit   = bar.low  <= stop
         target_hit = bar.high >= target
         # SL before TP when both same-bar (kernc 0.6.0 contract)
         if stop_hit:
             return {"fill_price": fill_price, "exit_price": float(stop),
-                    "exit_reason": "stop", "bars_held": j - fill_idx}
+                    "exit_reason": "stop", "bars_held": j - fill_idx, "qty": qty}
         if target_hit:
             return {"fill_price": fill_price, "exit_price": float(target),
-                    "exit_reason": "target", "bars_held": j - fill_idx}
+                    "exit_reason": "target", "bars_held": j - fill_idx, "qty": qty}
 
     last = prices.iloc[-1]
     return {"fill_price": fill_price, "exit_price": float(last.close),
-            "exit_reason": "eod", "bars_held": len(prices) - 1 - fill_idx}
+            "exit_reason": "eod", "bars_held": len(prices) - 1 - fill_idx, "qty": qty}

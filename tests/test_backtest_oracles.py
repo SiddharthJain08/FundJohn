@@ -69,6 +69,7 @@ def test_eod_exit_when_neither_stop_nor_target_hit():
     out = _run_bracket(p, Bracket(entry=100.2, stop=95.0, target=110.0))
     assert out["exit_reason"] == "eod"
     assert out["exit_price"] == pytest.approx(100.4)
+    assert out["bars_held"] == 2
 
 
 def test_gap_open_through_stop_fills_at_open_not_stop():
