@@ -19,24 +19,32 @@ intra-category coverage; this raises the trigger to ``>= 0.80``.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 _STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for",
     "with", "by", "as", "at", "from", "is", "are", "was", "were", "be",
 })
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Match Unicode word characters (so CJK/Cyrillic/accented Latin survive
+# tokenization instead of collapsing to empty sets) AND preserve standalone
+# '+' / '-' tokens (so 'Apple +5%' and 'Apple -5%' — a beat vs a miss —
+# don't dedup to one survivor).
+_TOKEN_RE = re.compile(r"\w+|[+\-]", re.UNICODE)
 
 
 def tokenize(headline: str) -> set[str]:
-    """Lowercase, regex-extract alphanumeric tokens, drop stopwords."""
+    """Lowercase, regex-extract Unicode word tokens (plus bare +/- signs),
+    drop stopwords."""
     return {t for t in _TOKEN_RE.findall(headline.lower()) if t not in _STOPWORDS}
 
 
 def jaccard(a: set[str], b: set[str]) -> float:
-    """Jaccard similarity of two token sets.  Two empty sets -> 1.0."""
+    """Set-Jaccard.  Empty-empty returns 0.0 ('no information to compare ->
+    distinct') rather than 1.0 — defends against headlines that tokenize to
+    empty (CJK with old regex, bad-encoding, tag-only, etc.) silently
+    colliding with each other."""
     if not a and not b:
-        return 1.0
+        return 0.0
     union = a | b
     if not union:
         return 0.0
@@ -58,8 +66,20 @@ def dedup_within_window(
     Optional ``category`` field tightens the threshold when two items share
     a category (e.g. both ``'wire-service'``), preventing over-collapse of
     legitimate independent coverage.
+
+    Naive ``ts`` values are normalized to UTC at the boundary (so callers
+    passing ``datetime.utcnow()`` from RSS feeds don't hit a cryptic
+    ``TypeError`` on the first window check).  Caller's input list is not
+    mutated — items with naive timestamps are shallow-copied.
     """
-    items_sorted = sorted(items, key=lambda x: x["ts"])
+    # Normalize naive ts to UTC at the boundary; don't mutate caller's items.
+    normalized = []
+    for it in items:
+        if it["ts"].tzinfo is None:
+            it = {**it, "ts": it["ts"].replace(tzinfo=timezone.utc)}
+        normalized.append(it)
+
+    items_sorted = sorted(normalized, key=lambda x: x["ts"])
     kept: list[dict] = []
     kept_tokens: list[tuple[set[str], dict]] = []
 
