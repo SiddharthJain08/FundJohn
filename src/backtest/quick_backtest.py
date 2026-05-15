@@ -448,3 +448,39 @@ def run_backtest_with_regime_partition(trades_df, strategy_id, thresholds):
         'regime_partition': {r: compute_regime_stats(trades_df, strategy_id, r) for r in ALL_REGIMES},
         'eligible_regimes_proposed': propose_eligible_regimes(trades_df, strategy_id, thresholds),
     }
+
+
+def run_single_bracket(prices, entry: float, stop: float, target: float, qty: int = 100) -> dict:
+    """Test-oracle entry: simulate one long bracket through `prices` (OHLCV df).
+    Used by tests/test_backtest_oracles.py. Returns dict with keys:
+      fill_price (float|None), exit_price (float|None), exit_reason ('stop'|'target'|'eod'|None),
+      bars_held (int)."""
+    fill_price = None
+    fill_idx = None
+    for i, row in enumerate(prices.itertuples()):
+        if row.low <= entry <= row.high:
+            fill_price = entry
+            fill_idx = i
+            break
+    if fill_idx is None:
+        return {"fill_price": None, "exit_price": None, "exit_reason": None, "bars_held": 0}
+
+    for j in range(fill_idx + 1, len(prices)):
+        bar = prices.iloc[j]
+        # Gap through stop at open: exit at open, not stop (no slippage protection)
+        if bar.open <= stop:
+            return {"fill_price": fill_price, "exit_price": float(bar.open),
+                    "exit_reason": "stop", "bars_held": j - fill_idx}
+        stop_hit   = bar.low  <= stop
+        target_hit = bar.high >= target
+        # SL before TP when both same-bar (kernc 0.6.0 contract)
+        if stop_hit:
+            return {"fill_price": fill_price, "exit_price": float(stop),
+                    "exit_reason": "stop", "bars_held": j - fill_idx}
+        if target_hit:
+            return {"fill_price": fill_price, "exit_price": float(target),
+                    "exit_reason": "target", "bars_held": j - fill_idx}
+
+    last = prices.iloc[-1]
+    return {"fill_price": fill_price, "exit_price": float(last.close),
+            "exit_reason": "eod", "bars_held": len(prices) - 1 - fill_idx}
