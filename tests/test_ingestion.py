@@ -89,6 +89,10 @@ def test_fetch_fmp_earnings():
 # Test 2 — Massive chain endpoint → OI dict structured correctly
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="MASSIVE_BASE refactored out of pipeline.py during commit beea4cd; "
+                         "REST /chain/{symbol} replaced by Polygon snapshot (fetch_polygon_chain, "
+                         "different signature) and Massive S3 flat-files (massive_client.py, no REST). "
+                         "Test needs rewrite against new API — tracked as Phase 1 follow-up #19.")
 def test_fetch_massive_chain():
     """Mock Massive /chain via aioresponses, assert OI dict keyed by float strike."""
     symbol  = 'SPY'
