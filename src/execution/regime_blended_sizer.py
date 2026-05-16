@@ -305,7 +305,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
-    lam = _load_lambda()
+    # Effective leverage = global λ × per-regime liquidity_param. Mirrors
+    # how _consolidate_path / _independent_path apply liquidity_param —
+    # historically sharpe_cadence skipped it, so target gross was 2×NAV in
+    # TRANSITIONING instead of the operator-intended 1.5×. Operator flipped
+    # this 2026-05-16: prefer principled-target over execution-friction
+    # workaround, friction to be reduced separately.
+    lam_global   = _load_lambda()
+    liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
+    lam = lam_global * max(0.0, min(2.0, liq_regime))
     min_cum_sharpe = _load_min_cumulative_sharpe()
 
     # Fix A: aggregate across cadence-window, not today-only.

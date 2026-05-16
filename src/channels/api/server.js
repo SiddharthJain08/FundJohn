@@ -537,6 +537,97 @@ app.put('/api/config/lambda', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Risk & Sizing — bundled config for the Portfolio page control panel.
+// Returns the global λ alongside per-regime liquidity / min-notional /
+// circuit-breaker so the operator can see effective leverage per regime
+// (= λ × liquidity_param) on one screen.
+app.get('/api/config/regime-sizing', async (req, res) => {
+  try {
+    const [lamRes, regimeRes] = await Promise.all([
+      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
+      dbQuery(`SELECT regime_state, liquidity_param, min_signal_notional_usd,
+                      position_circuit_breaker_pct, updated_at
+               FROM regime_sizer_params
+               ORDER BY CASE regime_state
+                          WHEN 'LOW_VOL' THEN 1
+                          WHEN 'TRANSITIONING' THEN 2
+                          WHEN 'HIGH_VOL' THEN 3
+                          WHEN 'CRISIS' THEN 4
+                          ELSE 5 END`),
+    ]);
+    let currentRegime = 'TRANSITIONING';
+    try {
+      const latestPath = path.join(__dirname, '../../../.agents/market-state/latest.json');
+      const latestJson = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      currentRegime = latestJson.state || 'TRANSITIONING';
+    } catch (_) {}
+    const lam = lamRes.rows[0];
+    res.json({
+      current_regime: currentRegime,
+      global: {
+        lambda:     lam ? parseFloat(lam.value) : 2.0,
+        min:        0.10,
+        max:        3.50,
+        updated_at: lam ? lam.updated_at : null,
+      },
+      regimes: regimeRes.rows.map(r => ({
+        state:                          r.regime_state,
+        liquidity_param:                parseFloat(r.liquidity_param),
+        min_signal_notional_usd:        parseFloat(r.min_signal_notional_usd),
+        position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
+        updated_at:                     r.updated_at,
+      })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/regime-sizing/:regime', async (req, res) => {
+  const regime = String(req.params.regime || '').toUpperCase();
+  const validRegimes = new Set(['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']);
+  if (!validRegimes.has(regime)) {
+    return res.status(400).json({ error: `regime must be one of ${[...validRegimes].join(', ')}` });
+  }
+  const body = req.body || {};
+  // Validate each optional field individually so partial updates work.
+  const updates = {};
+  if (body.liquidity_param !== undefined) {
+    const v = parseFloat(body.liquidity_param);
+    if (!isFinite(v) || v < 0.0 || v > 2.0) {
+      return res.status(400).json({ error: 'liquidity_param must be a number in [0.0, 2.0]' });
+    }
+    updates.liquidity_param = v;
+  }
+  if (body.min_signal_notional_usd !== undefined) {
+    const v = parseFloat(body.min_signal_notional_usd);
+    if (!isFinite(v) || v < 0 || v > 100000) {
+      return res.status(400).json({ error: 'min_signal_notional_usd must be a number in [0, 100000]' });
+    }
+    updates.min_signal_notional_usd = v;
+  }
+  if (body.position_circuit_breaker_pct !== undefined) {
+    const v = parseFloat(body.position_circuit_breaker_pct);
+    if (!isFinite(v) || v < 0 || v > 0.5) {
+      return res.status(400).json({ error: 'position_circuit_breaker_pct must be a number in [0.0, 0.5]' });
+    }
+    updates.position_circuit_breaker_pct = v;
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'no valid fields to update' });
+  }
+  try {
+    const setClauses = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(', ');
+    const params = [regime, ...Object.values(updates)];
+    const r = await dbQuery(
+      `UPDATE regime_sizer_params SET ${setClauses}, updated_at = NOW() WHERE regime_state = $1 RETURNING *`,
+      params
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: `regime ${regime} not found in regime_sizer_params` });
+    }
+    res.json({ regime, ...updates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
     const [openRes, closedRes] = await Promise.all([
@@ -2757,12 +2848,55 @@ body.rs-chat-locked{overflow:hidden}
 .pf-heatmap-controls .pf-hm-info{flex:1}
 .pf-heatmap-controls .pf-hm-btn{background:transparent;border:1px solid var(--border);color:var(--blue);padding:3px 12px;border-radius:4px;font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .12s}
 .pf-heatmap-controls .pf-hm-btn:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
-.pf-lambda-control{display:flex;align-items:center;gap:8px;font-family:'SF Mono',monospace}
-.pf-lambda-control .pf-lambda-label{color:var(--muted);font-weight:600;font-size:11px}
-.pf-lambda-control input[type=range]{width:120px;height:4px;-webkit-appearance:none;background:var(--border2);border-radius:2px;outline:none;cursor:pointer}
-.pf-lambda-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0;box-shadow:0 0 0 1px rgba(88,166,255,0.4)}
-.pf-lambda-control input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0}
-.pf-lambda-control .pf-lambda-value{color:var(--blue);font-weight:700;font-size:11px;min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
+/* ── Risk & Sizing panel ───────────────────────────────────────────────────
+ * Full-width risk-preference slider (λ_global) with regime parameter cards
+ * below. Lives in #pf-risk-panel on the Portfolio page. The slider is the
+ * single most-consequential operator-tunable knob — sized to reflect that.
+ */
+.pf-risk-section .pf-section-body{padding:0}
+.pf-risk-panel{padding:18px 22px 22px 22px;background:linear-gradient(180deg,rgba(13,17,23,0.5) 0%,rgba(13,17,23,0.15) 100%)}
+.pf-risk-headline{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:18px;flex-wrap:wrap}
+.pf-risk-title{font-size:12px;color:var(--text);font-weight:600;letter-spacing:.03em;text-transform:uppercase}
+.pf-risk-help{font-size:11px;color:var(--muted);line-height:1.5;flex:1;max-width:65%;text-align:right;font-weight:400}
+.pf-risk-help code{background:rgba(88,166,255,0.08);color:var(--blue);padding:1px 5px;border-radius:3px;font-size:10.5px;font-family:'SF Mono',monospace}
+.pf-lambda-mega{position:relative;margin:12px 0 4px}
+.pf-lambda-mega input[type=range]{width:100%;height:10px;-webkit-appearance:none;background:linear-gradient(90deg,#1f6f43 0%,#2ea043 22%,#d29922 55%,#f85149 90%,#7c2128 100%);border-radius:5px;outline:none;cursor:pointer;border:1px solid var(--border)}
+.pf-lambda-mega input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 1px rgba(88,166,255,0.4)}
+.pf-lambda-mega input[type=range]::-webkit-slider-thumb:active{cursor:grabbing;background:var(--blue);box-shadow:0 2px 12px rgba(88,166,255,0.6),0 0 0 4px rgba(88,166,255,0.2)}
+.pf-lambda-mega input[type=range]::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5)}
+.pf-lambda-ticks{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.pf-lambda-ticks .pf-tick{display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;transition:color .12s}
+.pf-lambda-ticks .pf-tick:hover{color:var(--blue)}
+.pf-lambda-ticks .pf-tick-val{font-weight:700;color:var(--muted);font-size:10.5px}
+.pf-lambda-ticks .pf-tick-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em}
+.pf-lambda-readout{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:14px;padding:10px 16px;background:rgba(88,166,255,0.05);border:1px solid rgba(88,166,255,0.18);border-radius:6px}
+.pf-lambda-readout .pf-lr-label{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+.pf-lambda-readout .pf-lr-value{color:var(--blue);font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+.pf-lambda-readout .pf-lr-sub{color:var(--muted);font-size:10.5px;font-family:'SF Mono',monospace}
+.pf-regime-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:18px}
+.pf-regime-card{background:var(--bg);border:1px solid var(--border2);border-radius:6px;padding:11px 12px;transition:border-color .15s}
+.pf-regime-card:hover{border-color:var(--border)}
+.pf-regime-card.regime-active{border-color:var(--blue);box-shadow:0 0 0 1px rgba(88,166,255,0.3)}
+.pf-regime-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.pf-regime-name{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.pf-regime-name.low_vol{color:#2ea043}
+.pf-regime-name.transitioning{color:#d29922}
+.pf-regime-name.high_vol{color:#f85149}
+.pf-regime-name.crisis{color:#a371f7}
+.pf-regime-active-badge{font-size:9px;color:var(--blue);background:rgba(88,166,255,0.15);padding:1px 6px;border-radius:8px;letter-spacing:.05em}
+.pf-regime-eff{font-size:18px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;margin-bottom:2px;line-height:1.1}
+.pf-regime-eff-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.pf-regime-eff-formula{font-size:9.5px;color:var(--muted);font-family:'SF Mono',monospace;margin-bottom:10px}
+.pf-regime-param-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:5px 0;border-top:1px solid var(--border2);font-size:10.5px}
+.pf-regime-param-row:first-of-type{border-top:0}
+.pf-regime-param-label{color:var(--muted);font-size:10px;letter-spacing:.02em}
+.pf-regime-param-input{background:rgba(13,17,23,0.6);border:1px solid var(--border2);color:var(--text);padding:3px 6px;border-radius:3px;font-family:'SF Mono',monospace;font-size:10.5px;width:64px;text-align:right;font-variant-numeric:tabular-nums}
+.pf-regime-param-input:focus{outline:0;border-color:var(--blue);background:var(--bg)}
+.pf-regime-param-input.dirty{border-color:#d29922;background:rgba(210,153,34,0.05)}
+.pf-regime-param-input.saving{border-color:var(--blue);background:rgba(88,166,255,0.05)}
+.pf-regime-param-suffix{color:var(--dim);font-size:9.5px;margin-left:-4px}
+@media(max-width:920px){.pf-regime-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}}
 .pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
 .pf-heatmap.expanded{max-height:570px;overflow-y:auto}
 .pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
@@ -3246,6 +3380,12 @@ body.rs-chat-locked{overflow:hidden}
       <span class="rl-item" data-state="CRISIS"><span class="rl-dot rl-dot-crisis"></span>Crisis</span>
     </div>
     <canvas id="pnlChart" style="width:100%;height:150px"></canvas>
+  </div>
+  <div class="pf-section pf-risk-section">
+    <div class="pf-section-header"><span>Risk &amp; Sizing</span><span id="pf-risk-saved-stamp" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-body">
+      <div id="pf-risk-panel"><div class="empty">Loading risk controls…</div></div>
+    </div>
   </div>
   <div class="pf-section">
     <div class="pf-section-header"><span>Active Positions</span><span style="display:flex;align-items:center;gap:10px"><select id="pf-pos-group-toggle" style="font-size:10px;background:var(--bg);color:var(--text);border:1px solid var(--border2);border-radius:3px;padding:2px 6px"><option value="">Flat</option><option value="strategy">By strategy</option></select><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></span></div>
@@ -5302,15 +5442,19 @@ async function loadPortfolio() {
   if (account && account.equity != null && isFinite(parseFloat(account.equity))) {
     _navCache = parseFloat(account.equity);
   }
-  // Pull lambda separately — small payload, fire-and-forget. Default 2.0
-  // if the endpoint hiccups.
+  // Pull risk-sizing config — bundles global λ with per-regime liquidity_param
+  // so the Risk & Sizing panel renders the full operator surface in one call.
+  let riskCfg = null;
   try {
-    const lr = await fetch('/api/config/lambda').then(r => r.json());
-    if (lr && isFinite(parseFloat(lr.value))) _lambdaCache = parseFloat(lr.value);
+    riskCfg = await fetch('/api/config/regime-sizing').then(r => r.json());
+    if (riskCfg && riskCfg.global && isFinite(parseFloat(riskCfg.global.lambda))) {
+      _lambdaCache = parseFloat(riskCfg.global.lambda);
+    }
   } catch (_) { /* keep cached value */ }
   renderAccountRow(account);
   valueCurveData = valCurve;
   renderPortfolioSummary(summary, valCurve);
+  renderRiskPanel(riskCfg);
   renderPositions(positions);
   renderHistory(history);
   pnlCandlesData = Array.isArray(candles) ? candles : [];
@@ -5865,6 +6009,190 @@ function _renderPositionsByStrategy(el, rows) {
   el.innerHTML = html;
 }
 
+// ── Risk & Sizing panel ────────────────────────────────────────────────────
+// Single most-consequential operator-tunable surface: global λ + per-regime
+// liquidity_param + safety floors. Daily target gross exposure =
+// λ × liquidity_param[current_regime] × NAV. Full-width slider with
+// risk-preference framing (Conservative ↔ Balanced ↔ Aggressive); regime
+// cards underneath show effective leverage live.
+let _riskCfgCache = null;
+function renderRiskPanel(cfg) {
+  const el = document.getElementById('pf-risk-panel');
+  if (!el) return;
+  if (cfg && cfg.global) _riskCfgCache = cfg;
+  cfg = _riskCfgCache;
+  if (!cfg || !cfg.global) {
+    el.innerHTML = '<div class="empty">Risk config unavailable — DB may be down.</div>';
+    return;
+  }
+  const lam = cfg.global.lambda;
+  const stampEl = document.getElementById('pf-risk-saved-stamp');
+  if (stampEl) stampEl.textContent = cfg.global.updated_at
+    ? 'λ saved ' + new Date(cfg.global.updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
+    : '';
+  const ticks = [
+    { v: 0.50, label: 'Conservative' },
+    { v: 1.00, label: 'Cautious' },
+    { v: 1.50, label: 'Balanced' },
+    { v: 2.00, label: 'Active' },
+    { v: 2.50, label: 'Aggressive' },
+    { v: 3.00, label: 'Max Risk' },
+  ];
+  const currentRegime = (cfg.current_regime || '').toUpperCase();
+  const current = (cfg.regimes || []).find(r => r.state === currentRegime);
+  const currentEff = current ? lam * current.liquidity_param : lam;
+  const tickHtml = ticks.map(t => \`<span class="pf-tick" data-v="\${t.v}"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`).join('');
+  const regimeCards = (cfg.regimes || []).map(r => {
+    const active = r.state === currentRegime;
+    const eff = lam * r.liquidity_param;
+    const css = r.state.toLowerCase();
+    return \`<div class="pf-regime-card \${active ? 'regime-active' : ''}" data-regime="\${r.state}">
+      <div class="pf-regime-card-head">
+        <span class="pf-regime-name \${css}">\${r.state.replace('_', ' ')}</span>
+        \${active ? '<span class="pf-regime-active-badge">LIVE</span>' : ''}
+      </div>
+      <div class="pf-regime-eff" id="pf-eff-\${r.state}">\${eff.toFixed(2)}×</div>
+      <div class="pf-regime-eff-label">effective leverage</div>
+      <div class="pf-regime-eff-formula">= λ × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label" title="Regime risk multiplier (0–2). Final leverage = λ × this.">liquidity_param</span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="2" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
+      </div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label" title="Floor for a single signal's notional; smaller signals get dropped at the executor.">min_notional</span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_usd" min="0" max="100000" step="25" value="\${r.min_signal_notional_usd.toFixed(0)}" /><span class="pf-regime-param-suffix">$</span></span>
+      </div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label" title="Per-position circuit breaker — liquidate if unrealized loss exceeds this fraction of position notional.">circuit_breaker</span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="position_circuit_breaker_pct" min="0" max="0.5" step="0.005" value="\${r.position_circuit_breaker_pct.toFixed(3)}" /><span class="pf-regime-param-suffix">×</span></span>
+      </div>
+    </div>\`;
+  }).join('');
+  el.innerHTML = \`<div class="pf-risk-panel">
+    <div class="pf-risk-headline">
+      <div class="pf-risk-title">Risk Preference (λ global)</div>
+      <div class="pf-risk-help">Daily gross exposure = <code>λ × regime.liquidity_param × NAV</code>. The slider sets your overall risk appetite; each regime card adjusts how much of that exposure deploys when the market is in that state.</div>
+    </div>
+    <div class="pf-lambda-mega">
+      <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
+      <div class="pf-lambda-ticks">\${tickHtml}</div>
+    </div>
+    <div class="pf-lambda-readout">
+      <span class="pf-lr-label">λ</span>
+      <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
+      <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
+    </div>
+    <div class="pf-regime-grid">\${regimeCards}</div>
+  </div>\`;
+
+  // Wire slider — drag with live readout, debounce 400ms before PUT.
+  const slider   = el.querySelector('#pf-lambda-slider');
+  const readout  = el.querySelector('#pf-lambda-readout');
+  const effReadout = el.querySelector('#pf-current-eff');
+  const _updateEffective = (newLam) => {
+    (cfg.regimes || []).forEach(r => {
+      const card = el.querySelector(\`[data-regime="\${r.state}"].pf-regime-card\`);
+      if (!card) return;
+      const liqInput = card.querySelector('[data-field="liquidity_param"]');
+      const liq = liqInput ? parseFloat(liqInput.value) : r.liquidity_param;
+      const eff = newLam * liq;
+      const effEl = document.getElementById('pf-eff-' + r.state);
+      if (effEl) effEl.textContent = eff.toFixed(2) + '×';
+    });
+    const cur = (cfg.regimes || []).find(r => r.state === currentRegime);
+    if (cur && effReadout) {
+      const liqInput = el.querySelector(\`[data-regime="\${currentRegime}"] [data-field="liquidity_param"]\`);
+      const liq = liqInput ? parseFloat(liqInput.value) : cur.liquidity_param;
+      effReadout.textContent = (newLam * liq).toFixed(2) + '×';
+    }
+  };
+  if (slider && readout) {
+    let timer = null;
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      readout.textContent = v.toFixed(2) + '×';
+      _updateEffective(v);
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/config/lambda', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: v }),
+          });
+          if (r.ok) {
+            _lambdaCache = v;
+            cfg.global.lambda = v;
+            cfg.global.updated_at = new Date().toISOString();
+            if (stampEl) stampEl.textContent = 'λ saved just now';
+            toast('λ saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
+          } else {
+            toast('λ update failed', 'error', 4000);
+          }
+        } catch (e) {
+          toast('λ update error: ' + e.message, 'error', 4000);
+        }
+      }, 400);
+    });
+  }
+
+  // Click-to-jump on tick labels.
+  el.querySelectorAll('.pf-lambda-ticks .pf-tick').forEach(tick => {
+    tick.addEventListener('click', () => {
+      const v = parseFloat(tick.dataset.v);
+      if (!isFinite(v) || !slider) return;
+      slider.value = String(v);
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+
+  // Wire regime param inputs — each input is independent; blur or
+  // Enter triggers PUT for that single field.
+  el.querySelectorAll('.pf-regime-param-input').forEach(input => {
+    const orig = input.value;
+    input.addEventListener('input', () => {
+      input.classList.toggle('dirty', input.value !== orig);
+      // Re-compute effective leverage live as liquidity_param changes.
+      if (input.dataset.field === 'liquidity_param') {
+        const lamNow = parseFloat(slider ? slider.value : lam);
+        _updateEffective(lamNow);
+        const liqDisp = document.getElementById('pf-liq-display-' + input.dataset.regime);
+        if (liqDisp) liqDisp.textContent = parseFloat(input.value || '0').toFixed(2);
+      }
+    });
+    const commit = async () => {
+      const v = parseFloat(input.value);
+      if (!isFinite(v) || input.value === orig) {
+        input.classList.remove('dirty');
+        return;
+      }
+      input.classList.remove('dirty');
+      input.classList.add('saving');
+      try {
+        const r = await fetch('/api/config/regime-sizing/' + input.dataset.regime, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [input.dataset.field]: v }),
+        });
+        if (r.ok) {
+          input.classList.remove('saving');
+          input.defaultValue = String(v);
+          toast(input.dataset.regime + '.' + input.dataset.field + ' saved: ' + v, 'ok', 3000);
+        } else {
+          input.classList.remove('saving');
+          input.classList.add('dirty');
+          const j = await r.json().catch(() => ({}));
+          toast('Save failed: ' + (j.error || r.statusText), 'error', 4000);
+        }
+      } catch (e) {
+        input.classList.remove('saving');
+        input.classList.add('dirty');
+        toast('Save error: ' + e.message, 'error', 4000);
+      }
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { input.blur(); } });
+  });
+}
+
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
   if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
@@ -5894,11 +6222,6 @@ function renderPositions(rows) {
 
   const controls = \`<div class="pf-heatmap-controls">
     <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
-    <div class="pf-lambda-control" title="λ = total notional deployed each day as a multiple of NAV. Range 0.10–3.50.">
-      <span class="pf-lambda-label">λ</span>
-      <input type="range" id="pf-lambda-slider" min="0.10" max="3.50" step="0.05" value="\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}" />
-      <span class="pf-lambda-value" id="pf-lambda-value">\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}×</span>
-    </div>
     <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
   </div>\`;
   const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
@@ -5933,35 +6256,9 @@ function renderPositions(rows) {
     _heatmapExpanded['pf-positions'] = !expanded;
     renderPositions(_rawDataCache['pf-positions']);
   });
-
-  // Lambda slider — drag debounced 400ms; mirrors live to the readout.
-  // PUT lands in pipeline_config, next pipeline tick reads the new value.
-  const slider = el.querySelector('#pf-lambda-slider');
-  const readout = el.querySelector('#pf-lambda-value');
-  if (slider && readout) {
-    let timer = null;
-    slider.addEventListener('input', () => {
-      const v = parseFloat(slider.value);
-      readout.textContent = v.toFixed(2) + 'x';
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        try {
-          const r = await fetch('/api/config/lambda', {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ value: v }),
-          });
-          if (r.ok) {
-            _lambdaCache = v;
-            toast('λ saved: ' + v.toFixed(2) + 'x — next cycle picks up the new value', 'ok', 4000);
-          } else {
-            toast('λ update failed', 'error', 4000);
-          }
-        } catch (e) {
-          toast('λ update error: ' + e.message, 'error', 4000);
-        }
-      }, 400);
-    });
-  }
+  // Lambda slider relocated to the full-width Risk & Sizing panel above
+  // (renderRiskPanel()); kept the cache in _lambdaCache so other callers
+  // that still reference it see the operator's last-saved value.
 }
 
 function renderHistory(rows) {
