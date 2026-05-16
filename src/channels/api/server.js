@@ -1070,6 +1070,23 @@ app.get('/api/strategies', async (req, res) => {
       }
     } catch (_) { /* leave breakdown empty if join fails */ }
 
+    // Per-strategy per-regime OUE multiplier from the latest strategy_weights_by_regime
+    // snapshot. Used to compute Forward ER (= ARR × multiplier) on the
+    // dashboard. Written by the Sunday weight cron (strategy_weights.py rebuild()).
+    const oueMultipliersByStrategy = {};
+    try {
+      const omRes = await dbQuery(`
+        SELECT strategy_id, regime_state, oue_multiplier
+          FROM strategy_weights_by_regime
+         WHERE is_current
+           AND oue_multiplier IS NOT NULL
+      `);
+      for (const row of omRes.rows) {
+        if (!oueMultipliersByStrategy[row.strategy_id]) oueMultipliersByStrategy[row.strategy_id] = {};
+        oueMultipliersByStrategy[row.strategy_id][row.regime_state] = parseFloat(row.oue_multiplier);
+      }
+    } catch (_) { /* leave empty if column missing pre-migration */ }
+
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
     const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
@@ -1124,6 +1141,10 @@ app.get('/api/strategies', async (req, res) => {
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
         d1_expected:         d1 ? (d1.expected  || 0) : 0,
+        // OUE multiplier per regime, from the latest Sunday weight cron.
+        // Frontend picks the active regime (or filtered regime) and
+        // multiplies ARR to produce a "Forward ER" projection.
+        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
         // Saturday-brain Tier-B fields. Only populated for state='staging'
         // strategies pushed by Saturday brain. The dashboard's strategies
         // page renders these so the operator sees exactly what the Approve
@@ -1179,6 +1200,10 @@ app.get('/api/strategies', async (req, res) => {
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
         d1_expected:         d1 ? (d1.expected  || 0) : 0,
+        // OUE multiplier per regime, from the latest Sunday weight cron.
+        // Frontend picks the active regime (or filtered regime) and
+        // multiplies ARR to produce a "Forward ER" projection.
+        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
       });
     }
     res.json(rows);
@@ -7106,6 +7131,20 @@ function _renderActiveStack(rows) {
     const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
     const adrPct = (avgRet != null && actDays != null && actDays > 0)
                    ? (avgRet * 100 / actDays) : null;            // per-day %
+    // Forward ER = ARR adjusted by the OUE multiplier. Sign-aware so the
+    // discount works both ways: a mult of 0.2 on +5% ARR drops to +1%
+    // (discount the upside), AND a mult of 0.2 on -2% ARR drops to -3.6%
+    // (amplify the downside). Multiplying signed ARR directly would
+    // wrongly make bad strategies look less negative when their OUE is
+    // disappointing. Effective_mult = mult if ARR ≥ 0 else (2 − mult).
+    const mults = r.oue_multipliers_by_regime || {};
+    const mult_for = filterRg || r.current_regime || 'TRANSITIONING';
+    const oueMult = mults[mult_for] != null ? mults[mult_for] : 1.0;
+    let forwardErPct = null;
+    if (arrPct != null) {
+      const effMult = arrPct >= 0 ? oueMult : (2.0 - oueMult);
+      forwardErPct = arrPct * effMult;
+    }
     return Object.assign({}, r, {
       d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
       _active_rank:    _activeRankFor(r),
@@ -7114,6 +7153,8 @@ function _renderActiveStack(rows) {
       _act_days:       actDays,
       _filtered_win:   winRate,
       _filtered_closed: closedCount,
+      _oue_mult:       oueMult,
+      _forward_er:     forwardErPct,
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -7149,7 +7190,8 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
       <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
-      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}.">ARR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}. Pure realized fact — no OUE adjustment.">ARR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_forward_er" data-sort-type="num" title="Forward ER projection = ARR × per-regime OUE multiplier. Discounts strategies whose realized outliers skew under (consistent disappoint); boosts those skewing over (consistent delight). Multiplier in [0.20, 2.00]; defaults to 1.00 until sample reaches 100 closes with ≥20 outliers in the regime.">Fwd&nbsp;ER&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
@@ -7208,9 +7250,10 @@ function _renderActiveStack(rows) {
         <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
         <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
         <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num \${pnlCls(r._forward_er)}" title="Forward ER = ARR × OUE multiplier (\${(r._oue_mult || 1).toFixed(2)}× for \${filterRg || r.current_regime || '—'})">\${r._forward_er != null ? ((r._forward_er >= 0 ? '+' : '') + r._forward_er.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
-        <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
+        <td class="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ.">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
       </tr>\${expandRow}\`;

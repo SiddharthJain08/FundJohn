@@ -51,6 +51,70 @@ class StrategyWeightRow:
     effective_sharpe: float
     weight: float
     daily_weight: float
+    # OUE health (per-regime closed-trade classification) and the
+    # multiplier we applied. Persisted so the dashboard + comprehensive
+    # review + operator audit can see exactly what the cron did.
+    oue_over: int | None = None
+    oue_under: int | None = None
+    oue_expected: int | None = None
+    oue_multiplier: float | None = None
+    oue_adjusted_sharpe: float | None = None
+
+
+# OUE multiplier gating constants. Operator-approved 2026-05-16: discount
+# weights by per-regime OUE health (bias toward over → boost, bias toward
+# under → discount). Only fires when the sample actually discriminates —
+# tiny samples stay at multiplier 1.0.
+OUE_MIN_TOTAL = 100      # need at least this many closed trades in regime
+OUE_MIN_OUTLIERS = 20    # at least this many over+under to compute bias
+OUE_FLOOR = 0.2          # never zero a strategy out (preserves rotation)
+OUE_CEIL = 2.0           # never more than 2× boost (prevents over-fitting to luck)
+
+
+def _oue_multiplier(over: int, under: int, expected: int) -> float:
+    """Return the OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
+
+    Logic: at sufficient sample size, bias = (over − under) / (over + under)
+    measures whether the strategy's realized outliers skew positive
+    (delight) or negative (disappoint). multiplier = 1 + bias. Returns
+    1.0 (no adjustment) on insufficient sample.
+    """
+    total = (over or 0) + (under or 0) + (expected or 0)
+    outliers = (over or 0) + (under or 0)
+    if total < OUE_MIN_TOTAL or outliers < OUE_MIN_OUTLIERS:
+        return 1.0
+    bias = ((over or 0) - (under or 0)) / outliers
+    return max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
+
+
+def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
+    """Per-(strategy, regime) closed-trade OUE counts from
+    execution_signals. Returns {(sid, regime): {over, under, expected}}.
+
+    Per-regime (not lifetime) because a strategy's calibration varies by
+    regime: a strategy that delivers on plan in LOW_VOL but craters in
+    CRISIS should only get the CRISIS row discounted.
+    """
+    if not strategy_ids:
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT strategy_id, regime_state, oue_kind, COUNT(*)::int AS n
+              FROM execution_signals
+             WHERE strategy_id = ANY(%s)
+               AND regime_state IS NOT NULL
+               AND oue_kind IS NOT NULL
+             GROUP BY strategy_id, regime_state, oue_kind
+            """,
+            (strategy_ids,),
+        )
+        for r in cur:
+            key = (r['strategy_id'], r['regime_state'])
+            entry = out.setdefault(key, {'over': 0, 'under': 0, 'expected': 0})
+            entry[r['oue_kind']] = r['n']
+    return out
 
 
 def _db():
@@ -154,9 +218,14 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
                 'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
             }
             seen_strats.add(r['strategy_id'])
-    except Exception:
+    except Exception as e:
         # Tables not yet migrated / DB hiccup — fall through to legacy sources.
-        pass
+        # Roll back the failed transaction so subsequent tier queries on the
+        # same connection don't crash with InFailedSqlTransaction (2026-05-16
+        # found this had been silently breaking the Sunday cron whenever
+        # Tier 1 errored — Tier 2 + Tier 3 never ran).
+        logger.warning('strategy_weights tier-1 backtest fetch failed (%s); falling back', e)
+        conn.rollback()
 
     # Tier 2: legacy strategy_regime_backtests (only for strategies with no
     # unified_backtest row yet).
@@ -299,9 +368,11 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
         bt   = _load_backtest_sharpe(conn, sids)
         regime_by_date = _load_regime_by_date()
         live = _load_live_sharpe(conn, sids, regime_by_date)
+        oue  = _load_oue_by_strategy_regime(conn, sids)
 
         if verbose:
-            print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, live buckets: {len(live)}')
+            print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, '
+                  f'live buckets: {len(live)}, oue buckets: {len(oue)}')
 
         per_regime_positives: dict[str, list[dict]] = {}
         for s in active:
@@ -310,21 +381,35 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                                                                 live.get((s['strategy_id'], R)))
                 if eff is None or eff <= 0:
                     continue
+                # OUE multiplier (per regime). Multiplies effective_sharpe
+                # before normalization, so the entire regime bucket is
+                # judged on OUE-adjusted edge.
+                oue_row = oue.get((s['strategy_id'], R), {'over': 0, 'under': 0, 'expected': 0})
+                mult = _oue_multiplier(oue_row['over'], oue_row['under'], oue_row['expected'])
+                eff_adj = eff * mult
                 per_regime_positives.setdefault(R, []).append({
                     'strategy_id': s['strategy_id'],
                     'cadence_days': s['cadence_days'],
                     'bt_sharpe': bt_s, 'bt_n': bt_n,
                     'live_sharpe': lv_s, 'live_n': lv_n,
                     'effective_sharpe': eff,
+                    'oue_over':            oue_row['over'],
+                    'oue_under':           oue_row['under'],
+                    'oue_expected':        oue_row['expected'],
+                    'oue_multiplier':      mult,
+                    'oue_adjusted_sharpe': eff_adj,
                 })
 
         rows: list[StrategyWeightRow] = []
         for R, entries in per_regime_positives.items():
-            denom = sum(e['effective_sharpe'] for e in entries)
+            # Normalize on OUE-adjusted Sharpe — strategies that consistently
+            # disappoint relative to their GBM expectation get less capital
+            # automatically, those that consistently delight get more.
+            denom = sum(e['oue_adjusted_sharpe'] for e in entries)
             if denom <= 0:
                 continue
             for e in entries:
-                w = e['effective_sharpe'] / denom
+                w = e['oue_adjusted_sharpe'] / denom
                 w_daily = w / max(1, e['cadence_days'])
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
@@ -333,6 +418,10 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     live_sharpe=e['live_sharpe'], live_n=e['live_n'],
                     effective_sharpe=e['effective_sharpe'],
                     weight=w, daily_weight=w_daily,
+                    oue_over=e['oue_over'], oue_under=e['oue_under'],
+                    oue_expected=e['oue_expected'],
+                    oue_multiplier=e['oue_multiplier'],
+                    oue_adjusted_sharpe=e['oue_adjusted_sharpe'],
                 ))
 
         cur = conn.cursor()
@@ -342,11 +431,15 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 INSERT INTO strategy_weights_by_regime
                   (strategy_id, regime_state, cadence_days,
                    bt_sharpe, bt_n, live_sharpe, live_n,
-                   effective_sharpe, weight, daily_weight, trigger, is_current)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, TRUE)
+                   effective_sharpe, weight, daily_weight, trigger, is_current,
+                   oue_over, oue_under, oue_expected,
+                   oue_multiplier, oue_adjusted_sharpe)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, TRUE, %s,%s,%s,%s,%s)
             ''', (r.strategy_id, r.regime_state, r.cadence_days,
                   r.bt_sharpe, r.bt_n, r.live_sharpe, r.live_n,
-                  r.effective_sharpe, r.weight, r.daily_weight, trigger))
+                  r.effective_sharpe, r.weight, r.daily_weight, trigger,
+                  r.oue_over, r.oue_under, r.oue_expected,
+                  r.oue_multiplier, r.oue_adjusted_sharpe))
         conn.commit()
 
         if verbose:
