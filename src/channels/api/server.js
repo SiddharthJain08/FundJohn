@@ -2864,9 +2864,14 @@ body.rs-chat-locked{overflow:hidden}
 .pf-lambda-mega input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 1px rgba(88,166,255,0.4)}
 .pf-lambda-mega input[type=range]::-webkit-slider-thumb:active{cursor:grabbing;background:var(--blue);box-shadow:0 2px 12px rgba(88,166,255,0.6),0 0 0 4px rgba(88,166,255,0.2)}
 .pf-lambda-mega input[type=range]::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5)}
-.pf-lambda-ticks{display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.04em}
-.pf-lambda-ticks .pf-tick{display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;transition:color .12s}
+/* Inset matches half the thumb width (28px / 2 = 14px) so tick centers
+ * align with where the thumb center can actually travel — without this,
+ * ticks drift up to ~2% of width off the true slider value. */
+.pf-lambda-ticks{position:relative;height:34px;margin:10px 14px 0 14px;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.pf-lambda-ticks .pf-tick{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;transition:color .12s;white-space:nowrap}
+.pf-lambda-ticks .pf-tick::before{content:'';position:absolute;left:50%;top:-6px;width:1px;height:5px;background:var(--border);transform:translateX(-50%)}
 .pf-lambda-ticks .pf-tick:hover{color:var(--blue)}
+.pf-lambda-ticks .pf-tick:hover::before{background:var(--blue)}
 .pf-lambda-ticks .pf-tick-val{font-weight:700;color:var(--muted);font-size:10.5px}
 .pf-lambda-ticks .pf-tick-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em}
 .pf-lambda-readout{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:14px;padding:10px 16px;background:rgba(88,166,255,0.05);border:1px solid rgba(88,166,255,0.18);border-radius:6px}
@@ -2887,9 +2892,11 @@ body.rs-chat-locked{overflow:hidden}
 .pf-regime-eff{font-size:18px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;margin-bottom:2px;line-height:1.1}
 .pf-regime-eff-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
 .pf-regime-eff-formula{font-size:9.5px;color:var(--muted);font-family:'SF Mono',monospace;margin-bottom:10px}
-.pf-regime-param-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:5px 0;border-top:1px solid var(--border2);font-size:10.5px}
+.pf-regime-param-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--border2);font-size:10.5px}
 .pf-regime-param-row:first-of-type{border-top:0}
-.pf-regime-param-label{color:var(--muted);font-size:10px;letter-spacing:.02em}
+.pf-regime-param-label-block{display:flex;flex-direction:column;gap:2px;min-width:0}
+.pf-regime-param-label{color:var(--text);font-size:10.5px;letter-spacing:.02em;font-weight:600}
+.pf-regime-param-hint{color:var(--dim);font-size:9.5px;line-height:1.3;letter-spacing:0;font-weight:400}
 .pf-regime-param-input{background:rgba(13,17,23,0.6);border:1px solid var(--border2);color:var(--text);padding:3px 6px;border-radius:3px;font-family:'SF Mono',monospace;font-size:10.5px;width:64px;text-align:right;font-variant-numeric:tabular-nums}
 .pf-regime-param-input:focus{outline:0;border-color:var(--blue);background:var(--bg)}
 .pf-regime-param-input.dirty{border-color:#d29922;background:rgba(210,153,34,0.05)}
@@ -6041,7 +6048,15 @@ function renderRiskPanel(cfg) {
   const currentRegime = (cfg.current_regime || '').toUpperCase();
   const current = (cfg.regimes || []).find(r => r.state === currentRegime);
   const currentEff = current ? lam * current.liquidity_param : lam;
-  const tickHtml = ticks.map(t => \`<span class="pf-tick" data-v="\${t.v}"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`).join('');
+  // Position each tick at its true location along the slider track
+  // (left% = (v - min) / (max - min)). Without this the ticks bunch at
+  // the edges because flex space-between maps tick #1 to 0% regardless
+  // of value.
+  const lmin = cfg.global.min, lmax = cfg.global.max;
+  const tickHtml = ticks.map(t => {
+    const pct = ((t.v - lmin) / (lmax - lmin)) * 100;
+    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`;
+  }).join('');
   const regimeCards = (cfg.regimes || []).map(r => {
     const active = r.state === currentRegime;
     const eff = lam * r.liquidity_param;
@@ -6055,16 +6070,25 @@ function renderRiskPanel(cfg) {
       <div class="pf-regime-eff-label">effective leverage</div>
       <div class="pf-regime-eff-formula">= Leverage × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Per-regime deployment fraction (0–2). Effective leverage = global Leverage × this. Lower it to throttle exposure in this regime.">liquidity_param</span>
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">liquidity_param</span>
+          <span class="pf-regime-param-hint">Throttle — fraction of global Leverage that actually deploys in this regime.</span>
+        </span>
         <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="2" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
       </div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Per-ticker net-notional floor. After all signals on a ticker are consolidated, if |net| falls below this, the ticker is dropped before submission (avoids burning fees on tiny positions).">min_notional</span>
-        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_usd" min="0" max="100000" step="25" value="\${r.min_signal_notional_usd.toFixed(0)}" /><span class="pf-regime-param-suffix">$</span></span>
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">min_notional</span>
+          <span class="pf-regime-param-hint">Skip tickers whose consolidated bet is too small to be worth the fees.</span>
+        </span>
+        <span><span class="pf-regime-param-suffix" style="margin-right:2px;margin-left:0">$</span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_usd" min="0" max="100000" step="25" value="\${r.min_signal_notional_usd.toFixed(0)}" /></span>
       </div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Auto-liquidate a position when its unrealized loss exceeds this fraction of NAV. e.g. 0.020 = 2% of NAV. Fires intraday during LOW_VOL/TRANSITIONING (consolidate-mode regimes).">circuit_breaker</span>
-        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="position_circuit_breaker_pct" min="0" max="0.5" step="0.005" value="\${r.position_circuit_breaker_pct.toFixed(3)}" /><span class="pf-regime-param-suffix">×</span></span>
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">circuit_breaker</span>
+          <span class="pf-regime-param-hint">Auto-liquidate a position once its unrealized loss exceeds this % of NAV.</span>
+        </span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="position_circuit_breaker_pct" data-percent="1" min="0" max="50" step="0.1" value="\${(r.position_circuit_breaker_pct * 100).toFixed(1)}" /><span class="pf-regime-param-suffix">%</span></span>
       </div>
     </div>\`;
   }).join('');
@@ -6160,11 +6184,14 @@ function renderRiskPanel(cfg) {
       }
     });
     const commit = async () => {
-      const v = parseFloat(input.value);
-      if (!isFinite(v) || input.value === orig) {
+      const raw = parseFloat(input.value);
+      if (!isFinite(raw) || input.value === orig) {
         input.classList.remove('dirty');
         return;
       }
+      // Inputs marked data-percent="1" are displayed in % but stored as a
+      // decimal in the DB (2.0% in UI → 0.02 on the wire).
+      const v = input.dataset.percent === '1' ? raw / 100 : raw;
       input.classList.remove('dirty');
       input.classList.add('saving');
       try {
@@ -6174,8 +6201,9 @@ function renderRiskPanel(cfg) {
         });
         if (r.ok) {
           input.classList.remove('saving');
-          input.defaultValue = String(v);
-          toast(input.dataset.regime + '.' + input.dataset.field + ' saved: ' + v, 'ok', 3000);
+          input.defaultValue = String(raw);
+          const human = input.dataset.percent === '1' ? raw.toFixed(2) + '%' : String(raw);
+          toast(input.dataset.regime + '.' + input.dataset.field + ' saved: ' + human, 'ok', 3000);
         } else {
           input.classList.remove('saving');
           input.classList.add('dirty');
