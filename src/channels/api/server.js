@@ -6028,7 +6028,7 @@ function renderRiskPanel(cfg) {
   const lam = cfg.global.lambda;
   const stampEl = document.getElementById('pf-risk-saved-stamp');
   if (stampEl) stampEl.textContent = cfg.global.updated_at
-    ? 'λ saved ' + new Date(cfg.global.updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
+    ? 'Leverage saved ' + new Date(cfg.global.updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
     : '';
   const ticks = [
     { v: 0.50, label: 'Conservative' },
@@ -6053,32 +6053,32 @@ function renderRiskPanel(cfg) {
       </div>
       <div class="pf-regime-eff" id="pf-eff-\${r.state}">\${eff.toFixed(2)}×</div>
       <div class="pf-regime-eff-label">effective leverage</div>
-      <div class="pf-regime-eff-formula">= λ × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
+      <div class="pf-regime-eff-formula">= Leverage × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Regime risk multiplier (0–2). Final leverage = λ × this.">liquidity_param</span>
+        <span class="pf-regime-param-label" title="Per-regime deployment fraction (0–2). Effective leverage = global Leverage × this. Lower it to throttle exposure in this regime.">liquidity_param</span>
         <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="2" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
       </div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Floor for a single signal's notional; smaller signals get dropped at the executor.">min_notional</span>
+        <span class="pf-regime-param-label" title="Per-ticker net-notional floor. After all signals on a ticker are consolidated, if |net| falls below this, the ticker is dropped before submission (avoids burning fees on tiny positions).">min_notional</span>
         <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_usd" min="0" max="100000" step="25" value="\${r.min_signal_notional_usd.toFixed(0)}" /><span class="pf-regime-param-suffix">$</span></span>
       </div>
       <div class="pf-regime-param-row">
-        <span class="pf-regime-param-label" title="Per-position circuit breaker — liquidate if unrealized loss exceeds this fraction of position notional.">circuit_breaker</span>
+        <span class="pf-regime-param-label" title="Auto-liquidate a position when its unrealized loss exceeds this fraction of NAV. e.g. 0.020 = 2% of NAV. Fires intraday during LOW_VOL/TRANSITIONING (consolidate-mode regimes).">circuit_breaker</span>
         <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="position_circuit_breaker_pct" min="0" max="0.5" step="0.005" value="\${r.position_circuit_breaker_pct.toFixed(3)}" /><span class="pf-regime-param-suffix">×</span></span>
       </div>
     </div>\`;
   }).join('');
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
-      <div class="pf-risk-title">Risk Preference (λ global)</div>
-      <div class="pf-risk-help">Daily gross exposure = <code>λ × regime.liquidity_param × NAV</code>. The slider sets your overall risk appetite; each regime card adjusts how much of that exposure deploys when the market is in that state.</div>
+      <div class="pf-risk-title">Leverage</div>
+      <div class="pf-risk-help">Daily gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>. The slider sets your global leverage target; each regime card throttles how much actually deploys when the market is in that state.</div>
     </div>
     <div class="pf-lambda-mega">
       <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
       <div class="pf-lambda-ticks">\${tickHtml}</div>
     </div>
     <div class="pf-lambda-readout">
-      <span class="pf-lr-label">λ</span>
+      <span class="pf-lr-label">Leverage</span>
       <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
       <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
     </div>
@@ -6123,13 +6123,13 @@ function renderRiskPanel(cfg) {
             _lambdaCache = v;
             cfg.global.lambda = v;
             cfg.global.updated_at = new Date().toISOString();
-            if (stampEl) stampEl.textContent = 'λ saved just now';
-            toast('λ saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
+            if (stampEl) stampEl.textContent = 'Leverage saved just now';
+            toast('Leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
           } else {
-            toast('λ update failed', 'error', 4000);
+            toast('Leverage update failed', 'error', 4000);
           }
         } catch (e) {
-          toast('λ update error: ' + e.message, 'error', 4000);
+          toast('Leverage update error: ' + e.message, 'error', 4000);
         }
       }, 400);
     });
