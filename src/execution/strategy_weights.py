@@ -61,39 +61,55 @@ class StrategyWeightRow:
     oue_adjusted_sharpe: float | None = None
 
 
-# OUE multiplier gating constants. Operator-approved 2026-05-16: discount
-# weights by per-regime OUE health (bias toward over → boost, bias toward
-# under → discount). Only fires when the sample actually discriminates —
-# tiny samples stay at multiplier 1.0.
-OUE_MIN_TOTAL = 100      # need at least this many closed trades in regime
-OUE_MIN_OUTLIERS = 20    # at least this many over+under to compute bias
+# OUE multiplier gating constants. Operator-approved 2026-05-16; refined
+# 2026-05-16 to use time-decayed counts (τ=45d) instead of lifetime so the
+# multiplier responds to recent behavior within ~6 weeks. A strategy that
+# was disappointing 4 months ago but has delivered the last 6 weeks will
+# now see its multiplier rise on the next Sunday cron, not stay pinned to
+# a stale history.
+OUE_TAU_DAYS = 45.0      # half-life ≈ 31 days; trade @ 90d ago weighted 0.14
+OUE_MIN_TOTAL = 30       # time-weighted closes in regime (was 100 lifetime)
+OUE_MIN_OUTLIERS = 5     # time-weighted over+under (was 20 lifetime)
 OUE_FLOOR = 0.2          # never zero a strategy out (preserves rotation)
 OUE_CEIL = 2.0           # never more than 2× boost (prevents over-fitting to luck)
 
 
-def _oue_multiplier(over: int, under: int, expected: int) -> float:
+def _oue_multiplier(over: float, under: float, expected: float) -> float:
     """Return the OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
 
     Logic: at sufficient sample size, bias = (over − under) / (over + under)
     measures whether the strategy's realized outliers skew positive
     (delight) or negative (disappoint). multiplier = 1 + bias. Returns
-    1.0 (no adjustment) on insufficient sample.
+    1.0 (no adjustment) on insufficient sample. Counts can be floats
+    (time-weighted) — the math is the same.
     """
-    total = (over or 0) + (under or 0) + (expected or 0)
-    outliers = (over or 0) + (under or 0)
+    total = (over or 0.0) + (under or 0.0) + (expected or 0.0)
+    outliers = (over or 0.0) + (under or 0.0)
     if total < OUE_MIN_TOTAL or outliers < OUE_MIN_OUTLIERS:
         return 1.0
-    bias = ((over or 0) - (under or 0)) / outliers
+    bias = ((over or 0.0) - (under or 0.0)) / outliers
     return max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
 
 
 def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
-    """Per-(strategy, regime) closed-trade OUE counts from
-    execution_signals. Returns {(sid, regime): {over, under, expected}}.
+    """Per-(strategy, regime) closed-trade OUE counts with time-decay.
 
-    Per-regime (not lifetime) because a strategy's calibration varies by
-    regime: a strategy that delivers on plan in LOW_VOL but craters in
-    CRISIS should only get the CRISIS row discounted.
+    Returns {(sid, regime): {
+       over, under, expected           ← TIME-WEIGHTED (floats)
+       lifetime_over, lifetime_under, lifetime_expected ← INTEGER lifetime
+    }}. The multiplier uses the time-weighted counts; the lifetime
+    counts get persisted to strategy_weights_by_regime.oue_over/under/
+    expected so the dashboard's #O/U/E column stays historically
+    meaningful.
+
+    Per-regime (not lifetime) because a strategy's calibration varies
+    by regime — discount applies only where the bad behavior happened.
+
+    Time-decay weight per trade: exp(-age_days / OUE_TAU_DAYS), where
+    age is days since pnl_date. A trade closed today contributes 1.0;
+    one from 45 days ago contributes 0.37; one from 90 days ago, 0.14.
+    Smoothly aging out old behavior without a hard edge-of-window
+    discontinuity.
     """
     if not strategy_ids:
         return {}
@@ -101,19 +117,35 @@ def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[st
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute(
             """
-            SELECT strategy_id, regime_state, oue_kind, COUNT(*)::int AS n
-              FROM execution_signals
-             WHERE strategy_id = ANY(%s)
-               AND regime_state IS NOT NULL
-               AND oue_kind IS NOT NULL
-             GROUP BY strategy_id, regime_state, oue_kind
+            SELECT es.strategy_id, es.regime_state, es.oue_kind,
+                   COUNT(*)::int AS lifetime_n,
+                   COALESCE(SUM(
+                     EXP(
+                       -LEAST(
+                          EXTRACT(EPOCH FROM (NOW() - sp.pnl_date::timestamp)) / 86400.0,
+                          365.0
+                       ) / %s
+                     )
+                   ), 0.0)::numeric AS weighted_n
+              FROM execution_signals es
+              JOIN signal_pnl sp ON sp.signal_id = es.id
+                                 AND sp.status = 'closed'
+                                 AND sp.realized_pnl_pct IS NOT NULL
+             WHERE es.strategy_id = ANY(%s)
+               AND es.regime_state IS NOT NULL
+               AND es.oue_kind IS NOT NULL
+             GROUP BY es.strategy_id, es.regime_state, es.oue_kind
             """,
-            (strategy_ids,),
+            (OUE_TAU_DAYS, strategy_ids),
         )
         for r in cur:
             key = (r['strategy_id'], r['regime_state'])
-            entry = out.setdefault(key, {'over': 0, 'under': 0, 'expected': 0})
-            entry[r['oue_kind']] = r['n']
+            entry = out.setdefault(key, {
+                'over': 0.0, 'under': 0.0, 'expected': 0.0,
+                'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
+            })
+            entry[r['oue_kind']] = float(r['weighted_n'])
+            entry['lifetime_' + r['oue_kind']] = int(r['lifetime_n'])
     return out
 
 
@@ -381,10 +413,15 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                                                                 live.get((s['strategy_id'], R)))
                 if eff is None or eff <= 0:
                     continue
-                # OUE multiplier (per regime). Multiplies effective_sharpe
-                # before normalization, so the entire regime bucket is
-                # judged on OUE-adjusted edge.
-                oue_row = oue.get((s['strategy_id'], R), {'over': 0, 'under': 0, 'expected': 0})
+                # OUE multiplier (per regime, time-decayed). Multiplies
+                # effective_sharpe before normalization so the bucket is
+                # judged on recent OUE-adjusted edge — a strategy that
+                # was bad 4 months ago but is delivering now gets its
+                # multiplier back as old trades age out (τ=45d).
+                oue_row = oue.get((s['strategy_id'], R), {
+                    'over': 0.0, 'under': 0.0, 'expected': 0.0,
+                    'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
+                })
                 mult = _oue_multiplier(oue_row['over'], oue_row['under'], oue_row['expected'])
                 eff_adj = eff * mult
                 per_regime_positives.setdefault(R, []).append({
@@ -393,9 +430,11 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     'bt_sharpe': bt_s, 'bt_n': bt_n,
                     'live_sharpe': lv_s, 'live_n': lv_n,
                     'effective_sharpe': eff,
-                    'oue_over':            oue_row['over'],
-                    'oue_under':           oue_row['under'],
-                    'oue_expected':        oue_row['expected'],
+                    # Lifetime integer counts get persisted (matches the
+                    # dashboard's #O/U/E column semantics + audit trail).
+                    'oue_over':            oue_row['lifetime_over'],
+                    'oue_under':           oue_row['lifetime_under'],
+                    'oue_expected':        oue_row['lifetime_expected'],
                     'oue_multiplier':      mult,
                     'oue_adjusted_sharpe': eff_adj,
                 })
