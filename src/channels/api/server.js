@@ -6251,8 +6251,8 @@ function renderPositions(rows) {
       });
     });
   });
-  const toggle = el.querySelector('#pf-hm-toggle');
-  if (toggle) toggle.addEventListener('click', () => {
+  const hmToggle = el.querySelector('#pf-hm-toggle');
+  if (hmToggle) hmToggle.addEventListener('click', () => {
     _heatmapExpanded['pf-positions'] = !expanded;
     renderPositions(_rawDataCache['pf-positions']);
   });
