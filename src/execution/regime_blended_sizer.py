@@ -389,10 +389,34 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
 
     # Pure formulation (2026-05-14): target_usd = ticker_w × (λ × NAV / Σ|ticker_w|).
     # High-conviction tickers (sum of contributing strategy weights × direction)
-    # get proportionally more allocation; no per-ticker cap, no min-trade floor,
-    # no redistribute pool. The operator explicitly accepts the concentration
-    # trade-off in exchange for honest expression of conviction.
+    # get proportionally more allocation; no per-ticker cap, no redistribute
+    # pool. The operator explicitly accepts the concentration trade-off in
+    # exchange for honest expression of conviction.
     target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
+
+    # Per-regime min-notional gate (2026-05-16). Drop tickers whose target
+    # falls below NAV × min_signal_notional_pct, then renormalize the
+    # survivors so total gross still equals λ × NAV. This pushes the
+    # freed capital into higher-conviction names — matches operator's
+    # "fewer, larger positions" goal. Falls back to the legacy USD column
+    # if the new pct column isn't present yet (pre-migration safety).
+    min_notional_pct = float(params.get('min_signal_notional_pct') or 0.0) if params else 0.0
+    if min_notional_pct <= 0 and params and params.get('min_signal_notional_usd'):
+        min_notional_pct = float(params['min_signal_notional_usd']) / max(nav, 1.0)
+    min_notional_dollars = nav * min_notional_pct
+    if min_notional_dollars > 0:
+        dropped_small = [t for t, v in target_usd.items() if abs(v) < min_notional_dollars]
+        for tkr in dropped_small:
+            target_usd.pop(tkr, None)
+            ticker_w.pop(tkr, None)
+            ticker_meta.pop(tkr, None)
+        if dropped_small:
+            new_gross = sum(abs(w) for w in ticker_w.values())
+            if new_gross > 0:
+                new_scale = (lam * nav) / new_gross
+                target_usd = {t: w * new_scale for t, w in ticker_w.items()}
+            logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
+                        len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
 
     # Rebalance against current broker positions: delta = target − current.
     # Tickers held but no longer in target → close (delta = −current).

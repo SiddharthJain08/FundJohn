@@ -546,7 +546,8 @@ app.get('/api/config/regime-sizing', async (req, res) => {
     const [lamRes, regimeRes] = await Promise.all([
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
       dbQuery(`SELECT regime_state, liquidity_param, min_signal_notional_usd,
-                      position_circuit_breaker_pct, updated_at
+                      min_signal_notional_pct, position_circuit_breaker_pct,
+                      updated_at
                FROM regime_sizer_params
                ORDER BY CASE regime_state
                           WHEN 'LOW_VOL' THEN 1
@@ -573,6 +574,7 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       regimes: regimeRes.rows.map(r => ({
         state:                          r.regime_state,
         liquidity_param:                parseFloat(r.liquidity_param),
+        min_signal_notional_pct:        r.min_signal_notional_pct != null ? parseFloat(r.min_signal_notional_pct) : null,
         min_signal_notional_usd:        parseFloat(r.min_signal_notional_usd),
         position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
         updated_at:                     r.updated_at,
@@ -603,6 +605,13 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
       return res.status(400).json({ error: 'min_signal_notional_usd must be a number in [0, 100000]' });
     }
     updates.min_signal_notional_usd = v;
+  }
+  if (body.min_signal_notional_pct !== undefined) {
+    const v = parseFloat(body.min_signal_notional_pct);
+    if (!isFinite(v) || v < 0 || v > 0.5) {
+      return res.status(400).json({ error: 'min_signal_notional_pct must be a fraction in [0.0, 0.5]' });
+    }
+    updates.min_signal_notional_pct = v;
   }
   if (body.position_circuit_breaker_pct !== undefined) {
     const v = parseFloat(body.position_circuit_breaker_pct);
@@ -6079,9 +6088,9 @@ function renderRiskPanel(cfg) {
       <div class="pf-regime-param-row">
         <span class="pf-regime-param-label-block">
           <span class="pf-regime-param-label">min_notional</span>
-          <span class="pf-regime-param-hint">Skip tickers whose consolidated bet is too small to be worth the fees.</span>
+          <span class="pf-regime-param-hint">Skip tickers whose consolidated bet is below this fraction of NAV — sub-threshold capital is renormalized into surviving names.</span>
         </span>
-        <span><span class="pf-regime-param-suffix" style="margin-right:2px;margin-left:0">$</span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_usd" min="0" max="100000" step="25" value="\${r.min_signal_notional_usd.toFixed(0)}" /></span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_pct" data-percent="1" min="0" max="50" step="0.01" value="\${((r.min_signal_notional_pct != null ? r.min_signal_notional_pct : (r.min_signal_notional_usd / 100000)) * 100).toFixed(2)}" /><span class="pf-regime-param-suffix">%</span></span>
       </div>
       <div class="pf-regime-param-row">
         <span class="pf-regime-param-label-block">
