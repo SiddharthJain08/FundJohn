@@ -26,6 +26,8 @@ from datetime import date
 from pathlib import Path
 
 import json
+import psycopg2
+import psycopg2.extras
 import requests
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -229,6 +231,123 @@ def _fmt_outlier_section(rows: list[dict], kind: str, gate: float) -> list[str]:
     )
 
 
+def _fmt_oue_today_digest(run_date: str) -> tuple[str, str]:
+    """OUE summary for trades that closed in the LAST DAY (since-prev cycle).
+
+    Each closed trade is classified once by oue_classifier into one of
+    {over, under, expected} based on its realized return vs the GBM
+    expectation captured at signal time. The invariant is:
+        O + U + E = total closed today
+    (vs the old over/under-only metric where a trade could appear in
+    multiple cycles or never appear at all if it stayed within band).
+
+    Returns (summary, file_text). file_text is empty when there are no
+    closes today — keeps the post compact.
+    """
+    import os
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        return (f'🟢 **OUE — Today’s closures ({run_date})** · '
+                f'no DB configured (POSTGRES_URI missing).', '')
+    try:
+        with psycopg2.connect(uri) as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT es.id, es.strategy_id, es.ticker, es.direction,
+                           es.oue_kind, es.oue_sigma_delta,
+                           sp.realized_pnl_pct, sp.days_held, sp.close_reason
+                      FROM execution_signals es
+                      JOIN LATERAL (
+                          SELECT realized_pnl_pct, days_held, close_reason, pnl_date
+                            FROM signal_pnl
+                           WHERE signal_id = es.id
+                             AND status = 'closed'
+                             AND realized_pnl_pct IS NOT NULL
+                             AND pnl_date::date = %s
+                           ORDER BY pnl_date DESC
+                           LIMIT 1
+                      ) sp ON TRUE
+                     WHERE es.status = 'closed'
+                       AND es.oue_kind IS NOT NULL
+                     ORDER BY es.oue_kind, es.oue_sigma_delta DESC NULLS LAST
+                """, (run_date,))
+                rows = cur.fetchall()
+    except Exception as e:
+        return (f'🟢 **OUE — Today’s closures ({run_date})** · DB query failed: {e}', '')
+
+    if not rows:
+        return (f'🟢 **OUE — Today’s closures ({run_date})** · '
+                f'no trades closed in this cycle.', '')
+
+    by_kind = {'over': [], 'under': [], 'expected': []}
+    for r in rows:
+        kind = r['oue_kind']
+        if kind in by_kind:
+            by_kind[kind].append(r)
+    n_o, n_u, n_e = len(by_kind['over']), len(by_kind['under']), len(by_kind['expected'])
+    total = n_o + n_u + n_e
+
+    def _fmt_top(rows: list[dict], n: int = 5) -> str:
+        if not rows:
+            return '_none_'
+        return ', '.join(
+            f"`{r.get('ticker')}`/`{(r.get('strategy_id') or '')[:18]}` "
+            f"**{float(r.get('oue_sigma_delta') or 0):+.2f}σ** "
+            f"({float(r.get('realized_pnl_pct') or 0) * 100:+.2f}%)"
+            for r in rows[:n]
+        )
+
+    summary_lines = [
+        f'🎯 **OUE — Today’s closures ({run_date})** · **{total}** trade(s) closed',
+        '',
+        f'🚀 **Over**     — **{n_o}** ({100 * n_o / total:.0f}%) — '
+        f'realized > expectation by ≥1σ',
+        f'🟥 **Under**    — **{n_u}** ({100 * n_u / total:.0f}%) — '
+        f'realized < expectation by ≥1σ',
+        f'🟢 **Expected** — **{n_e}** ({100 * n_e / total:.0f}%) — '
+        f'within ±1σ of expectation',
+        '',
+        f'Top over (top 5): {_fmt_top(by_kind["over"])}',
+        f'Top under (top 5): {_fmt_top(by_kind["under"])}',
+        '',
+        f'_O + U + E = {n_o} + {n_u} + {n_e} = {total} (invariant)._',
+    ]
+
+    file_lines = [
+        f'OUE — Today’s closures ({run_date})',
+        '=' * 60,
+        '',
+        f'Total closed:  {total}',
+        f'Over:          {n_o}',
+        f'Under:         {n_u}',
+        f'Expected:      {n_e}',
+        '',
+    ]
+    header = f'{"ticker":<7}  {"strategy":<28}  {"dir":<5}  {"kind":<8}  {"σΔ":>6}  {"realized":>9}  {"days":>4}  reason'
+    sep = '-' * len(header)
+    for kind_name in ('over', 'under', 'expected'):
+        kind_rows = by_kind[kind_name]
+        if not kind_rows:
+            continue
+        file_lines += [
+            '',
+            f'── {kind_name.upper()} ({len(kind_rows)}) ──',
+            header, sep,
+        ]
+        for r in kind_rows:
+            file_lines.append(
+                f'{r.get("ticker") or "":<7}  '
+                f'{(r.get("strategy_id") or "")[:28]:<28}  '
+                f'{(r.get("direction") or "")[:5]:<5}  '
+                f'{(r.get("oue_kind") or ""):<8}  '
+                f'{float(r.get("oue_sigma_delta") or 0):>+6.2f}  '
+                f'{float(r.get("realized_pnl_pct") or 0) * 100:>+8.2f}%  '
+                f'{int(r.get("days_held") or 0):>4}  '
+                f'{r.get("close_reason") or ""}'
+            )
+    return ('\n'.join(summary_lines), '\n'.join(file_lines))
+
+
 def _fmt_outcomes_digest(run_date: str,
                           overperf: list[dict],
                           underperf: list[dict],
@@ -305,22 +424,13 @@ def main() -> int:
     print(f'[send_report] webhook lookup: trade-signals={"ok" if wh_signals else "missing"} '
           f'trade-reports={"ok" if wh_reports else "missing"}')
 
-    # Yesterday's performance outliers — same source (signal_pnl × d-1
-    # structured handoff), symmetric σ gate, rendered with identical
-    # table layouts. Gate is read from the structured handoff where the
-    # handoff builder stamped it (pipeline_config.sigma_gate, default 2.0).
-    overperf: list = []
-    underperf: list = []
-    gate = 2.0
-    try:
-        structured = read_handoff(run_date, 'structured') or {}
-        overperf  = structured.get('yesterdays_overperformance')  or []
-        underperf = structured.get('yesterdays_underperformance') or []
-        gate      = float(structured.get('sigma_gate') or 2.0)
-    except Exception as e:
-        print(f'[send_report] outlier load skipped: {e}')
-
-    summary, file_text = _fmt_outcomes_digest(run_date, overperf, underperf, gate)
+    # OUE — Today's Closures (replaces 2026-05-16 the legacy over/under
+    # digest built from the unrealized-fallback handoff). Pulls
+    # execution_signals.oue_kind for trades that closed in this cycle,
+    # showing O / U / E counts and top realized moves. Invariant
+    # O + U + E = total closed today is enforced by the classifier
+    # marking every close exactly once.
+    summary, file_text = _fmt_oue_today_digest(run_date)
 
     if dry_run or (not wh_signals and not wh_reports):
         msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \

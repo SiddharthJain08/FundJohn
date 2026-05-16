@@ -703,6 +703,7 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
     open_signals = cur.fetchall()
 
     updates = 0
+    _newly_closed_signal_ids: list[int] = []
     for row in open_signals:
         sig_id     = row['id']
         strat_id   = row['strategy_id']
@@ -790,10 +791,29 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
                     "UPDATE execution_signals SET status='closed' WHERE id=%s",
                     (sig_id,)
                 )
+                # OUE classification (over/under/expected vs the signal's
+                # GBM expectation captured at handoff time). Deferred to
+                # after this loop so a single failed lookup doesn't roll
+                # back the close itself.
+                _newly_closed_signal_ids.append(sig_id)
 
             updates += 1
         except Exception as e:
             logger.error(f"update_pnl error {sig_id}: {e}")
+
+    # Classify newly-closed signals via the OUE pipeline. Best-effort:
+    # individual failures don't fail the cycle. Skipped signals stay
+    # NULL and a later run picks them up (the classifier itself skips
+    # already-classified rows).
+    if _newly_closed_signal_ids:
+        try:
+            from execution.oue_classifier import classify_batch
+            uri = os.environ.get('POSTGRES_URI', '')
+            if uri:
+                stats = classify_batch(uri, _newly_closed_signal_ids)
+                logger.info(f"OUE classified {len(_newly_closed_signal_ids)} closes: {stats}")
+        except Exception as e:
+            logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
 
     return updates
 

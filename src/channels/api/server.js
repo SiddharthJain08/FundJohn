@@ -1005,34 +1005,27 @@ app.get('/api/strategies', async (req, res) => {
       currentRegime = latestJson.state || 'TRANSITIONING';
     } catch (_) {}
 
-    // Cumulative per-strategy O/U/R counts across all daily cycles.
-    //   O = performance_outliers WHERE kind='over'
-    //   U = performance_outliers WHERE kind='under'
-    //   R = veto_log (excluding legacy 'missing_field' from pre-Phase-2
-    //       lint_memo writer — those aren't trade rejections)
-    // Grows monotonically as each daily cycle's trade_handoff_builder +
-    // trade_agent_llm append rows to the two source tables.
+    // Cumulative per-strategy O/U/E counts (Over / Under / Expected)
+    // across every closed trade. Replaces 2026-05-16 the prior O/U/R
+    // (Rejected-signal-count) metric — see migration 101 + oue_classifier.py.
+    // Invariant: O + U + E = total closed trades for that strategy.
+    //   O = realized > expectation by ≥1σ
+    //   U = realized < expectation by ≥1σ
+    //   E = within ±1σ band (i.e. behaved as the GBM model predicted)
     const d1StrategyStats = {};
     try {
-      const [ouRes, rRes] = await Promise.all([
-        dbQuery(`SELECT strategy_id, kind, COUNT(*)::int AS n
-                   FROM performance_outliers
-                  WHERE strategy_id IS NOT NULL
-                  GROUP BY strategy_id, kind`).catch(() => ({ rows: [] })),
-        dbQuery(`SELECT strategy_id, COUNT(*)::int AS n
-                   FROM veto_log
-                  WHERE strategy_id IS NOT NULL
-                    AND veto_reason <> 'missing_field'
-                  GROUP BY strategy_id`).catch(() => ({ rows: [] })),
-      ]);
-      for (const row of ouRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
-        if (row.kind === 'over')  s.overperf  = row.n;
-        if (row.kind === 'under') s.underperf = row.n;
-      }
-      for (const row of rRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
-        s.rejected = row.n;
+      const oueRes = await dbQuery(`
+        SELECT strategy_id, oue_kind, COUNT(*)::int AS n
+          FROM execution_signals
+         WHERE strategy_id IS NOT NULL
+           AND oue_kind IS NOT NULL
+         GROUP BY strategy_id, oue_kind
+      `).catch(() => ({ rows: [] }));
+      for (const row of oueRes.rows) {
+        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, expected: 0 });
+        if (row.oue_kind === 'over')     s.overperf  = row.n;
+        if (row.oue_kind === 'under')    s.underperf = row.n;
+        if (row.oue_kind === 'expected') s.expected  = row.n;
       }
     } catch (_) {}
 
@@ -1130,7 +1123,7 @@ app.get('/api/strategies', async (req, res) => {
         live_return_pct:     sr.live_return_pct     ?? null,
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
+        d1_expected:         d1 ? (d1.expected  || 0) : 0,
         // Saturday-brain Tier-B fields. Only populated for state='staging'
         // strategies pushed by Saturday brain. The dashboard's strategies
         // page renders these so the operator sees exactly what the Approve
@@ -1185,7 +1178,7 @@ app.get('/api/strategies', async (req, res) => {
         live_return_pct:     sr.live_return_pct     ?? null,
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
+        d1_expected:         d1 ? (d1.expected  || 0) : 0,
       });
     }
     res.json(rows);
@@ -3225,7 +3218,7 @@ body.rs-chat-locked{overflow:hidden}
   .st-action-btn:active { transform: scale(0.94); }
 
   /* ── Per-table column hides ──────────────────────────────────────── *
-   * Active Stack: Strategy | Status | Regimes | Open | Closed | Win% | ARR% | ADR% | ACT | #O/U/R | Last Signal | Actions
+   * Active Stack: Strategy | Status | Regimes | Open | Closed | Win% | ARR% | ADR% | ACT | #O/U/E | Last Signal | Actions
    * Hide: 3 (Regimes), 11 (Last Signal). */
   #st-active-wrap .db-table th:nth-child(3),
   #st-active-wrap .db-table td:nth-child(3),
@@ -7080,7 +7073,7 @@ function _renderActiveStack(rows) {
     return;
   }
   // Compute derived columns for sorting.
-  //   d1_total         = O+U+R (click count on # O/U/R)
+  //   d1_total         = O+U+E (click count on # O/U/E)
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
@@ -7114,7 +7107,7 @@ function _renderActiveStack(rows) {
     const adrPct = (avgRet != null && actDays != null && actDays > 0)
                    ? (avgRet * 100 / actDays) : null;            // per-day %
     return Object.assign({}, r, {
-      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
       _active_rank:    _activeRankFor(r),
       _arr_pct:        arrPct,
       _adr_pct:        adrPct,
@@ -7159,7 +7152,7 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}.">ARR&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
-      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
+      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
     </tr>
@@ -7172,11 +7165,11 @@ function _renderActiveStack(rows) {
       const arr = r._arr_pct;
       const adr = r._adr_pct;
       const act = r._act_days;
-      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, x = r.d1_rejected || 0;
-      const ourEmpty = o === 0 && u === 0 && x === 0;
-      const ourCell = ourEmpty
+      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, e = r.d1_expected || 0;
+      const oueEmpty = o === 0 && u === 0 && e === 0;
+      const ourCell = oueEmpty
         ? '<span style="color:var(--dim)">—</span>'
-        : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${x}</span>\`;
+        : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${e}</span>\`;
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';

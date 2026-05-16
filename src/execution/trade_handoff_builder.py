@@ -776,19 +776,11 @@ def build(run_date: str) -> dict:
             }
             d1_matches += 1
 
-    d1_strategy_stats: dict[str, dict[str, int]] = {}
-    def _bump(strat, bucket):
-        s = d1_strategy_stats.setdefault(
-            strat, {'overperf': 0, 'underperf': 0, 'rejected': 0})
-        s[bucket] += 1
-    for r in y_overperf:
-        if r.get('strategy_id'): _bump(r['strategy_id'], 'overperf')
-    for r in y_underperf:
-        if r.get('strategy_id'): _bump(r['strategy_id'], 'underperf')
-    for r in y_vetoed:
-        if r.get('strategy_id'): _bump(r['strategy_id'], 'rejected')
-    print(f'[handoff] d1 attachment: {d1_matches}/{len(green)} green signals '
-          f'matched d-1; {len(d1_strategy_stats)} strategies in d1_strategy_stats')
+    # d1_strategy_stats (per-strategy O/U/R counts) was removed 2026-05-16:
+    # it was a noisy weight-adjust signal that TradeJohn shouldn't weigh
+    # daily. Lifetime OUE per strategy is computed from execution_signals
+    # at the weekly position-recs review where it actually drives sizing.
+    print(f'[handoff] d1 attachment: {d1_matches}/{len(green)} green signals matched d-1')
 
     # Persist outliers for cumulative dashboard counts. UNIQUE constraint
     # (cycle_date, strategy_id, ticker, kind) lets us re-run the handoff
@@ -809,7 +801,6 @@ def build(run_date: str) -> dict:
         'yesterdays_vetoed':          y_vetoed,
         'yesterdays_overperformance': y_overperf,
         'yesterdays_underperformance':y_underperf,
-        'd1_strategy_stats':          d1_strategy_stats,
         'sigma_gate':      sigma_gate,
         'mastermind_rec':  mm_rec,
         'stats': {
