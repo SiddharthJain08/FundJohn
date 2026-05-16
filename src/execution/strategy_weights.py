@@ -73,22 +73,53 @@ OUE_MIN_OUTLIERS = 5     # time-weighted over+under (was 20 lifetime)
 OUE_FLOOR = 0.2          # never zero a strategy out (preserves rotation)
 OUE_CEIL = 2.0           # never more than 2× boost (prevents over-fitting to luck)
 
+# Lifetime-sign guardrail (operator-set 2026-05-16): cumulative
+# overperformers (lifetime O > U with enough sample) can be BOOSTED by
+# recent OUE but NEVER discounted below 1.0; cumulative underperformers
+# can be DISCOUNTED but never boosted above 1.0. Prevents weights from
+# drifting downward on a transient bad streak for an otherwise-proven
+# strategy, and prevents temporary luck from inflating a structurally
+# underperforming strategy.
+OUE_LIFETIME_MIN_TOTAL    = 50   # need this many lifetime closes to trust the sign
+OUE_LIFETIME_MIN_OUTLIERS = 10   # and this many lifetime outliers
 
-def _oue_multiplier(over: float, under: float, expected: float) -> float:
-    """Return the OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
 
-    Logic: at sufficient sample size, bias = (over − under) / (over + under)
-    measures whether the strategy's realized outliers skew positive
-    (delight) or negative (disappoint). multiplier = 1 + bias. Returns
-    1.0 (no adjustment) on insufficient sample. Counts can be floats
-    (time-weighted) — the math is the same.
+def _oue_multiplier(over: float, under: float, expected: float,
+                    lifetime_over: int = 0, lifetime_under: int = 0,
+                    lifetime_expected: int = 0) -> float:
+    """OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
+
+    Two-stage computation:
+      1. Recent bias from TIME-DECAYED counts (over, under, expected) →
+         a multiplier that responds to recent behavior.
+      2. Lifetime-sign GUARDRAIL: if cumulative O > U with enough
+         sample, the multiplier is floored at 1.0 (overperformers can
+         only be boosted, never discounted). Mirror case for U > O.
+
+    Returns 1.0 (no adjustment) on insufficient recent sample.
     """
     total = (over or 0.0) + (under or 0.0) + (expected or 0.0)
     outliers = (over or 0.0) + (under or 0.0)
     if total < OUE_MIN_TOTAL or outliers < OUE_MIN_OUTLIERS:
         return 1.0
     bias = ((over or 0.0) - (under or 0.0)) / outliers
-    return max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
+    mult = max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
+
+    # Lifetime-sign guardrail. Only applies once cumulative sample is
+    # large enough to trust the direction; small-history strategies
+    # remain governed purely by their recent-window bias.
+    lt_outliers = (lifetime_over or 0) + (lifetime_under or 0)
+    lt_total = lt_outliers + (lifetime_expected or 0)
+    if lt_total >= OUE_LIFETIME_MIN_TOTAL and lt_outliers >= OUE_LIFETIME_MIN_OUTLIERS:
+        if lifetime_over > lifetime_under:
+            # Cumulative OVER → never discount below 1.0
+            mult = max(1.0, mult)
+        elif lifetime_under > lifetime_over:
+            # Cumulative UNDER → never boost above 1.0
+            mult = min(1.0, mult)
+        # Exact tie → no sign constraint
+
+    return mult
 
 
 def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
@@ -422,7 +453,12 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     'over': 0.0, 'under': 0.0, 'expected': 0.0,
                     'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
                 })
-                mult = _oue_multiplier(oue_row['over'], oue_row['under'], oue_row['expected'])
+                mult = _oue_multiplier(
+                    oue_row['over'], oue_row['under'], oue_row['expected'],
+                    lifetime_over=oue_row['lifetime_over'],
+                    lifetime_under=oue_row['lifetime_under'],
+                    lifetime_expected=oue_row['lifetime_expected'],
+                )
                 eff_adj = eff * mult
                 per_regime_positives.setdefault(R, []).append({
                     'strategy_id': s['strategy_id'],
