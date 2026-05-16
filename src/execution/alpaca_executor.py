@@ -303,12 +303,13 @@ def _get_order_by_coid(coid):
     return _run_alpaca_cli(['order', 'get-by-client-id', '--client-order-id', coid])
 
 
-# Minimum stop/target distance as a fraction of base, used both for the
-# preserved-ratio path (lower bound on rebuilt distance) and for the
-# fallback path when signal ratios are degenerate. 0.5% matches the prior
-# snap-buffer (max(0.02, base × 0.005)) so brackets that previously
-# survived continue to do so.
-MIN_BRACKET_GAP_PCT = 0.005
+# Minimum stop/target distance as a fraction of base. 1% gap absorbs the
+# typical ~0.5% intraday drift between our pre-flight quote and the
+# `base_price` Alpaca's order endpoint uses for bracket validation. Floored
+# higher than the prior 0.5% after 2026-05-15 cycle showed 38 longs
+# rejected with `stop_loss must be <= base_price - 0.01` despite signal
+# stops 0.3-5% away from entry — drift exceeded the gap on every one.
+MIN_BRACKET_GAP_PCT = 0.01
 
 
 def _recompute_bracket_from_quote(entry, stop, target, side, base):
@@ -481,13 +482,28 @@ def execute_single(sess, equity, order, run_date):
     # offsets so the order still passes validation.
     adjusted_notes: list[str] = []
     if order_class == 'bracket':
+        # paper-api.alpaca.markets doesn't serve market data — quotes/snapshot
+        # endpoints return 404. Hit data.alpaca.markets explicitly. Prefer
+        # latestTrade.p (what Alpaca's order endpoint validates against)
+        # over the quote midpoint, which can be miles off in wide markets.
         try:
-            qr = sess.get(f'{sess._base}/v2/stocks/{ticker}/quotes/latest', timeout=5)
+            qr = sess.get(
+                f'https://data.alpaca.markets/v2/stocks/{ticker}/snapshot',
+                timeout=5,
+            )
             if qr.status_code == 200:
-                qj = qr.json().get('quote', {})
-                bid = float(qj.get('bp') or 0.0)
-                ask = float(qj.get('ap') or 0.0)
-                base = ((bid + ask) / 2.0) if (bid > 0 and ask > 0) else (bid or ask)
+                sj = qr.json() or {}
+                latest_trade = sj.get('latestTrade') or {}
+                latest_quote = sj.get('latestQuote') or {}
+                trade_p = float(latest_trade.get('p') or 0.0)
+                bid     = float(latest_quote.get('bp') or 0.0)
+                ask     = float(latest_quote.get('ap') or 0.0)
+                if trade_p > 0:
+                    base = trade_p
+                elif bid > 0 and ask > 0:
+                    base = (bid + ask) / 2.0
+                else:
+                    base = bid or ask
                 if base > 0:
                     new_entry, new_stop, new_target, why = _recompute_bracket_from_quote(
                         entry, stop, target, side, base
@@ -501,6 +517,8 @@ def execute_single(sess, equity, order, run_date):
                     entry, stop, target = new_entry, new_stop, new_target
                     if why:
                         adjusted_notes.append(f'({why})')
+            else:
+                log(f'  ↯ {ticker}: pre-flight snapshot HTTP {qr.status_code} — submitting unsnapped')
         except Exception as _qe:
             # Don't block submission on a quote fetch hiccup; let Alpaca's
             # own validation be the final word. The 422-retry block below

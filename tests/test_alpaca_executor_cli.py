@@ -32,19 +32,25 @@ def _mock_proc(returncode=0, stdout='', stderr=''):
     return m
 
 
-def _mock_session(quote_bid=100.0, quote_ask=100.10, quote_status=200):
-    """Build a mock requests.Session for the pre-flight quote fetch.
+def _mock_session(quote_bid=100.0, quote_ask=100.10, quote_status=200,
+                  latest_trade=None):
+    """Build a mock requests.Session for the pre-flight snapshot fetch.
 
-    Default: returns a 200 with synthetic mid-price quote so the snap
-    path is exercised. Set quote_status=500 to force the quote-fetch
-    failure branch (order submitted unsnapped).
+    Default: 200 with synthetic latestTrade (mid of bid/ask if not given)
+    so the recompute path is exercised. Set quote_status=500 to force the
+    snapshot-fetch failure branch (order submitted unsnapped).
     """
     sess = MagicMock()
     sess._base = 'https://paper-api.alpaca.markets'
-    quote_resp = MagicMock()
-    quote_resp.status_code = quote_status
-    quote_resp.json.return_value = {'quote': {'bp': quote_bid, 'ap': quote_ask}}
-    sess.get.return_value = quote_resp
+    snap_resp = MagicMock()
+    snap_resp.status_code = quote_status
+    mid = (quote_bid + quote_ask) / 2.0 if quote_bid and quote_ask else (quote_bid or quote_ask)
+    p = latest_trade if latest_trade is not None else mid
+    snap_resp.json.return_value = {
+        'latestTrade': {'p': p},
+        'latestQuote': {'bp': quote_bid, 'ap': quote_ask},
+    }
+    sess.get.return_value = snap_resp
     return sess
 
 
@@ -442,12 +448,13 @@ class TestPreFlightTargetSnap(unittest.TestCase):
         """Long: target must be >= base + 0.01. If TradeJohn's t1 is too
         tight (close to base), the pre-flight snaps it up."""
         # quote mid = 100.05 (bid 100.00, ask 100.10). Original target=100.02 is
-        # below base+0.01 = 100.06 → snaps to base + max(0.02, 100.05*0.005) = 100.55
+        # 0.02% above entry — target_pct floors to MIN_BRACKET_GAP_PCT=1%,
+        # so new_target = base × 1.01 = 100.05 × 1.01 = 101.0505 → 101.05.
         sess = _mock_session(quote_bid=100.00, quote_ask=100.10)
         order = {
             'ticker': 'AAPL', 'strategy_id': 'S15', 'direction': 'long',
             'pct_nav': 0.02, 'entry': 100.00, 'stop': 95.00,
-            't1': 100.02,    # too close to base
+            't1': 100.02,    # 0.02% target — gets floored to 1% gap from base
         }
         success_stdout = json.dumps({'id': 'tgt-uuid', 'status': 'accepted'})
         with patch.object(ae, 'in_market_hours', return_value=True), \
@@ -457,9 +464,9 @@ class TestPreFlightTargetSnap(unittest.TestCase):
                                        order=order, run_date='2026-04-28')
         argv = mock_run.call_args[0][0]
         tp_json = json.loads(argv[argv.index('--take-profit') + 1])
-        # Snapped to base 100.05 + max(0.02, 0.5%×100.05) = 100.05 + 0.50 = 100.55
-        self.assertEqual(tp_json['limit_price'], '100.55')
-        self.assertEqual(result['target'], 100.55)
+        # Re-anchored to base 100.05 with 1% MIN floor → target = 101.05
+        self.assertEqual(tp_json['limit_price'], '101.05')
+        self.assertEqual(result['target'], 101.05)
 
 
 if __name__ == '__main__':

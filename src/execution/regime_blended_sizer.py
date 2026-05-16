@@ -132,6 +132,27 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
+def _load_min_cumulative_sharpe(default: float = 4.0) -> float:
+    """Read min_cumulative_sharpe from pipeline_config; fall back to default.
+
+    Used by _sharpe_cadence_path to drop tickers where the SIGNED sum of
+    contributing strategies' effective_sharpe falls below this threshold.
+    Naturally kills (a) low-conviction single-strategy bets and (b) tickers
+    where opposing strategies nearly cancel out — the operator's
+    'conflicting strategy information will cancel out' invariant.
+    """
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_cumulative_sharpe'")
+                row = cur.fetchone()
+                v = float(row[0]) if row else default
+                return max(0.0, min(50.0, v))
+    except Exception:
+        return default
+
+
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
                                 cadence_by_strat: dict[str, int]):
     """Pull every open signal still within its strategy's cadence window.
@@ -163,6 +184,7 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
 
     sids = list(weight_by_strat.keys())
     out = []
+    tradable_symbols: set[str] = set()
     try:
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -177,22 +199,39 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                     ORDER BY strategy_id, ticker, signal_date DESC
                 ''', (sids, earliest))
                 rows = cur.fetchall()
+                # Load the Alpaca tradable universe so delisted / halted /
+                # unsupported tickers (FX, indexes, crypto) get dropped at
+                # the active-window boundary — trade_handoff_builder's
+                # filter doesn't apply here because the sharpe_cadence path
+                # reads execution_signals directly. Fail-open on empty
+                # set so a missing universe table can't halt trading.
+                cur.execute("""SELECT symbol FROM alpaca_tradable_universe
+                              WHERE status='active' AND tradable=TRUE""")
+                tradable_symbols = {r[0] for r in cur.fetchall()}
     except Exception as e:
         logger.warning('sharpe_cadence: active-window fetch failed (%s); falling back to today-only', e)
         return []
     # Per-strategy cadence filter: drop signals older than the strategy's
     # own window. The SQL query above used max_cad as a coarse upper
-    # bound; here we tighten per strategy.
+    # bound; here we tighten per strategy. Also drop tickers not in the
+    # tradable universe (fail-open when set is empty).
+    dropped_untradable = 0
     for r in rows:
         sid = r['strategy_id']
         cad = cadence_by_strat.get(sid, 1)
         age = (today - r['signal_date']).days
         if age > cad + 2:        # 2-day weekend buffer
             continue
+        if tradable_symbols and r['ticker'] not in tradable_symbols:
+            dropped_untradable += 1
+            continue
         out.append({'strategy_id': sid, 'ticker': r['ticker'],
                     'direction': r['direction'], 'signal_date': r['signal_date'],
                     'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
                     'target_1': r['target_1'], 'target_2': r['target_2']})
+    if dropped_untradable:
+        logger.info('sharpe_cadence: dropped %d untradable signals (universe=%d)',
+                    dropped_untradable, len(tradable_symbols))
     return out
 
 
@@ -264,8 +303,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no current weights for %s', regime_state)
         return []
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
     lam = _load_lambda()
+    min_cum_sharpe = _load_min_cumulative_sharpe()
 
     # Fix A: aggregate across cadence-window, not today-only.
     active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
@@ -277,9 +318,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     else:
         logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
 
-    # Aggregate ticker_weight across signalling strategies.
+    # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
+    # is the SIGNED sum of effective_sharpe — opposing strategies cancel
+    # (so a long_sharpe=5 + short_sharpe=4 ticker collapses to |1|, dropped
+    # by the gate below). Unsigned sum would let conflicting tickers slip
+    # through.
     from collections import defaultdict
     ticker_w = defaultdict(float)
+    ticker_net_sharpe = defaultdict(float)
     ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
     for s in active:
         sid = s.get('strategy_id')
@@ -290,6 +336,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if d == 0:
             continue
         ticker_w[tkr] += weight_by_strat[sid] * d
+        ticker_net_sharpe[tkr] += sharpe_by_strat.get(sid, 0.0) * d
         ticker_meta[tkr]['strategies'].append(sid)
         ticker_meta[tkr]['directions'].append(d)
         # Direction-leader bracket pick (Phase 1 spec #6): the largest-weight
@@ -307,6 +354,24 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
+        return []
+
+    # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
+    # below the configured floor (default 4.0, from pipeline_config). This
+    # is the operator's primary conviction filter — kills single-strategy
+    # bets AND near-cancellation tickers in one rule.
+    if min_cum_sharpe > 0:
+        gated_out = [tkr for tkr in list(ticker_w.keys())
+                     if abs(ticker_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
+        for tkr in gated_out:
+            ticker_w.pop(tkr, None)
+            ticker_meta.pop(tkr, None)
+        if gated_out:
+            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below min_cum_sharpe=%.2f (kept=%d)',
+                        len(gated_out), min_cum_sharpe, len(ticker_w))
+
+    if not ticker_w:
+        logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
         return []
 
     gross = sum(abs(w) for w in ticker_w.values())
