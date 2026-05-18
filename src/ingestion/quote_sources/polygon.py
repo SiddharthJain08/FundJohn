@@ -34,7 +34,12 @@ class PolygonQuoteSource:
     BASE = 'https://api.polygon.io'
 
     def __init__(self, api_key: str | None = None, timeout: int = 5):
-        self.api_key = api_key or os.environ.get('POLYGON_API_KEY', '')
+        # Distinguish None (caller didn't pass anything → use env) from ''
+        # (caller explicitly passed empty → disable). `api_key or env_get`
+        # treats both as falsy, so a test that wants to assert no-creds
+        # behavior (api_key='') would still pick up POLYGON_API_KEY from
+        # the live env.
+        self.api_key = api_key if api_key is not None else os.environ.get('POLYGON_API_KEY', '')
         self.timeout = timeout
 
     async def fetch(self, tickers: Iterable[str]) -> dict[str, Quote]:

@@ -196,7 +196,10 @@ def list_rows() -> list[dict]:
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def recent_audit(limit: int = 25) -> list[dict]:
+def recent_param_audit(limit: int = 25) -> list[dict]:
+    """Audit trail for the DB-backed regime-params flow (set_params).
+    Renamed from recent_audit on 2026-05-18 to disambiguate from the
+    manifest-eligibility audit flow added below."""
     with _connect() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -209,6 +212,148 @@ def recent_audit(limit: int = 25) -> list[dict]:
             cols = ('changed_at', 'actor', 'strategy_id', 'regime_state',
                     'before_row', 'after_row', 'reason', 'source')
             return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+# ── Manifest-eligibility flow (parallel to the DB-backed set_params above) ──
+#
+# Operator path for editing a strategy's eligible_regimes field in
+# src/strategies/manifest.json. Atomic write (tempfile+rename) + audit
+# row that gets inserted BEFORE the manifest is touched, so an audit
+# failure leaves the manifest unmodified. Tests monkeypatch
+# _insert_audit / _query_audit to avoid DB dependency.
+
+
+def _insert_audit(*, strategy_id: str,
+                  before_regimes: Optional[list[str]],
+                  after_regimes: list[str],
+                  actor: str,
+                  reason: str = '',
+                  source: str = '') -> None:
+    """Persist one manifest-eligibility change for audit.
+
+    Default impl writes to strategy_regime_param_changes with
+    regime_state='ALL_MANIFEST' so the row coexists with per-regime
+    param audits without colliding. Tests monkeypatch this entirely.
+    """
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO strategy_regime_param_changes
+                    (actor, strategy_id, regime_state,
+                     before_row, after_row, reason, source)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            """, (actor, strategy_id, 'ALL_MANIFEST',
+                  json.dumps({'eligible_regimes': before_regimes}),
+                  json.dumps({'eligible_regimes': after_regimes}),
+                  reason, source))
+        conn.commit()
+
+
+def _query_audit(limit: int) -> list[dict]:
+    """Return recent manifest-eligibility audit rows. Default impl
+    pulls from strategy_regime_param_changes WHERE regime_state =
+    'ALL_MANIFEST'. Tests monkeypatch."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT changed_at, actor, strategy_id,
+                       before_row, after_row, reason, source
+                  FROM strategy_regime_param_changes
+                 WHERE regime_state = 'ALL_MANIFEST'
+                 ORDER BY changed_at DESC
+                 LIMIT %s
+            """, (limit,))
+            cols = ('changed_at', 'actor', 'strategy_id',
+                    'before_row', 'after_row', 'reason', 'source')
+            out = []
+            for r in cur.fetchall():
+                d = dict(zip(cols, r))
+                # Decode before_row / after_row JSONB into list-of-regimes
+                for field, key in (('before_row', 'before_regimes'),
+                                   ('after_row',  'after_regimes')):
+                    v = d.get(field)
+                    if isinstance(v, dict):
+                        d[key] = v.get('eligible_regimes')
+                    elif isinstance(v, str):
+                        try:
+                            d[key] = json.loads(v).get('eligible_regimes')
+                        except (ValueError, AttributeError):
+                            d[key] = None
+                    else:
+                        d[key] = None
+                out.append(d)
+            return out
+
+
+def set_eligibility(*,
+                    strategy_id: str,
+                    new_regimes: list[str],
+                    actor: str,
+                    reason: str = '',
+                    source: str = '',
+                    manifest_path) -> None:
+    """Update manifest.json's strategies[strategy_id].eligible_regimes
+    to `new_regimes`. Validates, dedupes, canonicalises order, writes
+    audit FIRST (so a DB failure leaves the manifest unchanged), then
+    atomically rewrites the manifest via tempfile+rename.
+
+    Raises:
+        ValueError: invalid regime or empty list.
+        KeyError:   strategy_id not in manifest.strategies.
+    """
+    if not new_regimes:
+        raise ValueError('at least one regime required (cannot make a strategy '
+                         'eligible in zero regimes — use a state transition instead)')
+    invalid = [r for r in new_regimes if r not in CANONICAL_REGIMES]
+    if invalid:
+        raise ValueError(f'invalid regime(s) {invalid}; must be one of {CANONICAL_REGIMES}')
+    # Dedup + canonical order (LOW_VOL, TRANSITIONING, HIGH_VOL, CRISIS).
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for r in CANONICAL_REGIMES:
+        if r in new_regimes and r not in seen:
+            seen.add(r)
+            deduped.append(r)
+
+    p = Path(manifest_path)
+    manifest = json.loads(p.read_text())
+    strategies = manifest.get('strategies') or {}
+    if strategy_id not in strategies:
+        raise KeyError(strategy_id)
+
+    before_regimes = strategies[strategy_id].get('eligible_regimes')
+
+    # Audit FIRST. If this raises, the manifest is unchanged.
+    _insert_audit(strategy_id=strategy_id,
+                  before_regimes=before_regimes,
+                  after_regimes=deduped,
+                  actor=actor, reason=reason, source=source)
+
+    # Atomic update — write to tempfile, then rename.
+    strategies[strategy_id]['eligible_regimes'] = deduped
+    tmp = p.with_suffix(p.suffix + '.tmp')
+    tmp.write_text(json.dumps(manifest, indent=2) + '\n')
+    tmp.replace(p)
+
+
+def list_strategies(*, manifest_path) -> list[dict]:
+    """Return [{strategy_id, eligible_regimes}, ...] from the manifest.
+    Strategies without an `eligible_regimes` key get None as a
+    backward-compat marker so callers can distinguish unset from empty."""
+    p = Path(manifest_path)
+    manifest = json.loads(p.read_text())
+    strategies = manifest.get('strategies') or {}
+    return [
+        {'strategy_id':       sid,
+         'eligible_regimes':  entry.get('eligible_regimes')}
+        for sid, entry in strategies.items()
+    ]
+
+
+def recent_audit(limit: int = 25) -> list[dict]:
+    """Manifest-eligibility audit trail. Delegates to _query_audit so
+    tests can monkeypatch the underlying source."""
+    return _query_audit(limit)
 
 
 def main():
@@ -241,7 +386,7 @@ def main():
                   f"target={r['target_pct']} maxhold={r['max_hold_days']}")
         return 0
     if args.audit:
-        for r in recent_audit(limit=args.limit):
+        for r in recent_param_audit(limit=args.limit):
             print(f"{r['changed_at']} {r['actor']:>16}  "
                   f"{r['strategy_id']}/{r['regime_state']}  "
                   f"src={r['source']} reason={r['reason'] or ''}")

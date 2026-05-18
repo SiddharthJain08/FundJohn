@@ -28,11 +28,19 @@ const COVERAGE_LAG_DAYS = 7;
 
 // ── Requirements + coverage helpers ─────────────────────────────────────────
 
-function readRequirements(strategyId) {
+// Resolve the canonical filename for a strategy. Manifest entry wins;
+// fallback preserves case (`${strategyId}.py`) — case-sensitive Linux
+// filesystem requires this. Earlier lowercased fallback caused
+// "file not found" during validation when manifest entry was missing.
+function _canonicalFileFor(strategyId) {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(OPENCLAW_DIR, 'src', 'strategies', 'manifest.json'), 'utf8'));
   const rec = manifest.strategies[strategyId] || {};
-  const canonical = (rec.metadata && rec.metadata.canonical_file) || `${strategyId.toLowerCase()}.py`;
+  return (rec.metadata && rec.metadata.canonical_file) || `${strategyId}.py`;
+}
+
+function readRequirements(strategyId) {
+  const canonical = _canonicalFileFor(strategyId);
   const base = canonical.replace(/\.py$/, '');
   const p = path.join(REQ_DIR, `${base}.requirements.json`);
   if (!fs.existsSync(p)) return { required: [], optional: [] };
@@ -369,17 +377,33 @@ async function _phaseBackfilling(job, ctx) {
 
   // Verify coverage now lands. If a backfiller reported success but
   // data_columns/data_coverage isn't yet visible, the strategycoder will fail
-  // for the wrong reason; stall here briefly with a clearer error if so.
+  // for the wrong reason; retry with exponential backoff before giving up.
+  // 2026-05-18: S_ptree_panel_tangency failed 5+ times in a row with
+  // coverage_lag — the backfiller wrote successfully but the read-side
+  // observed the writes a few seconds later. Retry loop closes the
+  // write-read window without operator intervention.
   const reqs = await loadEffectiveRequirements(job.strategy_id, dbQuery);
   const all  = [...new Set([...reqs.required, ...reqs.optional])];
-  const stillMissing = await sourcesMissingCoverage(all, dbQuery);
+  let stillMissing = await sourcesMissingCoverage(all, dbQuery);
   if (stillMissing.length) {
-    await failJob(job, {
-      error: 'coverage_lag',
-      still_missing: stillMissing,
-      hint: 'Backfill finished but data_coverage still does not show the columns. Check the backfiller output and retry.',
-    });
-    return { phase: 'failed' };
+    const COVERAGE_RETRY_MAX  = 5;
+    const COVERAGE_BACKOFF_MS = 2000;  // 2s base
+    for (let attempt = 1; attempt <= COVERAGE_RETRY_MAX && stillMissing.length; attempt++) {
+      const jitter = 1 + (Math.random() * 0.4 - 0.2);  // ±20%
+      const delay  = COVERAGE_BACKOFF_MS * attempt * jitter;
+      await new Promise(r => setTimeout(r, delay));
+      stillMissing = await sourcesMissingCoverage(all, dbQuery);
+      if (!stillMissing.length) break;
+    }
+    if (stillMissing.length) {
+      await failJob(job, {
+        error: 'coverage_lag',
+        still_missing: stillMissing,
+        attempts: COVERAGE_RETRY_MAX,
+        hint: `Backfill finished but data_coverage still does not show the columns after ${COVERAGE_RETRY_MAX} retries with backoff (~30s total). Check the backfiller output and retry.`,
+      });
+      return { phase: 'failed' };
+    }
   }
 
   await updateJob(job.job_id, { phase: 'coding', progress: 60 });

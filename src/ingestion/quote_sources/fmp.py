@@ -29,7 +29,8 @@ class FMPQuoteSource:
     BASE = 'https://financialmodelingprep.com/stable'
 
     def __init__(self, api_key: str | None = None, timeout: int = 5):
-        self.api_key = api_key or os.environ.get('FMP_API_KEY', '')
+        # See PolygonQuoteSource for the None-vs-'' rationale.
+        self.api_key = api_key if api_key is not None else os.environ.get('FMP_API_KEY', '')
         self.timeout = timeout
 
     async def fetch(self, tickers: Iterable[str]) -> dict[str, Quote]:
