@@ -127,7 +127,7 @@ a weekday. The 10:00 AM ET pipeline cycle should already have completed.
    strategies are importable, agents are reachable):
        python3 -m system_checks --json
    Parse the JSON. Same exit-code convention as doctor. Each check has
-   a `name`, `status`, `tags`, and `detail`. Failing checks should be
+   a \`name\`, \`status\`, \`tags\`, and \`detail\`. Failing checks should be
    investigated before greenlight.
 
 3. Digest:

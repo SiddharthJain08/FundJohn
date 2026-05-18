@@ -54,9 +54,9 @@ function _resolveImplPath(stratId) {
 // If opts.onChild is provided, it's invoked synchronously with the spawned
 // ChildProcess so the caller can SIGTERM it later (used by Cancel).
 function _spawnPython(args, opts = {}) {
-  const { cwd, timeoutMs = 600_000, onChild } = opts;
+  const { cwd, timeoutMs = 600_000, onChild, env } = opts;
   return new Promise((resolve) => {
-    const child = spawn('python3', args, { cwd, env: process.env });
+    const child = spawn('python3', args, { cwd, env: env || process.env });
     if (typeof onChild === 'function') { try { onChild(child); } catch (_) {} }
     let stdout = '', stderr = '';
     const killTimer = setTimeout(() => {
@@ -609,7 +609,7 @@ class ResearchOrchestrator {
         try { onPhase('backtest', hb); } catch (_) {}
       }, 5_000);
       try {
-        const { stdout, code } = await _spawnPython(
+        const { stdout, stderr, code } = await _spawnPython(
           ['-m', 'backtest.unified_backtest', '--strategy-file', implPath],
           { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
             env: { ...process.env, PYTHONPATH: 'src' } });
@@ -618,7 +618,7 @@ class ResearchOrchestrator {
         // strategy_backtest_runs for the just-written row.
         const runIdMatch = stdout.match(/run_id=([0-9a-f-]{36})/);
         if (code !== 0 || !runIdMatch) {
-          btResult = { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}` };
+          btResult = { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}; stderr: ${stderr.slice(-400)}` };
         } else {
           try {
             const runRes = await this._query(
