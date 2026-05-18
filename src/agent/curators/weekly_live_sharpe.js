@@ -22,29 +22,17 @@ function loadEnv() {
   return { ...process.env };
 }
 
+const { postToChannel } = require('./_discord_webhook');
+
 async function postDiscord(content) {
-  const token = process.env.DISCORD_BOT_TOKEN || process.env.DATABOT_TOKEN || process.env.BOT_TOKEN || '';
-  const channel = process.env.DISCORD_GENERAL_CHANNEL_ID || '';
-  if (!token || !channel) {
-    console.log('discord: skipped (missing token or channel id)');
-    return;
+  // Route through botjohn's #general webhook (looked up in agent_registry).
+  // Pre-2026-05-18 this checked DISCORD_GENERAL_CHANNEL_ID which was never
+  // set in .env, so every Sunday's weekly-weights rebuild silently logged
+  // "discord: skipped (missing token or channel id)" instead of posting.
+  const r = await postToChannel('botjohn', 'general', content);
+  if (!r.ok) {
+    console.error(`discord: post failed — ${r.reason || r.status}: ${r.detail || r.body || ''}`);
   }
-  const https = require('https');
-  await new Promise((res, rej) => {
-    const body = JSON.stringify({ content });
-    const req = https.request({
-      hostname: 'discord.com',
-      path: `/api/v10/channels/${channel}/messages`,
-      method: 'POST',
-      headers: {
-        'Authorization': `Bot ${token}`,
-        'Content-Type': 'application/json',
-        'User-Agent': 'OpenClawBot (openclaw, 1.0)',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    }, r => { r.on('data', () => {}); r.on('end', res); });
-    req.on('error', rej); req.write(body); req.end();
-  });
 }
 
 (async () => {

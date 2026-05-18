@@ -31,10 +31,18 @@ function runOneShot({ prompt, model = DEFAULT_MODEL, cwd = process.cwd(),
                       disallowedTools = [], allowedTools = null,
                       timeoutMs = 600_000 } = {}) {
   return new Promise((resolve) => {
+    // Prompt is piped via stdin, NOT passed as argv. comprehensive_review
+    // and position_recommender generate prompts in the 200KB+ range
+    // (440 signals × 1500 PnL rows for low_volatility_us was the trigger);
+    // exceeding Linux ARG_MAX (typ. 2 MB total argv+env) would crash with
+    // ENAMETOOLONG / E2BIG before the child even spawned. stdin has no
+    // such limit. 2026-05-13..18 incident: strategy_memos went silent
+    // for one week because of this.
     const args = [
-      '-p', prompt,
+      '-p',
       '--model', model,
       '--output-format', 'stream-json',
+      '--input-format', 'text',
       '--permission-mode', 'bypassPermissions',
       '--include-partial-messages',
       '--verbose',
@@ -45,8 +53,10 @@ function runOneShot({ prompt, model = DEFAULT_MODEL, cwd = process.cwd(),
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdin.write(prompt);
+    child.stdin.end();
 
     const events = [];
     let text = '';
