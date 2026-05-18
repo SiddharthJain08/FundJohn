@@ -112,14 +112,20 @@ time. Dashboard wiring is left for Phase 2B follow-up.
 
 ## Migrated callers
 
-| Date | Caller | Commit | Notes |
-|---|---|---|---|
-| 2026-05-18 | `src/execution/handoff.py:write_handoff` | B2.5 | demonstrator; key path + TTL unchanged so all readers (read_handoff, alpaca_executor, send_report) work without change |
+| Date | Caller | Commit | Gate (default-OFF) | Notes |
+|---|---|---|---|---|
+| 2026-05-18 | `src/execution/handoff.py:write_handoff` | B2.5 / B2.5b | `OPENCLAW_DATAHUB_HANDOFF=1` | demonstrator; key path + TTL unchanged so all readers (read_handoff, alpaca_executor, send_report) work without change. With gate OFF, behavior is byte-identical to pre-Phase-2B. |
 
-Future migrations follow the same template: pick a Python caller, route
-its `set`/`setex`/`publish` through `DataHub.publish(topic, payload,
-ttl=..)`, keep the key path identical so non-migrated consumers keep
-reading the same Redis key.
+Future migrations follow the same template:
+1. Pick a Python caller.
+2. Route its `set`/`setex`/`publish` through `DataHub.publish(topic,
+   payload, ttl=..)`, keeping the key path identical so non-migrated
+   consumers keep reading the same Redis key.
+3. Add a default-OFF env gate (`OPENCLAW_DATAHUB_<CALLER>=1`) matching
+   the pattern set by Phase 2D (`OPENCLAW_UNIFIED_QUOTES`), Phase 1
+   (`OPENCLAW_PYPORTFOLIOOPT_SHADOW`), and live sizer
+   (`OPENCLAW_REGIME_BLENDED_LIVE`). Operator flips the gate per cycle
+   after parity-clean smoke.
 
 ## Branch-point decision (spec line 760)
 

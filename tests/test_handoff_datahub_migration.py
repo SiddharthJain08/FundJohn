@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "src"))
 import redis  # noqa: E402
 
 from execution.handoff import (  # noqa: E402
+    DATAHUB_HANDOFF_GATE_ENV,
     REDIS_TTL,
     read_handoff,
     write_handoff,
@@ -63,7 +64,13 @@ def _cleanup_handoff():
     fpath.unlink(missing_ok=True)
 
 
-def test_write_handoff_via_datahub_writes_canonical_key(_cleanup_handoff):
+@pytest.fixture()
+def _gate_on(monkeypatch):
+    """Flip the DataHub gate ON for tests that exercise the migrated path."""
+    monkeypatch.setenv(DATAHUB_HANDOFF_GATE_ENV, "1")
+
+
+def test_write_handoff_via_datahub_writes_canonical_key(_cleanup_handoff, _gate_on):
     """write_handoff places JSON at handoff:{date}:{stage} with TTL 24h."""
     payload = {"orders": [], "marker": "datahub-smoke"}
     assert write_handoff(_TEST_DATE, _TEST_STAGE, payload) is True
@@ -76,7 +83,7 @@ def test_write_handoff_via_datahub_writes_canonical_key(_cleanup_handoff):
     assert 0 < ttl <= REDIS_TTL, f"expected TTL in (0, {REDIS_TTL}], got {ttl}"
 
 
-def test_read_handoff_round_trips_after_datahub_write(_cleanup_handoff):
+def test_read_handoff_round_trips_after_datahub_write(_cleanup_handoff, _gate_on):
     """read_handoff (raw GET path) sees what write_handoff (DataHub) wrote."""
     payload = {"answer": 42, "regime": "LOW_VOL"}
     assert write_handoff(_TEST_DATE, _TEST_STAGE, payload) is True
@@ -84,7 +91,7 @@ def test_read_handoff_round_trips_after_datahub_write(_cleanup_handoff):
     assert got == payload
 
 
-def test_write_handoff_also_publishes(_cleanup_handoff):
+def test_write_handoff_also_publishes(_cleanup_handoff, _gate_on):
     """DataHub fan-out: a subscriber on handoff:* sees the migration publish."""
     seen = []
 
@@ -110,3 +117,31 @@ def test_write_handoff_also_publishes(_cleanup_handoff):
         assert len(seen) >= 1, "expected DataHub to publish on the handoff topic"
     finally:
         ps.close()
+
+
+def test_gate_off_does_not_publish(_cleanup_handoff, monkeypatch):
+    """With the gate OFF (default), DataHub.publish is NEVER called.
+
+    Verified two ways: (1) `_datahub()` is monkey-patched to a sentinel
+    that records calls; (2) the legacy `r.setex` path still wrote the
+    canonical key (so backwards compat holds).
+    """
+    monkeypatch.delenv(DATAHUB_HANDOFF_GATE_ENV, raising=False)
+    from execution import handoff as ho
+
+    calls = []
+
+    def _spy():
+        calls.append(("_datahub", time.time()))
+        return None  # simulate hub unavailable
+
+    monkeypatch.setattr(ho, "_datahub", _spy)
+    payload = {"gate": "off", "expect": "legacy-path"}
+    assert write_handoff(_TEST_DATE, _TEST_STAGE, payload) is True
+    assert calls == [], (
+        f"_datahub() must not be invoked when gate is OFF; got {calls}"
+    )
+    # Legacy path still wrote the canonical key.
+    r = redis.Redis(decode_responses=True)
+    raw = r.get(_TEST_KEY)
+    assert raw is not None and json.loads(raw) == payload
