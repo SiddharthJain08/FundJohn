@@ -6711,13 +6711,6 @@ function _regimeBacktestSharpe(r) {
     if (current === rg) klass.push('st-rg-current');
     if (sharpe == null) klass.push('st-rg-na');
     if (!isEligible)   klass.push('st-rg-ineligible');
-    // Sign-based color override on the value text (not the whole cell)
-    let valStyle = '';
-    if (sharpe != null) {
-      valStyle = sharpe >= 0
-        ? 'color:var(--green)'
-        : 'color:var(--red)';
-    }
     const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
     const eligLine = isEligible ? 'eligible' : 'NOT eligible';
     const note = b && b.note ? \` (\${b.note})\` : '';
@@ -6727,10 +6720,10 @@ function _regimeBacktestSharpe(r) {
     const ttl = rg + ' [' + eligLine + ']: ' + statsLine;
     return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}">
               <span class="st-rg-tag">\${rg}</span>
-              <span class="st-rg-val" style="\${valStyle}">\${valTxt}</span>
+              <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
   }).join('');
-  return \`<div class="st-regime-grid" title="Per-regime BACKTEST Sharpe (from unified_backtest). Color = sign. Tooltip = trades + drawdown.">\${cells}</div>\`;
+  return \`<div class="st-regime-grid" title="Per-regime BACKTEST Sharpe (from unified_backtest). Tooltip = trades + drawdown.">\${cells}</div>\`;
 }
 
 // Backwards-compat shim — left in case other call sites reference it; the
