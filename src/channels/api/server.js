@@ -7683,8 +7683,7 @@ function _renderCandidates(rows) {
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
-      <th>Regimes</th>
-      <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Color = sign of Sharpe.">By Regime Sharpe</th>
+      <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Small dot = current market regime, blue border = declared eligible. Color = sign of Sharpe.">By Regime</th>
       <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
       <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
       <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
@@ -7774,7 +7773,6 @@ function _renderCandidates(rows) {
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
-        <td>\${_regimesCell(r)}</td>
         <td>\${_regimeBacktestSharpe(r)}</td>
         <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
         <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
