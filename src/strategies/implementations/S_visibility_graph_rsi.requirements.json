@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_visibility_graph_rsi",
+  "required": ["prices"],
+  "optional": []
+}

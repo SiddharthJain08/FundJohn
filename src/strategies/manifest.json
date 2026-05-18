@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-14T23:22:06.099616Z",
+  "updated_at": "2026-05-18T07:47:55.513054Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "staging",
@@ -547,7 +547,7 @@
     },
     "S_3d_pca_characteristic_factors": {
       "state": "candidate",
-      "state_since": "2026-04-27T03:36:31.524787+00:00",
+      "state_since": "2026-05-16T21:10:58.069256+00:00",
       "metadata": {
         "canonical_file": "S_3d_pca_characteristic_factors.py",
         "class": "ThreeDPCACharacteristicFactors",
@@ -595,6 +595,38 @@
           "timestamp": "2026-04-27T03:34:37.748159+00:00",
           "actor": "auto_backtest",
           "reason": "Auto-backtest: Sharpe -45.25, DD 0.0%, trades 1",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-16T21:09:34.856Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-16T21:09:35.670046+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-16T21:10:57.370Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-16T21:10:58.069256+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
         }
       ]
@@ -3354,7 +3386,7 @@
     },
     "S_risk_neutral_skew_cross_section": {
       "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.914649+00:00",
+      "state_since": "2026-05-16T21:10:15.430285+00:00",
       "metadata": {
         "canonical_file": "S_risk_neutral_skew_cross_section.py",
         "class": "RiskNeutralSkewCrossSection",
@@ -3417,6 +3449,22 @@
           "timestamp": "2026-05-14T04:34:27.914649+00:00",
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_manual",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-16T21:10:14.752Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-16T21:10:15.430285+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
         }
       ]
@@ -3514,6 +3562,167 @@
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": []
+    },
+    "S_estimation_risk_three_fund": {
+      "state": "staging",
+      "state_since": "2026-05-16T14:51:57.154Z",
+      "metadata": {
+        "canonical_file": "s_estimation_risk_three_fund.py",
+        "class": "S_estimation_risk_three_fund",
+        "description": "Under parameter uncertainty, the analytically optimal portfolio combines the riskless asset, the sample tangency portfolio, and the sample global minimum-variance (GMV) portfolio with shrinkage weights, reducing estimation-error-driven out-of-sample losses versus the classical 2-"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-16T14:51:57.154Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "returns: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2022-12-03",
+                  "gap_to": "2026-05-16"
+                }
+              ]
+            },
+            "candidate_id": "c976e385-c86a-4da2-ad0a-92d96f772b24"
+          }
+        }
+      ]
+    },
+    "S_earnings_news_specific_momentum": {
+      "state": "staging",
+      "state_since": "2026-05-16T14:51:57.154Z",
+      "metadata": {
+        "canonical_file": "s_earnings_news_specific_momentum.py",
+        "class": "S_earnings_news_specific_momentum",
+        "description": "Stock prices systematically under-react to firm-level earnings news, producing a durable stock-specific momentum component that generates cleaner alpha with lower risk than broad cross-sectional price momentum."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-16T14:51:57.154Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-05-14; needs \u2265 2024-12-28)",
+                "returns: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31\u21922026-05-14; needs \u2265 2024-12-28)"
+              ],
+              "missing_columns": [
+                "earnings",
+                "earnings_calendar"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2024-12-28",
+                  "gap_to": "2025-03-31"
+                },
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2024-12-28",
+                  "gap_to": "2025-03-31"
+                }
+              ]
+            },
+            "candidate_id": "d8e1f1c1-83d2-4028-8e9b-e1e081d907cd"
+          }
+        }
+      ]
+    },
+    "S_bayes_stein_shrinkage_mvo": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_bayes_stein_shrinkage_mvo.py",
+        "class": "BayesSteinShrinkageMVO",
+        "description": "Shrink sample mean return estimates toward grand mean prior via empirical Bayes (Jorion 1986 Stein result); solve long-only mean-variance portfolio."
+      },
+      "history": []
+    },
+    "S_empirical_bayes_shrinkage_mv": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_empirical_bayes_shrinkage_mv.py",
+        "class": "EmpiricalBayesShrinkageMV",
+        "description": "Empirical Bayes shrinkage of sample returns, variances, and correlations toward cross-sectional grand means; solve long-only MV QP for portfolio weights (Frost & Savarino 1986)."
+      },
+      "history": []
+    },
+    "S_mvgarch_nig_crra_portfolio": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_mvgarch_nig_crra_portfolio.py",
+        "class": "MvGarchNigCrraPortfolio",
+        "description": "EWMA-GARCH conditional covariance (\u03bb=0.94) drives CRRA-optimal GMV portfolio weights on 30 DJIA names; NIG tail awareness via heavy decay."
+      },
+      "history": []
+    },
+    "S_p_index_eef_weekly_rotation": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_p_index_eef_weekly_rotation.py",
+        "class": "PIndexEEFWeeklyRotation",
+        "description": "EEF p-index weekly rotation \u2014 LONG top-decile stocks by mean-variance efficiency score (Li et al. 2025)"
+      },
+      "history": []
+    },
+    "S_prism_vq_cross_section_factor": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_prism_vq_cross_section_factor.py",
+        "class": "PrismVQCrossSectionFactor",
+        "description": "VQ-inspired discrete factor encoding + regime-conditioned MoE weights; LONG top decile, SHORT bottom decile \u2014 rebalance every 5 trading days",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": []
+    },
+    "S_visibility_graph_rsi": {
+      "state": "candidate",
+      "state_since": "2026-05-16T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_visibility_graph_rsi.py",
+        "class": "VisibilityGraphRSI",
+        "description": "Backward-visibility graph RSI oscillator: LONG on oversold cross-up (VGRSI<30\u2192>30), SHORT on overbought cross-down (VGRSI>70\u2192<70).",
+        "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
         ]

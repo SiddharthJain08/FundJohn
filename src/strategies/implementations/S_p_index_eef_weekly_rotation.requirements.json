@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_p_index_eef_weekly_rotation",
+  "required": ["prices"],
+  "optional": ["financials"]
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_mvgarch_nig_crra_portfolio",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_prism_vq_cross_section_factor",
+  "required": ["prices"],
+  "optional": ["financials"]
+}
