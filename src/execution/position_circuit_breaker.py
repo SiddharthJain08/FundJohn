@@ -68,12 +68,12 @@ def main():
         conn.close()
         return
     regime_state = row['state']
-    if regime_state in ('HIGH_VOL', 'CRISIS'):
-        # Independent-mode regimes — strategy-level brackets handle cutoff.
-        print(f'[circuit_breaker] regime={regime_state} (independent mode); skipping')
-        conn.close()
-        return
-
+    # Regime gate removed 2026-05-16: with sharpe_cadence-LIVE running in
+    # every regime, there's no "independent-mode strategy bracket" backstop
+    # in HIGH_VOL/CRISIS anymore — losses can compound there too. The
+    # breaker now fires in all four regimes, with each regime's own
+    # threshold from regime_sizer_params (typically tighter in HIGH_VOL
+    # and CRISIS).
     cur.execute("SELECT position_circuit_breaker_pct FROM regime_sizer_params WHERE regime_state=%s",
                 (regime_state,))
     threshold_row = cur.fetchone()

@@ -13,10 +13,13 @@ Usage:
 import os
 import sys
 import json
+import uuid
 import argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+
+from src.research.paper_fingerprint import compute_fingerprint  # noqa: E402
 
 
 def _classify_backtest_reason(br: dict) -> str:
@@ -90,13 +93,63 @@ def _backfill_corpus_from_candidates(cur) -> int:
                     or url[:200]) if isinstance(spec, dict) else url[:200]
         abstract = (spec.get('signal_logic') or spec.get('abstract') or '') if isinstance(spec, dict) else ''
         source   = (spec.get('source') if isinstance(spec, dict) else None) or 'manual'
+
+        # Phase 2-followup #17 — attempt fingerprint dedup for shape-consistency
+        # with the other 3 ingest sites.  Historical research_candidates rarely
+        # carry authors/year (the legacy keyword pipeline didn't preserve them),
+        # so this site is effectively a no-op for most rows — fp will be None
+        # and the INSERT proceeds normally with paper_fingerprint=NULL.
+        spec_authors = spec.get('authors') if isinstance(spec, dict) else None
+        if isinstance(spec_authors, str):
+            spec_authors = [s.strip() for s in spec_authors.split(',') if s.strip()]
+        elif not isinstance(spec_authors, list):
+            spec_authors = []
+        spec_year = None
+        spec_pub = spec.get('published_date') if isinstance(spec, dict) else None
+        if isinstance(spec_pub, str) and len(spec_pub) >= 4:
+            try:
+                spec_year = int(spec_pub[:4])
+            except ValueError:
+                spec_year = None
+        elif isinstance(spec, dict) and isinstance(spec.get('year'), int):
+            spec_year = spec['year']
+        fp = compute_fingerprint(title or '', spec_authors, spec_year)
+
+        dedup_dropped = False
+        dedup_group_id = None
+        if fp:
+            cur.execute(
+                "SELECT paper_id, dedup_group_id FROM research_corpus "
+                "WHERE paper_fingerprint = %s "
+                "ORDER BY ingested_at ASC LIMIT 1",
+                (fp,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                # Cross-source duplicate — share group_id with the original;
+                # if the original had NULL group_id, mint one and back-fill.
+                # NOTE: small race under concurrent writers; acceptable for
+                # the Saturday batch ingest (no concurrent inserters).
+                existing_group = existing[1]
+                if existing_group is None:
+                    existing_group = str(uuid.uuid4())
+                    cur.execute(
+                        "UPDATE research_corpus SET dedup_group_id = %s "
+                        "WHERE paper_id = %s",
+                        (existing_group, existing[0]),
+                    )
+                dedup_group_id = existing_group
+                dedup_dropped = True
+
         cur.execute(
             """INSERT INTO research_corpus
-                 (source, source_url, title, abstract, ingested_at, raw_metadata)
-               VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                 (source, source_url, title, abstract, ingested_at, raw_metadata,
+                  paper_fingerprint, dedup_group_id, dedup_dropped)
+               VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                ON CONFLICT (source_url) DO NOTHING""",
             (source, url, title or url[:200], abstract or '',
-             submitted_at, json.dumps({'backfill_from': 'research_candidates'}))
+             submitted_at, json.dumps({'backfill_from': 'research_candidates'}),
+             fp, dedup_group_id, dedup_dropped)
         )
         if cur.rowcount:
             inserted += 1

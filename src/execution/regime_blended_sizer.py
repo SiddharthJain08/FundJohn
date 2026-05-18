@@ -19,43 +19,9 @@ from execution.tradejohn_confirmer import confirm as default_confirmer
 
 logger = logging.getLogger(__name__)
 
-MAX_DAILY_NEW_NOTIONAL_PCT = 0.25  # Aggregate cap: total new notional ≤ 25% of available NAV
-AVAILABLE_NAV_FLOOR_PCT = 0.05     # Floor: even when fully invested, allocate ≥5% NAV
-
 CONSOLIDATE_REGIMES = ('LOW_VOL', 'TRANSITIONING')
 INDEPENDENT_REGIMES = ('HIGH_VOL', 'CRISIS')
 HIGH_VOL_FALLBACK_TARGET_PCT = 0.01  # 1% NAV when strategy missing from sizing recs
-
-def _apply_aggregate_cap(orders: list[dict], account_state: dict) -> list[dict]:
-    """Cap total notional at MAX_DAILY_NEW_NOTIONAL_PCT × available_nav.
-
-    available_nav = max(NAV × 5%, NAV - long_market_value).
-    If sum(order.notional) ≤ cap, return orders unchanged.
-    Otherwise scale every order's qty + notional by (cap / total_notional).
-    Mutates each order dict in place AND returns the (same) list.
-    """
-    if not orders:
-        return orders
-    nav = float(account_state.get('equity', 0))
-    if nav <= 0:
-        return orders
-    long_mv = float(account_state.get('long_market_value', 0))
-    available_nav = max(nav * AVAILABLE_NAV_FLOOR_PCT, nav - long_mv)
-    cap = MAX_DAILY_NEW_NOTIONAL_PCT * available_nav
-
-    total = sum(abs(o['notional_usd']) for o in orders)
-    if total <= cap or cap <= 0:
-        return orders
-
-    scale = cap / total
-    logger.info('regime_blended_sizer: aggregate cap binding — scaling %d orders by %.4f '
-                '(total=$%.0f → cap=$%.0f, NAV=$%.0f, long_mv=$%.0f, available_nav=$%.0f)',
-                len(orders), scale, total, cap, nav, long_mv, available_nav)
-    for o in orders:
-        o['notional_usd'] = o['notional_usd'] * scale
-        o['qty'] = o['qty'] * scale
-        o['cap_scale_applied'] = scale
-    return orders
 
 
 def _select_mode(regime_state: str) -> str:
@@ -111,7 +77,11 @@ def size_positions(
         else:
             orders = _independent_path(passed, account_state, regime_params)
 
-    return _apply_aggregate_cap(orders, account_state)
+    # Aggregate cap (legacy 25% available_NAV) dropped 2026-05-14 per operator
+    # decision — the new sharpe_cadence sizer governs deployment via λ × NAV
+    # gross, per-ticker 25% cap, and $25 minimum. Executor's daily cap +
+    # per-order minimum likewise removed downstream.
+    return orders
 
 
 def _check_force_fire_flag() -> bool:
@@ -162,6 +132,27 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
+def _load_min_cumulative_sharpe(default: float = 4.0) -> float:
+    """Read min_cumulative_sharpe from pipeline_config; fall back to default.
+
+    Used by _sharpe_cadence_path to drop tickers where the SIGNED sum of
+    contributing strategies' effective_sharpe falls below this threshold.
+    Naturally kills (a) low-conviction single-strategy bets and (b) tickers
+    where opposing strategies nearly cancel out — the operator's
+    'conflicting strategy information will cancel out' invariant.
+    """
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_cumulative_sharpe'")
+                row = cur.fetchone()
+                v = float(row[0]) if row else default
+                return max(0.0, min(50.0, v))
+    except Exception:
+        return default
+
+
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
                                 cadence_by_strat: dict[str, int]):
     """Pull every open signal still within its strategy's cadence window.
@@ -193,12 +184,14 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
 
     sids = list(weight_by_strat.keys())
     out = []
+    tradable_symbols: set[str] = set()
     try:
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute('''
                     SELECT DISTINCT ON (strategy_id, ticker)
-                           strategy_id, ticker, direction, signal_date
+                           strategy_id, ticker, direction, signal_date,
+                           entry_price, stop_loss, target_1, target_2
                     FROM execution_signals
                     WHERE status = 'open'
                       AND strategy_id = ANY(%s)
@@ -206,20 +199,39 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                     ORDER BY strategy_id, ticker, signal_date DESC
                 ''', (sids, earliest))
                 rows = cur.fetchall()
+                # Load the Alpaca tradable universe so delisted / halted /
+                # unsupported tickers (FX, indexes, crypto) get dropped at
+                # the active-window boundary — trade_handoff_builder's
+                # filter doesn't apply here because the sharpe_cadence path
+                # reads execution_signals directly. Fail-open on empty
+                # set so a missing universe table can't halt trading.
+                cur.execute("""SELECT symbol FROM alpaca_tradable_universe
+                              WHERE status='active' AND tradable=TRUE""")
+                tradable_symbols = {r[0] for r in cur.fetchall()}
     except Exception as e:
         logger.warning('sharpe_cadence: active-window fetch failed (%s); falling back to today-only', e)
         return []
     # Per-strategy cadence filter: drop signals older than the strategy's
     # own window. The SQL query above used max_cad as a coarse upper
-    # bound; here we tighten per strategy.
+    # bound; here we tighten per strategy. Also drop tickers not in the
+    # tradable universe (fail-open when set is empty).
+    dropped_untradable = 0
     for r in rows:
         sid = r['strategy_id']
         cad = cadence_by_strat.get(sid, 1)
         age = (today - r['signal_date']).days
         if age > cad + 2:        # 2-day weekend buffer
             continue
+        if tradable_symbols and r['ticker'] not in tradable_symbols:
+            dropped_untradable += 1
+            continue
         out.append({'strategy_id': sid, 'ticker': r['ticker'],
-                    'direction': r['direction'], 'signal_date': r['signal_date']})
+                    'direction': r['direction'], 'signal_date': r['signal_date'],
+                    'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
+                    'target_1': r['target_1'], 'target_2': r['target_2']})
+    if dropped_untradable:
+        logger.info('sharpe_cadence: dropped %d untradable signals (universe=%d)',
+                    dropped_untradable, len(tradable_symbols))
     return out
 
 
@@ -291,8 +303,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no current weights for %s', regime_state)
         return []
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
+    sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
-    lam = _load_lambda()
+    # Effective leverage = global λ × per-regime liquidity_param. Mirrors
+    # how _consolidate_path / _independent_path apply liquidity_param —
+    # historically sharpe_cadence skipped it, so target gross was 2×NAV in
+    # TRANSITIONING instead of the operator-intended 1.5×. Operator flipped
+    # this 2026-05-16: prefer principled-target over execution-friction
+    # workaround, friction to be reduced separately.
+    lam_global   = _load_lambda()
+    liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
+    lam = lam_global * max(0.0, min(2.0, liq_regime))
+    min_cum_sharpe = _load_min_cumulative_sharpe()
 
     # Fix A: aggregate across cadence-window, not today-only.
     active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
@@ -304,10 +326,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     else:
         logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
 
-    # Aggregate ticker_weight across signalling strategies.
+    # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
+    # is the SIGNED sum of effective_sharpe — opposing strategies cancel
+    # (so a long_sharpe=5 + short_sharpe=4 ticker collapses to |1|, dropped
+    # by the gate below). Unsigned sum would let conflicting tickers slip
+    # through.
     from collections import defaultdict
     ticker_w = defaultdict(float)
-    ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': []})
+    ticker_net_sharpe = defaultdict(float)
+    ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
     for s in active:
         sid = s.get('strategy_id')
         tkr = s.get('ticker')
@@ -317,11 +344,42 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if d == 0:
             continue
         ticker_w[tkr] += weight_by_strat[sid] * d
+        ticker_net_sharpe[tkr] += sharpe_by_strat.get(sid, 0.0) * d
         ticker_meta[tkr]['strategies'].append(sid)
         ticker_meta[tkr]['directions'].append(d)
+        # Direction-leader bracket pick (Phase 1 spec #6): the largest-weight
+        # contribution in the *winning* direction wins. We keep every
+        # (direction, weight, bracket) tuple here; final selection happens
+        # after ticker_w sign is known.
+        ticker_meta[tkr]['brackets'].append({
+            'direction':  d,
+            'weight':     weight_by_strat[sid],
+            'entry':      s.get('entry_price'),
+            'stop':       s.get('stop_loss'),
+            't1':         s.get('target_1'),
+            't2':         s.get('target_2'),
+        })
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
+        return []
+
+    # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
+    # below the configured floor (default 4.0, from pipeline_config). This
+    # is the operator's primary conviction filter — kills single-strategy
+    # bets AND near-cancellation tickers in one rule.
+    if min_cum_sharpe > 0:
+        gated_out = [tkr for tkr in list(ticker_w.keys())
+                     if abs(ticker_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
+        for tkr in gated_out:
+            ticker_w.pop(tkr, None)
+            ticker_meta.pop(tkr, None)
+        if gated_out:
+            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below min_cum_sharpe=%.2f (kept=%d)',
+                        len(gated_out), min_cum_sharpe, len(ticker_w))
+
+    if not ticker_w:
+        logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
         return []
 
     gross = sum(abs(w) for w in ticker_w.values())
@@ -329,72 +387,52 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         return []
     scale = (lam * nav) / gross
 
-    PER_TICKER_CAP = 0.25 * nav
-    MIN_TRADE_USD  = 25.0
-    final_usd: dict[str, float] = {}
-    # Track excess by SIDE so long-cap-excess stays on the long side
-    # (and same for shorts). Mixing the two would flip a short-side
-    # cap into an additional long allocation — bug we hit in v1.
-    long_excess  = 0.0
-    short_excess = 0.0  # held as a positive magnitude
-    for tkr, w in ticker_w.items():
-        usd = w * scale
-        if abs(usd) < MIN_TRADE_USD:
-            # Sub-threshold tickers donate their (signed) notional to
-            # their side's redistribution pool.
-            if usd > 0: long_excess  += usd
-            else:        short_excess += -usd
-            continue
-        if abs(usd) > PER_TICKER_CAP:
-            sign = 1 if usd > 0 else -1
-            excess = abs(usd) - PER_TICKER_CAP
-            if sign > 0: long_excess  += excess
-            else:        short_excess += excess
-            usd = sign * PER_TICKER_CAP
-        final_usd[tkr] = usd
+    # Pure formulation (2026-05-14): target_usd = ticker_w × (λ × NAV / Σ|ticker_w|).
+    # High-conviction tickers (sum of contributing strategy weights × direction)
+    # get proportionally more allocation; no per-ticker cap, no redistribute
+    # pool. The operator explicitly accepts the concentration trade-off in
+    # exchange for honest expression of conviction.
+    target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
 
-    # Bucket-aware redistribution. Long-excess is spread proportionally
-    # across long survivors (those with usd > 0) by |usd|; same for
-    # shorts. One pass — newly-capped tickers stay capped.
-    def _redistribute_side(pool: float, side: int):
-        if pool <= 0.01:
-            return
-        survivors = [t for t, v in final_usd.items() if (v > 0) == (side > 0)]
-        total_abs = sum(abs(final_usd[t]) for t in survivors)
-        if total_abs <= 0:
-            return
-        for t in survivors:
-            share = pool * (abs(final_usd[t]) / total_abs)
-            final_usd[t] += side * share
-            if abs(final_usd[t]) > PER_TICKER_CAP:
-                final_usd[t] = side * PER_TICKER_CAP
-    _redistribute_side(long_excess,  +1)
-    _redistribute_side(short_excess, -1)
+    # Per-regime min-notional gate (2026-05-16). Drop tickers whose target
+    # falls below NAV × min_signal_notional_pct, then renormalize the
+    # survivors so total gross still equals λ × NAV. This pushes the
+    # freed capital into higher-conviction names — matches operator's
+    # "fewer, larger positions" goal. Falls back to the legacy USD column
+    # if the new pct column isn't present yet (pre-migration safety).
+    min_notional_pct = float(params.get('min_signal_notional_pct') or 0.0) if params else 0.0
+    if min_notional_pct <= 0 and params and params.get('min_signal_notional_usd'):
+        min_notional_pct = float(params['min_signal_notional_usd']) / max(nav, 1.0)
+    min_notional_dollars = nav * min_notional_pct
+    if min_notional_dollars > 0:
+        dropped_small = [t for t, v in target_usd.items() if abs(v) < min_notional_dollars]
+        for tkr in dropped_small:
+            target_usd.pop(tkr, None)
+            ticker_w.pop(tkr, None)
+            ticker_meta.pop(tkr, None)
+        if dropped_small:
+            new_gross = sum(abs(w) for w in ticker_w.values())
+            if new_gross > 0:
+                new_scale = (lam * nav) / new_gross
+                target_usd = {t: w * new_scale for t, w in ticker_w.items()}
+            logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
+                        len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
 
-    # ── Fix B: rebalance against current broker positions ────────────
-    # final_usd[tkr] is now the TARGET notional for each ticker (signed).
-    # To avoid stacking new orders on top of yesterday's positions, we
-    # compute the order DELTA = target - current. Tickers held but no
-    # longer in target → close orders (delta = -current). Daily PV
-    # consumption stays at λ × NAV instead of drifting.
+    # Rebalance against current broker positions: delta = target − current.
+    # Tickers held but no longer in target → close (delta = −current).
     broker = _load_broker_positions_usd()
-    target_usd = dict(final_usd)
     delta_usd: dict[str, float] = {}
-    # Targets present today → emit delta vs current
     for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        delta = target - current
-        if abs(delta) >= MIN_TRADE_USD:
+        delta = target - broker.get(tkr, 0.0)
+        if delta != 0.0:
             delta_usd[tkr] = delta
-    # Tickers we hold but no longer want → close them (delta = -current)
     for tkr, current in broker.items():
-        if tkr in target_usd:
+        if tkr in target_usd or current == 0.0:
             continue
-        if abs(current) >= MIN_TRADE_USD:
-            delta_usd[tkr] = -current
-            # Synthesise minimal meta so TradeJohn + downstream payload can index it
-            if tkr not in ticker_meta:
-                ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0]}
+        delta_usd[tkr] = -current
+        if tkr not in ticker_meta:
+            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
+                                'brackets': []}
     logger.info('regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, deltas=%d',
                 len(target_usd), len(broker), len(delta_usd))
 
@@ -422,22 +460,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if a == 'cancel':
             delta_usd.pop(tkr)
 
-    # Emit orders for the deltas only. entry/stop/t1/t2 are filled downstream
-    # when the executor fetches the current quote; we only commit
-    # delta-notional + direction here.
+    # Emit orders for the deltas. entry/stop/t1/t2 are picked from the
+    # winning-direction contributor's signal bracket (direction-leader
+    # rule, mirrors _consolidate_path). Orders whose direction has no
+    # matching contributor (e.g. orphan-closes) get no bracket and will
+    # be filtered by the live wrapper.
     orders = []
     for tkr, usd in delta_usd.items():
+        dir_sign = 1 if usd >= 0 else -1
+        bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
         orders.append({
             'ticker':                  tkr,
             'strategy_id':             '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120],
-            'direction':               'long' if usd >= 0 else 'short',
+            'direction':               'long' if dir_sign > 0 else 'short',
             'notional_usd':            abs(usd),
             'pct_nav':                 abs(usd) / nav,
             'shares':                  0,
-            'entry':                   None,
-            'stop':                    None,
-            't1':                      None,
-            't2':                      None,
+            'entry':                   bracket.get('entry'),
+            'stop':                    bracket.get('stop'),
+            't1':                      bracket.get('t1'),
+            't2':                      bracket.get('t2'),
             'kelly_final':             abs(usd) / nav,
             'ev':                      0.0,
             'p_t1':                    0.5,
@@ -447,6 +489,35 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'contributing_strategies': ticker_meta[tkr]['strategies'],
         })
     return orders
+
+
+def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
+    """Direction-leader bracket pick. From the contributing-signal pool,
+    keep entries with matching direction, then pick the largest-weight
+    bracket whose entry/stop/t1 are all populated *and finite* (NaN
+    rejected — some strategies write Decimal('NaN') into execution_signals
+    when their entry/stop math degenerates). Returns an empty dict if no
+    usable bracket exists.
+    """
+    import math
+    def _finite(x) -> bool:
+        if x is None:
+            return False
+        try:
+            return math.isfinite(float(x))
+        except (TypeError, ValueError):
+            return False
+
+    if not candidates:
+        return {}
+    aligned = [b for b in candidates if b.get('direction') == dir_sign]
+    usable  = [b for b in aligned
+               if _finite(b.get('entry')) and _finite(b.get('stop'))
+               and _finite(b.get('t1'))]
+    if not usable:
+        return {}
+    usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
+    return usable[0]
 
 def _consolidate_path(signals, account_state, params, confirmer):
     regt_bp = float(account_state['regt_buying_power'])

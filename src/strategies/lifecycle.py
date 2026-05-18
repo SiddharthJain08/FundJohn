@@ -151,7 +151,17 @@ class LifecycleStateMachine:
 
     @classmethod
     def from_manifest(cls, path: str | Path) -> "LifecycleStateMachine":
-        """Load state machine from a manifest JSON file."""
+        """Load state machine from a manifest JSON file.
+
+        Self-healing guard: any entry under m['decommissioned'] whose
+        state is actually one of {live, candidate, staging, monitoring}
+        is treated as a misrouted active strategy and lifted into
+        _records. Sat 2026-05-16 incident: 17 newly-coded strategies
+        ended up under decommissioned with state='candidate', invisible
+        to eligibility_assigner / strategy_weights / pipeline_orchestrator.
+        Until the upstream writer is found, this guard prevents the
+        invariant violation from sticking across a round-trip.
+        """
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"Manifest not found: {p}")
@@ -167,7 +177,35 @@ class LifecycleStateMachine:
                 metadata=rec.get("metadata", {}),
                 eligible_regimes=rec.get("eligible_regimes"),
             )
-        return cls(records, data.get("decommissioned", {}))
+        decom_raw = data.get("decommissioned", {}) or {}
+        decom_clean: Dict = {}
+        for sid, rec in decom_raw.items():
+            state = (rec or {}).get('state', 'decommissioned')
+            if state in {'live', 'candidate', 'staging', 'monitoring'} and sid not in records:
+                # Misrouted active strategy — recover into _records.
+                try:
+                    history = [TransitionEvent(**e) for e in rec.get("history", [])]
+                    records[sid] = StrategyRecord(
+                        strategy_id=sid,
+                        state=StrategyState(state),
+                        state_since=rec.get("state_since")
+                                    or datetime.now(timezone.utc).isoformat(),
+                        history=history,
+                        metadata=rec.get("metadata", {}),
+                        eligible_regimes=rec.get("eligible_regimes"),
+                    )
+                    logger.warning(
+                        "lifecycle: rescued misrouted active strategy %s "
+                        "(state=%s) from decommissioned -> strategies",
+                        sid, state,
+                    )
+                    continue
+                except Exception:
+                    # If reconstruction fails for any reason, keep the entry
+                    # under decommissioned so we don't lose data.
+                    pass
+            decom_clean[sid] = rec
+        return cls(records, decom_clean)
 
     @classmethod
     def new_empty(cls) -> "LifecycleStateMachine":

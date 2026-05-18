@@ -29,7 +29,16 @@ def consolidate(signals: list[dict], regt_buying_power: float, params: dict) -> 
     are NOT in the return — caller writes audit rows separately if needed.
     """
     lambda_regime = params['liquidity_param']
-    min_notional = params['min_signal_notional_usd']
+    # Min notional is now keyed on `min_signal_notional_pct` (fraction of NAV).
+    # Caller passes regt_buying_power as the leverage budget; NAV ≈ that / 4
+    # for a margin account (multiplier=4). Falls back to the legacy USD
+    # column if pct isn't set, so pre-migration callers keep working.
+    pct = params.get('min_signal_notional_pct')
+    if pct is not None and float(pct) > 0:
+        nav_estimate = regt_buying_power / 4.0
+        min_notional = float(pct) * nav_estimate
+    else:
+        min_notional = params.get('min_signal_notional_usd') or 0
 
     by_ticker: dict[str, list[dict]] = defaultdict(list)
     for sig in signals:

@@ -111,19 +111,50 @@ function _formatDigest(rows) {
 }
 
 async function _postToDiscord(channelName, text) {
+  // Webhook-based path for one-shot curator scripts that run outside
+  // johnbot.service (where discord.js Client is uninitialised). The
+  // previous code path required notifications.post() with a live Client
+  // and silently returned false on every Saturday's position-recs run.
   try {
-    const notif = require('../../channels/discord/notifications');
-    if (typeof notif.post === 'function') {
-      await notif.post(channelName, text);
-      return true;
-    }
+    const { postToChannel } = require('./_discord_webhook');
+    const r = await postToChannel('botjohn', channelName, text);
+    if (r.ok) return true;
+    console.error(`[position-recs] Discord post failed: ${r.reason || r.status}: ${r.detail || r.body || ''}`);
   } catch (e) {
     console.error(`[position-recs] Discord post failed: ${e.message}`);
   }
   return false;
 }
 
-async function run({ dryRun = false, notify = () => {} } = {}) {
+async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } = {}) {
+  // Freshness gate — refuse to run on stale memos. Without this guard,
+  // 2026-05-13..16: comprehensive_review was crashing every Saturday
+  // (spawn E2BIG in _opus_oneshot), strategy_memos went silent for a
+  // week, and position-recs happily wrote tautological "no change"
+  // recommendations off stale memos. The split-source-of-truth pattern
+  // hid the upstream failure under a green downstream cycle.
+  const { rows: freshRows } = await _query(
+    `SELECT MAX(created_at) AS newest_at,
+            EXTRACT(EPOCH FROM NOW() - MAX(created_at)) / 3600 AS hours_old,
+            COUNT(*) AS recent_count
+       FROM strategy_memos
+      WHERE created_at >= NOW() - INTERVAL '14 days'`
+  );
+  const hoursOld    = freshRows[0]?.hours_old;
+  const recentCount = Number(freshRows[0]?.recent_count || 0);
+  if (recentCount === 0 || hoursOld == null || Number(hoursOld) > maxMemoAgeHours) {
+    const detail = recentCount === 0
+      ? 'no memos in last 14d — comprehensive_review likely broken'
+      : `newest memo ${Number(hoursOld).toFixed(1)}h old (limit ${maxMemoAgeHours}h)`;
+    notify(`refusing to run — ${detail}`);
+    if (!dryRun) {
+      await _postToDiscord('botjohn-log',
+        `⚠️ **position_recommender refused to run** — ${detail}.` +
+        ` Fix comprehensive_review or pass --max-memo-age-hours.`);
+    }
+    return { inserted: 0, posted: false, note: 'stale_memos', detail };
+  }
+
   const memos = await _latestMemos();
   notify(`${memos.length} memo(s) to distil`);
   if (!memos.length) {

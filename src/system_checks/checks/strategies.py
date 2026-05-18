@@ -118,3 +118,24 @@ def _manifest_in_registry_impl_map():
     if missing:
         return Status.FAIL, f'{len(missing)} live/staging not in _IMPL_MAP: {missing[:5]}'
     return Status.PASS, f'all live/staging entries registered ({candidates_skipped} candidates + {archived_skipped} archived skipped)'
+
+
+@check(name='manifest_no_active_under_decommissioned', tags=['strategies'], requires=['fs'])
+def _manifest_no_active_under_decommissioned():
+    """An entry under m['decommissioned'] must NOT carry state='live',
+    'candidate', or 'staging'. Sat 2026-05-16: 6 freshly-coded Tier-A
+    strategies ended up under decommissioned with state='candidate',
+    invisible to eligibility_assigner (which only reads m['strategies'])
+    and breaking the unified-backtest <-> weights handshake silently."""
+    if not MANIFEST.exists():
+        return Status.SKIP, 'no manifest'
+    m = json.loads(MANIFEST.read_text())
+    decom = m.get('decommissioned') or {}
+    bad = []
+    for sid, rec in decom.items():
+        state = (rec or {}).get('state', 'decommissioned')
+        if state not in _ARCHIVED_STATES and state != 'decommissioned':
+            bad.append(f'{sid}={state}')
+    if bad:
+        return Status.FAIL, f'{len(bad)} active strategies under decommissioned: ' + '; '.join(bad[:10])
+    return Status.PASS, f'{len(decom)} decommissioned entries, all archived-state'

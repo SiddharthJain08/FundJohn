@@ -69,7 +69,7 @@ async function _buildTradePack(strategyId) {
   // strategy. Veto histogram migrated here from TradeJohn's daily handoff
   // (2026-04-27): multi-week veto patterns drive Mastermind's weekly
   // strategy memo + sizing deltas, not daily TradeJohn sizing.
-  const [sigRes, pnlRes, vetoRes] = await Promise.all([
+  const [sigRes, pnlRes, oueRes] = await Promise.all([
     _query(
       `SELECT id::text, signal_date, ticker, direction, entry_price, stop_loss,
               target_1, target_2, target_3, position_size_pct, regime_state,
@@ -90,20 +90,31 @@ async function _buildTradePack(strategyId) {
         LIMIT 1500`,
       [strategyId]
     ),
+    // OUE — replaces 2026-05-16 the legacy veto-log histogram. Per closed
+    // trade we have one classification: 'over' (realized > GBM expectation
+    // by ≥1σ), 'under' (≤-1σ), or 'expected' (within band). Invariant:
+    // O + U + E = total closed trades for the strategy. Opus uses this
+    // to decide whether the strategy is mis-priced for risk: high
+    // over+under ratios suggest the GBM expectation needs tuning;
+    // high under ratio alone suggests the bracket geometry needs work.
     _query(
-      `SELECT veto_reason, COUNT(*)::int AS n
-         FROM veto_log
+      `SELECT oue_kind, COUNT(*)::int AS n
+         FROM execution_signals
         WHERE strategy_id = $1
-          AND run_date >= NOW()::date - INTERVAL '30 days'
-        GROUP BY veto_reason
-        ORDER BY n DESC`,
+          AND oue_kind IS NOT NULL
+        GROUP BY oue_kind`,
       [strategyId]
     ).catch(() => ({ rows: [] })),
   ]);
-  const vetoHistogram = Object.fromEntries(
-    vetoRes.rows.map(r => [r.veto_reason, r.n])
-  );
-  return { signals: sigRes.rows, pnl: pnlRes.rows, vetoHistogram };
+  const oue = { over: 0, under: 0, expected: 0 };
+  for (const r of oueRes.rows) {
+    if (r.oue_kind in oue) oue[r.oue_kind] = r.n;
+  }
+  oue.total = oue.over + oue.under + oue.expected;
+  oue.over_rate     = oue.total > 0 ? oue.over     / oue.total : null;
+  oue.under_rate    = oue.total > 0 ? oue.under    / oue.total : null;
+  oue.expected_rate = oue.total > 0 ? oue.expected / oue.total : null;
+  return { signals: sigRes.rows, pnl: pnlRes.rows, oue };
 }
 
 function _counterfactuals(pnl) {
@@ -291,8 +302,13 @@ ${JSON.stringify(tradePack.signals.slice(0, 120), null, 2)}
 Recent signal_pnl rows (up to 1500):
 ${JSON.stringify(tradePack.pnl.slice(0, 400), null, 2)}
 
-30-day veto histogram (veto_reason → count) for this strategy:
-${JSON.stringify(tradePack.vetoHistogram || {}, null, 2)}
+Lifetime OUE (Over / Under / Expected) classification across every closed
+trade — invariant O + U + E = total closed. Use this to judge whether
+the strategy is mis-priced for risk: a high (over+under) ratio means the
+GBM expectation is off; a high under-only ratio means the bracket
+geometry (stop / target / max-hold) needs work; a near-zero over rate
+with healthy expected says the strategy under-delivers on its upside.
+${JSON.stringify(tradePack.oue || {}, null, 2)}
 
 Now write the memo and the JSON block, separated by '---'.`;
 }

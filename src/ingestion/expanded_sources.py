@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -35,6 +36,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from _http_retry import fetch_with_retry  # noqa: E402
+from src.research.paper_fingerprint import compute_fingerprint  # noqa: E402
 
 # Browser-like User-Agent. Many of the feeds we hit (federalreserve.gov,
 # alphaarchitect.com, two sigma) reject the default urllib User-Agent
@@ -232,16 +234,55 @@ def fetch_source(source_spec: dict, max_per_source: int = 50) -> list[dict]:
 
 def insert_into_corpus(papers: list[dict], conn) -> tuple[int, int]:
     """Returns (inserted, skipped_duplicate). Honors research_corpus.source_url
-    UNIQUE — same dedup as arxiv_discovery + openalex_discovery."""
+    UNIQUE — same dedup as arxiv_discovery + openalex_discovery.
+
+    Phase 2-followup #17: also computes paper_fingerprint and routes
+    cross-source dups (same paper, different URL) into the per-fingerprint
+    dedup_group_id model — preserved with dedup_dropped=TRUE per the
+    append-only invariant.
+    """
     if not papers:
         return 0, 0
     cur = conn.cursor()
     inserted = skipped = 0
     for p in papers:
+        # published_date here is an ISO 'YYYY-MM-DD' string (from _parse_pubdate)
+        # or None. authors is already a list of strings.
+        pub_date = p.get('published_date')
+        year_int = int(pub_date[:4]) if pub_date else None
+        fp = compute_fingerprint(p.get('title') or '', p.get('authors') or [], year_int)
+
+        dedup_dropped = False
+        dedup_group_id = None
+        if fp:
+            cur.execute(
+                "SELECT paper_id, dedup_group_id FROM research_corpus "
+                "WHERE paper_fingerprint = %s "
+                "ORDER BY ingested_at ASC LIMIT 1",
+                (fp,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                # Cross-source duplicate — share group_id with the original;
+                # if the original had NULL group_id, mint one and back-fill.
+                # NOTE: small race under concurrent writers; acceptable for
+                # the Saturday batch ingest (no concurrent inserters).
+                existing_group = existing[1]
+                if existing_group is None:
+                    existing_group = str(uuid.uuid4())
+                    cur.execute(
+                        "UPDATE research_corpus SET dedup_group_id = %s "
+                        "WHERE paper_id = %s",
+                        (existing_group, existing[0]),
+                    )
+                dedup_group_id = existing_group
+                dedup_dropped = True
+
         cur.execute(
             """INSERT INTO research_corpus
-                 (source, source_url, title, abstract, authors, venue, published_date, raw_metadata)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                 (source, source_url, title, abstract, authors, venue, published_date,
+                  raw_metadata, paper_fingerprint, dedup_group_id, dedup_dropped)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                ON CONFLICT (source_url) DO NOTHING""",
             (
                 p['source'], p['source_url'], (p.get('title') or '')[:1000],
@@ -250,6 +291,7 @@ def insert_into_corpus(papers: list[dict], conn) -> tuple[int, int]:
                 (p.get('venue') or '')[:200],
                 p.get('published_date'),
                 json.dumps(p.get('raw_metadata') or {}),
+                fp, dedup_group_id, dedup_dropped,
             )
         )
         if cur.rowcount:

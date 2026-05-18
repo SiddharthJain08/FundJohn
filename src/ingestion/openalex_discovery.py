@@ -21,17 +21,26 @@ Usage:
 import os
 import sys
 import json
+import uuid
 import argparse
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from urllib.request import Request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Make src.research.paper_fingerprint importable in both module and script modes.
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-from _http_retry import fetch_with_retry  # local import to avoid src.ingestion package __init__
+try:
+    from src.ingestion._http_retry import fetch_with_retry
+except ImportError:
+    # Script-mode fallback: when invoked as `python3 src/ingestion/openalex_discovery.py`,
+    # Python sets sys.path[0] to the script's directory so the bare name resolves.
+    from _http_retry import fetch_with_retry  # noqa: E402
+
+from src.research.paper_fingerprint import compute_fingerprint  # noqa: E402
 
 OPENALEX_BASE = 'https://api.openalex.org/works'
 
@@ -269,14 +278,49 @@ def insert_into_corpus(papers: list[dict]) -> int:
         cur = conn.cursor()
         for p in papers:
             raw = json.dumps(p.get('raw_metadata') or {})
+
+            # Phase 2-followup #17 — paper-fingerprint cross-source dedup.
+            # published_date here is an ISO string ('YYYY-MM-DD') or None.
+            pub_date = p.get('published_date')
+            year_int = int(pub_date[:4]) if pub_date else None
+            fp = compute_fingerprint(p.get('title') or '', p.get('authors') or [], year_int)
+
+            dedup_dropped = False
+            dedup_group_id = None
+            if fp:
+                cur.execute(
+                    "SELECT paper_id, dedup_group_id FROM research_corpus "
+                    "WHERE paper_fingerprint = %s "
+                    "ORDER BY ingested_at ASC LIMIT 1",
+                    (fp,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    # Cross-source duplicate — share group_id with the original;
+                    # if the original had NULL group_id, mint one and back-fill.
+                    # NOTE: small race under concurrent writers; acceptable for
+                    # the Saturday batch ingest (no concurrent inserters).
+                    existing_group = existing[1]
+                    if existing_group is None:
+                        existing_group = str(uuid.uuid4())
+                        cur.execute(
+                            "UPDATE research_corpus SET dedup_group_id = %s "
+                            "WHERE paper_id = %s",
+                            (existing_group, existing[0]),
+                        )
+                    dedup_group_id = existing_group
+                    dedup_dropped = True
+
             cur.execute(
                 """INSERT INTO research_corpus
-                     (source, source_url, title, abstract, authors, venue, published_date, raw_metadata)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                     (source, source_url, title, abstract, authors, venue, published_date,
+                      raw_metadata, paper_fingerprint, dedup_group_id, dedup_dropped)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                    ON CONFLICT (source_url) DO NOTHING""",
                 (
                     p['source'], p['source_url'], p['title'], p.get('abstract') or '',
                     p.get('authors') or None, p.get('venue'), p.get('published_date'), raw,
+                    fp, dedup_group_id, dedup_dropped,
                 )
             )
             if cur.rowcount:

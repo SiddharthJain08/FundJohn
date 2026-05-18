@@ -124,6 +124,15 @@ _IMPL_MAP = {
     'S_abnormal_accruals_earnings_quality': ('strategies.implementations.S_abnormal_accruals_earnings_quality', 'AbnormalAccrualsEarningsQuality'),
     'S_motif_orbit_spillover_portfolio': ('strategies.implementations.S_motif_orbit_spillover_portfolio', 'MotifOrbitSpilloverPortfolio'),
     'S_btc_gold_dual_momentum_rotation': ('strategies.implementations.S_btc_gold_dual_momentum_rotation', 'BtcGoldDualMomentumRotation'),
+    'S_p_index_eef_weekly_rotation': ('strategies.implementations.S_p_index_eef_weekly_rotation', 'PIndexEEFWeeklyRotation'),
+    'S_empirical_bayes_shrinkage_mv': ('strategies.implementations.S_empirical_bayes_shrinkage_mv', 'EmpiricalBayesShrinkageMV'),
+    'S_mvgarch_nig_crra_portfolio':   ('strategies.implementations.S_mvgarch_nig_crra_portfolio',   'MvGarchNigCrraPortfolio'),
+    'S_bayes_stein_shrinkage_mvo':    ('strategies.implementations.S_bayes_stein_shrinkage_mvo',    'BayesSteinShrinkageMVO'),
+    'S_visibility_graph_rsi':         ('strategies.implementations.S_visibility_graph_rsi',         'VisibilityGraphRSI'),
+    'S_prism_vq_cross_section_factor': ('strategies.implementations.S_prism_vq_cross_section_factor', 'PrismVQCrossSectionFactor'),
+    # Tier-B staging — awaiting data backfill; stubs return [] until gate clears
+    'S_estimation_risk_three_fund':    ('strategies.implementations.s_estimation_risk_three_fund',    'S_estimation_risk_three_fund'),
+    'S_earnings_news_specific_momentum': ('strategies.implementations.s_earnings_news_specific_momentum', 'S_earnings_news_specific_momentum'),
 }
 
 

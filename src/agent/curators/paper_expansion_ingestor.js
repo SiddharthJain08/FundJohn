@@ -25,10 +25,40 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { runOneShot, parseJsonBlock } = require('./_opus_oneshot');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 const WORKSPACE    = `${OPENCLAW_DIR}/workspaces/default`;
+
+// Phase 2-followup #21 — paper-fingerprint dedup, JS site (5th of 5).
+// Single source of truth: the existing Python helper at
+// src/research/paper_fingerprint.py. We shell out via a thin CLI wrapper
+// at scripts/compute_paper_fingerprints.py rather than re-implement the
+// SHA-1/normalization in JS (re-impl risks divergence from the 4 Python
+// sites).
+const FP_SCRIPT = path.join(__dirname, '..', '..', '..', 'scripts', 'compute_paper_fingerprints.py');
+
+// Batch-fingerprint a list of {title, authors, year} records.
+// Returns same-length array of 16-hex-char fingerprints (or null when
+// any of title/first-author/year is missing — partial papers don't dedup).
+// Fail-soft: if the shell-out itself errors, returns all-nulls so the
+// ingest still proceeds without dedup rather than blocking.
+function computeFingerprintsBatch(papers) {
+  if (!papers || papers.length === 0) return [];
+  try {
+    const out = execFileSync('python3', [FP_SCRIPT], {
+      input: JSON.stringify(papers),
+      encoding: 'utf-8',
+      maxBuffer: 16 * 1024 * 1024,  // 16MB headroom — way more than a weekly batch
+    });
+    return JSON.parse(out);
+  } catch (err) {
+    console.error('[paper-fingerprint] CLI shell-out failed; skipping fingerprint dedup:', err.message);
+    return papers.map(() => null);
+  }
+}
 
 async function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -266,13 +296,68 @@ fetches, and end with the fenced JSON block.`;
 async function _insertPapers(papers, notify) {
   let imported = 0;
   let skipped = 0;
-  for (const p of papers) {
+
+  // Phase 2-followup #21 — compute fingerprints for the whole batch in
+  // ONE subprocess (per-paper exec would be ~25ms × N; one exec is bounded).
+  // Shape matches the CLI: {title, authors, year}.  published_date here is
+  // an ISO 'YYYY-MM-DD' string per the input contract — same convention as
+  // the 4 Python sites (commit b7c17ca), so int(str[:4]) extracts year.
+  const fpInput = papers.map(p => ({
+    title: (p && p.title) ? String(p.title) : '',
+    authors: (p && Array.isArray(p.authors)) ? p.authors :
+             (p && p.authors) ? [String(p.authors)] : [],
+    year: (p && p.published_date && /^\d{4}/.test(String(p.published_date)))
+            ? Number(String(p.published_date).slice(0, 4)) : null,
+  }));
+  const fps = computeFingerprintsBatch(fpInput);
+
+  for (let i = 0; i < papers.length; i++) {
+    const p = papers[i];
     if (!p || !p.source_url || !p.title) { skipped++; continue; }
+    const fp = fps[i] || null;
+
+    let dedup_dropped = false;
+    let dedup_group_id = null;
+
+    // Cross-source dedup check — same paper at a different URL fires here
+    // (ON CONFLICT (source_url) only catches identical URLs).  Per-fingerprint
+    // group_id model: all rows sharing a fingerprint share the group_id;
+    // first-seen has dedup_dropped=FALSE, subsequent ones have TRUE but are
+    // still preserved (append-only invariant).  Small race under concurrent
+    // writers — acceptable for the Sunday batch ingest pattern (single writer).
+    if (fp) {
+      try {
+        const existing = await _query(
+          `SELECT paper_id, dedup_group_id FROM research_corpus
+            WHERE paper_fingerprint = $1
+            ORDER BY ingested_at ASC LIMIT 1`,
+          [fp],
+        );
+        if (existing.rows.length > 0) {
+          let existingGroup = existing.rows[0].dedup_group_id;
+          if (existingGroup === null) {
+            existingGroup = crypto.randomUUID();
+            await _query(
+              `UPDATE research_corpus SET dedup_group_id = $1 WHERE paper_id = $2`,
+              [existingGroup, existing.rows[0].paper_id],
+            );
+          }
+          dedup_group_id = existingGroup;
+          dedup_dropped = true;
+        }
+      } catch (e) {
+        // Lookup failure should not block the ingest — log and proceed
+        // without dedup metadata for this row.
+        notify(`fingerprint lookup failed for ${p.source_url}: ${e.message}`);
+      }
+    }
+
     try {
       const { rowCount } = await _query(
         `INSERT INTO research_corpus
-           (source_url, title, abstract, authors, venue, published_date, source, raw_metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+           (source_url, title, abstract, authors, venue, published_date, source, raw_metadata,
+            paper_fingerprint, dedup_group_id, dedup_dropped)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11)
          ON CONFLICT (source_url) DO NOTHING`,
         [
           p.source_url,
@@ -283,6 +368,9 @@ async function _insertPapers(papers, notify) {
           p.published_date && /^\d{4}-\d{2}-\d{2}/.test(String(p.published_date)) ? p.published_date : null,
           p.source || 'expansion',
           JSON.stringify({ ingested_via: 'paper_expansion', original: p }),
+          fp,
+          dedup_group_id,
+          dedup_dropped,
         ],
       );
       if (rowCount > 0) imported++; else skipped++;
@@ -394,4 +482,4 @@ async function run({ dryRun = false, notify = () => {} } = {}) {
   };
 }
 
-module.exports = { run };
+module.exports = { run, computeFingerprintsBatch };

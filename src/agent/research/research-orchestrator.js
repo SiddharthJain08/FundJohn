@@ -54,9 +54,9 @@ function _resolveImplPath(stratId) {
 // If opts.onChild is provided, it's invoked synchronously with the spawned
 // ChildProcess so the caller can SIGTERM it later (used by Cancel).
 function _spawnPython(args, opts = {}) {
-  const { cwd, timeoutMs = 600_000, onChild } = opts;
+  const { cwd, timeoutMs = 600_000, onChild, env } = opts;
   return new Promise((resolve) => {
-    const child = spawn('python3', args, { cwd, env: process.env });
+    const child = spawn('python3', args, { cwd, env: env || process.env });
     if (typeof onChild === 'function') { try { onChild(child); } catch (_) {} }
     let stdout = '', stderr = '';
     const killTimer = setTimeout(() => {
@@ -594,10 +594,13 @@ class ResearchOrchestrator {
     notify?.(`  ✅ ${stratId} validation passed — running backtest (may take 2–5 min)...`);
     onPhase('backtest', 60);
 
-    // ── Phase 2: Auto-backtest convergence gate ───────────────────────────────
-    // auto_backtest.py exits 0 on pass, 1 on fail. JSON is on stdout in both
-    // cases. Heartbeat emits progress every 5s during the long run so the
-    // dashboard chip visibly ticks instead of appearing stuck.
+    // ── Phase 2: Unified backtest convergence gate ────────────────────────────
+    // 2026-05-14 cutover: unified_backtest is the canonical single source
+    // of truth (discovery methodology, per-regime breakdown, persisted to
+    // strategy_backtest_runs + strategy_backtest_regimes + strategy_backtest_trades).
+    // After the run we invoke eligibility_assigner so the new strategy's
+    // metadata.eligible_regimes is set from data, not the author's class declaration.
+    // Heartbeat emits progress every 5s so the dashboard chip ticks visibly.
     let btResult;
     {
       let hb = 60;
@@ -606,16 +609,70 @@ class ResearchOrchestrator {
         try { onPhase('backtest', hb); } catch (_) {}
       }, 5_000);
       try {
-        const { stdout, code } = await _spawnPython(
-          ['src/strategies/auto_backtest.py', implPath],
-          { cwd: OPENCLAW_DIR, timeoutMs: 600_000, onChild: opts.onChild });
-        try {
-          btResult = JSON.parse(stdout);
-        } catch (_) {
-          btResult = { error: `auto_backtest.py exit=${code}; stdout: ${stdout.slice(0, 300)}`, windows: [] };
+        const { stdout, stderr, code } = await _spawnPython(
+          ['-m', 'backtest.unified_backtest', '--strategy-file', implPath],
+          { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
+            env: { ...process.env, PYTHONPATH: 'src' } });
+        // unified_backtest writes log lines to stdout and the run_id at the end.
+        // It does NOT return JSON; we synthesize a minimal btResult by querying
+        // strategy_backtest_runs for the just-written row.
+        const runIdMatch = stdout.match(/run_id=([0-9a-f-]{36})/);
+        if (code !== 0 || !runIdMatch) {
+          btResult = { error: `unified_backtest exit=${code}; stdout: ${stdout.slice(-400)}; stderr: ${stderr.slice(-400)}` };
+        } else {
+          try {
+            const runRes = await this._query(
+              `SELECT total_sharpe, total_max_dd_pct, total_return_pct, total_trades,
+                      total_hit_rate, avg_holding_days, run_id
+               FROM strategy_backtest_runs WHERE run_id = $1`,
+              [runIdMatch[1]]
+            );
+            const regRes = await this._query(
+              `SELECT regime_state, sharpe, max_dd_pct, return_pct, trade_count, hit_rate
+               FROM strategy_backtest_regimes WHERE run_id = $1`,
+              [runIdMatch[1]]
+            );
+            const r = runRes.rows[0] || {};
+            const regime_breakdown = {};
+            for (const row of regRes.rows) {
+              regime_breakdown[row.regime_state] = {
+                sharpe:           row.sharpe,
+                max_dd:           row.max_dd_pct != null ? row.max_dd_pct / 100 : null,
+                total_return_pct: row.return_pct,
+                trade_count:      row.trade_count,
+                hit_rate:         row.hit_rate,
+              };
+            }
+            btResult = {
+              sharpe:            r.total_sharpe,
+              max_dd:            r.total_max_dd_pct != null ? r.total_max_dd_pct / 100 : null,
+              total_return_pct:  r.total_return_pct,
+              trade_count:       r.total_trades,
+              hit_rate:          r.total_hit_rate,
+              avg_holding_days:  r.avg_holding_days,
+              regime_breakdown,
+              run_id:            r.run_id,
+              method:            'unified_backtest_discovery',
+            };
+          } catch (e) {
+            btResult = { error: `unified_backtest succeeded but DB read failed: ${e.message}` };
+          }
         }
       } finally {
         clearInterval(heartbeat);
+      }
+    }
+
+    // Auto-set eligible_regimes from the run's per-regime metrics. Best-effort;
+    // a failure here doesn't block promotion (the operator can rerun later).
+    if (btResult && !btResult.error && btResult.run_id) {
+      try {
+        await _spawnPython(
+          ['-m', 'backtest.eligibility_assigner', '--strategy-id', stratId],
+          { cwd: OPENCLAW_DIR, timeoutMs: 30_000,
+            env: { ...process.env, PYTHONPATH: 'src' } });
+      } catch (e) {
+        notify?.(`  ⚠️ ${stratId} eligibility_assigner failed (non-fatal): ${e.message?.slice(0, 200)}`);
       }
     }
 

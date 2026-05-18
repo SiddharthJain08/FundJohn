@@ -146,3 +146,73 @@ class TestBuildSizedPayload:
         from execution.regime_blended_sizer_live import _build_sized_payload
         payload = _build_sized_payload([_make_order()], {'cycle_date': '2026-05-12'})
         assert payload['orders'][0]['t2'] is None
+
+
+def _sharpe_cadence_order(ticker='AAPL', direction='long', notional=10050.0,
+                          entry=100.0, stop=95.0, t1=110.0,
+                          strategies=('S_a',)):
+    """Sharpe-cadence shape: string direction, top-level bracket fields,
+    shares=0, contributing_strategies list, no `qty` key.
+    """
+    return {
+        'ticker':                  ticker,
+        'strategy_id':             '|'.join(strategies),
+        'direction':               direction,
+        'notional_usd':            notional,
+        'pct_nav':                 notional / 100_000,
+        'shares':                  0,
+        'entry':                   entry,
+        'stop':                    stop,
+        't1':                      t1,
+        't2':                      None,
+        'kelly_final':             notional / 100_000,
+        'ev':                      0.0,
+        'p_t1':                    0.5,
+        'source_mode':             'sharpe_cadence',
+        'target_usd':              notional if direction == 'long' else -notional,
+        'current_usd':             0.0,
+        'contributing_strategies': list(strategies),
+    }
+
+
+class TestSharpeCadenceShape:
+    """Regression: _build_sized_payload must accept the sharpe_cadence
+    order shape (string direction, top-level entry/stop/t1, no `qty`,
+    no `bracket` dict). Before fix it crashed with KeyError 'bracket'
+    and TypeError comparing 'long' > 0."""
+
+    def test_sharpe_cadence_long_order(self):
+        from execution.regime_blended_sizer_live import _build_sized_payload
+        payload = _build_sized_payload([_sharpe_cadence_order()],
+                                       {'cycle_date': '2026-05-14'}, equity=100_000.0)
+        assert len(payload['orders']) == 1
+        sig = payload['orders'][0]
+        assert sig['direction'] == 'long'
+        assert sig['entry'] == 100.0
+        assert sig['stop'] == 95.0
+        assert sig['t1'] == 110.0
+        # shares computed from notional/entry when `qty` absent
+        assert sig['shares'] == 100
+        assert sig['pct_nav'] > 0
+        assert sig['strategy_id'] == 'S_a'   # top-level pass-through (joined)
+        assert sig['source_mode'] == 'sharpe_cadence'
+
+    def test_sharpe_cadence_short_order(self):
+        from execution.regime_blended_sizer_live import _build_sized_payload
+        o = _sharpe_cadence_order(direction='short', entry=100.0, stop=105.0, t1=90.0)
+        payload = _build_sized_payload([o], {'cycle_date': '2026-05-14'}, equity=100_000.0)
+        sig = payload['orders'][0]
+        assert sig['direction'] == 'short'
+        assert sig['shares'] >= 1
+
+    def test_sharpe_cadence_missing_bracket_dropped(self):
+        """Orders with no entry/stop/t1 (orphan-close case) are skipped, not crashed."""
+        from execution.regime_blended_sizer_live import _build_sized_payload
+        o = _sharpe_cadence_order(entry=None, stop=None, t1=None)
+        payload = _build_sized_payload([o], {'cycle_date': '2026-05-14'}, equity=100_000.0)
+        assert payload['orders'] == []  # silently dropped (logged to stderr)
+
+
+# Legacy aggregate-cap tests removed 2026-05-14 — _apply_aggregate_cap
+# was deleted with the cap drop. Sizer's per-ticker cap + sharpe_cadence
+# normalization is the new authority; no aggregate-scale step remains.

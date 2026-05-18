@@ -1129,6 +1129,47 @@ def check_systemd_services():
     return _warn('systemd_services', '; '.join(inactive))
 
 
+# Files Node parses at module-load on a maintenance / curator path. A
+# SyntaxError here was the 2026-05-13..18 silence (run_maintenance.js:130
+# template literal). Catching it at preflight prevents the same class
+# of bug from killing the next scheduled run.
+JS_PREFLIGHT_FILES = [
+    'src/agent/run_maintenance.js',
+    'src/agent/curators/saturday_brain.js',
+    'src/agent/curators/comprehensive_review.js',
+    'src/agent/curators/position_recommender.js',
+    'src/agent/curators/weekly_live_sharpe.js',
+    'src/agent/curators/_opus_oneshot.js',
+    'src/agent/research/research-orchestrator.js',
+    'src/pipeline/daily_health_digest.js',
+]
+
+
+@_check('node_syntax', slow=True)
+def check_node_syntax():
+    """node -c parses each critical JS file. Catches template-literal /
+    syntax regressions before they hit the next scheduled run."""
+    failures = []
+    for rel in JS_PREFLIGHT_FILES:
+        path = ROOT / rel
+        if not path.exists():
+            continue  # tolerated: caller may not have all curators
+        try:
+            proc = subprocess.run(
+                ['node', '-c', str(path)],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return _fail('node_syntax', f'{type(exc).__name__}: {exc}')
+        if proc.returncode != 0:
+            stderr = (proc.stderr or '').strip().splitlines()
+            first = stderr[0] if stderr else 'unknown error'
+            failures.append(f'{rel}: {first[:120]}')
+    if failures:
+        return _fail('node_syntax', '; '.join(failures))
+    return _ok('node_syntax', f'{len(JS_PREFLIGHT_FILES)} files parsed')
+
+
 # ── Orchestration ──────────────────────────────────────────────────────────
 
 def _all_checks():

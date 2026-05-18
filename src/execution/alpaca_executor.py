@@ -5,10 +5,12 @@ trade_agent_llm.py and submits bracket orders to Alpaca paper.
 
 Safety gates (in order, any failure → skip):
   1. daily_signal_summary → same quality gate as the trade step.
-  2. Per-order NAV cap  — MAX_ORDER_PCT_NAV.
-  3. Daily total cap    — MAX_DAILY_NEW_NOTIONAL_PCT applied across the run.
-  4. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
+  2. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
      alpaca_order_id in position_recommendations.
+
+Note: all per-order and daily aggregate notional caps were dropped 2026-05-14.
+The sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
+formulation is the single source of deployment policy.
 
 Time-in-force: 'day' if currently in regular trading hours, 'opg'
 (market-on-open, next session) otherwise. This means the nightly 21:30
@@ -45,18 +47,14 @@ from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 
 
 # ── Safety knobs ────────────────────────────────────────────────────────────
-MAX_ORDER_PCT_NAV            = 0.05   # 5% NAV hard cap per order
-MAX_DAILY_NEW_NOTIONAL_PCT   = 0.25   # 25% NAV max in new notional per run
-MIN_EFFECTIVE_PCT            = 0.001  # drop sub-0.1% NAV orders (noise)
-# Available-NAV floor (operator policy 2026-05-08): subtract long_market_value
-# from equity before applying the daily-notional cap, with a 5%-of-equity
-# floor so the system trickles instead of halts when fully invested.
-AVAILABLE_NAV_FLOOR_PCT      = 0.05
-# Hard ceiling on cumulative new notional per cycle as a fraction of
-# RegT (overnight) buying power. Independent of the equity-based daily
-# cap; whichever is smaller wins. Protects against runaway accumulation
-# even when equity-derived sizing thinks there's headroom.
-MAX_BP_USAGE_PCT             = 0.50
+# 2026-05-14: All executor-side clamps removed by operator decision —
+# MAX_ORDER_PCT_NAV (5% per-order), MAX_DAILY_NEW_NOTIONAL_PCT (25% daily
+# aggregate), MIN_EFFECTIVE_PCT (0.1% per-order floor), MAX_BP_USAGE_PCT
+# (50% regt_bp backstop). The sharpe_cadence sizer's pure
+# target_usd = ticker_w × (λ × NAV / Σ|ticker_w|) formulation is the
+# single source of deployment policy. High-conviction tickers (multi-strategy
+# agreement) deserve the larger allocation the formula assigns; any cap here
+# would distort relative-conviction expression.
 
 # Per-run in-memory cache of tickers Alpaca paper rejected as
 # untradable/unsupported (delisted, halted, asset-not-found, etc.). Keyed
@@ -305,6 +303,103 @@ def _get_order_by_coid(coid):
     return _run_alpaca_cli(['order', 'get-by-client-id', '--client-order-id', coid])
 
 
+# Minimum stop/target distance as a fraction of base. 1% gap absorbs the
+# typical ~0.5% intraday drift between our pre-flight quote and the
+# `base_price` Alpaca's order endpoint uses for bracket validation. Floored
+# higher than the prior 0.5% after 2026-05-15 cycle showed 38 longs
+# rejected with `stop_loss must be <= base_price - 0.01` despite signal
+# stops 0.3-5% away from entry — drift exceeded the gap on every one.
+MIN_BRACKET_GAP_PCT = 0.01
+
+
+def _recompute_bracket_from_quote(entry, stop, target, side, base):
+    """Re-anchor (entry, stop, target) to the current market quote while
+    preserving the signal's stop_pct and target_pct relative to entry.
+
+    Side semantics:
+      side == 'buy'  (long):  stop <  entry  AND  target >  entry
+      side == 'sell' (short): stop >  entry  AND  target <  entry
+
+    Returns: (new_entry, new_stop, new_target, why_str). `why_str` is
+    empty when the recompute used preserved ratios; otherwise it explains
+    which fallback fired (e.g., 'min-gap floor' or 'degenerate ratio').
+
+    Guarantees on output (with base > 0):
+      long:  new_stop   ≤ base × (1 - MIN_BRACKET_GAP_PCT)
+             new_target ≥ base × (1 + MIN_BRACKET_GAP_PCT)
+      short: new_stop   ≥ base × (1 + MIN_BRACKET_GAP_PCT)
+             new_target ≤ base × (1 - MIN_BRACKET_GAP_PCT)
+    """
+    import math as _math
+    # Defensive: caller is responsible for entry > 0 and finite. If
+    # something slipped past, snap to base ± min-gap and bail.
+    try:
+        e = float(entry); s = float(stop); t = float(target); b = float(base)
+    except (TypeError, ValueError):
+        b = float(base) if base else 0.0
+        gap = max(0.02, b * MIN_BRACKET_GAP_PCT)
+        if side == 'buy':
+            return (round(b, 2), round(b - gap, 2), round(b + gap, 2), 'non-numeric input')
+        return (round(b, 2), round(b + gap, 2), round(b - gap, 2), 'non-numeric input')
+    if not (_math.isfinite(e) and _math.isfinite(s) and _math.isfinite(t) and _math.isfinite(b) and b > 0):
+        b = b if (_math.isfinite(b) and b > 0) else 0.0
+        gap = max(0.02, b * MIN_BRACKET_GAP_PCT)
+        if side == 'buy':
+            return (round(b, 2), round(b - gap, 2), round(b + gap, 2), 'non-finite input')
+        return (round(b, 2), round(b + gap, 2), round(b - gap, 2), 'non-finite input')
+
+    # Signal-time ratios relative to entry. If entry is degenerate (≤ 0),
+    # fall back to min-gap. Otherwise clamp ratios to a sane envelope so a
+    # rogue strategy that emits stop=$0 or target=$10000 can't blow up the
+    # downstream order math.
+    why_parts = []
+    if e <= 0:
+        stop_pct = MIN_BRACKET_GAP_PCT
+        target_pct = MIN_BRACKET_GAP_PCT
+        why_parts.append('degenerate entry')
+    else:
+        if side == 'buy':
+            stop_pct   = (e - s) / e
+            target_pct = (t - e) / e
+        else:  # 'sell' (short)
+            stop_pct   = (s - e) / e
+            target_pct = (e - t) / e
+        # Both ratios should be > 0 by construction. If a signal emitted
+        # them on the wrong side (stop above entry for long, etc.), fall
+        # back to the min gap rather than carry the bug through.
+        if stop_pct <= 0:
+            stop_pct = MIN_BRACKET_GAP_PCT
+            why_parts.append('inverted stop')
+        if target_pct <= 0:
+            target_pct = MIN_BRACKET_GAP_PCT
+            why_parts.append('inverted target')
+        # Outer clamp: keep the rebuilt distance reasonable. 50% of base
+        # is more than any sane bracket on a daily strategy.
+        if stop_pct > 0.5:
+            stop_pct = 0.5
+            why_parts.append('stop_pct clamped 50%')
+        if target_pct > 0.5:
+            target_pct = 0.5
+            why_parts.append('target_pct clamped 50%')
+
+    # Anchor everything to current base. Floor the gap at MIN_BRACKET_GAP_PCT
+    # so Alpaca's $0.01 validity rule never bites.
+    stop_pct   = max(stop_pct,   MIN_BRACKET_GAP_PCT)
+    target_pct = max(target_pct, MIN_BRACKET_GAP_PCT)
+
+    if side == 'buy':
+        new_entry  = b
+        new_stop   = b * (1.0 - stop_pct)
+        new_target = b * (1.0 + target_pct)
+    else:
+        new_entry  = b
+        new_stop   = b * (1.0 + stop_pct)
+        new_target = b * (1.0 - target_pct)
+
+    return (round(new_entry, 2), round(new_stop, 2), round(new_target, 2),
+            '; '.join(why_parts))
+
+
 def execute_single(sess, equity, order, run_date):
     """Submit one bracket order. Returns result dict.
 
@@ -342,9 +437,19 @@ def execute_single(sess, equity, order, run_date):
         return {'ticker': ticker, 'status': 'SKIP', 'reason': 'missing levels',
                 'client_order_id': coid}
 
-    entry, stop, target = float(entry), float(stop), float(target)
+    import math as _math
+    try:
+        entry, stop, target = float(entry), float(stop), float(target)
+    except (TypeError, ValueError):
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-numeric levels',
+                'client_order_id': coid}
+    if not (_math.isfinite(entry) and _math.isfinite(stop) and _math.isfinite(target)):
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-finite levels (NaN/inf)',
+                'client_order_id': coid}
+    if entry <= 0:
+        return {'ticker': ticker, 'status': 'SKIP', 'reason': 'non-positive entry',
+                'client_order_id': coid}
 
-    pct_nav = max(MIN_EFFECTIVE_PCT, min(pct_nav, MAX_ORDER_PCT_NAV))
     notional = equity * pct_nav
     qty = max(1, int(notional / entry))
     # In-hours: execute immediately ('day' TIF). Off-hours: queue for next open
@@ -364,65 +469,64 @@ def execute_single(sess, equity, order, run_date):
         log(f'  ↓ {ticker}: short → simple order_class (bracket-on-short rejected by Alpaca paper)')
         order_class = 'simple'
 
-    # Pre-flight stop adjustment: TradeJohn's stop is computed off the
-    # signal-time entry, but Alpaca validates stop_loss against the
-    # CURRENT base_price (latest trade). When the market drifts between
-    # signal generation and submission, otherwise-valid brackets get
-    # rejected with 422 "stop_loss.stop_price must be <= base_price -
-    # 0.01" (longs) or ">= base_price + 0.01" (shorts). Refetching the
-    # latest quote and snapping the stop to the validity boundary
-    # rescues these orders rather than dropping them. Limited to
-    # bracket day-orders — opg simple orders don't have brackets.
+    # Pre-flight bracket recompute: re-anchor entry/stop/target to current
+    # market quote while preserving the SIGNAL'S ratio shape (stop_pct =
+    # |entry-stop|/entry, target_pct = |target-entry|/entry). This both
+    # prevents Alpaca's 422 base_price rejections AND keeps the strategy's
+    # risk/reward intent intact when the market has drifted between signal
+    # generation and submission.
     # Bracket validity has TWO legs Alpaca enforces against base_price:
     #   long: stop <= base - 0.01   AND   target >= base + 0.01
     #   short: stop >= base + 0.01  AND   target <= base - 0.01
-    # We snap BOTH legs in the same quote fetch — pre-2026-05-08 we only
-    # snapped stops, which left ~11 daily rejections from tight targets
-    # (S15_iv_rv, S21_iv_hv: target close to entry → close to base).
+    # Fallback (quote fetch fail / degenerate ratios): use absolute snap
+    # offsets so the order still passes validation.
     adjusted_notes: list[str] = []
     if order_class == 'bracket':
+        # paper-api.alpaca.markets doesn't serve market data — quotes/snapshot
+        # endpoints return 404. Hit data.alpaca.markets explicitly. Prefer
+        # latestTrade.p (what Alpaca's order endpoint validates against)
+        # over the quote midpoint, which can be miles off in wide markets.
         try:
-            qr = sess.get(f'{sess._base}/v2/stocks/{ticker}/quotes/latest', timeout=5)
+            qr = sess.get(
+                f'https://data.alpaca.markets/v2/stocks/{ticker}/snapshot',
+                timeout=5,
+            )
             if qr.status_code == 200:
-                qj = qr.json().get('quote', {})
-                bid = float(qj.get('bp') or 0.0)
-                ask = float(qj.get('ap') or 0.0)
-                # Use mid-price as the reference base; fall back to whichever side is non-zero.
-                base = ((bid + ask) / 2.0) if (bid > 0 and ask > 0) else (bid or ask)
+                sj = qr.json() or {}
+                latest_trade = sj.get('latestTrade') or {}
+                latest_quote = sj.get('latestQuote') or {}
+                trade_p = float(latest_trade.get('p') or 0.0)
+                bid     = float(latest_quote.get('bp') or 0.0)
+                ask     = float(latest_quote.get('ap') or 0.0)
+                if trade_p > 0:
+                    base = trade_p
+                elif bid > 0 and ask > 0:
+                    base = (bid + ask) / 2.0
+                else:
+                    base = bid or ask
                 if base > 0:
-                    buf = max(0.02, base * 0.005)  # snap margin: 2¢ or 0.5% of base
-                    if side == 'buy':
-                        # Long: stop <= base - 0.01
-                        if stop >= base - 0.01:
-                            new_stop = round(base - buf, 2)
-                            adjusted_notes.append(f'stop {stop:.2f}→{new_stop:.2f}')
-                            stop = new_stop
-                        # Long: target >= base + 0.01
-                        if target <= base + 0.01:
-                            new_target = round(base + buf, 2)
-                            adjusted_notes.append(f'target {target:.2f}→{new_target:.2f}')
-                            target = new_target
-                    elif side == 'sell':
-                        # Short: stop >= base + 0.01
-                        if stop <= base + 0.01:
-                            new_stop = round(base + buf, 2)
-                            adjusted_notes.append(f'stop {stop:.2f}→{new_stop:.2f}')
-                            stop = new_stop
-                        # Short: target <= base - 0.01
-                        if target >= base - 0.01:
-                            new_target = round(base - buf, 2)
-                            adjusted_notes.append(f'target {target:.2f}→{new_target:.2f}')
-                            target = new_target
+                    new_entry, new_stop, new_target, why = _recompute_bracket_from_quote(
+                        entry, stop, target, side, base
+                    )
+                    if abs(new_stop - stop) > 0.005:
+                        adjusted_notes.append(f'stop {stop:.2f}→{new_stop:.2f}')
+                    if abs(new_target - target) > 0.005:
+                        adjusted_notes.append(f'target {target:.2f}→{new_target:.2f}')
+                    if abs(new_entry - entry) > 0.005:
+                        adjusted_notes.append(f'entry {entry:.2f}→{new_entry:.2f}')
+                    entry, stop, target = new_entry, new_stop, new_target
+                    if why:
+                        adjusted_notes.append(f'({why})')
+            else:
+                log(f'  ↯ {ticker}: pre-flight snapshot HTTP {qr.status_code} — submitting unsnapped')
         except Exception as _qe:
             # Don't block submission on a quote fetch hiccup; let Alpaca's
-            # own validation be the final word. Logged so we can see when
-            # the snap path is silently failing (otherwise an order looks
-            # like a "fresh" 422 from Alpaca rather than our pre-flight
-            # whiffing).
+            # own validation be the final word. The 422-retry block below
+            # will rescue if Alpaca returns base_price in the error.
             log(f'  ↯ {ticker}: pre-flight quote fetch failed ({type(_qe).__name__}: {_qe}) — submitting unsnapped')
 
     if adjusted_notes:
-        log(f'  ↪ {ticker}: bracket snapped — {", ".join(adjusted_notes)}')
+        log(f'  ↪ {ticker}: bracket recomputed — {", ".join(adjusted_notes)}')
 
     try:
         ok, payload, err = _submit_order_via_cli(
@@ -452,34 +556,38 @@ def execute_single(sess, equity, order, run_date):
                         'tif': tif, 'order_class': order_class, 'client_order_id': coid}
 
         # 422 with base_price violation → Alpaca's error envelope carries the
-        # base_price it validated against. If our pre-flight snap whiffed
-        # (quote fetch returned 0/exception, or quote was stale by the time
-        # the order hit), use the authoritative value from the 422 and retry
-        # once with a freshly snapped stop.
+        # base_price it validated against. Use the authoritative bp to run the
+        # full bracket recompute (preserves the signal's stop/target ratios)
+        # and retry once. Catches the case where our pre-flight quote was
+        # stale or the quote fetch failed entirely.
         if err_status == 422 and side in ('buy', 'sell') and tif == 'day':
             ej     = err.get('error_json') or {}
             bp_raw = ej.get('base_price')
-            if bp_raw and ('stop_loss' in err_text or 'base_price' in err_text):
+            wants_retry = bp_raw and ('stop_loss' in err_text
+                                       or 'take_profit' in err_text
+                                       or 'base_price' in err_text)
+            if wants_retry:
                 try:
                     bp = float(bp_raw)
                 except (TypeError, ValueError):
                     bp = 0.0
                 if bp > 0:
-                    if side == 'buy':
-                        new_stop = round(bp - max(0.02, bp * 0.005), 2)
-                    else:
-                        new_stop = round(bp + max(0.02, bp * 0.005), 2)
-                    log(f'  ↻ {ticker}: 422 base_price={bp:.2f} — retry with stop {stop:.2f}→{new_stop:.2f}')
+                    r_entry, r_stop, r_target, r_why = _recompute_bracket_from_quote(
+                        entry, stop, target, side, bp
+                    )
+                    log(f'  ↻ {ticker}: 422 base_price={bp:.2f} — retry with '
+                        f'stop {stop:.2f}→{r_stop:.2f}, target {target:.2f}→{r_target:.2f}'
+                        + (f' ({r_why})' if r_why else ''))
                     ok3, payload3, err3 = _submit_order_via_cli(
                         ticker=ticker, side=side, qty=qty, tif=tif,
-                        order_class=order_class, target=target, stop=new_stop, coid=coid,
+                        order_class=order_class, target=r_target, stop=r_stop, coid=coid,
                     )
                     if ok3:
                         oid = (payload3 or {}).get('id', '?') if isinstance(payload3, dict) else '?'
-                        log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={new_stop:.2f}  notional=${notional:,.0f}  order={oid} (snap-retry)')
+                        log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{r_entry:.2f}  TP={r_target:.2f}  SL={r_stop:.2f}  notional=${notional:,.0f}  order={oid} (recompute-retry)')
                         return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                                 'side': side, 'qty': qty, 'notional': notional,
-                                'entry': entry, 'stop': new_stop, 'target': target,
+                                'entry': r_entry, 'stop': r_stop, 'target': r_target,
                                 'tif': tif, 'order_class': order_class, 'client_order_id': coid}
                     err = err3 or err
 
@@ -548,25 +656,11 @@ def main():
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
 
-    # Fix #2 (executor side): subtract long_market_value from equity so
-    # already-deployed positions reduce headroom instead of being free.
-    # Floor at 5% of equity (operator policy 2026-05-08) so the system
-    # trickles rather than halts when fully invested.
-    available_nav = max(equity * AVAILABLE_NAV_FLOOR_PCT, equity - long_mv)
-    headroom_cap  = available_nav * MAX_DAILY_NEW_NOTIONAL_PCT
-    # Fix #1: regt_buying_power × 50% as an independent ceiling. This
-    # protects against the executor sizing against equity while ignoring
-    # actual margin headroom — pre-2026-05-08 the cap denominator was
-    # raw equity, so cumulative new notional could exceed available BP.
-    bp_cap = regt_bp * MAX_BP_USAGE_PCT
-    daily_cap_notional = min(headroom_cap, bp_cap)
-
     # Reset per-run unsupported-asset cache.
     _unsupported_assets.clear()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
-    log(f'Daily cap: min(headroom ${headroom_cap:,.0f}, bp×0.5 ${bp_cap:,.0f}) = ${daily_cap_notional:,.0f}'
-        f'  orders to attempt: {len(orders)}')
+    log(f'orders to attempt: {len(orders)} (pure sizer output — no executor-side cap)')
 
     submitted = []
     skipped   = []
@@ -580,12 +674,8 @@ def main():
             skipped.append({'ticker': ticker, 'reason': 'already executed'})
             continue
 
-        # Prospective notional for daily cap
-        pct_nav = max(MIN_EFFECTIVE_PCT, min(float(order.get('pct_nav') or 0.0), MAX_ORDER_PCT_NAV))
+        pct_nav = float(order.get('pct_nav') or 0.0)
         projected = equity * pct_nav
-        if new_notional_total + projected > daily_cap_notional:
-            skipped.append({'ticker': ticker, 'reason': f'daily cap reached (${new_notional_total:,.0f} + ${projected:,.0f} > ${daily_cap_notional:,.0f})'})
-            continue
 
         if args.dry_run:
             log(f'DRY {ticker} {sid}  would submit {pct_nav*100:.2f}% NAV (~${projected:,.0f})')

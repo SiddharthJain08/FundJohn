@@ -8,6 +8,7 @@ const { verdictCache, query: dbQuery } = require('../../database/postgres');
 const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
+const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -244,22 +245,65 @@ app.get('/api/portfolio/positions', async (req, res) => {
     // grey + days_held=0 everywhere. Now the client receives every open
     // signal in the recent window (~5500 rows / ~1MB) and the ticker
     // rollups carry meaningful color + days_held.
+    //
+    // Two LATERAL JOINs: `sp` = most recent mark, `sp_prev` = the mark
+    // immediately before that. We deliberately use rank-by-pnl_date rather
+    // than `pnl_date < CURRENT_DATE` so that on stale-data days (pipeline
+    // hasn't written today's row yet) `sp` falls back to the last available
+    // mark and `sp_prev` is still the one before — which is exactly the
+    // "two most recent marks" delta an operator wants on those days.
     const result = await dbQuery(`
       SELECT es.id, es.strategy_id, es.ticker, es.direction,
              es.entry_price, es.stop_loss, es.target_1, es.position_size_pct,
              es.signal_date, es.status,
              sp.close_price AS current_price,
-             sp.unrealized_pnl_pct, sp.days_held
+             sp.unrealized_pnl_pct, sp.days_held,
+             sp_prev.unrealized_pnl_pct AS prev_pnl_pct,
+             sp_prev.close_price        AS prev_close
       FROM execution_signals es
       LEFT JOIN LATERAL (
-        SELECT close_price, unrealized_pnl_pct, days_held
+        SELECT close_price, unrealized_pnl_pct, days_held, pnl_date
         FROM signal_pnl WHERE signal_id = es.id ORDER BY pnl_date DESC LIMIT 1
       ) sp ON true
+      LEFT JOIN LATERAL (
+        SELECT close_price, unrealized_pnl_pct
+        FROM signal_pnl
+        WHERE signal_id = es.id AND pnl_date < sp.pnl_date
+        ORDER BY pnl_date DESC LIMIT 1
+      ) sp_prev ON true
       WHERE es.status = 'open'
         AND es.signal_date >= CURRENT_DATE - INTERVAL '90 days'
       ORDER BY es.signal_date DESC
     `);
-    res.json(result.rows);
+
+    // NAV via Alpaca CLI account.equity. One round-trip per request; this
+    // endpoint is render-driven, not hot-loop. If Alpaca is unreachable the
+    // rows still ship with day_pnl_usd=null and the dashboard's em-dash
+    // fallback fires — preferable to wedging the entire positions list on
+    // a degraded broker leg.
+    let nav = null;
+    try {
+      const a = await runAlpaca(['account', 'get'], { timeout: 10_000 });
+      if (a.ok && a.payload && a.payload.equity != null) {
+        const eq = parseFloat(a.payload.equity);
+        if (Number.isFinite(eq) && eq > 0) nav = eq;
+      }
+    } catch (_) { /* nav stays null → day_pnl_usd renders as em-dash */ }
+
+    const enriched = result.rows.map(r => ({
+      ...r,
+      day_pnl_usd: computeDayPnlUsd({
+        today_pnl_pct:     r.unrealized_pnl_pct,
+        prev_pnl_pct:      r.prev_pnl_pct,
+        position_size_pct: r.position_size_pct,
+        nav,
+      }),
+    }));
+
+    if (req.query.group_by === 'strategy') {
+      return res.json({ groups: groupByStrategy(enriched) });
+    }
+    res.json(enriched);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -490,6 +534,106 @@ app.put('/api/config/lambda', async (req, res) => {
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Risk & Sizing — bundled config for the Portfolio page control panel.
+// Returns the global λ alongside per-regime liquidity / min-notional /
+// circuit-breaker so the operator can see effective leverage per regime
+// (= λ × liquidity_param) on one screen.
+app.get('/api/config/regime-sizing', async (req, res) => {
+  try {
+    const [lamRes, regimeRes] = await Promise.all([
+      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
+      dbQuery(`SELECT regime_state, liquidity_param, min_signal_notional_usd,
+                      min_signal_notional_pct, position_circuit_breaker_pct,
+                      updated_at
+               FROM regime_sizer_params
+               ORDER BY CASE regime_state
+                          WHEN 'LOW_VOL' THEN 1
+                          WHEN 'TRANSITIONING' THEN 2
+                          WHEN 'HIGH_VOL' THEN 3
+                          WHEN 'CRISIS' THEN 4
+                          ELSE 5 END`),
+    ]);
+    let currentRegime = 'TRANSITIONING';
+    try {
+      const latestPath = path.join(__dirname, '../../../.agents/market-state/latest.json');
+      const latestJson = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      currentRegime = latestJson.state || 'TRANSITIONING';
+    } catch (_) {}
+    const lam = lamRes.rows[0];
+    res.json({
+      current_regime: currentRegime,
+      global: {
+        lambda:     lam ? parseFloat(lam.value) : 2.0,
+        min:        0.10,
+        max:        3.50,
+        updated_at: lam ? lam.updated_at : null,
+      },
+      regimes: regimeRes.rows.map(r => ({
+        state:                          r.regime_state,
+        liquidity_param:                parseFloat(r.liquidity_param),
+        min_signal_notional_pct:        r.min_signal_notional_pct != null ? parseFloat(r.min_signal_notional_pct) : null,
+        min_signal_notional_usd:        parseFloat(r.min_signal_notional_usd),
+        position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
+        updated_at:                     r.updated_at,
+      })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/regime-sizing/:regime', async (req, res) => {
+  const regime = String(req.params.regime || '').toUpperCase();
+  const validRegimes = new Set(['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']);
+  if (!validRegimes.has(regime)) {
+    return res.status(400).json({ error: `regime must be one of ${[...validRegimes].join(', ')}` });
+  }
+  const body = req.body || {};
+  // Validate each optional field individually so partial updates work.
+  const updates = {};
+  if (body.liquidity_param !== undefined) {
+    const v = parseFloat(body.liquidity_param);
+    if (!isFinite(v) || v < 0.0 || v > 2.0) {
+      return res.status(400).json({ error: 'liquidity_param must be a number in [0.0, 2.0]' });
+    }
+    updates.liquidity_param = v;
+  }
+  if (body.min_signal_notional_usd !== undefined) {
+    const v = parseFloat(body.min_signal_notional_usd);
+    if (!isFinite(v) || v < 0 || v > 100000) {
+      return res.status(400).json({ error: 'min_signal_notional_usd must be a number in [0, 100000]' });
+    }
+    updates.min_signal_notional_usd = v;
+  }
+  if (body.min_signal_notional_pct !== undefined) {
+    const v = parseFloat(body.min_signal_notional_pct);
+    if (!isFinite(v) || v < 0 || v > 0.5) {
+      return res.status(400).json({ error: 'min_signal_notional_pct must be a fraction in [0.0, 0.5]' });
+    }
+    updates.min_signal_notional_pct = v;
+  }
+  if (body.position_circuit_breaker_pct !== undefined) {
+    const v = parseFloat(body.position_circuit_breaker_pct);
+    if (!isFinite(v) || v < 0 || v > 0.5) {
+      return res.status(400).json({ error: 'position_circuit_breaker_pct must be a number in [0.0, 0.5]' });
+    }
+    updates.position_circuit_breaker_pct = v;
+  }
+  if (Object.keys(updates).length === 0) {
+    return res.status(400).json({ error: 'no valid fields to update' });
+  }
+  try {
+    const setClauses = Object.keys(updates).map((k, i) => `${k} = $${i + 2}`).join(', ');
+    const params = [regime, ...Object.values(updates)];
+    const r = await dbQuery(
+      `UPDATE regime_sizer_params SET ${setClauses}, updated_at = NOW() WHERE regime_state = $1 RETURNING *`,
+      params
+    );
+    if (r.rowCount === 0) {
+      return res.status(404).json({ error: `regime ${regime} not found in regime_sizer_params` });
+    }
+    res.json({ regime, ...updates });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -783,6 +927,54 @@ app.get('/api/strategies', async (req, res) => {
     `)).rows;
     const srById = Object.fromEntries(srRows.map(r => [r.id, r]));
 
+    // Unified-backtest (2026-05-14) is the canonical source-of-truth for
+    // backtest metrics. We read the latest primary_window=true run per
+    // strategy and the per-regime breakdown, then merge into a {sharpe,
+    // max_dd_pct, return_pct, trade_count, regime_breakdown} map keyed by
+    // strategy_id. Strategies that haven't been backfilled yet fall back
+    // to strategy_registry's legacy columns (which still get populated by
+    // auto_backtest until the research-orch migration in phase 2.3).
+    const ubtRunRows = (await dbQuery(`
+      SELECT DISTINCT ON (strategy_id)
+             strategy_id, total_sharpe, total_max_dd_pct, total_return_pct,
+             total_trades, run_at
+      FROM strategy_backtest_runs
+      WHERE primary_window = TRUE
+      ORDER BY strategy_id, run_at DESC
+    `).catch(() => ({ rows: [] }))).rows;
+    const ubtRegimeRows = (await dbQuery(`
+      SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
+             br.max_dd_pct, br.return_pct, br.hit_rate
+      FROM strategy_backtest_regimes br
+      JOIN (
+        SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+        FROM strategy_backtest_runs WHERE primary_window = TRUE
+        ORDER BY strategy_id, run_at DESC
+      ) r ON r.run_id = br.run_id
+    `).catch(() => ({ rows: [] }))).rows;
+    const unifiedBacktest = {};
+    for (const r of ubtRunRows) {
+      unifiedBacktest[r.strategy_id] = {
+        sharpe:      r.total_sharpe,
+        return_pct:  r.total_return_pct,
+        max_dd_pct:  r.total_max_dd_pct,
+        trade_count: r.total_trades,
+        run_at:      r.run_at,
+        regime_breakdown: {},
+      };
+    }
+    for (const r of ubtRegimeRows) {
+      const entry = unifiedBacktest[r.strategy_id];
+      if (!entry) continue;
+      entry.regime_breakdown[r.regime_state] = {
+        sharpe:      r.sharpe,
+        max_dd:      r.max_dd_pct != null ? r.max_dd_pct / 100 : null,  // breakdown JSON uses fraction
+        total_return_pct: r.return_pct,
+        trade_count: r.trade_count,
+        hit_rate:    r.hit_rate,
+      };
+    }
+
     // Resolve which `data_requirements_planned` columns are NOT known to any
     // provider/collector. These rows would be rejected by the staging worker
     // with `error: 'unsupported_source'`. We surface them on staging rows as
@@ -813,34 +1005,27 @@ app.get('/api/strategies', async (req, res) => {
       currentRegime = latestJson.state || 'TRANSITIONING';
     } catch (_) {}
 
-    // Cumulative per-strategy O/U/R counts across all daily cycles.
-    //   O = performance_outliers WHERE kind='over'
-    //   U = performance_outliers WHERE kind='under'
-    //   R = veto_log (excluding legacy 'missing_field' from pre-Phase-2
-    //       lint_memo writer — those aren't trade rejections)
-    // Grows monotonically as each daily cycle's trade_handoff_builder +
-    // trade_agent_llm append rows to the two source tables.
+    // Cumulative per-strategy O/U/E counts (Over / Under / Expected)
+    // across every closed trade. Replaces 2026-05-16 the prior O/U/R
+    // (Rejected-signal-count) metric — see migration 101 + oue_classifier.py.
+    // Invariant: O + U + E = total closed trades for that strategy.
+    //   O = realized > expectation by ≥1σ
+    //   U = realized < expectation by ≥1σ
+    //   E = within ±1σ band (i.e. behaved as the GBM model predicted)
     const d1StrategyStats = {};
     try {
-      const [ouRes, rRes] = await Promise.all([
-        dbQuery(`SELECT strategy_id, kind, COUNT(*)::int AS n
-                   FROM performance_outliers
-                  WHERE strategy_id IS NOT NULL
-                  GROUP BY strategy_id, kind`).catch(() => ({ rows: [] })),
-        dbQuery(`SELECT strategy_id, COUNT(*)::int AS n
-                   FROM veto_log
-                  WHERE strategy_id IS NOT NULL
-                    AND veto_reason <> 'missing_field'
-                  GROUP BY strategy_id`).catch(() => ({ rows: [] })),
-      ]);
-      for (const row of ouRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
-        if (row.kind === 'over')  s.overperf  = row.n;
-        if (row.kind === 'under') s.underperf = row.n;
-      }
-      for (const row of rRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, rejected: 0 });
-        s.rejected = row.n;
+      const oueRes = await dbQuery(`
+        SELECT strategy_id, oue_kind, COUNT(*)::int AS n
+          FROM execution_signals
+         WHERE strategy_id IS NOT NULL
+           AND oue_kind IS NOT NULL
+         GROUP BY strategy_id, oue_kind
+      `).catch(() => ({ rows: [] }));
+      for (const row of oueRes.rows) {
+        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, expected: 0 });
+        if (row.oue_kind === 'over')     s.overperf  = row.n;
+        if (row.oue_kind === 'under')    s.underperf = row.n;
+        if (row.oue_kind === 'expected') s.expected  = row.n;
       }
     } catch (_) {}
 
@@ -885,6 +1070,23 @@ app.get('/api/strategies', async (req, res) => {
       }
     } catch (_) { /* leave breakdown empty if join fails */ }
 
+    // Per-strategy per-regime OUE multiplier from the latest strategy_weights_by_regime
+    // snapshot. Used to compute Forward ER (= ARR × multiplier) on the
+    // dashboard. Written by the Sunday weight cron (strategy_weights.py rebuild()).
+    const oueMultipliersByStrategy = {};
+    try {
+      const omRes = await dbQuery(`
+        SELECT strategy_id, regime_state, oue_multiplier
+          FROM strategy_weights_by_regime
+         WHERE is_current
+           AND oue_multiplier IS NOT NULL
+      `);
+      for (const row of omRes.rows) {
+        if (!oueMultipliersByStrategy[row.strategy_id]) oueMultipliersByStrategy[row.strategy_id] = {};
+        oueMultipliersByStrategy[row.strategy_id][row.regime_state] = parseFloat(row.oue_multiplier);
+      }
+    } catch (_) { /* leave empty if column missing pre-migration */ }
+
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
     const staleCutoff = Date.now() - STALE_DAYS * 24 * 3600 * 1000;
@@ -924,18 +1126,25 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:           sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        // Unified backtest (2026-05-14) is canonical; fall back to legacy
+        // strategy_registry columns for strategies not yet backfilled.
+        backtest_sharpe:           unifiedBacktest[sid]?.sharpe           ?? sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       unifiedBacktest[sid]?.return_pct       ?? sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      unifiedBacktest[sid]?.trade_count      ?? sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_run_at:           unifiedBacktest[sid]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
+        d1_expected:         d1 ? (d1.expected  || 0) : 0,
+        // OUE multiplier per regime, from the latest Sunday weight cron.
+        // Frontend picks the active regime (or filtered regime) and
+        // multiplies ARR to produce a "Forward ER" projection.
+        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
         // Saturday-brain Tier-B fields. Only populated for state='staging'
         // strategies pushed by Saturday brain. The dashboard's strategies
         // page renders these so the operator sees exactly what the Approve
@@ -976,18 +1185,25 @@ app.get('/api/strategies', async (req, res) => {
         avg_days_held:      s.avg_days_held,
         last_signal_date:   s.last_signal_date,
         dominant_regime:    s.dominant_regime,
-        backtest_sharpe:           sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: sr.backtest_regime_breakdown ?? null,
+        // Unified backtest (2026-05-14) is canonical; fall back to legacy
+        // strategy_registry columns for strategies not yet backfilled.
+        backtest_sharpe:           unifiedBacktest[s.strategy_id]?.sharpe           ?? sr.backtest_sharpe           ?? null,
+        backtest_return_pct:       unifiedBacktest[s.strategy_id]?.return_pct       ?? sr.backtest_return_pct       ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[s.strategy_id]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
+        backtest_trade_count:      unifiedBacktest[s.strategy_id]?.trade_count      ?? sr.backtest_trade_count      ?? null,
+        backtest_regime_breakdown: unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_run_at:           unifiedBacktest[s.strategy_id]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
         live_days:           sr.live_days           ?? null,
         live_sharpe:         sr.live_sharpe         ?? null,
         live_return_pct:     sr.live_return_pct     ?? null,
         d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_rejected:         d1 ? (d1.rejected  || 0) : 0,
+        d1_expected:         d1 ? (d1.expected  || 0) : 0,
+        // OUE multiplier per regime, from the latest Sunday weight cron.
+        // Frontend picks the active regime (or filtered regime) and
+        // multiplies ARR to produce a "Forward ER" projection.
+        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
       });
     }
     res.json(rows);
@@ -1081,16 +1297,32 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // operator-gated promotion step.
   const failedGates = [];
   if (tKey === 'candidate:live' && !force) {
-    let sr = {};
+    // Read unified backtest first (canonical 2026-05-14); legacy
+    // strategy_registry as fallback for strategies not yet backfilled.
+    let sharpe = NaN, maxDd = NaN;
     try {
-      const srRes = await dbQuery(
-        `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
+      const ubt = await dbQuery(
+        `SELECT total_sharpe, total_max_dd_pct FROM strategy_backtest_runs
+          WHERE strategy_id = $1 AND primary_window = TRUE
+          ORDER BY run_at DESC LIMIT 1`,
         [sid]
       );
-      sr = srRes.rows[0] || {};
+      if (ubt.rows[0]) {
+        sharpe = parseFloat(ubt.rows[0].total_sharpe);
+        maxDd  = parseFloat(ubt.rows[0].total_max_dd_pct);
+      }
     } catch (_) {}
-    const sharpe = parseFloat(sr.backtest_sharpe);
-    const maxDd  = parseFloat(sr.backtest_max_dd_pct);
+    if (isNaN(sharpe) || isNaN(maxDd)) {
+      try {
+        const srRes = await dbQuery(
+          `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
+          [sid]
+        );
+        const sr = srRes.rows[0] || {};
+        if (isNaN(sharpe)) sharpe = parseFloat(sr.backtest_sharpe);
+        if (isNaN(maxDd))  maxDd  = parseFloat(sr.backtest_max_dd_pct);
+      } catch (_) {}
+    }
     if (!isNaN(sharpe) && sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
     if (!isNaN(maxDd)  && maxDd  > CANDIDATE_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
     if (failedGates.length > 0) {
@@ -1208,6 +1440,69 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
 
   res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now,
              weights_rebuild_triggered: stackChanged });
+});
+
+// ── Manual backtest rerun ────────────────────────────────────────────────────
+// POST /api/strategies/:id/rerun_backtest
+// Fires unified_backtest + eligibility_assigner for one strategy. Async —
+// returns 202 immediately with a run_token the client can poll the runs
+// table with (`SELECT run_at FROM strategy_backtest_runs WHERE strategy_id`).
+// Auth note: same trust model as the rest of the dashboard endpoints
+// (operator-internal, port 3000 behind nginx).
+app.post('/api/strategies/:id/rerun_backtest', async (req, res) => {
+  const { spawn } = require('child_process');
+  const sid = req.params.id;
+  const actor = (req.body && req.body.actor) || 'manual:dashboard';
+
+  // Best-effort: confirm the strategy_id exists in the manifest before spawning.
+  const fs = require('fs');
+  const path = require('path');
+  const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (!(m?.strategies || {})[sid]) {
+      return res.status(404).json({ error: `strategy_id ${sid} not in manifest` });
+    }
+  } catch (e) {
+    return res.status(500).json({ error: `manifest read failed: ${e.message}` });
+  }
+
+  // Spawn the backtest detached so the HTTP response can return immediately.
+  // Logs land in /tmp/unified_backtest_${sid}.log for operator inspection.
+  const logPath = `/tmp/unified_backtest_${sid}_${Date.now()}.log`;
+  const logFd   = fs.openSync(logPath, 'a');
+  const cwd     = path.resolve(__dirname, '../../..');
+  const env     = { ...process.env, PYTHONPATH: 'src' };
+
+  const child = spawn(
+    process.execPath.endsWith('/node') ? 'python3' : 'python3',  // explicit
+    ['-m', 'backtest.unified_backtest', '--strategy-id', sid],
+    { cwd, env, detached: true, stdio: ['ignore', logFd, logFd] }
+  );
+  child.unref();
+
+  // Schedule eligibility_assigner to run after the backtest completes via a
+  // chained spawn — exec a small shell wrapper that runs the assigner once
+  // the backtest process exits. Simpler than node-side child-event chaining
+  // when we've already detached.
+  try {
+    const wrapper = spawn(
+      'sh', ['-c',
+        `wait ${child.pid} 2>/dev/null; ` +
+        `python3 -m backtest.eligibility_assigner --strategy-id ${JSON.stringify(sid)} >> ${JSON.stringify(logPath)} 2>&1`
+      ],
+      { cwd, env, detached: true, stdio: 'ignore' }
+    );
+    wrapper.unref();
+  } catch (_) { /* non-fatal */ }
+
+  res.status(202).json({
+    ok:           true,
+    strategy_id:  sid,
+    actor,
+    log_path:     logPath,
+    note:         'unified_backtest spawned detached; poll strategy_backtest_runs for new run_at',
+  });
 });
 
 // ── Approval dispatcher ──────────────────────────────────────────────────────
@@ -2564,6 +2859,9 @@ body.rs-chat-locked{overflow:hidden}
 .db-table.grouped tr.strat-row .strat-name{color:var(--muted);font-family:inherit;font-size:9.5px;letter-spacing:.01em;display:inline-block;max-width:118px;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
 .db-table.grouped tr.strat-row:last-child td{border-bottom:1px solid var(--border2)}
 .wl-badge{display:inline-block;font-size:8.5px;font-weight:600;color:var(--dim);margin-left:4px;letter-spacing:.03em}
+.pf-strategy-group-header{padding:8px 12px;background:rgba(88,166,255,0.06);border-top:1px solid var(--border2);border-bottom:1px solid var(--border2);font-size:11px;font-weight:600;color:var(--text);display:flex;justify-content:space-between;align-items:center;letter-spacing:.02em}
+.pf-strategy-group-header .pf-sg-name{color:var(--blue)}
+.pf-strategy-group-header .pf-sg-meta{color:var(--muted);font-weight:400;font-size:10px}
 
 /* ── Positions heatmap (slice-and-dice) ────────────────────────────────────
  * Default layout: top-12 tickers in 3-4 rows, container ~280px tall. The
@@ -2577,12 +2875,62 @@ body.rs-chat-locked{overflow:hidden}
 .pf-heatmap-controls .pf-hm-info{flex:1}
 .pf-heatmap-controls .pf-hm-btn{background:transparent;border:1px solid var(--border);color:var(--blue);padding:3px 12px;border-radius:4px;font-size:10px;cursor:pointer;letter-spacing:.04em;transition:all .12s}
 .pf-heatmap-controls .pf-hm-btn:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
-.pf-lambda-control{display:flex;align-items:center;gap:8px;font-family:'SF Mono',monospace}
-.pf-lambda-control .pf-lambda-label{color:var(--muted);font-weight:600;font-size:11px}
-.pf-lambda-control input[type=range]{width:120px;height:4px;-webkit-appearance:none;background:var(--border2);border-radius:2px;outline:none;cursor:pointer}
-.pf-lambda-control input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0;box-shadow:0 0 0 1px rgba(88,166,255,0.4)}
-.pf-lambda-control input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--blue);cursor:pointer;border:0}
-.pf-lambda-control .pf-lambda-value{color:var(--blue);font-weight:700;font-size:11px;min-width:42px;text-align:right;font-variant-numeric:tabular-nums}
+/* ── Risk & Sizing panel ───────────────────────────────────────────────────
+ * Full-width risk-preference slider (λ_global) with regime parameter cards
+ * below. Lives in #pf-risk-panel on the Portfolio page. The slider is the
+ * single most-consequential operator-tunable knob — sized to reflect that.
+ */
+.pf-risk-section .pf-section-body{padding:0}
+.pf-risk-panel{padding:18px 22px 22px 22px;background:linear-gradient(180deg,rgba(13,17,23,0.5) 0%,rgba(13,17,23,0.15) 100%)}
+.pf-risk-headline{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;gap:18px;flex-wrap:wrap}
+.pf-risk-title{font-size:12px;color:var(--text);font-weight:600;letter-spacing:.03em;text-transform:uppercase}
+.pf-risk-help{font-size:11px;color:var(--muted);line-height:1.5;flex:1;max-width:65%;text-align:right;font-weight:400}
+.pf-risk-help code{background:rgba(88,166,255,0.08);color:var(--blue);padding:1px 5px;border-radius:3px;font-size:10.5px;font-family:'SF Mono',monospace}
+.pf-lambda-mega{position:relative;margin:12px 0 4px}
+.pf-lambda-mega input[type=range]{width:100%;height:10px;-webkit-appearance:none;background:linear-gradient(90deg,#1f6f43 0%,#2ea043 22%,#d29922 55%,#f85149 90%,#7c2128 100%);border-radius:5px;outline:none;cursor:pointer;border:1px solid var(--border)}
+.pf-lambda-mega input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5),0 0 0 1px rgba(88,166,255,0.4)}
+.pf-lambda-mega input[type=range]::-webkit-slider-thumb:active{cursor:grabbing;background:var(--blue);box-shadow:0 2px 12px rgba(88,166,255,0.6),0 0 0 4px rgba(88,166,255,0.2)}
+.pf-lambda-mega input[type=range]::-moz-range-thumb{width:28px;height:28px;border-radius:50%;background:var(--bg);cursor:grab;border:3px solid var(--blue);box-shadow:0 2px 8px rgba(0,0,0,0.5)}
+/* Inset matches half the thumb width (28px / 2 = 14px) so tick centers
+ * align with where the thumb center can actually travel — without this,
+ * ticks drift up to ~2% of width off the true slider value. */
+.pf-lambda-ticks{position:relative;height:34px;margin:10px 14px 0 14px;font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.pf-lambda-ticks .pf-tick{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;cursor:pointer;transition:color .12s;white-space:nowrap}
+.pf-lambda-ticks .pf-tick::before{content:'';position:absolute;left:50%;top:-6px;width:1px;height:5px;background:var(--border);transform:translateX(-50%)}
+.pf-lambda-ticks .pf-tick:hover{color:var(--blue)}
+.pf-lambda-ticks .pf-tick:hover::before{background:var(--blue)}
+.pf-lambda-ticks .pf-tick-val{font-weight:700;color:var(--muted);font-size:10.5px}
+.pf-lambda-ticks .pf-tick-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em}
+.pf-lambda-readout{display:flex;align-items:center;justify-content:center;gap:14px;margin-top:14px;padding:10px 16px;background:rgba(88,166,255,0.05);border:1px solid rgba(88,166,255,0.18);border-radius:6px}
+.pf-lambda-readout .pf-lr-label{color:var(--muted);font-size:11px;letter-spacing:.04em;text-transform:uppercase}
+.pf-lambda-readout .pf-lr-value{color:var(--blue);font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+.pf-lambda-readout .pf-lr-sub{color:var(--muted);font-size:10.5px;font-family:'SF Mono',monospace}
+.pf-regime-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:18px}
+.pf-regime-card{background:var(--bg);border:1px solid var(--border2);border-radius:6px;padding:11px 12px;transition:border-color .15s}
+.pf-regime-card:hover{border-color:var(--border)}
+.pf-regime-card.regime-active{border-color:var(--blue);box-shadow:0 0 0 1px rgba(88,166,255,0.3)}
+.pf-regime-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.pf-regime-name{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.pf-regime-name.low_vol{color:#2ea043}
+.pf-regime-name.transitioning{color:#d29922}
+.pf-regime-name.high_vol{color:#f85149}
+.pf-regime-name.crisis{color:#a371f7}
+.pf-regime-active-badge{font-size:9px;color:var(--blue);background:rgba(88,166,255,0.15);padding:1px 6px;border-radius:8px;letter-spacing:.05em}
+.pf-regime-eff{font-size:18px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;margin-bottom:2px;line-height:1.1}
+.pf-regime-eff-label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.pf-regime-eff-formula{font-size:9.5px;color:var(--muted);font-family:'SF Mono',monospace;margin-bottom:10px}
+.pf-regime-param-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--border2);font-size:10.5px}
+.pf-regime-param-row:first-of-type{border-top:0}
+.pf-regime-param-label-block{display:flex;flex-direction:column;gap:2px;min-width:0}
+.pf-regime-param-label{color:var(--text);font-size:10.5px;letter-spacing:.02em;font-weight:600}
+.pf-regime-param-hint{color:var(--dim);font-size:9.5px;line-height:1.3;letter-spacing:0;font-weight:400}
+.pf-regime-param-input{background:rgba(13,17,23,0.6);border:1px solid var(--border2);color:var(--text);padding:3px 6px;border-radius:3px;font-family:'SF Mono',monospace;font-size:10.5px;width:64px;text-align:right;font-variant-numeric:tabular-nums}
+.pf-regime-param-input:focus{outline:0;border-color:var(--blue);background:var(--bg)}
+.pf-regime-param-input.dirty{border-color:#d29922;background:rgba(210,153,34,0.05)}
+.pf-regime-param-input.saving{border-color:var(--blue);background:rgba(88,166,255,0.05)}
+.pf-regime-param-suffix{color:var(--dim);font-size:9.5px;margin-left:-4px}
+@media(max-width:920px){.pf-regime-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}}
 .pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
 .pf-heatmap.expanded{max-height:570px;overflow-y:auto}
 .pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
@@ -2895,7 +3243,7 @@ body.rs-chat-locked{overflow:hidden}
   .st-action-btn:active { transform: scale(0.94); }
 
   /* ── Per-table column hides ──────────────────────────────────────── *
-   * Active Stack: Strategy | Status | Regimes | Open | Closed | Win% | ARR% | ADR% | ACT | #O/U/R | Last Signal | Actions
+   * Active Stack: Strategy | Status | Regimes | Open | Closed | Win% | ARR% | ADR% | ACT | #O/U/E | Last Signal | Actions
    * Hide: 3 (Regimes), 11 (Last Signal). */
   #st-active-wrap .db-table th:nth-child(3),
   #st-active-wrap .db-table td:nth-child(3),
@@ -3067,8 +3415,14 @@ body.rs-chat-locked{overflow:hidden}
     </div>
     <canvas id="pnlChart" style="width:100%;height:150px"></canvas>
   </div>
+  <div class="pf-section pf-risk-section">
+    <div class="pf-section-header"><span>Risk &amp; Sizing</span><span id="pf-risk-saved-stamp" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-body">
+      <div id="pf-risk-panel"><div class="empty">Loading risk controls…</div></div>
+    </div>
+  </div>
   <div class="pf-section">
-    <div class="pf-section-header"><span>Active Positions</span><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></div>
+    <div class="pf-section-header"><span>Active Positions</span><span style="display:flex;align-items:center;gap:10px"><select id="pf-pos-group-toggle" style="font-size:10px;background:var(--bg);color:var(--text);border:1px solid var(--border2);border-radius:3px;padding:2px 6px"><option value="">Flat</option><option value="strategy">By strategy</option></select><span id="pf-pos-count" style="color:var(--muted);font-weight:400;font-size:10px"></span></span></div>
     <div class="pf-section-body"><div id="pf-positions"><div class="empty">Loading...</div></div></div>
   </div>
   <div class="pf-section">
@@ -5122,15 +5476,19 @@ async function loadPortfolio() {
   if (account && account.equity != null && isFinite(parseFloat(account.equity))) {
     _navCache = parseFloat(account.equity);
   }
-  // Pull lambda separately — small payload, fire-and-forget. Default 2.0
-  // if the endpoint hiccups.
+  // Pull risk-sizing config — bundles global λ with per-regime liquidity_param
+  // so the Risk & Sizing panel renders the full operator surface in one call.
+  let riskCfg = null;
   try {
-    const lr = await fetch('/api/config/lambda').then(r => r.json());
-    if (lr && isFinite(parseFloat(lr.value))) _lambdaCache = parseFloat(lr.value);
+    riskCfg = await fetch('/api/config/regime-sizing').then(r => r.json());
+    if (riskCfg && riskCfg.global && isFinite(parseFloat(riskCfg.global.lambda))) {
+      _lambdaCache = parseFloat(riskCfg.global.lambda);
+    }
   } catch (_) { /* keep cached value */ }
   renderAccountRow(account);
   valueCurveData = valCurve;
   renderPortfolioSummary(summary, valCurve);
+  renderRiskPanel(riskCfg);
   renderPositions(positions);
   renderHistory(history);
   pnlCandlesData = Array.isArray(candles) ? candles : [];
@@ -5607,12 +5965,304 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${rowsHtml}</div>\`;
 }
 
+// Browser-side mirror of src/channels/api/positions_grouped.js#groupByStrategy.
+// The Node-side helper still serves /api/portfolio/positions?group_by=strategy
+// and the unit tests; this client-side twin exists so DOM renderers can share
+// the same bucketing/subtotal contract without duplicating it inline. Keep
+// the two in lock-step: null/missing strategy_id collapses to '(unattributed)',
+// subtotal sums Number(r.day_pnl_usd) || 0, input order preserved per group.
+function _groupByStrategyClient(rows) {
+  const buckets = new Map();
+  for (const r of rows) {
+    const key = r.strategy_id || '(unattributed)';
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  const out = [];
+  for (const [strategy_id, positions] of buckets) {
+    const subtotal = positions.reduce((s, r) => s + (Number(r.day_pnl_usd) || 0), 0);
+    out.push({ strategy_id, positions, subtotal_day_pnl_usd: subtotal });
+  }
+  return out;
+}
+
+// "By strategy" view of the active positions table (Phase 1E — concept lifted
+// from achannarasappa/ticker AssetGroup primitive). Renders a section header
+// per strategy_id with a per-row table beneath it. Subtotal is the sum of
+// day_pnl_usd, computed server-side via positions_grouped#computeDayPnlUsd
+// (Phase 1 follow-up #11) — rows whose mark history is too short or whose
+// position_size_pct is NaN ship as null and route through the em-dash
+// fallback so a brand-new position does not fake a real $0 print.
+function _renderPositionsByStrategy(el, rows) {
+  const groups = _groupByStrategyClient(rows);
+  const countEl = document.getElementById('pf-pos-count');
+  if (countEl) {
+    countEl.textContent = rows.length
+      ? \`\${groups.length} \${groups.length === 1 ? 'strategy' : 'strategies'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\`
+      : '';
+  }
+  if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
+  const headers = \`<thead><tr>
+      <th>Ticker</th><th>Dir</th>
+      <th class="num">Entry</th><th class="num">Current</th>
+      <th class="num">Size %</th><th class="num">P&amp;L %</th>
+      <th class="num">Day $</th>
+      <th class="num">Days</th>
+    </tr></thead>\`;
+  const html = groups.map(g => {
+    // Em-dash when EVERY row has missing day_pnl_usd — matches the rest of the
+    // dashboard's missing-data convention so the operator doesn't misread a
+    // silent zero as a real flat-pnl day. With the server-side computation in
+    // place this only fires when an entire strategy has only fresh-today
+    // positions (no prev mark) or the NAV fetch failed.
+    const allMissing = g.positions.every(r =>
+      r.day_pnl_usd == null || Number.isNaN(Number(r.day_pnl_usd))
+    );
+    const subFmt = allMissing ? '—' : _fmtDollar(g.subtotal_day_pnl_usd, true);
+    const header = \`<div class="pf-strategy-group-header">
+        <span class="pf-sg-name">\${g.strategy_id}</span>
+        <span class="pf-sg-meta">\${g.positions.length} position\${g.positions.length === 1 ? '' : 's'} · day P&amp;L \${subFmt}</span>
+      </div>\`;
+    const body = g.positions.map(p => {
+      const pnl = p.unrealized_pnl_pct != null ? Number(p.unrealized_pnl_pct) * 100 : null;
+      const dayUsd = p.day_pnl_usd == null || Number.isNaN(Number(p.day_pnl_usd))
+        ? null : Number(p.day_pnl_usd);
+      return \`<tr>
+        <td><span class="tk-name" style="color:var(--blue);cursor:pointer" onclick="showMarket();selectTicker('\${p.ticker}')">\${p.ticker}</span></td>
+        <td class="\${_dirCls(p.direction)}">\${p.direction || '—'}</td>
+        <td class="num">\${p.entry_price != null ? '$' + Number(p.entry_price).toFixed(2) : '—'}</td>
+        <td class="num">\${p.current_price != null ? '$' + Number(p.current_price).toFixed(2) : '—'}</td>
+        <td class="num">\${p.position_size_pct != null ? (Number(p.position_size_pct) * 100).toFixed(2) + '%' : '—'}</td>
+        <td class="num \${pnlCls(pnl)}">\${_fmtPctSigned(pnl, true)}</td>
+        <td class="num \${dayUsd == null ? '' : pnlCls(dayUsd)}">\${dayUsd == null ? '—' : _fmtDollar(dayUsd, true)}</td>
+        <td class="num">\${p.days_held != null ? p.days_held : '—'}</td>
+      </tr>\`;
+    }).join('');
+    return header + \`<table class="db-table" style="min-width:560px">\${headers}<tbody>\${body}</tbody></table>\`;
+  }).join('');
+  el.innerHTML = html;
+}
+
+// ── Risk & Sizing panel ────────────────────────────────────────────────────
+// Single most-consequential operator-tunable surface: global λ + per-regime
+// liquidity_param + safety floors. Daily target gross exposure =
+// λ × liquidity_param[current_regime] × NAV. Full-width slider with
+// risk-preference framing (Conservative ↔ Balanced ↔ Aggressive); regime
+// cards underneath show effective leverage live.
+let _riskCfgCache = null;
+function renderRiskPanel(cfg) {
+  const el = document.getElementById('pf-risk-panel');
+  if (!el) return;
+  if (cfg && cfg.global) _riskCfgCache = cfg;
+  cfg = _riskCfgCache;
+  if (!cfg || !cfg.global) {
+    el.innerHTML = '<div class="empty">Risk config unavailable — DB may be down.</div>';
+    return;
+  }
+  const lam = cfg.global.lambda;
+  const stampEl = document.getElementById('pf-risk-saved-stamp');
+  if (stampEl) stampEl.textContent = cfg.global.updated_at
+    ? 'Leverage saved ' + new Date(cfg.global.updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
+    : '';
+  const ticks = [
+    { v: 0.50, label: 'Conservative' },
+    { v: 1.00, label: 'Cautious' },
+    { v: 1.50, label: 'Balanced' },
+    { v: 2.00, label: 'Active' },
+    { v: 2.50, label: 'Aggressive' },
+    { v: 3.00, label: 'Max Risk' },
+  ];
+  const currentRegime = (cfg.current_regime || '').toUpperCase();
+  const current = (cfg.regimes || []).find(r => r.state === currentRegime);
+  const currentEff = current ? lam * current.liquidity_param : lam;
+  // Position each tick at its true location along the slider track
+  // (left% = (v - min) / (max - min)). Without this the ticks bunch at
+  // the edges because flex space-between maps tick #1 to 0% regardless
+  // of value.
+  const lmin = cfg.global.min, lmax = cfg.global.max;
+  const tickHtml = ticks.map(t => {
+    const pct = ((t.v - lmin) / (lmax - lmin)) * 100;
+    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`;
+  }).join('');
+  const regimeCards = (cfg.regimes || []).map(r => {
+    const active = r.state === currentRegime;
+    const eff = lam * r.liquidity_param;
+    const css = r.state.toLowerCase();
+    return \`<div class="pf-regime-card \${active ? 'regime-active' : ''}" data-regime="\${r.state}">
+      <div class="pf-regime-card-head">
+        <span class="pf-regime-name \${css}">\${r.state.replace('_', ' ')}</span>
+        \${active ? '<span class="pf-regime-active-badge">LIVE</span>' : ''}
+      </div>
+      <div class="pf-regime-eff" id="pf-eff-\${r.state}">\${eff.toFixed(2)}×</div>
+      <div class="pf-regime-eff-label">effective leverage</div>
+      <div class="pf-regime-eff-formula">= Leverage × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">liquidity_param</span>
+          <span class="pf-regime-param-hint">Throttle — fraction of global Leverage that actually deploys in this regime.</span>
+        </span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="2" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
+      </div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">min_notional</span>
+          <span class="pf-regime-param-hint">Skip tickers whose consolidated bet is below this fraction of NAV — sub-threshold capital is renormalized into surviving names.</span>
+        </span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="min_signal_notional_pct" data-percent="1" min="0" max="50" step="0.01" value="\${((r.min_signal_notional_pct != null ? r.min_signal_notional_pct : (r.min_signal_notional_usd / 100000)) * 100).toFixed(2)}" /><span class="pf-regime-param-suffix">%</span></span>
+      </div>
+      <div class="pf-regime-param-row">
+        <span class="pf-regime-param-label-block">
+          <span class="pf-regime-param-label">circuit_breaker</span>
+          <span class="pf-regime-param-hint">Auto-liquidate a position once its unrealized loss exceeds this % of NAV.</span>
+        </span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="position_circuit_breaker_pct" data-percent="1" min="0" max="50" step="0.1" value="\${(r.position_circuit_breaker_pct * 100).toFixed(1)}" /><span class="pf-regime-param-suffix">%</span></span>
+      </div>
+    </div>\`;
+  }).join('');
+  el.innerHTML = \`<div class="pf-risk-panel">
+    <div class="pf-risk-headline">
+      <div class="pf-risk-title">Leverage</div>
+      <div class="pf-risk-help">Daily gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>. The slider sets your global leverage target; each regime card throttles how much actually deploys when the market is in that state.</div>
+    </div>
+    <div class="pf-lambda-mega">
+      <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
+      <div class="pf-lambda-ticks">\${tickHtml}</div>
+    </div>
+    <div class="pf-lambda-readout">
+      <span class="pf-lr-label">Leverage</span>
+      <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
+      <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
+    </div>
+    <div class="pf-regime-grid">\${regimeCards}</div>
+  </div>\`;
+
+  // Wire slider — drag with live readout, debounce 400ms before PUT.
+  const slider   = el.querySelector('#pf-lambda-slider');
+  const readout  = el.querySelector('#pf-lambda-readout');
+  const effReadout = el.querySelector('#pf-current-eff');
+  const _updateEffective = (newLam) => {
+    (cfg.regimes || []).forEach(r => {
+      const card = el.querySelector(\`[data-regime="\${r.state}"].pf-regime-card\`);
+      if (!card) return;
+      const liqInput = card.querySelector('[data-field="liquidity_param"]');
+      const liq = liqInput ? parseFloat(liqInput.value) : r.liquidity_param;
+      const eff = newLam * liq;
+      const effEl = document.getElementById('pf-eff-' + r.state);
+      if (effEl) effEl.textContent = eff.toFixed(2) + '×';
+    });
+    const cur = (cfg.regimes || []).find(r => r.state === currentRegime);
+    if (cur && effReadout) {
+      const liqInput = el.querySelector(\`[data-regime="\${currentRegime}"] [data-field="liquidity_param"]\`);
+      const liq = liqInput ? parseFloat(liqInput.value) : cur.liquidity_param;
+      effReadout.textContent = (newLam * liq).toFixed(2) + '×';
+    }
+  };
+  if (slider && readout) {
+    let timer = null;
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      readout.textContent = v.toFixed(2) + '×';
+      _updateEffective(v);
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/config/lambda', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: v }),
+          });
+          if (r.ok) {
+            _lambdaCache = v;
+            cfg.global.lambda = v;
+            cfg.global.updated_at = new Date().toISOString();
+            if (stampEl) stampEl.textContent = 'Leverage saved just now';
+            toast('Leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
+          } else {
+            toast('Leverage update failed', 'error', 4000);
+          }
+        } catch (e) {
+          toast('Leverage update error: ' + e.message, 'error', 4000);
+        }
+      }, 400);
+    });
+  }
+
+  // Click-to-jump on tick labels.
+  el.querySelectorAll('.pf-lambda-ticks .pf-tick').forEach(tick => {
+    tick.addEventListener('click', () => {
+      const v = parseFloat(tick.dataset.v);
+      if (!isFinite(v) || !slider) return;
+      slider.value = String(v);
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  });
+
+  // Wire regime param inputs — each input is independent; blur or
+  // Enter triggers PUT for that single field.
+  el.querySelectorAll('.pf-regime-param-input').forEach(input => {
+    const orig = input.value;
+    input.addEventListener('input', () => {
+      input.classList.toggle('dirty', input.value !== orig);
+      // Re-compute effective leverage live as liquidity_param changes.
+      if (input.dataset.field === 'liquidity_param') {
+        const lamNow = parseFloat(slider ? slider.value : lam);
+        _updateEffective(lamNow);
+        const liqDisp = document.getElementById('pf-liq-display-' + input.dataset.regime);
+        if (liqDisp) liqDisp.textContent = parseFloat(input.value || '0').toFixed(2);
+      }
+    });
+    const commit = async () => {
+      const raw = parseFloat(input.value);
+      if (!isFinite(raw) || input.value === orig) {
+        input.classList.remove('dirty');
+        return;
+      }
+      // Inputs marked data-percent="1" are displayed in % but stored as a
+      // decimal in the DB (2.0% in UI → 0.02 on the wire).
+      const v = input.dataset.percent === '1' ? raw / 100 : raw;
+      input.classList.remove('dirty');
+      input.classList.add('saving');
+      try {
+        const r = await fetch('/api/config/regime-sizing/' + input.dataset.regime, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [input.dataset.field]: v }),
+        });
+        if (r.ok) {
+          input.classList.remove('saving');
+          input.defaultValue = String(raw);
+          const human = input.dataset.percent === '1' ? raw.toFixed(2) + '%' : String(raw);
+          toast(input.dataset.regime + '.' + input.dataset.field + ' saved: ' + human, 'ok', 3000);
+        } else {
+          input.classList.remove('saving');
+          input.classList.add('dirty');
+          const j = await r.json().catch(() => ({}));
+          toast('Save failed: ' + (j.error || r.statusText), 'error', 4000);
+        }
+      } catch (e) {
+        input.classList.remove('saving');
+        input.classList.add('dirty');
+        toast('Save error: ' + e.message, 'error', 4000);
+      }
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { input.blur(); } });
+  });
+}
+
 function renderPositions(rows) {
   const el = document.getElementById('pf-positions');
   if (rows.length && rows[0] && Array.isArray(rows[0].signals)) {
     rows = rows.flatMap(g => g.signals);
   }
   _rawDataCache['pf-positions'] = rows;
+  const toggle = document.getElementById('pf-pos-group-toggle');
+  // Wire the toggle once — onchange just re-renders from the cache.
+  if (toggle && !toggle.dataset.bound) {
+    toggle.dataset.bound = '1';
+    toggle.addEventListener('change', () => renderPositions(_rawDataCache['pf-positions'] || []));
+  }
+  if (toggle && toggle.value === 'strategy') {
+    return _renderPositionsByStrategy(el, rows);
+  }
   const groups = _groupByTicker(rows, 'open');
   document.getElementById('pf-pos-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
@@ -5627,11 +6277,6 @@ function renderPositions(rows) {
 
   const controls = \`<div class="pf-heatmap-controls">
     <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
-    <div class="pf-lambda-control" title="λ = total notional deployed each day as a multiple of NAV. Range 0.10–3.50.">
-      <span class="pf-lambda-label">λ</span>
-      <input type="range" id="pf-lambda-slider" min="0.10" max="3.50" step="0.05" value="\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}" />
-      <span class="pf-lambda-value" id="pf-lambda-value">\${(_lambdaCache != null ? _lambdaCache : 2.0).toFixed(2)}×</span>
-    </div>
     <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
   </div>\`;
   const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
@@ -5661,40 +6306,14 @@ function renderPositions(rows) {
       });
     });
   });
-  const toggle = el.querySelector('#pf-hm-toggle');
-  if (toggle) toggle.addEventListener('click', () => {
+  const hmToggle = el.querySelector('#pf-hm-toggle');
+  if (hmToggle) hmToggle.addEventListener('click', () => {
     _heatmapExpanded['pf-positions'] = !expanded;
     renderPositions(_rawDataCache['pf-positions']);
   });
-
-  // Lambda slider — drag debounced 400ms; mirrors live to the readout.
-  // PUT lands in pipeline_config, next pipeline tick reads the new value.
-  const slider = el.querySelector('#pf-lambda-slider');
-  const readout = el.querySelector('#pf-lambda-value');
-  if (slider && readout) {
-    let timer = null;
-    slider.addEventListener('input', () => {
-      const v = parseFloat(slider.value);
-      readout.textContent = v.toFixed(2) + 'x';
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        try {
-          const r = await fetch('/api/config/lambda', {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ value: v }),
-          });
-          if (r.ok) {
-            _lambdaCache = v;
-            toast('λ saved: ' + v.toFixed(2) + 'x — next cycle picks up the new value', 'ok', 4000);
-          } else {
-            toast('λ update failed', 'error', 4000);
-          }
-        } catch (e) {
-          toast('λ update error: ' + e.message, 'error', 4000);
-        }
-      }, 400);
-    });
-  }
+  // Lambda slider relocated to the full-width Risk & Sizing panel above
+  // (renderRiskPanel()); kept the cache in _lambdaCache so other callers
+  // that still reference it see the operator's last-saved value.
 }
 
 function renderHistory(rows) {
@@ -6479,7 +7098,7 @@ function _renderActiveStack(rows) {
     return;
   }
   // Compute derived columns for sorting.
-  //   d1_total         = O+U+R (click count on # O/U/R)
+  //   d1_total         = O+U+E (click count on # O/U/E)
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
@@ -6512,14 +7131,30 @@ function _renderActiveStack(rows) {
     const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
     const adrPct = (avgRet != null && actDays != null && actDays > 0)
                    ? (avgRet * 100 / actDays) : null;            // per-day %
+    // Forward ER = ARR adjusted by the OUE multiplier. Sign-aware so the
+    // discount works both ways: a mult of 0.2 on +5% ARR drops to +1%
+    // (discount the upside), AND a mult of 0.2 on -2% ARR drops to -3.6%
+    // (amplify the downside). Multiplying signed ARR directly would
+    // wrongly make bad strategies look less negative when their OUE is
+    // disappointing. Effective_mult = mult if ARR ≥ 0 else (2 − mult).
+    const mults = r.oue_multipliers_by_regime || {};
+    const mult_for = filterRg || r.current_regime || 'TRANSITIONING';
+    const oueMult = mults[mult_for] != null ? mults[mult_for] : 1.0;
+    let forwardErPct = null;
+    if (arrPct != null) {
+      const effMult = arrPct >= 0 ? oueMult : (2.0 - oueMult);
+      forwardErPct = arrPct * effMult;
+    }
     return Object.assign({}, r, {
-      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_rejected || 0),
+      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
       _active_rank:    _activeRankFor(r),
       _arr_pct:        arrPct,
       _adr_pct:        adrPct,
       _act_days:       actDays,
       _filtered_win:   winRate,
       _filtered_closed: closedCount,
+      _oue_mult:       oueMult,
+      _forward_er:     forwardErPct,
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -6555,10 +7190,11 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
       <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
       <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
-      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}.">ARR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}. Pure realized fact — no OUE adjustment.">ARR&nbsp;%\${filterTag}</th>
+      <th class="num" data-sort-key="_forward_er" data-sort-type="num" title="Forward ER = ARR × per-regime OUE multiplier. Multiplier uses time-decayed OUE (τ=45d) so it responds to recent behavior — a strategy improving this month sees its multiplier lift within ~4-6 weeks. Range [0.20, 2.00], default 1.00 until weighted sample ≥30 closes / ≥5 outliers per regime. Lifetime-sign guardrail: strategies cumulatively over-performing (lifetime O>U with ≥50 closes / ≥10 outliers) can be boosted but never discounted below 1.0; cumulative under-performers capped at 1.0 — protects established strategies from transient streaks and prevents weights drifting downward.">Fwd&nbsp;ER&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
-      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Cumulative counts across all daily cycles: Overperformers / Underperformers / Rejected">#&nbsp;O/U/R</th>
+      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
     </tr>
@@ -6571,11 +7207,11 @@ function _renderActiveStack(rows) {
       const arr = r._arr_pct;
       const adr = r._adr_pct;
       const act = r._act_days;
-      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, x = r.d1_rejected || 0;
-      const ourEmpty = o === 0 && u === 0 && x === 0;
-      const ourCell = ourEmpty
+      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, e = r.d1_expected || 0;
+      const oueEmpty = o === 0 && u === 0 && e === 0;
+      const ourCell = oueEmpty
         ? '<span style="color:var(--dim)">—</span>'
-        : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${x}</span>\`;
+        : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${e}</span>\`;
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
@@ -6614,9 +7250,10 @@ function _renderActiveStack(rows) {
         <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
         <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
         <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num \${pnlCls(r._forward_er)}" title="Forward ER = ARR × OUE multiplier (\${(r._oue_mult || 1).toFixed(2)}× for \${filterRg || r.current_regime || '—'})">\${r._forward_er != null ? ((r._forward_er >= 0 ? '+' : '') + r._forward_er.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
-        <td class="num" title="Cumulative Over / Under / Rejected across all daily cycles">\${ourCell}</td>
+        <td class="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ.">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
       </tr>\${expandRow}\`;

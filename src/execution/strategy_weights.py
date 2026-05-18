@@ -51,6 +51,133 @@ class StrategyWeightRow:
     effective_sharpe: float
     weight: float
     daily_weight: float
+    # OUE health (per-regime closed-trade classification) and the
+    # multiplier we applied. Persisted so the dashboard + comprehensive
+    # review + operator audit can see exactly what the cron did.
+    oue_over: int | None = None
+    oue_under: int | None = None
+    oue_expected: int | None = None
+    oue_multiplier: float | None = None
+    oue_adjusted_sharpe: float | None = None
+
+
+# OUE multiplier gating constants. Operator-approved 2026-05-16; refined
+# 2026-05-16 to use time-decayed counts (τ=45d) instead of lifetime so the
+# multiplier responds to recent behavior within ~6 weeks. A strategy that
+# was disappointing 4 months ago but has delivered the last 6 weeks will
+# now see its multiplier rise on the next Sunday cron, not stay pinned to
+# a stale history.
+OUE_TAU_DAYS = 45.0      # half-life ≈ 31 days; trade @ 90d ago weighted 0.14
+OUE_MIN_TOTAL = 30       # time-weighted closes in regime (was 100 lifetime)
+OUE_MIN_OUTLIERS = 5     # time-weighted over+under (was 20 lifetime)
+OUE_FLOOR = 0.2          # never zero a strategy out (preserves rotation)
+OUE_CEIL = 2.0           # never more than 2× boost (prevents over-fitting to luck)
+
+# Lifetime-sign guardrail (operator-set 2026-05-16): cumulative
+# overperformers (lifetime O > U with enough sample) can be BOOSTED by
+# recent OUE but NEVER discounted below 1.0; cumulative underperformers
+# can be DISCOUNTED but never boosted above 1.0. Prevents weights from
+# drifting downward on a transient bad streak for an otherwise-proven
+# strategy, and prevents temporary luck from inflating a structurally
+# underperforming strategy.
+OUE_LIFETIME_MIN_TOTAL    = 50   # need this many lifetime closes to trust the sign
+OUE_LIFETIME_MIN_OUTLIERS = 10   # and this many lifetime outliers
+
+
+def _oue_multiplier(over: float, under: float, expected: float,
+                    lifetime_over: int = 0, lifetime_under: int = 0,
+                    lifetime_expected: int = 0) -> float:
+    """OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
+
+    Two-stage computation:
+      1. Recent bias from TIME-DECAYED counts (over, under, expected) →
+         a multiplier that responds to recent behavior.
+      2. Lifetime-sign GUARDRAIL: if cumulative O > U with enough
+         sample, the multiplier is floored at 1.0 (overperformers can
+         only be boosted, never discounted). Mirror case for U > O.
+
+    Returns 1.0 (no adjustment) on insufficient recent sample.
+    """
+    total = (over or 0.0) + (under or 0.0) + (expected or 0.0)
+    outliers = (over or 0.0) + (under or 0.0)
+    if total < OUE_MIN_TOTAL or outliers < OUE_MIN_OUTLIERS:
+        return 1.0
+    bias = ((over or 0.0) - (under or 0.0)) / outliers
+    mult = max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
+
+    # Lifetime-sign guardrail. Only applies once cumulative sample is
+    # large enough to trust the direction; small-history strategies
+    # remain governed purely by their recent-window bias.
+    lt_outliers = (lifetime_over or 0) + (lifetime_under or 0)
+    lt_total = lt_outliers + (lifetime_expected or 0)
+    if lt_total >= OUE_LIFETIME_MIN_TOTAL and lt_outliers >= OUE_LIFETIME_MIN_OUTLIERS:
+        if lifetime_over > lifetime_under:
+            # Cumulative OVER → never discount below 1.0
+            mult = max(1.0, mult)
+        elif lifetime_under > lifetime_over:
+            # Cumulative UNDER → never boost above 1.0
+            mult = min(1.0, mult)
+        # Exact tie → no sign constraint
+
+    return mult
+
+
+def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
+    """Per-(strategy, regime) closed-trade OUE counts with time-decay.
+
+    Returns {(sid, regime): {
+       over, under, expected           ← TIME-WEIGHTED (floats)
+       lifetime_over, lifetime_under, lifetime_expected ← INTEGER lifetime
+    }}. The multiplier uses the time-weighted counts; the lifetime
+    counts get persisted to strategy_weights_by_regime.oue_over/under/
+    expected so the dashboard's #O/U/E column stays historically
+    meaningful.
+
+    Per-regime (not lifetime) because a strategy's calibration varies
+    by regime — discount applies only where the bad behavior happened.
+
+    Time-decay weight per trade: exp(-age_days / OUE_TAU_DAYS), where
+    age is days since pnl_date. A trade closed today contributes 1.0;
+    one from 45 days ago contributes 0.37; one from 90 days ago, 0.14.
+    Smoothly aging out old behavior without a hard edge-of-window
+    discontinuity.
+    """
+    if not strategy_ids:
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT es.strategy_id, es.regime_state, es.oue_kind,
+                   COUNT(*)::int AS lifetime_n,
+                   COALESCE(SUM(
+                     EXP(
+                       -LEAST(
+                          EXTRACT(EPOCH FROM (NOW() - sp.pnl_date::timestamp)) / 86400.0,
+                          365.0
+                       ) / %s
+                     )
+                   ), 0.0)::numeric AS weighted_n
+              FROM execution_signals es
+              JOIN signal_pnl sp ON sp.signal_id = es.id
+                                 AND sp.status = 'closed'
+                                 AND sp.realized_pnl_pct IS NOT NULL
+             WHERE es.strategy_id = ANY(%s)
+               AND es.regime_state IS NOT NULL
+               AND es.oue_kind IS NOT NULL
+             GROUP BY es.strategy_id, es.regime_state, es.oue_kind
+            """,
+            (OUE_TAU_DAYS, strategy_ids),
+        )
+        for r in cur:
+            key = (r['strategy_id'], r['regime_state'])
+            entry = out.setdefault(key, {
+                'over': 0.0, 'under': 0.0, 'expected': 0.0,
+                'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
+            })
+            entry[r['oue_kind']] = float(r['weighted_n'])
+            entry['lifetime_' + r['oue_kind']] = int(r['lifetime_n'])
+    return out
 
 
 def _db():
@@ -114,23 +241,94 @@ def _load_active_strategies(conn) -> list[dict]:
 
 
 def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
-    """Most-recent per-(strategy, regime) row from strategy_regime_backtests."""
+    """Most-recent per-(strategy, regime) sharpe + trade_count, with a
+    three-tier fallback so newly promoted strategies aren't immediately
+    auto-demoted for lack of a backtest snapshot.
+
+    Source priority (2026-05-14, post-unified-backtest cutover):
+      1. strategy_backtest_regimes (joined to the latest primary_window=true
+         run per strategy). This is the canonical source written by
+         unified_backtest.py.
+      2. strategy_regime_backtests — legacy regime-partitioned backtester
+         (auto_backtest backfill path). Kept as fallback until every live
+         strategy has a unified_backtest row.
+      3. strategy_registry.backtest_sharpe × strategy_regime_params eligible
+         regimes — single-overall-sharpe spread across declared regimes for
+         strategies absent from both per-regime tables.
+    """
     if not strategy_ids:
         return {}
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cur.execute('''
-        SELECT DISTINCT ON (strategy_id, regime_state)
-               strategy_id, regime_state, sharpe, trade_count
-        FROM strategy_regime_backtests
-        WHERE strategy_id = ANY(%s) AND sharpe IS NOT NULL
-        ORDER BY strategy_id, regime_state, run_at DESC NULLS LAST
-    ''', (strategy_ids,))
+
+    # Tier 1: unified_backtest (canonical).
+    # `strategy_backtest_regimes` is keyed by run_id only — strategy_id lives
+    # on `strategy_backtest_runs`. Earlier code selected br.strategy_id which
+    # silently errored every Sunday with "column br.strategy_id does not
+    # exist", forcing the entire weekly weights rebuild down to Tier 3.
     out = {}
-    for r in cur:
-        out[(r['strategy_id'], r['regime_state'])] = {
-            'bt_sharpe': float(r['sharpe']) if r['sharpe'] is not None else None,
-            'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
-        }
+    seen_strats = set()
+    try:
+        cur.execute('''
+            SELECT latest.strategy_id, br.regime_state, br.sharpe, br.trade_count
+            FROM strategy_backtest_regimes br
+            JOIN (
+                SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+                FROM strategy_backtest_runs
+                WHERE strategy_id = ANY(%s) AND primary_window = TRUE
+                ORDER BY strategy_id, run_at DESC
+            ) latest ON latest.run_id = br.run_id
+            WHERE br.sharpe IS NOT NULL
+        ''', (strategy_ids,))
+        for r in cur:
+            out[(r['strategy_id'], r['regime_state'])] = {
+                'bt_sharpe': float(r['sharpe']),
+                'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+            }
+            seen_strats.add(r['strategy_id'])
+    except Exception as e:
+        # Tables not yet migrated / DB hiccup — fall through to legacy sources.
+        # Roll back the failed transaction so subsequent tier queries on the
+        # same connection don't crash with InFailedSqlTransaction (2026-05-16
+        # found this had been silently breaking the Sunday cron whenever
+        # Tier 1 errored — Tier 2 + Tier 3 never ran).
+        logger.warning('strategy_weights tier-1 backtest fetch failed (%s); falling back', e)
+        conn.rollback()
+
+    # Tier 2: legacy strategy_regime_backtests (only for strategies with no
+    # unified_backtest row yet).
+    missing = [s for s in strategy_ids if s not in seen_strats]
+    if missing:
+        cur.execute('''
+            SELECT DISTINCT ON (strategy_id, regime_state)
+                   strategy_id, regime_state, sharpe, trade_count
+            FROM strategy_regime_backtests
+            WHERE strategy_id = ANY(%s) AND sharpe IS NOT NULL
+            ORDER BY strategy_id, regime_state, run_at DESC NULLS LAST
+        ''', (missing,))
+        for r in cur:
+            out[(r['strategy_id'], r['regime_state'])] = {
+                'bt_sharpe': float(r['sharpe']) if r['sharpe'] is not None else None,
+                'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+            }
+            seen_strats.add(r['strategy_id'])
+
+    # Tier 3: strategy_registry overall sharpe ⨯ eligible regimes.
+    still_missing = [s for s in strategy_ids if s not in seen_strats]
+    if still_missing:
+        cur.execute('''
+            SELECT srp.strategy_id, srp.regime_state,
+                   sr.backtest_sharpe, sr.backtest_trade_count
+            FROM strategy_regime_params srp
+            JOIN strategy_registry sr ON sr.id = srp.strategy_id
+            WHERE srp.strategy_id = ANY(%s)
+              AND srp.eligible = TRUE
+              AND sr.backtest_sharpe IS NOT NULL
+        ''', (still_missing,))
+        for r in cur:
+            out[(r['strategy_id'], r['regime_state'])] = {
+                'bt_sharpe': float(r['backtest_sharpe']),
+                'bt_n':      int(r['backtest_trade_count']) if r['backtest_trade_count'] is not None else None,
+            }
     return out
 
 
@@ -237,9 +435,11 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
         bt   = _load_backtest_sharpe(conn, sids)
         regime_by_date = _load_regime_by_date()
         live = _load_live_sharpe(conn, sids, regime_by_date)
+        oue  = _load_oue_by_strategy_regime(conn, sids)
 
         if verbose:
-            print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, live buckets: {len(live)}')
+            print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, '
+                  f'live buckets: {len(live)}, oue buckets: {len(oue)}')
 
         per_regime_positives: dict[str, list[dict]] = {}
         for s in active:
@@ -248,21 +448,47 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                                                                 live.get((s['strategy_id'], R)))
                 if eff is None or eff <= 0:
                     continue
+                # OUE multiplier (per regime, time-decayed). Multiplies
+                # effective_sharpe before normalization so the bucket is
+                # judged on recent OUE-adjusted edge — a strategy that
+                # was bad 4 months ago but is delivering now gets its
+                # multiplier back as old trades age out (τ=45d).
+                oue_row = oue.get((s['strategy_id'], R), {
+                    'over': 0.0, 'under': 0.0, 'expected': 0.0,
+                    'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
+                })
+                mult = _oue_multiplier(
+                    oue_row['over'], oue_row['under'], oue_row['expected'],
+                    lifetime_over=oue_row['lifetime_over'],
+                    lifetime_under=oue_row['lifetime_under'],
+                    lifetime_expected=oue_row['lifetime_expected'],
+                )
+                eff_adj = eff * mult
                 per_regime_positives.setdefault(R, []).append({
                     'strategy_id': s['strategy_id'],
                     'cadence_days': s['cadence_days'],
                     'bt_sharpe': bt_s, 'bt_n': bt_n,
                     'live_sharpe': lv_s, 'live_n': lv_n,
                     'effective_sharpe': eff,
+                    # Lifetime integer counts get persisted (matches the
+                    # dashboard's #O/U/E column semantics + audit trail).
+                    'oue_over':            oue_row['lifetime_over'],
+                    'oue_under':           oue_row['lifetime_under'],
+                    'oue_expected':        oue_row['lifetime_expected'],
+                    'oue_multiplier':      mult,
+                    'oue_adjusted_sharpe': eff_adj,
                 })
 
         rows: list[StrategyWeightRow] = []
         for R, entries in per_regime_positives.items():
-            denom = sum(e['effective_sharpe'] for e in entries)
+            # Normalize on OUE-adjusted Sharpe — strategies that consistently
+            # disappoint relative to their GBM expectation get less capital
+            # automatically, those that consistently delight get more.
+            denom = sum(e['oue_adjusted_sharpe'] for e in entries)
             if denom <= 0:
                 continue
             for e in entries:
-                w = e['effective_sharpe'] / denom
+                w = e['oue_adjusted_sharpe'] / denom
                 w_daily = w / max(1, e['cadence_days'])
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
@@ -271,6 +497,10 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     live_sharpe=e['live_sharpe'], live_n=e['live_n'],
                     effective_sharpe=e['effective_sharpe'],
                     weight=w, daily_weight=w_daily,
+                    oue_over=e['oue_over'], oue_under=e['oue_under'],
+                    oue_expected=e['oue_expected'],
+                    oue_multiplier=e['oue_multiplier'],
+                    oue_adjusted_sharpe=e['oue_adjusted_sharpe'],
                 ))
 
         cur = conn.cursor()
@@ -280,11 +510,15 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 INSERT INTO strategy_weights_by_regime
                   (strategy_id, regime_state, cadence_days,
                    bt_sharpe, bt_n, live_sharpe, live_n,
-                   effective_sharpe, weight, daily_weight, trigger, is_current)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, TRUE)
+                   effective_sharpe, weight, daily_weight, trigger, is_current,
+                   oue_over, oue_under, oue_expected,
+                   oue_multiplier, oue_adjusted_sharpe)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, TRUE, %s,%s,%s,%s,%s)
             ''', (r.strategy_id, r.regime_state, r.cadence_days,
                   r.bt_sharpe, r.bt_n, r.live_sharpe, r.live_n,
-                  r.effective_sharpe, r.weight, r.daily_weight, trigger))
+                  r.effective_sharpe, r.weight, r.daily_weight, trigger,
+                  r.oue_over, r.oue_under, r.oue_expected,
+                  r.oue_multiplier, r.oue_adjusted_sharpe))
         conn.commit()
 
         if verbose:

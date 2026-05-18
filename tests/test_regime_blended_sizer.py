@@ -106,9 +106,9 @@ def test_tradejohn_scale_applies_multiplier():
         run_date=date(2026, 5, 12), strategy_state=state,
         regime_params=_params('LOW_VOL'), confirmer=scaling,
     )
-    # preliminary = 0.5 × 1.0 × 400_000 × 1.0 = 200_000; scaled by confirmer = 100_000
-    # aggregate cap = 25% × available_nav = 25% × 100_000 = 25_000 (cap binds)
-    assert orders[0]['notional_usd'] == pytest.approx(25_000.0)
+    # preliminary = 0.5 × 1.0 × 400_000 × 1.0 = 200_000; scaled by confirmer × 0.5 = 100_000
+    # (legacy 25% aggregate cap dropped 2026-05-14 — sizer's own per-ticker cap governs)
+    assert orders[0]['notional_usd'] == pytest.approx(100_000.0)
 
 def test_cadence_pending_signal_skipped():
     sigs = [_sig('S1', 'AAPL', 1)]
@@ -138,107 +138,7 @@ def test_high_vol_missing_target_pct_nav_falls_back_one_percent(caplog):
     assert any('missing_strategy_sizing' in rec.message for rec in caplog.records)
 
 
-def test_aggregate_cap_binds_consolidate_path():
-    """Many high-kelly signals in LOW_VOL → aggregate cap scales orders down."""
-    # 10 signals × very high kelly_p; without cap, total notional = ~$2M against $100k NAV
-    sigs = [{'signal_id': f'sig{i}', 'strategy_id': f'S{i}', 'ticker': f'TICK{i}',
-             'direction': 1, 'entry': 100, 'stop': 95, 't1': 110, 'p_t1': 0.7,
-             'entry_price': 100, 'stop_loss': 95, 'take_profit_1': 110, 'target_1': 110,
-             'strategy_memo_mult': 1.0}
-            for i in range(10)]
-    state = {f'S{i}': {'last_fire_date': None, 'next_fire_date': None,
-                        'avg_holding_days': 1.0, 'source': 'bootstrap_daily'}
-             for i in range(10)}
-    account = {'equity': 100_000, 'regt_buying_power': 400_000,
-               'long_market_value': 0, 'cash': 100_000}
-
-    orders = size_positions(
-        signals=sigs, account_state=account, regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params={'liquidity_param': 1.0, 'min_signal_notional_usd': 100,
-                        'position_circuit_breaker_pct': 0.02},
-        confirmer=lambda p, runner=None: {pp['ticker']: {'action': 'approve', 'multiplier': 1.0,
-                                                          'rationale': ''} for pp in p},
-    )
-    # Total notional must be ≤ 25% of NAV ($25k for $100k NAV)
-    total = sum(abs(o['notional_usd']) for o in orders)
-    assert total <= 25_000.5, f'total ${total:.0f} exceeds cap'
-    # All orders should have cap_scale_applied
-    assert all('cap_scale_applied' in o for o in orders)
-
-
-def test_aggregate_cap_uses_5pct_floor_when_fully_invested():
-    """If long_market_value ≥ NAV (fully invested), available_nav floors at 5% × NAV."""
-    sigs = [{**{'signal_id': f's{i}', 'strategy_id': f'S{i}', 'ticker': f'T{i}',
-             'direction': 1, 'entry': 100, 'stop': 95, 't1': 110, 'p_t1': 0.7,
-             'entry_price': 100, 'stop_loss': 95, 'take_profit_1': 110, 'target_1': 110,
-             'strategy_memo_mult': 1.0}}
-            for i in range(5)]
-    state = {f'S{i}': {'last_fire_date': None, 'next_fire_date': None,
-                        'avg_holding_days': 1.0, 'source': 'bootstrap_daily'}
-             for i in range(5)}
-    account = {'equity': 100_000, 'regt_buying_power': 400_000,
-               'long_market_value': 200_000,  # fully invested
-               'cash': -100_000}
-
-    orders = size_positions(
-        signals=sigs, account_state=account, regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params={'liquidity_param': 1.0, 'min_signal_notional_usd': 100,
-                        'position_circuit_breaker_pct': 0.02},
-        confirmer=lambda p, runner=None: {pp['ticker']: {'action': 'approve', 'multiplier': 1.0,
-                                                          'rationale': ''} for pp in p},
-    )
-    # available_nav = max(100k × 5%, 100k - 200k) = max(5k, -100k) = 5k
-    # cap = 25% × 5k = 1.25k
-    total = sum(abs(o['notional_usd']) for o in orders)
-    assert total <= 1_250.5, f'total ${total:.0f} exceeds 5%-floor cap of $1250'
-
-
-def test_aggregate_cap_no_op_when_under_cap():
-    """If total notional already under cap, no scaling applied."""
-    sigs = [{'signal_id': 's1', 'strategy_id': 'S1', 'ticker': 'AAPL',
-             'direction': 1, 'entry': 100, 'stop': 95, 't1': 110, 'p_t1': 0.4,
-             'entry_price': 100, 'stop_loss': 95, 'take_profit_1': 110, 'target_1': 110,
-             'strategy_memo_mult': 1.0}]
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None,
-                    'avg_holding_days': 1.0, 'source': 'bootstrap_daily'}}
-    account = {'equity': 100_000, 'regt_buying_power': 400_000,
-               'long_market_value': 0, 'cash': 100_000}
-
-    orders = size_positions(
-        signals=sigs, account_state=account, regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params={'liquidity_param': 1.0, 'min_signal_notional_usd': 100,
-                        'position_circuit_breaker_pct': 0.02},
-        confirmer=lambda p, runner=None: {pp['ticker']: {'action': 'approve', 'multiplier': 1.0,
-                                                          'rationale': ''} for pp in p},
-    )
-    # 1 signal with moderate kelly; just verify it runs without errors
-    assert len(orders) == 1
-
-
-def test_aggregate_cap_applies_to_independent_path_too():
-    """HIGH_VOL/CRISIS independent path also subject to the cap."""
-    sigs = [{'signal_id': f's{i}', 'strategy_id': f'S{i}', 'ticker': f'T{i}',
-             'direction': 1, 'entry': 100, 'stop': 95, 't1': 110, 'p_t1': 0.6,
-             'entry_price': 100, 'stop_loss': 95, 'take_profit_1': 110, 'target_1': 110,
-             'target_pct_nav': 0.10, 'strategy_memo_mult': 1.0}
-            for i in range(10)]
-    state = {f'S{i}': {'last_fire_date': None, 'next_fire_date': None,
-                        'avg_holding_days': 1.0, 'source': 'bootstrap_daily'}
-             for i in range(10)}
-    account = {'equity': 100_000, 'regt_buying_power': 400_000,
-               'long_market_value': 0, 'cash': 100_000}
-
-    orders = size_positions(
-        signals=sigs, account_state=account, regime={'state': 'HIGH_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params={'liquidity_param': 0.5, 'min_signal_notional_usd': 100,
-                        'position_circuit_breaker_pct': 0.01},
-        confirmer=lambda p, runner=None: {},
-    )
-    # 10 signals × target_pct_nav=0.10 × NAV=$100k × λ=0.5 = $5k each = $50k total (without cap)
-    # cap = 25% × $100k = $25k
-    total = sum(abs(o['notional_usd']) for o in orders)
-    assert total <= 25_000.5, f'independent-path total ${total:.0f} exceeds cap'
+# Legacy aggregate-cap tests removed 2026-05-14 — the 25% available_NAV
+# aggregate cap was dropped per operator decision. Sizer policy is now
+# λ × NAV gross, per-ticker 25% cap, $25 minimum (sharpe_cadence) /
+# regt_bp × kelly × memo_mult (consolidate) — no extra aggregate scaler.

@@ -259,11 +259,12 @@ if __name__ == '__main__':
     portfolio_state = handoff.get('portfolio') or load_portfolio_state()
 
     # 3. Assemble TradeJohn's context by whitelisting fields. TradeJohn is a
-    #    daily per-signal Kelly-sizing agent; multi-day aggregates
-    #    (veto_history_30d, full yesterdays_*) belong to MastermindJohn's
-    #    weekly runs, not here. The per-signal `d1` attachments + the
-    #    `d1_strategy_stats` rollup give TradeJohn exactly what Rules A–F
-    #    need to fire without shipping the full outlier arrays.
+    #    daily per-signal Kelly-sizing agent; multi-day aggregates belong
+    #    to MastermindJohn's weekly runs, not here. d1_strategy_stats
+    #    (per-strategy O/U/R counts) was dropped 2026-05-16 — the
+    #    operator decided per-strategy outlier stats shouldn't drive
+    #    daily veto decisions; lifetime OUE feeds the weekly position-recs
+    #    review instead.
     if handoff_stage == 'structured':
         tradejohn_handoff = {
             'cycle_date':        handoff.get('cycle_date') or run_date,
@@ -272,7 +273,6 @@ if __name__ == '__main__':
             'portfolio':         handoff.get('portfolio'),
             'signals':           handoff.get('signals') or [],
             'sigma_gate':        handoff.get('sigma_gate'),
-            'd1_strategy_stats': handoff.get('d1_strategy_stats') or {},
             'mastermind_rec':    handoff.get('mastermind_rec'),
         }
 
