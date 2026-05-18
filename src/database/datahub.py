@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -50,6 +51,7 @@ import redis
 from .datahub_topics import (
     T_DATAHUB_DEDUPED,
     T_DATAHUB_OVERSIZED,
+    T_DATAHUB_RATE_LIMITED,
     validate_topic,
 )
 
@@ -72,11 +74,18 @@ DEFAULT_REDIS_URL = "redis://localhost:6379"
 _OBSERVABILITY_TOPICS = (
     T_DATAHUB_DEDUPED,
     T_DATAHUB_OVERSIZED,
+    T_DATAHUB_RATE_LIMITED,
 )
 
 
 class DataHubError(RuntimeError):
     """Raised on connection failure or programmer error."""
+
+
+@dataclass
+class _RateLimit:
+    max_publishes: int
+    window_seconds: int
 
 
 @dataclass
@@ -200,6 +209,7 @@ class DataHub:
         self.key_prefix = key_prefix
         self.producer_id = producer_id
         self.stats = _Stats()
+        self._rate_limit: Optional[_RateLimit] = None
 
     # ── Construction helpers ─────────────────────────────────────────
 
@@ -219,6 +229,31 @@ class DataHub:
 
     def _dedup_key(self, topic: str, payload_hash: str) -> str:
         return f"datahub:dedup:{self.key_prefix}{topic}:{payload_hash}"
+
+    def _rate_key(self, window_id: int) -> str:
+        return f"datahub:rl:{self.producer_id}:{window_id}"
+
+    # ── Configuration ────────────────────────────────────────────────
+
+    def set_rate_limit(
+        self, *, max_publishes: int, window_seconds: int
+    ) -> None:
+        """Configure the per-producer soft-fail rate limit (B2.4).
+
+        ``max_publishes`` is a fixed-window cap; once exceeded inside
+        ``window_seconds`` further ``publish()`` calls return ``False``
+        and emit ``T_DATAHUB_RATE_LIMITED`` for observability. Set
+        ``max_publishes=0`` or ``None`` to disable.
+        """
+        if not max_publishes:
+            self._rate_limit = None
+            return
+        if max_publishes < 1 or window_seconds < 1:
+            raise ValueError("max_publishes and window_seconds must be >= 1")
+        self._rate_limit = _RateLimit(
+            max_publishes=int(max_publishes),
+            window_seconds=int(window_seconds),
+        )
 
     # ── publish ──────────────────────────────────────────────────────
 
@@ -266,7 +301,34 @@ class DataHub:
             )
             return False
 
-        # 3. Rate-limit check is added in B2.4.
+        # 3. Rate-limit check (B2.4 — per-producer fixed-window soft-fail).
+        if self._rate_limit is not None:
+            window_id = int(time.time() // self._rate_limit.window_seconds)
+            key = self._rate_key(window_id)
+            count = self.client.incr(key)
+            if count == 1:
+                # First hit in this window — set TTL so the counter expires
+                # cleanly. window+1 to absorb clock drift on the boundary.
+                self.client.expire(key, self._rate_limit.window_seconds + 1)
+            if count > self._rate_limit.max_publishes:
+                self.stats.rate_limited += 1
+                # Roll the counter back so a tight loop of denied requests
+                # doesn't inflate it past the limit indefinitely. The
+                # limiter is a circuit-breaker, not a billing meter.
+                try:
+                    self.client.decr(key)
+                except Exception:
+                    pass
+                self._emit_observability(
+                    T_DATAHUB_RATE_LIMITED,
+                    {
+                        "topic": topic,
+                        "producer": self.producer_id,
+                        "limit": self._rate_limit.max_publishes,
+                        "window_seconds": self._rate_limit.window_seconds,
+                    },
+                )
+                return False
 
         # 4. Dedup check.
         if dedup_window is not None and dedup_window > 0:

@@ -35,6 +35,7 @@ from database.datahub import (  # noqa: E402
 )
 from database.datahub_topics import (  # noqa: E402
     T_DATAHUB_OVERSIZED,
+    T_DATAHUB_RATE_LIMITED,
     validate_topic,
 )
 
@@ -63,7 +64,11 @@ def hub():
     h = DataHub(client=r, key_prefix=TEST_PREFIX, producer_id="pytest")
     yield h
     # Teardown: delete only the keys we created. NEVER FLUSHDB.
-    for pattern in (f"{TEST_PREFIX}*", f"datahub:dedup:{TEST_PREFIX}*"):
+    for pattern in (
+        f"{TEST_PREFIX}*",
+        f"datahub:dedup:{TEST_PREFIX}*",
+        "datahub:rl:pytest:*",
+    ):
         for k in r.scan_iter(match=pattern, count=500):
             r.delete(k)
 
@@ -131,7 +136,35 @@ def test_dedup_window_suppresses_duplicates(hub):
     assert hub.stats["deduped"] >= 1
 
 
-# ── B2.4 rate-limit window: see test_rate_limit_fail_soft (added in B2.4) ──
+# ── B2.4 rate-limit window ───────────────────────────────────────────────
+
+
+def test_rate_limit_fail_soft(hub):
+    """Exceeding the per-producer window returns False + emits rate-limited topic."""
+    topic = "agent:status:test-rl-bot"
+    # Limit: 3 publishes per 60s for this producer
+    hub.set_rate_limit(max_publishes=3, window_seconds=60)
+    captured = []
+
+    def cb(channel, msg):
+        captured.append((channel, msg))
+
+    # Subscribe to the observability topic in a thread (psubscribe).
+    listener = hub.subscribe(T_DATAHUB_RATE_LIMITED, cb)
+    try:
+        results = [hub.publish(topic, {"i": i}) for i in range(5)]
+        # First 3 succeed, last 2 fail-soft
+        assert results[:3] == [True, True, True]
+        assert results[3:] == [False, False]
+        # Give the listener a moment to receive
+        for _ in range(20):
+            if captured:
+                break
+            time.sleep(0.05)
+        assert len(captured) >= 1, "rate-limited observability event not received"
+        assert hub.stats["rate_limited"] >= 2
+    finally:
+        listener.stop()
 
 
 # ── B2.3d wildcard subscribe ─────────────────────────────────────────────
