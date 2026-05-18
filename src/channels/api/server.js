@@ -975,6 +975,24 @@ app.get('/api/strategies', async (req, res) => {
       };
     }
 
+    // Decorate every breakdown entry with `declared` so the dashboard can
+    // render BT Sharpe for ALL traded regimes (including non-declared) and
+    // still show eligibility independently. eligibleSet = manifest's
+    // literature-driven eligible_regimes; falls back to active_in_regimes
+    // when manifest hasn't set it. NULL eligible_regimes is treated as
+    // eligible-everywhere (matches regime_gate.is_eligible() semantics).
+    const _decorateDeclared = (breakdown, eligibleSet) => {
+      if (!breakdown) return breakdown;
+      const out = {};
+      for (const [rg, b] of Object.entries(breakdown)) {
+        if (b == null) { out[rg] = b; continue; }
+        out[rg] = Object.assign({}, b, {
+          declared: b.declared != null ? b.declared : (eligibleSet ? eligibleSet.has(rg) : true),
+        });
+      }
+      return out;
+    };
+
     // Resolve which `data_requirements_planned` columns are NOT known to any
     // provider/collector. These rows would be rejected by the staging worker
     // with `error: 'unsupported_source'`. We surface them on staging rows as
@@ -1103,13 +1121,17 @@ app.get('/api/strategies', async (req, res) => {
       const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
       const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
       const d1 = d1StrategyStats[sid] || null;
+      const _eligRaw   = Array.isArray(rec.eligible_regimes) ? rec.eligible_regimes : null;
+      const _eligibleSet = new Set(_eligRaw || activeRegimes);
+      const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
+      const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
       rows.push({
         strategy_id:        sid,
         state:              rec.state || 'unknown',
         is_stale:           isStale,
         regime_active:      regimeActive,
         active_in_regimes:  activeRegimes,
-        eligible_regimes:   Array.isArray(rec.eligible_regimes) ? rec.eligible_regimes : null,
+        eligible_regimes:   _eligRaw,
         current_regime:     currentRegime,
         description:        rec.metadata?.description || '',
         state_since:        rec.state_since || null,
@@ -1132,7 +1154,7 @@ app.get('/api/strategies', async (req, res) => {
         backtest_return_pct:       unifiedBacktest[sid]?.return_pct       ?? sr.backtest_return_pct       ?? null,
         backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
         backtest_trade_count:      unifiedBacktest[sid]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_regime_breakdown: _decoratedBreakdown,
         backtest_run_at:           unifiedBacktest[sid]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
         live_days:           sr.live_days           ?? null,
@@ -1191,7 +1213,10 @@ app.get('/api/strategies', async (req, res) => {
         backtest_return_pct:       unifiedBacktest[s.strategy_id]?.return_pct       ?? sr.backtest_return_pct       ?? null,
         backtest_max_dd_pct:       unifiedBacktest[s.strategy_id]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
         backtest_trade_count:      unifiedBacktest[s.strategy_id]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        backtest_regime_breakdown: _decorateDeclared(
+          unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+          null,  // orphans have no manifest → no declared eligibility
+        ),
         backtest_run_at:           unifiedBacktest[s.strategy_id]?.run_at           ?? null,
         live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
         live_days:           sr.live_days           ?? null,
@@ -1246,6 +1271,20 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   const force   = req.body && req.body.force === true;
   const reason  = (req.body && req.body.reason) || '';
   const actor   = (req.body && req.body.actor)  || 'manual:dashboard';
+  // Optional: caller (typically the approval picker on the dashboard) can
+  // overwrite the strategy's manifest.eligible_regimes atomically with the
+  // state transition. NULL/undefined → leave existing eligible_regimes
+  // untouched. Validated against the canonical 4-regime axis below.
+  const _CANON_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+  let eligibleRegimes = null;
+  if (req.body && Array.isArray(req.body.eligible_regimes)) {
+    const cleaned = [...new Set(req.body.eligible_regimes)].filter(r => _CANON_REGIMES.includes(r));
+    if (cleaned.length === 0) {
+      return res.status(400).json({ error: 'eligible_regimes cannot be empty' });
+    }
+    // Preserve canonical order for stable diffing.
+    eligibleRegimes = _CANON_REGIMES.filter(r => cleaned.includes(r));
+  }
 
   if (!sid || !toState) {
     return res.status(400).json({ error: 'sid and to_state are required' });
@@ -1359,6 +1398,16 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
       r.state_since = now;
       r.history     = r.history || [];
       r.history.push(event);
+      if (eligibleRegimes) {
+        const prior = Array.isArray(r.eligible_regimes) ? r.eligible_regimes.slice() : null;
+        r.eligible_regimes = eligibleRegimes;
+        // Fold the eligibility change into the lifecycle event metadata so
+        // /api/lifecycle/audit shows exactly what was decided at promotion.
+        event.metadata = Object.assign({}, event.metadata || {}, {
+          eligible_regimes_before: prior,
+          eligible_regimes_after:  eligibleRegimes,
+        });
+      }
       m.updated_at = now;
       return m;
     }, { actor: `dashboard:${actor || 'unknown'}` });
@@ -2698,6 +2747,27 @@ body.rs-chat-locked{overflow:hidden}
 /* Approve button variants — consistent sizing, clear state communication */
 .st-approve-async{border-style:solid;color:var(--blue);border-color:rgba(88,166,255,0.45)}
 .st-approve-async:hover{border-color:var(--blue);background:rgba(88,166,255,0.08)}
+/* Approval-picker modal: regime-set chooser fired by stApprove(). */
+.st-approve-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:9999;animation:stModalIn .12s ease-out}
+.st-approve-modal{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:18px 20px;min-width:480px;max-width:560px;color:var(--text);box-shadow:0 12px 36px rgba(0,0,0,0.55);font-family:inherit}
+.st-approve-bt-table{width:100%;border-collapse:collapse;margin:6px 0 12px;font-size:11px}
+.st-approve-bt-table th{text-align:left;font-weight:600;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.05em;padding:4px 6px;border-bottom:1px solid var(--border2)}
+.st-approve-bt-table td{padding:5px 6px;border-bottom:1px solid var(--border2)}
+.st-approve-bt-table td.num{text-align:right;font-variant-numeric:tabular-nums}
+.st-approve-bt-table td.num.pos{color:var(--green)}
+.st-approve-bt-table td.num.neg{color:var(--red)}
+.st-approve-bt-table td.num.low{color:var(--yellow)}
+.st-approve-modes{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px;padding:8px;background:var(--bg);border-radius:5px;border:1px solid var(--border2)}
+.st-approve-mode-btn{background:var(--panel);border:1px solid var(--border);color:var(--text);font-size:11px;padding:4px 10px;border-radius:4px;cursor:pointer;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+.st-approve-mode-btn:hover{border-color:var(--blue);color:var(--blue)}
+.st-approve-mode-hint{font-size:10px;color:var(--muted);margin-left:auto}
+.st-approve-footer{display:flex;gap:8px;align-items:center}
+.st-approve-footer button{background:var(--panel);border:1px solid var(--border);color:var(--text);font-size:11px;padding:5px 14px;border-radius:4px;cursor:pointer;font-family:inherit}
+.st-approve-footer button.st-approve-confirm{background:var(--green);color:#000;border-color:var(--green);font-weight:600}
+.st-approve-footer button.st-approve-confirm:hover{filter:brightness(1.1)}
+.st-approve-footer button.st-approve-confirm:disabled{opacity:0.45;cursor:not-allowed}
+.st-approve-footer button.st-approve-cancel:hover{border-color:var(--red);color:var(--red)}
+@keyframes stModalIn{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:scale(1)}}
 .st-approve-retry{border-color:var(--red);color:var(--red)}
 .st-approve-retry:hover{background:rgba(248,81,73,0.10);border-color:var(--red)}
 .st-action-btn{transition:all .12s ease;white-space:nowrap}
@@ -2736,6 +2806,11 @@ body.rs-chat-locked{overflow:hidden}
 .st-regime-cell.st-rg-na .st-rg-val{opacity:0.55;font-weight:500}
 .st-regime-cell.st-rg-current::after{content:'';position:absolute;top:1px;right:2px;width:5px;height:5px;border-radius:50%;background:#fff;box-shadow:0 0 0 1.5px var(--blue)}
 .st-regime-cell.st-rg-ineligible{opacity:0.32;filter:grayscale(1);text-decoration:line-through;text-decoration-thickness:1px}
+/* Non-declared regimes on the candidates table: keep the BT Sharpe value
+   fully readable but mark the cell with a dashed border to flag that the
+   strategy's literature manifest does NOT list this regime as eligible. */
+.st-regime-cell.st-rg-not-declared{box-shadow:inset 0 0 0 1px rgba(255,255,255,0.18); border:1px dashed rgba(255,255,255,0.35); padding:1px 8px 2px}
+.st-regime-cell.st-rg-not-declared .st-rg-tag::after{content:' (not declared)'; font-weight:500; opacity:0.7; font-size:7.5px}
 .st-regime-cell.st-rg-editable{cursor:pointer;transition:transform .08s ease, box-shadow .08s ease}
 .st-regime-cell.st-rg-editable:hover{transform:translateY(-1px);box-shadow:0 0 0 1.5px var(--blue);opacity:1;filter:none}
 .st-rg-LOW_VOL      {color:#fff;background:var(--green)}
@@ -6703,16 +6778,22 @@ function _regimeBacktestSharpe(r) {
     : (r.active_in_regimes && r.active_in_regimes.length ? r.active_in_regimes : _REGIME_AXIS);
   const current = r.current_regime || null;
   const cells = _REGIME_AXIS.map(rg => {
-    const isEligible = eligible.includes(rg);
     const b      = breakdown[rg] || null;
+    // Source-of-truth for "declared": backend now sets b.declared per regime.
+    // Fall back to manifest eligible_regimes for old rows missing the flag.
+    const isDeclared = (b && b.declared != null) ? !!b.declared : eligible.includes(rg);
     const trades = b && b.trade_count != null ? b.trade_count : 0;
     const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (sharpe == null) klass.push('st-rg-na');
-    if (!isEligible)   klass.push('st-rg-ineligible');
+    // NOT-declared uses a light dashed-border treatment (st-rg-not-declared)
+    // — the BT Sharpe value stays fully readable. Heavy st-rg-ineligible
+    // (grey + strikethrough) is reserved for the LIVE active-stack cells
+    // where the regime is actually turned off in the sizer.
+    if (!isDeclared)   klass.push('st-rg-not-declared');
     const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
-    const eligLine = isEligible ? 'eligible' : 'NOT eligible';
+    const eligLine = isDeclared ? 'declared eligible' : 'NOT declared (outside literature scope)';
     const note = b && b.note ? \` (\${b.note})\` : '';
     const statsLine = sharpe == null
       ? (trades > 0 ? \`\${trades} trades, sharpe NULL (trade_count < 5)\` : \`no backtest trades\${note}\`)
@@ -6723,7 +6804,7 @@ function _regimeBacktestSharpe(r) {
               <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
   }).join('');
-  return \`<div class="st-regime-grid" title="Per-regime BACKTEST Sharpe (from unified_backtest). Tooltip = trades + drawdown.">\${cells}</div>\`;
+  return \`<div class="st-regime-grid" title="Per-regime BACKTEST Sharpe (from unified_backtest). Dashed border = not in literature-declared regimes. Tooltip = trades + drawdown.">\${cells}</div>\`;
 }
 
 // Backwards-compat shim — left in case other call sites reference it; the
@@ -7801,16 +7882,18 @@ function toast(msg, type = 'info', ttlMs = 4_000) {
   }, ttlMs);
 }
 
-async function _stTransition(sid, toState, force, reason) {
+async function _stTransition(sid, toState, force, reason, eligibleRegimes) {
   try {
+    const body = { to_state: toState, force: !!force, reason: reason || '', actor: 'manual:dashboard' };
+    if (Array.isArray(eligibleRegimes)) body.eligible_regimes = eligibleRegimes;
     const resp = await fetch('/api/strategies/' + encodeURIComponent(sid) + '/transition', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ to_state: toState, force: !!force, reason: reason || '', actor: 'manual:dashboard' }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) { toast('Transition failed: ' + (data.error || resp.statusText), 'error', 6_000); return false; }
-    toast(sid + ' → ' + toState, 'ok', 3_000);
+    toast(sid + ' → ' + toState + (eligibleRegimes ? ' (regimes: ' + eligibleRegimes.join(',') + ')' : ''), 'ok', 3_500);
     await loadStrategies();
     return true;
   } catch (e) {
@@ -7824,14 +7907,134 @@ async function stUnstack(sid) {
   await _stTransition(sid, 'deprecated', false, 'Manual unstack via dashboard');
 }
 
+// Pop the regime-picker modal on Approve. Operator chooses:
+//   • By Sharpe   — auto-select regimes with backtest Sharpe ≥ threshold
+//   • Keep declared — use the strategy's literature-driven eligible_regimes
+//   • Custom      — manual checkboxes (defaults to the declared set)
+// Then calls /transition with the chosen eligible_regimes piggybacked.
 async function stApprove(sid, gateWarn) {
+  const row = (strategiesData || []).find(r => r.strategy_id === sid);
+  if (!row) { toast('Strategy row not found', 'error'); return; }
+  const decision = await _stOpenApprovalPicker(row, gateWarn);
+  if (!decision) return;  // operator cancelled
+  const reasonSuffix = ' [regimes via ' + decision.mode + ': ' + decision.eligible_regimes.join(',') + ']';
   if (gateWarn) {
-    if (!confirm('"' + sid + '" has metrics below gates (Sharpe < 0.5 or |Max DD| > 20%). Approve with override? This will be logged.')) return;
-    await _stTransition(sid, 'live', true, 'Manual approve via dashboard (override)');
+    await _stTransition(sid, 'live', true,
+      'Manual approve via dashboard (override)' + reasonSuffix,
+      decision.eligible_regimes);
   } else {
-    if (!confirm('Approve ' + sid + ' into the Active Stack?')) return;
-    await _stTransition(sid, 'live', false, 'Manual approve via dashboard');
+    await _stTransition(sid, 'live', false,
+      'Manual approve via dashboard' + reasonSuffix,
+      decision.eligible_regimes);
   }
+}
+
+// Open a modal letting the operator pick the regime set for promotion.
+// Returns a Promise resolving to {mode, eligible_regimes} or null on cancel.
+function _stOpenApprovalPicker(row, gateWarn) {
+  const _AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+  const breakdown = row.backtest_regime_breakdown || {};
+  const declared  = Array.isArray(row.eligible_regimes) && row.eligible_regimes.length
+    ? row.eligible_regimes.slice()
+    : (row.active_in_regimes || []).slice();
+  const declaredSet = new Set(declared);
+  // Pre-compute the "by Sharpe" set at the default threshold so the panel
+  // can show a live preview before the operator clicks Apply.
+  const DEFAULT_SHARPE_MIN = 0.5;
+  const sharpeFor = rg => {
+    const b = breakdown[rg];
+    return (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
+  };
+  const computeBySharpe = (threshold) => _AXIS.filter(rg => {
+    const s = sharpeFor(rg);
+    return s != null && s >= threshold;
+  });
+
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'st-approve-modal-backdrop';
+    backdrop.innerHTML = \`
+      <div class="st-approve-modal" role="dialog" aria-modal="true">
+        <h3 style="margin:0 0 6px;font-size:14px">Approve <code>\${_escStr(row.strategy_id)}</code> → LIVE</h3>
+        <p style="margin:0 0 14px;font-size:11px;color:var(--muted)">
+          Pick which regimes the strategy is eligible for. The sizer will only allocate capital in regimes you select here. You can change this later from the Active Stack table.\${gateWarn ? '<br><b style="color:var(--orange)">⚠ Strategy is below Sharpe/DD gates — this will be logged as an override.</b>' : ''}
+        </p>
+
+        <table class="st-approve-bt-table">
+          <tr><th>Regime</th><th class="num">BT Sharpe</th><th class="num">Trades</th><th>Declared?</th><th>Select</th></tr>
+          \${_AXIS.map(rg => {
+            const b = breakdown[rg] || {};
+            const s = sharpeFor(rg);
+            const tr = b.trade_count ?? 0;
+            const dec = declaredSet.has(rg);
+            const sCls = s == null ? '' : (s >= 0.5 ? 'pos' : (s < 0 ? 'neg' : 'low'));
+            return \`<tr>
+              <td><span class="st-rg-tag st-rg-\${rg}" style="padding:2px 6px;border-radius:3px;font-size:10px;font-weight:700">\${rg}</span></td>
+              <td class="num \${sCls}">\${s != null ? s.toFixed(2) : '—'}</td>
+              <td class="num" style="color:var(--muted)">\${tr || '—'}</td>
+              <td>\${dec ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--dim)">—</span>'}</td>
+              <td><input type="checkbox" data-regime="\${rg}" \${dec ? 'checked' : ''}></td>
+            </tr>\`;
+          }).join('')}
+        </table>
+
+        <div class="st-approve-modes">
+          <button class="st-approve-mode-btn" data-mode="literature">Keep declared (\${declared.join(', ') || 'none'})</button>
+          <button class="st-approve-mode-btn" data-mode="sharpe">By Sharpe ≥ <input type="number" id="st-approve-sharpe-min" step="0.1" min="-5" max="5" value="\${DEFAULT_SHARPE_MIN}" style="width:48px;font-size:11px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:1px 4px"></button>
+          <span class="st-approve-mode-hint">Or check boxes individually above.</span>
+        </div>
+
+        <div class="st-approve-footer">
+          <span id="st-approve-summary" style="font-size:11px;color:var(--muted)"></span>
+          <span style="flex:1"></span>
+          <button class="st-approve-cancel">Cancel</button>
+          <button class="st-approve-confirm">\${gateWarn ? '⚠ Approve (override)' : '✅ Approve'}</button>
+        </div>
+      </div>\`;
+    document.body.appendChild(backdrop);
+
+    let chosenMode = declaredSet.size ? 'literature' : 'custom';
+    const summary = backdrop.querySelector('#st-approve-summary');
+    const checkboxes = () => Array.from(backdrop.querySelectorAll('input[type="checkbox"][data-regime]'));
+    const getSelected = () => checkboxes().filter(c => c.checked).map(c => c.dataset.regime);
+    const updateSummary = () => {
+      const sel = getSelected();
+      summary.textContent = sel.length
+        ? 'Will activate: ' + sel.join(', ')
+        : 'Select at least one regime.';
+      backdrop.querySelector('.st-approve-confirm').disabled = sel.length === 0;
+    };
+    const applyMode = (mode) => {
+      chosenMode = mode;
+      let target;
+      if (mode === 'literature') target = new Set(declared);
+      else if (mode === 'sharpe') {
+        const t = parseFloat(backdrop.querySelector('#st-approve-sharpe-min').value);
+        target = new Set(computeBySharpe(isNaN(t) ? DEFAULT_SHARPE_MIN : t));
+      } else target = new Set(getSelected());  // custom: leave as-is
+      for (const cb of checkboxes()) cb.checked = target.has(cb.dataset.regime);
+      updateSummary();
+    };
+    applyMode(chosenMode);
+
+    backdrop.querySelectorAll('.st-approve-mode-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        if (e.target.tagName === 'INPUT') return;  // don't trigger when typing threshold
+        applyMode(btn.dataset.mode);
+      });
+    });
+    backdrop.querySelector('#st-approve-sharpe-min').addEventListener('input', () => applyMode('sharpe'));
+    checkboxes().forEach(cb => cb.addEventListener('change', () => { chosenMode = 'custom'; updateSummary(); }));
+
+    const close = (result) => { backdrop.remove(); resolve(result); };
+    backdrop.querySelector('.st-approve-cancel').addEventListener('click', () => close(null));
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(null); });
+    backdrop.querySelector('.st-approve-confirm').addEventListener('click', () => {
+      const sel = getSelected();
+      if (sel.length === 0) return;
+      close({ mode: chosenMode, eligible_regimes: sel });
+    });
+  });
 }
 
 async function stReject(sid) {

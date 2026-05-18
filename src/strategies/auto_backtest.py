@@ -31,10 +31,14 @@ Prints JSON:
   "total_return_pct": <compounded across windows>,
   "trade_count": <sum>,
   "regime_breakdown": {
-     "LOW_VOL":       {"sharpe":…, "max_dd":…, "total_return_pct":…, "trade_count":…, "oos_days":…},
-     "TRANSITIONING": {…},
-     "HIGH_VOL":      {"note": "not_declared"} | {"note": "no_oos_window"} | {…metrics…},
-     "CRISIS":        {…},
+     # Every regime is backtested regardless of `declared`; `declared` tells
+     # the consumer whether the strategy's literature-driven manifest lists
+     # this regime as eligible. Use `declared` for eligibility decisions and
+     # `sharpe`/`trade_count` for raw performance.
+     "LOW_VOL":       {"sharpe":…, "max_dd":…, "total_return_pct":…, "trade_count":…, "oos_days":…, "declared": true},
+     "TRANSITIONING": {…, "declared": …},
+     "HIGH_VOL":      {"note": "no_oos_window", "declared": …} | {…metrics…, "declared": …},
+     "CRISIS":        {…, "declared": …},
   },
   "windows": [{"window": …, "regime": …, "sharpe":…, "max_dd":…, "trade_count":…, "total_return_pct":…}],
   "method": "v2_regime_stratified",
@@ -541,7 +545,13 @@ def run_backtest(filepath: str) -> dict:
         # default and preserves prior behavior on weird subclasses).
         declared = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
-    plan = regime_windows_for_strategy(declared)
+    # Plan windows across ALL canonical regimes — not just declared — so the
+    # candidates dashboard can show real Sharpe for every regime the strategy
+    # actually trades in (including regimes outside its literature-declared
+    # active_in_regimes). The 'declared' flag below preserves the eligibility
+    # context so downstream blending stays manifest-driven via the
+    # eligibility_filter path in regime_blended_backtest.portfolio_per_regime.
+    plan = regime_windows_for_strategy(CANONICAL_REGIMES)
     vix_lookup = _build_vix_lookup()
 
     # Step 5: run each planned window. Per-regime breakdown is built from
@@ -565,17 +575,18 @@ def run_backtest(filepath: str) -> dict:
         window_results.append(res)
 
     # Build per-regime breakdown. Categories:
-    #   1. Regime declared and at least one window succeeded → metrics.
-    #   2. Regime declared but no eligible historical window → no_oos_window.
-    #   3. Regime not declared by the strategy → not_declared.
+    #   1. Regime ran and has trades → real metrics (+ declared flag).
+    #   2. Regime ran but no trades emitted → metrics with sharpe=NULL (the
+    #      strategy chose not to trade — honest signal for the operator).
+    #   3. Regime has no eligible historical OOS span → no_oos_window.
+    # Every breakdown entry carries `declared: bool` so the dashboard can
+    # render eligibility independently of presence of trade data.
     regime_breakdown: dict[str, dict] = {}
     for r in CANONICAL_REGIMES:
-        if r not in declared:
-            regime_breakdown[r] = {'note': 'not_declared'}
-            continue
+        is_declared = r in declared
         regime_wins = [w for w in window_results if w.get('regime') == r]
         if not regime_wins:
-            regime_breakdown[r] = {'note': 'no_oos_window'}
+            regime_breakdown[r] = {'note': 'no_oos_window', 'declared': is_declared}
             continue
         # Trade-weighted sharpe; max max_dd; compounded return.
         trades_r = [w.get('trade_count', 0) or 0 for w in regime_wins]
@@ -600,6 +611,7 @@ def run_backtest(filepath: str) -> dict:
             'trade_count':      total_trades,
             'oos_days':         oos_days_r,
             'window_count':     len(regime_wins),
+            'declared':         is_declared,
         }
 
     # Aggregate across all windows (strategy-level scorecard).
