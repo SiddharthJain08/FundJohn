@@ -59,6 +59,7 @@ if _LIVE_FLAG:
     STEPS = [
         ('collect',              'run_collector_once'),        # one cycle of collector.js
         ('signals',              'engine'),                    # zero-LLM strategy executor
+        ('ic_gate',              'ic_gate_runner'),            # Phase 2A IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
         ('handoff',              'trade_handoff_builder'),     # structured handoff
         ('trade',                'regime_blended_sizer_live'), # LIVE PRIMARY (real LLM confirmer)
         ('alpaca',               'alpaca_executor'),           # submit to Alpaca
@@ -78,6 +79,7 @@ else:
     STEPS = [
         ('collect',              'run_collector_once'),           # Node wrapper: one cycle of collector.js (parquet-primary)
         ('signals',              'engine'),                       # zero-LLM strategy executor → execution_signals
+        ('ic_gate',              'ic_gate_runner'),               # Phase 2A IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
         ('handoff',              'trade_handoff_builder'),        # deterministic features → handoff:{date}:structured
         ('trade',                'trade_agent_llm'),              # Deterministic sizer (LLM bypassed by default)
         ('trade_parity',         'regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
@@ -106,6 +108,7 @@ NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
 STEP_FAILURE_CHANNEL = {
     'collect':     'data-alerts',
     'signals':     'data-alerts',
+    'ic_gate':     'trade-reports',
     'handoff':     'trade-reports',
     'trade':        'trade-reports',
     'trade_parity': 'data-alerts',
@@ -508,7 +511,15 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         # also chronically hit.
         return (_maybe_dry(['node', str(js_pipe)]), 5400)
     # default: src/execution/<script>.py
-    timeout = 1620 if script == 'trade_agent_llm' else 300
+    if script == 'trade_agent_llm':
+        timeout = 1620
+    elif script == 'ic_gate_runner':
+        # IC gate runner blocks on operator Discord responses. IC_TIMEOUT_SECONDS
+        # defaults to 600s inside the runner; allow generous headroom on the
+        # orchestrator wrapper so the runner's own poll-timeout fires first.
+        timeout = int(os.environ.get('IC_TIMEOUT_SECONDS', '600')) + 120
+    else:
+        timeout = 300
     return (_maybe_dry(['python3', str(py_exec), '--date', run_date]), timeout)
 
 
@@ -706,6 +717,7 @@ if __name__ == '__main__':
     STEP_AGENTS = {
         'collect':     ('databot',      f'Collecting data: {run_date}',             None),
         'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
+        'ic_gate':     ('tradedesk',    f'IC approval gate: {run_date}',            None),
         'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
         'trade':        ('tradedesk', f'TradeJohn signal generation: {run_date}',        None),
         'trade_parity': ('databot',   f'Running parity DRY-RUN: {run_date}',             None),
