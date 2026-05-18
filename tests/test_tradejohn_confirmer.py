@@ -12,6 +12,13 @@ from execution.tradejohn_confirmer import (
     confirm, _build_prompt, _parse_response, FAIL_OPEN_DEFAULT,
 )
 
+# Per the 2026-05-14 contract change (commit 14d369a), the confirmer
+# emits {action: keep|cancel, rationale}. Older approve/veto/scale +
+# multiplier inputs are mapped on parse (approve→keep, veto→cancel,
+# scale→keep), and the multiplier field is dropped entirely (sizer
+# is upstream and final).
+
+
 def _proposal(ticker='AAPL', size=10000):
     return {'ticker': ticker, 'preliminary_size_usd': size, 'direction': 1,
             'contributions': [{'strategy_id': 'S1', 'attribution_weight': 1.0}],
@@ -20,19 +27,24 @@ def _proposal(ticker='AAPL', size=10000):
                         '30d_veto_history_for_ticker': 0, 'hv30d': 0.18}}
 
 def test_parse_response_approve_veto_scale():
+    """Legacy approve/veto/scale inputs map to the new keep/cancel contract."""
     raw = '{"AAPL": {"action": "approve", "multiplier": 1.0, "rationale": "ok"},' \
           ' "MSFT": {"action": "veto", "multiplier": 0, "rationale": "earnings"},' \
           ' "GOOGL": {"action": "scale", "multiplier": 0.5, "rationale": "soft news"}}'
     out = _parse_response(raw, ['AAPL', 'MSFT', 'GOOGL'])
-    assert out['AAPL']['action'] == 'approve'
-    assert out['MSFT']['multiplier'] == 0
-    assert out['GOOGL']['multiplier'] == 0.5
+    assert out['AAPL']['action'] == 'keep'    # approve → keep
+    assert out['MSFT']['action'] == 'cancel'  # veto → cancel
+    assert out['GOOGL']['action'] == 'keep'   # scale → keep (sizer is upstream)
+    # No multiplier field in the new contract:
+    assert 'multiplier' not in out['AAPL']
+    assert 'multiplier' not in out['MSFT']
+    assert 'multiplier' not in out['GOOGL']
 
 def test_parse_response_malformed_ticker_fails_open(caplog):
     raw = '{"AAPL": {"action": "approve", "multiplier": 1.0},' \
           ' "MSFT": "not-a-dict"}'
     out = _parse_response(raw, ['AAPL', 'MSFT'])
-    assert out['AAPL']['action'] == 'approve'
+    assert out['AAPL']['action'] == 'keep'  # approve → keep
     assert out['MSFT'] == FAIL_OPEN_DEFAULT
     assert any('MSFT' in rec.message for rec in caplog.records)
 
@@ -42,25 +54,31 @@ def test_parse_response_total_garbage_fails_open(caplog):
     assert any('failed to parse' in rec.message.lower() for rec in caplog.records)
 
 def test_parse_response_missing_ticker_fails_open():
-    raw = '{"AAPL": {"action": "approve", "multiplier": 1.0}}'
+    raw = '{"AAPL": {"action": "keep"}}'
     out = _parse_response(raw, ['AAPL', 'MSFT'])
-    assert out['AAPL']['action'] == 'approve'
+    assert out['AAPL']['action'] == 'keep'
     assert out['MSFT'] == FAIL_OPEN_DEFAULT
 
 def test_build_prompt_includes_required_fields():
+    """Prompt must reference per-ticker proposals + the action contract.
+    The real PROMPT_PATH template ships keep/cancel — no multiplier."""
     prompt = _build_prompt([_proposal('AAPL'), _proposal('MSFT', size=5000)])
     assert 'AAPL' in prompt and 'MSFT' in prompt
     assert 'preliminary_size_usd' in prompt
-    assert '"action"' in prompt and '"multiplier"' in prompt
+    assert 'action' in prompt          # contract field
+    assert 'keep' in prompt            # one of the two valid actions
+    assert 'cancel' in prompt          # the other
 
 def test_confirm_invokes_runner_and_parses(monkeypatch):
     captured = {}
     def fake_runner(prompt, max_tokens):
         captured['prompt'] = prompt
+        # Confirmer accepts legacy schema for backward-compat, normalises out
         return '{"AAPL": {"action": "scale", "multiplier": 0.7, "rationale": "x"}}'
     proposals = [_proposal('AAPL', size=20000)]
     out = confirm(proposals, runner=fake_runner)
-    assert out['AAPL']['multiplier'] == 0.7
+    assert out['AAPL']['action'] == 'keep'  # scale → keep (multiplier dropped)
+    assert 'multiplier' not in out['AAPL']
     assert 'AAPL' in captured['prompt']
 
 def test_confirm_runner_timeout_fails_open(monkeypatch, caplog):
@@ -85,10 +103,10 @@ def test_confirm_empty_proposals_returns_empty():
 def test_parse_response_unwraps_claude_bin_result_envelope():
     """claude-bin --output-format json wraps in {result: '...'}. We must
     unwrap that, then re-parse the inner string as JSON."""
-    inner = '{"AAPL": {"action": "approve", "multiplier": 1.0, "rationale": "x"}}'
+    inner = '{"AAPL": {"action": "keep", "rationale": "x"}}'
     raw = json.dumps({'type': 'result', 'subtype': 'success', 'result': inner})
     out = _parse_response(raw, ['AAPL'])
-    assert out['AAPL']['action'] == 'approve'
+    assert out['AAPL']['action'] == 'keep'
 
 
 def test_parse_response_extracts_json_from_markdown_fences():
@@ -96,20 +114,20 @@ def test_parse_response_extracts_json_from_markdown_fences():
     prompt asking for bare JSON. Regression for 2026-05-13 live cycle."""
     inner = (
         'Analysis: nothing concerning here.\n\n```json\n'
-        '{"WBD": {"action": "approve", "multiplier": 1.0, "rationale": "ok"}}\n'
+        '{"WBD": {"action": "keep", "rationale": "ok"}}\n'
         '```\n'
     )
     raw = json.dumps({'result': inner})
     out = _parse_response(raw, ['WBD'])
-    assert out['WBD']['action'] == 'approve'
+    assert out['WBD']['action'] == 'keep'
 
 
 def test_parse_response_extracts_json_when_prose_precedes():
     """Even without fences, find the first {...} object after prose."""
     inner = (
-        'No context provided. Defaulting to approve based on rubric.\n'
-        '{"AVB": {"action": "approve", "multiplier": 1.0, "rationale": "ok"}}'
+        'No context provided. Defaulting to keep based on rubric.\n'
+        '{"AVB": {"action": "keep", "rationale": "ok"}}'
     )
     raw = json.dumps({'result': inner})
     out = _parse_response(raw, ['AVB'])
-    assert out['AVB']['action'] == 'approve'
+    assert out['AVB']['action'] == 'keep'

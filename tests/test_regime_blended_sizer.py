@@ -57,7 +57,7 @@ def test_low_vol_consolidate_calls_tradejohn_and_emits_per_ticker():
     confirmer_called = []
     def fake_confirmer(proposals, runner=None):
         confirmer_called.append(proposals)
-        return {p['ticker']: {'action': 'approve', 'multiplier': 1.0, 'rationale': ''}
+        return {p['ticker']: {'action': 'keep', 'rationale': ''}
                 for p in proposals}
     orders = size_positions(
         signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
@@ -83,10 +83,11 @@ def test_high_vol_independent_skips_tradejohn_uses_target_pct_nav():
     assert orders[0]['qty'] == pytest.approx(25.0)
 
 def test_tradejohn_veto_zeroes_size():
+    """Per 2026-05-14 contract: confirmer action='cancel' suppresses the order."""
     sigs = [_sig('S1', 'AAPL', 1, kelly_p=0.5)]
     state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
     def vetoing(proposals, runner=None):
-        return {p['ticker']: {'action': 'veto', 'multiplier': 0.0, 'rationale': 'earnings'}
+        return {p['ticker']: {'action': 'cancel', 'rationale': 'earnings'}
                 for p in proposals}
     orders = size_positions(
         signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
@@ -96,19 +97,22 @@ def test_tradejohn_veto_zeroes_size():
     assert orders == []
 
 def test_tradejohn_scale_applies_multiplier():
+    """Per 2026-05-14 contract: 'scale' is no longer a valid action.
+    The sizer is upstream and final; confirmer can only keep or cancel.
+    This test now verifies that the legacy 'scale' input (mapped to
+    'keep' by the confirmer's compat layer) does NOT modify notional."""
     sigs = [_sig('S1', 'AAPL', 1, kelly_p=0.5, memo_mult=1.0)]
     state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
-    def scaling(proposals, runner=None):
-        return {p['ticker']: {'action': 'scale', 'multiplier': 0.5, 'rationale': ''}
+    def keep_only(proposals, runner=None):
+        return {p['ticker']: {'action': 'keep', 'rationale': ''}
                 for p in proposals}
     orders = size_positions(
         signals=sigs, account_state=_account(regt_bp=400_000), regime={'state': 'LOW_VOL'},
         run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('LOW_VOL'), confirmer=scaling,
+        regime_params=_params('LOW_VOL'), confirmer=keep_only,
     )
-    # preliminary = 0.5 × 1.0 × 400_000 × 1.0 = 200_000; scaled by confirmer × 0.5 = 100_000
-    # (legacy 25% aggregate cap dropped 2026-05-14 — sizer's own per-ticker cap governs)
-    assert orders[0]['notional_usd'] == pytest.approx(100_000.0)
+    # preliminary = 0.5 × 1.0 × 400_000 × 1.0 = 200_000; no scale applied.
+    assert orders[0]['notional_usd'] == pytest.approx(200_000.0)
 
 def test_cadence_pending_signal_skipped():
     sigs = [_sig('S1', 'AAPL', 1)]

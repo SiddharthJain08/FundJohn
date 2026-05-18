@@ -37,7 +37,7 @@ def test_low_vol_to_crisis_mode_flip():
 
     def confirmer(proposals, runner=None):
         confirmer_call_count[0] += 1
-        return {p['ticker']: {'action': 'approve', 'multiplier': 1.0, 'rationale': ''}
+        return {p['ticker']: {'action': 'keep', 'rationale': ''}
                 for p in proposals}
 
     # Cycle 1: LOW_VOL → consolidate (1 ticker, calls confirmer)

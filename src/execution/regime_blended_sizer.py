@@ -531,13 +531,18 @@ def _consolidate_path(signals, account_state, params, confirmer):
 
     decisions = confirmer(proposals)
 
+    # tradejohn_confirmer.py contract changed 2026-05-14 (commit 14d369a):
+    # actions are now {keep, cancel} only — the scale path was dropped
+    # because the formula sizer owns sizing now, and the confirmer only
+    # decides whether to fire at all. Pre-2026-05-14 this checked 'veto'
+    # which the new confirmer NEVER emits; vetoed positions were silently
+    # passing through into orders[]. Safety fix: check 'cancel'.
     orders = []
     for p in proposals:
-        d = decisions.get(p['ticker'], {'action': 'approve', 'multiplier': 1.0})
-        multiplier = float(d.get('multiplier', 1.0))
-        if d.get('action') == 'veto' or multiplier == 0:
+        d = decisions.get(p['ticker'], {'action': 'keep'})
+        if d.get('action') == 'cancel':
             continue
-        notional = p['preliminary_size_usd'] * multiplier
+        notional = p['preliminary_size_usd']
         entry = p['bracket']['entry_price']
         qty = (notional / entry) if entry > 0 else 0
         orders.append({

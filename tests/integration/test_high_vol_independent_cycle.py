@@ -57,7 +57,7 @@ def test_high_vol_independent_cycle_emits_per_signal_orders():
 
     def fake_confirmer(proposals, runner=None):
         confirmer_calls.append(proposals)
-        return {p['ticker']: {'action': 'approve', 'multiplier': 1.0, 'rationale': 'test'}
+        return {p['ticker']: {'action': 'keep', 'rationale': 'test'}
                 for p in proposals}
 
     orders = size_positions(

@@ -92,7 +92,7 @@ def _build_signals():
 def _fake_confirmer(proposals, runner=None):
     """Approve all proposals at full size — no LLM invocation."""
     return {
-        p['ticker']: {'action': 'approve', 'multiplier': 1.0, 'rationale': 'test-auto-approve'}
+        p['ticker']: {'action': 'keep', 'rationale': 'test-auto-approve'}
         for p in proposals
     }
 

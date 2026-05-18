@@ -36,10 +36,12 @@ def _build_prompt(proposals: list[dict]) -> str:
     payload = {'proposals': proposals}
     return template + '\n\n## INPUT\n```json\n' + json.dumps(payload, indent=2, default=str) + '\n```'
 
-_FALLBACK_TEMPLATE = """You are TradeJohn, a per-ticker position-sizing confirmer.
-For each proposal in INPUT, output an action (approve | veto | scale)
-and a multiplier (0 to 2). Respond with strict JSON: a top-level object
-keyed by ticker, each value {"action", "multiplier", "rationale"}."""
+_FALLBACK_TEMPLATE = """You are TradeJohn, a per-ticker risk gate. Upstream sizing is
+fully formulaic. Your only action is to cancel orders on tickers with highly
+alarming, ticker-specific news. Default to keep; cancel < 5% of tickers per cycle.
+Respond with strict JSON: a top-level object keyed by uppercase ticker,
+each value {"action": "keep" | "cancel", "rationale": "≤ 200 chars"}.
+Do not include a multiplier field."""
 
 def _default_runner(prompt: str, max_budget_usd: float = DEFAULT_MAX_BUDGET_USD) -> str:
     """Spawn claude-bin and return stdout. Raises on non-zero exit."""
