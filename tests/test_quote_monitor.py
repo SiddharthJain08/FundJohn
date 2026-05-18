@@ -294,6 +294,25 @@ def test_registry_populated_after_adapter_imports():
     assert set(r.names()) >= {'polygon', 'fmp', 'alpaca', 'yahoo'}
 
 
+def test_pipeline_orchestrator_does_not_import_quote_monitor():
+    """D2.6 invariant: with OPENCLAW_UNIFIED_QUOTES unset, the daily collect
+    step must be byte-identical to today. Asserted structurally — the
+    orchestrator source must not reference quote_monitor.
+
+    This is the durable check that catches any future accidental wiring of
+    the QuoteMonitor into the cycle before the operator has flipped the
+    gate after 5 trading days of parity-table observation."""
+    import pathlib
+    orch_path = pathlib.Path(__file__).parent.parent / 'src' / 'execution' / 'pipeline_orchestrator.py'
+    src = orch_path.read_text()
+    assert 'quote_monitor' not in src, (
+        'pipeline_orchestrator.py references quote_monitor — the Phase 2D '
+        'gate exists so the daily collect step is byte-identical until the '
+        'operator flips OPENCLAW_UNIFIED_QUOTES=1 after parity observation.'
+    )
+    assert 'quote_sources' not in src
+
+
 # ── 8: dedup-on-rapid-update ────────────────────────────────────────────────
 
 def test_dedup_on_rapid_update_returns_cached_result():
