@@ -214,6 +214,86 @@ def test_env_gated_source_selection():
         assert gate_enabled() is False
 
 
+# ── adapter parity smokes (D2.5) ─────────────────────────────────────────────
+# These are SUPPLEMENTARY to the 8 required tests above: they verify each
+# concrete adapter wraps its upstream call shape correctly. Same _http_retry
+# mock pattern as tests/test_dbnomics_client.py.
+
+class _FakeResp:
+    def __init__(self, body: bytes):
+        self._body = body
+        self.status = 200
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def test_polygon_adapter_parses_snapshot_payload():
+    from src.ingestion.quote_sources.polygon import PolygonQuoteSource
+    payload = b'{"ticker":{"lastTrade":{"p":190.27},"lastQuote":{"bp":190.25,"ap":190.30},"day":{"v":12345678,"c":190.10}}}'
+    with patch('src.ingestion._http_retry.urlopen') as mock_open:
+        mock_open.return_value = _FakeResp(payload)
+        src = PolygonQuoteSource(api_key='fake-key')
+        result = asyncio.run(src.fetch(['AAPL']))
+    assert 'AAPL' in result
+    assert result['AAPL'].price == 190.27          # lastTrade.p preferred
+    assert result['AAPL'].bid    == 190.25
+    assert result['AAPL'].ask    == 190.30
+    assert result['AAPL'].source == 'polygon'
+    assert result['AAPL'].volume == 12345678
+
+
+def test_fmp_adapter_parses_quote_payload():
+    from src.ingestion.quote_sources.fmp import FMPQuoteSource
+    payload = b'[{"symbol":"AAPL","price":190.45,"volume":54321000,"bid":190.40,"ask":190.50}]'
+    with patch('src.ingestion._http_retry.urlopen') as mock_open:
+        mock_open.return_value = _FakeResp(payload)
+        src = FMPQuoteSource(api_key='fake-key')
+        result = asyncio.run(src.fetch(['AAPL']))
+    assert 'AAPL' in result
+    assert result['AAPL'].price == 190.45
+    assert result['AAPL'].source == 'fmp'
+
+
+def test_alpaca_adapter_parses_snapshot_payload():
+    from src.ingestion.quote_sources.alpaca import AlpacaQuoteSource
+    payload = b'{"latestTrade":{"p":189.99},"latestQuote":{"bp":189.95,"ap":190.05},"dailyBar":{"v":99000000}}'
+    with patch('src.ingestion._http_retry.urlopen') as mock_open:
+        mock_open.return_value = _FakeResp(payload)
+        src = AlpacaQuoteSource(api_key='fake-id', api_secret='fake-secret')
+        result = asyncio.run(src.fetch(['AAPL']))
+    assert 'AAPL' in result
+    assert result['AAPL'].price == 189.99          # latestTrade.p preferred
+    assert result['AAPL'].bid    == 189.95
+    assert result['AAPL'].ask    == 190.05
+    assert result['AAPL'].source == 'alpaca'
+
+
+def test_adapters_skip_missing_credentials():
+    """Polygon/FMP/Alpaca with no API key return empty dict (no HTTP call)."""
+    from src.ingestion.quote_sources.polygon import PolygonQuoteSource
+    from src.ingestion.quote_sources.fmp import FMPQuoteSource
+    from src.ingestion.quote_sources.alpaca import AlpacaQuoteSource
+    for cls in (PolygonQuoteSource, FMPQuoteSource):
+        src = cls(api_key='')
+        assert asyncio.run(src.fetch(['AAPL'])) == {}
+    src = AlpacaQuoteSource(api_key='', api_secret='')
+    assert asyncio.run(src.fetch(['AAPL'])) == {}
+
+
+def test_registry_populated_after_adapter_imports():
+    """SOURCE_REGISTRY must contain all four adapters after import."""
+    from src.ingestion.quote_sources import polygon, fmp, alpaca, yahoo  # noqa: F401
+    from src.ingestion import quote_sources as r
+    assert set(r.names()) >= {'polygon', 'fmp', 'alpaca', 'yahoo'}
+
+
 # ── 8: dedup-on-rapid-update ────────────────────────────────────────────────
 
 def test_dedup_on_rapid_update_returns_cached_result():
