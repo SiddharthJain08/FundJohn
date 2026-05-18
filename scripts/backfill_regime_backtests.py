@@ -27,10 +27,21 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 import psycopg2
 import psycopg2.extras
-from dotenv import load_dotenv
-load_dotenv(ROOT / '.env')
 
 from strategies.auto_backtest import run_backtest
+
+# dotenv load is deferred to _load_env() and called from main() ONLY.
+# Top-level load_dotenv pollutes the pytest os.environ across the whole
+# session, which caused the integration sizer tests to receive
+# OPENCLAW_SHARPE_CADENCE_SIZER=1 via inheritance and route through the
+# DB-reading sharpe_cadence path instead of the input-signal-only
+# independent path. See test-pollution bisect 2026-05-18.
+def _load_env() -> None:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / '.env')
+    except (ImportError, PermissionError, OSError):
+        pass
 
 CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']
 IMPLEMENTATIONS_DIR = ROOT / 'src' / 'strategies' / 'implementations'
@@ -173,6 +184,7 @@ def write_strategy(conn, run_id: str, strategy_id: str, entry: dict, result: dic
 
 
 def main():
+    _load_env()
     ap = argparse.ArgumentParser()
     ap.add_argument('--states', default='live',
                     help='Comma-separated manifest states to backfill (default: live)')
