@@ -12,6 +12,13 @@ Keys:
 
 Filesystem fallback: output/handoffs/{date}_{stage}.json
 TTL: 86400 seconds (24h)
+
+Phase 2B (2026-05-18): `write_handoff` routes the Redis side through
+``DataHub`` (src/database/datahub.py). This is the demonstrator caller
+for the DataHub facade — the key path (`handoff:{date}:{stage}`) and
+TTL (86400) are unchanged, so all existing readers via ``read_handoff``
+keep working. DataHub additionally publishes on the same topic so any
+future subscriber can react to a new handoff without polling.
 """
 
 import os, json
@@ -37,10 +44,30 @@ def _redis_client():
         return None
 
 
+def _datahub():
+    """Lazily build a DataHub bound to the same Redis the rest of the
+    module uses. Returns ``None`` if DataHub or Redis is unreachable so
+    the filesystem fallback path is still exercised.
+
+    Imported inside the function to keep ``handoff.py`` importable from
+    code that hasn't installed redis (legacy callers).
+    """
+    try:
+        from database.datahub import DataHub, DataHubError
+    except Exception:
+        return None
+    try:
+        return DataHub(producer_id='handoff')
+    except DataHubError:
+        return None
+    except Exception:
+        return None
+
+
 def write_handoff(run_date: str, stage: str, payload: Any) -> bool:
     """
     Serialize payload to JSON and write to:
-      1. Redis key handoff:{run_date}:{stage}  (TTL 24h)
+      1. Redis key handoff:{run_date}:{stage}  (TTL 24h), via DataHub
       2. output/handoffs/{run_date}_{stage}.json  (filesystem fallback)
 
     Returns True if at least filesystem write succeeded.
@@ -48,12 +75,25 @@ def write_handoff(run_date: str, stage: str, payload: Any) -> bool:
     data = json.dumps(payload, default=str)
     key  = f'handoff:{run_date}:{stage}'
 
-    r = _redis_client()
-    if r:
+    # Preferred path: route Redis writes through DataHub so we get the
+    # topic-schema validation, payload-size cap, and pub/sub fan-out for
+    # free. Failures fall back to direct redis, which falls back to the
+    # filesystem.
+    published = False
+    hub = _datahub()
+    if hub is not None:
         try:
-            r.setex(key, REDIS_TTL, data)
+            published = hub.publish(key, payload, ttl=REDIS_TTL)
         except Exception:
-            pass
+            published = False
+
+    if not published:
+        r = _redis_client()
+        if r:
+            try:
+                r.setex(key, REDIS_TTL, data)
+            except Exception:
+                pass
 
     HANDOFF_DIR.mkdir(parents=True, exist_ok=True)
     fpath = HANDOFF_DIR / f'{run_date}_{stage}.json'
