@@ -99,17 +99,30 @@ def load_strategies(states: set[str]) -> list[tuple[str, dict, Path]]:
     out: list[tuple[str, dict, Path]] = []
     skipped: list[tuple[str, str]] = []
     for sid, entry in strategies.items():
-        if entry.get('state') not in states:
+        state = entry.get('state')
+        if state not in states:
             continue
         fp = resolve_filepath(sid, entry)
         if fp is None:
-            skipped.append((sid, 'file_not_found'))
+            # STAGING is the operator-approval gate (Tier-B brain output) —
+            # the .py is intentionally absent until the operator approves
+            # data fetch + the coding step runs. Don't log it as
+            # "file_not_found"; that read alarming for ~6 months.
+            why = 'staging_not_yet_coded' if state == 'staging' else 'file_not_found'
+            skipped.append((sid, why))
             continue
         out.append((sid, entry, fp))
     if skipped:
-        print(f'[backfill] Skipped {len(skipped)} strategies without files:')
-        for sid, why in skipped:
-            print(f'  - {sid}: {why}')
+        hard = [(s, w) for s, w in skipped if w != 'staging_not_yet_coded']
+        soft = [(s, w) for s, w in skipped if w == 'staging_not_yet_coded']
+        if hard:
+            print(f'[backfill] Skipped {len(hard)} strategies without files:')
+            for sid, why in hard:
+                print(f'  - {sid}: {why}')
+        if soft:
+            print(f'[backfill] Skipped {len(soft)} STAGING strategies (pre-coding, expected):')
+            for sid, _ in soft:
+                print(f'  - {sid}')
     return out
 
 

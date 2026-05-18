@@ -197,8 +197,17 @@ async function runSaturdayBrain() {
   if (mode === 'paper-expansion')       return runPaperExpansion();
   console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion`);
   process.exit(2);
-})().catch((e) => {
-  console.error(`[mastermind] FATAL: ${e.message}`);
-  console.error(e.stack);
-  process.exit(1);
-});
+})()
+  // Force-exit after the mode finishes. Multiple sub-curators open pg
+  // Pools / Redis clients without explicit teardown (saturday_brain has
+  // _query._pool, research-orchestrator has both), and Node won't exit
+  // while those handles are open. 2026-05-16: saturday-brain printed
+  // its final summary at 14:51:57 then sat idle until systemd SIGTERMed
+  // it 6h later — making a successful run look like a Result=timeout
+  // failure to anything watching systemd state.
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(`[mastermind] FATAL: ${e.message}`);
+    console.error(e.stack);
+    process.exit(1);
+  });

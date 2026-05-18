@@ -130,6 +130,9 @@ _IMPL_MAP = {
     'S_bayes_stein_shrinkage_mvo':    ('strategies.implementations.S_bayes_stein_shrinkage_mvo',    'BayesSteinShrinkageMVO'),
     'S_visibility_graph_rsi':         ('strategies.implementations.S_visibility_graph_rsi',         'VisibilityGraphRSI'),
     'S_prism_vq_cross_section_factor': ('strategies.implementations.S_prism_vq_cross_section_factor', 'PrismVQCrossSectionFactor'),
+    # Tier-B staging — awaiting data backfill; stubs return [] until gate clears
+    'S_estimation_risk_three_fund':    ('strategies.implementations.s_estimation_risk_three_fund',    'S_estimation_risk_three_fund'),
+    'S_earnings_news_specific_momentum': ('strategies.implementations.s_earnings_news_specific_momentum', 'S_earnings_news_specific_momentum'),
 }
 
 

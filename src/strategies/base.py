@@ -169,7 +169,8 @@ class BaseStrategy(ABC):
     ) -> dict:
         """Standard stop/target computation. Reusable across strategies."""
         diff = prices_series.diff().abs()
-        atr  = float(diff.rolling(14).mean().iloc[-1]) if len(diff) >= 14 else current_price * 0.02
+        _atr_raw = diff.rolling(14).mean().iloc[-1] if len(diff) >= 14 else float('nan')
+        atr  = float(_atr_raw) if pd.notna(_atr_raw) else current_price * 0.02
 
         # Scale ATR multiplier by regime to preserve R:R geometry in high-vol environments.
         # High vol inflates ATR-based stops without expanding fixed-% targets, killing EV.
