@@ -74,13 +74,25 @@ function parseCommand(text) {
 }
 
 /**
- * Look up the Nth IC_REQUIRED row for today (UTC). Returns {id, strategy_id, ticker}
- * or null. Numbering matches the runner's prompt (ORDER BY strategy_id, ticker).
+ * Look up the Nth row for today (UTC) by the same ordering the runner used
+ * when posting the prompt. CRITICAL: we order over IC_REQUIRED rows only
+ * AT POST TIME — but we cannot filter on classification here, because that
+ * filter would skew the OFFSET after the operator approves rows out-of-order.
+ *
+ * Instead we filter to the original IC_REQUIRED prompt set by taking only
+ * rows whose initial classification was IC_REQUIRED (current or AUTO_APPROVE/
+ * VETOED are not in the prompt). Since the runner only ever inserts a row as
+ * IC_REQUIRED for that bucket, the stable selection is "classification was
+ * ever in (IC_REQUIRED, APPROVED, SCALED, VETOED, TIMED_OUT)" — which is
+ * everything except the synchronously-decided AUTO_APPROVE/VETOED-by-classifier
+ * rows. Those are persisted with decided_by='classifier'; the prompt rows have
+ * decided_by either NULL (still pending) or an operator/runner_timeout name.
  */
 async function findNthPending(client, runDate, n) {
   const r = await client.query(
-    `SELECT id, strategy_id, ticker FROM ic_decisions
-       WHERE run_date = $1 AND classification = 'IC_REQUIRED'
+    `SELECT id, strategy_id, ticker, classification FROM ic_decisions
+       WHERE run_date = $1
+         AND (decided_by IS NULL OR decided_by NOT IN ('classifier'))
        ORDER BY strategy_id, ticker
        OFFSET $2 LIMIT 1`,
     [runDate, n - 1],
@@ -101,25 +113,34 @@ async function applyDecision({ action, n, scaled_size_pct }, decidedBy, runDate)
       return { ok: false, reason: 'no_pending_row',
                detail: `no IC_REQUIRED row #${n} for ${runDate}` };
     }
+    // Guard: only UPDATE rows still IC_REQUIRED. An operator typing the
+    // same command twice, or trying to override a TIMED_OUT row an hour
+    // later, must not silently overwrite a settled decision. rowCount=0 →
+    // surface the already-decided state to the operator.
+    let res;
     if (action === 'SCALED') {
-      await client.query(
+      res = await client.query(
         `UPDATE ic_decisions
             SET classification = 'SCALED',
                 decided_by = $1,
                 decided_at = NOW(),
                 scaled_size_pct = $2
-          WHERE id = $3`,
+          WHERE id = $3 AND classification = 'IC_REQUIRED'`,
         [decidedBy, scaled_size_pct, row.id],
       );
     } else {
-      await client.query(
+      res = await client.query(
         `UPDATE ic_decisions
             SET classification = $1,
                 decided_by = $2,
                 decided_at = NOW()
-          WHERE id = $3`,
+          WHERE id = $3 AND classification = 'IC_REQUIRED'`,
         [action, decidedBy, row.id],
       );
+    }
+    if (res.rowCount === 0) {
+      return { ok: false, reason: 'already_decided',
+               detail: `#${n} (${row.strategy_id}/${row.ticker}) is ${row.classification}` };
     }
     return { ok: true, action, row, scaled_size_pct: scaled_size_pct ?? null };
   } finally {
