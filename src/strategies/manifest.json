@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-18T07:47:55.513054Z",
+  "updated_at": "2026-05-18T08:17:33.804666Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "staging",
@@ -3020,115 +3020,23 @@
     },
     "S_bankruptcy_risk_anomaly": {
       "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.900712+00:00",
+      "state_since": "2026-04-27T00:00:00+00:00",
       "metadata": {
-        "canonical_file": "s_bankruptcy_risk_anomaly.py",
-        "class": "S_bankruptcy_risk_anomaly",
-        "description": "Firms with high bankruptcy risk (measured by Z-score or O-score) earn anomalously low subsequent returns, enabling a contrarian long-safety/short-distress spread that persists despite its counter-intuitive direction relative to standard risk-return theory."
+        "canonical_file": "S_bankruptcy_risk_anomaly.py",
+        "class": "BankruptcyRiskAnomaly",
+        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score \u2014 Dichev (1998)"
       },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2022-11-13)",
-                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-11-13",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "68dee4e2-85b3-4f16-a01a-ff842621c852"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T03:39:12.355575+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-12T19:24:54.260Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.900712+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        }
-      ]
+      "history": []
     },
     "S_fear_index_return_prediction": {
       "state": "candidate",
-      "state_since": "2026-04-30T15:15:00.518759+00:00",
+      "state_since": "2026-04-30T00:00:00+00:00",
       "metadata": {
-        "canonical_file": "s_fear_index_return_prediction.py",
-        "class": "S_fear_index_return_prediction",
-        "description": "Extreme spikes in implied volatility indices (VIX, VXN, VDAX) predict positive 20-60 day forward returns because fear-driven selling creates a risk premium that subsequently compresses as sentiment normalizes."
+        "canonical_file": "S_fear_index_return_prediction.py",
+        "class": "FearIndexReturnPrediction",
+        "description": "LONG when VIX z-score (252d) > 1.5 \u2014 fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
       },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "macro: reachable but not backfilled (providers alpha_vantage)",
-                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpha_vantage",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-12-08",
-                  "gap_to": "2026-04-26"
-                }
-              ]
-            },
-            "candidate_id": "93b6687a-2fc8-4c3d-96f2-5cee1f57e0b1"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T15:14:08.864434+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ]
+      "history": []
     },
     "S_industry_momentum_moskowitz": {
       "state": "archived",
@@ -3323,66 +3231,14 @@
       ]
     },
     "S_macro_risk_momentum_ip_beta": {
-      "state": "live",
-      "state_since": "2026-04-30T15:17:13.497Z",
+      "state": "candidate",
+      "state_since": "2026-04-30T00:00:00+00:00",
       "metadata": {
-        "canonical_file": "s_macro_risk_momentum_ip_beta.py",
-        "class": "S_macro_risk_momentum_ip_beta",
-        "description": "Price momentum winners carry temporarily higher loadings on industrial production growth than losers, so momentum profits represent compensation for macroeconomic risk rather than a persistent mispricing anomaly.",
-        "eligible_regimes": [
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
-        ]
+        "canonical_file": "S_macro_risk_momentum_ip_beta.py",
+        "class": "MacroRiskMomentumIPBeta",
+        "description": "Momentum winners carry higher IP-growth beta; long top decile, short bottom decile (Liu & Zhang 2008)"
       },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "macro: reachable but not backfilled (providers alpha_vantage)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "alpha_vantage",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-03-31",
-                  "gap_to": "2026-04-26"
-                }
-              ]
-            },
-            "candidate_id": "35d09fa8-9f8c-4d9e-9b94-9febaed63351"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T15:16:42.611622+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 1.42, DD 0.9%, trades 170",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-04-30T15:17:13.497Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        }
-      ]
+      "history": []
     },
     "S_risk_neutral_skew_cross_section": {
       "state": "candidate",
@@ -3471,100 +3327,71 @@
     },
     "S_renko_kagi_pairs_spread": {
       "state": "candidate",
-      "state_since": "2026-05-02T22:00:22.560807+00:00",
+      "state_since": "2026-04-26T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_renko_kagi_pairs_spread.py",
-        "class": "RenkoKagiPairsSpread"
+        "class": "RenkoKagiPairsSpread",
+        "description": "Pairs trading via renko/kagi chart reversals on vol-calibrated spread bricks"
       },
       "history": []
     },
     "S_expected_idiosyncratic_skewness": {
       "state": "candidate",
-      "state_since": "2026-05-02T22:00:24.562040+00:00",
+      "state_since": "2026-04-26T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_expected_idiosyncratic_skewness.py",
-        "class": "ExpectedIdiosyncraticSkewness"
+        "class": "ExpectedIdiosyncraticSkewness",
+        "description": "Sort on forecasted idiosyncratic skewness: LONG low-skew, SHORT high-skew stocks"
       },
       "history": []
     },
     "S_partial_cointegration_pairs": {
       "state": "candidate",
-      "state_since": "2026-05-02T22:00:27.580731+00:00",
+      "state_since": "2026-04-26T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_partial_cointegration_pairs.py",
-        "class": "PartialCointegrationPairs"
+        "class": "PartialCointegrationPairs",
+        "description": "Partial cointegration pairs: Kalman-filter spread decomposition, trade mean-reverting z-score."
       },
       "history": []
     },
     "S_pairs_trading_min_distance": {
-      "state": "live",
-      "state_since": "2026-05-03T21:51:21.224Z",
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
         "class": "PairsTradingMinDistance",
-        "eligible_regimes": [
-          "HIGH_VOL",
-          "CRISIS"
-        ]
+        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing."
       },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-03T21:51:21.224Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        }
-      ]
+      "history": []
     },
     "S_pca_etf_stat_arb_reversion": {
-      "state": "archived",
-      "state_since": "2026-05-03T21:55:30.083Z",
+      "state": "candidate",
+      "state_since": "2026-04-26T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_pca_etf_stat_arb_reversion.py",
-        "class": "PCAETFStatArbReversion"
+        "class": "PCAETFStatArbReversion",
+        "description": "Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals."
       },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-05-03T21:55:04.294Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "archived",
-          "timestamp": "2026-05-03T21:55:30.083Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        }
-      ]
+      "history": []
     },
     "S_motif_orbit_spillover_portfolio": {
       "state": "candidate",
-      "state_since": "2026-05-09T14:20:32.514839+00:00",
+      "state_since": "2026-05-09T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_motif_orbit_spillover_portfolio.py",
-        "class": "MotifOrbitSpilloverPortfolio"
+        "class": "MotifOrbitSpilloverPortfolio",
+        "description": "Orbit-position diversity score via quantile connectedness entropy; long top-quintile risk-transmitters, short bottom-quintile receivers, monthly rebalance."
       },
       "history": []
     },
     "S_btc_gold_dual_momentum_rotation": {
       "state": "candidate",
-      "state_since": "2026-05-09T14:22:22.331027+00:00",
+      "state_since": "2026-05-09T00:00:00+00:00",
       "metadata": {
         "canonical_file": "S_btc_gold_dual_momentum_rotation.py",
         "class": "BtcGoldDualMomentumRotation",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
-        ]
+        "description": "Rotate into the stronger store-of-value asset (IBIT or GLD) via composite 4/8/12-week dual momentum; go flat if both absolute momentum signals are negative."
       },
       "history": []
     },
@@ -3728,6 +3555,16 @@
         ]
       },
       "history": []
+    },
+    "S_tda_topological_risk_portfolio": {
+      "state": "candidate",
+      "state_since": "2026-05-02T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tda_topological_risk_portfolio.py",
+        "class": "TdaTopologicalRiskPortfolio",
+        "description": "Persistence-landscape Topological Risk (L1-norm of 1D sublevel-set PD) minimum-risk weighting over S&P 500; monthly rebalance, 252-day lookback."
+      },
+      "history": []
     }
   },
   "decommissioned": {
@@ -3765,116 +3602,6 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
-    },
-    "S_renko_kagi_pairs_spread": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_renko_kagi_pairs_spread.py",
-        "class": "RenkoKagiPairsSpread",
-        "description": "Pairs trading via renko/kagi chart reversals on vol-calibrated spread bricks"
-      },
-      "history": []
-    },
-    "S_expected_idiosyncratic_skewness": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_expected_idiosyncratic_skewness.py",
-        "class": "ExpectedIdiosyncraticSkewness",
-        "description": "Sort on forecasted idiosyncratic skewness: LONG low-skew, SHORT high-skew stocks"
-      },
-      "history": []
-    },
-    "S_partial_cointegration_pairs": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_partial_cointegration_pairs.py",
-        "class": "PartialCointegrationPairs",
-        "description": "Partial cointegration pairs: Kalman-filter spread decomposition, trade mean-reverting z-score."
-      },
-      "history": []
-    },
-    "S_pairs_trading_min_distance": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_pairs_trading_min_distance.py",
-        "class": "PairsTradingMinDistance",
-        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing."
-      },
-      "history": []
-    },
-    "S_pca_etf_stat_arb_reversion": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_pca_etf_stat_arb_reversion.py",
-        "class": "PCAETFStatArbReversion",
-        "description": "Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals."
-      },
-      "history": []
-    },
-    "S_bankruptcy_risk_anomaly": {
-      "state": "candidate",
-      "state_since": "2026-04-27T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_bankruptcy_risk_anomaly.py",
-        "class": "BankruptcyRiskAnomaly",
-        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score \u2014 Dichev (1998)"
-      },
-      "history": []
-    },
-    "S_fear_index_return_prediction": {
-      "state": "candidate",
-      "state_since": "2026-04-30T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_fear_index_return_prediction.py",
-        "class": "FearIndexReturnPrediction",
-        "description": "LONG when VIX z-score (252d) > 1.5 \u2014 fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
-      },
-      "history": []
-    },
-    "S_macro_risk_momentum_ip_beta": {
-      "state": "candidate",
-      "state_since": "2026-04-30T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_macro_risk_momentum_ip_beta.py",
-        "class": "MacroRiskMomentumIPBeta",
-        "description": "Momentum winners carry higher IP-growth beta; long top decile, short bottom decile (Liu & Zhang 2008)"
-      },
-      "history": []
-    },
-    "S_tda_topological_risk_portfolio": {
-      "state": "candidate",
-      "state_since": "2026-05-02T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_tda_topological_risk_portfolio.py",
-        "class": "TdaTopologicalRiskPortfolio",
-        "description": "Persistence-landscape Topological Risk (L1-norm of 1D sublevel-set PD) minimum-risk weighting over S&P 500; monthly rebalance, 252-day lookback."
-      },
-      "history": []
-    },
-    "S_motif_orbit_spillover_portfolio": {
-      "state": "candidate",
-      "state_since": "2026-05-09T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_motif_orbit_spillover_portfolio.py",
-        "class": "MotifOrbitSpilloverPortfolio",
-        "description": "Orbit-position diversity score via quantile connectedness entropy; long top-quintile risk-transmitters, short bottom-quintile receivers, monthly rebalance."
-      },
-      "history": []
-    },
-    "S_btc_gold_dual_momentum_rotation": {
-      "state": "candidate",
-      "state_since": "2026-05-09T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_btc_gold_dual_momentum_rotation.py",
-        "class": "BtcGoldDualMomentumRotation",
-        "description": "Rotate into the stronger store-of-value asset (IBIT or GLD) via composite 4/8/12-week dual momentum; go flat if both absolute momentum signals are negative."
-      },
-      "history": []
     }
   }
 }
