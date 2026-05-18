@@ -30,6 +30,12 @@ def _dep_available(dep: str) -> tuple[bool, str]:
         if not os.environ.get('DISCORD_BOT_TOKEN'):
             return False, 'DISCORD_BOT_TOKEN not set'
         return True, ''
+    if dep == 'systemd':
+        # systemd is only present on the production VPS; running tests
+        # in a container should skip these checks cleanly.
+        if Path('/run/systemd/system').exists():
+            return True, ''
+        return False, 'not running under systemd'
     return False, f'unknown dep {dep!r}'
 
 
