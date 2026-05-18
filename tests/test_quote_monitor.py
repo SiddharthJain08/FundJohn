@@ -294,6 +294,96 @@ def test_registry_populated_after_adapter_imports():
     assert set(r.names()) >= {'polygon', 'fmp', 'alpaca', 'yahoo'}
 
 
+# ── D2.7 parity-capture smokes ─────────────────────────────────────────────
+
+def test_parity_rows_computed_from_fanout_result():
+    """compute_parity_rows: one row per (primary, other) pair per ticker
+    where both sources resolved. Divergence in pct + bps with the right
+    sign (price_b > price_a → positive)."""
+    from src.ingestion.quote_monitor import FanOutResult
+    from src.ingestion.quote_monitor_parity import compute_parity_rows
+    qa = _quote('AAPL', 190.00, 'polygon')
+    qb1 = _quote('AAPL', 190.19, 'fmp')      # +10 bps
+    qb2 = _quote('AAPL', 189.81, 'alpaca')   # -10 bps
+    qc = _quote('MSFT', 410.00, 'polygon')
+    qd = _quote('MSFT', 410.41, 'fmp')       # +10 bps
+    result = FanOutResult(
+        by_source={
+            'polygon': {'AAPL': qa, 'MSFT': qc},
+            'fmp':     {'AAPL': qb1, 'MSFT': qd},
+            'alpaca':  {'AAPL': qb2},  # no MSFT from alpaca
+        }
+    )
+    rows = compute_parity_rows(result)
+    assert len(rows) == 3  # AAPL×fmp, AAPL×alpaca, MSFT×fmp
+    aapl_fmp = [r for r in rows if r['ticker'] == 'AAPL' and r['source_b'] == 'fmp'][0]
+    assert aapl_fmp['source_a'] == 'polygon'
+    assert abs(aapl_fmp['divergence_bps'] - 10) <= 1
+    aapl_alpaca = [r for r in rows if r['ticker'] == 'AAPL' and r['source_b'] == 'alpaca'][0]
+    assert aapl_alpaca['divergence_bps'] < 0
+    # If primary didn't resolve a ticker, skip it (parity anchored on Polygon).
+    result_no_primary = FanOutResult(by_source={'fmp': {'AAPL': qb1}})
+    assert compute_parity_rows(result_no_primary) == []
+
+
+def test_insert_parity_rows_uses_supplied_conn_without_db():
+    """insert_parity_rows accepts an injected conn (test-only path) so we
+    can verify the SQL shape without a live Postgres."""
+    from src.ingestion.quote_monitor_parity import insert_parity_rows
+
+    class _Cur:
+        def __init__(self):
+            self.calls = []
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def __init__(self):
+            self.cur = _Cur()
+            self.committed = False
+        def cursor(self):
+            return self.cur
+        def commit(self):
+            self.committed = True
+
+    rows = [{
+        'ticker': 'AAPL', 'source_a': 'polygon', 'price_a': 190.0,
+        'source_b': 'fmp', 'price_b': 190.19,
+        'divergence_pct': 0.1, 'divergence_bps': 10, 'max_age_sec': 0.0,
+        'fetched_at_a': datetime.now(timezone.utc),
+        'fetched_at_b': datetime.now(timezone.utc),
+    }]
+    conn = _Conn()
+    n = insert_parity_rows(rows, conn=conn)
+    assert n == 1
+    assert conn.committed
+    sql, params = conn.cur.calls[0]
+    assert 'INSERT INTO quote_monitor_parity' in sql
+    assert params['ticker'] == 'AAPL'
+    assert params['source_a'] == 'polygon'
+    # Empty input → zero rows, no commit attempt.
+    conn2 = _Conn()
+    assert insert_parity_rows([], conn=conn2) == 0
+
+
+def test_migration_103_quote_monitor_parity_exists_and_creates_table():
+    """The 103_quote_monitor_parity.sql migration must create the table
+    with the columns the parity-capture writer expects."""
+    import pathlib
+    mig = pathlib.Path(__file__).parent.parent / 'src' / 'database' / 'migrations' / '103_quote_monitor_parity.sql'
+    assert mig.exists(), 'migration 103 missing'
+    sql = mig.read_text()
+    assert 'CREATE TABLE IF NOT EXISTS quote_monitor_parity' in sql
+    for col in ('ticker', 'source_a', 'price_a', 'source_b', 'price_b',
+                'divergence_pct', 'divergence_bps', 'max_age_sec',
+                'fetched_at_a', 'fetched_at_b'):
+        assert col in sql, f'column {col} missing from migration 103'
+
+
 def test_pipeline_orchestrator_does_not_import_quote_monitor():
     """D2.6 invariant: with OPENCLAW_UNIFIED_QUOTES unset, the daily collect
     step must be byte-identical to today. Asserted structurally — the
