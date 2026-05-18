@@ -311,19 +311,24 @@ def test_column_deprecation_preserves_parquet_history(conn):
 # ─────────────────────────────────────────────────────────────────────────────
 # Inline orphan-column removal on strategy unstacking.
 #
-# When a strategy transitions to DEPRECATED or ARCHIVED,
-# LifecycleStateMachine._remove_orphan_columns_inline runs synchronously and:
-#   1. drops every requirements.json column not used by any remaining
-#      live/monitoring/candidate/staging strategy from the data_columns
-#      ledger (Postgres),
-#   2. strips those columns from data/master/schema_registry.json (atomic
-#      tmp + rename).
-# Historical parquet rows are preserved.
+# 2026-05-18: tests in this block are SKIPPED. The orphan-column removal
+# feature was intentionally removed on 2026-04-28 because it conflicts with
+# the CLAUDE.md core invariant: NEVER DELETE FROM the canonical Postgres
+# tables (which include `data_columns`) or the `data/master/` parquets.
+# See `src/strategies/lifecycle.py:373-379` for the architectural note.
 #
-# These tests exercise the helper directly with a synthesised
-# requirements.json + schema_registry.json under tmp_path, against a real DB
-# row in data_columns. We never write to the production manifest.
+# Past data stays forever; future strategies can opt into any column
+# already collected. The tests below test a feature contract that no
+# longer exists by design. Kept for reference in case the invariant is
+# ever relaxed (e.g. a flag-gated "archive to cold storage then delete"
+# flow would let the tests be un-skipped).
 # ─────────────────────────────────────────────────────────────────────────────
+
+_ORPHAN_REMOVAL_DISABLED = pytest.mark.skip(
+    reason='orphan-column removal disabled 2026-04-28 — conflicts with the '
+           '"NEVER DELETE FROM MASTER DATABASE" invariant (data_columns is '
+           'an append-only canonical table). See lifecycle.py:373-379.'
+)
 
 @pytest.fixture()
 def autocommit_conn():
@@ -432,6 +437,7 @@ def _seed_data_columns(cur, columns):
         )
 
 
+@_ORPHAN_REMOVAL_DISABLED
 def test_unstack_removes_orphan_columns_inline(autocommit_conn, patched_paths):
     """Single strategy uses a unique column; archiving it must drop the
     column from data_columns AND schema_registry inline (no queue)."""
@@ -460,6 +466,7 @@ def test_unstack_removes_orphan_columns_inline(autocommit_conn, patched_paths):
     assert col not in reg['fundamentals']['columns'], 'column should be stripped from schema_registry'
 
 
+@_ORPHAN_REMOVAL_DISABLED
 def test_unstack_preserves_columns_used_by_active_peers(autocommit_conn, patched_paths):
     """Two strategies share a column. Archiving one must NOT remove the
     column when the other is still live/candidate/staging."""
@@ -505,6 +512,7 @@ def test_unstack_preserves_columns_used_by_active_peers(autocommit_conn, patched
         del lsm._records[peer]
 
 
+@_ORPHAN_REMOVAL_DISABLED
 def test_unstack_paper_peer_does_not_block_removal(autocommit_conn, patched_paths):
     """A legacy PAPER-state strategy still referencing a column must NOT
     block its removal when the unstack strategy was the last
@@ -537,6 +545,7 @@ def test_unstack_paper_peer_does_not_block_removal(autocommit_conn, patched_path
     assert cur.fetchone() is None, 'data_columns row should be deleted (PAPER does not gate)'
 
 
+@_ORPHAN_REMOVAL_DISABLED
 def test_unstack_deprecated_archived_peers_do_not_gate(autocommit_conn, patched_paths):
     """Peers in DEPRECATED or ARCHIVED state must NOT keep an orphan column
     alive — they're outside the active set by definition."""
@@ -580,8 +589,8 @@ def test_backfill_universe_helper_matches_db():
     tickers involved in the strategy" — every staging-approval backfill
     spans the full active universe, not just the rows the strategy reads.
     """
-    from src.pipeline.backfillers import fmp as fmp_bf
-    from src.pipeline.backfillers import edgar as edgar_bf
+    from pipeline.backfillers import fmp as fmp_bf
+    from pipeline.backfillers import edgar as edgar_bf
 
     helper_set = set(fmp_bf._active_universe())
     assert len(helper_set) > 0, '_active_universe() returned an empty set'
@@ -606,6 +615,7 @@ def test_backfill_universe_helper_matches_db():
         'edgar._active_universe() diverges from fmp._active_universe()'
 
 
+@_ORPHAN_REMOVAL_DISABLED
 def test_full_transition_triggers_inline_removal(autocommit_conn, patched_paths):
     """End-to-end: lifecycle.transition(state→DEPRECATED) must invoke the
     inline removal hook (not a queue insert)."""
