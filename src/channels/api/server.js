@@ -1071,8 +1071,8 @@ app.get('/api/strategies', async (req, res) => {
     } catch (_) { /* leave breakdown empty if join fails */ }
 
     // Per-strategy per-regime OUE multiplier from the latest strategy_weights_by_regime
-    // snapshot. Used to compute Forward ER (= ARR × multiplier) on the
-    // dashboard. Written by the Sunday weight cron (strategy_weights.py rebuild()).
+    // snapshot. Surfaced as the "# O/U/E" cell tooltip. Written by the
+    // Sunday weight cron (strategy_weights.py rebuild()).
     const oueMultipliersByStrategy = {};
     try {
       const omRes = await dbQuery(`
@@ -1142,8 +1142,8 @@ app.get('/api/strategies', async (req, res) => {
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
         d1_expected:         d1 ? (d1.expected  || 0) : 0,
         // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Frontend picks the active regime (or filtered regime) and
-        // multiplies ARR to produce a "Forward ER" projection.
+        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
+        // also feeds the live weights-by-regime engine.
         oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
         // Saturday-brain Tier-B fields. Only populated for state='staging'
         // strategies pushed by Saturday brain. The dashboard's strategies
@@ -1201,8 +1201,8 @@ app.get('/api/strategies', async (req, res) => {
         d1_underperf:        d1 ? (d1.underperf || 0) : 0,
         d1_expected:         d1 ? (d1.expected  || 0) : 0,
         // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Frontend picks the active regime (or filtered regime) and
-        // multiplies ARR to produce a "Forward ER" projection.
+        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
+        // also feeds the live weights-by-regime engine.
         oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
       });
     }
@@ -6691,6 +6691,48 @@ function _regimeBreakdown(r) {
   return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
+// Mirror of _regimeBreakdown for the research-candidates table: shows
+// per-regime BACKTEST Sharpe (from strategy_backtest_regimes via
+// /api/strategies → r.backtest_regime_breakdown) instead of live ARR.
+// Used in candidates pre-promotion to give the operator the same
+// per-regime view the regime-blended sizer will see.
+function _regimeBacktestSharpe(r) {
+  const breakdown = r.backtest_regime_breakdown || {};
+  const eligible  = Array.isArray(r.eligible_regimes)
+    ? r.eligible_regimes
+    : (r.active_in_regimes && r.active_in_regimes.length ? r.active_in_regimes : _REGIME_AXIS);
+  const current = r.current_regime || null;
+  const cells = _REGIME_AXIS.map(rg => {
+    const isEligible = eligible.includes(rg);
+    const b      = breakdown[rg] || null;
+    const trades = b && b.trade_count != null ? b.trade_count : 0;
+    const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
+    const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
+    if (current === rg) klass.push('st-rg-current');
+    if (sharpe == null) klass.push('st-rg-na');
+    if (!isEligible)   klass.push('st-rg-ineligible');
+    // Sign-based color override on the value text (not the whole cell)
+    let valStyle = '';
+    if (sharpe != null) {
+      valStyle = sharpe >= 0
+        ? 'color:var(--green)'
+        : 'color:var(--red)';
+    }
+    const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
+    const eligLine = isEligible ? 'eligible' : 'NOT eligible';
+    const note = b && b.note ? \` (\${b.note})\` : '';
+    const statsLine = sharpe == null
+      ? (trades > 0 ? \`\${trades} trades, sharpe NULL (trade_count < 5)\` : \`no backtest trades\${note}\`)
+      : \`sharpe=\${sharpe.toFixed(2)} · \${trades} trades · dd=\${b.max_dd != null ? (b.max_dd * 100).toFixed(1) + '%' : '—'}\`;
+    const ttl = rg + ' [' + eligLine + ']: ' + statsLine;
+    return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}">
+              <span class="st-rg-tag">\${rg}</span>
+              <span class="st-rg-val" style="\${valStyle}">\${valTxt}</span>
+            </span>\`;
+  }).join('');
+  return \`<div class="st-regime-grid" title="Per-regime BACKTEST Sharpe (from unified_backtest). Color = sign. Tooltip = trades + drawdown.">\${cells}</div>\`;
+}
+
 // Backwards-compat shim — left in case other call sites reference it; the
 // active-stack table uses _regimeBreakdown now.
 function _regimesCell(r) {
@@ -7131,20 +7173,15 @@ function _renderActiveStack(rows) {
     const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
     const adrPct = (avgRet != null && actDays != null && actDays > 0)
                    ? (avgRet * 100 / actDays) : null;            // per-day %
-    // Forward ER = ARR adjusted by the OUE multiplier. Sign-aware so the
-    // discount works both ways: a mult of 0.2 on +5% ARR drops to +1%
-    // (discount the upside), AND a mult of 0.2 on -2% ARR drops to -3.6%
-    // (amplify the downside). Multiplying signed ARR directly would
-    // wrongly make bad strategies look less negative when their OUE is
-    // disappointing. Effective_mult = mult if ARR ≥ 0 else (2 − mult).
+    // FWD ER (= ARR × per-regime OUE multiplier) removed 2026-05-18.
+    // The multiplier defaults to 1.0 until the OUE sample threshold is
+    // hit (≥30 closes / ≥5 outliers per regime), which most strategies
+    // never reach, so FWD ER was always == ARR for the typical row —
+    // a redundant column. The OUE multiplier itself is still computed
+    // and surfaced via the # O/U/E column + per-row tooltip.
     const mults = r.oue_multipliers_by_regime || {};
     const mult_for = filterRg || r.current_regime || 'TRANSITIONING';
     const oueMult = mults[mult_for] != null ? mults[mult_for] : 1.0;
-    let forwardErPct = null;
-    if (arrPct != null) {
-      const effMult = arrPct >= 0 ? oueMult : (2.0 - oueMult);
-      forwardErPct = arrPct * effMult;
-    }
     return Object.assign({}, r, {
       d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
       _active_rank:    _activeRankFor(r),
@@ -7154,7 +7191,6 @@ function _renderActiveStack(rows) {
       _filtered_win:   winRate,
       _filtered_closed: closedCount,
       _oue_mult:       oueMult,
-      _forward_er:     forwardErPct,
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -7191,7 +7227,6 @@ function _renderActiveStack(rows) {
       <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
       <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
       <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}. Pure realized fact — no OUE adjustment.">ARR&nbsp;%\${filterTag}</th>
-      <th class="num" data-sort-key="_forward_er" data-sort-type="num" title="Forward ER = ARR × per-regime OUE multiplier. Multiplier uses time-decayed OUE (τ=45d) so it responds to recent behavior — a strategy improving this month sees its multiplier lift within ~4-6 weeks. Range [0.20, 2.00], default 1.00 until weighted sample ≥30 closes / ≥5 outliers per regime. Lifetime-sign guardrail: strategies cumulatively over-performing (lifetime O>U with ≥50 closes / ≥10 outliers) can be boosted but never discounted below 1.0; cumulative under-performers capped at 1.0 — protects established strategies from transient streaks and prevents weights drifting downward.">Fwd&nbsp;ER&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
       <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
       <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
@@ -7218,7 +7253,7 @@ function _renderActiveStack(rows) {
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
-          <td colspan="12">
+          <td colspan="11">
             <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
               <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
                 <div class="st-expand-head">
@@ -7250,7 +7285,6 @@ function _renderActiveStack(rows) {
         <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
         <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
         <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
-        <td class="num \${pnlCls(r._forward_er)}" title="Forward ER = ARR × OUE multiplier (\${(r._oue_mult || 1).toFixed(2)}× for \${filterRg || r.current_regime || '—'})">\${r._forward_er != null ? ((r._forward_er >= 0 ? '+' : '') + r._forward_er.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
         <td class="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ.">\${ourCell}</td>
@@ -7650,6 +7684,7 @@ function _renderCandidates(rows) {
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
       <th>Regimes</th>
+      <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Color = sign of Sharpe.">By Regime Sharpe</th>
       <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
       <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
       <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
@@ -7740,6 +7775,7 @@ function _renderCandidates(rows) {
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
         <td>\${_regimesCell(r)}</td>
+        <td>\${_regimeBacktestSharpe(r)}</td>
         <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
         <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
         <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>

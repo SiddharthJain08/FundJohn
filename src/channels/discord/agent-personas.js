@@ -26,7 +26,7 @@ const AGENTS = {
     emoji:       '🦞',
     model:       'claude-sonnet-4-6',
     description: 'Portfolio Manager & Orchestrator',
-    channelKeys: ['general', 'botjohn-log'],
+    channelKeys: ['general', 'botjohn-log', 'ic-approvals'],
   },
   // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below
   // (Opus 4.7) which now owns both #research-feed and #strategy-memos.

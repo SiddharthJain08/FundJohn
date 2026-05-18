@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -574,11 +575,65 @@ def load_current(regime_state: str) -> list[dict]:
         conn.close()
 
 
-def find_negative_across_all_eligible(conn=None) -> list[str]:
-    """Strategies whose effective_sharpe ≤ 0 across EVERY eligible regime
-    AND that have ZERO closed positions to date.
+GRACE_PERIOD_DAYS_DEFAULT = 30
 
-    Two requirements:
+
+def _strategies_in_grace_period(manifest: dict, grace_days: int) -> set[str]:
+    """Strategies whose most recent transition INTO live/monitoring is more
+    recent than `grace_days` ago. Exempt from auto-demote so freshly-
+    approved strategies have time to accumulate closed trades before the
+    Sharpe-across-all-regimes guard fires.
+
+    Reads the manifest history (no DB query). A strategy WITHOUT a
+    transition record into live/monitoring (e.g. registered directly in
+    that state by a migration) gets the benefit of the doubt — included
+    in the exempt set, since we can't tell when it became active.
+
+    2026-05-14 incident: S_transitioning_overbought_revert was promoted
+    candidate→live at 04:34:27 and auto_demote_after_lifecycle_change
+    fired 6 minutes later, before signal_performance had recorded the
+    5 closed trades the strategy had completed. The 30-day window
+    matches MasterMindJohn's weekly review cadence — operator + brain
+    decide demote, not the hardcoded engine.
+    """
+    if grace_days <= 0:
+        return set()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=grace_days)
+    in_grace: set[str] = set()
+    for sid, entry in manifest.get('strategies', {}).items():
+        if entry.get('state') not in ('live', 'monitoring'):
+            continue
+        history = entry.get('history') or []
+        # Find most recent transition INTO live or monitoring
+        most_recent_into_active = None
+        for h in reversed(history):
+            if h.get('to_state') in ('live', 'monitoring'):
+                ts_str = h.get('timestamp')
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    most_recent_into_active = ts
+                    break
+                except (ValueError, TypeError):
+                    continue
+        if most_recent_into_active is None:
+            # No tracked transition — give benefit of the doubt
+            in_grace.add(sid)
+            continue
+        if most_recent_into_active > cutoff:
+            in_grace.add(sid)
+    return in_grace
+
+
+def find_negative_across_all_eligible(conn=None, grace_days: int | None = None) -> list[str]:
+    """Strategies whose effective_sharpe ≤ 0 across EVERY eligible regime
+    AND that have ZERO closed positions to date AND have been live for
+    longer than the grace period.
+
+    Three requirements:
       1. No positive-Sharpe row in the current strategy_weights_by_regime
          snapshot — the strategy has no regime where the formula would
          deploy it.
@@ -587,13 +642,20 @@ def find_negative_across_all_eligible(conn=None) -> list[str]:
          (positive or negative) stay live regardless of Sharpe; their
          disposition is for MasterMind's weekly review + the operator
          to decide, not the hardcoded engine.
+      3. Out of grace period — the strategy entered live/monitoring
+         more than `grace_days` ago (default 30, override via
+         OPENCLAW_AUTO_DEMOTE_GRACE_DAYS env var). Newly-approved
+         strategies are exempt so they have time to trade.
 
     Auto-demoted strategies are moved live→candidate via
-    auto_demote_negative_sharpe in src/strategies/lifecycle.py. A strategy
-    positive in any one of its eligible regimes stays live (excluded
-    only from the bad regimes via weight = 0 rows the engine doesn't
-    write).
+    auto_demote_negative_sharpe in src/strategies/lifecycle.py.
     """
+    if grace_days is None:
+        try:
+            grace_days = int(os.environ.get('OPENCLAW_AUTO_DEMOTE_GRACE_DAYS',
+                                            GRACE_PERIOD_DAYS_DEFAULT))
+        except (TypeError, ValueError):
+            grace_days = GRACE_PERIOD_DAYS_DEFAULT
     own = conn is None
     if own:
         conn = _db()
@@ -603,6 +665,7 @@ def find_negative_across_all_eligible(conn=None) -> list[str]:
                       if e.get('state') in ('live', 'monitoring')]
         if not active_ids:
             return []
+        in_grace = _strategies_in_grace_period(manifest, grace_days)
         cur = conn.cursor()
         # Set A: strategies with at least one positive-Sharpe regime
         cur.execute('''
@@ -616,9 +679,11 @@ def find_negative_across_all_eligible(conn=None) -> list[str]:
             WHERE status = 'closed' AND strategy_id = ANY(%s)
         ''', (active_ids,))
         with_closed_history = {r[0] for r in cur}
-        # Demote-eligible = active AND (not in A) AND (not in B)
+        # Demote-eligible = active AND (not in A) AND (not in B) AND (not in grace)
         return [s for s in active_ids
-                if s not in with_any_positive and s not in with_closed_history]
+                if s not in with_any_positive
+                and s not in with_closed_history
+                and s not in in_grace]
     finally:
         if own:
             conn.close()

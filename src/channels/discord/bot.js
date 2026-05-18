@@ -30,6 +30,7 @@ const workspaceManager = require('../../workspace/manager');
 const { generateToolModules } = require('../../agent/tools/registry');
 const { v4: uuidv4 } = require('uuid');
 const memoryWriter = require('../../agent/memory/memory-writer');
+const icHandler    = require('./ic_handler');
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
@@ -249,6 +250,16 @@ client.on('messageCreate', async (message) => {
   if (flashResponse !== null) {
     await relay.send(message, flashResponse);
     return;
+  }
+
+  // Phase 2A — IC approval commands in #ic-approvals. Handler is
+  // self-contained: filters internally on channel name, parses
+  // approve/veto/scale commands, writes ic_decisions, replies to user.
+  try {
+    const icResult = await icHandler.handleMessage(message);
+    if (icResult && icResult.handled) return;
+  } catch (e) {
+    console.error('[bot] ic_handler.handleMessage error:', e.message);
   }
 
   // Route to PTC mode
