@@ -261,11 +261,15 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
     # Tier 1: unified_backtest (canonical).
+    # `strategy_backtest_regimes` is keyed by run_id only — strategy_id lives
+    # on `strategy_backtest_runs`. Earlier code selected br.strategy_id which
+    # silently errored every Sunday with "column br.strategy_id does not
+    # exist", forcing the entire weekly weights rebuild down to Tier 3.
     out = {}
     seen_strats = set()
     try:
         cur.execute('''
-            SELECT br.strategy_id, br.regime_state, br.sharpe, br.trade_count
+            SELECT latest.strategy_id, br.regime_state, br.sharpe, br.trade_count
             FROM strategy_backtest_regimes br
             JOIN (
                 SELECT DISTINCT ON (strategy_id) strategy_id, run_id
