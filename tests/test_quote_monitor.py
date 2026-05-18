@@ -412,14 +412,15 @@ def test_dedup_on_rapid_update_returns_cached_result():
     poly = _StubSource('polygon', {'AAPL': 190.0}, priority=0)
     mon = QuoteMonitor(dedup_window_sec=2.0, sources=[poly])
     mon.set_symbols(['AAPL'])
-    asyncio.run(mon.fan_out())
+    first_result = asyncio.run(mon.fan_out())
     first_call_count = poly.call_count
     assert first_call_count == 1
-    # Second set_symbols with the SAME set, within window — should be no-op
-    # and the cached result remains accessible.
+    # Second set_symbols with the SAME set, within window — should be a
+    # no-op AND the cached FanOutResult must be the SAME object (identity,
+    # not equality) so the parity-capture caller can short-circuit.
     mon.set_symbols(['AAPL'])
-    assert mon.last_result is not None  # cache preserved
-    assert poly.call_count == first_call_count  # adapter not re-hit
+    assert mon.last_result is first_result        # cache identity preserved
+    assert poly.call_count == first_call_count    # adapter not re-hit
     # Different ticker set busts the cache.
     mon.set_symbols(['AAPL', 'MSFT'])
-    assert mon.last_result is None  # cache cleared by new symbol set
+    assert mon.last_result is None                # cache cleared by new symbol set
