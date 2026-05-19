@@ -40,6 +40,7 @@ const COVERAGE_LAG_DAYS_DEFAULT = 7;
 const COVERAGE_LAG_DAYS_BY_CADENCE = {
   daily:     7,
   weekly:    14,
+  monthly:   35,
   quarterly: 100,
   forward:   36500,   // ~100y — forward-looking, presence of any row is enough
 };

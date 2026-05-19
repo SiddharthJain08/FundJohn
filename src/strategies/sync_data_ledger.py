@@ -41,6 +41,19 @@ DERIVED_FROM_PRICES = [
     ('realized_vol',  'computed'),
 ]
 
+# Derived columns computed from options_aggregates_enriched.parquet (which
+# itself derives from options_aggregates/*.parquet via the rolling-fields
+# enrichment script scripts/compute_rolling_options_fields.py). These
+# inherit the enriched parquet's coverage so the staging-approval coverage
+# check can pass once the enrichment has been run at least once.
+#
+# 2026-05-19: registered for HV-series strategies (Triple-Gate Fear etc.)
+# that gate on unusual_options_flow as part of their setup logic. The
+# heuristic is currently `pc_ratio > 1.5` — see compute_rolling_options_fields.py:124.
+DERIVED_FROM_OPTIONS_AGGREGATES = [
+    ('unusual_options_flow', 'derived_from_options_aggregates'),
+]
+
 # Provider mapping. AlphaVantage was removed 2026-04-28 — macro now sources
 # from yfinance (matches the actual ingestion path in
 # src/ingestion/fetch_vol_indices.py, which writes 'source': 'yfinance').
@@ -59,6 +72,7 @@ PROVIDERS = {
     'log_returns':       'computed',
     'realized_vol':      'computed',
     'intraday_features': 'polygon+alpaca',     # synthetic VIX from option chain + intraday equity bars
+    'unusual_options_flow': 'derived_from_options_aggregates',  # pc_ratio > 1.5 heuristic
 }
 
 
@@ -162,6 +176,40 @@ def sync() -> dict:
                 'max_date': stats['max_date'],
                 'row_count': stats['row_count'],
             })
+
+        # Register derived columns computed from options_aggregates_enriched —
+        # inherit that parquet's coverage. Cadence is monthly because the
+        # upstream options_aggregates collector + the rolling-fields
+        # enrichment script currently run irregularly (last refresh
+        # 2026-04-22 as of registration). Bump to 'daily' once the
+        # collector + enrichment are back on a daily cron.
+        opts_agg_path = DATA_DIR / 'options_aggregates_enriched.parquet'
+        if opts_agg_path.exists():
+            opts_agg_stats = _stats(opts_agg_path)
+            for col_name, provider in DERIVED_FROM_OPTIONS_AGGREGATES:
+                cur.execute(
+                    """
+                    INSERT INTO data_columns
+                      (column_name, provider, introduced_at, refresh_cadence,
+                       estimated_monthly_cost, min_date, max_date, row_count, ticker_count)
+                    VALUES (%s, %s, NOW(), 'monthly', 0,
+                            %s::date, %s::date, %s, %s)
+                    ON CONFLICT (column_name) DO UPDATE SET
+                      provider     = EXCLUDED.provider,
+                      refresh_cadence = EXCLUDED.refresh_cadence,
+                      min_date     = EXCLUDED.min_date,
+                      max_date     = EXCLUDED.max_date,
+                      row_count    = EXCLUDED.row_count,
+                      ticker_count = EXCLUDED.ticker_count
+                    """,
+                    (
+                        col_name, provider,
+                        opts_agg_stats['min_date'], opts_agg_stats['max_date'],
+                        opts_agg_stats['row_count'], opts_agg_stats['ticker_count'],
+                    )
+                )
+                synced_cols.append({'column': col_name,
+                                    'derived_from': 'options_aggregates_enriched'})
 
         # Register derived columns — inherit prices coverage
         if prices_stats:

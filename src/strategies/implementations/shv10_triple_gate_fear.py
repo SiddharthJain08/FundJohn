@@ -1,4 +1,8 @@
-"""S-HV10: Triple-Gate Fear  STAGING (unusual_flow not yet in aux_data). Whaley (2000)."""
+"""S-HV10: Triple-Gate Fear  Whaley (2000).
+
+unusual_flow is sourced from options_aggregates_enriched.parquet (heuristic:
+put/call volume ratio > 1.5, see scripts/compute_rolling_options_fields.py).
+Wired 2026-05-19 — data_columns.unusual_options_flow registered same day."""
 from __future__ import annotations
 from typing import List
 from strategies.base import BaseStrategy, Signal
@@ -19,7 +23,8 @@ class TripleGateFear(BaseStrategy):
         }
 
     def generate_signals(self, prices, regime, universe, aux_data=None) -> List[Signal]:
-        """STAGING: Gate 3 (unusual_flow) always False until data added  no signals fire."""
+        """Three-gate setup: VRP elevated, put/call ratio elevated, unusual
+        flow detected. All three must fire AND iv_rank ≥ min for a SELL signal."""
         if prices is None or prices.empty:
             return []
         regime_state = (regime or {}).get('state', 'LOW_VOL')
@@ -36,12 +41,15 @@ class TripleGateFear(BaseStrategy):
             opts = options_data.get(ticker, {})
             vrp          = opts.get('vrp')
             pc_ratio     = opts.get('pc_ratio')
-            unusual_flow = opts.get('unusual_flow')   # NOT YET AVAILABLE  None
+            unusual_flow = opts.get('unusual_flow')   # 0/1 from enriched parquet, or None
             iv_rank      = opts.get('iv_rank', 50.0)
 
             gate1 = vrp is not None and vrp > p['min_vrp']
             gate2 = pc_ratio is not None and pc_ratio > p['min_pc_ratio']
-            gate3 = unusual_flow is True                    # always False in staging
+            # unusual_flow stores int 0/1 (not bool); coerce with bool() so the
+            # gate triggers on 1 — the prior `is True` identity check was
+            # always False against int values. 2026-05-19 fix.
+            gate3 = bool(unusual_flow)
 
             if not (gate1 and gate2 and gate3):
                 continue
