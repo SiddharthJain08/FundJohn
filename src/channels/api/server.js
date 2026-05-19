@@ -547,17 +547,25 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
   }
 });
 
-// Lambda — daily notional deployed as multiple of NAV. Operator-tunable
-// from the Portfolio page slider. Sizer reads pipeline_config on every
-// cycle so a slider change takes effect on the next pipeline tick.
-// Range [0.10, 3.50] (default 2.0) anchored to current effective leverage.
+// Lambda — overnight (Reg T) leverage multiplier for the daily process.
+// Operator-tunable from the Portfolio page slider. Sizer reads pipeline_config
+// on every cycle so a slider change takes effect on the next pipeline tick.
+// Range [0.10, 2.00] (default 2.0) — capped at Reg T overnight max (2×
+// equity, 50% initial margin). 2026-05-19: cap reduced from 3.50 to 2.00
+// after the operator noted the prior range exceeded Reg T overnight
+// limits; the existing value (3.0 set 2026-05-16) was clamped to 2.0.
+const LAMBDA_OVERNIGHT_MIN = 0.10;
+const LAMBDA_OVERNIGHT_MAX = 2.00;
+const LAMBDA_INTRADAY_MIN  = 0.10;
+const LAMBDA_INTRADAY_MAX  = 4.00;   // PDT day-trading buying power max
+
 app.get('/api/config/lambda', async (req, res) => {
   try {
     const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'");
     const row = r.rows[0];
     res.json({
-      value:      row ? parseFloat(row.value) : 2.0,
-      min:        0.10, max: 3.50,
+      value:      row ? Math.min(parseFloat(row.value), LAMBDA_OVERNIGHT_MAX) : 2.0,
+      min:        LAMBDA_OVERNIGHT_MIN, max: LAMBDA_OVERNIGHT_MAX,
       updated_at: row ? row.updated_at : null,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -565,13 +573,46 @@ app.get('/api/config/lambda', async (req, res) => {
 
 app.put('/api/config/lambda', async (req, res) => {
   const v = parseFloat(req.body && req.body.value);
-  if (!isFinite(v) || v < 0.10 || v > 3.50) {
-    return res.status(400).json({ error: 'value must be a number in [0.10, 3.50]' });
+  if (!isFinite(v) || v < LAMBDA_OVERNIGHT_MIN || v > LAMBDA_OVERNIGHT_MAX) {
+    return res.status(400).json({ error: `value must be a number in [${LAMBDA_OVERNIGHT_MIN}, ${LAMBDA_OVERNIGHT_MAX}]` });
   }
   try {
     await dbQuery(`
       INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('position_sizing_lambda', $1, 'Daily notional deployed = lambda × NAV. Range [0.10, 3.50]. Adjustable via dashboard.', NOW())
+      VALUES ('position_sizing_lambda', $1, 'Overnight (Reg T) leverage. Daily notional deployed = lambda × NAV. Range [0.10, 2.00]. Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(v)]);
+    res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Intraday lambda — separate placeholder for PDT day-trading buying power
+// (up to 4× equity). 2026-05-19: stored but NOT consumed by any sizer
+// today. Will come online once intraday strategies + Phase 3 extended-hours
+// executor are wired to consume it. Operator can pre-tune from the
+// Portfolio page without affecting today's overnight trades.
+app.get('/api/config/lambda-intraday', async (req, res) => {
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda_intraday'");
+    const row = r.rows[0];
+    res.json({
+      value:      row ? Math.min(parseFloat(row.value), LAMBDA_INTRADAY_MAX) : 1.0,
+      min:        LAMBDA_INTRADAY_MIN, max: LAMBDA_INTRADAY_MAX,
+      updated_at: row ? row.updated_at : null,
+      active:     false,   // not yet consumed by any sizer
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/lambda-intraday', async (req, res) => {
+  const v = parseFloat(req.body && req.body.value);
+  if (!isFinite(v) || v < LAMBDA_INTRADAY_MIN || v > LAMBDA_INTRADAY_MAX) {
+    return res.status(400).json({ error: `value must be a number in [${LAMBDA_INTRADAY_MIN}, ${LAMBDA_INTRADAY_MAX}]` });
+  }
+  try {
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('position_sizing_lambda_intraday', $1, 'Intraday (PDT day-trading) leverage. Range [0.10, 4.00]. Placeholder — not consumed by current sizer (2026-05-19).', NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
@@ -584,8 +625,9 @@ app.put('/api/config/lambda', async (req, res) => {
 // (= λ × liquidity_param) on one screen.
 app.get('/api/config/regime-sizing', async (req, res) => {
   try {
-    const [lamRes, regimeRes] = await Promise.all([
+    const [lamRes, lamIntradayRes, regimeRes] = await Promise.all([
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
+      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda_intraday'"),
       dbQuery(`SELECT regime_state, liquidity_param, min_signal_notional_usd,
                       min_signal_notional_pct, position_circuit_breaker_pct,
                       updated_at
@@ -604,13 +646,21 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       currentRegime = latestJson.state || 'TRANSITIONING';
     } catch (_) {}
     const lam = lamRes.rows[0];
+    const lamId = lamIntradayRes.rows[0];
     res.json({
       current_regime: currentRegime,
       global: {
-        lambda:     lam ? parseFloat(lam.value) : 2.0,
-        min:        0.10,
-        max:        3.50,
+        lambda:     lam ? Math.min(parseFloat(lam.value), LAMBDA_OVERNIGHT_MAX) : 2.0,
+        min:        LAMBDA_OVERNIGHT_MIN,
+        max:        LAMBDA_OVERNIGHT_MAX,
         updated_at: lam ? lam.updated_at : null,
+        // Intraday placeholder (PDT) — separate slider in dashboard.
+        // Not consumed by current sizer (2026-05-19).
+        lambda_intraday:        lamId ? Math.min(parseFloat(lamId.value), LAMBDA_INTRADAY_MAX) : 1.0,
+        lambda_intraday_min:    LAMBDA_INTRADAY_MIN,
+        lambda_intraday_max:    LAMBDA_INTRADAY_MAX,
+        lambda_intraday_updated_at: lamId ? lamId.updated_at : null,
+        lambda_intraday_active: false,
       },
       regimes: regimeRes.rows.map(r => ({
         state:                          r.regime_state,
@@ -6328,21 +6378,58 @@ function renderRiskPanel(cfg) {
       </div>
     </div>\`;
   }).join('');
+  // Intraday lambda (placeholder, not consumed yet) — separate slider.
+  // 2026-05-19: matches Alpaca PDT day-trading max (4×); overnight slider
+  // capped at Reg T overnight max (2×).
+  const lamIntraday = (cfg.global.lambda_intraday != null) ? cfg.global.lambda_intraday : 1.0;
+  const lamIdMin    = (cfg.global.lambda_intraday_min != null) ? cfg.global.lambda_intraday_min : 0.10;
+  const lamIdMax    = (cfg.global.lambda_intraday_max != null) ? cfg.global.lambda_intraday_max : 4.00;
+  const lamIdActive = !!cfg.global.lambda_intraday_active;
+  const lamIdStamp  = cfg.global.lambda_intraday_updated_at
+    ? 'saved ' + new Date(cfg.global.lambda_intraday_updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
+    : '';
+  const intradayTicks = [
+    { v: 1.00, label: '1×' },
+    { v: 2.00, label: '2×' },
+    { v: 3.00, label: '3×' },
+    { v: 4.00, label: 'PDT max' },
+  ];
+  const intradayTickHtml = intradayTicks.map(t => {
+    const pct = ((t.v - lamIdMin) / (lamIdMax - lamIdMin)) * 100;
+    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`;
+  }).join('');
+
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
       <div class="pf-risk-title">Leverage</div>
-      <div class="pf-risk-help">Daily gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>. The slider sets your global leverage target; each regime card throttles how much actually deploys when the market is in that state.</div>
+      <div class="pf-risk-help">Two independent caps. <strong>Overnight (Reg T)</strong> controls today's daily process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T rules. <strong>Intraday (PDT)</strong> is a placeholder up to 4× — not consumed by any strategy today, comes online when intraday-only strategies + extended-hours executor are wired.</div>
     </div>
-    <div class="pf-lambda-mega">
-      <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
-      <div class="pf-lambda-ticks">\${tickHtml}</div>
+
+    <div class="pf-lambda-block">
+      <div class="pf-lambda-block-head"><span class="pf-lr-label">Overnight Leverage (Reg T)</span><span class="pf-lr-cap">cap \${cfg.global.max.toFixed(2)}×</span></div>
+      <div class="pf-lambda-mega">
+        <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
+        <div class="pf-lambda-ticks">\${tickHtml}</div>
+      </div>
+      <div class="pf-lambda-readout">
+        <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
+        <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
+      </div>
     </div>
-    <div class="pf-lambda-readout">
-      <span class="pf-lr-label">Leverage</span>
-      <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
-      <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
+
+    <div class="pf-lambda-block" style="margin-top:14px;opacity:\${lamIdActive ? 1 : 0.78}">
+      <div class="pf-lambda-block-head"><span class="pf-lr-label">Intraday Leverage (PDT)</span><span class="pf-lr-cap">cap \${lamIdMax.toFixed(2)}× · \${lamIdActive ? 'active' : 'placeholder — not yet consumed'}</span></div>
+      <div class="pf-lambda-mega">
+        <input type="range" id="pf-lambda-intraday-slider" min="\${lamIdMin}" max="\${lamIdMax}" step="0.05" value="\${lamIntraday.toFixed(2)}" />
+        <div class="pf-lambda-ticks">\${intradayTickHtml}</div>
+      </div>
+      <div class="pf-lambda-readout">
+        <span class="pf-lr-value" id="pf-lambda-intraday-readout">\${lamIntraday.toFixed(2)}×</span>
+        <span class="pf-lr-sub" id="pf-lambda-intraday-stamp">\${lamIdStamp}</span>
+      </div>
     </div>
-    <div class="pf-regime-grid">\${regimeCards}</div>
+
+    <div class="pf-regime-grid" style="margin-top:14px">\${regimeCards}</div>
   </div>\`;
 
   // Wire slider — drag with live readout, debounce 400ms before PUT.
@@ -6384,12 +6471,46 @@ function renderRiskPanel(cfg) {
             cfg.global.lambda = v;
             cfg.global.updated_at = new Date().toISOString();
             if (stampEl) stampEl.textContent = 'Leverage saved just now';
-            toast('Leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
+            toast('Overnight leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
           } else {
-            toast('Leverage update failed', 'error', 4000);
+            toast('Overnight leverage update failed', 'error', 4000);
           }
         } catch (e) {
-          toast('Leverage update error: ' + e.message, 'error', 4000);
+          toast('Overnight leverage update error: ' + e.message, 'error', 4000);
+        }
+      }, 400);
+    });
+  }
+
+  // Intraday slider — debounced PUT to /api/config/lambda-intraday.
+  // Stored but not consumed by any sizer yet (lambda_intraday_active=false
+  // from the API); operator can pre-tune for when intraday strategies +
+  // extended-hours executor are wired.
+  const intradaySlider  = el.querySelector('#pf-lambda-intraday-slider');
+  const intradayReadout = el.querySelector('#pf-lambda-intraday-readout');
+  const intradayStamp   = el.querySelector('#pf-lambda-intraday-stamp');
+  if (intradaySlider && intradayReadout) {
+    let intradayTimer = null;
+    intradaySlider.addEventListener('input', () => {
+      const v = parseFloat(intradaySlider.value);
+      intradayReadout.textContent = v.toFixed(2) + '×';
+      clearTimeout(intradayTimer);
+      intradayTimer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/config/lambda-intraday', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: v }),
+          });
+          if (r.ok) {
+            cfg.global.lambda_intraday = v;
+            cfg.global.lambda_intraday_updated_at = new Date().toISOString();
+            if (intradayStamp) intradayStamp.textContent = 'saved just now (placeholder — not consumed yet)';
+            toast('Intraday leverage saved: ' + v.toFixed(2) + '× — placeholder, no effect until intraday strategies wire up', 'ok', 4000);
+          } else {
+            toast('Intraday leverage update failed', 'error', 4000);
+          }
+        } catch (e) {
+          toast('Intraday leverage update error: ' + e.message, 'error', 4000);
         }
       }, 400);
     });

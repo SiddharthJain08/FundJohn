@@ -119,7 +119,12 @@ def _dir_to_int(d) -> int:
 
 def _load_lambda(default: float = 2.0) -> float:
     """Read position_sizing_lambda from pipeline_config; fall back to default
-    on any error. Bounded clamp guards against operator-pasted garbage."""
+    on any error. Bounded clamp guards against operator-pasted garbage.
+
+    Cap = 2.0 (Reg T overnight max). 2026-05-19: tightened from 3.50 to
+    2.00 to match Reg T overnight rule (50% initial margin → 2× equity
+    gross). Pre-existing values above 2.0 silently clamp on next cycle —
+    intentional, since trading over 2× overnight would violate Reg T."""
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
@@ -127,7 +132,7 @@ def _load_lambda(default: float = 2.0) -> float:
                 cur.execute("SELECT value FROM pipeline_config WHERE key = 'position_sizing_lambda'")
                 row = cur.fetchone()
                 v = float(row[0]) if row else default
-                return max(0.10, min(3.50, v))
+                return max(0.10, min(2.00, v))
     except Exception:
         return default
 
