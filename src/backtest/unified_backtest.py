@@ -547,10 +547,25 @@ def run_backtest(strategy_id: str, *,
             }),
             None,
         ))
+        # 2026-05-19: always write a row per canonical regime, even when
+        # the strategy produced 0 trades in that regime. The dashboard's
+        # per-regime BT Sharpe view (renderBacktestRegimeBreakdown) reads
+        # one breakdown row per (strategy, regime) — pre-fix we only wrote
+        # regimes with trades, so candidates whose strategy only fires in
+        # 1-2 regimes silently lost their "By Regime" cell coverage on the
+        # rest. Matches the auto_backtest.py behaviour shipped in ea5fafa.
+        # Zero-trade regimes get trade_count=0 + NULLs for the metric
+        # columns (schema allows it; only trade_count is NOT NULL).
         regime_rows = []
         for regime in CANONICAL_REGIMES:
             agg = per_regime.get(regime, {})
-            if not agg or agg.get('trade_count', 0) == 0:
+            n_trades = int(agg.get('trade_count', 0) or 0)
+            if n_trades == 0:
+                regime_rows.append((
+                    run_id, regime,
+                    0, None, None, None, None, None, None,
+                    int(agg.get('oos_days_in_regime') or 0),
+                ))
                 continue
             regime_rows.append((
                 run_id, regime,
