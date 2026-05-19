@@ -11,12 +11,14 @@ Pipeline:
   4. Hysteresis: read last N=3 entries from intraday_regime_states.
      Require all 3 match the new state before declaring transition.
   5. Confidence override: max prob < 0.70 → force TRANSITIONING.
-  6. Cooldown gate: liquidate:cooldown:{date} Redis key — if set, the
+  6. Cooldown gate: redeploy:cooldown:{date} OR liquidate:cooldown:{date} —
+     either key (set by a prior redeploy or a manual --force flatten)
      audit row records the transition with a _COOLDOWN suffix tag.
-  7. On confirmed transition (Phase 1, 2026-05-19): no broker action.
-     The audit row is persisted with fired_liquidation=False and a
-     `__pending_redeploy` transition_tag marker. Phase 2 will replace
-     that marker with a pipeline-redeploy spawn.
+  7. On confirmed transition (Phase 2, 2026-05-19): spawn the pipeline
+     redeploy via scripts/redeploy_pipeline.py (detached, fire-and-forget).
+     Audit row uses transition_tag=INTRADAY_HMM_REDEPLOY_<from>_<to> and
+     fired_liquidation=True. Cooldown-blocked transitions keep the
+     existing _COOLDOWN suffix and do not spawn.
   8. Always persist a state row, even when no transition (for hysteresis lookback).
 
 Exit codes:
@@ -32,6 +34,7 @@ import json
 import logging
 import os
 import pickle
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -233,6 +236,72 @@ def _confirmed_transition(history: list[dict], current_state: str,
     return True, prior
 
 
+# ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
+
+def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
+                    *, dry_run: bool) -> str:
+    """Spawn scripts/redeploy_pipeline.py DETACHED. Returns 'spawned' or
+    'dry-run' for the Discord-summary tag, or 'spawn_error' on Popen failure.
+
+    Detached pattern matches cron-schedule.js:326-332: own session, stdio
+    redirected to a per-date log file, parent does not wait. The 5-min
+    intraday cron tick must return in <2s; the orchestrator itself runs up
+    to 30 min inside the detached child.
+    """
+    reason = f'INTRADAY_HMM_{prior_state}_{new_state}'
+    log_dir = ROOT / 'logs'
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    log_path = log_dir / f'redeploy_pipeline_{date_str}.log'
+    cmd = [
+        sys.executable,
+        str(ROOT / 'scripts' / 'redeploy_pipeline.py'),
+        '--reason', reason,
+        '--date', date_str,
+    ]
+    if dry_run:
+        cmd.append('--dry-run')
+
+    try:
+        log_fd = os.open(
+            str(log_path),
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o644,
+        )
+    except Exception as e:
+        logger.warning('redeploy spawn: log open failed (%s) — using DEVNULL', e)
+        log_fd = subprocess.DEVNULL
+
+    try:
+        subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fd,
+            stderr=log_fd,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except Exception as e:
+        logger.error('redeploy spawn failed: %s', e)
+        if isinstance(log_fd, int) and log_fd != subprocess.DEVNULL:
+            try:
+                os.close(log_fd)
+            except Exception:
+                pass
+        return 'spawn_error'
+
+    # Parent must close its copy of the fd; the child inherits its own.
+    if isinstance(log_fd, int) and log_fd != subprocess.DEVNULL:
+        try:
+            os.close(log_fd)
+        except Exception:
+            pass
+    return 'dry-run' if dry_run else 'spawned'
+
+
 # ── Discord notifier ─────────────────────────────────────────────────────────
 
 def _post_webhook(channel: str, msg: str) -> bool:
@@ -333,18 +402,31 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     fired_liquidation = False
 
     # 4) Cooldown + transition audit gates
-    # Phase 1 (2026-05-19): auto-liquidation removed. Confirmed transitions
-    # now record a `__pending_redeploy` marker so the audit table makes it
-    # visible that a regime change was detected but no broker action was
-    # taken. Phase 2 will replace the marker with a pipeline redeploy spawn.
+    # Phase 2 (2026-05-19): confirmed transitions spawn scripts/redeploy_pipeline.py
+    # detached (LIVE) or with --dry-run (LIVE=0). The detached child writes
+    # to logs/redeploy_pipeline_<date>.log so the 5-min cron tick returns fast.
+    # The `fired_liquidation` audit column is misnamed for the redeploy world
+    # but kept as-is for this phase; a future cleanup will rename to
+    # `fired_action` or split into `fired_redeploy`.
     if fired and prior_state and not force_dry_run:
         rcli = _redis()
         cooldown_active = False
+        date_str = features['ts_utc'].strftime('%Y-%m-%d')
+        # Cooldown gate honors BOTH keys:
+        #   redeploy:cooldown:{date}  — written by scripts/redeploy_pipeline.py
+        #     after a successful intraday redeploy; suppresses thrash on
+        #     whipsaw transitions.
+        #   liquidate:cooldown:{date} — written by regime_liquidator.py on a
+        #     successful manual --force flatten. Suppressing intraday
+        #     redeploys during this window keeps the operator's flatten
+        #     intent from being immediately undone by a re-detection.
         if rcli is not None:
             try:
-                date_str = features['ts_utc'].strftime('%Y-%m-%d')
-                if rcli.get(f'liquidate:cooldown:{date_str}'):
-                    cooldown_active = True
+                for k in (f'redeploy:cooldown:{date_str}',
+                          f'liquidate:cooldown:{date_str}'):
+                    if rcli.get(k):
+                        cooldown_active = True
+                        break
             except Exception:
                 pass
 
@@ -353,22 +435,24 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
                         prior_state, state_name)
             transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_COOLDOWN'
         else:
+            is_live = _is_live_intraday()
+            spawn_kind = _spawn_redeploy(
+                prior_state, state_name, date_str, dry_run=(not is_live),
+            )
             transition_tag = (
-                f'INTRADAY_HMM_{prior_state}_{state_name}__pending_redeploy'
+                f'INTRADAY_HMM_REDEPLOY_{prior_state}_{state_name}'
             )
+            fired_liquidation = True
             logger.info(
-                'confirmed transition %s→%s — TRANSITION DETECTED, no broker '
-                'action (Phase 1 placeholder pending Phase 2 redeploy)',
-                prior_state, state_name,
+                'confirmed transition %s→%s — redeploy spawned (%s)',
+                prior_state, state_name, spawn_kind,
             )
-            live_note = ('LIVE' if _is_live_intraday() else 'DRY-RUN')
             _post_to_discord(
                 'intraday-regime',
-                f':eyes: **Intraday HMM TRANSITION DETECTED** '
+                f':zap: **Intraday HMM** confirmed '
                 f'{prior_state} → {state_name} '
-                f'(streak={streak}, conf={confidence:.2f}, {live_note}). '
-                f'No broker action — Phase 1 placeholder pending '
-                f'Phase 2 redeploy wiring.',
+                f'(streak={streak}, conf={confidence:.2f}, '
+                f'redeploy={spawn_kind})',
             )
 
     # 5) Persist state row

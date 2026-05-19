@@ -302,19 +302,23 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
-    // 9:30-16:00 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
+    // 9:00-19:55 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
     // Fire-and-forget detached spawn (matches the 10am pipeline pattern).
     // Each tick: collects 9 features → appends parquet → scores HMM →
-    // hysteresis(3)/confidence(<70%)/cooldown(60min) gates. Phase 1
-    // (2026-05-19) removed the auto-liquidation hook; Phase 2 will wire
-    // confirmed transitions to a pipeline redeploy.
+    // hysteresis(3)/confidence(<70%)/cooldown(60min) gates. Phase 2
+    // (2026-05-19) wires confirmed transitions to scripts/redeploy_pipeline.py
+    // (detached subprocess.Popen, never blocks this cron tick).
     //
-    // The cron pattern '*/5 9-16' fires at 9:00, 9:05 ... 16:00. The 9:00
-    // tick runs the detector but no transition can fire (no model yet
-    // loaded at 9 AM; the detector will load it once accumulated). The
-    // 9:30-9:25 gap is acceptable — RTH starts at 9:30, the first
-    // useful score is the 9:30 tick.
-    cron.schedule('*/5 9-16 * * 1-5', () => {
+    // The cron pattern '*/5 9-19' fires every 5 min from 9:00 through
+    // 19:55 ET, extending past 16:00 to cover the after-hours session
+    // (16:00-20:00 ET). After-hours redeploys hit alpaca_executor's
+    // current OPG path until Phase 3 lands extended-hours limit support;
+    // redeploy_pipeline.py self-blocks after-hours via the
+    // OPENCLAW_REDEPLOY_EXTENDED_HOURS gate (default OFF) so the new
+    // 16-19 coverage is dry-by-default until Phase 3 flips the default.
+    // 9:00 tick runs the detector but no transition can fire (no model
+    // yet loaded). First useful score is the 9:30 tick.
+    cron.schedule('*/5 9-19 * * 1-5', () => {
         try {
             const fs = require('fs');
             const path = require('path');
