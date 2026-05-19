@@ -523,6 +523,31 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
     return (_maybe_dry(['python3', str(py_exec), '--date', run_date]), timeout)
 
 
+def filter_steps(steps, requested_csv):
+    """Filter STEPS list by a comma-separated step-name allowlist.
+
+    Returns (filtered_list, error_str). On success, error_str is ''.
+    On unknown step names, returns ([], '<msg>') so the caller can log
+    + exit 2 (Tier 3 config error).
+
+    Order of the returned list follows the canonical STEPS order — not the
+    order supplied by the operator. This keeps step ordering invariants
+    (signals before handoff before trade, etc.) regardless of how the CLI
+    args were typed.
+    """
+    if requested_csv is None or requested_csv.strip() == '':
+        return list(steps), ''
+    requested = [s.strip() for s in requested_csv.split(',') if s.strip()]
+    if not requested:
+        return list(steps), ''
+    known = {k for k, _ in steps}
+    unknown = [s for s in requested if s not in known]
+    if unknown:
+        return [], f'unknown step name(s): {", ".join(unknown)} (known: {sorted(known)})'
+    requested_set = set(requested)
+    return [pair for pair in steps if pair[0] in requested_set], ''
+
+
 class CycleAbort(Exception):
     """Raised when a step exits with code 2 (auth/config) under strict
     exit-code discipline. Distinct from a regular step failure: the
@@ -621,48 +646,78 @@ def run_step(script, run_date, env):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
+def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--date',         default=str(date.today()))
     parser.add_argument('--force-resume', action='store_true',
                         help='Ignore existing lock and resume from checkpoint')
-    args = parser.parse_args()
+    parser.add_argument('--steps', default=None,
+                        help='Comma-separated subset of step names to run '
+                             '(e.g. "signals,handoff,trade,alpaca,reconcile"). '
+                             'Order follows the canonical STEPS list, not '
+                             'the input order. Default: run all steps.')
+    parser.add_argument('--reason', default=None,
+                        help='Optional free-text label (max 80 chars) prepended '
+                             'to Discord posts and cycle-start log line. Used '
+                             'so intraday redeploys are distinguishable from '
+                             'the daily 10 AM cycle in #trade-reports.')
+    args = parser.parse_args(argv)
+
+    # Clamp --reason to 80 chars to keep Discord prefixes scannable.
+    reason = (args.reason or '').strip()[:80] if args.reason else ''
+    reason_tag = f'[{reason}] ' if reason else ''
+
+    # ── Resolve effective step list (filter / order-canonical) ───────────────
+    effective_steps, filter_err = filter_steps(STEPS, args.steps)
+    if filter_err:
+        log(f'--steps validation FAILED: {filter_err}')
+        return 2   # Tier 3 config error
+    is_subset = args.steps is not None and len(effective_steps) != len(STEPS)
+    has_collect_step = any(k == 'collect' for k, _ in effective_steps)
 
     run_date     = args.date
     postgres_uri = os.environ.get('POSTGRES_URI', '')
     if not postgres_uri:
         log('POSTGRES_URI not set — aborting')
-        sys.exit(2)   # auth/config error per Tier 3 exit-code discipline
+        return 2   # auth/config error per Tier 3 exit-code discipline
 
     # ── Pre-flight: doctor --required-only ──────────────────────────────────
     # Exit 2 from the doctor means a critical dependency is broken (Alpaca
     # auth failed, Postgres unreachable, env vars missing). Burning the
     # collect step on a broken setup just produces a partial cycle that has
     # to be cleaned up later — abort up front instead.
-    try:
-        doctor_proc = subprocess.run(
-            [sys.executable, str(ROOT / 'src' / 'maintenance' / 'doctor.py'),
-             '--required-only', '--json'],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        if doctor_proc.returncode == 2:
-            try:
-                payload = json.loads(doctor_proc.stdout)
-                fails = [c for c in payload.get('checks', []) if c.get('severity') == 'fail']
-                detail = '; '.join(f'{c["name"]}: {c["detail"]}' for c in fails) or 'see doctor output'
-            except json.JSONDecodeError:
-                detail = doctor_proc.stdout[:200]
-            log(f'doctor pre-flight FAILED — aborting cycle: {detail}')
-            sys.exit(2)
-        elif doctor_proc.returncode == 1:
-            log('doctor pre-flight reports warnings (continuing)')
-        else:
-            log('doctor pre-flight OK')
-    except subprocess.TimeoutExpired:
-        log('doctor pre-flight timed out (>30s) — continuing without it')
-    except Exception as exc:
-        log(f'doctor pre-flight error: {type(exc).__name__}: {exc} — continuing')
+    #
+    # Skip pre-flight when --steps is set and excludes 'collect': the ~30s
+    # check is only meaningful before data collection. Redeploy runs
+    # (signals,handoff,trade,alpaca,reconcile) operate on already-collected
+    # data, so the doctor check buys nothing.
+    if is_subset and not has_collect_step:
+        log('doctor skipped (subset run, no collect step)')
+    else:
+        try:
+            doctor_proc = subprocess.run(
+                [sys.executable, str(ROOT / 'src' / 'maintenance' / 'doctor.py'),
+                 '--required-only', '--json'],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            if doctor_proc.returncode == 2:
+                try:
+                    payload = json.loads(doctor_proc.stdout)
+                    fails = [c for c in payload.get('checks', []) if c.get('severity') == 'fail']
+                    detail = '; '.join(f'{c["name"]}: {c["detail"]}' for c in fails) or 'see doctor output'
+                except json.JSONDecodeError:
+                    detail = doctor_proc.stdout[:200]
+                log(f'doctor pre-flight FAILED — aborting cycle: {detail}')
+                return 2
+            elif doctor_proc.returncode == 1:
+                log('doctor pre-flight reports warnings (continuing)')
+            else:
+                log('doctor pre-flight OK')
+        except subprocess.TimeoutExpired:
+            log('doctor pre-flight timed out (>30s) — continuing without it')
+        except Exception as exc:
+            log(f'doctor pre-flight error: {type(exc).__name__}: {exc} — continuing')
 
     # engine.py, alpaca_executor.py etc import `strategies.xxx` / `database.xxx`
     # as top-level packages — those live under src/, so PYTHONPATH needs both
@@ -680,7 +735,7 @@ if __name__ == '__main__':
     # the race completes all 5 steps, and subsequent triggers exit cleanly.
     if not args.force_resume and is_completed_today(r, run_date):
         log(f'Pipeline already completed for {run_date} — skipping (use --force-resume to re-run)')
-        sys.exit(0)
+        return 0
 
     # ── Checkpoint / resume ───────────────────────────────────────────────────
     checkpoint  = read_checkpoint(r)
@@ -693,24 +748,29 @@ if __name__ == '__main__':
             paused_at = checkpoint.get('paused_at', '')
             log(f'Resume detected — date={cp_date}, completed={sorted(completed)}, paused_at={paused_at}')
             notify(
-                f'⚡ **Pipeline resuming** — budget recovered | {run_date}\n'
+                f'{reason_tag}⚡ **Pipeline resuming** — budget recovered | {run_date}\n'
                 f'Picking up after: **{sorted(completed)[-1] if completed else "start"}** | '
-                f'Remaining: {[s for k, s in STEPS if k not in completed]}'
+                f'Remaining: {[s for k, s in effective_steps if k not in completed]}'
             )
         else:
             log(f'Checkpoint is for {cp_date}, not {run_date} — starting fresh')
             clear_checkpoint(r)
 
     # ── Prevent concurrent runs ───────────────────────────────────────────────
+    # Shared lock: `pipeline:lock:{date}` is the SAME key for daily cycles
+    # and intraday redeploys. A redeploy MUST NOT run concurrently with the
+    # daily 10 AM cycle. --force-resume continues to bypass for operator
+    # overrides.
     if not args.force_resume:
         if not acquire_lock(r, run_date):
             log(f'Pipeline already running for {run_date} — exiting (use --force-resume to override)')
-            sys.exit(0)
+            return 0
     else:
         # Force resume: refresh lock
         r.set(f'{LOCK_KEY}:{run_date}', '1', ex=LOCK_TTL)
 
-    log(f'Pipeline starting for {run_date} | steps: {[k for k, _ in STEPS]}')
+    subset_tag = ' [subset run]' if is_subset else ''
+    log(f'{reason_tag}Pipeline starting for {run_date}{subset_tag} | steps: {[k for k, _ in effective_steps]}')
 
     # Agent status mapping: step_key → (agent_id, busy_task, idle_task).
     # Covers the 10am cycle step list.
@@ -729,7 +789,7 @@ if __name__ == '__main__':
 
     try:
       try:
-        for step_key, script in STEPS:
+        for step_key, script in effective_steps:
 
             # Skip already-completed steps
             if step_key in completed:
@@ -742,26 +802,26 @@ if __name__ == '__main__':
                 if not sq_ok:
                     log(f'Signal quality gate blocked trade step: {sq_reason}')
                     notify(
-                        f'⚠️ **Trade step skipped — signal quality gate** | {run_date}\n'
+                        f'{reason_tag}⚠️ **Trade step skipped — signal quality gate** | {run_date}\n'
                         f'Reason: {sq_reason}\n'
                         f'No positions will be opened this cycle. Review strategy parameters or regime alignment.'
                     )
                     release_lock(r, run_date)
-                    sys.exit(0)
+                    return 0
 
             # Budget check before LLM-adjacent steps
             if step_key in BUDGET_CHECK_BEFORE:
-                ok, reason = check_budget(r)
+                ok, budget_reason = check_budget(r)
                 if not ok:
-                    log(f'Budget check failed before {script}: {reason}')
-                    write_checkpoint(r, completed, run_date, reason)
+                    log(f'Budget check failed before {script}: {budget_reason}')
+                    write_checkpoint(r, completed, run_date, budget_reason)
                     notify(
-                        f'⏸️ **Pipeline paused — {reason}** | {run_date}\n'
+                        f'{reason_tag}⏸️ **Pipeline paused — {budget_reason}** | {run_date}\n'
                         f'Completed: {sorted(completed) or "none"} | Waiting on: **{script}** + remaining steps\n'
                         f'Will auto-resume when budget recovers (checked every 30 min).'
                     )
                     release_lock(r, run_date)
-                    sys.exit(0)
+                    return 0
 
             # Update agent status → busy
             agent_info = STEP_AGENTS.get(step_key)
@@ -770,7 +830,7 @@ if __name__ == '__main__':
 
             # #pipeline-feed: phase boundary START
             _t0 = time.time()
-            pipeline_feed(f'▶️ `{step_key}` starting ({run_date})')
+            pipeline_feed(f'{reason_tag}▶️ `{step_key}` starting ({run_date})')
 
             # Run the step
             ok, rc = run_step(script, run_date, env)
@@ -783,7 +843,7 @@ if __name__ == '__main__':
                 log(f'Step {script} exited 2 (auth/config) — raising CycleAbort')
                 fail_channel = STEP_FAILURE_CHANNEL.get(step_key, 'pipeline-feed')
                 notify(
-                    f'🚨 **Pipeline AUTH/CONFIG ABORT: {script}** | {run_date}\n'
+                    f'{reason_tag}🚨 **Pipeline AUTH/CONFIG ABORT: {script}** | {run_date}\n'
                     f'Exit code 2 — credentials revoked or required env var '
                     f'missing. Cycle will NOT retry.\n'
                     f'Completed: {sorted(completed) or "none"}\n'
@@ -806,7 +866,7 @@ if __name__ == '__main__':
             # #pipeline-feed: phase boundary END
             dt = int(time.time() - _t0)
             icon = '✅' if ok else '❌'
-            pipeline_feed(f'{icon} `{step_key}` {"done" if ok else "FAILED"} in {dt}s ({run_date})')
+            pipeline_feed(f'{reason_tag}{icon} `{step_key}` {"done" if ok else "FAILED"} in {dt}s ({run_date})')
 
             # Update agent status → idle
             if agent_info:
@@ -820,7 +880,7 @@ if __name__ == '__main__':
                 log(f'Step {script} failed (rc={rc}) — aborting pipeline')
                 fail_channel = STEP_FAILURE_CHANNEL.get(step_key, 'pipeline-feed')
                 notify(
-                    f'❌ **Pipeline step failed: {script}** (rc={rc}) | {run_date}\n'
+                    f'{reason_tag}❌ **Pipeline step failed: {script}** (rc={rc}) | {run_date}\n'
                     f'Completed: {sorted(completed) or "none"}\n'
                     f'Log: `logs/pipeline_orchestrator_{run_date}.log`',
                     channel=fail_channel,
@@ -832,13 +892,20 @@ if __name__ == '__main__':
                                           completed_steps=sorted(completed),
                                           error_msg=f'{script} exited {rc}')
                 release_lock(r, run_date)
-                sys.exit(1)
+                return 1
 
         # All steps done
         clear_checkpoint(r)
-        mark_completed(r, run_date)
-        log(f'Pipeline complete for {run_date} — all {len(STEPS)} steps done.')
-        pipeline_feed(f'🏁 **Cycle complete** — {run_date} · {len(STEPS)}/{len(STEPS)} steps ok')
+        # Only set the full-day completion sentinel when this run executed
+        # the entire canonical pipeline. Subset runs (e.g. intraday redeploy)
+        # MUST NOT mark the day complete, otherwise the next collector
+        # auto-spawn or 10 AM cron will short-circuit and skip the real cycle.
+        if not is_subset:
+            mark_completed(r, run_date)
+        n_done = len(effective_steps)
+        scope = 'subset' if is_subset else 'full cycle'
+        log(f'{reason_tag}Pipeline complete for {run_date} ({scope}) — {n_done} steps done.')
+        pipeline_feed(f'{reason_tag}🏁 **Cycle complete** — {run_date} · {n_done}/{n_done} steps ok ({scope})')
 
         # Final action: nudge the dashboard to re-render against the fresh DB
         # state. Non-blocking; failure here never fails the pipeline.
@@ -853,7 +920,13 @@ if __name__ == '__main__':
         # marked completion=aborted_auth and posted the alert. Surface the
         # exit non-zero (1) so external cron sees the cycle didn't finish.
         log(f'Cycle aborted (auth/config): {exc}')
-        sys.exit(1)
+        return 1
     finally:
         release_lock(r, run_date)
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
 
