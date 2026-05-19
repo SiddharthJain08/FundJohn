@@ -927,6 +927,22 @@ app.get('/api/strategies', async (req, res) => {
     `)).rows;
     const srById = Object.fromEntries(srRows.map(r => [r.id, r]));
 
+    // Phase 2A canonical eligibility = strategy_regime_params DB rows. The
+    // live regime-blended sizer reads these to filter strategies per regime;
+    // the dashboard must display the same truth so the operator sees what
+    // the live stack actually trades. Map: sid → { regime: eligible_bool }.
+    const regimeParamsById = {};
+    try {
+      const rpRows = (await dbQuery(`
+        SELECT strategy_id, regime_state, eligible
+          FROM strategy_regime_params
+      `)).rows;
+      for (const r of rpRows) {
+        regimeParamsById[r.strategy_id] = regimeParamsById[r.strategy_id] || {};
+        regimeParamsById[r.strategy_id][r.regime_state] = r.eligible;
+      }
+    } catch (_) { /* table missing in tests / pre-Phase-2A — fall back to manifest */ }
+
     // Unified-backtest (2026-05-14) is the canonical source-of-truth for
     // backtest metrics. We read the latest primary_window=true run per
     // strategy and the per-regime breakdown, then merge into a {sharpe,
@@ -1121,7 +1137,19 @@ app.get('/api/strategies', async (req, res) => {
       const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
       const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
       const d1 = d1StrategyStats[sid] || null;
-      const _eligRaw   = Array.isArray(rec.eligible_regimes) ? rec.eligible_regimes : null;
+      // Eligibility precedence: strategy_regime_params (Phase 2A DB
+      // source-of-truth, what the live sizer enforces) → manifest
+      // eligible_regimes (legacy, may still be set on unmigrated rows) →
+      // active_in_regimes (literature default). _CANON_AXIS preserves
+      // canonical order for stable diffs across renders.
+      const _CANON_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+      const _rpFor = regimeParamsById[sid] || null;
+      const _rpDerived = _rpFor && Object.keys(_rpFor).length
+        ? _CANON_AXIS.filter(rg => _rpFor[rg] === true)
+        : null;
+      const _eligRaw   = _rpDerived !== null
+        ? _rpDerived
+        : (Array.isArray(rec.eligible_regimes) ? rec.eligible_regimes : null);
       const _eligibleSet = new Set(_eligRaw || activeRegimes);
       const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
       const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
@@ -1400,7 +1428,11 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
       r.history.push(event);
       if (eligibleRegimes) {
         const prior = Array.isArray(r.eligible_regimes) ? r.eligible_regimes.slice() : null;
-        r.eligible_regimes = eligibleRegimes;
+        // Phase 2A ownership moved to strategy_regime_params (DB). Don't keep
+        // a stale copy on the manifest — the doctor's manifest_eligibility_drift
+        // check FAILs when this field is present under OPENCLAW_REGIME_BLENDED_LIVE=1.
+        // The DB upsert below this withManifestLock is the canonical write.
+        delete r.eligible_regimes;
         // Fold the eligibility change into the lifecycle event metadata so
         // /api/lifecycle/audit shows exactly what was decided at promotion.
         event.metadata = Object.assign({}, event.metadata || {}, {
@@ -1413,6 +1445,75 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     }, { actor: `dashboard:${actor || 'unknown'}` });
   } catch (e) {
     return res.status(500).json({ error: 'Manifest write failed: ' + e.message });
+  }
+
+  // ── Sync strategy_regime_params (source-of-truth, Phase 2A) ──────────────
+  // The live regime-blended sizer reads strategy_regime_params.eligible per
+  // (strategy, regime) to decide whether to size positions for that regime.
+  // The picker writes the operator's chosen set here so the live stack
+  // matches the operator's intent. We upsert all 4 canonical regimes per
+  // call so deselecting LOW_VOL (for example) explicitly flips
+  // eligible=False, rather than leaving a stale True from a prior approval.
+  if (eligibleRegimes) {
+    const chosen = new Set(eligibleRegimes);
+    try {
+      for (const rg of _CANON_REGIMES) {
+        const isElig = chosen.has(rg);
+        // Read current row (FOR UPDATE not strictly needed here — the picker
+        // is operator-driven and serialised by manifest_lock above; concurrent
+        // writers to the same (sid, regime) row are unexpected).
+        const { rows: beforeRows } = await dbQuery(
+          `SELECT strategy_id, regime_state, eligible,
+                  size_scalar, stop_pct, target_pct, max_hold_days
+             FROM strategy_regime_params
+            WHERE strategy_id=$1 AND regime_state=$2`,
+          [sid, rg],
+        );
+        const before = beforeRows[0] || null;
+        // Skip the write when the row already matches what we'd set — avoids
+        // an audit row spam on re-approvals that don't actually change the
+        // eligibility set.
+        if (before && before.eligible === isElig) continue;
+        const beforeJson = before ? JSON.stringify({
+          strategy_id: sid, regime_state: rg, eligible: before.eligible,
+          size_scalar: before.size_scalar != null ? Number(before.size_scalar) : null,
+          stop_pct:    before.stop_pct    != null ? Number(before.stop_pct)    : null,
+          target_pct:  before.target_pct  != null ? Number(before.target_pct)  : null,
+          max_hold_days: before.max_hold_days,
+        }) : null;
+        const afterJson = JSON.stringify({
+          strategy_id: sid, regime_state: rg, eligible: isElig,
+          // Preserve sizing params verbatim — picker only owns the
+          // eligible flag.
+          size_scalar:   before ? (before.size_scalar != null ? Number(before.size_scalar) : null) : null,
+          stop_pct:      before ? (before.stop_pct    != null ? Number(before.stop_pct)    : null) : null,
+          target_pct:    before ? (before.target_pct  != null ? Number(before.target_pct)  : null) : null,
+          max_hold_days: before ? before.max_hold_days : null,
+        });
+        await dbQuery(
+          `INSERT INTO strategy_regime_param_changes
+              (actor, strategy_id, regime_state,
+               before_row, after_row, reason, source)
+           VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, 'dashboard_picker')`,
+          [`dashboard:${actor || 'unknown'}`, sid, rg, beforeJson, afterJson,
+           `picker set eligible=${isElig} (transition ${fromState}→${toState})`],
+        );
+        await dbQuery(
+          `INSERT INTO strategy_regime_params
+              (strategy_id, regime_state, eligible, set_by)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (strategy_id, regime_state) DO UPDATE
+              SET eligible = EXCLUDED.eligible,
+                  set_at   = NOW(),
+                  set_by   = EXCLUDED.set_by`,
+          [sid, rg, isElig, `dashboard:${actor || 'unknown'}`],
+        );
+      }
+    } catch (e) {
+      // Don't fail the whole transition on DB write — the manifest write
+      // already succeeded and the operator can re-approve. Log loudly.
+      console.error(`[transition] strategy_regime_params upsert failed for ${sid}: ${e.message}`);
+    }
   }
 
   // Audit trail (non-fatal if DB unavailable).

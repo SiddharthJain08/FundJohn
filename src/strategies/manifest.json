@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-18T08:17:33.804666Z",
+  "updated_at": "2026-05-19T06:21:47.120275+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "staging",
@@ -546,8 +546,8 @@
       "history": []
     },
     "S_3d_pca_characteristic_factors": {
-      "state": "candidate",
-      "state_since": "2026-05-16T21:10:58.069256+00:00",
+      "state": "live",
+      "state_since": "2026-05-19T05:59:06.496Z",
       "metadata": {
         "canonical_file": "S_3d_pca_characteristic_factors.py",
         "class": "ThreeDPCACharacteristicFactors",
@@ -628,6 +628,22 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-19T05:59:06.496Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: LOW_VOL,TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
         }
       ]
     },
@@ -3231,18 +3247,34 @@
       ]
     },
     "S_macro_risk_momentum_ip_beta": {
-      "state": "candidate",
-      "state_since": "2026-04-30T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-05-19T06:00:26.092Z",
       "metadata": {
         "canonical_file": "S_macro_risk_momentum_ip_beta.py",
         "class": "MacroRiskMomentumIPBeta",
         "description": "Momentum winners carry higher IP-growth beta; long top decile, short bottom decile (Liu & Zhang 2008)"
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-19T06:00:26.092Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ]
     },
     "S_risk_neutral_skew_cross_section": {
-      "state": "candidate",
-      "state_since": "2026-05-16T21:10:15.430285+00:00",
+      "state": "staging",
+      "state_since": "2026-05-18T12:57:30.173Z",
       "metadata": {
         "canonical_file": "S_risk_neutral_skew_cross_section.py",
         "class": "RiskNeutralSkewCrossSection",
@@ -3322,6 +3354,14 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_lifecycle_change",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "staging",
+          "timestamp": "2026-05-18T12:57:30.173Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual reject via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -3396,8 +3436,8 @@
       "history": []
     },
     "S_estimation_risk_three_fund": {
-      "state": "staging",
-      "state_since": "2026-05-16T14:51:57.154Z",
+      "state": "candidate",
+      "state_since": "2026-05-19T06:01:51.816884+00:00",
       "metadata": {
         "canonical_file": "s_estimation_risk_three_fund.py",
         "class": "S_estimation_risk_three_fund",
@@ -3433,12 +3473,20 @@
             },
             "candidate_id": "c976e385-c86a-4da2-ad0a-92d96f772b24"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-19T06:01:51.816884+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ]
     },
     "S_earnings_news_specific_momentum": {
-      "state": "staging",
-      "state_since": "2026-05-16T14:51:57.154Z",
+      "state": "candidate",
+      "state_since": "2026-05-19T03:12:17.050555+00:00",
       "metadata": {
         "canonical_file": "s_earnings_news_specific_momentum.py",
         "class": "S_earnings_news_specific_momentum",
@@ -3483,6 +3531,14 @@
             },
             "candidate_id": "d8e1f1c1-83d2-4028-8e9b-e1e081d907cd"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-19T03:12:17.050555+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ]
     },
@@ -3527,8 +3583,8 @@
       "history": []
     },
     "S_prism_vq_cross_section_factor": {
-      "state": "candidate",
-      "state_since": "2026-05-16T00:00:00+00:00",
+      "state": "live",
+      "state_since": "2026-05-19T06:01:01.507Z",
       "metadata": {
         "canonical_file": "S_prism_vq_cross_section_factor.py",
         "class": "PrismVQCrossSectionFactor",
@@ -3540,7 +3596,24 @@
           "CRISIS"
         ]
       },
-      "history": []
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-19T06:01:01.507Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: LOW_VOL,TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ]
     },
     "S_visibility_graph_rsi": {
       "state": "candidate",
