@@ -6,8 +6,15 @@ docs/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = (bt_n × bt_sharpe + live_n × live_sharpe)
                        / (bt_n + live_n)
-    w(s, R)      = effective_sharpe / Σ_{s' positive} effective_sharpe(s')
-    daily_weight = w(s, R) / sqrt(cadence_days(s))
+    weight        = oue_adjusted_sharpe(s, R)
+    daily_weight  = weight / sqrt(cadence_days(s))
+
+`weight` is the raw OUE-adjusted Sharpe — NOT a normalised fraction.
+The sizer's downstream renormalisation (scale = λ·NAV / Σ|ticker_w|)
+makes the absolute scale invariant for sizing; keeping weight in
+Sharpe units means both the cum-sharpe gate (Σ effective_sharpe ×
+direction) and the per-ticker allocation (Σ daily_weight × direction)
+speak the same language — Sharpe.
 
 Why sqrt(cadence_days) and not cadence_days? Sharpe scales with sqrt(time)
 under iid returns (σ_T = σ_1·sqrt(T)), so a strategy whose effective_sharpe
@@ -479,6 +486,13 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             print(f'active strategies: {len(active)}, backtest rows: {len(bt)}, '
                   f'live buckets: {len(live)}, oue buckets: {len(oue)}')
 
+        # weight column = oue_adjusted_sharpe directly (2026-05-19, operator
+        # spec "make sure weight itself is strategy sharpe"). Normalisation
+        # by Σ sharpe was a representation choice that obscured the absolute
+        # conviction level; the sizer's λ·NAV renormalisation downstream
+        # already handles per-cycle allocation, so this change is sizing-
+        # invariant but makes the table's `weight` column directly
+        # comparable across strategies as a Sharpe magnitude.
         per_regime_positives: dict[str, list[dict]] = {}
         for s in active:
             for R in s['eligible_regimes']:
@@ -519,14 +533,12 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
 
         rows: list[StrategyWeightRow] = []
         for R, entries in per_regime_positives.items():
-            # Normalize on OUE-adjusted Sharpe — strategies that consistently
-            # disappoint relative to their GBM expectation get less capital
-            # automatically, those that consistently delight get more.
-            denom = sum(e['oue_adjusted_sharpe'] for e in entries)
-            if denom <= 0:
-                continue
             for e in entries:
-                w = e['oue_adjusted_sharpe'] / denom
+                # weight = raw OUE-adjusted Sharpe (operator spec). The
+                # sizer downstream re-normalises absolute scale via
+                # scale = λ·NAV / Σ|ticker_w|, so per-cycle allocation
+                # is invariant to scale.
+                w = e['oue_adjusted_sharpe']
                 # Sharpe scales as σ·sqrt(T): a T-day holder's per-cycle
                 # equivalent contribution is w/sqrt(T), not w/T.
                 w_daily = w / math.sqrt(max(1, e['cadence_days']))
@@ -563,7 +575,8 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
 
         if verbose:
             for R, entries in per_regime_positives.items():
-                print(f'  {R}: {len(entries)} strategies, Σ weight = 1.0 (by construction)')
+                s_sum = sum(e['oue_adjusted_sharpe'] for e in entries)
+                print(f'  {R}: {len(entries)} strategies, Σ weight (=Σ oue_adj_sharpe) = {s_sum:.3f}')
 
         # Auto-demote chain — gated by env flag so the first sweep is
         # operator-initiated, not implicit. Set OPENCLAW_AUTO_DEMOTE=1 in
