@@ -24,7 +24,27 @@ const REQ_DIR      = path.join(OPENCLAW_DIR, 'src', 'strategies', 'implementatio
 const SCHEMA_PATH  = path.join(OPENCLAW_DIR, 'data', 'master', 'schema_registry.json');
 
 // data_coverage / data_columns "fresh enough" cutoff (matches collector tolerance).
-const COVERAGE_LAG_DAYS = 7;
+// Per-cadence lag — daily sources must be within a week, quarterly fundamentals
+// can be up to ~100 days behind today (Q1 close + ~45d filing window + buffer),
+// forward-looking calendars (earnings_calendar) carry future dates so any
+// row at all counts. The cutoff is picked from data_columns.refresh_cadence
+// when present, defaulting to COVERAGE_LAG_DAYS_DEFAULT (= daily) for sources
+// the ledger doesn't know about.
+//
+// 2026-05-19: split out of a single COVERAGE_LAG_DAYS=7 constant after 36
+// staging-approval jobs auto-failed with coverage_lag on `financials`
+// (legitimately 50d stale because Q1 2026 was the last quarter to report)
+// and `earnings_calendar` (NULL max_date because all rows are forward-dated).
+// See sourcesMissingCoverage() below.
+const COVERAGE_LAG_DAYS_DEFAULT = 7;
+const COVERAGE_LAG_DAYS_BY_CADENCE = {
+  daily:     7,
+  weekly:    14,
+  quarterly: 100,
+  forward:   36500,   // ~100y — forward-looking, presence of any row is enough
+};
+// Back-compat: existing code paths may import COVERAGE_LAG_DAYS.
+const COVERAGE_LAG_DAYS = COVERAGE_LAG_DAYS_DEFAULT;
 
 // ── Requirements + coverage helpers ─────────────────────────────────────────
 
@@ -115,14 +135,33 @@ async function sourceIsKnownToProvider(src, schema, dbQuery) {
 }
 
 async function sourcesMissingCoverage(sources, dbQuery) {
-  const cutoff = new Date(Date.now() - COVERAGE_LAG_DAYS * 86_400_000)
-    .toISOString().slice(0, 10);
   const missing = [];
   for (const src of sources) {
+    // Per-source cadence → per-source cutoff. The ledger row is the source
+    // of truth for cadence; defaults to "daily" so the historical 7-day
+    // behaviour is preserved for sources that don't declare otherwise.
+    const { rows: cad } = await dbQuery(
+      `SELECT refresh_cadence FROM data_columns WHERE column_name=$1 LIMIT 1`,
+      [src]).catch(() => ({ rows: [] }));
+    const cadence = (cad[0] && cad[0].refresh_cadence) || 'daily';
+    const lagDays = COVERAGE_LAG_DAYS_BY_CADENCE[cadence] ?? COVERAGE_LAG_DAYS_DEFAULT;
+    const cutoff = new Date(Date.now() - lagDays * 86_400_000)
+      .toISOString().slice(0, 10);
+
     const { rows: byCol } = await dbQuery(
       `SELECT 1 FROM data_columns WHERE column_name=$1 AND max_date >= $2 LIMIT 1`,
       [src, cutoff]).catch(() => ({ rows: [] }));
     if (byCol.length) continue;
+    // For `forward` cadence sources (earnings_calendar etc.) we only need
+    // a row to exist; max_date can be NULL because the parquet's only date
+    // column is forward-looking and _parquet_stats refuses to cap-then-store
+    // a future date. Fall back to a presence check.
+    if (cadence === 'forward') {
+      const { rows: anyRow } = await dbQuery(
+        `SELECT 1 FROM data_columns WHERE column_name=$1 LIMIT 1`, [src]
+      ).catch(() => ({ rows: [] }));
+      if (anyRow.length) continue;
+    }
     const { rows: byType } = await dbQuery(
       `SELECT 1 FROM data_coverage WHERE data_type=$1 AND date_to >= $2 LIMIT 1`,
       [src, cutoff]).catch(() => ({ rows: [] }));
