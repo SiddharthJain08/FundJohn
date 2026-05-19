@@ -284,17 +284,11 @@ function start(swarm, generateId, notifyDiscord) {
             log(`ERROR: morning market-state failed — ${e.message.slice(0, 200)}`);
             return;
         }
-        // Liquidate-on-regime-change: fires only when prior_state != state
-        // in the freshly-written regime_latest.json. Default DRY-RUN; set
-        // OPENCLAW_ALPACA_LIVE_LIQUIDATE=1 to enable live broker action.
-        // Wrapped in its own try/catch so a liquidator failure doesn't
-        // mask the successful regime write or block the dashboard ping.
-        try {
-            runPython('src/execution/regime_liquidator.py');
-            log('Regime liquidator complete');
-        } catch (e) {
-            log(`Regime liquidator failed: ${e.message.slice(0, 200)}`);
-        }
+        // Auto-liquidation-on-regime-change removed 2026-05-19 (Phase 1 of the
+        // redeploy-not-liquidate plan). Daily HMM is now a read-only regime
+        // writer; transitions surface to the 10 AM pipeline via the
+        // market_regime row and regime_latest.json. Phase 2 wires intraday
+        // transitions to a pipeline redeploy instead.
         try {
             const http = require('http');
             const port = parseInt(process.env.DASHBOARD_PORT) || 3000;
@@ -311,14 +305,14 @@ function start(swarm, generateId, notifyDiscord) {
     // 9:30-16:00 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
     // Fire-and-forget detached spawn (matches the 10am pipeline pattern).
     // Each tick: collects 9 features → appends parquet → scores HMM →
-    // hysteresis(3)/confidence(<70%)/cooldown(60min) gates → optional
-    // liquidation via regime_liquidator.py. Default-OFF (DRY-RUN) until
-    // OPENCLAW_INTRADAY_HMM_LIVE=1 is set in .env.
+    // hysteresis(3)/confidence(<70%)/cooldown(60min) gates. Phase 1
+    // (2026-05-19) removed the auto-liquidation hook; Phase 2 will wire
+    // confirmed transitions to a pipeline redeploy.
     //
     // The cron pattern '*/5 9-16' fires at 9:00, 9:05 ... 16:00. The 9:00
-    // tick will run the detector but no liquidation can occur (no model
-    // yet trained at 9 AM; the detector will load it once accumulated).
-    // The 9:30-9:25 gap is acceptable — RTH starts at 9:30, the first
+    // tick runs the detector but no transition can fire (no model yet
+    // loaded at 9 AM; the detector will load it once accumulated). The
+    // 9:30-9:25 gap is acceptable — RTH starts at 9:30, the first
     // useful score is the 9:30 tick.
     cron.schedule('*/5 9-16 * * 1-5', () => {
         try {

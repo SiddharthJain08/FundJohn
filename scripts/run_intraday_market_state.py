@@ -11,17 +11,16 @@ Pipeline:
   4. Hysteresis: read last N=3 entries from intraday_regime_states.
      Require all 3 match the new state before declaring transition.
   5. Confidence override: max prob < 0.70 → force TRANSITIONING.
-  6. Cooldown gate: liquidate:cooldown:{date} Redis key — if set, skip
-     liquidation regardless of transition.
-  7. On confirmed transition (and OPENCLAW_INTRADAY_HMM_LIVE=1):
-     - Persist state row with fired_liquidation=True
-     - Call regime_liquidator.liquidate_on_regime_change(
-         force_transition_tag='INTRADAY_HMM_<from>_<to>')
-     - Post to #intraday-regime Discord
+  6. Cooldown gate: liquidate:cooldown:{date} Redis key — if set, the
+     audit row records the transition with a _COOLDOWN suffix tag.
+  7. On confirmed transition (Phase 1, 2026-05-19): no broker action.
+     The audit row is persisted with fired_liquidation=False and a
+     `__pending_redeploy` transition_tag marker. Phase 2 will replace
+     that marker with a pipeline-redeploy spawn.
   8. Always persist a state row, even when no transition (for hysteresis lookback).
 
 Exit codes:
-  0 — normal (any of: feature collected, state appended, transition fired)
+  0 — normal (any of: feature collected, state appended, transition detected)
   1 — partial failure (e.g., features collected but model load failed)
   2 — unrecoverable (POSTGRES_URI missing, parquet write failed)
 """
@@ -78,17 +77,11 @@ def _load_intraday_features_module():
     return mod
 
 
-def _load_regime_liquidator_module():
-    # liquidator imports execution.alpaca_trader internally; needs sys.path.
-    from execution import regime_liquidator as rl  # noqa
-    return rl
-
-
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _is_live_intraday() -> bool:
-    """Gate independent of OPENCLAW_ALPACA_LIVE_LIQUIDATE. Both must be 1
-    to actually fire broker action."""
+    """Phase 1: surfaces in the Discord notification only (no broker
+    action — see Phase 2 for the redeploy spawn this flag will arm)."""
     return os.environ.get('OPENCLAW_INTRADAY_HMM_LIVE') == '1'
 
 
@@ -149,7 +142,7 @@ def _persist_state_row(conn, ts_utc, state, prior_state, confidence,
 
 
 def _redis():
-    """Best-effort Redis. Mirrors regime_liquidator._redis."""
+    """Best-effort Redis client. Returns None on any connect failure."""
     try:
         import redis
         url = os.environ.get('REDIS_URL', 'redis://localhost:6379')
@@ -242,21 +235,54 @@ def _confirmed_transition(history: list[dict], current_state: str,
 
 # ── Discord notifier ─────────────────────────────────────────────────────────
 
-def _post_to_discord(channel: str, msg: str) -> None:
-    """Reuse regime_liquidator's webhook lookup pattern. Best-effort.
+def _post_webhook(channel: str, msg: str) -> bool:
+    """Look up the persisted webhook for `channel` in agent_registry and
+    POST `msg`. Inlined here so this module has no dependency on the
+    auto-liquidator after Phase 1.
+    """
+    uri = os.environ.get('POSTGRES_URI')
+    if not uri:
+        return False
+    try:
+        import psycopg2
+        import requests
+    except ImportError:
+        return False
+    url = None
+    try:
+        conn = psycopg2.connect(uri, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT webhook_urls FROM agent_registry WHERE webhook_urls IS NOT NULL"
+        )
+        for (hooks,) in cur.fetchall():
+            if hooks and channel in hooks:
+                url = hooks[channel]
+                break
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning('[intraday] webhook lookup failed: %s', e)
+        return False
+    if not url:
+        logger.info('[intraday] no webhook for #%s', channel)
+        return False
+    try:
+        r = requests.post(url, json={'content': msg[:1900]}, timeout=10)
+        return bool(r.ok)
+    except Exception as e:
+        logger.warning('[intraday] webhook post failed: %s', e)
+        return False
 
-    Falls back to `botjohn-log` if the requested channel doesn't have a
-    webhook registered in agent_registry. The intraday-regime channel
-    requires operator-side Discord setup (see migration 068); until
-    that's done, posts route to the existing botjohn-log webhook so
-    notifications still surface somewhere visible.
+
+def _post_to_discord(channel: str, msg: str) -> None:
+    """Best-effort Discord post. Falls back to `botjohn-log` if the
+    requested channel has no webhook registered in agent_registry.
     """
     try:
-        rl = _load_regime_liquidator_module()
-        ok = rl._post_to_discord(channel, msg)
+        ok = _post_webhook(channel, msg)
         if not ok and channel != 'botjohn-log':
-            rl._post_to_discord('botjohn-log',
-                                 f'[{channel}] {msg}')
+            _post_webhook('botjohn-log', f'[{channel}] {msg}')
     except Exception as e:
         logger.warning('discord post failed: %s', e)
 
@@ -306,7 +332,11 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     transition_tag = None
     fired_liquidation = False
 
-    # 4) Cooldown + live gates
+    # 4) Cooldown + transition audit gates
+    # Phase 1 (2026-05-19): auto-liquidation removed. Confirmed transitions
+    # now record a `__pending_redeploy` marker so the audit table makes it
+    # visible that a regime change was detected but no broker action was
+    # taken. Phase 2 will replace the marker with a pipeline redeploy spawn.
     if fired and prior_state and not force_dry_run:
         rcli = _redis()
         cooldown_active = False
@@ -322,33 +352,23 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
             logger.info('confirmed transition %s→%s blocked by cooldown gate',
                         prior_state, state_name)
             transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_COOLDOWN'
-        elif _is_live_intraday():
-            transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}'
-            try:
-                rl = _load_regime_liquidator_module()
-                liq_result = rl.liquidate_on_regime_change(
-                    force_transition_tag=transition_tag,
-                )
-                if liq_result.get('action') in ('liquidated', 'dry_run'):
-                    fired_liquidation = True
-                    _post_to_discord(
-                        'intraday-regime',
-                        f':zap: **Intraday HMM** confirmed {prior_state} → {state_name} '
-                        f'(streak={streak}, conf={confidence:.2f}, '
-                        f'fired={liq_result.get("action")})',
-                    )
-                else:
-                    logger.info('liquidator returned %s', liq_result.get('action'))
-            except Exception as e:
-                logger.warning('liquidator call failed: %s', e)
         else:
-            transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_DRYRUN'
-            logger.info('confirmed transition %s→%s (DRY-RUN, OPENCLAW_INTRADAY_HMM_LIVE=0)',
-                        prior_state, state_name)
+            transition_tag = (
+                f'INTRADAY_HMM_{prior_state}_{state_name}__pending_redeploy'
+            )
+            logger.info(
+                'confirmed transition %s→%s — TRANSITION DETECTED, no broker '
+                'action (Phase 1 placeholder pending Phase 2 redeploy)',
+                prior_state, state_name,
+            )
+            live_note = ('LIVE' if _is_live_intraday() else 'DRY-RUN')
             _post_to_discord(
                 'intraday-regime',
-                f':warning: **Intraday HMM DRY-RUN** would fire {prior_state} → {state_name} '
-                f'(streak={streak}, conf={confidence:.2f})',
+                f':eyes: **Intraday HMM TRANSITION DETECTED** '
+                f'{prior_state} → {state_name} '
+                f'(streak={streak}, conf={confidence:.2f}, {live_note}). '
+                f'No broker action — Phase 1 placeholder pending '
+                f'Phase 2 redeploy wiring.',
             )
 
     # 5) Persist state row
