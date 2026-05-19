@@ -35,10 +35,15 @@ def test_intraday_mc_stale_is_warn(monkeypatch):
     assert r['severity'] == doc.WARN
 
 
-def test_intraday_mc_very_stale_is_fail(monkeypatch):
+def test_intraday_mc_very_stale_no_pending_is_warn(monkeypatch):
+    """Stale > 72h without pending proposals → WARN (2026-05-19: demoted
+    from FAIL under the regime-redeploy-not-liquidate architecture; the
+    daily cycle does not consume path-MC, so loud aborts here only mask
+    the real signal which is `test_intraday_mc_stale_pending_proposal_is_fail`)."""
     _stub(monkeypatch, latest=datetime.now(timezone.utc) - timedelta(hours=80))
     r = doc.check_intraday_mc_freshness()
-    assert r['severity'] == doc.FAIL
+    assert r['severity'] == doc.WARN
+    assert 'no pending' in r['detail']
 
 
 def test_intraday_mc_stale_pending_proposal_is_fail(monkeypatch):

@@ -822,9 +822,19 @@ def _count_pending_proposals_without_intraday_mc(days_old: int):
 
 @_check('intraday_mc_freshness')
 def check_intraday_mc_freshness():
-    """Phase 2E: PASS if a path-MC ran within 26h, WARN if 26-72h, FAIL if
-    stale > 72h OR if there's any pending proposal aged > 7d without a
-    path-MC row (path-MC was needed for the decision but never ran)."""
+    """Phase 2E: PASS if a path-MC ran within 26h, WARN if 26-72h or stale
+    >72h without any pending proposals (data is old but no decision is
+    waiting on it). FAIL only when there is an actual pending proposal
+    aged > 7d without a path-MC row — that's when path-MC was needed for
+    a real decision but never ran.
+
+    Rationale (2026-05-19): under the new regime-redeploy-not-liquidate
+    architecture, intraday MC is only on the proposal-driven param-tuning
+    path (operator-gated); the daily 10am cycle and Phase 2 redeploy do
+    not consume it. Demoting the stale-without-pending case from FAIL to
+    WARN stops the daily cycle from auto-aborting when nobody is asking
+    for path-MC, while keeping the loud FAIL for the case that actually
+    matters (pending proposals starved of the data they need)."""
     name = 'intraday_mc_freshness'
     try:
         latest = _latest_intraday_mc_run_at()
@@ -842,7 +852,7 @@ def check_intraday_mc_freshness():
         return _ok(name, f'fresh ({h:.1f}h old)')
     if h <= INTRADAY_MC_VERY_STALE_HOURS:
         return _warn(name, f'stale ({h:.1f}h old)')
-    return _fail(name, f'very stale ({h:.1f}h old)')
+    return _warn(name, f'very stale ({h:.1f}h old) — no pending proposals depend on path-MC')
 
 
 @_check('strategy_overlap_freshness')
