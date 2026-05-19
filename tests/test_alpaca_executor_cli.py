@@ -55,6 +55,14 @@ def _mock_session(quote_bid=100.0, quote_ask=100.10, quote_status=200,
 
 
 class TestSubmitHappyPath(unittest.TestCase):
+    def setUp(self):
+        # Reset module-level caches so cross-file test order can't leak
+        # cached asset / session state into these CLI assertions.
+        ae._asset_cache.clear()
+        ae._unsupported_assets.clear()
+        ae._market_hours_cache.update({'is_open': None, 'cached_at': 0.0})
+        ae._session_kind_cache.update({'session': None, 'cached_at': 0.0})
+
     def test_submit_happy_path_shells_correct_args(self):
         # Mock quote near entry so the pre-flight snap doesn't fire.
         # (AAPL near $150 → quote needs to be near $150 too.)
@@ -69,7 +77,7 @@ class TestSubmitHappyPath(unittest.TestCase):
             't1':           160.00,
         }
         success_stdout = json.dumps({'id': 'order-uuid-123', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(0, success_stdout, '')) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
@@ -102,28 +110,64 @@ class TestSubmitHappyPath(unittest.TestCase):
         self.assertEqual(result['tif'],      'day')
         self.assertEqual(result['order_class'], 'bracket')
 
-    def test_submit_off_hours_uses_opg_simple(self):
-        """Off-hours: TIF=opg, order_class=simple (no take-profit / stop-loss)."""
+    def test_submit_off_hours_uses_extended_hours_limit(self):
+        """Off-hours (2026-05-19 redesign): TIF=day, order_class=simple,
+        order_type=limit, --extended-hours flag present. OPG was removed.
+
+        Updated from the old `test_submit_off_hours_uses_opg_simple` which
+        asserted the legacy OPG path. The May-18 OPG paper-fill incident
+        prompted the removal; the new path submits a marketable LIMIT order
+        against the bid/ask in the pre/after-hours ECN session.
+        """
+        # _mock_session pre-flight snapshot is irrelevant (bracket-only path);
+        # but we DO need to mock latest-quote + asset get for the ext-hours
+        # eligibility filter + limit-price selection. subprocess.run is the
+        # single mock for both the CLI shell-outs and the order submit, so we
+        # use side_effect to script the sequence:
+        #   1. asset get  → us_equity, tradable
+        #   2. latest-quote → bid/ask
+        #   3. order submit → success
         sess = _mock_session()
         order = {
             'ticker': 'MSFT', 'strategy_id': 'S15', 'direction': 'long',
             'pct_nav': 0.01, 'entry': 400.0, 'stop': 380.0, 't1': 420.0,
         }
-        success_stdout = json.dumps({'id': 'opg-uuid', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=False), \
+        asset_meta = json.dumps({
+            'symbol': 'MSFT', 'class': 'us_equity', 'tradable': True,
+            'easy_to_borrow': True, 'shortable': True, 'status': 'active',
+        })
+        quote_resp = json.dumps({
+            'symbol': 'MSFT',
+            'quote': {'bp': 399.95, 'ap': 400.05, 't': '2026-04-28T22:00:00Z'},
+        })
+        submit_resp = json.dumps({'id': 'ext-uuid', 'status': 'accepted'})
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
              patch('execution.alpaca_executor.subprocess.run',
-                   return_value=_mock_proc(0, success_stdout, '')) as mock_run:
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, submit_resp, ''),
+                   ]) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
                                        order=order, run_date='2026-04-28')
-        argv = mock_run.call_args[0][0]
-        self.assertEqual(argv[argv.index('--time-in-force') + 1], 'opg')
-        # simple order_class → no order-class / take-profit / stop-loss
+        # The submit call is the third subprocess.run invocation.
+        self.assertEqual(mock_run.call_count, 3)
+        argv = mock_run.call_args_list[-1][0][0]
+        self.assertEqual(argv[argv.index('--time-in-force') + 1], 'day')
+        self.assertEqual(argv[argv.index('--type') + 1], 'limit')
+        self.assertIn('--extended-hours', argv)
+        self.assertIn('--limit-price', argv)
+        # ask × 1.005 = 400.05 × 1.005 = 402.05025 → 402.05 (rounded to 2dp)
+        self.assertEqual(argv[argv.index('--limit-price') + 1], '402.05')
+        # simple order_class → no bracket flags
         self.assertNotIn('--order-class',  argv)
         self.assertNotIn('--take-profit', argv)
         self.assertNotIn('--stop-loss',   argv)
-        self.assertEqual(result['status'],     'submitted')
-        self.assertEqual(result['tif'],        'opg')
-        self.assertEqual(result['order_class'],'simple')
+        self.assertEqual(result['status'],         'submitted')
+        self.assertEqual(result['tif'],            'day')
+        self.assertEqual(result['order_class'],    'simple')
+        self.assertEqual(result['order_type'],     'limit')
+        self.assertTrue(result['extended_hours'])
 
 
 class TestBasePriceRetry(unittest.TestCase):
@@ -144,7 +188,7 @@ class TestBasePriceRetry(unittest.TestCase):
         })
         second_ok = json.dumps({'id': 'snap-uuid', 'status': 'accepted'})
 
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    side_effect=[
                        _mock_proc(1, '', first_err),
@@ -180,7 +224,7 @@ class TestBasePriceRetry(unittest.TestCase):
             'pct_nav': 0.02, 'entry': 200.0, 'stop': 205.0, 't1': 180.0,
         }
         success_stdout = json.dumps({'id': 'short-simple', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(0, success_stdout, '')) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
@@ -209,7 +253,7 @@ class TestDupCoidRecovery(unittest.TestCase):
             'code':   42210001,
         })
         recovery = json.dumps({'id': 'existing-order', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    side_effect=[
                        _mock_proc(1, '', first_err),
@@ -242,7 +286,7 @@ class TestPctNavPassthrough(unittest.TestCase):
             't1':          110.00,
         }
         success_stdout = json.dumps({'id': 'cap-uuid', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(0, success_stdout, '')) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
@@ -297,7 +341,7 @@ class TestErrorPath(unittest.TestCase):
             'error':  'qty must be a positive integer',
             'code':   42210099,
         })
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(1, '', err)) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,
@@ -315,7 +359,7 @@ class TestErrorPath(unittest.TestCase):
             'pct_nav': 0.02, 'entry': 150.0, 'stop': 140.0, 't1': 160.0,
         }
         import subprocess as sp
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    side_effect=sp.TimeoutExpired(cmd='alpaca', timeout=30)):
             result = ae.execute_single(sess, equity=100_000.0,
@@ -326,8 +370,9 @@ class TestErrorPath(unittest.TestCase):
 
 class TestInMarketHours(unittest.TestCase):
     def setUp(self):
-        # Reset the module-level cache between tests
+        # Reset the module-level caches between tests
         ae._market_hours_cache.update({'is_open': None, 'cached_at': 0.0})
+        ae._session_kind_cache.update({'session': None, 'cached_at': 0.0})
 
     def test_in_market_hours_shells_alpaca_clock(self):
         clock_json = json.dumps({
@@ -403,7 +448,7 @@ class TestUnsupportedAssetCache(unittest.TestCase):
             'error':  'asset HOLX is not tradable on this account',
             'code':   42210010,
         })
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(1, '', err)):
             ae.execute_single(sess, equity=100_000.0, order=order, run_date='2026-04-28')
@@ -436,7 +481,7 @@ class TestUnsupportedAssetCache(unittest.TestCase):
             'status': 422, 'code': 42210099,
             'error': 'qty must be a positive integer',
         })
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(1, '', err)):
             ae.execute_single(sess, equity=100_000.0, order=order, run_date='2026-04-28')
@@ -457,7 +502,7 @@ class TestPreFlightTargetSnap(unittest.TestCase):
             't1': 100.02,    # 0.02% target — gets floored to 1% gap from base
         }
         success_stdout = json.dumps({'id': 'tgt-uuid', 'status': 'accepted'})
-        with patch.object(ae, 'in_market_hours', return_value=True), \
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
              patch('execution.alpaca_executor.subprocess.run',
                    return_value=_mock_proc(0, success_stdout, '')) as mock_run:
             result = ae.execute_single(sess, equity=100_000.0,

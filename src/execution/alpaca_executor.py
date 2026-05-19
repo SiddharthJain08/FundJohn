@@ -12,10 +12,17 @@ Note: all per-order and daily aggregate notional caps were dropped 2026-05-14.
 The sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
 formulation is the single source of deployment policy.
 
-Time-in-force: 'day' if currently in regular trading hours, 'opg'
-(market-on-open, next session) otherwise. This means the nightly 21:30
-UTC / 17:30 ET pipeline queues orders for the next day's open instead
-of submitting into a closed market.
+Session-aware order shape:
+  - RTH (09:30–16:00 ET): bracket day market orders (unchanged).
+  - premarket (04:00–09:30 ET) / afterhours (16:00–20:00 ET):
+    simple day LIMIT orders with --extended-hours, marketable bid/ask
+    offset (default 0.5%). Bracket order_class is unsupported by
+    Alpaca in extended hours; stops are managed by alpaca_replace_stop.
+  - closed (20:00–04:00 ET): refuse submission. Orders are logged
+    and skipped so the next morning's reconcile sees the deferral.
+
+OPG (market-on-open) was removed 2026-05-19 — the May-18 OPG paper-fill
+incident demonstrated it isn't a reliable substitute for live orders.
 
 Writes:
   - Inserts/updates position_recommendations with action='OPEN' +
@@ -64,6 +71,12 @@ from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 # relisted/unhalted between days, so persisting wouldn't be safe.
 _unsupported_assets: set[str] = set()
 
+# Per-run cache of Alpaca asset metadata keyed by symbol. Populated lazily
+# by _get_asset_meta() on the first eligibility check; reused for the
+# remainder of the cycle. Cleared on every main() invocation — asset
+# status (tradable/active) can flip between cycles.
+_asset_cache: dict[str, dict] = {}
+
 # Alpaca CLI binary. Override with ALPACA_CLI_BIN env var if installed elsewhere.
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
@@ -76,22 +89,40 @@ def log(msg):
 
 
 _market_hours_cache = {'is_open': None, 'cached_at': 0.0}
+_session_kind_cache = {'session': None, 'cached_at': 0.0}
 
 
-def in_market_hours():
-    """Return True if regular trading hours per `alpaca clock`.
+def _alpaca_session_kind() -> str:
+    """Classify the current market session for execution-policy purposes.
 
-    Cached for 60s — the CLI subprocess shell-out is ~50–100 ms, and tight
-    loops (orchestrator → alpaca_executor → execute_single) might call this
-    several times per cycle. Falls back to a static 09:30–16:00 ET weekday
-    window if the CLI is unavailable (e.g. credentials missing in tests).
+    Returns one of:
+      - 'rth'        — regular trading hours, 09:30–16:00 ET (is_open=True)
+      - 'premarket'  — 04:00–09:30 ET on a trading day (is_open=False)
+      - 'afterhours' — 16:00–20:00 ET on a trading day (is_open=False)
+      - 'closed'     — fully closed: weekends, holidays, or 20:00–04:00 ET
+                       overnight gap on a trading day
+
+    Derived from the existing `alpaca clock` payload. When is_open=True we
+    short-circuit to 'rth'. Otherwise we project the *current* moment onto
+    America/New_York and compare against the pre/post boundaries — preferring
+    `next_open` / `next_close` from the clock payload to determine whether
+    today is a trading day, falling back to weekday math + ET-window check
+    if the payload lacks those fields. Cached for 60s alongside the in-hours
+    cache to amortize CLI shell-out cost.
+
+    Pre/post boundaries (ET):
+      pre_open  = 04:00   # ECN pre-market opens
+      rth_open  = 09:30
+      rth_close = 16:00
+      post_end  = 20:00   # ECN post-market closes
     """
     import time as _time
     now = _time.time()
-    if (_market_hours_cache['is_open'] is not None and
-            now - _market_hours_cache['cached_at'] < 60.0):
-        return _market_hours_cache['is_open']
+    if (_session_kind_cache['session'] is not None and
+            now - _session_kind_cache['cached_at'] < 60.0):
+        return _session_kind_cache['session']
 
+    payload: dict | None = None
     try:
         proc = subprocess.run(
             [ALPACA_CLI, 'clock'],
@@ -99,25 +130,128 @@ def in_market_hours():
         )
         if proc.returncode == 0 and proc.stdout:
             payload = json.loads(proc.stdout)
-            is_open = bool(payload.get('is_open'))
-            _market_hours_cache.update({'is_open': is_open, 'cached_at': now})
-            return is_open
-        # CLI returned an error — log and fall through to static check.
-        log(f'alpaca clock returned rc={proc.returncode} — falling back to static ET window')
+        else:
+            log(f'alpaca clock returned rc={proc.returncode} — using static ET window for session classification')
     except Exception as exc:
-        log(f'alpaca clock failed ({type(exc).__name__}: {exc}) — falling back to static ET window')
+        log(f'alpaca clock failed ({type(exc).__name__}: {exc}) — using static ET window for session classification')
 
-    # Static fallback: 09:30–16:00 America/New_York, Mon–Fri.
+    # Compute current ET wall-clock time.
     try:
         from zoneinfo import ZoneInfo
         now_et = datetime.now(ZoneInfo('America/New_York'))
     except Exception:
+        # Best-effort fallback: assume UTC offset = -4h (EDT). Off by one hour
+        # during EST, but the boundaries are coarse enough this won't reclassify
+        # in production. Avoid hard-coding here for the failure to hide.
         now_et = datetime.now(timezone.utc).astimezone()
-    if now_et.weekday() >= 5:
-        return False
+
+    pre_open  = time(4, 0)
     rth_open  = time(9, 30)
     rth_close = time(16, 0)
-    return rth_open <= now_et.time() <= rth_close
+    post_end  = time(20, 0)
+    cur_t = now_et.time()
+
+    # 1. Live `is_open=True` → trivially RTH. Use the clock as the source of
+    #    truth (handles half-days, holidays Alpaca knows about, etc.).
+    if payload is not None and payload.get('is_open'):
+        session = 'rth'
+    elif payload is not None:
+        # 2. Clock says closed. Are we on a trading day at all?
+        #    We use next_open/next_close to triangulate. If next_open is later
+        #    today, we're in pre-market (and today is a trading day). If
+        #    next_close is later today, we're in RTH (shouldn't hit — is_open
+        #    would have been True). If next_open is on a *later* date, we're
+        #    in afterhours of a trading day OR overnight of a non-trading day.
+        from datetime import datetime as _dt
+        def _parse_iso(s):
+            if not s:
+                return None
+            try:
+                # Alpaca returns ISO 8601 with tz; convert to ET.
+                # Python's fromisoformat handles +HH:MM offsets in 3.11+.
+                _t = _dt.fromisoformat(s.replace('Z', '+00:00'))
+                try:
+                    from zoneinfo import ZoneInfo
+                    return _t.astimezone(ZoneInfo('America/New_York'))
+                except Exception:
+                    return _t
+            except (ValueError, TypeError):
+                return None
+
+        next_open_et  = _parse_iso(payload.get('next_open'))
+        # If next_open is today (same ET date) → we're pre-market today.
+        # If next_open is tomorrow (or later) AND we're within RTH window
+        # somehow, would be RTH (already handled). Otherwise we're after-hours
+        # if cur_t is in the post window AND today is a trading day.
+        # Heuristic: if next_open exists and falls on a future calendar day,
+        # then "today" already had its open — so we're post-RTH (afterhours
+        # if before 20:00 ET, else closed). If next_open is today, we're
+        # pre-open (premarket if after 04:00 ET, else closed/overnight).
+        if next_open_et is not None and next_open_et.date() == now_et.date():
+            # Today's open is still in the future → we're before today's open.
+            if pre_open <= cur_t < rth_open:
+                session = 'premarket'
+            else:
+                session = 'closed'
+        elif next_open_et is not None and next_open_et.date() > now_et.date():
+            # Today's open is past (or today is not a trading day).
+            if rth_close <= cur_t < post_end:
+                session = 'afterhours'
+            elif pre_open <= cur_t < rth_open:
+                # Weekend morning where next_open is the following Monday:
+                # technically "pre-market" of a non-trading day. ECNs are
+                # closed on weekends, so classify as closed to be safe.
+                if now_et.weekday() >= 5:
+                    session = 'closed'
+                else:
+                    session = 'premarket'
+            else:
+                session = 'closed'
+        else:
+            # next_open missing/unparseable — fall through to static logic.
+            session = _static_session(now_et, pre_open, rth_open, rth_close, post_end)
+    else:
+        # 3. Clock payload entirely unavailable — pure static ET-window check.
+        session = _static_session(now_et, pre_open, rth_open, rth_close, post_end)
+
+    _session_kind_cache.update({'session': session, 'cached_at': now})
+    return session
+
+
+def _static_session(now_et, pre_open, rth_open, rth_close, post_end) -> str:
+    """Static-fallback session classifier from ET wall clock alone. Used when
+    the alpaca clock CLI is unavailable. Treats Sat/Sun as 'closed' across
+    all hours (ignores holiday-specific closures — best-effort only)."""
+    if now_et.weekday() >= 5:
+        return 'closed'
+    cur_t = now_et.time()
+    if rth_open <= cur_t < rth_close:
+        return 'rth'
+    if pre_open <= cur_t < rth_open:
+        return 'premarket'
+    if rth_close <= cur_t < post_end:
+        return 'afterhours'
+    return 'closed'
+
+
+def in_market_hours():
+    """Return True if regular trading hours per `alpaca clock`.
+
+    Thin wrapper around _alpaca_session_kind() preserved for backward
+    compatibility with existing callers + tests. Returns True iff
+    _alpaca_session_kind() == 'rth'. Caches via the session-kind cache.
+
+    Falls back to a static 09:30–16:00 ET weekday window if the CLI is
+    unavailable (e.g. credentials missing in tests).
+    """
+    import time as _time
+    now = _time.time()
+    if (_market_hours_cache['is_open'] is not None and
+            now - _market_hours_cache['cached_at'] < 60.0):
+        return _market_hours_cache['is_open']
+    is_open = _alpaca_session_kind() == 'rth'
+    _market_hours_cache.update({'is_open': is_open, 'cached_at': now})
+    return is_open
 
 
 def check_signal_quality(conn):
@@ -278,25 +412,169 @@ def _run_alpaca_cli(args, timeout=30):
     return False, None, err
 
 
-def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, coid):
-    """Submit a single bracket/simple order via `alpaca order submit`.
-    Returns the same (ok, payload, err) tuple as _run_alpaca_cli."""
+def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, coid,
+                          order_type='market', extended_hours=False, limit_price=None):
+    """Submit a single order via `alpaca order submit`.
+
+    Args:
+      order_type: 'market' (default, RTH) or 'limit' (extended hours).
+      extended_hours: when True, passes the bare `--extended-hours` flag so
+        Alpaca routes the order to the pre/post ECN session. Requires
+        order_type='limit' + tif='day' per Alpaca's contract.
+      limit_price: required when order_type='limit'. Must be a positive float;
+        passed as string with 2-decimal price formatting.
+      target, stop: only consumed when order_class='bracket'.
+
+    Returns the same (ok, payload, err) tuple as _run_alpaca_cli.
+    """
     args = [
         'order', 'submit',
         '--symbol',          ticker,
         '--side',             side,
         '--qty',              str(qty),
-        '--type',             'market',
+        '--type',             order_type,
         '--time-in-force',    tif,
         '--client-order-id',  coid,
     ]
+    if order_type == 'limit':
+        if limit_price is None:
+            # Caller should have filtered; defensive guard.
+            return False, None, {
+                'exit_code': -1, 'status': None, 'code': None,
+                'error': 'limit order requested without limit_price',
+                'error_json': None, 'raw_stderr': '',
+            }
+        args += ['--limit-price', _price_str(limit_price)]
+    if extended_hours:
+        # Bare flag — CLI treats presence as True per `alpaca order submit --help`.
+        args += ['--extended-hours']
     if order_class == 'bracket':
+        # Brackets are RTH-only; Alpaca rejects bracket+extended-hours.
         args += [
             '--order-class',  'bracket',
             '--take-profit',  json.dumps({'limit_price': _price_str(target)}),
             '--stop-loss',    json.dumps({'stop_price':  _price_str(stop)}),
         ]
     return _run_alpaca_cli(args)
+
+
+def _pick_limit_price(ticker: str, side: str, *, max_offset_pct: float = 0.005) -> float | None:
+    """Return a marketable limit price for an extended-hours order, or None
+    if no usable quote/trade is available.
+
+    Strategy:
+      1. Fetch latest quote via `alpaca data latest-quote --symbol <T>`.
+         Use bid for sells (offset DOWN) and ask for buys (offset UP) so the
+         order is marketable against the thin ext-hours book.
+      2. If bid/ask are both zero/missing, fall back to last trade via
+         `alpaca data latest-trade --symbol <T>` and apply the same offset.
+      3. Return None if all CLI calls fail or yield no usable price.
+
+    Offsets:
+      buy:  ask × (1 + max_offset_pct)   default 0.5% above the ask
+      sell: bid × (1 - max_offset_pct)   default 0.5% below the bid
+    Output rounded to two decimals.
+
+    `side` is the order side ('buy' to open a long / close a short,
+    'sell' to open a short / close a long). Timeout 5s per CLI call —
+    ext-hours data is sometimes slow.
+    """
+    side = (side or '').lower()
+    if side not in ('buy', 'sell'):
+        return None
+
+    # 1. Latest quote.
+    ok, payload, _err = _run_alpaca_cli(
+        ['data', 'latest-quote', '--symbol', ticker], timeout=5,
+    )
+    bid = ask = 0.0
+    if ok and isinstance(payload, dict):
+        q = payload.get('quote') or {}
+        try:
+            bid = float(q.get('bp') or 0.0)
+            ask = float(q.get('ap') or 0.0)
+        except (TypeError, ValueError):
+            bid = ask = 0.0
+
+    chosen = 0.0
+    if side == 'buy' and ask > 0:
+        chosen = ask * (1.0 + max_offset_pct)
+    elif side == 'sell' and bid > 0:
+        chosen = bid * (1.0 - max_offset_pct)
+
+    # 2. Fall back to last trade.
+    if chosen <= 0:
+        ok2, payload2, _err2 = _run_alpaca_cli(
+            ['data', 'latest-trade', '--symbol', ticker], timeout=5,
+        )
+        if ok2 and isinstance(payload2, dict):
+            tr = payload2.get('trade') or {}
+            try:
+                last = float(tr.get('p') or 0.0)
+            except (TypeError, ValueError):
+                last = 0.0
+            if last > 0:
+                if side == 'buy':
+                    chosen = last * (1.0 + max_offset_pct)
+                else:
+                    chosen = last * (1.0 - max_offset_pct)
+
+    if chosen <= 0:
+        return None
+    return round(chosen, 2)
+
+
+def _get_asset_meta(ticker: str) -> dict | None:
+    """Fetch and cache `alpaca asset get --symbol-or-asset-id <ticker>`.
+
+    Returns the parsed asset metadata dict (with keys `class`, `tradable`,
+    `easy_to_borrow`, `shortable`, `status`, …) or None if the CLI call
+    failed (e.g. asset not found). Cached for the cycle via _asset_cache;
+    cleared in main().
+
+    Note: Alpaca's asset payload uses `class` (one of `crypto`,
+    `us_equity`, `us_option`), NOT `asset_class`. Callers must read
+    `meta.get('class')` accordingly.
+    """
+    if ticker in _asset_cache:
+        return _asset_cache[ticker]
+    ok, payload, _err = _run_alpaca_cli(
+        ['asset', 'get', '--symbol-or-asset-id', ticker], timeout=5,
+    )
+    meta = payload if (ok and isinstance(payload, dict)) else None
+    _asset_cache[ticker] = meta or {}
+    return meta
+
+
+def _skip_extended_hours(ticker: str, side: str) -> str | None:
+    """Return a reason string if `ticker` is NOT eligible for an
+    extended-hours order, else None. Best-effort — Alpaca paper does not
+    reliably populate every field, so unknowns are treated as 'pass'
+    (don't pre-emptively block).
+
+    Filters (only enforced when meta fetch succeeded):
+      - class != 'us_equity'    → skip (options, crypto, etc.)
+      - tradable == False       → skip
+    Soft check (do NOT skip on missing):
+      - easy_to_borrow + sell_short — many paper assets don't populate
+        this field; missing → 'unknown' → allow through.
+    """
+    meta = _get_asset_meta(ticker)
+    if not meta:
+        # Meta fetch failed entirely — best effort, allow through. The order
+        # submit itself will reject with a clear error if the asset really
+        # isn't supported, and _unsupported_assets will cache it for the run.
+        return None
+    cls = meta.get('class')
+    if cls and cls != 'us_equity':
+        return f'asset_class={cls} (ext-hours us_equity-only)'
+    tradable = meta.get('tradable')
+    if tradable is False:
+        return 'tradable=false'
+    # easy_to_borrow is a soft signal; do NOT skip on missing/false here.
+    # (Many shortable names show easy_to_borrow=False on paper; Alpaca's
+    # locate flow handles availability at submit time.)
+    return None
 
 
 def _get_order_by_coid(coid):
@@ -452,12 +730,42 @@ def execute_single(sess, equity, order, run_date):
 
     notional = equity * pct_nav
     qty = max(1, int(notional / entry))
-    # In-hours: execute immediately ('day' TIF). Off-hours: queue for next open
-    # ('opg' TIF) so the nightly pipeline still produces live bracket orders.
-    # Note: Alpaca rejects bracket orders with order_class='bracket' + TIF='opg';
-    # for off-hours we submit a plain market opg entry and skip auto-brackets.
-    tif = 'day' if in_market_hours() else 'opg'
-    order_class = 'bracket' if tif == 'day' else 'simple'
+    # Session-aware order shape (Phase 3, 2026-05-19):
+    #   - rth        → market day bracket (or simple-on-short workaround below)
+    #   - premarket  → limit day simple + --extended-hours
+    #   - afterhours → limit day simple + --extended-hours
+    #   - closed     → refuse (overnight 20:00–04:00 ET, weekends, holidays)
+    # OPG was removed: the May-18 OPG paper-fill failure showed it isn't a
+    # reliable substitute for live orders.
+    session = _alpaca_session_kind()
+    limit_price: float | None = None
+    if session == 'rth':
+        tif, order_class, ext_hours, order_type = 'day', 'bracket', False, 'market'
+    elif session in ('premarket', 'afterhours'):
+        # Eligibility filter for ext-hours: us_equity + tradable only.
+        # Options/crypto/non-tradable assets skip immediately. Each skip is
+        # logged so the next morning's reconcile can see why we deferred.
+        skip_reason = _skip_extended_hours(ticker, side)
+        if skip_reason:
+            log(f'INFO _skip_extended_hours ticker={ticker} reason={skip_reason}')
+            return {'ticker': ticker, 'status': 'SKIP',
+                    'reason': f'ext-hours skip ({session}): {skip_reason}',
+                    'client_order_id': coid,
+                    'tif': 'day', 'order_class': 'simple'}
+        tif, order_class, ext_hours, order_type = 'day', 'simple', True, 'limit'
+        limit_price = _pick_limit_price(ticker, side)
+        if limit_price is None:
+            log(f'  ✗ {ticker}: no quote/trade for ext-hours limit price — skipping submit')
+            return {'ticker': ticker, 'status': 'SKIP',
+                    'reason': f'ext-hours skip ({session}): no quote/trade for limit price',
+                    'client_order_id': coid,
+                    'tif': 'day', 'order_class': 'simple'}
+    else:  # 'closed'
+        log(f'  ✗ {ticker}: market fully closed (session=closed) — no submit')
+        return {'ticker': ticker, 'status': 'SKIP',
+                'reason': 'market fully closed (session=closed)',
+                'client_order_id': coid,
+                'tif': 'day', 'order_class': 'simple'}
     # Shorts (side='sell' to open) can't reliably ride a bracket on Alpaca
     # paper — the parent gets rejected with "bracket orders must be entry
     # orders" when there's any prior fill in the same symbol, and the
@@ -465,6 +773,7 @@ def execute_single(sess, equity, order, run_date):
     # order; downstream stop/target management lives in
     # alpaca_replace_stop.py and the strategy's own exit signals. Logged
     # for visibility (these used to fail silently with 14+ rejections/day).
+    # In extended-hours, order_class is already 'simple' so this is a no-op.
     if side == 'sell' and order_class == 'bracket':
         log(f'  ↓ {ticker}: short → simple order_class (bracket-on-short rejected by Alpaca paper)')
         order_class = 'simple'
@@ -532,14 +841,20 @@ def execute_single(sess, equity, order, run_date):
         ok, payload, err = _submit_order_via_cli(
             ticker=ticker, side=side, qty=qty, tif=tif,
             order_class=order_class, target=target, stop=stop, coid=coid,
+            order_type=order_type, extended_hours=ext_hours, limit_price=limit_price,
         )
         if ok:
             oid = (payload or {}).get('id', '?') if isinstance(payload, dict) else '?'
-            log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
+            if order_type == 'limit':
+                log(f'OK  {ticker} {side.upper()} x{qty} sh  LIMIT={limit_price:.2f}  ext_hours={ext_hours}  notional=${notional:,.0f}  order={oid}')
+            else:
+                log(f'OK  {ticker} {side.upper()} x{qty} sh  entry~{entry:.2f}  TP={target:.2f}  SL={stop:.2f}  notional=${notional:,.0f}  order={oid}')
             return {'ticker': ticker, 'status': 'submitted', 'order_id': oid,
                     'side': side, 'qty': qty, 'notional': notional,
                     'entry': entry, 'stop': stop, 'target': target,
-                    'tif': tif, 'order_class': order_class, 'client_order_id': coid}
+                    'tif': tif, 'order_class': order_class, 'client_order_id': coid,
+                    'extended_hours': ext_hours, 'order_type': order_type,
+                    'limit_price': limit_price}
 
         err_text   = (err.get('error') or '').lower()
         err_status = err.get('status')
@@ -559,8 +874,10 @@ def execute_single(sess, equity, order, run_date):
         # base_price it validated against. Use the authoritative bp to run the
         # full bracket recompute (preserves the signal's stop/target ratios)
         # and retry once. Catches the case where our pre-flight quote was
-        # stale or the quote fetch failed entirely.
-        if err_status == 422 and side in ('buy', 'sell') and tif == 'day':
+        # stale or the quote fetch failed entirely. Bracket-only — ext-hours
+        # uses simple/limit and never triggers Alpaca's base_price rule.
+        if (err_status == 422 and side in ('buy', 'sell') and tif == 'day'
+                and order_class == 'bracket'):
             ej     = err.get('error_json') or {}
             bp_raw = ej.get('base_price')
             wants_retry = bp_raw and ('stop_loss' in err_text
@@ -578,9 +895,13 @@ def execute_single(sess, equity, order, run_date):
                     log(f'  ↻ {ticker}: 422 base_price={bp:.2f} — retry with '
                         f'stop {stop:.2f}→{r_stop:.2f}, target {target:.2f}→{r_target:.2f}'
                         + (f' ({r_why})' if r_why else ''))
+                    # 422-base_price retry only fires for RTH bracket orders
+                    # (extended-hours uses limit + simple — no bracket validation).
+                    # Preserve market+no-ext-hours shape here.
                     ok3, payload3, err3 = _submit_order_via_cli(
                         ticker=ticker, side=side, qty=qty, tif=tif,
                         order_class=order_class, target=r_target, stop=r_stop, coid=coid,
+                        order_type='market', extended_hours=False, limit_price=None,
                     )
                     if ok3:
                         oid = (payload3 or {}).get('id', '?') if isinstance(payload3, dict) else '?'
@@ -647,8 +968,15 @@ def main():
         conn.close(); sys.exit(0)
     log(f'Signal-quality OK — {why}')
 
-    rth = in_market_hours()
-    log(f'Market hours: {"RTH — submitting bracket day orders" if rth else "closed — submitting OPG market orders (queue for next open)"}')
+    session = _alpaca_session_kind()
+    rth = (session == 'rth')
+    _session_descriptions = {
+        'rth':        'RTH — submitting bracket day market orders',
+        'premarket':  'PREMARKET (04:00–09:30 ET) — submitting simple day LIMIT orders with --extended-hours; us_equity-only',
+        'afterhours': 'AFTERHOURS (16:00–20:00 ET) — submitting simple day LIMIT orders with --extended-hours; us_equity-only',
+        'closed':     'CLOSED (overnight 20:00–04:00 ET / weekend / holiday) — refusing all submits',
+    }
+    log(f'Market session: {_session_descriptions.get(session, session)}')
 
     sess    = _alpaca_session()
     account = _fetch_account_state(sess)
@@ -656,11 +984,12 @@ def main():
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
 
-    # Reset per-run unsupported-asset cache.
+    # Reset per-run unsupported-asset + asset-meta caches.
     _unsupported_assets.clear()
+    _asset_cache.clear()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
-    log(f'orders to attempt: {len(orders)} (pure sizer output — no executor-side cap)')
+    log(f'[executor] session={session}, submitting {len(orders)} orders (pure sizer output — no executor-side cap)')
 
     submitted = []
     skipped   = []
@@ -687,8 +1016,10 @@ def main():
         # not just what succeeded. Reject rows carry alpaca_http +
         # alpaca_error and have alpaca_order_id NULL, so already_executed()
         # still treats them as "not yet executed" for retry semantics.
+        # tif is always 'day' across all sessions (post-OPG removal 2026-05-19);
+        # order_class is 'bracket' in RTH, 'simple' in pre/afterhours/closed-skip.
         record_submission(conn, run_date, order, result,
-                          result.get('tif') or ('day' if rth else 'opg'),
+                          result.get('tif') or 'day',
                           result.get('order_class') or ('bracket' if rth else 'simple'),
                           result.get('client_order_id') or '')
         if result.get('status') in ('submitted', 'recovered'):
