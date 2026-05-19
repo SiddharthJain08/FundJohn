@@ -290,6 +290,42 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
     } catch (_) { /* nav stays null → day_pnl_usd renders as em-dash */ }
 
+    // Broker truth (Phase 2I, 2026-05-19): the strategy-intent rows below
+    // describe what each strategy wants; the broker holds ONE consolidated
+    // position per ticker. Fetch alpaca position list once and attach the
+    // broker's view to each row keyed by ticker so the dashboard's
+    // _groupByTicker can show the parent (ticker) row from broker truth
+    // and the expanded sub-rows from strategy intents. Pre-fix the rollup
+    // summed intents and produced > 100% NAV on multi-strategy tickers
+    // (WBD hit 409% across 17 strategies).
+    const brokerPositions = {};
+    try {
+      const positionsResp = await runAlpaca(['position', 'list'], { timeout: 10_000 });
+      const list = positionsResp && positionsResp.ok && Array.isArray(positionsResp.payload)
+        ? positionsResp.payload : [];
+      for (const p of list) {
+        if (!p || !p.symbol) continue;
+        const qty  = parseFloat(p.qty);
+        const mv   = parseFloat(p.market_value);
+        const avg  = parseFloat(p.avg_entry_price);
+        const cur  = parseFloat(p.current_price);
+        const plpc = parseFloat(p.unrealized_plpc);
+        brokerPositions[p.symbol] = {
+          qty:               Number.isFinite(qty)  ? qty  : null,
+          market_value:      Number.isFinite(mv)   ? mv   : null,
+          avg_entry_price:   Number.isFinite(avg)  ? avg  : null,
+          current_price:     Number.isFinite(cur)  ? cur  : null,
+          unrealized_plpc:   Number.isFinite(plpc) ? plpc : null,
+          // size_pct = market_value / NAV, normalised to a fraction (0.05 = 5%).
+          // Absolute value so shorts contribute positive size to the heatmap
+          // tile area; direction (side) is the qty sign carrier.
+          size_pct: (Number.isFinite(mv) && nav && nav > 0)
+            ? Math.abs(mv) / nav : null,
+          side: Number.isFinite(qty) ? (qty >= 0 ? 'long' : 'short') : null,
+        };
+      }
+    } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
+
     const enriched = result.rows.map(r => ({
       ...r,
       day_pnl_usd: computeDayPnlUsd({
@@ -298,6 +334,11 @@ app.get('/api/portfolio/positions', async (req, res) => {
         position_size_pct: r.position_size_pct,
         nav,
       }),
+      // null when broker doesn't hold this ticker (stale 'open' row that the
+      // reconcile sweep hasn't caught yet, or a same-day signal not yet
+      // submitted). _groupByTicker uses null as the signal to fall back to
+      // strategy-intent rollup math.
+      broker_position: brokerPositions[r.ticker] || null,
     }));
 
     if (req.query.group_by === 'strategy') {
@@ -5891,9 +5932,22 @@ function _groupByTicker(rows, mode) {
     g.net_dir = dirs.size === 0 ? '—' : (dirs.size === 1 ? [...dirs][0] : 'MIXED');
     g.avg_entry = wEntryDen > 0 ? wEntrySum / wEntryDen : null;
     g.price = priceN > 0 ? priceSum / priceN : null;
-    g.total_size_pct = totalSize;
+    // Broker truth (2026-05-19): if any strategy-intent row carries a
+    // broker_position block, the broker holds this ticker — use its size +
+    // entry + return for the parent row, overriding the intent-rollup. All
+    // signals for a ticker carry the same broker_position so signals[0] is
+    // representative. When the broker doesn't hold the ticker (drift case),
+    // broker stays null and the parent row falls back to intent rollup
+    // (legacy behaviour, for stale 'open' rows still in the table).
+    g.broker = (g.signals[0] && g.signals[0].broker_position) || null;
+    g.total_size_pct = (g.broker && g.broker.size_pct != null)
+      ? g.broker.size_pct                // broker-truth $ size / NAV
+      : totalSize;                       // fallback to summed intents
     g.contrib_pct = sizeWPnlSum;
-    g.net_pnl = pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null; // size-weighted mean pnl, restricted to rows with both size + pnl
+    g.net_pnl = (g.broker && g.broker.unrealized_plpc != null)
+      ? g.broker.unrealized_plpc         // broker-truth unrealized P/L %
+      : (pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null);
+    if (g.broker && g.broker.market_value != null) g.market_value = g.broker.market_value;
     g.avg_days = daysN > 0 ? daysSum / daysN : null;
     g.wins = wins;
     g.losses = isOpen ? null : (g.n - wins);

@@ -622,12 +622,26 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                     params_clean['features'] = {k: _to_native(v) for k, v in feats.items()}
 
                 cur.execute("SAVEPOINT sp_signal")
+                # 2026-05-19: hard cap of one open signal per (strategy, ticker).
+                # The existing ON CONFLICT prevents same-day dups; the NOT
+                # EXISTS guard extends that to any prior open signal — so each
+                # strategy emits at most one signal per ticker per pipeline
+                # run, and the open position persists until its bracket
+                # triggers (stop/target/max_hold). Without this, daily
+                # re-emissions of the same setup created up to 18× duplicates
+                # per (strategy, ticker) → strategy_stats.open_count inflated
+                # and portfolio rollup over-leveraged (WBD hit 409% of NAV
+                # before the 2026-05-19 reconcile sweep).
                 cur.execute("""
                     INSERT INTO execution_signals
                         (strategy_id, workspace_id, signal_date, ticker, direction,
                          entry_price, stop_loss, target_1, target_2, target_3,
                          position_size_pct, regime_state, signal_params, status)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'open')
+                    SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'open'
+                     WHERE NOT EXISTS (
+                       SELECT 1 FROM execution_signals
+                        WHERE strategy_id = %s AND ticker = %s AND status = 'open'
+                     )
                     ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
                 """, (
                     strategy_id, WORKSPACE, run_date,
@@ -636,6 +650,7 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                     sig.target_1, sig.target_2, sig.target_3,
                     sig.position_size_pct, regime_state,
                     json.dumps(params_clean),
+                    strategy_id, sig.ticker,   # NOT EXISTS params
                 ))
                 rows_inserted = max(cur.rowcount, 0)  # ON CONFLICT DO NOTHING returns -1
                 cur.execute("RELEASE SAVEPOINT sp_signal")
