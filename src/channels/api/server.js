@@ -444,6 +444,12 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
     // is the strategy's volatility of pnl_pct on this ticker — used as
     // the IR denominator. We compute IR per-strategy after rolling up
     // LONG/SHORT direction groups.
+    // 2026-05-19: exclude deprecated/archived strategies from alpha-bars.
+    // Pre-fix, S5_max_pain (deprecated 2026-05-12) still showed as a
+    // contributor on every ticker it had ever traded because the JOIN
+    // didn't filter by lifecycle state. The live sizer skips deprecated
+    // strategies via strategy_weights_by_regime; the dashboard alpha
+    // display should reflect the same truth.
     const stratRes = await dbQuery(`
       SELECT es.strategy_id,
              es.direction,
@@ -452,7 +458,9 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
              COUNT(*)::int                    AS n_trades
       FROM signal_performance sp
       JOIN execution_signals es ON es.id = sp.signal_id
+      JOIN strategy_registry sr ON sr.id = es.strategy_id
       WHERE sp.status = 'closed' AND es.ticker = $1
+        AND sr.status != 'deprecated'
       GROUP BY es.strategy_id, es.direction
     `, [ticker]);
     // Ticker-level reference: mean(pnl_pct) over every closed trade.
