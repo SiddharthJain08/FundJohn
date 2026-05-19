@@ -138,6 +138,81 @@ def collapse_fills(fills):
     return out
 
 
+def fetch_broker_tickers() -> set[str] | None:
+    """Return the set of tickers the broker currently holds, or None
+    if the CLI call fails (caller should skip phantom cleanup on None).
+    """
+    proc = subprocess.run([ALPACA_CLI, 'position', 'list'],
+                          capture_output=True, text=True, timeout=30, check=False)
+    if proc.returncode != 0:
+        log(f'position list rc={proc.returncode}; skipping phantom cleanup')
+        return None
+    try:
+        positions = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        log('position list returned non-JSON; skipping phantom cleanup')
+        return None
+    if not isinstance(positions, list):
+        return None
+    return {p['symbol'] for p in positions if p.get('symbol')}
+
+
+def cleanup_phantom_signals(conn, dry_run: bool, broker_tickers: set[str]) -> int:
+    """Mark execution_signals.status='closed' for open rows whose ticker
+    is no longer held by the broker.
+
+    Spares today's signals (signal_date == CURRENT_DATE) — they may be
+    fresh orders that haven't filled yet. Older rows where the broker
+    isn't holding the ticker are unambiguous phantoms (closed externally,
+    rejected, or expired before fill); they pollute the dashboard
+    portfolio rollup and the sizer's active-window query if left open.
+
+    Append-only invariant preserved: status flip only, no DELETE.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, ticker, strategy_id, signal_date
+          FROM execution_signals
+         WHERE status='open'
+           AND signal_date < CURRENT_DATE
+           AND NOT (ticker = ANY(%s))
+        """,
+        (list(broker_tickers),))
+    rows = cur.fetchall()
+    if not rows:
+        log('phantom cleanup: nothing to do (open rows match broker holdings)')
+        cur.close()
+        return 0
+    if dry_run:
+        log(f'phantom cleanup: would close {len(rows)} stale open signals (DRY-RUN)')
+        for r in rows[:5]:
+            log(f'  DRY: sig={r[0]} {r[2]}/{r[1]} signal_date={r[3]}')
+        cur.close()
+        return len(rows)
+    # Per-row savepoint loop. The execution_signals table has pre-existing
+    # legacy duplicate (sid, signal_date, ticker, direction) tuples that
+    # predate the unique constraint; a bulk UPDATE on those rows trips
+    # UniqueViolation. Per-row + savepoint lets the loop skip past those
+    # rows without losing the closes on healthy rows.
+    n_closed, n_skipped = 0, 0
+    for r in rows:
+        sp = f'sp_phantom_{r[0].hex if hasattr(r[0],"hex") else "x"}'.replace('-', '_')
+        try:
+            cur.execute(f'SAVEPOINT {sp}')
+            cur.execute("UPDATE execution_signals SET status='closed' WHERE id=%s::uuid", (str(r[0]),))
+            cur.execute(f'RELEASE SAVEPOINT {sp}')
+            n_closed += 1
+        except psycopg2.errors.UniqueViolation:
+            cur.execute(f'ROLLBACK TO SAVEPOINT {sp}')
+            n_skipped += 1
+    conn.commit()
+    cur.close()
+    log(f'phantom cleanup: closed {n_closed} stale open signals '
+        f'({n_skipped} skipped due to legacy dup-key))')
+    return n_closed
+
+
 def reconcile(run_date: str, conn, dry_run: bool = False):
     """Update alpaca_submissions rows for `run_date` with broker fill state.
 
@@ -219,6 +294,12 @@ def main():
     conn = psycopg2.connect(uri)
     try:
         reconcile(args.date, conn, dry_run=args.dry_run)
+        # Phantom cleanup: stale 'open' execution_signals whose tickers the
+        # broker no longer holds. Fail-open on broker fetch error (the
+        # reconcile work above is the critical path).
+        broker_tickers = fetch_broker_tickers()
+        if broker_tickers is not None:
+            cleanup_phantom_signals(conn, args.dry_run, broker_tickers)
     except RuntimeError as exc:
         log(f'aborted: {exc}')
         conn.close()

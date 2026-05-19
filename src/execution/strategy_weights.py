@@ -35,6 +35,8 @@ sys.path.insert(0, str(ROOT / 'src'))
 import psycopg2
 import psycopg2.extras
 
+import math
+
 from execution.cadence import cadence_days
 
 logger = logging.getLogger(__name__)
@@ -212,6 +214,28 @@ def _load_active_strategies(conn) -> list[dict]:
     for r in cur:
         eligible_by_strat.setdefault(r['strategy_id'], []).append(r['regime_state'])
 
+    # Live-observed avg_holding_days per strategy. The static signal_frequency
+    # declaration is a lower bound — many strategies declare 'daily' but
+    # actually hold positions for 3-15 days because stops/targets don't hit
+    # within one bar. cadence_days drives both the sizer's active-window
+    # lookback AND daily_weight = w / cadence_days; using the static value
+    # for a strategy that holds 4 days both over-counts old signals AND
+    # over-weights it relative to a true-daily strategy.
+    #
+    # Resolution: cadence_days = max(static_declared, ceil(live_avg)). The
+    # max() keeps the static declaration as a floor (a strategy declared
+    # monthly that happens to close fast doesn't get bumped down).
+    cur.execute('SELECT strategy_id, avg_holding_days FROM strategy_state WHERE strategy_id = ANY(%s)',
+                (active_ids,))
+    live_avg_by_strat: dict[str, float] = {}
+    for r in cur:
+        v = r['avg_holding_days']
+        if v is not None:
+            try:
+                live_avg_by_strat[r['strategy_id']] = float(v)
+            except (TypeError, ValueError):
+                pass
+
     out: list[dict] = []
     for sid in active_ids:
         eligible = eligible_by_strat.get(sid, [])
@@ -232,11 +256,18 @@ def _load_active_strategies(conn) -> list[dict]:
                         break
             except Exception as e:
                 logger.warning('strategy_weights: could not read %s: %s', impl_path, e)
+        static_cad = cadence_days(sig_freq)
+        live_avg = live_avg_by_strat.get(sid)
+        live_cad = max(1, math.ceil(live_avg)) if live_avg and live_avg > 0 else 0
+        effective_cad = max(static_cad, live_cad)
+        if live_cad > static_cad:
+            logger.info('strategy_weights: %s cadence_days %d → %d (live avg=%.2f overrides static "%s")',
+                        sid, static_cad, effective_cad, live_avg, sig_freq or 'unknown')
         out.append({
             'strategy_id': sid,
             'eligible_regimes': eligible,
             'signal_frequency': sig_freq,
-            'cadence_days': cadence_days(sig_freq),
+            'cadence_days': effective_cad,
         })
     return out
 

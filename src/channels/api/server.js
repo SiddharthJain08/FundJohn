@@ -6202,9 +6202,16 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const containerHeight = expanded ? 560 : 280;
   const tilesPerRow     = expanded ? 12 : 4;
   const shown           = expanded ? sorted : sorted.slice(0, 12);
-  // Size denominator: full universe of tickers, not just the visible slice.
-  // Compact view → share-of-book stays stable when the operator expands.
-  const sizeDenom = sorted.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
+  // Size denominator: only tickers the broker actually holds. Phantom
+  // intent-rollups from stale execution_signals (broker doesn't hold them)
+  // would otherwise dilute the share %. 2026-05-19: GLW at 194% of NAV
+  // displayed as 8.95% because 272 phantom intent tickers padded the
+  // denominator to 21.73. Fallback to all groups if no broker-held rows
+  // exist (e.g. flat book) so tiles still render proportionally.
+  const heldGroups = sorted.filter(g => g.broker && g.broker.size_pct != null);
+  const sizeDenom = (heldGroups.length
+    ? heldGroups.reduce((s, g) => s + (g.total_size_pct || 0), 0)
+    : sorted.reduce((s, g) => s + (g.total_size_pct || 0), 0)) || 1;
   const overall   = shown.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
   let rowsHtml = '';
   for (let i = 0; i < shown.length; i += tilesPerRow) {

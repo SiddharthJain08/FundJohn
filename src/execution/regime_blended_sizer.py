@@ -182,10 +182,14 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
         return []
 
     today = _date.today()
-    # Earliest signal_date that could still be active: today - max cadence
+    # Earliest signal_date that could still be active: today - max cadence.
+    # No weekend buffer: cadence_days is now sourced from live avg_holding_days
+    # (in strategy_weights._load_active_strategies), so a strategy that
+    # appears stale on Monday morning genuinely hasn't generated new info.
+    # The user's invariant (2026-05-19): only fresh information from the
+    # cycle's actual cadence window — no expired information.
     max_cad = max(cadence_by_strat.get(s, 1) for s in weight_by_strat) if cadence_by_strat else 1
-    # +2 calendar-day buffer to absorb weekend gaps when cadence is small
-    earliest = today - _timedelta(days=max_cad + 7)
+    earliest = today - _timedelta(days=max_cad)
 
     sids = list(weight_by_strat.keys())
     out = []
@@ -221,11 +225,16 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     # bound; here we tighten per strategy. Also drop tickers not in the
     # tradable universe (fail-open when set is empty).
     dropped_untradable = 0
+    dropped_stale = 0
     for r in rows:
         sid = r['strategy_id']
         cad = cadence_by_strat.get(sid, 1)
         age = (today - r['signal_date']).days
-        if age > cad + 2:        # 2-day weekend buffer
+        # Strict cadence: a cad=1 (daily) strategy contributes ONLY today's
+        # signal; a cad=4 (4-day-holding) strategy contributes the last
+        # 4 days of signals (age in [0,3]). Drop everything older.
+        if age >= cad:
+            dropped_stale += 1
             continue
         if tradable_symbols and r['ticker'] not in tradable_symbols:
             dropped_untradable += 1
@@ -237,6 +246,8 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     if dropped_untradable:
         logger.info('sharpe_cadence: dropped %d untradable signals (universe=%d)',
                     dropped_untradable, len(tradable_symbols))
+    if dropped_stale:
+        logger.info('sharpe_cadence: dropped %d stale signals (age >= cadence_days)', dropped_stale)
     return out
 
 
