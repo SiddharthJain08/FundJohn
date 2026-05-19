@@ -639,12 +639,18 @@ app.get('/api/config/regime-sizing', async (req, res) => {
                           WHEN 'CRISIS' THEN 4
                           ELSE 5 END`),
     ]);
+    // 2026-05-19: prior code used `path.join(...)` but `path` is not imported
+    // at module scope (only inline as `require('path')` for REGIME_FILE). The
+    // ReferenceError was caught silently and the endpoint always returned
+    // the TRANSITIONING fallback, even though the file said LOW_VOL. Use the
+    // already-resolved REGIME_FILE constant — same target, no inline join.
     let currentRegime = 'TRANSITIONING';
     try {
-      const latestPath = path.join(__dirname, '../../../.agents/market-state/latest.json');
-      const latestJson = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      const latestJson = JSON.parse(fs.readFileSync(REGIME_FILE, 'utf8'));
       currentRegime = latestJson.state || 'TRANSITIONING';
-    } catch (_) {}
+    } catch (e) {
+      console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
+    }
     const lam = lamRes.rows[0];
     const lamId = lamIntradayRes.rows[0];
     res.json({
@@ -1136,12 +1142,18 @@ app.get('/api/strategies', async (req, res) => {
     }
 
     // Current regime state from latest.json (authoritative)
+    // 2026-05-19: prior code used `path.join(...)` but `path` is not imported
+    // at module scope (only inline as `require('path')` for REGIME_FILE). The
+    // ReferenceError was caught silently and the endpoint always returned
+    // the TRANSITIONING fallback, even though the file said LOW_VOL. Use the
+    // already-resolved REGIME_FILE constant — same target, no inline join.
     let currentRegime = 'TRANSITIONING';
     try {
-      const latestPath = path.join(__dirname, '../../../.agents/market-state/latest.json');
-      const latestJson = JSON.parse(fs.readFileSync(latestPath, 'utf8'));
+      const latestJson = JSON.parse(fs.readFileSync(REGIME_FILE, 'utf8'));
       currentRegime = latestJson.state || 'TRANSITIONING';
-    } catch (_) {}
+    } catch (e) {
+      console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
+    }
 
     // Cumulative per-strategy O/U/E counts (Over / Under / Expected)
     // across every closed trade. Replaces 2026-05-16 the prior O/U/R
@@ -6323,13 +6335,14 @@ function renderRiskPanel(cfg) {
   if (stampEl) stampEl.textContent = cfg.global.updated_at
     ? 'Leverage saved ' + new Date(cfg.global.updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
     : '';
+  // 2026-05-19: Daily slider cap dropped from 3.00 → 2.00 (Reg T overnight
+  // max). Tick set now ends at the cap so labels don't render off-track.
   const ticks = [
+    { v: 0.25, label: 'Defensive' },
     { v: 0.50, label: 'Conservative' },
     { v: 1.00, label: 'Cautious' },
     { v: 1.50, label: 'Balanced' },
-    { v: 2.00, label: 'Active' },
-    { v: 2.50, label: 'Aggressive' },
-    { v: 3.00, label: 'Max Risk' },
+    { v: 2.00, label: 'Reg T Max' },
   ];
   const currentRegime = (cfg.current_regime || '').toUpperCase();
   const current = (cfg.regimes || []).find(r => r.state === currentRegime);
@@ -6402,22 +6415,10 @@ function renderRiskPanel(cfg) {
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
       <div class="pf-risk-title">Leverage</div>
-      <div class="pf-risk-help">Two independent caps. <strong>Overnight (Reg T)</strong> controls today's daily process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T rules. <strong>Intraday (PDT)</strong> is a placeholder up to 4× — not consumed by any strategy today, comes online when intraday-only strategies + extended-hours executor are wired.</div>
+      <div class="pf-risk-help">Two independent caps. <strong>Intraday (PDT)</strong> is a placeholder up to 4× — not consumed by any strategy today, comes online when intraday-only strategies + extended-hours executor are wired. <strong>Daily (Reg T)</strong> controls today's daily/multi-day process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T overnight rules.</div>
     </div>
 
-    <div class="pf-lambda-block">
-      <div class="pf-lambda-block-head"><span class="pf-lr-label">Overnight Leverage (Reg T)</span><span class="pf-lr-cap">cap \${cfg.global.max.toFixed(2)}×</span></div>
-      <div class="pf-lambda-mega">
-        <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
-        <div class="pf-lambda-ticks">\${tickHtml}</div>
-      </div>
-      <div class="pf-lambda-readout">
-        <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
-        <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
-      </div>
-    </div>
-
-    <div class="pf-lambda-block" style="margin-top:14px;opacity:\${lamIdActive ? 1 : 0.78}">
+    <div class="pf-lambda-block" style="opacity:\${lamIdActive ? 1 : 0.78}">
       <div class="pf-lambda-block-head"><span class="pf-lr-label">Intraday Leverage (PDT)</span><span class="pf-lr-cap">cap \${lamIdMax.toFixed(2)}× · \${lamIdActive ? 'active' : 'placeholder — not yet consumed'}</span></div>
       <div class="pf-lambda-mega">
         <input type="range" id="pf-lambda-intraday-slider" min="\${lamIdMin}" max="\${lamIdMax}" step="0.05" value="\${lamIntraday.toFixed(2)}" />
@@ -6426,6 +6427,18 @@ function renderRiskPanel(cfg) {
       <div class="pf-lambda-readout">
         <span class="pf-lr-value" id="pf-lambda-intraday-readout">\${lamIntraday.toFixed(2)}×</span>
         <span class="pf-lr-sub" id="pf-lambda-intraday-stamp">\${lamIdStamp}</span>
+      </div>
+    </div>
+
+    <div class="pf-lambda-block" style="margin-top:14px">
+      <div class="pf-lambda-block-head"><span class="pf-lr-label">Daily Leverage (Reg T)</span><span class="pf-lr-cap">cap \${cfg.global.max.toFixed(2)}× · active</span></div>
+      <div class="pf-lambda-mega">
+        <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
+        <div class="pf-lambda-ticks">\${tickHtml}</div>
+      </div>
+      <div class="pf-lambda-readout">
+        <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
+        <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
       </div>
     </div>
 
@@ -6471,12 +6484,12 @@ function renderRiskPanel(cfg) {
             cfg.global.lambda = v;
             cfg.global.updated_at = new Date().toISOString();
             if (stampEl) stampEl.textContent = 'Leverage saved just now';
-            toast('Overnight leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
+            toast('Daily leverage saved: ' + v.toFixed(2) + '× — next cycle picks up the new value', 'ok', 4000);
           } else {
-            toast('Overnight leverage update failed', 'error', 4000);
+            toast('Daily leverage update failed', 'error', 4000);
           }
         } catch (e) {
-          toast('Overnight leverage update error: ' + e.message, 'error', 4000);
+          toast('Daily leverage update error: ' + e.message, 'error', 4000);
         }
       }, 400);
     });
