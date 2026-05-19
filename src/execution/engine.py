@@ -622,37 +622,61 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                     params_clean['features'] = {k: _to_native(v) for k, v in feats.items()}
 
                 cur.execute("SAVEPOINT sp_signal")
-                # 2026-05-19: hard cap of one open signal per (strategy, ticker).
-                # The existing ON CONFLICT prevents same-day dups; the NOT
-                # EXISTS guard extends that to any prior open signal — so each
-                # strategy emits at most one signal per ticker per pipeline
-                # run, and the open position persists until its bracket
-                # triggers (stop/target/max_hold). Without this, daily
-                # re-emissions of the same setup created up to 18× duplicates
-                # per (strategy, ticker) → strategy_stats.open_count inflated
-                # and portfolio rollup over-leveraged (WBD hit 409% of NAV
-                # before the 2026-05-19 reconcile sweep).
+                # 2026-05-19 Phase A: bracket-upsert per (strategy, ticker).
+                # Invariant: at most ONE open execution_signals row per
+                # (strategy_id, ticker). Re-emissions don't insert a new row;
+                # they UPDATE the existing one's bracket fields so the
+                # strategy's current intent (stop/target/size/signal_params)
+                # is reflected in DB, dashboard, and sizer reads on every
+                # cycle. entry_price + signal_date stay at the original
+                # entry (audit trail of when the position was first taken).
+                #
+                # Live broker bracket leg is NOT touched here — that's
+                # Phase B (scripts/sync_brackets.py, gated by
+                # OPENCLAW_DAILY_BRACKET_REPLACE=1). Without B, a held
+                # position's broker stop-leg keeps its day-0 values until
+                # natural exit + re-entry; the DB and dashboard always
+                # show the strategy's current intent.
                 cur.execute("""
-                    INSERT INTO execution_signals
-                        (strategy_id, workspace_id, signal_date, ticker, direction,
-                         entry_price, stop_loss, target_1, target_2, target_3,
-                         position_size_pct, regime_state, signal_params, status)
-                    SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, 'open'
-                     WHERE NOT EXISTS (
-                       SELECT 1 FROM execution_signals
-                        WHERE strategy_id = %s AND ticker = %s AND status = 'open'
-                     )
-                    ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
-                """, (
-                    strategy_id, WORKSPACE, run_date,
-                    sig.ticker, sig.direction,
-                    sig.entry_price, sig.stop_loss,
-                    sig.target_1, sig.target_2, sig.target_3,
-                    sig.position_size_pct, regime_state,
-                    json.dumps(params_clean),
-                    strategy_id, sig.ticker,   # NOT EXISTS params
-                ))
-                rows_inserted = max(cur.rowcount, 0)  # ON CONFLICT DO NOTHING returns -1
+                    SELECT id FROM execution_signals
+                     WHERE strategy_id = %s AND ticker = %s AND status = 'open'
+                     LIMIT 1
+                """, (strategy_id, sig.ticker))
+                existing_row = cur.fetchone()
+                if existing_row:
+                    cur.execute("""
+                        UPDATE execution_signals
+                           SET stop_loss        = %s,
+                               target_1         = %s,
+                               target_2         = %s,
+                               target_3         = %s,
+                               position_size_pct = %s,
+                               regime_state     = %s,
+                               signal_params    = %s::jsonb
+                         WHERE id = %s
+                    """, (
+                        sig.stop_loss, sig.target_1, sig.target_2, sig.target_3,
+                        sig.position_size_pct, regime_state,
+                        json.dumps(params_clean), existing_row[0],
+                    ))
+                    rows_inserted = 0   # not a new emit; bracket refresh only
+                else:
+                    cur.execute("""
+                        INSERT INTO execution_signals
+                            (strategy_id, workspace_id, signal_date, ticker, direction,
+                             entry_price, stop_loss, target_1, target_2, target_3,
+                             position_size_pct, regime_state, signal_params, status)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open')
+                        ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
+                    """, (
+                        strategy_id, WORKSPACE, run_date,
+                        sig.ticker, sig.direction,
+                        sig.entry_price, sig.stop_loss,
+                        sig.target_1, sig.target_2, sig.target_3,
+                        sig.position_size_pct, regime_state,
+                        json.dumps(params_clean),
+                    ))
+                    rows_inserted = max(cur.rowcount, 0)  # ON CONFLICT DO NOTHING returns -1
                 cur.execute("RELEASE SAVEPOINT sp_signal")
                 total += rows_inserted
             except Exception as e:

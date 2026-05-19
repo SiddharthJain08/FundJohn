@@ -85,6 +85,7 @@ else:
         ('trade_parity',         'regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
         ('alpaca',               'alpaca_executor'),              # Auto-submit sized orders to Alpaca paper
         ('trade_parity_capture', 'trade_parity_capture'),         # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
+        ('sync_brackets',        'sync_brackets'),                 # Phase B (2026-05-19): replace live bracket stop-legs when DB intent drifted (DEFAULT-OFF, gated on OPENCLAW_DAILY_BRACKET_REPLACE=1; dry-runs by default)
         ('reconcile',            'alpaca_reconcile'),             # Reconcile alpaca_submissions vs broker FILL activities
         ('report',               'send_report'),                  # Greenlist → #trade-signals, veto digest → #trade-reports
         ('pyportfolioopt_shadow','pyportfolioopt_shadow'),        # Phase 1G shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
@@ -114,6 +115,7 @@ STEP_FAILURE_CHANNEL = {
     'trade_parity': 'data-alerts',
     'alpaca':       'trade-reports',
     'trade_parity_capture': 'data-alerts',
+    'sync_brackets':         'trade-reports',
     'correlation_sidecar':   'data-alerts',
     'report':      'trade-reports',
     'health':      'pipeline-feed',
