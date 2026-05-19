@@ -7,7 +7,13 @@ Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = (bt_n × bt_sharpe + live_n × live_sharpe)
                        / (bt_n + live_n)
     w(s, R)      = effective_sharpe / Σ_{s' positive} effective_sharpe(s')
-    daily_weight = w(s, R) / cadence_days(s)
+    daily_weight = w(s, R) / sqrt(cadence_days(s))
+
+Why sqrt(cadence_days) and not cadence_days? Sharpe scales with sqrt(time)
+under iid returns (σ_T = σ_1·sqrt(T)), so a strategy whose effective_sharpe
+is computed over T-day holding windows should be down-weighted by sqrt(T)
+to convert to a per-cycle-equivalent contribution — dividing by T itself
+double-counts the time-window and unfairly penalises multi-day holders.
 
 Σ_s w(s, R) = 1.0 within each regime by construction. Strategies with
 effective_sharpe ≤ 0 are excluded from that regime entirely (never
@@ -521,7 +527,9 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 continue
             for e in entries:
                 w = e['oue_adjusted_sharpe'] / denom
-                w_daily = w / max(1, e['cadence_days'])
+                # Sharpe scales as σ·sqrt(T): a T-day holder's per-cycle
+                # equivalent contribution is w/sqrt(T), not w/T.
+                w_daily = w / math.sqrt(max(1, e['cadence_days']))
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
                     cadence_days=e['cadence_days'],
