@@ -734,9 +734,8 @@ OVERLAP_VERY_STALE_HOURS = 72
 INTRADAY_MC_FRESH_HOURS    = 26
 INTRADAY_MC_VERY_STALE_HOURS = 72
 INTRADAY_MC_PENDING_STALE_DAYS = 7
-ADDENDA_PENDING_STALE_DAYS = 30
-ADDENDA_EXPIRED_BUT_ACTIVE_WARN = 1
-ADDENDA_EXPIRED_BUT_ACTIVE_FAIL = 3
+# 2026-05-19: ADDENDA_* constants removed alongside the
+# mastermind_prompt_addenda feature.
 REGIME_CORR_CRISIS_PROB_HIGH_THRESHOLD = 0.30
 
 
@@ -926,50 +925,11 @@ def check_regime_correlation_coverage():
     return _warn(name, summary)
 
 
-def _query_addenda_health():
-    """Indirection seam for mastermind_addendum_health: counts of
-    (expired_but_status_active, pending_aged_over_threshold)."""
-    import psycopg2
-    uri = (os.environ.get('DATABASE_URL')
-           or os.environ.get('POSTGRES_URI')
-           or 'postgresql://openclaw:password@localhost:5432/openclaw')
-    with psycopg2.connect(uri) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                  count(*) FILTER (WHERE status='active'
-                                     AND valid_until IS NOT NULL
-                                     AND valid_until <= NOW()) AS expired_but_active,
-                  count(*) FILTER (WHERE status='pending'
-                                     AND created_at < NOW() - (%s::int * INTERVAL '1 day')) AS stale_pending,
-                  count(*) FILTER (WHERE status='active') AS total_active
-                FROM mastermind_prompt_addenda
-            """, (ADDENDA_PENDING_STALE_DAYS,))
-            r = cur.fetchone()
-    return {'expired_but_active': int(r[0]),
-            'stale_pending': int(r[1]),
-            'total_active': int(r[2])}
-
-
-@_check('mastermind_addendum_health')
-def check_mastermind_addendum_health():
-    """Phase 2F: PASS unless addenda lifecycle is rotting.
-    WARN: 1-2 expired-but-active OR any stale pending.
-    FAIL: >=3 expired-but-active OR >=3 stale pending."""
-    name = 'mastermind_addendum_health'
-    try:
-        h = _query_addenda_health()
-    except Exception as exc:
-        return _warn(name, f'query failed: {exc!s}')
-    detail = (f"{h['total_active']} active, "
-              f"{h['expired_but_active']} expired-but-active, "
-              f"{h['stale_pending']} stale-pending")
-    if h['expired_but_active'] >= ADDENDA_EXPIRED_BUT_ACTIVE_FAIL or h['stale_pending'] >= 3:
-        return _fail(name, detail)
-    if h['expired_but_active'] >= ADDENDA_EXPIRED_BUT_ACTIVE_WARN or h['stale_pending'] >= 1:
-        return _warn(name, detail)
-    return _ok(name, detail)
-
+# 2026-05-19: _query_addenda_health + mastermind_addendum_health check
+# removed. The mastermind_prompt_addenda table is no longer read or
+# written by any code path — operator interaction with MastermindJohn's
+# weekly research process has been retired in favor of the research-page
+# entry points (papers / sources / hand-developed strategies).
 
 def _drift_summary():
     """Indirection seam for the drift-alerts check."""

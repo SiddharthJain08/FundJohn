@@ -251,34 +251,15 @@ Memo content must:
 No hedge language. Every claim must cite a number from the data.
 `;
 
-function loadActiveCalibrationAddenda() {
-  /* Phase 2F: prepended to the strategy-memo prompt. Failures here must
-   * not break the review — Mastermind keeps running with no addenda. */
-  try {
-    const result = spawnSync(PYTHON,
-      ['-m', 'agent.mastermind_recalibration', '--list-active'],
-      { cwd: OPENCLAW_DIR, encoding: 'utf8',
-        env: { ...process.env, PYTHONPATH:
-          process.env.PYTHONPATH
-            ? `${OPENCLAW_DIR}/src:${process.env.PYTHONPATH}`
-            : `${OPENCLAW_DIR}/src` } });
-    if (result.status !== 0) return [];
-    const parsed = JSON.parse(result.stdout || '{"addenda":[]}');
-    return Array.isArray(parsed.addenda) ? parsed.addenda : [];
-  } catch (_) {
-    return [];
-  }
-}
+// 2026-05-19: Phase 2F calibration-addenda prepend logic removed.
+// Operators no longer interact with MastermindJohn's weekly review prompt —
+// the research-page dashboard is the only operator entry into the research
+// pipeline (add papers / sources / hand-developed strategies). The
+// mastermind_prompt_addenda table stays as a historical record but is
+// neither read nor written by this codebase.
 
-function buildAddendaPrefix(addenda) {
-  if (!addenda || !addenda.length) return '';
-  const lines = addenda.map(a => `- ${a.addendum_text}`).join('\n');
-  return `## Calibration addenda (operator-approved, applied to this run):\n${lines}\n\n`;
-}
-
-function buildStrategyPrompt(strategy, tradePack, counterfactuals, addenda) {
-  const addendaPrefix = buildAddendaPrefix(addenda || []);
-  return `${addendaPrefix}${MEMO_SYSTEM_PREAMBLE}
+function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
+  return `${MEMO_SYSTEM_PREAMBLE}
 
 Strategy: ${strategy.id} (${strategy.name})
 Status: ${strategy.status}
@@ -334,10 +315,7 @@ async function _postToDiscord(channelName, text) {
   return false;
 }
 
-async function _reviewOne(strategy, { dryRun, notify, addenda = [] }) {
-  const addendaIdsActive = (Array.isArray(addenda) ? addenda : [])
-    .map(a => Number(a?.id))
-    .filter(n => Number.isFinite(n));
+async function _reviewOne(strategy, { dryRun, notify }) {
   const log = (m) => { notify?.(`${strategy.id}: ${m}`); };
   const tradePack = await _buildTradePack(strategy.id);
   if (!tradePack.signals.length && !tradePack.pnl.length) {
@@ -346,7 +324,7 @@ async function _reviewOne(strategy, { dryRun, notify, addenda = [] }) {
   }
 
   const counterfactuals = _counterfactuals(tradePack.pnl);
-  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals, addenda);
+  const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals);
   log(`prompting Opus (signals=${tradePack.signals.length} pnl=${tradePack.pnl.length})`);
 
   const out = await runOneShot({
@@ -441,10 +419,11 @@ print(json.dumps(propose_eligible_regimes(df, sid, thresh)))`,
     return { strategy_id: strategy.id, dry_run: true, memo };
   }
 
-  // Phase 2F per-memo audit: pin which calibration addenda were prepended to
-  // this run's Opus prompt. metadata is the durable trail; the run-level
-  // summary just aggregates.
-  const memoMetadata = { addenda_ids_active: addendaIdsActive };
+  // metadata column is preserved as an empty object; the addenda-tracking
+  // field (addenda_ids_active) is no longer set because calibration addenda
+  // were removed 2026-05-19. metadata stays available for future audit
+  // fields without schema churn.
+  const memoMetadata = {};
 
   const { rows } = await _query(
     `INSERT INTO strategy_memos
@@ -542,12 +521,11 @@ print(pid)`,
 
 async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {}) {
   const strategies = await _fetchStrategies(strategyIds);
-  const addenda = loadActiveCalibrationAddenda();
-  notify(`${strategies.length} strategies to review (calibration addenda: ${addenda.length})`);
+  notify(`${strategies.length} strategies to review`);
   const results = [];
   let totalCost = 0;
   for (const s of strategies) {
-    const r = await _reviewOne(s, { dryRun, notify, addenda });
+    const r = await _reviewOne(s, { dryRun, notify });
     results.push(r);
     if (r.cost_usd) totalCost += Number(r.cost_usd);
   }
@@ -555,10 +533,9 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
     strategiesReviewed: results.filter(r => r.memo_id).length,
     strategiesSkipped:  results.filter(r => r.skipped).length,
     errors:             results.filter(r => r.error).length,
-    addendaApplied:     addenda.map(a => a.id),
     costUsd:            totalCost,
     results,
   };
 }
 
-module.exports = { run, loadActiveCalibrationAddenda, buildAddendaPrefix };
+module.exports = { run };

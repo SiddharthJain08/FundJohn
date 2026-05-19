@@ -2419,8 +2419,9 @@ app.use('/api', require('./routes_regime_drift'));
 // Phase 2E intraday-path MC also lives in routes_regime_2d.js
 app.use('/api', require('./routes_regime_2d'));
 
-// Phase 2F — Mastermind prompt recalibration loop
-app.use('/api', require('./routes_recalibration'));
+// 2026-05-19: Phase 2F calibration-addenda routes removed. The operator
+// no longer touches Mastermind's weekly review prompt — only the research
+// page (papers / sources / hand-developed strategies) is the entry point.
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => res.send(getDashboardHtml()));
@@ -3649,41 +3650,6 @@ body.rs-chat-locked{overflow:hidden}
           </tr>
         </thead>
         <tbody></tbody>
-      </table>
-    </div>
-
-    <!-- Phase 2F — Mastermind calibration addenda (always visible; compact when empty).
-         IDs use 'addenda-' prefix instead of 'ad-' because ad-blockers (uBlock,
-         AdBlock, Brave shields) match id="ad-*" as advertisement containers
-         and apply display:none !important cosmetic filters. -->
-    <div class="pf-section" id="addenda-section">
-      <div class="pf-section-header">
-        <span>📝 Calibration Addenda <span class="st-sub-label" id="addenda-count">—</span></span>
-        <span class="st-sub-label" style="display:flex;align-items:center;gap:8px">
-          <span>prepended to next Saturday Mastermind prompt</span>
-          <button id="addenda-add-btn" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">+ Add</button>
-        </span>
-      </div>
-      <div id="addenda-add-form" style="display:none;padding:8px;border:1px solid var(--border2);border-radius:4px;margin-bottom:6px;background:var(--bg2,#f8f8f8)">
-        <textarea id="addenda-add-text" placeholder="Addendum text (will be prepended verbatim to next Mastermind prompt)" rows="3" style="width:100%;font-size:12px;font-family:inherit;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box"></textarea>
-        <input id="addenda-add-rationale" type="text" placeholder="Rationale (operator-facing audit string)" style="width:100%;font-size:12px;border:1px solid var(--border2);border-radius:3px;padding:6px;box-sizing:border-box;margin-top:5px"/>
-        <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:5px">
-          <button id="addenda-add-cancel" style="padding:3px 9px;font-size:11px;background:var(--bg2,#ccc);color:var(--fg,#000);border:1px solid var(--border2);border-radius:3px;cursor:pointer">Cancel</button>
-          <button id="addenda-add-save" style="padding:3px 9px;font-size:11px;background:var(--accent,#2ea043);color:white;border:none;border-radius:3px;cursor:pointer">Save (active)</button>
-        </div>
-      </div>
-      <table id="addenda-table" style="border-collapse:collapse;width:100%;font-size:12px">
-        <thead>
-          <tr style="text-align:left;color:var(--muted);font-size:11px">
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Status</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Source</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Addendum</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Rationale</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Created</th>
-            <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Decide</th>
-          </tr>
-        </thead>
-        <tbody><tr><td colspan="6" style="padding:8px;color:var(--muted);font-size:11px">Loading…</td></tr></tbody>
       </table>
     </div>
 
@@ -6612,8 +6578,8 @@ async function loadStrategies() {
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
     ]);
     _rpRender(proposals?.proposals || []);
-    _addendaLoad();              // Phase 2F — calibration addenda panel
-    _addendaWireForm();          // idempotent
+    // 2026-05-19: calibration-addenda panel removed (operator no longer
+    // edits Mastermind's weekly prompt — research-page-only entry).
     _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
     strategiesData = Array.isArray(rows) ? rows : [];
     _stActiveJobs = {};
@@ -7114,122 +7080,10 @@ async function _rpRunPathMC(id, btn) {
   }
 }
 
-// Phase 2F — render addenda panel
-function _addendaFormatTs(s) {
-  if (!s) return '—';
-  return String(s).slice(0, 16).replace('T', ' ');
-}
-
-function _addendaStatusBadge(status) {
-  const colors = { pending: '#b08800', active: '#2ea043', expired: '#777',
-                    rejected: '#a04040', superseded: '#555' };
-  return '<span style="background:' + (colors[status] || '#888') + ';color:white;padding:1px 6px;border-radius:3px;font-size:10px">' + status + '</span>';
-}
-
-function _addendaRender(addenda) {
-  const section = document.getElementById('addenda-section');
-  const tbody = document.querySelector('#addenda-table tbody');
-  const countEl = document.getElementById('addenda-count');
-  if (!section || !tbody) return;
-  // Filter to relevant (pending + active); historical states shown if asked
-  const visible = addenda.filter(a => a.status === 'pending' || a.status === 'active');
-  countEl.textContent = visible.length
-    ? '(' + visible.length + ' affecting next Mastermind run)'
-    : '(none active)';
-  tbody.innerHTML = '';
-  if (!visible.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="padding:8px;color:var(--muted);font-size:11px">No active addenda. Use + Add to author one, or wait for the bias detector to emit (currently dormant pending ≥10 outcomes/bucket).</td></tr>';
-    return;
-  }
-  for (const a of visible) {
-    const tr = document.createElement('tr');
-    const decideBtns = a.status === 'pending'
-      ? ('<button class="addenda-btn" data-id="' + a.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
-         '<button class="addenda-btn" data-id="' + a.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>')
-      : ('<button class="addenda-btn" data-id="' + a.id + '" data-action="expire" style="padding:3px 8px;font-size:11px;background:#777;color:white;border:none;border-radius:3px;cursor:pointer">Expire</button>');
-    tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + _addendaStatusBadge(a.status) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + (a.source || '—') + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;max-width:380px;word-break:break-word">' + (a.addendum_text || '') + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted);max-width:200px;word-break:break-word">' + (a.rationale || '') + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + _addendaFormatTs(a.created_at) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' + decideBtns + '</td>';
-    tbody.appendChild(tr);
-  }
-  for (const btn of tbody.querySelectorAll('.addenda-btn')) {
-    btn.onclick = () => _addendaDecide(btn.dataset.id, btn.dataset.action);
-  }
-}
-
-async function _addendaLoad() {
-  try {
-    const res = await fetch('/api/recalibration/addenda?status=all');
-    const j = await res.json();
-    _addendaRender(Array.isArray(j.addenda) ? j.addenda : []);
-  } catch (e) {
-    _addendaRender([]);
-  }
-}
-
-async function _addendaDecide(id, action) {
-  let actor = window.localStorage.getItem('rg_operator');
-  if (!actor) {
-    actor = prompt('Operator name (saved for the session):', '');
-    if (!actor) return;
-    window.localStorage.setItem('rg_operator', actor);
-  }
-  const reason = prompt('Reason for ' + action + ' of addendum #' + id + '?', '');
-  if (reason === null) return;
-  try {
-    const res = await fetch('/api/recalibration/addenda/' + encodeURIComponent(id) + '/' + encodeURIComponent(action), {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ decided_by: actor, reason }),
-    });
-    const j = await res.json();
-    if (!res.ok || j.status !== 'OK') throw new Error(j.error || j.status || res.statusText);
-    await _addendaLoad();
-  } catch (e) {
-    alert('Addendum ' + action + ' failed: ' + e.message);
-  }
-}
-
-async function _addendaAddSave() {
-  const text = (document.getElementById('addenda-add-text').value || '').trim();
-  const rationale = (document.getElementById('addenda-add-rationale').value || '').trim();
-  if (!text) { alert('Addendum text is required.'); return; }
-  let actor = window.localStorage.getItem('rg_operator');
-  if (!actor) {
-    actor = prompt('Operator name (saved for the session):', '');
-    if (!actor) return;
-    window.localStorage.setItem('rg_operator', actor);
-  }
-  try {
-    const res = await fetch('/api/recalibration/addenda', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ addendum_text: text, rationale, decided_by: actor }),
-    });
-    const j = await res.json();
-    if (!res.ok) throw new Error(j.error || res.statusText);
-    document.getElementById('addenda-add-text').value = '';
-    document.getElementById('addenda-add-rationale').value = '';
-    document.getElementById('addenda-add-form').style.display = 'none';
-    await _addendaLoad();
-  } catch (e) {
-    alert('Addendum save failed: ' + e.message);
-  }
-}
-
-function _addendaWireForm() {
-  const btn = document.getElementById('addenda-add-btn');
-  const form = document.getElementById('addenda-add-form');
-  const cancel = document.getElementById('addenda-add-cancel');
-  const save = document.getElementById('addenda-add-save');
-  if (!btn || !form || !cancel || !save || btn._wired) return;
-  btn._wired = true;
-  btn.onclick = () => { form.style.display = form.style.display === 'none' ? '' : 'none'; };
-  cancel.onclick = () => { form.style.display = 'none'; };
-  save.onclick = () => _addendaAddSave();
-}
+// 2026-05-19: Phase 2F calibration-addenda render/load/decide/wire helpers
+// removed. The operator no longer interacts with MastermindJohn's weekly
+// review prompt — research-page is the single entry point for paper /
+// source / hand-developed-strategy additions.
 
 async function _rpDecide(id, action) {
   let actor = window.localStorage.getItem('rg_operator');
