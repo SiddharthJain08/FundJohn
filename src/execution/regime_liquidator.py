@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-"""regime_liquidator.py — flatten OpenClaw positions on regime transitions.
+"""regime_liquidator.py — flatten OpenClaw positions on operator demand.
 
-Hook: invoked by src/engine/cron-schedule.js right after the 9:00 AM ET
-regime refresh writes /root/openclaw/.agents/market-state/regime_latest.json.
-When today's `state` differs from `prior_state` this module:
-  1. Cancels every open OpenClaw order (parent + bracket legs). The COID
+Hook: manual operator entry — invoked by scripts/run_forced_liquidation.sh
+on operator demand. Auto-triggers were removed 2026-05-19 in Phase 1 of the
+redeploy-not-liquidate plan (intraday/daily regime transitions now spawn a
+delta-based pipeline redeploy via scripts/redeploy_pipeline.py instead of
+blowing out the book).
+
+When invoked this module:
+  1. Refuses to run outside RTH — operator must rerun during regular
+     trading hours. Pre-/post-market submission paths (OPG queueing) were
+     removed 2026-05-19 because the 2026-05-18 incident showed OPG fills
+     paper at unfillable prices and the audit `result_status` overloaded
+     submission-ack with actual-fill.
+  2. Cancels every open OpenClaw order (parent + bracket legs). The COID
      prefix 'AX' is the OpenClaw signature (see alpaca_executor.py:283).
-  2. Submits a market close per OpenClaw symbol still showing a non-zero
-     position at the broker. RTH uses `alpaca position close`; pre-/post-
-     market uses an OPG market order on the opposite side. 9 AM ET is
-     pre-market, so OPG is the default.
-  3. Audits every action into the alpaca_liquidations table.
-  4. Sets a Redis idempotency sentinel so a same-day re-run is a no-op.
-  5. Posts a summary to #trade-reports.
+  3. Submits a market close per OpenClaw symbol still showing a non-zero
+     position at the broker via `alpaca position close`.
+  4. Polls each submitted close to a terminal broker state (filled,
+     expired, canceled, rejected, done_for_day, replaced, failed) with a
+     90s budget. The audit row's `result_status` records the REAL outcome
+     (filled / partial / pending / rejected / submit_error) — not the
+     submission ack.
+  5. Audits every action into the alpaca_liquidations table.
+  6. Sets a Redis idempotency sentinel so a same-day re-run is a no-op.
+  7. Posts a summary to #trade-reports with the outcome breakdown.
 
 Default mode is DRY-RUN (logs the intended plan, no broker calls). Set
 OPENCLAW_ALPACA_LIVE_LIQUIDATE=1 to enable. Pattern mirrors
@@ -22,16 +34,15 @@ The 10 AM trading cycle is intentionally NOT blocked: after liquidation
 the system is free to rotate into fresh signals sized for the new
 regime within the same morning. (Per user direction.)
 
-Trigger semantics:
-- Only `prior_state != state` triggers. The broader `regime_change_alert`
-  flag also fires on confidence dips and stress spikes; firing
-  liquidation on those would be surprising behaviour.
-- The persisted `state` is the effective_state from run_market_state.py
-  (confidence-override already applied). prior_state is pulled from the
-  previous file's `state`. Comparison is therefore effective-to-effective
-  and needs no special-casing.
-- A corrupt regime_latest.json (incomplete write) returns cleanly with
-  no broker calls.
+Trigger semantics (manual force path):
+- Operator must pass `--force` (sets force_override=True). The natural
+  regime-change branch remains in code for completeness but is no longer
+  reachable from cron — see Phase 1 strip in cron-schedule.js +
+  run_intraday_market_state.py.
+- `force_transition_tag` exists for sentinel-key disambiguation but is
+  expected to be unused now that intraday auto-fire is gone (Phase 1).
+- A corrupt regime_latest.json (incomplete write) is tolerated under
+  --force: state defaults to UNKNOWN, prior to MANUAL_FORCE.
 """
 
 from __future__ import annotations
@@ -88,7 +99,8 @@ def _run_cli(args, timeout=30):
 
 def _market_is_open() -> bool:
     """True if `alpaca clock` reports RTH. Default to False on any failure
-    — safer because OPG queues, day rejects pre-market."""
+    — safer because the manual flatten path refuses to submit outside RTH
+    (see liquidate_on_regime_change RTH guard, Phase 4 2026-05-19)."""
     ok, payload, _err = _run_cli(['clock'], timeout=5)
     if not ok or not isinstance(payload, dict):
         return False
@@ -252,36 +264,110 @@ def _collect_openclaw_orders_to_cancel(open_orders: list[dict]) -> list[dict]:
 
 
 def _close_symbol(symbol: str, qty: float,
-                  market_open: bool) -> tuple[bool, dict]:
-    """Submit a market close for `symbol`.
-    RTH:           `alpaca position close --symbol-or-asset-id <SYM>`
-    Pre/post-mkt:  `alpaca order submit ... --type market --time-in-force opg`
-    """
-    if market_open:
-        ok, payload, err = _run_cli(
-            ['position', 'close', '--symbol-or-asset-id', symbol], timeout=15,
-        )
-        return ok, (payload if ok else (err or {}))
+                  market_open: bool | None = None) -> tuple[bool, dict]:
+    """Submit a market close for `symbol` via the RTH close path.
 
-    abs_qty = abs(qty)
-    qty_str = str(int(abs_qty)) if float(abs_qty).is_integer() else f'{abs_qty}'
-    side = 'sell' if qty > 0 else 'buy'
-    coid = f'AXLIQ_{datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")}_{symbol}'[:128]
-    # Alpaca CLI flag is `--symbol` for `order submit` (`--symbol-or-asset-id`
-    # only exists on `position close`). 2026-05-14 fix: the closed-market
-    # path was rejected wholesale with "unknown flag: --symbol-or-asset-id"
-    # before this rename.
+    Uses `alpaca position close --symbol-or-asset-id <SYM>`. The OPG /
+    pre-market `order submit` branch was removed 2026-05-19 — the public
+    entry (`liquidate_on_regime_change`) refuses to run outside RTH, so
+    this helper assumes RTH.
+
+    `qty` is retained for caller-side bookkeeping (audit row + outcome
+    classification) but is not passed to the CLI: `position close`
+    flattens the broker's current position fully.
+
+    `market_open` is an IGNORED backward-compat shim for external
+    callers (notably `position_circuit_breaker.py`, which gates its own
+    invocation on `_market_is_open()` already). Behaviour no longer
+    depends on it — there is only one (RTH) close path. New callers
+    should omit it.
+    """
+    _ = market_open  # intentionally unused; see docstring
     ok, payload, err = _run_cli(
-        ['order', 'submit',
-         '--symbol', symbol,
-         '--side', side,
-         '--qty', qty_str,
-         '--type', 'market',
-         '--time-in-force', 'opg',
-         '--client-order-id', coid],
-        timeout=15,
+        ['position', 'close', '--symbol-or-asset-id', symbol], timeout=15,
     )
     return ok, (payload if ok else (err or {}))
+
+
+# Alpaca order statuses considered terminal for polling purposes. Note that
+# `partially_filled` is NOT terminal — the broker can still fill more, so
+# we keep polling until one of these is observed or the budget elapses.
+_TERMINAL_ORDER_STATUSES = frozenset({
+    'filled', 'expired', 'canceled', 'cancelled',
+    'rejected', 'done_for_day', 'replaced', 'failed',
+})
+
+
+def _poll_to_terminal(order_id: str,
+                      timeout_s: int = 90,
+                      interval_s: int = 3) -> dict | None:
+    """Poll `alpaca order get --order-id <id>` until the order reaches a
+    terminal status or until `timeout_s` elapses. Returns the final order
+    dict, or None if every poll failed (CLI errors / non-dict payloads).
+
+    Terminal statuses: filled, expired, canceled/cancelled, rejected,
+    done_for_day, replaced, failed. `partially_filled` is non-terminal
+    and we keep polling — the partial classification is computed from
+    filled_qty vs requested_qty by `_classify_outcome`, not the status
+    string.
+    """
+    if not order_id:
+        return None
+    deadline = time.monotonic() + max(1, timeout_s)
+    last_dict: dict | None = None
+    while True:
+        ok, payload, _err = _run_cli(
+            ['order', 'get', '--order-id', order_id], timeout=10,
+        )
+        if ok and isinstance(payload, dict):
+            last_dict = payload
+            status = str(payload.get('status') or '').lower()
+            if status in _TERMINAL_ORDER_STATUSES:
+                return payload
+        if time.monotonic() >= deadline:
+            return last_dict
+        time.sleep(max(1, interval_s))
+
+
+def _classify_outcome(submit_ok: bool,
+                      final_order: dict | None,
+                      qty: float) -> str:
+    """Classify the real outcome of a close attempt for audit purposes.
+
+    Returns one of:
+      - 'submit_error' — CLI returned non-zero on submit; never got an id.
+      - 'filled'       — all requested qty filled (status='filled' OR
+                         filled_qty >= requested_qty).
+      - 'partial'      — some qty filled, then terminal (or timed out
+                         with a non-zero filled_qty).
+      - 'pending'      — never reached a terminal state within the
+                         polling budget (and no fills observed).
+      - 'rejected'     — terminal but zero fills (expired, rejected,
+                         canceled, done_for_day, replaced, failed).
+    """
+    if not submit_ok:
+        return 'submit_error'
+    if not isinstance(final_order, dict):
+        return 'pending'
+
+    requested = abs(float(qty)) if qty is not None else 0.0
+    try:
+        filled = abs(float(final_order.get('filled_qty') or 0))
+    except (TypeError, ValueError):
+        filled = 0.0
+    status = str(final_order.get('status') or '').lower()
+
+    if status == 'filled' or (requested > 0 and filled >= requested):
+        return 'filled'
+
+    is_terminal = status in _TERMINAL_ORDER_STATUSES
+    if filled > 0:
+        # Partial fill — either explicitly terminal with some fills, or
+        # poll-timed-out with some fills already booked.
+        return 'partial'
+    if is_terminal:
+        return 'rejected'
+    return 'pending'
 
 
 def _cancel_order(order_id: str) -> tuple[bool, dict]:
@@ -398,7 +484,6 @@ def liquidate_on_regime_change(run_date: str | None = None,
             pass
 
     live = _is_live() and not force_dry_run
-    market_open = _market_is_open()
 
     uri = os.environ.get('POSTGRES_URI')
     if not uri:
@@ -420,6 +505,23 @@ def liquidate_on_regime_change(run_date: str | None = None,
     for r in oc_subs:
         coids_by_symbol.setdefault(r['ticker'], []).append(r['client_order_id'])
 
+    # RTH-only guard: refuse to run outside regular trading hours. Applies
+    # to BOTH the natural (regime-change) and forced (`--force`) paths.
+    # The OPG submission branch was removed 2026-05-19 after the
+    # 2026-05-18 paper-fill incident; the only safe close path is the RTH
+    # `position close` call. We placed this AFTER the cooldown/sentinel
+    # gates (those are soft early-outs) and AFTER the DB read so the
+    # error payload can surface the symbols that would have been closed.
+    market_open = _market_is_open()
+    if not market_open:
+        conn.close()
+        logger.error(
+            '[liquidate] market is not currently open '
+            '(manual flatten requires RTH) — aborting; rerun after 9:30 ET'
+        )
+        return {'action': 'error', 'reason': 'not_rth',
+                'symbols_skipped': oc_symbols}
+
     plan = {'transition': transition_key, 'date': date_str,
             'market_open': market_open, 'oc_symbols': oc_symbols}
 
@@ -431,7 +533,7 @@ def liquidate_on_regime_change(run_date: str | None = None,
         plan['cancel'] = cancels
         plan['close'] = [
             {'symbol': s, 'qty': positions.get(s, {}).get('qty', 0),
-             'tif': 'day' if market_open else 'opg'}
+             'tif': 'day'}
             for s in oc_symbols if positions.get(s, {}).get('qty')
         ]
         conn.close()
@@ -470,9 +572,26 @@ def liquidate_on_regime_change(run_date: str | None = None,
         if not pos or not pos.get('qty'):
             continue
         qty = pos['qty']
-        ok, payload = _close_symbol(sym, qty, market_open)
+        ok, payload = _close_symbol(sym, qty)
+        # The submit response carries the broker-assigned order id; we
+        # then poll that id to a terminal state so the audit row reflects
+        # the REAL outcome rather than the submission ack. The audit
+        # `close_result` JSONB column stores the final polled order (not
+        # the initial pending_new payload) so operators can inspect the
+        # fill timeline directly from the table.
+        close_id = payload.get('id') if (ok and isinstance(payload, dict)) else None
+        final_order = _poll_to_terminal(close_id) if (ok and close_id) else None
+        outcome = _classify_outcome(ok, final_order, qty=qty)
+        # Prefer the polled final order for the audit payload; fall back
+        # to the initial submit payload if polling never returned a dict.
+        audit_payload = final_order if isinstance(final_order, dict) else (
+            payload if ok else None
+        )
         close_results.append({'symbol': sym, 'ok': ok, 'qty': qty,
-                              'tif': 'day' if market_open else 'opg',
+                              'tif': 'day',
+                              'outcome': outcome,
+                              'order_id': close_id,
+                              'final_order': final_order,
                               'response': payload})
         try:
             _record_audit(
@@ -481,9 +600,9 @@ def liquidate_on_regime_change(run_date: str | None = None,
                 coids_by_symbol.get(sym, []),
                 {oid: r for oid, r in cancel_results.items()
                  if r.get('symbol') == sym},
-                payload if ok else None,
-                'closed' if ok else 'error',
-                None if ok else json.dumps(payload)[:500],
+                audit_payload,
+                outcome,
+                None if outcome == 'filled' else json.dumps(payload)[:500],
             )
             conn.commit()
         except Exception as e:
@@ -493,8 +612,19 @@ def liquidate_on_regime_change(run_date: str | None = None,
     conn.close()
 
     n_cancel_ok = sum(1 for r in cancel_results.values() if r.get('ok'))
-    n_close_ok = sum(1 for r in close_results if r.get('ok'))
+    # n_close_ok now counts TERMINAL FILLS, not submission-acks (Phase 4
+    # poll-to-terminal change). Anything not filled — partial, pending,
+    # rejected, submit_error — counts toward n_close_err for the May-9
+    # sentinel guard. This makes a zero-fill run leave the sentinel +
+    # cooldown unset, so an operator retry isn't silently masked.
+    n_close_ok = sum(1 for r in close_results
+                     if r.get('outcome') == 'filled')
     n_close_err = len(close_results) - n_close_ok
+    n_partial   = sum(1 for r in close_results if r.get('outcome') == 'partial')
+    n_pending   = sum(1 for r in close_results if r.get('outcome') == 'pending')
+    n_rejected  = sum(1 for r in close_results if r.get('outcome') == 'rejected')
+    n_submit_err = sum(1 for r in close_results
+                       if r.get('outcome') == 'submit_error')
     # A run is "successful enough" to record the sentinel + cooldown only
     # when at least one close succeeded, or when there was nothing to
     # close (already flat). If every close errored, we treat the run as
@@ -517,12 +647,30 @@ def liquidate_on_regime_change(run_date: str | None = None,
         except Exception:
             pass
 
-    closed_syms = ", ".join(r["symbol"] for r in close_results if r["ok"])[:200]
+    closed_syms = ", ".join(
+        r["symbol"] for r in close_results if r.get("outcome") == 'filled'
+    )[:200]
+    # Up to 10 non-filled symbols with their outcome, for operator triage.
+    non_filled = [r for r in close_results if r.get('outcome') != 'filled']
+    non_filled_lines = "\n".join(
+        f'    - {r["symbol"]}: {r.get("outcome", "?")}'
+        for r in non_filled[:10]
+    )
+    if non_filled and len(non_filled) > 10:
+        non_filled_lines += f'\n    - … and {len(non_filled) - 10} more'
+
+    breakdown = (
+        f'filled={n_close_ok} / partial={n_partial} / '
+        f'pending={n_pending} / rejected={n_rejected} / '
+        f'submit_error={n_submit_err}'
+    )
+
     if not fire_succeeded:
         summary = (
             f':x: **Regime liquidation FAILED** {prior} → {state}\n'
             f'• Cancelled: {n_cancel_ok}/{len(cancel_results)} orders\n'
             f'• Closed:    {n_close_ok}/{len(close_results)} symbols\n'
+            f'• Breakdown: {breakdown}\n'
             f'• Errors:    {n_close_err} (sentinel + cooldown NOT set — retry-eligible)'
         )
     else:
@@ -530,8 +678,11 @@ def liquidate_on_regime_change(run_date: str | None = None,
             f':rotating_light: **Regime liquidation** {prior} → {state}\n'
             f'• Cancelled: {n_cancel_ok}/{len(cancel_results)} orders\n'
             f'• Closed:    {n_close_ok}/{len(close_results)} symbols ({closed_syms})\n'
+            f'• Breakdown: {breakdown}\n'
             f'• Errors:    {n_close_err}'
         )
+    if non_filled_lines:
+        summary += f'\n• Non-filled:\n{non_filled_lines}'
     _post_to_discord('trade-reports', summary)
 
     if not fire_succeeded:
@@ -579,7 +730,11 @@ def _main():
     if result.get('action') == 'failed':
         sys.exit(1)
     if result.get('action') in ('liquidated', 'liquidated_partial'):
-        bad = sum(1 for r in result.get('close_results', []) if not r.get('ok'))
+        # Anything not 'filled' is bad for exit-code purposes (partial,
+        # pending, rejected, submit_error all warrant a non-zero exit so
+        # the wrapper script surfaces it). Mirrors n_close_err semantics.
+        bad = sum(1 for r in result.get('close_results', [])
+                  if r.get('outcome') != 'filled')
         if bad:
             sys.exit(1)
     sys.exit(0)

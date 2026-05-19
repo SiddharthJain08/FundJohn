@@ -6,9 +6,12 @@ Verifies:
   - dry-run gate is OFF by default (no subprocess)
   - state-unchanged → noop, no CLI calls
   - corrupt regime file → error, no CLI calls
+  - RTH-only guard refuses pre/post-market (Phase 4 2026-05-19)
   - cancel-before-close ordering when live
-  - pre-market path uses --time-in-force opg
   - RTH path uses `position close --symbol-or-asset-id`
+  - Post-submit poll-to-terminal classifies real outcome
+    (filled / partial / pending / rejected / submit_error)
+  - May-9 sentinel guard: zero-fill runs do not seal sentinel/cooldown
   - Redis sentinel makes a same-day re-run a no-op
 
 Run:
@@ -123,7 +126,8 @@ class TestDryRunDefault(unittest.TestCase):
     def test_dry_run_default_no_destructive_cli(self):
         """Env unset → returns dry_run plan; only read-only CLI calls
         (clock, position list, order list) ever fire — no cancel, no
-        position close, no order submit."""
+        position close, no order submit. Phase 4 guard requires RTH so
+        we mock CLOCK_OPEN."""
         os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
 
         # Stub psycopg2.connect → returns conn whose cursor returns the
@@ -134,7 +138,7 @@ class TestDryRunDefault(unittest.TestCase):
         mock_conn.cursor.return_value = mock_cur
 
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),       # clock
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),         # clock (RTH guard)
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),  # position list
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),  # order list
         ]
@@ -163,7 +167,9 @@ class TestDryRunDefault(unittest.TestCase):
 
 
 class TestLiveOrdering(unittest.TestCase):
-    """When live, all cancellations must precede the first close call."""
+    """When live, all cancellations must precede the first close call.
+    The OPG (pre-market) close path was removed 2026-05-19 — only the
+    RTH `position close` path remains."""
     def setUp(self):
         os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
         os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
@@ -187,17 +193,22 @@ class TestLiveOrdering(unittest.TestCase):
             result = rl.liquidate_on_regime_change()
         return result, mock_run
 
-    def test_cancel_before_close_pre_market(self):
-        """Pre-market path: clock(closed) → order list → 2 cancels → position
-        list → order submit (OPG)."""
+    def test_rth_uses_position_close(self):
+        """RTH path: clock(open) → order list → 3 cancels → position list
+        → position close → order get (poll terminal)."""
+        filled_order = {'id': 'close-order-id', 'status': 'filled',
+                        'filled_qty': '50'}
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),       # _market_is_open
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),         # _market_is_open
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),  # order list
-            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),  # cancel parent
-            _mock_proc(0, json.dumps({'id': 'tp-leg',     'status': 'cancelled'})),  # cancel tp
-            _mock_proc(0, json.dumps({'id': 'sl-leg',     'status': 'cancelled'})),  # cancel sl
+            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'tp-leg',     'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'sl-leg',     'status': 'cancelled'})),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),  # position list
-            _mock_proc(0, json.dumps({'id': 'opg-order', 'status': 'accepted'})),  # order submit
+            _mock_proc(0, json.dumps({'id': 'close-order-id',
+                                       'symbol': 'AAPL', 'qty': '50',
+                                       'status': 'pending_new'})),  # position close
+            _mock_proc(0, json.dumps(filled_order)),  # order get (poll)
         ]
         result, mock_run = self._run_with_proc_seq(proc_seq)
         self.assertEqual(result['action'], 'liquidated')
@@ -209,44 +220,27 @@ class TestLiveOrdering(unittest.TestCase):
             argv = call[0][0]
             if argv[1:3] == ['order', 'cancel']:
                 cancel_indices.append(i)
-            if argv[1:3] == ['order', 'submit'] or argv[1:3] == ['position', 'close']:
+            if (first_close_idx is None
+                    and argv[1:3] == ['position', 'close']):
                 first_close_idx = i
-                break
         self.assertIsNotNone(first_close_idx, 'no close call issued')
         self.assertTrue(cancel_indices, 'no cancel calls issued')
         self.assertTrue(max(cancel_indices) < first_close_idx,
                         'cancel calls must precede the first close call')
 
-        # Verify the OPG market order shape.
-        submit_argv = mock_run.call_args_list[first_close_idx][0][0]
-        self.assertEqual(submit_argv[1:3], ['order', 'submit'])
-        self.assertIn('--time-in-force', submit_argv)
-        tif_idx = submit_argv.index('--time-in-force')
-        self.assertEqual(submit_argv[tif_idx + 1], 'opg')
-        self.assertEqual(submit_argv[submit_argv.index('--side') + 1], 'sell')
-        self.assertEqual(submit_argv[submit_argv.index('--type') + 1], 'market')
+        # `position close --symbol-or-asset-id AAPL`.
+        close_argv = mock_run.call_args_list[first_close_idx][0][0]
+        self.assertEqual(close_argv[1:3], ['position', 'close'])
+        self.assertIn('--symbol-or-asset-id', close_argv)
+        idx = close_argv.index('--symbol-or-asset-id')
+        self.assertEqual(close_argv[idx + 1], 'AAPL')
 
-    def test_rth_uses_position_close(self):
-        """RTH path: clock(open) → cancels → position list → position close."""
-        proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_OPEN)),         # _market_is_open
-            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),  # order list
-            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
-            _mock_proc(0, json.dumps({'id': 'tp-leg',     'status': 'cancelled'})),
-            _mock_proc(0, json.dumps({'id': 'sl-leg',     'status': 'cancelled'})),
-            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
-            _mock_proc(0, json.dumps({'symbol': 'AAPL', 'qty': '50',
-                                       'status': 'closed'})),
-        ]
-        result, mock_run = self._run_with_proc_seq(proc_seq)
-        self.assertEqual(result['action'], 'liquidated')
-
-        # Last call should be `position close --symbol-or-asset-id AAPL`.
-        last_argv = mock_run.call_args_list[-1][0][0]
-        self.assertEqual(last_argv[1:3], ['position', 'close'])
-        self.assertIn('--symbol-or-asset-id', last_argv)
-        idx = last_argv.index('--symbol-or-asset-id')
-        self.assertEqual(last_argv[idx + 1], 'AAPL')
+        # NO `order submit` (OPG path is gone).
+        for call in mock_run.call_args_list:
+            argv = call[0][0]
+            self.assertNotEqual(argv[1:3], ['order', 'submit'],
+                                f'OPG path should never fire: {argv}')
+            self.assertNotIn('opg', argv)
 
 
 class TestForceOverride(unittest.TestCase):
@@ -260,7 +254,8 @@ class TestForceOverride(unittest.TestCase):
 
     def test_force_bypasses_same_state_noop(self):
         """Without force, REGIME_SAME → noop. With force=True, the pipeline
-        proceeds (dry-run path here, since live gate is off)."""
+        proceeds (dry-run path here, since live gate is off). RTH required
+        post-Phase-4."""
         os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
 
         mock_conn = MagicMock()
@@ -269,7 +264,7 @@ class TestForceOverride(unittest.TestCase):
         mock_conn.cursor.return_value = mock_cur
 
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
         ]
@@ -301,7 +296,7 @@ class TestForceOverride(unittest.TestCase):
         mock_cur.fetchall.return_value = [SUBMISSION_ROW]
         mock_conn.cursor.return_value = mock_cur
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
         ]
@@ -326,7 +321,7 @@ class TestForceOverride(unittest.TestCase):
         mock_cur.fetchall.return_value = [SUBMISSION_ROW]
         mock_conn.cursor.return_value = mock_cur
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
         ]
@@ -355,7 +350,11 @@ class TestForceTransitionTag(unittest.TestCase):
     """`force_transition_tag` (introduced 2026-05-08 for intraday HMM)
     lets callers supply their own transition key — distinct from
     MANUAL_FORCE so daily/manual/intraday firings are all separable in
-    audit + sentinels."""
+    audit + sentinels.
+
+    Post Phase 1 (2026-05-19), no live caller passes this tag (the
+    intraday HMM no longer fires the liquidator). The parameter is
+    retained for backward compat + sentinel-key disambiguation."""
 
     def setUp(self):
         os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
@@ -367,7 +366,7 @@ class TestForceTransitionTag(unittest.TestCase):
         mock_cur.fetchall.return_value = [SUBMISSION_ROW]
         mock_conn.cursor.return_value = mock_cur
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
         ]
@@ -416,7 +415,7 @@ class TestForceTransitionTag(unittest.TestCase):
         mock_cur.fetchall.return_value = [SUBMISSION_ROW]
         mock_conn.cursor.return_value = mock_cur
         proc_seq = [
-            _mock_proc(0, json.dumps(CLOCK_CLOSED)),
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
             _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
             _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
         ]
@@ -484,7 +483,8 @@ class TestCooldownGate(unittest.TestCase):
 
     def test_live_fire_sets_cooldown_sentinel(self):
         """After a successful live fire, both `liquidate:fired:...`
-        AND `liquidate:cooldown:{date}` must be set."""
+        AND `liquidate:cooldown:{date}` must be set. Post-Phase-4 the
+        close-attempt outcome must be 'filled' for n_close_ok to count."""
         os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
         try:
             stub = _StubRedis()
@@ -499,7 +499,10 @@ class TestCooldownGate(unittest.TestCase):
                 _mock_proc(0, json.dumps({'id': 'tp', 'status': 'cancelled'})),
                 _mock_proc(0, json.dumps({'id': 'sl', 'status': 'cancelled'})),
                 _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),  # position list
-                _mock_proc(0, json.dumps({'symbol': 'AAPL', 'status': 'closed'})),
+                _mock_proc(0, json.dumps({'id': 'close-id', 'symbol': 'AAPL',
+                                          'status': 'pending_new'})),  # close
+                _mock_proc(0, json.dumps({'id': 'close-id', 'status': 'filled',
+                                          'filled_qty': '50'})),  # poll
             ]
             with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
                  patch.object(rl, '_redis', return_value=stub), \
@@ -515,6 +518,307 @@ class TestCooldownGate(unittest.TestCase):
             self.assertIn('liquidate:cooldown:2026-05-07', stub.store)
         finally:
             os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+
+# ── Phase 4 new test classes (2026-05-19) ────────────────────────────────────
+
+
+class TestRthOnlyGuard(unittest.TestCase):
+    """Phase 4 (2026-05-19): the manual flatten path refuses to run
+    outside RTH. Applies to both natural and forced paths. No OPG
+    submission ever fires."""
+
+    def setUp(self):
+        # Force live so the guard is exercised on the live code path too;
+        # but the guard should bite even in dry-run because it gates the
+        # entire entry function. Tests assert no destructive CLI is run.
+        os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+    def tearDown(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+    def _stub_conn(self):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        return mock_conn
+
+    def test_pre_market_clock_returns_error_no_submits(self):
+        """clock(closed) → action=error, reason=not_rth; no destructive CLI."""
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_CLOSED)),  # the only CLI call
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=self._stub_conn()), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq) as mock_run:
+            result = rl.liquidate_on_regime_change()
+        self.assertEqual(result['action'], 'error')
+        self.assertEqual(result['reason'], 'not_rth')
+        self.assertIn('AAPL', result['symbols_skipped'])
+        # No `position close` or `order submit` ever issued.
+        for call in mock_run.call_args_list:
+            argv = call[0][0]
+            self.assertNotEqual(argv[1:3], ['position', 'close'],
+                                f'pre-market guard must not close: {argv}')
+            self.assertNotEqual(argv[1:3], ['order', 'submit'],
+                                f'pre-market guard must not submit: {argv}')
+            self.assertNotIn('opg', argv)
+
+    def test_after_market_clock_returns_error(self):
+        """clock(closed, after-hours flavor) → same guard, also error."""
+        # alpaca clock has the same is_open=False shape after hours.
+        proc_seq = [
+            _mock_proc(0, json.dumps({'is_open': False, 'next_open': 'tomorrow'})),
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=None), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('psycopg2.connect', return_value=self._stub_conn()), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq) as mock_run:
+            result = rl.liquidate_on_regime_change(force_override=True)
+        self.assertEqual(result['action'], 'error')
+        self.assertEqual(result['reason'], 'not_rth')
+        for call in mock_run.call_args_list:
+            argv = call[0][0]
+            self.assertNotEqual(argv[1:3], ['position', 'close'])
+            self.assertNotEqual(argv[1:3], ['order', 'submit'])
+
+
+class TestPollAudit(unittest.TestCase):
+    """Phase 4: after each successful close submission, poll the order
+    to a terminal broker state and record the REAL outcome in the audit
+    row (filled / partial / pending / rejected / submit_error)."""
+
+    def setUp(self):
+        os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+    def tearDown(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+    def _capture_audit_calls(self):
+        """Build a mock conn + cursor that captures _record_audit's
+        executemany/execute calls so the test can inspect the
+        `result_status` arg."""
+        mock_conn = MagicMock()
+        # The submissions-query cursor returns SUBMISSION_ROW; subsequent
+        # cursors are for the audit insert and we just need to capture
+        # their .execute args.
+        submissions_cur = MagicMock()
+        submissions_cur.fetchall.return_value = [SUBMISSION_ROW]
+        audit_cur = MagicMock()
+        # cursor() returns submissions_cur first, then audit_cur on every
+        # subsequent call.
+        mock_conn.cursor.side_effect = [submissions_cur, audit_cur, audit_cur,
+                                        audit_cur, audit_cur, audit_cur]
+        return mock_conn, audit_cur
+
+    def _run_close(self, close_payload, poll_payloads):
+        """Run the live flatten with a single AAPL position, returning
+        (result_dict, audit_cursor, mock_run)."""
+        mock_conn, audit_cur = self._capture_audit_calls()
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),  # order list
+            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'tp-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'sl-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),  # position list
+            close_payload,  # position close
+            *poll_payloads,  # order get polls
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=_StubRedis()), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('execution.regime_liquidator.time.sleep'), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq) as mock_run:
+            result = rl.liquidate_on_regime_change()
+        return result, audit_cur, mock_run
+
+    def _audit_status(self, audit_cur):
+        """Pull the result_status arg from the audit cursor's execute call."""
+        # _record_audit issues a single INSERT per symbol; positional params
+        # in the call are (sql, values_tuple). result_status is at index 9
+        # in the VALUES tuple (matching the INSERT column order).
+        self.assertTrue(audit_cur.execute.called,
+                        'audit row was never inserted')
+        values = audit_cur.execute.call_args[0][1]
+        return values[9]
+
+    def test_filled_outcome_recorded(self):
+        """Submit succeeds + poll returns status=filled → 'filled'."""
+        filled = _mock_proc(0, json.dumps({'id': 'cid', 'status': 'filled',
+                                            'filled_qty': '50'}))
+        close = _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'}))
+        result, audit_cur, _run = self._run_close(close, [filled])
+        self.assertEqual(self._audit_status(audit_cur), 'filled')
+        self.assertEqual(result['action'], 'liquidated')
+
+    def test_partial_outcome_recorded(self):
+        """Submit succeeds + poll returns terminal with partial fill → 'partial'."""
+        # First poll: still working. Second: terminal expired with partial.
+        polls = [
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'partially_filled',
+                                       'filled_qty': '20'})),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'expired',
+                                       'filled_qty': '20'})),
+        ]
+        close = _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'}))
+        result, audit_cur, _run = self._run_close(close, polls)
+        self.assertEqual(self._audit_status(audit_cur), 'partial')
+        # Partial counts as NOT FILLED for sentinel purposes. With only
+        # one position in fixtures, zero fills → fire_succeeded=False →
+        # action='failed' (correct: May-9 guard keeps the sentinel clear
+        # so the operator can retry without being silently masked).
+        self.assertEqual(result['action'], 'failed')
+
+    def test_expired_outcome_recorded(self):
+        """Submit succeeds + order expires with zero fills → 'rejected'."""
+        polls = [
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'expired',
+                                       'filled_qty': '0'})),
+        ]
+        close = _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'}))
+        result, audit_cur, _run = self._run_close(close, polls)
+        self.assertEqual(self._audit_status(audit_cur), 'rejected')
+
+    def test_pending_outcome_recorded(self):
+        """Submit succeeds + poll never returns terminal (timeout) → 'pending'.
+        We simulate timeout by mocking _poll_to_terminal directly with a
+        non-terminal final order."""
+        # Use the direct helper path: patch _poll_to_terminal to return a
+        # non-terminal order so we don't actually loop for 90s.
+        mock_conn, audit_cur = self._capture_audit_calls()
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'tp-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'sl-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'})),
+        ]
+        # Poll returns the original pending_new (non-terminal, no fills).
+        non_terminal = {'id': 'cid', 'status': 'accepted', 'filled_qty': '0'}
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=_StubRedis()), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch.object(rl, '_poll_to_terminal', return_value=non_terminal), \
+             patch('execution.regime_liquidator.time.sleep'), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change()
+        self.assertEqual(self._audit_status(audit_cur), 'pending')
+        # Same as the partial case: one position, zero fills → 'failed'
+        # (sentinel guard correctly leaves the run retry-eligible).
+        self.assertEqual(result['action'], 'failed')
+
+    def test_submit_error_recorded(self):
+        """CLI returns non-zero on submit → 'submit_error', no poll."""
+        close_err = _mock_proc(1, '', json.dumps({'error': 'insufficient buying power'}))
+        # No poll payloads — _poll_to_terminal should not be called when
+        # submit failed.
+        result, audit_cur, mock_run = self._run_close(close_err, poll_payloads=[])
+        self.assertEqual(self._audit_status(audit_cur), 'submit_error')
+        # Make sure `order get` (the poll) was never issued.
+        for call in mock_run.call_args_list:
+            argv = call[0][0]
+            self.assertNotEqual(argv[1:3], ['order', 'get'],
+                                'no poll should run when submit failed')
+
+
+class TestSentinelStillGuardedByMay9Logic(unittest.TestCase):
+    """The May-9 sentinel guard (`fire_succeeded = n_close_ok > 0 or
+    len(close_results) == 0`) keeps its current semantics but
+    `n_close_ok` now means terminal-FILLS, not submission-acks.
+
+    A run where every close errors out (or partials/expires) must NOT
+    seal the sentinel + cooldown — otherwise the operator's retry is
+    silently masked, which was the May-9 incident."""
+
+    def setUp(self):
+        os.environ['OPENCLAW_ALPACA_LIVE_LIQUIDATE'] = '1'
+        os.environ['POSTGRES_URI'] = 'postgres://stub/stub'
+
+    def tearDown(self):
+        os.environ.pop('OPENCLAW_ALPACA_LIVE_LIQUIDATE', None)
+
+    def test_zero_filled_does_not_set_sentinel(self):
+        """Every close terminal-rejects → no sentinel/cooldown."""
+        stub = _StubRedis()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'tp-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'sl-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'})),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'rejected',
+                                       'filled_qty': '0'})),  # poll = rejected
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('execution.regime_liquidator.time.sleep'), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change()
+        # Action is 'failed' because n_close_ok=0 and len(close_results)>0.
+        self.assertEqual(result['action'], 'failed')
+        self.assertNotIn('liquidate:fired:2026-05-07:TRANSITIONING->HIGH_VOL',
+                         stub.store,
+                         'sentinel must NOT seal on zero-fill run (May-9 guard)')
+        self.assertNotIn('liquidate:cooldown:2026-05-07', stub.store,
+                         'cooldown must NOT seal on zero-fill run (May-9 guard)')
+
+    def test_one_filled_sets_sentinel(self):
+        """One filled close (rest could be anything) → sentinel IS set.
+        Only one OpenClaw symbol in fixtures, so a single filled run
+        exercises the n_close_ok=1 > 0 path."""
+        stub = _StubRedis()
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.fetchall.return_value = [SUBMISSION_ROW]
+        mock_conn.cursor.return_value = mock_cur
+        proc_seq = [
+            _mock_proc(0, json.dumps(CLOCK_OPEN)),
+            _mock_proc(0, json.dumps([OPEN_OC_PARENT])),
+            _mock_proc(0, json.dumps({'id': 'parent-uuid', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'tp-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps({'id': 'sl-leg', 'status': 'cancelled'})),
+            _mock_proc(0, json.dumps(POSITIONS_AAPL_LONG)),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'pending_new'})),
+            _mock_proc(0, json.dumps({'id': 'cid', 'status': 'filled',
+                                       'filled_qty': '50'})),
+        ]
+        with patch.object(rl, '_load_regime', return_value=REGIME_CHANGED), \
+             patch.object(rl, '_redis', return_value=stub), \
+             patch.object(rl, '_post_to_discord', return_value=True), \
+             patch('execution.regime_liquidator.time.sleep'), \
+             patch('psycopg2.connect', return_value=mock_conn), \
+             patch('execution.regime_liquidator.subprocess.run',
+                   side_effect=proc_seq):
+            result = rl.liquidate_on_regime_change()
+        self.assertEqual(result['action'], 'liquidated')
+        self.assertIn('liquidate:fired:2026-05-07:TRANSITIONING->HIGH_VOL',
+                      stub.store,
+                      'sentinel MUST seal when at least one close filled')
+        self.assertIn('liquidate:cooldown:2026-05-07', stub.store)
 
 
 if __name__ == '__main__':
