@@ -803,29 +803,42 @@ app.get('/api/data/usage', async (req, res) => {
         path2.join(__dirname, '../../../data/master/schema_registry.json'), 'utf8'));
     } catch (_) {}
 
-    // Per-strategy declared categories (used at category-level since
-    // that's the granularity strategies emit today).
-    const stratRes = await dbQuery(`
-      SELECT id AS strategy_id,
-             parameters->'required_columns'   AS req_cols,
-             data_requirements_planned        AS planned
-      FROM strategy_registry
-    `);
+    // Per-strategy declared categories — canonical source is each strategy's
+    // .requirements.json on disk (the same source the staging approver uses).
+    // strategy_registry.parameters.required_columns / .data_requirements_planned
+    // are stale on most rows (only 27/106 had data as of 2026-05-19), so
+    // they'd undercount users. We read manifest.json for state filtering
+    // and walk the on-disk requirements files for true required+optional.
+    //
+    // "Active stack" = live / candidate / staging / monitoring. Deprecated
+    // and archived strategies don't count as users — they no longer drive
+    // demand for the data column, so the operator should see the live
+    // dependency picture, not the historical one.
+    const _USAGE_ACTIVE_STATES = new Set(['live', 'candidate', 'staging', 'monitoring']);
+    const { _internals: _stgInternalsForUsage } = require('../../agent/approvals/staging_approver');
+    const _readReqs = _stgInternalsForUsage.readRequirements;
+    let _manifestForUsage;
+    try {
+      _manifestForUsage = JSON.parse(fs2.readFileSync(
+        path2.join(__dirname, '../../strategies/manifest.json'), 'utf8'));
+    } catch (_) { _manifestForUsage = { strategies: {} }; }
     const usersByCategory = {};
-    for (const s of stratRes.rows) {
-      let cats = [];
-      if (Array.isArray(s.req_cols)) cats = s.req_cols.filter(c => typeof c === 'string');
-      if (!cats.length && Array.isArray(s.planned)) {
-        cats = s.planned.map(p => p && (p.column || p.data_type)).filter(c => typeof c === 'string');
-      }
-      for (const c of new Set(cats)) {
+    let strategiesTotal = 0;
+    for (const [sid, rec] of Object.entries(_manifestForUsage.strategies || {})) {
+      if (!_USAGE_ACTIVE_STATES.has(rec.state)) continue;
+      strategiesTotal++;
+      let reqs;
+      try { reqs = _readReqs(sid); } catch (_) { reqs = { required: [], optional: [] }; }
+      const cats = [...new Set([
+        ...(Array.isArray(reqs.required) ? reqs.required : []),
+        ...(Array.isArray(reqs.optional) ? reqs.optional : []),
+      ])].filter(c => typeof c === 'string');
+      for (const c of cats) {
         if (!usersByCategory[c]) usersByCategory[c] = [];
-        usersByCategory[c].push(s.strategy_id);
+        usersByCategory[c].push(sid);
       }
     }
     for (const k of Object.keys(usersByCategory)) usersByCategory[k].sort();
-
-    const strategiesTotal = stratRes.rows.length;
 
     // Build the flat parameter list:
     //   1. Walk schema_registry → emit one parameter per non-identifier column
