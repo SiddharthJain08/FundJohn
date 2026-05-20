@@ -31,6 +31,7 @@ const PYTHON = process.env.PYTHON_BIN || 'python3';
  */
 
 const { runOneShot, parseJsonBlock } = require('./_opus_oneshot');
+const { resolveModel } = require('../config/resolve_model');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 const WORKSPACE    = `${OPENCLAW_DIR}/workspaces/default`;
@@ -327,8 +328,10 @@ async function _reviewOne(strategy, { dryRun, notify }) {
   const prompt = buildStrategyPrompt(strategy, tradePack, counterfactuals);
   log(`prompting Opus (signals=${tradePack.signals.length} pnl=${tradePack.pnl.length})`);
 
+  const memoModel = resolveModel('mastermind', 'comprehensive-review', 'memo_writer');
   const out = await runOneShot({
     prompt,
+    model: memoModel,
     cwd: WORKSPACE,
     disallowedTools: ['Bash','Write','Edit','NotebookEdit','WebSearch','WebFetch','Task'],
     timeoutMs: 480_000,
