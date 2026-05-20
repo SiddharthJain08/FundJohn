@@ -57,6 +57,7 @@ STATE_NAMES_BY_RANK = {0: 'LOW_VOL', 1: 'TRANSITIONING',
 PARQUET_PATH = ROOT / 'data' / 'master' / 'intraday_features.parquet'
 MACRO_PATH   = ROOT / 'data' / 'master' / 'macro.parquet'
 PRICES_30M   = ROOT / 'data' / 'master' / 'prices_30m.parquet'
+ENRICHED_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 MODEL_DIR = ROOT / '.agents' / 'market-state'
 
 
@@ -113,7 +114,76 @@ def _load_historical_backfill() -> pd.DataFrame:
     bf['spy_realized_vol_30m'] = bf.apply(
         lambda r: rv_native.get(r['date'].date(), r['vix_synth_30d'] / 100.0), axis=1,
     )
-    bf['rr_25d'] = float('nan')   # backfill has no risk-reversal — let _build_X impute to mean
+
+    # rr_25d backfill is a two-stage strategy because we only have direct
+    # measurements for ~18% of the 10y backfill window:
+    #   Stage A (~461 days, 2024-04 → 2026-04): rescaled SPY skew from
+    #     options_aggregates_enriched. Vendor OTM strikes aren't at exact
+    #     ±0.25-delta so raw scale differs from live (live μ=0.052 σ=0.010 vs
+    #     enriched μ=0.067 σ=0.059) — z-score-match to live moments.
+    #   Stage B (~2080 days, pre-2024 + post-Apr-2026): VIX-regression-imputed.
+    #     A simple OLS (rr ~ a·VIX + b·term + c) fits the 461-day calibration
+    #     set with R²≈0.35; predictions extend smoothly to extreme regimes
+    #     (COVID VIX=82 → rr≈0.15, calm VIX=12 → rr≈0.048). Beats constant
+    #     mean-imputation because it preserves the well-known empirical
+    #     coupling between vol level and put-call skew.
+    rr_by_date: dict = {}
+    rr_regression_coefs: tuple | None = None
+    if ENRICHED_PATH.exists():
+        en = pd.read_parquet(ENRICHED_PATH)
+        spy_en = en[en['ticker'] == 'SPY'].copy()
+        if not spy_en.empty and 'otm_put_iv' in spy_en.columns:
+            spy_en['date_only'] = pd.to_datetime(spy_en['date']).dt.date
+            spy_en['skew_raw'] = spy_en['otm_put_iv'] - spy_en['otm_call_iv']
+            valid = spy_en['skew_raw'].dropna()
+            if len(valid) >= 50:
+                live_intra = pd.read_parquet(PARQUET_PATH)
+                live_rr = live_intra['rr_25d'].dropna()
+                if len(live_rr) >= 30:
+                    skew_m, skew_s = float(valid.mean()), float(valid.std())
+                    live_m, live_s = float(live_rr.mean()), float(live_rr.std())
+                    if skew_s > 0 and live_s > 0:
+                        spy_en['rr_rescaled'] = (
+                            (spy_en['skew_raw'] - skew_m) / skew_s * live_s + live_m
+                        )
+                        rr_by_date = dict(zip(spy_en['date_only'], spy_en['rr_rescaled']))
+                        logger.info(
+                            'rr_25d Stage A: %d enriched-skew days '
+                            'rescaled (skew μ=%.4f σ=%.4f → live μ=%.4f σ=%.4f)',
+                            len(rr_by_date), skew_m, skew_s, live_m, live_s,
+                        )
+                        # Fit regression for Stage B on the calibrated Stage A days
+                        # joined to VIX/term. Falls back to constant mean if join fails.
+                        join_df = spy_en[['date_only', 'rr_rescaled']].dropna()
+                        join_df['date'] = pd.to_datetime(join_df['date_only'])
+                        anchor = bf[['date', 'vix_synth_30d', 'vix_term_slope']].merge(
+                            join_df[['date', 'rr_rescaled']], on='date', how='inner',
+                        ).dropna()
+                        if len(anchor) >= 50:
+                            X = np.column_stack([anchor['vix_synth_30d'].values,
+                                                 anchor['vix_term_slope'].values])
+                            y = anchor['rr_rescaled'].values
+                            X_aug = np.column_stack([X, np.ones(len(X))])
+                            coef, *_ = np.linalg.lstsq(X_aug, y, rcond=None)
+                            yhat = X_aug @ coef
+                            r2 = 1 - ((y - yhat) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+                            rr_regression_coefs = (float(coef[0]), float(coef[1]),
+                                                    float(coef[2]), float(r2))
+                            logger.info(
+                                'rr_25d Stage B: regression rr ~ %.5f·VIX + %.5f·term + %.4f '
+                                '(R²=%.3f on %d anchor days)',
+                                *rr_regression_coefs[:3], r2, len(anchor),
+                            )
+    # Apply rr_25d: Stage A lookup first, else Stage B regression
+    if rr_regression_coefs:
+        a, b, c, _ = rr_regression_coefs
+        bf['rr_25d'] = bf.apply(
+            lambda r: rr_by_date.get(r['date'].date(),
+                                     a * r['vix_synth_30d'] + b * r['vix_term_slope'] + c),
+            axis=1,
+        )
+    else:
+        bf['rr_25d'] = bf['date'].dt.date.map(rr_by_date).astype(float)
 
     # Match the live-features schema: ts_utc + source_quality_flag.
     # Use 21:00 UTC = 16:00 ET (market close) as the canonical daily tick time.
