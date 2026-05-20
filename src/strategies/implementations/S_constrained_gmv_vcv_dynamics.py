@@ -74,7 +74,7 @@ class ConstrainedGMVVCVDynamics(BaseStrategy):
         ev = ewma_vol[selected].values.astype(float)
 
         # Build Sigma = diag(ewma_vol) @ sample_corr @ diag(ewma_vol)  [§3-4, EWMA estimator]
-        corr = ret_sub.corr().values
+        corr = ret_sub.corr().values.copy()
         np.fill_diagonal(corr, 1.0)
         Sigma = np.outer(ev, ev) * corr + np.eye(len(selected)) * 1e-8
 

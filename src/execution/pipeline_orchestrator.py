@@ -816,8 +816,16 @@ def main(argv=None):
             _t0 = time.time()
             pipeline_feed(f'{reason_tag}▶️ `{step_key}` starting ({run_date})')
 
+            # Full daily cycle always overwrites any intraday-redeploy sized
+            # handoff so the canonical 10 AM run is authoritative. The
+            # executor's per-order already_executed() guard prevents double-
+            # submitting orders that were already filled by the intraday run.
+            step_env = env
+            if step_key == 'trade' and not is_subset:
+                step_env = {**env, 'OPENCLAW_FORCE_RESIZE': '1'}
+
             # Run the step
-            ok, rc = run_step(script, run_date, env)
+            ok, rc = run_step(script, run_date, step_env)
 
             # Tier 3 exit-code discipline (gated): rc == 2 means auth/config
             # error — abort the cycle without retrying. Behind the

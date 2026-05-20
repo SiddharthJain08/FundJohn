@@ -81,8 +81,41 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
         stop_raw  = bracket.get('stop_loss')   if bracket else o.get('stop')
         t1_raw    = bracket.get('take_profit_1') if bracket else o.get('t1')
         t2_raw    = bracket.get('take_profit_2') if bracket else o.get('t2')
+        # Orphan-close orders (positions held but no longer signalled) have
+        # no bracket — the executor prices them from the live snapshot.
+        is_orphan_close = '__close_orphan__' in (
+            o.get('strategy_id') or ''
+            + '|'.join(o.get('contributing_strategies') or [])
+        )
         if not (_finite(entry_raw) and _finite(stop_raw) and _finite(t1_raw)):
-            dropped_no_bracket += 1
+            if not is_orphan_close:
+                dropped_no_bracket += 1
+                continue
+            # Orphan-close: pass through without bracket, executor uses snapshot
+            notional_oc = abs(float(o.get('notional_usd') or o.get('current_usd') or 0))
+            pct_nav_oc  = round(notional_oc / nav, 6)
+            order_oc = {
+                'ticker':                  o['ticker'],
+                'strategy_id':             '__close_orphan__',
+                'direction':               dir_str,
+                'entry':                   None,
+                'stop':                    None,
+                't1':                      None,
+                't2':                      None,
+                'pct_nav':                 pct_nav_oc,
+                'shares':                  0,
+                'notional_usd':            round(notional_oc, 2),
+                'kelly_final':             pct_nav_oc,
+                'ev':                      0.0,
+                'p_t1':                    0.5,
+                'source_mode':             o.get('source_mode'),
+                'close_only':              True,
+                'contributing_strategies': ['__close_orphan__'],
+                'contributions':           [{'strategy_id': '__close_orphan__',
+                                             'attribution_weight': 1.0}],
+                'current_usd':             o.get('current_usd', 0.0),
+            }
+            payload['orders'].append(order_oc)
             continue
 
         entry      = float(entry_raw)

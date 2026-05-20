@@ -705,6 +705,66 @@ def execute_single(sess, equity, order, run_date):
     target  = order.get('t1') or order.get('target')
     side    = 'sell' if str(order.get('direction') or '').lower() == 'short' else 'buy'
 
+    # Orphan-close orders: close the full broker position, no bracket needed.
+    if order.get('close_only'):
+        session_co = _alpaca_session_kind()
+        if session_co == 'closed':
+            return {'ticker': ticker, 'status': 'SKIP',
+                    'reason': 'close_only: market closed',
+                    'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
+        if session_co == 'rth':
+            # RTH: `position close` flattens the exact broker position.
+            ok_co, pay_co, err_co = _run_alpaca_cli(
+                ['position', 'close', '--symbol-or-asset-id', ticker], timeout=15,
+            )
+            if ok_co:
+                order_id = (pay_co or {}).get('id') or (pay_co or {}).get('order_id', '?')
+                notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
+                log(f'↩ {ticker} CLOSE (position close)  notional≈${notional_co:,.0f}'
+                    f'  order={order_id}')
+                return {'ticker': ticker, 'status': 'submitted',
+                        'qty': (pay_co or {}).get('qty', 0),
+                        'notional': notional_co, 'entry': None,
+                        'order_id': order_id, 'http': 200,
+                        'tif': 'day', 'order_class': 'simple',
+                        'client_order_id': coid}
+            log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only RTH): {err_co.get("error","")}')
+            return {'ticker': ticker, 'status': 'rejected',
+                    'reason': err_co.get('error') or 'position close failed',
+                    'http': err_co.get('status'), 'body': str(err_co),
+                    'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
+        else:
+            # Pre/afterhours: limit order using quoted price, approximate qty
+            skip_ext = _skip_extended_hours(ticker, side)
+            if skip_ext:
+                return {'ticker': ticker, 'status': 'SKIP',
+                        'reason': f'close_only ext-hours skip: {skip_ext}',
+                        'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
+            lp_co = _pick_limit_price(ticker, side)
+            if lp_co is None:
+                return {'ticker': ticker, 'status': 'SKIP',
+                        'reason': 'close_only: no quote/trade for limit price',
+                        'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
+            notional_co = equity * pct_nav
+            qty_co = max(1, int(notional_co / lp_co)) if lp_co > 0 else 1
+            ok_co, pay_co, err_co = _submit_order_via_cli(
+                ticker=ticker, side=side, qty=qty_co, tif='day',
+                order_class='simple', target=None, stop=None, coid=coid,
+                order_type='limit', extended_hours=True, limit_price=lp_co,
+            )
+            if ok_co:
+                log(f'↩ {ticker} CLOSE x{qty_co} sh  LIMIT={lp_co:.2f}  notional=${qty_co*lp_co:,.0f}'
+                    f'  order={pay_co.get("order_id","?")}')
+                return {'ticker': ticker, 'status': 'submitted', 'qty': qty_co,
+                        'notional': qty_co * lp_co, 'entry': lp_co,
+                        'order_id': pay_co.get('order_id'), 'http': 200,
+                        'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
+            log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only ext): {err_co.get("error","")}')
+            return {'ticker': ticker, 'status': 'rejected',
+                    'reason': err_co.get('error') or 'submit failed',
+                    'http': err_co.get('status'), 'body': str(err_co),
+                    'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
+
     if not (entry and stop and target):
         return {'ticker': ticker, 'status': 'SKIP', 'reason': 'missing levels',
                 'client_order_id': coid}
@@ -988,6 +1048,15 @@ def main():
     submitted = []
     skipped   = []
     new_notional_total = 0.0
+
+    # Submit sells/closes first to free up buying power, then buys by conviction
+    orders = sorted(
+        orders,
+        key=lambda o: (
+            0 if str(o.get('direction') or '').lower() in ('short', 'sell') or o.get('close_only') else 1,
+            -float(o.get('pct_nav') or 0.0),
+        ),
+    )
 
     for order in orders:
         sid    = order.get('strategy_id') or 'unknown'

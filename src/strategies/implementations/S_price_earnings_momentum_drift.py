@@ -85,7 +85,7 @@ class PriceEarningsMomentumDrift(BaseStrategy):
         if len(sue_series) > 0:
             common = common.intersection(sue_series.index)
 
-        if len(common) < 20:
+        if len(common) < 20 or len(sue_series) == 0:
             # Fall back to price-only momentum
             score = price_mom.rank(pct=True)
         else:
