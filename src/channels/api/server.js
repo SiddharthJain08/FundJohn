@@ -326,20 +326,26 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
     } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
 
-    const enriched = result.rows.map(r => ({
-      ...r,
-      day_pnl_usd: computeDayPnlUsd({
-        today_pnl_pct:     r.unrealized_pnl_pct,
-        prev_pnl_pct:      r.prev_pnl_pct,
-        position_size_pct: r.position_size_pct,
-        nav,
-      }),
-      // null when broker doesn't hold this ticker (stale 'open' row that the
-      // reconcile sweep hasn't caught yet, or a same-day signal not yet
-      // submitted). _groupByTicker uses null as the signal to fall back to
-      // strategy-intent rollup math.
-      broker_position: brokerPositions[r.ticker] || null,
-    }));
+    // Active positions = broker truth. execution_signals carries every
+    // strategy's *intent*, including stale rows the reconcile sweep hasn't
+    // closed yet (phantoms). The dashboard's "Active Positions" panel must
+    // reflect what we actually hold, so we drop any row whose ticker the
+    // broker isn't carrying. Degraded-mode fallback: if the broker fetch
+    // failed (brokerPositions empty AND we caught earlier), ship every row
+    // so the operator still sees something rather than a blank panel.
+    const brokerHasAny = Object.keys(brokerPositions).length > 0;
+    const enriched = result.rows
+      .filter(r => !brokerHasAny || brokerPositions[r.ticker])
+      .map(r => ({
+        ...r,
+        day_pnl_usd: computeDayPnlUsd({
+          today_pnl_pct:     r.unrealized_pnl_pct,
+          prev_pnl_pct:      r.prev_pnl_pct,
+          position_size_pct: r.position_size_pct,
+          nav,
+        }),
+        broker_position: brokerPositions[r.ticker] || null,
+      }));
 
     if (req.query.group_by === 'strategy') {
       return res.json({ groups: groupByStrategy(enriched) });

@@ -162,12 +162,20 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
     """Run the orchestrator subset synchronously. Returns the orchestrator's
     exit code. We're already in a detached process (spawned by the intraday
     cron), so it's safe to block here for up to 30 min."""
+    # --force-resume is required: the daily 10am pipeline sets
+    # `pipeline:completed:{date}` after its final step, which would otherwise
+    # block every intraday redeploy for the rest of the trading day. The
+    # actual idempotency layer for redeploys is *this* script's
+    # `redeploy:cooldown:{date}` (60min) + `redeploy:fired:{date}:{reason}`
+    # (24h) gates checked above — so bypassing the orchestrator's daily
+    # sentinel is safe, and necessary for redeploys to fire at all post-10am.
     cmd = [
         sys.executable,
         str(ROOT / 'src' / 'execution' / 'pipeline_orchestrator.py'),
         '--steps', REDEPLOY_STEPS,
         '--reason', reason,
         '--date', run_date,
+        '--force-resume',
     ]
     env = {**os.environ}
     if dry_run:
