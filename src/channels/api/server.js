@@ -4635,8 +4635,11 @@ function _renderRegimeStructure(intraday, daily) {
     .map(([lbl, key, dp]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${fmt(f[key], dp)}</div></div>\`)
     .join('');
 
-  // 24h sparkline.
-  const hist = Array.isArray(intraday.history) ? intraday.history.slice(-72) : [];
+  // 24h sparkline — render every tick the endpoint returned (last 24h of
+  // intraday_regime_states). Tick width is fixed at 4px so the bar grows
+  // wider as more ticks accumulate, ending roughly at the right edge of
+  // the Next-Day Probabilities column below.
+  const hist = Array.isArray(intraday.history) ? intraday.history : [];
   const sparkHtml = hist.length
     ? hist.map(r => {
         const c = _STATE_COLOR[r.state] || 'var(--dim)';
