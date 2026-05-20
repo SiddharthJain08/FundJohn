@@ -199,19 +199,22 @@ The `sentiment` node, like in the legacy orchestrator, is gated by `OPENCLAW_SEN
 
 ### 4.1 Behavioral parity
 
-To an operator watching `#pipeline-feed` / `#data-alerts` / `#trade-reports` after the flag-flip, the message stream is **identical to today**. Same emojis, same channels, same content. Only addition: per-step events in the dashboard SSE feed (additive, non-disruptive).
+To an operator watching `#pipeline-feed` / `#data-alerts` / `#trade-reports` after the flag-flip, the message stream is **identical to today**. Same emojis, same channels, same content. Only addition: per-step events in the dashboard SSE feed (additive, non-disruptive). No new Postgres tables — structured per-cycle history lives in PostgresSaver checkpoints (Section 5) instead.
 
 ### 4.2 New `src/execution/pipeline_logging.js`
 
-Re-uses the existing `src/channels/discord/notifications.js` for webhook dispatch and the existing pg pool for Postgres writes — no new connection management. Exports:
+Re-uses the existing `src/channels/discord/notifications.js` for webhook dispatch. **No new Postgres tables.** The Python orchestrator today writes only to `agent_registry` (status updates) and not to a per-step log table — structured per-step history comes from PostgresSaver checkpoints (Section 5), which is already in scope and queryable via the standard `langgraph_checkpoints` table.
+
+Exports:
 
 | Function | Behavior |
 |---|---|
-| `feedStart(step, runDate, reason)` | Posts `▶️ <step> started for <runDate>` to `#pipeline-feed`; inserts `pipeline_runs` row with `status='running'` |
-| `feedEnd(step, status, runDate, durationMs)` | Posts `✅` (ok) or `⚠️` (warn) to `#pipeline-feed`; updates row to `'ok'` or `'warn'` with `duration_ms` |
-| `notifyFailure(step, runDate, rc, stderrTail)` | Posts `❌` to step's failure channel (per `STEP_FAILURE_CHANNEL`); updates row to `'failed'` |
-| `cycleStart(runDate, reason, runId)` | Posts `🚀 daily cycle started — <runDate> (<reason>)` to `#pipeline-feed`; inserts `pipeline_cycles` row |
-| `cycleEnd(runDate, runId, status, abortedAt)` | Posts `✅` or `❌ aborted at <step>`; updates `pipeline_cycles` row |
+| `feedStart(step, runDate, reason)` | Posts `▶️ <step> started for <runDate>` to `#pipeline-feed` |
+| `feedEnd(step, status, runDate, durationMs)` | Posts `✅` (ok) or `⚠️` (warn) to `#pipeline-feed` |
+| `notifyFailure(step, runDate, rc, stderrTail)` | Posts `❌` to step's failure channel (per `STEP_FAILURE_CHANNEL`) |
+| `cycleStart(runDate, reason, runId)` | Posts `🚀 daily cycle started — <runDate> (<reason>)` to `#pipeline-feed` |
+| `cycleEnd(runDate, runId, status, abortedAt)` | Posts `✅` (ok) or `❌ aborted at <step>` to `#pipeline-feed` |
+| `updateAgentStatus(agentId, status, currentTask?)` | Updates `agent_registry` (matches Python `set_agent_status` at pipeline_orchestrator.py:112) |
 
 `STEP_FAILURE_CHANNEL` and `STEP_AGENTS` maps are **ported verbatim** from `pipeline_orchestrator.py` to JS constants. Tests snapshot-compare both maps against the Python source so they don't drift while both files coexist.
 
@@ -347,7 +350,7 @@ For each step, six cases run against a mocked `runSubprocess`:
 
 ### 7.4 Integration tests
 
-- **`pipeline_logging.js`** (4 cases): `feedStart` posts to right channel + writes DB row; `notifyFailure` routes per `STEP_FAILURE_CHANNEL`; webhook failure is non-fatal (DB write still attempted); `STEP_FAILURE_CHANNEL` snapshot-matches Python version
+- **`pipeline_logging.js`** (4 cases): `feedStart` posts to `#pipeline-feed`; `notifyFailure` routes per `STEP_FAILURE_CHANNEL`; webhook failure is non-fatal (logs warning, doesn't throw); `STEP_FAILURE_CHANNEL` + `STEP_AGENTS` maps snapshot-match the Python source verbatim
 - **Recovery probe** (3 cases): no in-flight thread → silent exit; in-flight thread with `next: ['trade']` → resume + 🔄 Discord post; in-flight thread with flag off → skip (legacy owns recovery)
 
 ### 7.5 End-to-end smoke (manual, pre-flip)
@@ -387,7 +390,7 @@ Settle these during writing-plans without re-opening this spec:
 
 - Exact JSON schema for `requestedSteps` input — Set on the wire (JSON array) vs Set object inside graph state. Recommend: array on the wire, materialize to `new Set(arr)` at graph entry.
 - Whether `runDailyCycleGraph` should fire-and-forget at the cron tick or await completion. Recommend: fire-and-forget (matches existing cron behavior; the cycle's own Discord notifications handle progress reporting).
-- Whether `cycleStart`/`cycleEnd` Postgres rows should use a separate `pipeline_cycles` table (clean separation from per-step `pipeline_runs`) or extend `pipeline_runs` with a synthetic `step='__cycle__'` row. Recommend: separate table; existing `pipeline_runs` queries don't need to add filters.
+- ~~Postgres table layout for per-cycle/per-step history.~~ **Resolved during plan-writing**: no new tables. PostgresSaver checkpoints already give us structured cycle/step history queryable via SQL. The Python orchestrator never wrote to `pipeline_runs` either — that table is for data-collection runs, unrelated.
 - Whether to back-port the recovery probe to the legacy code path during cohabitation. Recommend: no — the Python orchestrator's existing Redis-checkpoint resume already covers it; back-porting would invert the flag's "default to legacy" semantic.
 
 ---
