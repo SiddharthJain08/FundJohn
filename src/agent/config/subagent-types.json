@@ -136,6 +136,16 @@
       "model_modes": {
         "comprehensive-review": {
           "node_models": { "memo_writer": "judge" }
+        },
+        "critique": {
+          "node_models": {
+            "aggressive_critic":   "debator",
+            "conservative_critic": "debator",
+            "neutral_critic":      "debator"
+          }
+        },
+        "synthesize": {
+          "node_models": { "synthesizer": "synthesizer" }
         }
       },
       "skills": ["fundjohn:obsidian-link"],
