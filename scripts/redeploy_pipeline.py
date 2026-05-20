@@ -169,28 +169,39 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
     # `redeploy:cooldown:{date}` (60min) + `redeploy:fired:{date}:{reason}`
     # (24h) gates checked above — so bypassing the orchestrator's daily
     # sentinel is safe, and necessary for redeploys to fire at all post-10am.
-    cmd = [
-        sys.executable,
-        str(ROOT / 'src' / 'execution' / 'pipeline_orchestrator.py'),
-        '--steps', REDEPLOY_STEPS,
-        '--reason', reason,
-        '--date', run_date,
-        '--force-resume',
-    ]
+    if os.environ.get('OPENCLAW_LANGGRAPH_ORCHESTRATOR') == '1':
+        # New path: invoke the LangGraph daily-cycle graph with subset filter.
+        run_graph_js = ROOT / 'bin' / 'run-graph.js'
+        payload = {
+            'runDate':        run_date,
+            'reason':         reason,
+            'requestedSteps': REDEPLOY_STEPS.split(','),
+        }
+        cmd = ['node', str(run_graph_js), 'daily-cycle', json.dumps(payload)]
+        logger.info('spawning LangGraph daily-cycle (dry_run=%s): %s', dry_run, ' '.join(cmd))
+    else:
+        # Legacy path: pipeline_orchestrator.py --steps --reason --force-resume
+        cmd = [
+            sys.executable,
+            str(ROOT / 'src' / 'execution' / 'pipeline_orchestrator.py'),
+            '--steps', REDEPLOY_STEPS,
+            '--reason', reason,
+            '--date', run_date,
+            '--force-resume',
+        ]
+        logger.info('spawning orchestrator (dry_run=%s): %s', dry_run, ' '.join(cmd))
+
     env = {**os.environ}
     if dry_run:
         env['PIPELINE_DRY_RUN'] = '1'
-    logger.info('spawning orchestrator (dry_run=%s): %s', dry_run, ' '.join(cmd))
     try:
-        proc = subprocess.run(
-            cmd, env=env, timeout=ORCHESTRATOR_TIMEOUT_S, check=False,
-        )
+        proc = subprocess.run(cmd, env=env, timeout=ORCHESTRATOR_TIMEOUT_S, check=False)
         return proc.returncode
     except subprocess.TimeoutExpired:
-        logger.error('orchestrator timed out after %ss', ORCHESTRATOR_TIMEOUT_S)
+        logger.error('pipeline subprocess timed out after %ss', ORCHESTRATOR_TIMEOUT_S)
         return 1
     except Exception as e:
-        logger.error('orchestrator spawn error: %s', e)
+        logger.error('pipeline subprocess spawn error: %s', e)
         return 1
 
 
