@@ -1,8 +1,5 @@
 """Shared Kelly-fraction helpers for sizers.
 
-Extracted from deterministic_sizer.py so multiple sizers (deterministic
-and regime_blended) can use the same math without duplicating logic.
-
 Public functions:
   - reward_to_risk(direction, entry, stop, t1) → float | None
   - kelly_fraction(p, R) → float (signed; negative means negative-EV)

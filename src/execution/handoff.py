@@ -5,7 +5,7 @@ Keys:
   handoff:{date}:structured — Phase 2 canonical input for TradeJohn, written
                               by trade_handoff_builder.py (features + regime
                               + portfolio + veto history + mastermind rec).
-  handoff:{date}:sized      — sized orders written by trade_agent_llm.py,
+  handoff:{date}:sized      — sized orders written by regime_blended_sizer_live,
                               consumed by alpaca_executor.py and send_report.py.
   handoff:{date}:memos      — LEGACY (removed with post_memos.py in Phase 2).
   handoff:{date}:research   — LEGACY (removed with research_report.py in Phase 2).

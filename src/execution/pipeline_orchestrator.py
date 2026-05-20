@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-pipeline_orchestrator.py — 10am daily cycle (Phase 2).
+pipeline_orchestrator.py — 10am daily cycle.
 
 Runs after every data collection cycle (spawned by collector.js).
 Agents communicate DIRECTLY — Discord posts are write-only for human visibility only.
 
 Pipeline (direct agent-to-agent, no Discord round-trip):
-  (queue_drain removed 2026-04-28 — fused-staging-approval handles backfills inline)
-  2. run_collector_once.js → one collector cycle (prices/options/fundamentals/news)
-  3. engine.py             → run strategies → execution_signals (zero-LLM)
-  4. trade_handoff_builder → HV/beta/momentum/EV per signal → structured JSON
-  5. trade_agent_llm.py    → TradeJohn Claude → sized orders handoff
-  6. alpaca_executor.py    → Alpaca paper bracket orders
-  7. send_report.py        → greenlist → #trade-signals, veto digest → #trade-reports
+  1. run_collector_once.js          → one collector cycle (prices/options/fundamentals/news)
+  2. engine.py                      → run strategies → execution_signals (zero-LLM)
+  3. ic_gate_runner.py              → IC approval gate (default-OFF)
+  4. trade_handoff_builder.py       → HV/beta/momentum/EV per signal → structured JSON
+  5. regime_blended_sizer_live.py   → sizer + TradeJohn confirmer → sized orders handoff
+  6. alpaca_executor.py             → Alpaca paper bracket orders
+  7. alpaca_reconcile.py            → reconcile fills
+  8. send_report.py                 → greenlist → #trade-signals, veto digest → #trade-reports
+  9. pyportfolioopt_shadow.py       → shadow alt-sizer (default-OFF)
+ 10. daily_health_digest.js         → end-of-cycle digest to #pipeline-feed
 
-Budget check before steps 1 and 3 (step 3 invokes TradeJohn Claude LLM).
+Budget check before the LLM-adjacent `trade` step (TradeJohn confirmer call).
 
 Usage:
   python3 src/execution/pipeline_orchestrator.py [--date YYYY-MM-DD] [--force-resume]
@@ -41,56 +44,22 @@ LOCK_TTL        = 7200   # 2 hour lock TTL — covers worst-case collector
 COMPLETED_KEY   = 'pipeline:completed'     # idempotency sentinel; set when all 5 steps done
 COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 
-# ── LIVE-flag: Phase 3 cutover ────────────────────────────────────────────────
-# Operator flips OPENCLAW_REGIME_BLENDED_LIVE=1 in .env to swap submitters.
-# DO NOT flip in .env until the 30-day parity window is complete.
-# Rollback: set OPENCLAW_REGIME_BLENDED_LIVE=0 (or remove) + restart johnbot.
-# Zero data loss either way — parity_orders + alpaca_submissions persist.
-_LIVE_FLAG = os.environ.get('OPENCLAW_REGIME_BLENDED_LIVE', '0') == '1'
-
-if _LIVE_FLAG:
-    # LIVE: regime_blended_sizer_live is the production submitter.
-    # trade_parity step is dropped (scope-down decision: rollback = flip env var).
-    # trade_parity_capture is retained to keep the parity_orders mirror of
-    # production alpaca_submissions up to date for monitoring.
-    # Phase 2G sidecar (correlation_adjusted_sidecar) runs AFTER the parity
-    # capture so it can read parity_orders[source='regime_blended']; the
-    # sidecar exits 0 even on error (non-fatal to the cycle).
-    STEPS = [
-        ('collect',              'run_collector_once'),        # one cycle of collector.js
-        ('signals',              'engine'),                    # zero-LLM strategy executor
-        ('ic_gate',              'ic_gate_runner'),            # Phase 2A IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
-        ('handoff',              'trade_handoff_builder'),     # structured handoff
-        ('trade',                'regime_blended_sizer_live'), # LIVE PRIMARY (real LLM confirmer)
-        ('alpaca',               'alpaca_executor'),           # submit to Alpaca
-        ('trade_parity_capture', 'trade_parity_capture'),      # mirror alpaca_submissions → parity_orders
-        ('correlation_sidecar',  'correlation_adjusted_sidecar'), # Phase 2G DRY-RUN sidecar (non-fatal)
-        ('reconcile',            'alpaca_reconcile'),          # reconcile fills
-        ('report',               'send_report'),               # post to Discord
-        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # Phase 1G shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
-        ('health',               'daily_health_digest'),       # daily health digest
-    ]
-else:
-    # DRY-RUN (default, Phase 2): trade_agent_llm primary; regime_blended in parity.
-    # queue_drain removed 2026-04-28: the fused-staging-approval worker now
-    # backfills required columns inline at approval time, so the daily cycle
-    # has nothing to drain. No replacement needed — staging approvals run
-    # their own backfill against the master parquets directly.
-    STEPS = [
-        ('collect',              'run_collector_once'),           # Node wrapper: one cycle of collector.js (parquet-primary)
-        ('signals',              'engine'),                       # zero-LLM strategy executor → execution_signals
-        ('ic_gate',              'ic_gate_runner'),               # Phase 2A IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
-        ('handoff',              'trade_handoff_builder'),        # deterministic features → handoff:{date}:structured
-        ('trade',                'trade_agent_llm'),              # Deterministic sizer (LLM bypassed by default)
-        ('trade_parity',         'regime_blended_sizer_parity'),  # Phase 2: DRY-RUN parity runner → parity_orders
-        ('alpaca',               'alpaca_executor'),              # Auto-submit sized orders to Alpaca paper
-        ('trade_parity_capture', 'trade_parity_capture'),         # Phase 2: mirror alpaca_submissions → parity_orders[source='production']
-        ('sync_brackets',        'sync_brackets'),                 # Phase B (2026-05-19): replace live bracket stop-legs when DB intent drifted (DEFAULT-OFF, gated on OPENCLAW_DAILY_BRACKET_REPLACE=1; dry-runs by default)
-        ('reconcile',            'alpaca_reconcile'),             # Reconcile alpaca_submissions vs broker FILL activities
-        ('report',               'send_report'),                  # Greenlist → #trade-signals, veto digest → #trade-reports
-        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),        # Phase 1G shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
-        ('health',               'daily_health_digest'),          # End-of-cycle: build + post daily health digest to #pipeline-feed
-    ]
+# regime_blended_sizer_live is the sole production submitter. The legacy
+# DRY-RUN / parity-comparison branch (trade_agent_llm + deterministic_sizer
+# + regime_blended_sizer_parity + trade_parity_capture + correlation_sidecar)
+# was removed 2026-05-20.
+STEPS = [
+    ('collect',              'run_collector_once'),        # one cycle of collector.js
+    ('signals',              'engine'),                    # zero-LLM strategy executor
+    ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
+    ('handoff',              'trade_handoff_builder'),     # structured handoff
+    ('trade',                'regime_blended_sizer_live'), # sizer + TradeJohn confirmer
+    ('alpaca',               'alpaca_executor'),           # submit to Alpaca
+    ('reconcile',            'alpaca_reconcile'),          # reconcile fills
+    ('report',               'send_report'),               # post to Discord
+    ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
+    ('health',               'daily_health_digest'),       # daily health digest
+]
 
 # Budget check required before LLM-adjacent steps. `trade` is the only Claude
 # call in the 10am cycle now — all other steps are deterministic / zero-token.
@@ -111,12 +80,9 @@ STEP_FAILURE_CHANNEL = {
     'signals':     'data-alerts',
     'ic_gate':     'trade-reports',
     'handoff':     'trade-reports',
-    'trade':        'trade-reports',
-    'trade_parity': 'data-alerts',
-    'alpaca':       'trade-reports',
-    'trade_parity_capture': 'data-alerts',
-    'sync_brackets':         'trade-reports',
-    'correlation_sidecar':   'data-alerts',
+    'trade':       'trade-reports',
+    'alpaca':      'trade-reports',
+    'reconcile':   'trade-reports',
     'report':      'trade-reports',
     'health':      'pipeline-feed',
 }
@@ -513,9 +479,7 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         # also chronically hit.
         return (_maybe_dry(['node', str(js_pipe)]), 5400)
     # default: src/execution/<script>.py
-    if script == 'trade_agent_llm':
-        timeout = 1620
-    elif script == 'ic_gate_runner':
+    if script == 'ic_gate_runner':
         # IC gate runner blocks on operator Discord responses. IC_TIMEOUT_SECONDS
         # defaults to 600s inside the runner; allow generous headroom on the
         # orchestrator wrapper so the runner's own poll-timeout fires first.
@@ -781,11 +745,9 @@ def main(argv=None):
         'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
         'ic_gate':     ('tradedesk',    f'IC approval gate: {run_date}',            None),
         'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
-        'trade':        ('tradedesk', f'TradeJohn signal generation: {run_date}',        None),
-        'trade_parity': ('databot',   f'Running parity DRY-RUN: {run_date}',             None),
-        'alpaca':       ('tradedesk', f'Submitting Alpaca orders: {run_date}',            None),
-        'trade_parity_capture': ('databot', f'Capturing parity production: {run_date}', None),
-        'correlation_sidecar':   ('databot', f'2G correlation sidecar: {run_date}',     None),
+        'trade':       ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
+        'alpaca':      ('tradedesk',    f'Submitting Alpaca orders: {run_date}',    None),
+        'reconcile':   ('databot',      f'Reconciling fills: {run_date}',           None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 

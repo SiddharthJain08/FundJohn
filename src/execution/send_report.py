@@ -2,8 +2,8 @@
 """
 send_report.py — daily post-trade Discord report (Phase 2).
 
-Reads the sized handoff written by trade_agent_llm.py (and acted on by
-alpaca_executor.py) and posts two concise messages:
+Reads the sized handoff written by regime_blended_sizer_live (and acted on
+by alpaca_executor.py) and posts two concise messages:
 
   • #trade-signals  — greenlist table (tickers that cleared the Kelly/EV
                       gate and went to Alpaca).

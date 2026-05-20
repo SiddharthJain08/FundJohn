@@ -1,7 +1,7 @@
 """Regime-blended sizer: orchestrator + mode dispatcher.
 
-Pipeline orchestrator's `trade` step calls this. Replaces deterministic_sizer
-as the primary sizer (which is kept for parity DRY-RUN per Task 16).
+Pipeline orchestrator's `trade` step calls this. Invoked by
+regime_blended_sizer_live for production submission.
 
 Mode dispatch (binary, by regime state):
   LOW_VOL, TRANSITIONING → consolidate path (formula + ticker_consolidator + tradejohn_confirmer)
@@ -77,10 +77,11 @@ def size_positions(
         else:
             orders = _independent_path(passed, account_state, regime_params)
 
-    # Aggregate cap (legacy 25% available_NAV) dropped 2026-05-14 per operator
-    # decision — the new sharpe_cadence sizer governs deployment via λ × NAV
-    # gross, per-ticker 25% cap, and $25 minimum. Executor's daily cap +
-    # per-order minimum likewise removed downstream.
+    # All position-level caps (legacy 25% aggregate-NAV cap, per-ticker 25%
+    # cap, $25 minimum, executor-side clamps) were removed 2026-05-14. The
+    # sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
+    # formulation is the sole deployment policy — high-conviction tickers
+    # (multi-strategy agreement) receive proportional allocation.
     return orders
 
 
@@ -137,7 +138,7 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
-def _load_min_cumulative_sharpe(default: float = 4.0) -> float:
+def _load_min_cumulative_sharpe(default: float = 3.0) -> float:
     """Read min_cumulative_sharpe from pipeline_config; fall back to default.
 
     Used by _sharpe_cadence_path to drop tickers where the SIGNED sum of
@@ -297,15 +298,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
          signal whose age is within its strategy's cadence_days). Latest
          signal per (strategy, ticker) wins.
       3. For each ticker, sum daily_weight × direction → ticker_weight.
-      4. Normalize so Σ |target_usd| = λ × NAV exactly.
-      5. Apply per-ticker 25% NAV cap + $25 minimum, bucket-aware
-         redistribute (long-pool, short-pool stay separate).
-      6. **Rebalance step**: read broker positions; the order_delta for
+      4. Normalize so Σ |target_usd| = λ × NAV exactly. No per-ticker
+         caps and no minimum-notional floor — high-conviction tickers
+         (multi-strategy agreement) receive proportional allocation.
+      5. **Rebalance step**: read broker positions; the order_delta for
          each ticker = target_usd − current_position_usd. Tickers held
          but no longer signalled → emit close orders. This keeps daily
          PV consumption = λ × NAV instead of stacking.
-      7. TradeJohn keep|cancel on the surviving deltas.
-      8. Emit orders in the deterministic_sizer payload shape.
+      6. TradeJohn keep|cancel on the surviving deltas.
+      7. Emit orders in the sized-handoff payload shape.
 
     The `signals` parameter (today's emissions) is now ignored in favour
     of the DB query — anything emitted today is already persisted to
@@ -381,7 +382,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         return []
 
     # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
-    # below the configured floor (default 4.0, from pipeline_config). This
+    # below the configured floor (default 3.0, from pipeline_config). This
     # is the operator's primary conviction filter — kills single-strategy
     # bets AND near-cancellation tickers in one rule.
     if min_cum_sharpe > 0:

@@ -7,7 +7,7 @@ Key invariants checked:
   - payload uses 'orders' key (not 'signals') — alpaca_executor reads orders
   - pct_nav is set and equals abs(notional_usd) / equity
   - strategy_id is populated from contributions[0] (required for already_executed())
-  - direction is lowercase string 'long'/'short' (matches deterministic_sizer convention)
+  - direction is lowercase string 'long'/'short'
   - entry/stop/t1 are floats mapped from bracket.entry_price/stop_loss/take_profit_1
   - qty (signed) → shares (int, absolute value)
 """

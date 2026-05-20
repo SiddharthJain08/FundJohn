@@ -5,10 +5,6 @@ submit, no LLM call.
 
 Use after each PR before deploying:
   python3 scripts/dry_run_new_sizer.py [--date YYYY-MM-DD]
-
-Compared to src/execution/regime_blended_sizer_parity.py (which writes to
-parity_orders for nightly diff comparison), this script is purely read-only
-and human-readable.
 """
 import argparse, json, os, sys
 from datetime import date
@@ -45,7 +41,7 @@ def main():
 
     uri = os.environ.get('POSTGRES_URI', 'postgresql://openclaw:password@localhost:5432/openclaw')
 
-    # Load same handoff trade_agent_llm reads
+    # Load the same handoff regime_blended_sizer_live reads
     handoff = read_handoff(args.date, 'structured')
     if handoff is None:
         print(f'[dry_run] no handoff for {args.date}; nothing to size', file=sys.stderr)

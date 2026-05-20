@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
 alpaca_executor.py — final pipeline step. Reads the sized handoff written by
-trade_agent_llm.py and submits bracket orders to Alpaca paper.
+regime_blended_sizer_live and submits bracket orders to Alpaca paper.
 
 Safety gates (in order, any failure → skip):
   1. daily_signal_summary → same quality gate as the trade step.
   2. Idempotency — skip any (run_date, strategy_id, ticker) with an existing
      alpaca_order_id in position_recommendations.
 
-Note: all per-order and daily aggregate notional caps were dropped 2026-05-14.
-The sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
-formulation is the single source of deployment policy.
+Note: no per-order or aggregate notional caps. The sharpe_cadence sizer's
+pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|) formulation is the
+single source of deployment policy.
 
 Session-aware order shape:
   - RTH (09:30–16:00 ET): bracket day market orders (unchanged).
@@ -53,15 +53,9 @@ from execution.alpaca_trader import _alpaca_session, _fetch_equity, _fetch_accou
 from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
 
 
-# ── Safety knobs ────────────────────────────────────────────────────────────
-# 2026-05-14: All executor-side clamps removed by operator decision —
-# MAX_ORDER_PCT_NAV (5% per-order), MAX_DAILY_NEW_NOTIONAL_PCT (25% daily
-# aggregate), MIN_EFFECTIVE_PCT (0.1% per-order floor), MAX_BP_USAGE_PCT
-# (50% regt_bp backstop). The sharpe_cadence sizer's pure
-# target_usd = ticker_w × (λ × NAV / Σ|ticker_w|) formulation is the
-# single source of deployment policy. High-conviction tickers (multi-strategy
-# agreement) deserve the larger allocation the formula assigns; any cap here
-# would distort relative-conviction expression.
+# No executor-side clamps. The sizer's pure
+# target_usd = ticker_w × (λ × NAV / Σ|ticker_w|) formulation governs
+# deployment in full.
 
 # Per-run in-memory cache of tickers Alpaca paper rejected as
 # untradable/unsupported (delisted, halted, asset-not-found, etc.). Keyed

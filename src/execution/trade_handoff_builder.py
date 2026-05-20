@@ -630,9 +630,8 @@ def build(run_date: str) -> dict:
     portfolio  = load_portfolio_state()
     # Augment portfolio state with live Alpaca account snapshot if available.
     # output/portfolio.json is manually-updated and frequently stale (the
-    # 2026-04-28 silent-failure pattern); deterministic_sizer needs accurate
-    # long_market_value to compute available_nav. Live fetch is best-effort
-    # — on failure we keep whatever portfolio.json had.
+    # 2026-04-28 silent-failure pattern). Live fetch is best-effort — on
+    # failure we keep whatever portfolio.json had.
     try:
         from execution.alpaca_trader import _alpaca_session, _fetch_account_state
         _account = _fetch_account_state(_alpaca_session())

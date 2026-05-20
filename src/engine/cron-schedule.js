@@ -403,30 +403,6 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
-    // Daily 21:00 UTC weekdays — parity diff report (Phase 2).
-    cron.schedule('0 21 * * 1-5', () => {
-        log('parity-diff: spawning parity_diff.py');
-        try {
-            const fs = require('fs');
-            const path = require('path');
-            const today = new Date().toISOString().slice(0, 10);
-            const logDir = path.join(ROOT, 'logs');
-            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
-            const logPath = path.join(logDir, `parity_diff_${today}.log`);
-            const logFd = fs.openSync(logPath, 'a');
-            const child = spawn(PYTHON, ['src/execution/parity_diff.py'], {
-                cwd: ROOT,
-                env: { ...process.env },
-                detached: true,
-                stdio: ['ignore', logFd, logFd],
-            });
-            child.unref();
-            log(`parity-diff: spawned (pid ${child.pid}) → ${logPath}`);
-        } catch (e) {
-            log(`parity-diff spawn error: ${e.message}`);
-        }
-    });
-
     // Sunday 08:00 ET — weekly memory synthesis + universe sync
     // (Reaper removed 2026-04-28 per CLAUDE.md NEVER-DELETE-DATA invariant —
     // orphan-column detection no longer feeds data_deprecation_queue.)

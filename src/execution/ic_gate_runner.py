@@ -57,7 +57,7 @@ WEBHOOK_HELPER           = ROOT / 'src' / 'agent' / 'curators' / '_discord_webho
 MANIFEST_PATH            = ROOT / 'src' / 'strategies' / 'manifest.json'
 
 
-# ── DB helpers (mirror correlation_adjusted_sidecar pattern) ────────────────
+# ── DB helpers ──────────────────────────────────────────────────────────────
 
 def _db_uri() -> str:
     return (os.environ.get('DATABASE_URL')

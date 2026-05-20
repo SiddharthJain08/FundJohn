@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Phase 3 LIVE wrapper — regime_blended_sizer producing real broker submissions.
+"""LIVE sizer — regime_blended_sizer producing real broker submissions.
 
-Pipeline orchestrator's `trade` step calls this when OPENCLAW_REGIME_BLENDED_LIVE=1.
-Reads the same structured handoff trade_agent_llm reads, runs the new sizer (with real
-TradeJohn confirmer + 25% NAV cap), and writes the sized handoff via
-_finalize_sized_payload — same path the existing alpaca_executor reads from.
+Pipeline orchestrator's `trade` step calls this. Reads the structured
+handoff, runs the sizer with the real TradeJohn confirmer, and persists
+the sized handoff via finalize_sized_payload — the path alpaca_executor
+reads from.
 
-Output format: the sized handoff uses the same payload['orders'] shape as
-deterministic_sizer/trade_agent_llm:
+Output format: payload['orders'] shape:
   {ticker, strategy_id, direction, entry, stop, t1, t2, pct_nav, shares,
    notional_usd, kelly_final, ev, p_t1, source_mode, contributing_strategies}
 
-alpaca_executor reads payload['orders'] and uses pct_nav for daily-cap math
-and strategy_id for the already_executed() idempotency check.
-
-Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §"Phase 3"
+alpaca_executor reads payload['orders']; strategy_id drives the
+already_executed() idempotency check.
 """
 import argparse, json, math, os, sys
 from datetime import date
@@ -36,13 +33,13 @@ import psycopg2, psycopg2.extras
 from execution.regime_blended_sizer import size_positions
 from execution.handoff import read_handoff
 from execution.tradejohn_confirmer import confirm as real_confirmer
-from execution.trade_agent_llm import _finalize_sized_payload
+from execution.sized_handoff import finalize_sized_payload
 
 
 def _build_sized_payload(orders: list[dict], handoff: dict,
                          equity: float = 100_000.0) -> dict:
     """Convert size_positions() output into the sized-handoff format
-    that _finalize_sized_payload + alpaca_executor expect.
+    that finalize_sized_payload + alpaca_executor expect.
 
     Key mapping from regime_blended_sizer output → alpaca_executor input:
       ticker                             → ticker
@@ -51,7 +48,7 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
       bracket.stop_loss                  → stop
       bracket.take_profit_1              → t1
       qty (signed float)                 → shares (int, absolute value)
-      abs(notional_usd) / equity         → pct_nav  (REQUIRED by alpaca_executor daily-cap math)
+      abs(notional_usd) / equity         → pct_nav
       notional_usd                       → notional_usd
       pct_nav                            → kelly_final (best proxy; carry through)
       contributions[0].strategy_id      → strategy_id (REQUIRED by already_executed())
@@ -261,8 +258,8 @@ def main():
         return 0
 
     payload = _build_sized_payload(orders, handoff, equity=equity)
-    ok = _finalize_sized_payload(run_date_str, payload, source='regime_blended_sizer_live')
-    print(f'[regime_blended_sizer_live] _finalize_sized_payload returned {ok}')
+    ok = finalize_sized_payload(run_date_str, payload, source='regime_blended_sizer_live')
+    print(f'[regime_blended_sizer_live] finalize_sized_payload returned {ok}')
     return 0 if ok else 3
 
 

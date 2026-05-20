@@ -49,7 +49,7 @@ def main() -> int:
     # CRITICAL: this wrapper must never abort the cycle. The shadow sizer is
     # a non-production sidecar; any crash (psycopg2 failure, malformed handoff,
     # ValueError, etc.) must not kill the next orchestrator step or skip
-    # mark_completed(). Mirrors correlation_adjusted_sidecar.py.
+    # mark_completed().
     try:
         runpy.run_path(str(SHADOW_SCRIPT), run_name="__main__")
     except SystemExit as e:

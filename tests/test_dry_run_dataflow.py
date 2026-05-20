@@ -129,7 +129,7 @@ class TestOrchestratorPassthrough(unittest.TestCase):
         every step's argv, not just alpaca_executor."""
         from execution.pipeline_orchestrator import _resolve_script
         with patch.dict('os.environ', {'PIPELINE_DRY_RUN': '1'}, clear=False):
-            for step in ('engine', 'trade_handoff_builder', 'trade_agent_llm',
+            for step in ('engine', 'trade_handoff_builder', 'regime_blended_sizer_live',
                          'alpaca_executor', 'alpaca_reconcile', 'send_report'):
                 argv, _ = _resolve_script(step, '2026-04-28')
                 self.assertIn('--dry-run', argv,
