@@ -101,3 +101,26 @@ test('OPENCLAW_MODEL_TIERING constant is exported from models.js', () => {
   const { TIERING_ENV } = require(path.join(ROOT, 'src/agent/config/models.js'));
   assert.equal(TIERING_ENV, 'OPENCLAW_MODEL_TIERING');
 });
+
+test('flag-off resolves through real SUBAGENT_MODELS — mastermind gets 1M Opus', () => {
+  delete process.env.OPENCLAW_MODEL_TIERING;
+  // Use real config (not fixtures)
+  _setConfigForTests({ subagentTypes: null, subagentModels: null });
+  assert.equal(
+    resolveModel('mastermind', 'comprehensive-review', 'memo_writer'),
+    'claude-opus-4-7[1m]'
+  );
+});
+
+test('unknown subagentType falls back to MODELS.primary.model with a warn', () => {
+  // Gate state irrelevant — _defaultModel runs in both branches
+  delete process.env.OPENCLAW_MODEL_TIERING;
+  _setConfigForTests({ subagentTypes: null, subagentModels: null });
+  const result = resolveModel('mastermimd-typo', 'any-mode', 'any-node');
+  assert.ok(
+    typeof result === 'string' && result.length > 0,
+    `should return a non-null model string; got ${JSON.stringify(result)}`
+  );
+  // Real MODELS.primary.model is currently 'claude-sonnet-4-6' (verify it's a claude model)
+  assert.match(result, /^claude-/, `expected a claude-* model; got ${result}`);
+});

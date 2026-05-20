@@ -493,7 +493,7 @@ Expected:
 
 ```
 aggressive: claude-sonnet-4-6
-synthesizer: claude-opus-4-7
+synthesizer: claude-opus-4-7[1m]
 ```
 
 - [ ] **Step 5: Commit**

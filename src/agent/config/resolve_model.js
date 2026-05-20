@@ -39,10 +39,19 @@ function _setConfigForTests({ subagentTypes, subagentModels }) {
 function _defaultModel(subagentType) {
   _loadDefaults();
   const entry = _subagentModels?.[subagentType];
-  // Pull from either {model: '...'} or a literal string
   if (entry && typeof entry === 'object' && entry.model) return entry.model;
   if (typeof entry === 'string') return entry;
-  return null;
+  // Unknown subagent — last-resort fallback to primary model with a warning
+  console.warn(
+    `[resolve_model] unknown subagentType=${JSON.stringify(subagentType)}; ` +
+    `falling back to MODELS.primary.model. Check for a typo.`
+  );
+  try {
+    const { MODELS } = require('./models.js');
+    return MODELS?.primary?.model || null;
+  } catch (e) {
+    return null;
+  }
 }
 
 function resolveModel(subagentType, mode, nodeName) {

@@ -18,7 +18,7 @@ const MODELS = {
   },
   opus1m: {
     provider: 'anthropic',
-    model: 'claude-opus-4-7',
+    model: 'claude-opus-4-7[1m]',
     description: 'Opus 4.7 (1M context) — corpus curation at scale.',
   },
   failover: {
