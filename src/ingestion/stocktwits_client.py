@@ -3,6 +3,9 @@ sentiment-tag aggregator.
 
 Endpoint: api.stocktwits.com/api/2/streams/symbol/<TICKER>.json
 Returns up to 30 most-recent messages with optional Bullish/Bearish tags.
+
+Note: the endpoint's WAF rejects Python's default `Python-urllib/3.x`
+User-Agent with HTTP 403. We send the same polite UA as reddit_client.
 """
 from __future__ import annotations
 import json
@@ -15,6 +18,7 @@ from typing import Dict, List
 logger = logging.getLogger(__name__)
 
 BASE_URL        = 'https://api.stocktwits.com/api/2/streams/symbol'
+USER_AGENT      = 'FundJohn-Sentiment/1.0 (+https://github.com/)'
 REQUEST_TIMEOUT = 10.0
 THROTTLE_SEC    = 0.4
 
@@ -34,8 +38,9 @@ def fetch_ticker_stream(ticker: str) -> Dict:
         'authors': [],
     }
     url = f'{BASE_URL}/{ticker.upper()}.json'
+    req = urllib.request.Request(url, headers={'User-Agent': USER_AGENT})
     try:
-        with urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT) as r:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as r:
             if r.status != 200:
                 logger.warning('stocktwits %s: status %s', ticker, r.status)
                 return empty
