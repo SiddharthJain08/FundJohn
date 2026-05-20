@@ -27,6 +27,9 @@
 const fs = require('fs');
 const { spawn } = require('child_process');
 
+const elig        = require('./_critique_eligibility.js');
+const synthesizer = require('./synthesizer.js');
+
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 
 async function _query(sql, params = []) {
@@ -88,6 +91,60 @@ function _deriveDeltas(recommendations, currentSize) {
                           recommendations?.action ||
                           'no reasoning provided by review',
   };
+}
+
+function _sourceRecommendedSize(synthesisRow, memoRecommendation) {
+  if (synthesisRow && synthesisRow.adjusted_recommended_size_pct != null) {
+    return Number(synthesisRow.adjusted_recommended_size_pct);
+  }
+  if (memoRecommendation && memoRecommendation.recommended_size_pct != null) {
+    return Number(memoRecommendation.recommended_size_pct);
+  }
+  return null;
+}
+
+async function _loadSynthesisRow(strategyId, weekOf) {
+  const { rows } = await _query(
+    `SELECT adjusted_recommended_size_pct, adjustment_reason, critics_accepted
+       FROM strategy_synthesis
+      WHERE strategy_id = $1 AND week_of = $2 LIMIT 1`,
+    [strategyId, weekOf]);
+  return rows[0] || null;
+}
+
+async function _runSynthesisIfEligible(memo, weekOf) {
+  if (process.env.OPENCLAW_MEMO_CRITIQUE !== '1') return null;
+  const eligible = await elig.filter();
+  if (!eligible.includes(memo.strategy_id)) return null;
+
+  // Load critiques from strategy_memo_critiques (written by --mode critique earlier)
+  const { rows: critiques } = await _query(
+    `SELECT critic_role, critique_text, cited_metrics
+       FROM strategy_memo_critiques
+      WHERE strategy_id = $1 AND week_of = $2`,
+    [memo.strategy_id, weekOf]);
+
+  // Load 30d P&L + open positions (JOIN execution_signals to recover ticker / entry / exit)
+  const { rows: trades } = await _query(
+    `SELECT es.ticker,
+            es.signal_date     AS entry_date,
+            sp.closed_at       AS exit_date,
+            sp.realized_pnl_pct,
+            sp.days_held       AS hold_days
+       FROM signal_pnl sp
+       JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.strategy_id = $1
+        AND sp.closed_at IS NOT NULL
+        AND sp.closed_at >= CURRENT_DATE - INTERVAL '30 days'
+      ORDER BY sp.closed_at DESC LIMIT 100`, [memo.strategy_id]);
+  const { rows: open } = await _query(
+    `SELECT ticker, signal_date, direction, entry_price
+       FROM execution_signals
+      WHERE strategy_id = $1 AND status = 'open'`, [memo.strategy_id]);
+
+  const originalSize = Number(memo.recommendations?.recommended_size_pct ?? 0);
+  return await synthesizer.synthesize(memo, critiques, trades, open, originalSize,
+                                       { weekOf });
 }
 
 function _formatDigest(rows) {
@@ -165,6 +222,29 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
   for (const memo of memos) {
     const currentSize = await _currentSize(memo.strategy_id);
     const deltas = _deriveDeltas(memo.recommendations || {}, currentSize);
+
+    // F3 synthesis pass: if OPENCLAW_MEMO_CRITIQUE=1 and the strategy is
+    // eligible, invoke the Mastermind synthesizer over critiques +
+    // last-30d P&L. Otherwise try to read a synthesis row that may have
+    // been written earlier by `run_mastermind --mode critique`. The
+    // resulting `effectiveSize` is the final recommended_size_pct; falls
+    // through to the memo's computed value when no synthesis exists.
+    const weekOf = new Date().toISOString().slice(0, 10);
+    const memoRec = { recommended_size_pct: deltas.recommended_size_pct };
+    let synthRow = null;
+    try {
+      synthRow = await _runSynthesisIfEligible(memo, weekOf)
+              || await _loadSynthesisRow(memo.strategy_id, weekOf);
+    } catch (e) {
+      notify(`  synthesis lookup failed for ${memo.strategy_id}: ${e.message}`);
+    }
+    const effectiveSize = _sourceRecommendedSize(synthRow, memoRec);
+    if (effectiveSize != null) {
+      deltas.recommended_size_pct = effectiveSize;
+      if (synthRow && synthRow.adjustment_reason) {
+        deltas.reasoning = `[synth] ${synthRow.adjustment_reason}`;
+      }
+    }
 
     if (dryRun) {
       persisted.push({ strategy_id: memo.strategy_id, dry_run: true, ...deltas });
@@ -321,4 +401,4 @@ async function _applyStopReplacements(persisted, notify, { reportOnly = false } 
   return all;
 }
 
-module.exports = { run, _applyStopReplacements };
+module.exports = { run, _applyStopReplacements, _sourceRecommendedSize };
