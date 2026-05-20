@@ -172,6 +172,7 @@ async function notifyPositionRecommendation(rec) {
 module.exports = {
     init,
     notify,
+    post,
     postStartup,
     notifyStrategyReport,
     notifyEmergencyAlert,

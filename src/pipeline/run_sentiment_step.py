@@ -155,6 +155,8 @@ def _merge_social_and_news(social_rows: List[Dict],
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=date.today().isoformat())
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Skip Postgres upsert + parquet append; run scrapers + FinBERT for plumbing validation only.')
     args = ap.parse_args(argv)
     run_date = args.date
     pg_uri = os.environ['POSTGRES_URI']
@@ -210,7 +212,11 @@ def main(argv: list[str] | None = None) -> int:
         'sentiment: %d total ticker rows ready for persist', len(merged)
     )
 
-    # Stage 8: persist (parquet append_parquet handles data/master/ mkdir)
+    # Stage 8: persist (parquet append_parquet handles data/master/ mkdir).
+    # --dry-run skips writes — scrapers + FinBERT still ran, so plumbing is validated.
+    if args.dry_run:
+        logger.info('sentiment: dry-run, skipping persist (would write %d rows)', len(merged))
+        return 0
     upsert_postgres(merged, run_date, pg_uri)
     append_parquet(merged, run_date)
     return 0

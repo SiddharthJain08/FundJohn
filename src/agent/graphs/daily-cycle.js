@@ -25,6 +25,25 @@ const STEPS_IN_ORDER = [
   'pyportfolioopt_shadow', 'health',
 ];
 
+// Step name → script base name (matches pipeline_orchestrator.py:51-79 STEPS list).
+// Step is the logical name used in logs, Discord, traceBus, and the requestedSteps
+// subset filter. Script is the file resolveScript looks for in src/pipeline/ or
+// src/execution/. Identity-mapped steps (signals → engine? no — signals → engine,
+// see below) are listed explicitly for clarity.
+const STEP_SCRIPTS = {
+  'collect':                'run_collector_once',
+  'sentiment':              'run_sentiment_step',
+  'signals':                'engine',
+  'ic_gate':                'ic_gate_runner',
+  'handoff':                'trade_handoff_builder',
+  'trade':                  'regime_blended_sizer_live',
+  'alpaca':                 'alpaca_executor',
+  'reconcile':              'alpaca_reconcile',
+  'report':                 'send_report',
+  'pyportfolioopt_shadow':  'pyportfolioopt_shadow',
+  'health':                 'daily_health_digest',
+};
+
 const DailyCycleState = Annotation.Root({
   runDate:        Annotation(),
   runId:          Annotation(),
@@ -69,7 +88,7 @@ function getCompiled() {
   if (_compiled) return _compiled;
   const { checkpointer } = getCheckpointer();
   const g = new StateGraph(DailyCycleState);
-  for (const step of STEPS_IN_ORDER) g.addNode(step, makeStepNode(step));
+  for (const step of STEPS_IN_ORDER) g.addNode(step, makeStepNode(step, STEP_SCRIPTS[step]));
   g.addEdge(START, STEPS_IN_ORDER[0]);
   for (let i = 0; i < STEPS_IN_ORDER.length - 1; i++) {
     g.addEdge(STEPS_IN_ORDER[i], STEPS_IN_ORDER[i + 1]);
@@ -210,6 +229,7 @@ module.exports = {
   resumeDailyCycle,
   listThreadState,
   STEPS_IN_ORDER,
+  STEP_SCRIPTS,
   DailyCycleState,
   getCompiled,
   _acquireRunLock,

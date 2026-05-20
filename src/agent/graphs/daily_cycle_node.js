@@ -14,12 +14,30 @@
  */
 'use strict';
 
+const path = require('node:path');
+
 const { skipForSubset, strictMode, runSubprocess } = require('./daily_cycle_helpers');
 const { resolveScript }                            = require('../../execution/resolve_script');
 const pipelineLog                                  = require('../../execution/pipeline_logging');
 const traceBus                                     = require('../traceBus');
 
-function makeStepNode(STEP) {
+// engine.py, alpaca_executor.py etc. import `strategies.xxx` / `database.xxx`
+// as top-level packages — those live under src/, so PYTHONPATH needs both
+// ROOT (for `src.xxx` imports) and ROOT/src (for bare-package imports).
+// Mirrors pipeline_orchestrator.py:710.
+const ROOT = path.resolve(__dirname, '..', '..', '..');
+function _pythonpath(existing) {
+  const parts = [ROOT, path.join(ROOT, 'src')];
+  if (existing) parts.push(existing);
+  return parts.join(path.delimiter);
+}
+
+function makeStepNode(STEP, scriptName) {
+  // scriptName is optional — defaults to STEP for backward compat with simple cases
+  // (signals/handoff/trade/etc. where step name == script base name). For mapped
+  // steps (collect → run_collector_once, sentiment → run_sentiment_step, etc.)
+  // the caller passes the script name explicitly.
+  const SCRIPT = scriptName || STEP;
   return async function stepNode(state, _config) {
     const runId = state.runId;
 
@@ -33,7 +51,9 @@ function makeStepNode(STEP) {
     await pipelineLog.feedStart(STEP, state.runDate, state.reason);
 
     const env = { ...process.env, ...(state.env || {}) };
-    const { argv, timeoutSec } = resolveScript(STEP, state.runDate, env);
+    // Inject PYTHONPATH so Python steps can `from strategies.X import ...` etc.
+    env.PYTHONPATH = _pythonpath(env.PYTHONPATH);
+    const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
     const { rc, stderrTail, durationMs, timedOut } = await runSubprocess(argv, { timeoutSec, env });
 
     const completion = {
