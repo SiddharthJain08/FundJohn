@@ -1,0 +1,88 @@
+"""src/ingestion/news_finbert_scorer.py — scores `market_news` rows via the
+local FinBERT-Tone service and aggregates per (ticker, date).
+
+Output one dict per ticker with counts in each polarity bucket plus a
+signed mean polarity score.
+"""
+from __future__ import annotations
+import logging
+from collections import defaultdict
+from typing import Dict, List, Optional
+
+from src.services.finbert.client import FinbertClient
+
+logger = logging.getLogger(__name__)
+
+_POLARITY_SIGN = {'Positive': +1, 'Negative': -1, 'Neutral': 0}
+
+
+def _signed_score(label: str, score: float) -> float:
+    return _POLARITY_SIGN.get(label, 0) * score
+
+
+def score_news_rows(news_rows: List[Dict]) -> List[Dict]:
+    """For each ticker in news_rows, return one aggregated dict.
+
+    Each input row needs at least: ticker, headline. summary is optional.
+    On any FinBERT error, the affected ticker's news fields are zeros + None.
+    """
+    if not news_rows:
+        return []
+    client = FinbertClient()
+    per_ticker: Dict[str, Dict] = defaultdict(lambda: {
+        'count': 0, 'pos': 0, 'neu': 0, 'neg': 0,
+        'signed_sum': 0.0, 'scored_headlines': [],
+        'error': False,
+    })
+    for r in news_rows:
+        ticker = (r.get('ticker') or '').upper()
+        text   = (r.get('headline') or '').strip()
+        if r.get('summary'):
+            text = (text + '. ' + r['summary'])[:512]
+        if not ticker or not text:
+            continue
+        # Touch the ticker so it appears in output even if all calls fail.
+        bucket = per_ticker[ticker]
+        try:
+            scored = client.score(text)
+        except Exception as e:
+            logger.warning('finbert score failed for %s: %s', ticker, e)
+            bucket['error'] = True
+            continue
+        label = scored.get('label', 'Neutral')
+        score = float(scored.get('score', 0.0))
+        bucket['count'] += 1
+        if label == 'Positive':
+            bucket['pos'] += 1
+        elif label == 'Negative':
+            bucket['neg'] += 1
+        else:
+            bucket['neu'] += 1
+        bucket['signed_sum'] += _signed_score(label, score)
+        bucket['scored_headlines'].append((abs(score), text[:200]))
+
+    out: List[Dict] = []
+    for ticker, b in per_ticker.items():
+        if b['error']:
+            out.append({
+                'ticker':              ticker,
+                'news_count_24h':      0,
+                'news_finbert_pos':    0,
+                'news_finbert_neu':    0,
+                'news_finbert_neg':    0,
+                'news_mean_score':     None,
+                'news_top_headlines':  [],
+            })
+            continue
+        top = sorted(b['scored_headlines'], key=lambda x: x[0], reverse=True)[:3]
+        mean_score: Optional[float] = (b['signed_sum'] / b['count']) if b['count'] > 0 else None
+        out.append({
+            'ticker':              ticker,
+            'news_count_24h':      b['count'],
+            'news_finbert_pos':    b['pos'],
+            'news_finbert_neu':    b['neu'],
+            'news_finbert_neg':    b['neg'],
+            'news_mean_score':     mean_score,
+            'news_top_headlines':  [h for _, h in top],
+        })
+    return out
