@@ -128,8 +128,8 @@
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH", "STRATEGY_STACK"],
       "model_tiers": {
-        "judge":       "claude-opus-4-7",
-        "synthesizer": "claude-opus-4-7",
+        "judge":       "claude-opus-4-7[1m]",
+        "synthesizer": "claude-opus-4-7[1m]",
         "debator":     "claude-sonnet-4-6",
         "extractor":   "claude-sonnet-4-6"
       },
