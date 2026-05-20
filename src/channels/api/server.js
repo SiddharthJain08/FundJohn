@@ -4536,7 +4536,20 @@ function _renderIntradayRegime(d) {
   // 5-min cron + 1 tolerance tick = 10 min. We use 15 to absorb cron slip.
   const ageMin = L.ts_utc ? (Date.now() - new Date(L.ts_utc).getTime())/60000 : Infinity;
   const stale = ageMin > 15;
-  const staleBadge = stale ? \`<span class="regime-alert-badge" title="last tick &gt;15 min ago — cron may be paused (market closed or service down)">STALE · \${age}</span>\` : '';
+  const staleBadge = stale ? \`<span class="regime-alert-badge" title="last tick &gt;15 min ago — cron may be paused (out of schedule window or service down)">STALE · \${age}</span>\` : '';
+  // Option market is closed outside 9:30-16:15 ET — Alpaca chain returns
+  // last quotes from prior close. Synthetic VIX features carry forward
+  // rather than reflecting new info. Tag the card so the operator knows
+  // a "fresh tick" pre-9:30 or post-16:15 ≠ "fresh signal".
+  const tickEt = L.ts_utc ? new Date(new Date(L.ts_utc).toLocaleString('en-US', { timeZone: 'America/New_York' })) : null;
+  const optionMktOpen = tickEt && (() => {
+    const m = tickEt.getHours() * 60 + tickEt.getMinutes();
+    const dow = tickEt.getDay();   // 0=Sun, 6=Sat
+    return dow >= 1 && dow <= 5 && m >= 570 && m <= 975;  // 9:30 → 16:15
+  })();
+  const carryFwdBadge = (!stale && tickEt && !optionMktOpen)
+    ? \`<span class="regime-alert-badge" style="background:var(--border2);color:var(--muted);border-color:var(--border)" title="Option market closed (9:30-16:15 ET). Synthetic VIX/RR features reflect prior-close quotes, not fresh signal.">CARRY-FWD QUOTES</span>\`
+    : '';
   const priorBadge = (L.prior_state && L.prior_state !== L.state)
     ? \`<span class="regime-alert-badge">⚠ \${L.prior_state} → \${L.state}</span>\` : '';
 
@@ -4579,6 +4592,7 @@ function _renderIntradayRegime(d) {
       <div class="regime-meta-item"><div class="regime-meta-label">Streak</div><div class="regime-meta-val">\${streak}</div></div>
       <div class="regime-meta-item"><div class="regime-meta-label">Last Tick</div><div class="regime-meta-val">\${age}</div></div>
       \${priorBadge}
+      \${carryFwdBadge}
       \${staleBadge}
     </div>
     <div class="regime-bottom-row" style="margin-top:8px">
