@@ -127,6 +127,17 @@
       "effortLevel": "low",
       "maxBudgetUsd": 8.0,
       "modes": ["RESEARCH", "STRATEGY_STACK"],
+      "model_tiers": {
+        "judge":       "claude-opus-4-7",
+        "synthesizer": "claude-opus-4-7",
+        "debator":     "claude-sonnet-4-6",
+        "extractor":   "claude-sonnet-4-6"
+      },
+      "model_modes": {
+        "comprehensive-review": {
+          "node_models": { "memo_writer": "judge" }
+        }
+      },
       "skills": ["fundjohn:obsidian-link"],
       "description": "MastermindJohn — Opus 4.7 (1M ctx). Two modes: (1) corpus — judges research_corpus papers in batches of ~100 against pipeline gate criteria; (2) strategy-stack — weekly review of live+monitoring strategies, produces sizing memo + position recommendations."
     },
