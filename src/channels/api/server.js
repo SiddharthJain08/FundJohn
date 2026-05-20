@@ -4574,6 +4574,19 @@ function _durationStr(min) {
   return hr ? \`\${d}d \${hr}h\` : \`\${d}d\`;
 }
 
+// Single source of truth for the 6 intraday-HMM feature labels — used by
+// both the subtitle line and the feature-tile grid. Order matches
+// HMM_INPUT_COLS in scripts/run_intraday_market_state.py + train_intraday_hmm.py:
+// [vix_synth_30d, vix_synth_90d, vix_term_slope, rr_25d, spy_gk_vol_daily, vvix_level].
+const _INTRADAY_FEATURE_TILES = [
+  ['VIX',        'vix_synth_30d',    2],
+  ['VIX3M',      'vix_synth_90d',    2],
+  ['Term Slope', 'vix_term_slope',   3],
+  ['SPY GK Vol', 'spy_gk_vol_daily', 3],
+  ['VVIX',       'vvix_level',       2],
+  ['25Δ RR',     'rr_25d',           3],
+];
+
 function _renderRegimeStructure(intraday, daily) {
   if (!intraday || !intraday.available) {
     return \`<div class="regime-panel-header" style="margin-bottom:8px">
@@ -4611,14 +4624,9 @@ function _renderRegimeStructure(intraday, daily) {
   // Intraday-derived features (6-feature HMM input).
   const f = L.features_json || {};
   const fmt = (v, dp) => v == null || (typeof v === 'number' && isNaN(v)) ? '—' : (typeof v === 'number' ? v.toFixed(dp) : String(v));
-  const featHtml = [
-    ['VIX',         fmt(f.vix_synth_30d, 2)],
-    ['VIX3M',       fmt(f.vix_synth_90d, 2)],
-    ['Term Slope',  fmt(f.vix_term_slope, 3)],
-    ['SPY GK Vol',  fmt(f.spy_gk_vol_daily, 3)],
-    ['VVIX',        fmt(f.vvix_level, 2)],
-    ['25Δ RR',      fmt(f.rr_25d, 3)],
-  ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
+  const featHtml = _INTRADAY_FEATURE_TILES
+    .map(([lbl, key, dp]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${fmt(f[key], dp)}</div></div>\`)
+    .join('');
 
   // 24h sparkline.
   const hist = Array.isArray(intraday.history) ? intraday.history.slice(-72) : [];
@@ -4664,7 +4672,7 @@ function _renderRegimeStructure(intraday, daily) {
     <div class="regime-panel-header" style="margin-bottom:10px">
       Volatility Regime Structure
       <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">
-        intraday HMM · 6-feature · last tick \${age}\${modelTag ? ' · ' + modelTag : ''}
+        intraday HMM · 6 features (\${_INTRADAY_FEATURE_TILES.map(t => t[0]).join(', ')}) · last tick \${age}\${modelTag ? ' · ' + modelTag : ''}
       </span>
     </div>
     <div class="regime-top-row">
