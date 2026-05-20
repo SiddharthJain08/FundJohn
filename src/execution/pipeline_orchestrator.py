@@ -48,18 +48,36 @@ COMPLETED_TTL   = 86400  # 24h — covers full-day re-trigger window
 # DRY-RUN / parity-comparison branch (trade_agent_llm + deterministic_sizer
 # + regime_blended_sizer_parity + trade_parity_capture + correlation_sidecar)
 # was removed 2026-05-20.
-STEPS = [
-    ('collect',              'run_collector_once'),        # one cycle of collector.js
-    ('signals',              'engine'),                    # zero-LLM strategy executor
-    ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
-    ('handoff',              'trade_handoff_builder'),     # structured handoff
-    ('trade',                'regime_blended_sizer_live'), # sizer + TradeJohn confirmer
-    ('alpaca',               'alpaca_executor'),           # submit to Alpaca
-    ('reconcile',            'alpaca_reconcile'),          # reconcile fills
-    ('report',               'send_report'),               # post to Discord
-    ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
-    ('health',               'daily_health_digest'),       # daily health digest
-]
+def _build_steps() -> list[tuple[str, str]]:
+    """Construct the canonical pipeline step list.
+
+    The sentiment-ingestion step (D1 plan Task 9) is inserted between
+    `collect` and `signals` when OPENCLAW_SENTIMENT_INGEST=1 so news +
+    social-media scores land in the master store before strategies read
+    them in `signals`. The gate is default-OFF; absent or any non-'1'
+    value preserves the legacy 10-step pipeline byte-for-byte.
+    """
+    base: list[tuple[str, str]] = [
+        ('collect',              'run_collector_once'),        # one cycle of collector.js
+        ('signals',              'engine'),                    # zero-LLM strategy executor
+        ('ic_gate',              'ic_gate_runner'),            # IC approval gate (DEFAULT-OFF; gated on OPENCLAW_IC_GATE=1; fail-open)
+        ('handoff',              'trade_handoff_builder'),     # structured handoff
+        ('trade',                'regime_blended_sizer_live'), # sizer + TradeJohn confirmer
+        ('alpaca',               'alpaca_executor'),           # submit to Alpaca
+        ('reconcile',            'alpaca_reconcile'),          # reconcile fills
+        ('report',               'send_report'),               # post to Discord
+        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
+        ('health',               'daily_health_digest'),       # daily health digest
+    ]
+    if os.environ.get('OPENCLAW_SENTIMENT_INGEST') == '1':
+        insert_at = next(i for i, (k, _) in enumerate(base) if k == 'collect') + 1
+        # Sentiment lands between `collect` and `signals` so strategies
+        # see fresh per-ticker scores. Script lives in src/pipeline/.
+        base.insert(insert_at, ('sentiment', 'run_sentiment_step'))
+    return base
+
+
+STEPS = _build_steps()
 
 # Budget check required before LLM-adjacent steps. `trade` is the only Claude
 # call in the 10am cycle now — all other steps are deterministic / zero-token.
@@ -77,6 +95,7 @@ NOTIFY_WEBHOOK = os.environ.get('ORCHESTRATOR_NOTIFY_WEBHOOK', '')
 # Phase boundaries (▶️/✅/❌) continue to go to #pipeline-feed for every step.
 STEP_FAILURE_CHANNEL = {
     'collect':     'data-alerts',
+    'sentiment':   'data-alerts',
     'signals':     'data-alerts',
     'ic_gate':     'trade-reports',
     'handoff':     'trade-reports',
@@ -742,6 +761,7 @@ def main(argv=None):
     # Covers the 10am cycle step list.
     STEP_AGENTS = {
         'collect':     ('databot',      f'Collecting data: {run_date}',             None),
+        'sentiment':   ('databot',      f'Scraping social + scoring news: {run_date}', None),
         'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
         'ic_gate':     ('tradedesk',    f'IC approval gate: {run_date}',            None),
         'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
