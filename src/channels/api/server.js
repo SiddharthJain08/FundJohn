@@ -4664,7 +4664,10 @@ function _renderRegimeStructure(intraday, daily) {
     const useful = b.rows.filter(r => r.state && r.state !== 'UNKNOWN');
     const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC\`;
     if (useful.length === 0) {
-      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.25" title="\${winLbl} · no data"></span>\`;
+      // Matches the exact look UNKNOWN ticks had in the pre-bucketing
+      // sparkline: var(--dim) at opacity 0.5 (the floor that fell out of
+      // Math.max(0.25, Number(r.confidence) || 0.5) when confidence=0).
+      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.5" title="\${winLbl} · no data"></span>\`;
     }
     const states = useful.map(r => r.state);
     const allSame = states.every(s => s === states[0]);
