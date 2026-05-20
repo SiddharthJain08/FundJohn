@@ -112,7 +112,7 @@ async function _loadSynthesisRow(strategyId, weekOf) {
   return rows[0] || null;
 }
 
-async function _runSynthesisIfEligible(memo, weekOf) {
+async function _runSynthesisIfEligible(memo, deltasRecSize, weekOf) {
   if (process.env.OPENCLAW_MEMO_CRITIQUE !== '1') return null;
   const eligible = await elig.filter();
   if (!eligible.includes(memo.strategy_id)) return null;
@@ -142,7 +142,7 @@ async function _runSynthesisIfEligible(memo, weekOf) {
        FROM execution_signals
       WHERE strategy_id = $1 AND status = 'open'`, [memo.strategy_id]);
 
-  const originalSize = Number(memo.recommendations?.recommended_size_pct ?? 0);
+  const originalSize = Number(deltasRecSize ?? 0);
   return await synthesizer.synthesize(memo, critiques, trades, open, originalSize,
                                        { weekOf });
 }
@@ -233,7 +233,7 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
     const memoRec = { recommended_size_pct: deltas.recommended_size_pct };
     let synthRow = null;
     try {
-      synthRow = await _runSynthesisIfEligible(memo, weekOf)
+      synthRow = await _runSynthesisIfEligible(memo, deltas.recommended_size_pct, weekOf)
               || await _loadSynthesisRow(memo.strategy_id, weekOf);
     } catch (e) {
       notify(`  synthesis lookup failed for ${memo.strategy_id}: ${e.message}`);
