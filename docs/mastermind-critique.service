@@ -1,0 +1,20 @@
+[Unit]
+Description=MastermindJohn — critique fan-out (Saturday 18:30 ET)
+After=network.target postgresql.service openclaw-strategy-review.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode critique
+StandardOutput=journal
+StandardError=journal
+# Parallel critic fan-out (Opus). Cap at 1 hour for safety, mirroring
+# strategy-review.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target
