@@ -4659,7 +4659,9 @@ function _renderRegimeStructure(intraday, daily) {
   const sparkHtml = _buckets.map(b => {
     if (b.rows.length === 0) {
       const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC · no data\`;
-      return \`<span class="regime-spark-tick" style="background:var(--border2);opacity:0.4" title="\${winLbl}"></span>\`;
+      // Match the prior look: dim gray at 0.25 opacity (same as how
+      // UNKNOWN-state ticks rendered in the pre-bucketing sparkline).
+      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.25" title="\${winLbl}"></span>\`;
     }
     const states = b.rows.map(r => r.state);
     const allSame = states.every(s => s === states[0]);
