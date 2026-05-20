@@ -161,6 +161,74 @@ async function runPaperExpansion() {
   console.log(JSON.stringify({ mode: 'paper-expansion', dry_run: dryRun, ...result }, null, 2));
 }
 
+async function runCritique() {
+  if (process.env.OPENCLAW_MEMO_CRITIQUE !== '1') {
+    console.log(JSON.stringify({ mode: 'critique', skipped: true,
+                                  reason: 'OPENCLAW_MEMO_CRITIQUE not set' }));
+    return;
+  }
+  const elig          = require('./_critique_eligibility.js');
+  const fanout        = require('./critique_fanout.js');
+  const dryRun        = process.argv.includes('--dry-run');
+  const weekOf        = new Date().toISOString().slice(0, 10);  // YYYY-MM-DD
+
+  const strategies = await elig.filter();
+  if (strategies.length === 0) {
+    console.log(JSON.stringify({ mode: 'critique', strategies: 0,
+                                  reason: 'no eligible strategies' }));
+    return;
+  }
+
+  // Load memo + trades + open positions per strategy. Keep this sequential
+  // so we don't hammer the DB; per-strategy critic fan-out is the parallel layer.
+  const { Pool } = require('pg');
+  const pool = new Pool({ connectionString: process.env.POSTGRES_URI, max: 4 });
+  let success = 0, failure = 0;
+
+  for (const sid of strategies) {
+    const memoRes = await pool.query(
+      `SELECT id, strategy_id, memo_date, markdown_body, recommendations
+         FROM strategy_memos
+        WHERE strategy_id = $1 AND memo_date >= CURRENT_DATE - 7
+        ORDER BY memo_date DESC, created_at DESC LIMIT 1`,
+      [sid]);
+    if (memoRes.rows.length === 0) {
+      console.warn(`[critique] ${sid}: no recent memo, skipping`);
+      continue;
+    }
+    const memo   = memoRes.rows[0];
+    const trades = (await pool.query(
+      `SELECT es.ticker,
+              es.signal_date     AS entry_date,
+              sp.closed_at       AS exit_date,
+              sp.realized_pnl_pct,
+              sp.days_held       AS hold_days
+         FROM signal_pnl sp
+         JOIN execution_signals es ON es.id = sp.signal_id
+        WHERE sp.strategy_id = $1
+          AND sp.closed_at IS NOT NULL
+          AND sp.closed_at >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY sp.closed_at DESC LIMIT 100`, [sid])).rows;
+    const open  = (await pool.query(
+      `SELECT ticker, signal_date, direction, entry_price, stop_loss
+         FROM execution_signals
+        WHERE strategy_id = $1 AND status = 'open'`, [sid])).rows;
+
+    if (dryRun) {
+      console.log(JSON.stringify({ strategy_id: sid, would_run: true,
+                                    trades: trades.length, open: open.length }));
+      continue;
+    }
+    const result = await fanout.runOne(memo, trades, open, { weekOf });
+    success += result.success_count;
+    failure += result.failure_count;
+  }
+  await pool.end();
+  console.log(JSON.stringify({ mode: 'critique', strategies: strategies.length,
+                                success_count: success, failure_count: failure,
+                                week_of: weekOf }));
+}
+
 async function runSaturdayBrain() {
   // Saturday brain is the consolidated weekly research run (Sat 10am ET).
   // It folds the legacy corpus + paper-expansion timers into one orchestrator
@@ -195,7 +263,8 @@ async function runSaturdayBrain() {
   if (mode === 'comprehensive-review')  return runComprehensiveReview();
   if (mode === 'position-recs')         return runPositionRecs();
   if (mode === 'paper-expansion')       return runPaperExpansion();
-  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion`);
+  if (mode === 'critique')              return runCritique();
+  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion | critique`);
   process.exit(2);
 })()
   // Force-exit after the mode finishes. Multiple sub-curators open pg
