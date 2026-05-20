@@ -251,6 +251,23 @@ function start(swarm, generateId, notifyDiscord) {
     // collect → signals → handoff → trade → alpaca → report.
     // Orchestrator is idempotent; duplicate triggers return immediately.
     cron.schedule('0 10 * * 1-5', () => {
+        const useLangGraph = process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1';
+        const today = new Date().toISOString().slice(0, 10);
+
+        if (useLangGraph) {
+            log('10am cycle: dispatching to LangGraph daily-cycle');
+            try {
+                const { runDailyCycleGraph } = require('../agent/graphs/daily-cycle');
+                runDailyCycleGraph({ runDate: today, reason: 'scheduled' })
+                    .then((out) => log(`daily-cycle finished: status=${out.status} aborted=${out.abortedAt || 'none'}`))
+                    .catch((err) => log(`daily-cycle FAILED: ${err.message}`));
+            } catch (e) {
+                log(`daily-cycle dispatch error: ${e.message}`);
+            }
+            return;
+        }
+
+        // Legacy path — Python orchestrator (unchanged from before E1)
         log('10am cycle: spawning pipeline_orchestrator.py');
         try {
             const { spawn } = require('child_process');
