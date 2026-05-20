@@ -90,11 +90,10 @@ def append_parquet(rows: List[Dict], run_date: str,
     if not rows:
         return 0
     df_new = pd.DataFrame([_to_row(r, run_date) for r in rows])
-    # Decode top_themes / top_headlines back from JSON to native python objs
-    # (parquet preserves both JSON-strings and lists/dicts; for consistency
-    # we store them as Python objects in the parquet column).
-    df_new['social_top_themes']    = df_new['social_top_themes'].apply(json.loads)
-    df_new['news_top_headlines']   = df_new['news_top_headlines'].apply(json.loads)
+    # social_top_themes + news_top_headlines stay as JSON strings in parquet.
+    # Decoding to Python dicts/lists triggers pyarrow's struct-type inference,
+    # which fails on empty dicts ("Cannot write struct type ... with no child
+    # field"). Strings round-trip cleanly; readers can json.loads on demand.
     df_new['date']                 = pd.to_datetime(df_new['date']).dt.date
 
     if parquet_path.exists():
