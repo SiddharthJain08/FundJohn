@@ -7,6 +7,7 @@
 
 const cycleGraph = require('../graph');
 const paperhunter = require('./paperhunter');
+const dailyCycle = require('./daily-cycle');
 
 const graphs = {
   cycle: {
@@ -24,6 +25,15 @@ const graphs = {
     run: async (input) => paperhunter.runPaperHunt(input),
     nodes: ['dispatch', 'extract_one', 'reduce'],
     features: ['parallel-fanout'],
+  },
+  'daily-cycle': {
+    name: 'daily-cycle',
+    description: 'Unified 11-step data pipeline (replaces pipeline_orchestrator.py)',
+    run: async (input) => dailyCycle.runDailyCycleGraph(input),
+    resume: async (input) => dailyCycle.resumeDailyCycle(input.runDate || input),
+    state: async (runDate) => dailyCycle.listThreadState(runDate),
+    nodes: dailyCycle.STEPS_IN_ORDER,
+    features: ['postgres-checkpoint', 'subset-filter', 'subprocess-wraps'],
   },
 };
 
