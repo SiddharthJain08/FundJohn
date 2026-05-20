@@ -210,6 +210,60 @@ def load_veto_history(uri: str, days: int = 30) -> dict:
         return {}
 
 
+def _load_sentiment_for_tickers(tickers: list[str], run_date: str,
+                                 postgres_uri: str) -> dict[str, dict]:
+    """Load ticker_sentiment_daily rows for the given tickers + date.
+
+    Returns map: ticker -> {social_posts_24h, social_bull_ratio, social_bear_ratio,
+                            social_unique_authors, social_top_themes,
+                            news_count_24h, news_finbert_pos, news_finbert_neu,
+                            news_finbert_neg, news_mean_score, news_top_headlines}.
+    Tickers without a row are absent from the result (caller handles missing).
+
+    Empty `tickers` short-circuits without opening a DB connection.
+    Any DB failure is logged and returns {} (fail-open — sentiment is
+    confirmer-only flavor; the handoff itself must still ship).
+    """
+    if not tickers:
+        return {}
+    try:
+        with psycopg2.connect(postgres_uri) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ticker, social_posts_24h, social_bull_ratio, social_bear_ratio,
+                           social_unique_authors, social_top_themes,
+                           news_count_24h, news_finbert_pos, news_finbert_neu, news_finbert_neg,
+                           news_mean_score, news_top_headlines
+                      FROM ticker_sentiment_daily
+                     WHERE ticker = ANY(%s) AND date = %s::date
+                    """,
+                    (list(tickers), run_date),
+                )
+                rows = cur.fetchall()
+        out: dict[str, dict] = {}
+        for row in rows:
+            (ticker, posts, bull_r, bear_r, authors, themes,
+             n_count, n_pos, n_neu, n_neg, n_mean, n_top) = row
+            out[ticker] = {
+                'social_posts_24h':      posts,
+                'social_bull_ratio':     float(bull_r) if bull_r is not None else None,
+                'social_bear_ratio':     float(bear_r) if bear_r is not None else None,
+                'social_unique_authors': authors,
+                'social_top_themes':     themes,
+                'news_count_24h':        n_count,
+                'news_finbert_pos':      n_pos,
+                'news_finbert_neu':      n_neu,
+                'news_finbert_neg':      n_neg,
+                'news_mean_score':       float(n_mean) if n_mean is not None else None,
+                'news_top_headlines':    n_top or [],
+            }
+        return out
+    except Exception as e:
+        print('[handoff] sentiment load failed:', e)
+        return {}
+
+
 def _write_performance_outliers(uri: str, cycle_date: str, rows: list[dict], kind: str) -> None:
     """Append one row to performance_outliers per outlier. Idempotent via
     UNIQUE (cycle_date, strategy_id, ticker, kind) + ON CONFLICT DO NOTHING.
@@ -684,6 +738,16 @@ def build(run_date: str) -> dict:
     # filter (fail-open) so a missing universe table can't halt trading.
     tradable_symbols = load_tradable_universe(uri)
 
+    # Bulk-load per-ticker sentiment for every enriched signal ONCE so the
+    # confirmer (Task 11) can read it off the proposal without burning a
+    # round-trip per ticker. Fail-open: missing rows / DB error → green
+    # entries simply lack a `sentiment` block (the confirmer must handle
+    # absence).
+    sentiment_by_ticker = _load_sentiment_for_tickers(
+        sorted({(f.get('ticker') or '').upper() for f in enriched if f.get('ticker')}),
+        run_date, uri
+    )
+
     # Pre-filter: split enriched into green-for-TradeJohn vs prefiltered.
     # The prefiltered list flows through to #trade-reports via send_report
     # so the operator still sees what got dropped and why.
@@ -725,6 +789,11 @@ def build(run_date: str) -> dict:
                 'p_t1':        p,
             })
             continue
+        # Attach sentiment ONLY to green (prefiltered never reaches the
+        # confirmer; saving sentiment on dropped rows is wasted bytes).
+        sb = sentiment_by_ticker.get((f.get('ticker') or '').upper())
+        if sb is not None:
+            f['sentiment'] = sb
         green.append(f)
     untradable_n = sum(1 for p in prefiltered if p.get('reason') == 'untradable_at_alpaca')
     print(f'[handoff] prefilter: {len(green)} green / {len(prefiltered)} filtered '
