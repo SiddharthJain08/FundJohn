@@ -473,6 +473,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         except Exception as e:
             logger.warning('regime_blended_sizer.sharpe_cadence: confirmer failed (%s); keeping all', e)
     for tkr in list(delta_usd.keys()):
+        # Orphan closes (no current signals) must always execute — confirmer cannot veto them.
+        if '__close_orphan__' in (ticker_meta.get(tkr) or {}).get('strategies', []):
+            continue
         a = (actions.get(tkr) or {}).get('action', 'keep')
         if a == 'cancel':
             delta_usd.pop(tkr)

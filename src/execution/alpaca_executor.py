@@ -1051,14 +1051,28 @@ def main():
     skipped   = []
     new_notional_total = 0.0
 
-    # Submit sells/closes first to free up buying power, then buys by conviction
-    orders = sorted(
-        orders,
-        key=lambda o: (
-            0 if str(o.get('direction') or '').lower() in ('short', 'sell') or o.get('close_only') else 1,
-            -float(o.get('pct_nav') or 0.0),
-        ),
-    )
+    # Execution priority — must free capital before consuming it:
+    #   0: orphan closes (ticker absent from current signals, strategy_id='__close_orphan__')
+    #   1: other position reduces/closes (close_only=True, ticker still in signals)
+    #   2: short opens / direction sells
+    #   3: long opens / position increases
+    # Within each tier: largest notional first to maximise freed buying power early.
+    def _exec_priority(o):
+        is_orphan = (o.get('strategy_id') or '') == '__close_orphan__'
+        is_close  = bool(o.get('close_only'))
+        is_short  = str(o.get('direction') or '').lower() in ('short', 'sell')
+        notional  = float(o.get('notional_usd') or 0.0)
+        if is_orphan:
+            tier = 0
+        elif is_close:
+            tier = 1
+        elif is_short:
+            tier = 2
+        else:
+            tier = 3
+        return (tier, -notional)
+
+    orders = sorted(orders, key=_exec_priority)
 
     for order in orders:
         sid    = order.get('strategy_id') or 'unknown'
