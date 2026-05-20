@@ -4635,19 +4635,41 @@ function _renderRegimeStructure(intraday, daily) {
     .map(([lbl, key, dp]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${fmt(f[key], dp)}</div></div>\`)
     .join('');
 
-  // 24h sparkline — render every tick the endpoint returned (last 24h of
-  // intraday_regime_states). Tick width is fixed at 4px so the bar grows
-  // wider as more ticks accumulate, ending roughly at the right edge of
-  // the Next-Day Probabilities column below.
-  const hist = Array.isArray(intraday.history) ? intraday.history : [];
-  const sparkHtml = hist.length
-    ? hist.map(r => {
-        const c = _STATE_COLOR[r.state] || 'var(--dim)';
-        const op = Math.max(0.25, Math.min(1, Number(r.confidence) || 0.5));
-        const tt = \`\${r.ts_utc}  \${r.state}  \${Math.round((Number(r.confidence)||0)*100)}%\`;
-        return \`<span class="regime-spark-tick" style="background:\${c};opacity:\${op}" title="\${tt}"></span>\`;
-      }).join('')
-    : '<span style="font-size:10px;color:var(--dim)">no 24h history yet</span>';
+  // 24h sparkline — exactly 96 fixed-width buckets, each representing one
+  // 15-min window (matches the 3-tick hysteresis confirmation gate, so a
+  // colored bucket = "a regime stable enough to have triggered a redeploy"
+  // and a streak of N same-color buckets = N × 15 min of confirmed regime).
+  // Raw 5-min rows from intraday_regime_states get bucketed by their UTC
+  // timestamp; buckets with no data render as dim placeholders so the
+  // operator can see gaps (overnight, weekends, service down).
+  const _BUCKETS = 96;
+  const _BUCKET_MS = 15 * 60 * 1000;
+  const _now = Date.now();
+  const _bucketStart = _now - _BUCKETS * _BUCKET_MS;
+  const _buckets = Array.from({ length: _BUCKETS }, (_, i) => ({
+    start: _bucketStart + i * _BUCKET_MS,
+    end:   _bucketStart + (i + 1) * _BUCKET_MS,
+    rows: [],
+  }));
+  for (const r of (intraday.history || [])) {
+    const t = new Date(r.ts_utc).getTime();
+    const idx = Math.floor((t - _bucketStart) / _BUCKET_MS);
+    if (idx >= 0 && idx < _BUCKETS) _buckets[idx].rows.push(r);
+  }
+  const sparkHtml = _buckets.map(b => {
+    if (b.rows.length === 0) {
+      const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC · no data\`;
+      return \`<span class="regime-spark-tick" style="background:var(--border2);opacity:0.4" title="\${winLbl}"></span>\`;
+    }
+    const states = b.rows.map(r => r.state);
+    const allSame = states.every(s => s === states[0]);
+    const color = allSame ? (_STATE_COLOR[states[0]] || 'var(--dim)') : 'var(--muted)';
+    const avgConf = b.rows.reduce((a, r) => a + (Number(r.confidence) || 0), 0) / b.rows.length;
+    const op = Math.max(0.3, Math.min(1, avgConf));
+    const stateLbl = allSame ? states[0] : 'mixed (' + states.join('/') + ')';
+    const tt = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC · \${stateLbl} · \${b.rows.length}/3 ticks · avg conf \${Math.round(avgConf*100)}%\`;
+    return \`<span class="regime-spark-tick" style="background:\${color};opacity:\${op}" title="\${tt}"></span>\`;
+  }).join('');
 
   // Daily-only fields kept on the card.
   const df = dly ? (dly.features || {}) : {};
