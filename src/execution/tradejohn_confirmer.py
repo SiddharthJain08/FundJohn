@@ -14,6 +14,7 @@ Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
 from __future__ import annotations
 import json
 import logging
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -30,9 +31,46 @@ DEFAULT_MAX_BUDGET_USD = 0.50
 DEFAULT_MODEL = 'sonnet'
 FAIL_OPEN_DEFAULT = {'action': 'keep', 'rationale': 'fail_open_default'}
 
+def _strip_sentiment_section(template: str) -> str:
+    """Remove the `## Sentiment & News Inputs` block from the template.
+
+    Walks lines, skipping from the `## Sentiment & News Inputs` header
+    until (but not including) the next `## ` header — or EOF if none.
+    Inclusive of the stripped header; exclusive of the next section.
+    """
+    out = []
+    skipping = False
+    for line in template.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if not skipping and stripped.startswith('## Sentiment & News Inputs'):
+            skipping = True
+            continue
+        if skipping and stripped.startswith('## ') and not stripped.startswith('## Sentiment & News Inputs'):
+            skipping = False
+            out.append(line)
+            continue
+        if skipping:
+            continue
+        out.append(line)
+    return ''.join(out)
+
+
 def _build_prompt(proposals: list[dict]) -> str:
-    """Compose the per-cycle prompt from the static template + per-ticker proposals."""
+    """Compose the per-cycle prompt from the static template + per-ticker proposals.
+
+    Gated on OPENCLAW_CONFIRMER_SENTIMENT=1. When the gate is OFF (default),
+    the `## Sentiment & News Inputs` section is stripped from the template AND
+    any `sentiment` key on each proposal is dropped — so the prompt + payload
+    are byte-equivalent to pre-Task-11 behavior.
+    """
+    gate_on = os.environ.get('OPENCLAW_CONFIRMER_SENTIMENT') == '1'
     template = PROMPT_PATH.read_text() if PROMPT_PATH.exists() else _FALLBACK_TEMPLATE
+    if not gate_on:
+        template = _strip_sentiment_section(template)
+        proposals = [
+            {k: v for k, v in p.items() if k != 'sentiment'}
+            for p in proposals
+        ]
     payload = {'proposals': proposals}
     return template + '\n\n## INPUT\n```json\n' + json.dumps(payload, indent=2, default=str) + '\n```'
 
