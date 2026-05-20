@@ -52,7 +52,7 @@ HMM_INPUT_COLS = [
     'rr_25d', 'spy_realized_vol_30m',
 ]
 STATE_NAMES_BY_RANK = {0: 'LOW_VOL', 1: 'TRANSITIONING',
-                        2: 'HIGH_VOL', 3: 'CRISIS'}
+                       2: 'HIGH_VOL', 3: 'CRISIS'}
 
 PARQUET_PATH = ROOT / 'data' / 'master' / 'intraday_features.parquet'
 MACRO_PATH   = ROOT / 'data' / 'master' / 'macro.parquet'
@@ -115,20 +115,21 @@ def _load_historical_backfill() -> pd.DataFrame:
         lambda r: rv_native.get(r['date'].date(), r['vix_synth_30d'] / 100.0), axis=1,
     )
 
-    # rr_25d backfill is a two-stage strategy because we only have direct
-    # measurements for ~18% of the 10y backfill window:
+    # rr_25d backfill — direct sources only, no OLS smoothing:
     #   Stage A (~461 days, 2024-04 → 2026-04): rescaled SPY skew from
-    #     options_aggregates_enriched. Vendor OTM strikes aren't at exact
-    #     ±0.25-delta so raw scale differs from live (live μ=0.052 σ=0.010 vs
-    #     enriched μ=0.067 σ=0.059) — z-score-match to live moments.
-    #   Stage B (~2080 days, pre-2024 + post-Apr-2026): VIX-regression-imputed.
-    #     A simple OLS (rr ~ a·VIX + b·term + c) fits the 461-day calibration
-    #     set with R²≈0.35; predictions extend smoothly to extreme regimes
-    #     (COVID VIX=82 → rr≈0.15, calm VIX=12 → rr≈0.048). Beats constant
-    #     mean-imputation because it preserves the well-known empirical
-    #     coupling between vol level and put-call skew.
+    #     options_aggregates_enriched (otm_put_iv − otm_call_iv). Vendor OTM
+    #     strikes ≠ exact ±0.25-delta so raw scale differs from the live
+    #     collector (live μ=0.052 σ=0.010 vs enriched μ=0.067 σ=0.059) —
+    #     z-score-match to live moments.
+    #   Stage B (~2080 days pre-2024 + post-Apr-2026): VVIX z-score, rescaled
+    #     to live rr_25d moments. VVIX is the CBOE-published vol-of-vol
+    #     index — a directly-observed market measurement of the same
+    #     convexity premium that drives put-call skew. Correlation with
+    #     anchor rr_25d ≈ 0.29 (same as VIX itself). Preserves the natural
+    #     variance of the rr_25d signal across regimes — no conditional-mean
+    #     smoothing that OLS would impose.
     rr_by_date: dict = {}
-    rr_regression_coefs: tuple | None = None
+    vvix_rescale: tuple | None = None
     if ENRICHED_PATH.exists():
         en = pd.read_parquet(ENRICHED_PATH)
         spy_en = en[en['ticker'] == 'SPY'].copy()
@@ -152,38 +153,31 @@ def _load_historical_backfill() -> pd.DataFrame:
                             'rescaled (skew μ=%.4f σ=%.4f → live μ=%.4f σ=%.4f)',
                             len(rr_by_date), skew_m, skew_s, live_m, live_s,
                         )
-                        # Fit regression for Stage B on the calibrated Stage A days
-                        # joined to VIX/term. Falls back to constant mean if join fails.
-                        join_df = spy_en[['date_only', 'rr_rescaled']].dropna()
-                        join_df['date'] = pd.to_datetime(join_df['date_only'])
-                        anchor = bf[['date', 'vix_synth_30d', 'vix_term_slope']].merge(
-                            join_df[['date', 'rr_rescaled']], on='date', how='inner',
-                        ).dropna()
-                        if len(anchor) >= 50:
-                            X = np.column_stack([anchor['vix_synth_30d'].values,
-                                                 anchor['vix_term_slope'].values])
-                            y = anchor['rr_rescaled'].values
-                            X_aug = np.column_stack([X, np.ones(len(X))])
-                            coef, *_ = np.linalg.lstsq(X_aug, y, rcond=None)
-                            yhat = X_aug @ coef
-                            r2 = 1 - ((y - yhat) ** 2).sum() / ((y - y.mean()) ** 2).sum()
-                            rr_regression_coefs = (float(coef[0]), float(coef[1]),
-                                                    float(coef[2]), float(r2))
-                            logger.info(
-                                'rr_25d Stage B: regression rr ~ %.5f·VIX + %.5f·term + %.4f '
-                                '(R²=%.3f on %d anchor days)',
-                                *rr_regression_coefs[:3], r2, len(anchor),
-                            )
-    # Apply rr_25d: Stage A lookup first, else Stage B regression
-    if rr_regression_coefs:
-        a, b, c, _ = rr_regression_coefs
-        bf['rr_25d'] = bf.apply(
-            lambda r: rr_by_date.get(r['date'].date(),
-                                     a * r['vix_synth_30d'] + b * r['vix_term_slope'] + c),
-            axis=1,
-        )
-    else:
-        bf['rr_25d'] = bf['date'].dt.date.map(rr_by_date).astype(float)
+                        # Stage B prep: load VVIX, compute z-score-rescale params
+                        vvix_df = macro[macro['series'] == 'VVIX'][['date', 'value']].rename(columns={'value': 'vvix'})
+                        vvix_df['date'] = pd.to_datetime(vvix_df['date'])
+                        if len(vvix_df) >= 100:
+                            v_m, v_s = float(vvix_df['vvix'].mean()), float(vvix_df['vvix'].std())
+                            if v_s > 0:
+                                vvix_rescale = (v_m, v_s, live_m, live_s,
+                                                dict(zip(vvix_df['date'].dt.date, vvix_df['vvix'])))
+                                logger.info(
+                                    'rr_25d Stage B: VVIX-rescaled (vvix μ=%.1f σ=%.1f → '
+                                    'rr μ=%.4f σ=%.4f) covering %d days',
+                                    v_m, v_s, live_m, live_s, len(vvix_df),
+                                )
+    # Apply rr_25d: Stage A direct lookup, else Stage B VVIX-rescale
+    def _rr_for_row(r):
+        d = r['date'].date()
+        if d in rr_by_date:
+            return rr_by_date[d]
+        if vvix_rescale:
+            v_m, v_s, l_m, l_s, vvix_map = vvix_rescale
+            vvix_val = vvix_map.get(d)
+            if vvix_val is not None:
+                return (float(vvix_val) - v_m) / v_s * l_s + l_m
+        return float('nan')   # _build_X falls back to column mean
+    bf['rr_25d'] = bf.apply(_rr_for_row, axis=1)
 
     # Match the live-features schema: ts_utc + source_quality_flag.
     # Use 21:00 UTC = 16:00 ET (market close) as the canonical daily tick time.
