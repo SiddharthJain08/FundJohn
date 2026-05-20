@@ -112,10 +112,9 @@ async function _loadSynthesisRow(strategyId, weekOf) {
   return rows[0] || null;
 }
 
-async function _runSynthesisIfEligible(memo, deltasRecSize, weekOf) {
+async function _runSynthesisIfEligible(memo, deltasRecSize, weekOf, eligibleSet) {
   if (process.env.OPENCLAW_MEMO_CRITIQUE !== '1') return null;
-  const eligible = await elig.filter();
-  if (!eligible.includes(memo.strategy_id)) return null;
+  if (eligibleSet && !eligibleSet.has(memo.strategy_id)) return null;
 
   // Load critiques from strategy_memo_critiques (written by --mode critique earlier)
   const { rows: critiques } = await _query(
@@ -218,6 +217,16 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
     return { inserted: 0, posted: false, note: 'no recent memos' };
   }
 
+  // Hoist eligibility lookup out of the per-memo loop: `elig.filter()` runs a
+  // `SELECT DISTINCT strategy_id FROM signal_pnl WHERE closed_at >= ...` and
+  // returns the same set for every memo this cycle. Compute it once (gated
+  // on OPENCLAW_MEMO_CRITIQUE so we don't spend the query when synthesis is
+  // off) and pass the resulting Set down to _runSynthesisIfEligible for
+  // O(1) membership checks.
+  const eligibleSet = (process.env.OPENCLAW_MEMO_CRITIQUE === '1')
+    ? new Set(await elig.filter())
+    : null;
+
   const persisted = [];
   for (const memo of memos) {
     const currentSize = await _currentSize(memo.strategy_id);
@@ -229,11 +238,16 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
     // been written earlier by `run_mastermind --mode critique`. The
     // resulting `effectiveSize` is the final recommended_size_pct; falls
     // through to the memo's computed value when no synthesis exists.
+    // weekOf is the UTC date — must match the value used by --mode critique
+    // (Task 7) which writes strategy_memo_critiques + strategy_synthesis. Both
+    // the critique step (Sat 22:30 UTC) and this step (Sat 23:00 UTC) run on
+    // the same UTC date, so the keys align. If either shifts past UTC midnight,
+    // realign or pass weekOf explicitly via CLI flag.
     const weekOf = new Date().toISOString().slice(0, 10);
     const memoRec = { recommended_size_pct: deltas.recommended_size_pct };
     let synthRow = null;
     try {
-      synthRow = await _runSynthesisIfEligible(memo, deltas.recommended_size_pct, weekOf)
+      synthRow = await _runSynthesisIfEligible(memo, deltas.recommended_size_pct, weekOf, eligibleSet)
               || await _loadSynthesisRow(memo.strategy_id, weekOf);
     } catch (e) {
       notify(`  synthesis lookup failed for ${memo.strategy_id}: ${e.message}`);

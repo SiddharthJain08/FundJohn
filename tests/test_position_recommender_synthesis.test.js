@@ -45,15 +45,16 @@ test('_runSynthesisIfEligible signature accepts deltasRecSize as positional para
     'utf8'
   );
   // Either compact one-line signature or multi-line — must contain deltasRecSize
+  // and accept an optional 4th arg (eligibleSet) hoisted out of the loop.
   assert.match(
     src,
-    /_runSynthesisIfEligible\s*\(\s*memo\s*,\s*deltasRecSize\s*,\s*weekOf\s*\)/,
-    '_runSynthesisIfEligible must accept (memo, deltasRecSize, weekOf)'
+    /_runSynthesisIfEligible\s*\(\s*memo\s*,\s*deltasRecSize\s*,\s*weekOf\s*(?:,\s*eligibleSet\s*)?\)/,
+    '_runSynthesisIfEligible must accept (memo, deltasRecSize, weekOf[, eligibleSet])'
   );
   // The call site in run() must pass deltas.recommended_size_pct as the second arg
   assert.match(
     src,
-    /_runSynthesisIfEligible\s*\(\s*memo\s*,\s*deltas\.recommended_size_pct\s*,\s*weekOf\s*\)/,
+    /_runSynthesisIfEligible\s*\(\s*memo\s*,\s*deltas\.recommended_size_pct\s*,\s*weekOf\s*(?:,\s*eligibleSet\s*)?\)/,
     'call site must pass deltas.recommended_size_pct'
   );
 });
