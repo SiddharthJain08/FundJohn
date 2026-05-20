@@ -3373,7 +3373,14 @@ body.rs-chat-locked{overflow:hidden}
 .regime-panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:20px}
 .regime-panel-header{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
 .regime-panel-header::after{content:'';flex:1;height:1px;background:var(--border2)}
-.regime-daily-divider{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600;margin:14px 0 8px;display:flex;align-items:center;gap:6px;border-top:1px dashed var(--border2);padding-top:10px}
+.regime-section-header{font-size:9px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:600;margin:0 0 8px;display:flex;align-items:center;gap:6px}
+.regime-section-header::after{content:'';flex:1;height:1px;background:var(--border2)}
+.regime-section{margin-bottom:16px}
+.regime-section:last-child{margin-bottom:0}
+.regime-hero{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:4px 0 14px;border-bottom:1px solid var(--border2);margin-bottom:14px}
+.regime-hero .regime-state-badge{font-size:16px;padding:7px 16px}
+.regime-body-grid{display:grid;grid-template-columns:1.45fr 1fr;gap:24px;align-items:start}
+@media(max-width:760px){.regime-body-grid{grid-template-columns:1fr}}
 .regime-spark-tick{display:inline-block;width:4px;height:14px;border-radius:1px}
 .regime-top-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:12px}
 .regime-state-badge{font-size:13px;font-weight:700;padding:4px 12px;border-radius:6px;letter-spacing:.04em;border:1px solid transparent}
@@ -4675,39 +4682,68 @@ function _renderRegimeStructure(intraday, daily) {
         intraday HMM · 6 features (\${_INTRADAY_FEATURE_TILES.map(t => t[0]).join(', ')}) · last tick \${age}\${modelTag ? ' · ' + modelTag : ''}
       </span>
     </div>
-    <div class="regime-top-row">
-      <span class="regime-state-badge \${stateClass}" style="font-size:15px;padding:6px 14px">\${L.state || 'UNKNOWN'}</span>
+
+    <!-- HERO: current state + key implications + alert badges -->
+    <div class="regime-hero">
+      <span class="regime-state-badge \${stateClass}">\${L.state || 'UNKNOWN'}</span>
       <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
       <div class="regime-meta-item"><div class="regime-meta-label">Position Scale</div><div class="regime-meta-val">\${posScale}</div></div>
       <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${duration}</div></div>
-      <div class="regime-bar-group">
-        <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
-        <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
-      </div>
-      <div class="regime-bar-group">
-        <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
-        <div class="regime-roro-track">
-          <div class="regime-roro-center"></div>
-          <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
-        </div>
-      </div>
-      \${priorBadge}
-      \${carryFwdBadge}
-      \${staleBadge}
+      <div style="flex:1"></div>
+      \${priorBadge}\${carryFwdBadge}\${staleBadge}
     </div>
-    <div class="regime-bottom-row" style="margin-top:8px">
-      <div class="regime-feat-grid">\${featHtml}\${macroHtml}</div>
-      <div class="regime-prob-section" style="min-width:240px">
-        <div class="regime-prob-label">24h State Sparkline</div>
-        <div style="display:flex;gap:1px;align-items:center;height:18px;padding:2px 0">\${sparkHtml}</div>
-        <div style="display:flex;gap:10px;font-size:9px;color:var(--muted);margin-top:6px;flex-wrap:wrap">
-          \${['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s =>
-            \`<span><span style="display:inline-block;width:8px;height:8px;background:\${_STATE_COLOR[s]};border-radius:1px;margin-right:3px;vertical-align:middle"></span>\${_STATE_SHORT[s]}</span>\`
-          ).join('')}
+
+    <!-- TWO-COLUMN BODY: what's driving (left) + what's happening (right) -->
+    <div class="regime-body-grid">
+
+      <!-- LEFT: stress backdrop, model inputs, corroborating macro -->
+      <div>
+        <div class="regime-section">
+          <div class="regime-section-header">Market Stress</div>
+          <div style="display:flex;gap:18px;flex-wrap:wrap">
+            <div class="regime-bar-group" style="flex:1;min-width:200px">
+              <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
+              <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
+            </div>
+            <div class="regime-bar-group" style="flex:1;min-width:200px">
+              <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
+              <div class="regime-roro-track">
+                <div class="regime-roro-center"></div>
+                <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="regime-prob-label" style="margin-top:10px">Next-Day Transition Probabilities <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily HMM)</span></div>
-        \${probHtml}
+
+        <div class="regime-section">
+          <div class="regime-section-header">HMM Model Inputs <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(6 features driving the classification)</span></div>
+          <div class="regime-feat-grid">\${featHtml}</div>
+        </div>
+
+        <div class="regime-section">
+          <div class="regime-section-header">Corroborating Macro <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily-only, not in the HMM)</span></div>
+          <div class="regime-feat-grid">\${macroHtml}</div>
+        </div>
       </div>
+
+      <!-- RIGHT: recent path + forward outlook -->
+      <div>
+        <div class="regime-section">
+          <div class="regime-section-header">24h State Path</div>
+          <div style="display:flex;gap:1px;align-items:center;height:18px;padding:2px 0">\${sparkHtml}</div>
+          <div style="display:flex;gap:10px;font-size:9px;color:var(--muted);margin-top:6px;flex-wrap:wrap">
+            \${['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s =>
+              \`<span><span style="display:inline-block;width:8px;height:8px;background:\${_STATE_COLOR[s]};border-radius:1px;margin-right:3px;vertical-align:middle"></span>\${_STATE_SHORT[s]}</span>\`
+            ).join('')}
+          </div>
+        </div>
+
+        <div class="regime-section">
+          <div class="regime-section-header">Next-Day Transition Probabilities <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily HMM)</span></div>
+          \${probHtml}
+        </div>
+      </div>
+
     </div>\`;
 }
 
