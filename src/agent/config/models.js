@@ -63,4 +63,4 @@ function getContextLimit(modelId) {
   return CONTEXT_LIMITS[modelId] || 200_000;
 }
 
-module.exports = { MODELS, SUBAGENT_MODELS, FLASH_MODEL, COMPACTION, getModelForSubagent, getContextLimit };
+module.exports = { MODELS, SUBAGENT_MODELS, FLASH_MODEL, COMPACTION, getModelForSubagent, getContextLimit, TIERING_ENV: 'OPENCLAW_MODEL_TIERING' };

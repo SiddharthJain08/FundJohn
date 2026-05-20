@@ -96,3 +96,8 @@ test('OPENCLAW_MODEL_TIERING off → always returns SUBAGENT_MODELS default', ()
     'claude-opus-4-7-default'
   );
 });
+
+test('OPENCLAW_MODEL_TIERING constant is exported from models.js', () => {
+  const { TIERING_ENV } = require(path.join(ROOT, 'src/agent/config/models.js'));
+  assert.equal(TIERING_ENV, 'OPENCLAW_MODEL_TIERING');
+});
