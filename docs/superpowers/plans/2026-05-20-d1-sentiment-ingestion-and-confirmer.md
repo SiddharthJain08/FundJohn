@@ -10,6 +10,29 @@
 
 ---
 
+## ⚠️ Schema corrections (2026-05-20, after pre-flight verification)
+
+The plan as originally written referenced tables that don't match the actual schema. Use these substitutions for every task below:
+
+| Original | Use instead |
+|---|---|
+| `market_universe WHERE active = TRUE` | `universe_config WHERE active = TRUE` |
+| `execution_positions WHERE status='open'` | `SELECT DISTINCT es.ticker FROM signal_pnl sp JOIN execution_signals es ON sp.signal_id = es.id WHERE sp.closed_at IS NULL` |
+| `strategy_universe_membership` | **Drop**. Use `SELECT DISTINCT ticker FROM execution_signals WHERE created_at > NOW() - INTERVAL '7 days'` as a proxy for "tickers active strategies care about". |
+| `watchlists` | **Drop entirely** — table doesn't exist. |
+| `market_news.ticker` | `market_news.primary_ticker` |
+| `market_news.headline` | `market_news.title` |
+
+**Universe resolver now has 3 sources (not 4):** `universe_config(active)`, recent open `signal_pnl/execution_signals`, recent-week `execution_signals`. Update tests accordingly.
+
+**Orchestration script path:** `_resolve_script` in `pipeline_orchestrator.py` only searches `src/execution/` and `src/pipeline/`. Place `run_sentiment_step.py` under **`src/pipeline/run_sentiment_step.py`** (matches the `run_collector_once` convention).
+
+**News scorer expansion:** `market_news` also has `related_tickers TEXT[]`. When loading news for a run_date, include rows where `T = ANY(related_tickers) OR primary_ticker = T` — the same multi-ticker story contributes to all mentioned tickers. Document this choice in `news_finbert_scorer.py`.
+
+**`published_at` is `TIMESTAMPTZ`.** Use `published_at >= %s::date AND published_at < (%s::date + INTERVAL '1 day')` (UTC-anchored window) instead of `::date = ::date`.
+
+---
+
 ## File structure
 
 | Path | Responsibility |
