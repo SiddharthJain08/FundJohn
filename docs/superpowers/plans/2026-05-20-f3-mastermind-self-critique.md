@@ -1172,12 +1172,17 @@ async function runCritique() {
     }
     const memo   = memoRes.rows[0];
     const trades = (await pool.query(
-      `SELECT ticker, entry_date, exit_date, realized_pnl_pct, hold_days
-         FROM signal_pnl
-        WHERE strategy_id = $1
-          AND exit_date IS NOT NULL
-          AND exit_date >= CURRENT_DATE - INTERVAL '30 days'
-        ORDER BY exit_date DESC LIMIT 100`, [sid])).rows;
+      `SELECT es.ticker,
+              es.signal_date     AS entry_date,
+              sp.closed_at       AS exit_date,
+              sp.realized_pnl_pct,
+              sp.days_held       AS hold_days
+         FROM signal_pnl sp
+         JOIN execution_signals es ON es.id = sp.signal_id
+        WHERE sp.strategy_id = $1
+          AND sp.closed_at IS NOT NULL
+          AND sp.closed_at >= CURRENT_DATE - INTERVAL '30 days'
+        ORDER BY sp.closed_at DESC LIMIT 100`, [sid])).rows;
     const open  = (await pool.query(
       `SELECT ticker, signal_date, direction, entry_price, stop_loss
          FROM execution_signals
@@ -1323,11 +1328,17 @@ async function _runSynthesisIfEligible(memo, weekOf) {
 
   // Load 30d P&L + open positions
   const { rows: trades } = await _query(
-    `SELECT ticker, entry_date, exit_date, realized_pnl_pct, hold_days
-       FROM signal_pnl
-      WHERE strategy_id = $1 AND exit_date IS NOT NULL
-        AND exit_date >= CURRENT_DATE - INTERVAL '30 days'
-      ORDER BY exit_date DESC LIMIT 100`, [memo.strategy_id]);
+    `SELECT es.ticker,
+            es.signal_date     AS entry_date,
+            sp.closed_at       AS exit_date,
+            sp.realized_pnl_pct,
+            sp.days_held       AS hold_days
+       FROM signal_pnl sp
+       JOIN execution_signals es ON es.id = sp.signal_id
+      WHERE sp.strategy_id = $1
+        AND sp.closed_at IS NOT NULL
+        AND sp.closed_at >= CURRENT_DATE - INTERVAL '30 days'
+      ORDER BY sp.closed_at DESC LIMIT 100`, [memo.strategy_id]);
   const { rows: open } = await _query(
     `SELECT ticker, signal_date, direction, entry_price
        FROM execution_signals
