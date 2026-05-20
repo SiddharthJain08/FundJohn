@@ -44,7 +44,8 @@ const FLASH_MODEL = MODELS.fast;
 // Context window limits per model
 const CONTEXT_LIMITS = {
   'claude-opus-4-6':           200_000,
-  'claude-opus-4-7':           1_000_000,  // 1M context variant
+  'claude-opus-4-7':           200_000,
+  'claude-opus-4-7[1m]':       1_000_000,  // 1M context variant — used by Mastermind
   'claude-sonnet-4-6':         200_000,
   'claude-haiku-4-5-20251001': 200_000,
 };

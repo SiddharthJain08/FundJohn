@@ -14,9 +14,15 @@
 
 const path = require('node:path');
 const fs   = require('node:fs');
+const { TIERING_ENV } = require('./models.js');
 
 let _subagentTypes  = null;
 let _subagentModels = null;
+const _warnedUnknownSubagents = new Set();
+
+function _resetWarnedForTests() {
+  _warnedUnknownSubagents.clear();
+}
 
 function _loadDefaults() {
   if (_subagentTypes === null) {
@@ -41,11 +47,13 @@ function _defaultModel(subagentType) {
   const entry = _subagentModels?.[subagentType];
   if (entry && typeof entry === 'object' && entry.model) return entry.model;
   if (typeof entry === 'string') return entry;
-  // Unknown subagent — last-resort fallback to primary model with a warning
-  console.warn(
-    `[resolve_model] unknown subagentType=${JSON.stringify(subagentType)}; ` +
-    `falling back to MODELS.primary.model. Check for a typo.`
-  );
+  if (!_warnedUnknownSubagents.has(subagentType)) {
+    _warnedUnknownSubagents.add(subagentType);
+    console.warn(
+      `[resolve_model] unknown subagentType=${JSON.stringify(subagentType)}; ` +
+      `falling back to MODELS.primary.model. Check for a typo.`
+    );
+  }
   try {
     const { MODELS } = require('./models.js');
     return MODELS?.primary?.model || null;
@@ -56,7 +64,7 @@ function _defaultModel(subagentType) {
 
 function resolveModel(subagentType, mode, nodeName) {
   // Gate
-  if (process.env.OPENCLAW_MODEL_TIERING !== '1') {
+  if (process.env[TIERING_ENV] !== '1') {
     return _defaultModel(subagentType);
   }
 
@@ -93,4 +101,4 @@ function resolveModel(subagentType, mode, nodeName) {
   return _defaultModel(subagentType);
 }
 
-module.exports = { resolveModel, _setConfigForTests };
+module.exports = { resolveModel, _setConfigForTests, _resetWarnedForTests };

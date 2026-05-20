@@ -124,3 +124,34 @@ test('unknown subagentType falls back to MODELS.primary.model with a warn', () =
   // Real MODELS.primary.model is currently 'claude-sonnet-4-6' (verify it's a claude model)
   assert.match(result, /^claude-/, `expected a claude-* model; got ${result}`);
 });
+
+test('unknown subagentType warns once per subagent, not every call', () => {
+  const { _resetWarnedForTests } = require(path.join(ROOT, 'src/agent/config/resolve_model.js'));
+  _resetWarnedForTests();
+  _setConfigForTests({ subagentTypes: null, subagentModels: null });
+
+  // Capture stderr warns
+  const origWarn = console.warn;
+  const warns = [];
+  console.warn = (...args) => warns.push(args.join(' '));
+
+  try {
+    resolveModel('mystery-bot', 'x', 'y');
+    resolveModel('mystery-bot', 'x', 'y');  // same unknown — should NOT warn again
+    resolveModel('mystery-bot', 'x', 'y');
+    assert.equal(warns.length, 1, `expected 1 warn, got ${warns.length}`);
+
+    resolveModel('other-mystery', 'x', 'y');  // different unknown — SHOULD warn
+    assert.equal(warns.length, 2);
+  } finally {
+    console.warn = origWarn;
+    _resetWarnedForTests();
+  }
+});
+
+test('getContextLimit returns 1M for claude-opus-4-7[1m]', () => {
+  const { getContextLimit } = require(path.join(ROOT, 'src/agent/config/models.js'));
+  assert.equal(getContextLimit('claude-opus-4-7[1m]'), 1_000_000);
+  // And the bare form is now 200K (not 1M)
+  assert.equal(getContextLimit('claude-opus-4-7'), 200_000);
+});
