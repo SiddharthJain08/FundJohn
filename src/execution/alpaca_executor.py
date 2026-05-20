@@ -305,9 +305,9 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
         (order.get('direction') or 'long').lower(),
         alpaca_resp.get('qty') or 0,
-        alpaca_resp.get('entry') or order.get('entry'),
-        order.get('stop'),
-        order.get('t1') or order.get('target'),
+        alpaca_resp.get('entry') or order.get('entry') or 0.0,
+        order.get('stop') or 0.0,
+        order.get('t1') or order.get('target') or 0.0,
         order.get('pct_nav'),
         alpaca_resp.get('notional'),
         tif, order_class, coid,
@@ -720,11 +720,13 @@ def execute_single(sess, equity, order, run_date):
             if ok_co:
                 order_id = (pay_co or {}).get('id') or (pay_co or {}).get('order_id', '?')
                 notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
+                qty_co_r = int((pay_co or {}).get('qty') or 0)
+                # Approximate entry from notional/qty for audit record (non-null required)
+                entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
                 log(f'↩ {ticker} CLOSE (position close)  notional≈${notional_co:,.0f}'
                     f'  order={order_id}')
                 return {'ticker': ticker, 'status': 'submitted',
-                        'qty': (pay_co or {}).get('qty', 0),
-                        'notional': notional_co, 'entry': None,
+                        'qty': qty_co_r, 'notional': notional_co, 'entry': entry_approx,
                         'order_id': order_id, 'http': 200,
                         'tif': 'day', 'order_class': 'simple',
                         'client_order_id': coid}

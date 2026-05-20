@@ -63,7 +63,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
     }
 
     nav = max(equity, 1.0)  # guard against zero-division
-    dropped_no_bracket = 0
 
     for o in orders:
         # Direction: legacy consolidate/independent paths emit int (+1/-1);
@@ -81,22 +80,21 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
         stop_raw  = bracket.get('stop_loss')   if bracket else o.get('stop')
         t1_raw    = bracket.get('take_profit_1') if bracket else o.get('t1')
         t2_raw    = bracket.get('take_profit_2') if bracket else o.get('t2')
-        # Orphan-close orders (positions held but no longer signalled) have
-        # no bracket — the executor prices them from the live snapshot.
-        is_orphan_close = '__close_orphan__' in (
-            o.get('strategy_id') or ''
-            + '|'.join(o.get('contributing_strategies') or [])
-        )
         if not (_finite(entry_raw) and _finite(stop_raw) and _finite(t1_raw)):
-            if not is_orphan_close:
-                dropped_no_bracket += 1
-                continue
-            # Orphan-close: pass through without bracket, executor uses snapshot
+            # No usable bracket. Two cases both handled the same way:
+            #  1. Orphan-close: position held but no longer signalled
+            #     (strategy_id = '__close_orphan__')
+            #  2. Position-reduce: delta is opposite to all contributing
+            #     signal directions (e.g., LONG signals but delta is negative
+            #     because target < current) — no SHORT bracket available
+            # Both need close_only=True so the executor uses `position close`
+            # (RTH) or a simple limit order (ext-hours) against the snapshot.
             notional_oc = abs(float(o.get('notional_usd') or o.get('current_usd') or 0))
             pct_nav_oc  = round(notional_oc / nav, 6)
+            sid_oc = o.get('strategy_id') or '__close_orphan__'
             order_oc = {
                 'ticker':                  o['ticker'],
-                'strategy_id':             '__close_orphan__',
+                'strategy_id':             sid_oc,
                 'direction':               dir_str,
                 'entry':                   None,
                 'stop':                    None,
@@ -110,10 +108,11 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                 'p_t1':                    0.5,
                 'source_mode':             o.get('source_mode'),
                 'close_only':              True,
-                'contributing_strategies': ['__close_orphan__'],
-                'contributions':           [{'strategy_id': '__close_orphan__',
-                                             'attribution_weight': 1.0}],
+                'contributing_strategies': o.get('contributing_strategies') or [sid_oc],
+                'contributions':           o.get('contributions') or [
+                    {'strategy_id': sid_oc, 'attribution_weight': 1.0}],
                 'current_usd':             o.get('current_usd', 0.0),
+                'target_usd':              o.get('target_usd', 0.0),
             }
             payload['orders'].append(order_oc)
             continue
@@ -165,11 +164,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             order['tradejohn_decision'] = o['tradejohn_decision']
 
         payload['orders'].append(order)
-
-    if dropped_no_bracket:
-        print(f'[regime_blended_sizer_live] dropped {dropped_no_bracket} order(s) '
-              f'missing entry/stop/t1 (orphan-close or stale active-window signal)',
-              file=sys.stderr)
 
     return payload
 
