@@ -156,6 +156,56 @@ def _redis():
         return None
 
 
+def _enrich_with_daily_derived(features: dict) -> dict:
+    """Inject spy_gk_vol_daily and vvix_level from data/master daily sources.
+
+    The live intraday collector emits VIX/term/skew features tick-by-tick,
+    but the HMM (since 2026-05-20) also expects:
+      • spy_gk_vol_daily — Garman-Klass daily SPY vol from prices.parquet
+      • vvix_level       — CBOE VVIX from macro.parquet
+
+    These are daily quantities; we use the latest available value ≤ tick
+    date. Fail-soft: if either source is missing/empty the feature stays
+    out of the dict and `_state_from_hmm` will impute it from
+    `model.feature_means_`.
+    """
+    try:
+        import pandas as pd  # local import — keeps cold-start of bootstrap mode cheap
+        ROOT = Path(__file__).resolve().parents[1]
+        prices_path = ROOT / 'data' / 'master' / 'prices.parquet'
+        macro_path  = ROOT / 'data' / 'master' / 'macro.parquet'
+        # Use the tick's ET date as the lookup target. Intraday ticks during
+        # an open session pull yesterday's daily values — fine, they don't
+        # move enough within a day to matter for regime classification.
+        ts = pd.Timestamp(features.get('ts_utc')) if features.get('ts_utc') else pd.Timestamp.now(tz='UTC')
+        if ts.tz is None: ts = ts.tz_localize('UTC')
+        tick_date = ts.tz_convert('America/New_York').date()
+        # GK daily vol
+        if prices_path.exists():
+            spy = pd.read_parquet(prices_path)
+            spy = spy[(spy['ticker'] == 'SPY') & spy['low'].notna() & (spy['low'] > 0)]
+            spy = spy.dropna(subset=['open', 'high', 'low', 'close'])
+            spy['date'] = pd.to_datetime(spy['date']).dt.date
+            spy = spy[spy['date'] <= tick_date].sort_values('date')
+            if len(spy):
+                last = spy.iloc[-1]
+                ln_hl = np.log(last['high'] / last['low'])
+                ln_co = np.log(last['close'] / last['open'])
+                gk_var = max(0.0, 0.5 * ln_hl ** 2 - (2 * np.log(2) - 1) * ln_co ** 2)
+                features['spy_gk_vol_daily'] = float(np.sqrt(gk_var) * np.sqrt(252))
+        # VVIX from macro
+        if macro_path.exists():
+            macro = pd.read_parquet(macro_path)
+            vvix = macro[macro['series'] == 'VVIX'].copy()
+            vvix['date'] = pd.to_datetime(vvix['date']).dt.date
+            vvix = vvix[vvix['date'] <= tick_date].sort_values('date')
+            if len(vvix):
+                features['vvix_level'] = float(vvix['value'].iloc[-1])
+    except Exception as e:
+        logger.warning('derived-feature enrichment failed (soft): %s', e)
+    return features
+
+
 def _state_from_hmm(model, features: dict) -> tuple[str, float, np.ndarray]:
     """Score one feature dict against the trained HMM.
 
@@ -366,6 +416,10 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     now = pd.Timestamp.now(tz='UTC')
     features = intraday.collect_intraday_features(now_utc=now)
     intraday.append_features_row(features)
+    # Enrich with daily-derived HMM inputs (spy_gk_vol_daily, vvix_level).
+    # These are NOT written to the parquet — they're score-time injections
+    # so the live tick matches the trained model's 6-feature schema.
+    features = _enrich_with_daily_derived(features)
 
     conn = _connect_postgres()
     if conn is None:

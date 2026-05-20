@@ -47,9 +47,19 @@ logger = logging.getLogger(__name__)
 
 MIN_TRAINING_ROWS = 500   # Bootstrap threshold: ≈ 6 trading days of RTH ticks
 N_STATES = 4
+# Feature set v3 (2026-05-20):
+#   • Dropped spy_realized_vol_30m — close-to-close stdev systematically
+#     UNDER-represented structural crises where churn compresses but the
+#     spot trends persistently (HIGH_VOL 0.222 > CRISIS 0.199 inversion).
+#   • Added spy_gk_vol_daily — Garman-Klass daily volatility from SPY OHLC.
+#     GK = 0.5·ln(H/L)² − (2·ln(2)−1)·ln(C/O)². Captures intraday range
+#     AND directional displacement; trending crash days score correctly.
+#   • Added vvix_level — CBOE vol-of-vol index. Direct measurement of the
+#     convexity / options-driven-shock dimension orthogonal to spot VIX.
+#     VVIX hit 207 during COVID but stayed ~130 during noisy HIGH_VOL days.
 HMM_INPUT_COLS = [
     'vix_synth_30d', 'vix_synth_90d', 'vix_term_slope',
-    'rr_25d', 'spy_realized_vol_30m',
+    'rr_25d', 'spy_gk_vol_daily', 'vvix_level',
 ]
 STATE_NAMES_BY_RANK = {0: 'LOW_VOL', 1: 'TRANSITIONING',
                        2: 'HIGH_VOL', 3: 'CRISIS'}
@@ -57,6 +67,7 @@ STATE_NAMES_BY_RANK = {0: 'LOW_VOL', 1: 'TRANSITIONING',
 PARQUET_PATH = ROOT / 'data' / 'master' / 'intraday_features.parquet'
 MACRO_PATH   = ROOT / 'data' / 'master' / 'macro.parquet'
 PRICES_30M   = ROOT / 'data' / 'master' / 'prices_30m.parquet'
+PRICES_DAILY = ROOT / 'data' / 'master' / 'prices.parquet'
 ENRICHED_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 MODEL_DIR = ROOT / '.agents' / 'market-state'
 
@@ -66,6 +77,46 @@ def _load_features() -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_parquet(PARQUET_PATH)
     df['ts_utc'] = pd.to_datetime(df['ts_utc'], utc=True)
+    # Enrich with the two derived features that aren't in the live collector
+    # output yet: spy_gk_vol_daily (from daily SPY OHLC) and vvix_level (from
+    # macro). For an intraday tick on date D, the "yesterday's close" daily
+    # value is what the trainer used at backfill time, so use latest available
+    # ≤ tick date (an asof-merge in spirit).
+    if df.empty:
+        return df
+    df['_tick_date'] = pd.to_datetime(
+        df['ts_utc'].dt.tz_convert('America/New_York').dt.date,
+    ).astype('datetime64[ns]')
+    # GK from prices.parquet
+    if PRICES_DAILY.exists():
+        spy_d = pd.read_parquet(PRICES_DAILY)
+        spy_d = spy_d[spy_d['ticker'] == 'SPY'].copy()
+        spy_d = spy_d.dropna(subset=['open', 'high', 'low', 'close'])
+        spy_d = spy_d[spy_d['low'] > 0]
+        if not spy_d.empty:
+            spy_d['_tick_date'] = pd.to_datetime(spy_d['date']).astype('datetime64[ns]')
+            ln_hl = np.log(spy_d['high'] / spy_d['low'])
+            ln_co = np.log(spy_d['close'] / spy_d['open'])
+            gk_var = 0.5 * ln_hl ** 2 - (2 * np.log(2) - 1) * ln_co ** 2
+            spy_d['spy_gk_vol_daily'] = np.sqrt(gk_var.clip(lower=0)) * np.sqrt(252)
+            spy_d = spy_d.sort_values('_tick_date')[['_tick_date', 'spy_gk_vol_daily']]
+            df = pd.merge_asof(
+                df.sort_values('_tick_date'),
+                spy_d, on='_tick_date', direction='backward',
+            )
+    # VVIX from macro.parquet
+    if MACRO_PATH.exists():
+        macro = pd.read_parquet(MACRO_PATH)
+        vvix_df = macro[macro['series'] == 'VVIX'][['date', 'value']].copy()
+        if not vvix_df.empty:
+            vvix_df['_tick_date'] = pd.to_datetime(vvix_df['date']).astype('datetime64[ns]')
+            vvix_df = vvix_df.sort_values('_tick_date').rename(columns={'value': 'vvix_level'})
+            df = pd.merge_asof(
+                df.sort_values('_tick_date'),
+                vvix_df[['_tick_date', 'vvix_level']],
+                on='_tick_date', direction='backward',
+            )
+    df = df.drop(columns=['_tick_date'])
     return df
 
 
@@ -98,21 +149,42 @@ def _load_historical_backfill() -> pd.DataFrame:
     bf = vix.merge(vix3m, on='date', how='inner').sort_values('date').reset_index(drop=True)
     bf['vix_term_slope'] = bf['vix_synth_90d'] / bf['vix_synth_30d']
 
-    # Realized vol: native median of intraday 30m bars where SPY data exists,
-    # VIX-implied proxy (annualized vol fraction) for older years.
-    rv_native: dict = {}
-    if PRICES_30M.exists():
-        p30 = pd.read_parquet(PRICES_30M)
-        spy30 = p30[p30['ticker'] == 'SPY'].copy()
-        if not spy30.empty:
-            spy30['datetime'] = pd.to_datetime(spy30['datetime'])
-            spy30 = spy30.sort_values('datetime').reset_index(drop=True)
-            spy30['ret'] = np.log(spy30['close'] / spy30['close'].shift(1))
-            spy30['rv_30m'] = spy30['ret'].abs() * np.sqrt(252 * 13)
-            spy30['date_only'] = spy30['datetime'].dt.date
-            rv_native = (spy30.groupby('date_only')['rv_30m'].median()).to_dict()
-    bf['spy_realized_vol_30m'] = bf.apply(
-        lambda r: rv_native.get(r['date'].date(), r['vix_synth_30d'] / 100.0), axis=1,
+    # Garman-Klass daily vol from SPY OHLC. GK is range+drift aware so trending
+    # crash days (low intraday churn, persistent drift) get the high RV they
+    # deserve — fixes the rv_30m HIGH_VOL>CRISIS inversion in the old model.
+    # σ²_GK = 0.5·ln(H/L)² − (2·ln(2)−1)·ln(C/O)², annualised by √252.
+    gk_by_date: dict = {}
+    if PRICES_DAILY.exists():
+        pdaily = pd.read_parquet(PRICES_DAILY)
+        spy_d = pdaily[pdaily['ticker'] == 'SPY'].copy()
+        spy_d = spy_d.dropna(subset=['open', 'high', 'low', 'close'])
+        spy_d = spy_d[spy_d['low'] > 0]
+        if not spy_d.empty:
+            spy_d['date'] = pd.to_datetime(spy_d['date'])
+            ln_hl = np.log(spy_d['high'] / spy_d['low'])
+            ln_co = np.log(spy_d['close'] / spy_d['open'])
+            gk_var = 0.5 * ln_hl ** 2 - (2 * np.log(2) - 1) * ln_co ** 2
+            spy_d['gk_ann'] = np.sqrt(gk_var.clip(lower=0)) * np.sqrt(252)
+            gk_by_date = dict(zip(spy_d['date'].dt.date, spy_d['gk_ann']))
+            logger.info(
+                'spy_gk_vol_daily: %d daily-OHLC rows (μ=%.4f σ=%.4f range %.4f..%.4f)',
+                len(gk_by_date), spy_d['gk_ann'].mean(), spy_d['gk_ann'].std(),
+                spy_d['gk_ann'].min(), spy_d['gk_ann'].max(),
+            )
+    bf['spy_gk_vol_daily'] = bf['date'].dt.date.map(gk_by_date)
+
+    # VVIX as a direct feature — CBOE vol-of-vol index. Captures
+    # options-driven structural shocks orthogonal to spot VIX.
+    vvix_by_date = {
+        d.date(): v for d, v in zip(
+            pd.to_datetime(macro[macro['series'] == 'VVIX']['date']),
+            macro[macro['series'] == 'VVIX']['value'],
+        )
+    }
+    bf['vvix_level'] = bf['date'].dt.date.map(vvix_by_date)
+    logger.info(
+        'vvix_level: %d daily VVIX rows mapped',
+        bf['vvix_level'].notna().sum(),
     )
 
     # rr_25d backfill — direct sources only, no OLS smoothing:
@@ -188,7 +260,7 @@ def _load_historical_backfill() -> pd.DataFrame:
     bf['zero_dte_volume_share'] = float('nan')
     return bf[['ts_utc', 'vix_synth_30d', 'vix_synth_90d', 'vix_term_slope',
                'pcr_oi', 'pcr_volume', 'rr_25d',
-               'spy_realized_vol_30m', 'zero_dte_volume_share',
+               'spy_gk_vol_daily', 'vvix_level', 'zero_dte_volume_share',
                'source_quality_flag']]
 
 
@@ -335,11 +407,8 @@ def main() -> int:
             {
                 'state': int(s),
                 'label': model.regime_name_by_state_.get(int(s), '?'),
-                'vix_30d':    round(float(model.means_[s][0]), 3),
-                'vix_90d':    round(float(model.means_[s][1]), 3),
-                'term_slope': round(float(model.means_[s][2]), 3),
-                'rr_25d':     round(float(model.means_[s][3]), 4),
-                'rv_30m':     round(float(model.means_[s][4]), 4),
+                **{feat: round(float(model.means_[s][k]), 4)
+                   for k, feat in enumerate(feature_names)},
             }
             for s in range(N_STATES)
         ],
