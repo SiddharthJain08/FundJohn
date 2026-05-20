@@ -2511,9 +2511,13 @@ app.get('/api/regime', async (req, res) => {
 // (written every 5 min during 9-19 ET by scripts/run_intraday_market_state.py
 // using the 6-feature HMM at .agents/market-state/hmm_intraday_latest.pkl).
 //
-// Returns the latest tick + last-24h history for sparkline. Model file mtime
-// surfaces as `model.trained_at` so the operator can see when the active HMM
-// was last retrained (the trainer re-pickles at 18:00 ET daily).
+// Returns the latest tick + last-24h history + derived structure fields:
+//   • derived.position_scale_pct — looked up from regime_sizer_params for
+//     the current intraday state (system-wide sizing scale).
+//   • derived.duration_minutes — minutes since the most recent state change.
+//     Falls back to the total history span if the state has never changed.
+// Model file mtime surfaces as `model.trained_at` so the operator can see
+// when the active HMM was last retrained.
 app.get('/api/regime/intraday', async (req, res) => {
   try {
     const latestRes = await dbQuery(
@@ -2526,14 +2530,47 @@ app.get('/api/regime/intraday', async (req, res) => {
     if (!latestRes.rows.length) {
       return res.json({ available: false, reason: 'no_ticks_yet' });
     }
-    const histRes = await dbQuery(
-      `SELECT ts_utc, state, confidence
-         FROM intraday_regime_states
-         WHERE ts_utc >= NOW() - INTERVAL '24 hours'
-         ORDER BY ts_utc ASC`
-    );
-    // Model file mtime + size as a lightweight "active model" fingerprint.
-    // Avoids spawning python just to read pickle attrs.
+    const latest = latestRes.rows[0];
+
+    const [histRes, sizerRes, prevChangeRes] = await Promise.all([
+      dbQuery(
+        `SELECT ts_utc, state, confidence
+           FROM intraday_regime_states
+           WHERE ts_utc >= NOW() - INTERVAL '24 hours'
+           ORDER BY ts_utc ASC`
+      ),
+      // Per-regime scale set by operator (LOW=1.0, TRANS=0.75, HIGH=0.5, CRISIS=0.25)
+      dbQuery(
+        `SELECT liquidity_param FROM regime_sizer_params
+          WHERE regime_state = $1`,
+        [latest.state]
+      ),
+      // Most recent tick whose state differs from current — duration starts after it.
+      dbQuery(
+        `SELECT ts_utc FROM intraday_regime_states
+          WHERE state IS DISTINCT FROM $1
+          ORDER BY ts_utc DESC
+          LIMIT 1`,
+        [latest.state]
+      ),
+    ]);
+
+    const scale = sizerRes.rows.length ? Number(sizerRes.rows[0].liquidity_param) : null;
+    // Duration: time since the FIRST tick of the current run. If no prior
+    // different-state row exists, fall back to the very first tick on record.
+    let durationStartTs;
+    if (prevChangeRes.rows.length) {
+      durationStartTs = prevChangeRes.rows[0].ts_utc;
+    } else {
+      const firstEverRes = await dbQuery(
+        `SELECT MIN(ts_utc) AS ts FROM intraday_regime_states`
+      );
+      durationStartTs = firstEverRes.rows[0]?.ts || null;
+    }
+    const durationMinutes = durationStartTs
+      ? Math.max(0, Math.round((Date.now() - new Date(durationStartTs).getTime()) / 60000))
+      : null;
+
     const modelPath = require('path').join(
       __dirname, '../../../.agents/market-state/hmm_intraday_latest.pkl'
     );
@@ -2542,11 +2579,16 @@ app.get('/api/regime/intraday', async (req, res) => {
       const st = await fs.promises.stat(modelPath);
       model = { trained_at: st.mtime.toISOString(), bytes: st.size };
     } catch (_) {}
+
     res.json({
       available: true,
-      latest:    latestRes.rows[0],
+      latest,
       history:   histRes.rows,
       model,
+      derived: {
+        position_scale_pct: scale,
+        duration_minutes:   durationMinutes,
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -4491,7 +4533,7 @@ function showOverview() {
     <div id="overview-news" style="padding:4px 0"><div class="empty">Loading news...</div></div>
   </div>\`;
   const regimePlaceholder = \`<div id="regime-panel" class="regime-panel">
-    <div class="regime-panel-header">Volatility Regime</div>
+    <div class="regime-panel-header">Volatility Regime Structure</div>
     <div class="empty" style="padding:10px 0;font-size:11px">Loading regime...</div>
   </div>\`;
   ov.innerHTML = regimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
@@ -4500,10 +4542,12 @@ function showOverview() {
 }
 
 // ── Regime Panel ─────────────────────────────────────────────────────────────
-// Primary = intraday HMM (6-feature, 5-min cadence, scored against
-// hmm_intraday_latest.pkl). Daily HMM is kept underneath as correlation
-// until it's removed entirely from the system. loadRegime() fetches both
-// in parallel and composes the panel; it's called on overview load and
+// "Volatility Regime Structure" — single consolidated card. State + features +
+// position_scale + duration come from the intraday HMM (6-feature, 5-min
+// cadence, scored against hmm_intraday_latest.pkl). A few daily-only fields
+// (Stress, RORO, VIX 5d Δ, SPX 20d RV, HY/IG spread, next-day transition
+// probs) are pulled from /api/regime — these have no intraday equivalent.
+// loadRegime() fetches both endpoints in parallel and composes the panel;
 // re-polled every 60s so freshness drift below the 5-min cron is visible.
 const _STATE_COLOR  = {LOW_VOL:'var(--green)',TRANSITIONING:'var(--yellow)',HIGH_VOL:'var(--orange)',CRISIS:'var(--red)'};
 const _STATE_SHORT  = {LOW_VOL:'Low Vol',TRANSITIONING:'Transit.',HIGH_VOL:'High Vol',CRISIS:'Crisis'};
@@ -4520,32 +4564,44 @@ function _ageStr(tsUtc) {
   return r ? \`\${h}h \${r}m ago\` : \`\${h}h ago\`;
 }
 
-function _renderIntradayRegime(d) {
-  if (!d || !d.available) {
+function _durationStr(min) {
+  if (min == null) return '—';
+  if (min < 60) return \`\${min}m\`;
+  const h = Math.floor(min/60);
+  if (h < 24) return \`\${h}h \${min%60}m\`;
+  const d = Math.floor(h/24);
+  const hr = h % 24;
+  return hr ? \`\${d}d \${hr}h\` : \`\${d}d\`;
+}
+
+function _renderRegimeStructure(intraday, daily) {
+  if (!intraday || !intraday.available) {
     return \`<div class="regime-panel-header" style="margin-bottom:8px">
-      Intraday Regime <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">5-min HMM</span>
+      Volatility Regime Structure <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">intraday HMM</span>
     </div>
     <div class="empty" style="padding:8px 0;font-size:11px">No intraday ticks yet — collector starts at 9:00 AM ET on market days.</div>\`;
   }
-  const L = d.latest || {};
+  const L = intraday.latest || {};
+  const D = intraday.derived || {};
+  const dly = (daily && daily.available) ? daily : null;
+
   const stateClass = _STATE_CLASS[L.state] || 'regime-state-NO_DATA';
   const conf       = L.confidence != null ? Math.round(L.confidence*100)+'%' : '—';
   const streak     = L.hysteresis_streak != null ? L.hysteresis_streak+' ticks' : '—';
   const age        = _ageStr(L.ts_utc);
-  // Stale if the last tick is more than 15 min old during US market hours.
-  // 5-min cron + 1 tolerance tick = 10 min. We use 15 to absorb cron slip.
+  const posScale   = D.position_scale_pct != null ? Math.round(D.position_scale_pct*100)+'%' : '—';
+  const duration   = _durationStr(D.duration_minutes);
+
+  // Stale: last tick > 15 min old (5-min cron + 1 tolerance tick + slack).
   const ageMin = L.ts_utc ? (Date.now() - new Date(L.ts_utc).getTime())/60000 : Infinity;
   const stale = ageMin > 15;
   const staleBadge = stale ? \`<span class="regime-alert-badge" title="last tick &gt;15 min ago — cron may be paused (out of schedule window or service down)">STALE · \${age}</span>\` : '';
-  // Option market is closed outside 9:30-16:15 ET — Alpaca chain returns
-  // last quotes from prior close. Synthetic VIX features carry forward
-  // rather than reflecting new info. Tag the card so the operator knows
-  // a "fresh tick" pre-9:30 or post-16:15 ≠ "fresh signal".
+  // Carry-fwd: tick is fresh but lands outside 9:30-16:15 ET (option market closed).
   const tickEt = L.ts_utc ? new Date(new Date(L.ts_utc).toLocaleString('en-US', { timeZone: 'America/New_York' })) : null;
   const optionMktOpen = tickEt && (() => {
     const m = tickEt.getHours() * 60 + tickEt.getMinutes();
-    const dow = tickEt.getDay();   // 0=Sun, 6=Sat
-    return dow >= 1 && dow <= 5 && m >= 570 && m <= 975;  // 9:30 → 16:15
+    const dow = tickEt.getDay();
+    return dow >= 1 && dow <= 5 && m >= 570 && m <= 975;
   })();
   const carryFwdBadge = (!stale && tickEt && !optionMktOpen)
     ? \`<span class="regime-alert-badge" style="background:var(--border2);color:var(--muted);border-color:var(--border)" title="Option market closed (9:30-16:15 ET). Synthetic VIX/RR features reflect prior-close quotes, not fresh signal.">CARRY-FWD QUOTES</span>\`
@@ -4553,6 +4609,7 @@ function _renderIntradayRegime(d) {
   const priorBadge = (L.prior_state && L.prior_state !== L.state)
     ? \`<span class="regime-alert-badge">⚠ \${L.prior_state} → \${L.state}</span>\` : '';
 
+  // Intraday-derived features (6-feature HMM input).
   const f = L.features_json || {};
   const fmt = (v, dp) => v == null || (typeof v === 'number' && isNaN(v)) ? '—' : (typeof v === 'number' ? v.toFixed(dp) : String(v));
   const featHtml = [
@@ -4564,8 +4621,8 @@ function _renderIntradayRegime(d) {
     ['25Δ RR',      fmt(f.rr_25d, 3)],
   ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
 
-  // 24h sparkline as fixed-width tinted boxes. Color = state, opacity = confidence.
-  const hist = Array.isArray(d.history) ? d.history.slice(-72) : [];
+  // 24h sparkline.
+  const hist = Array.isArray(intraday.history) ? intraday.history.slice(-72) : [];
   const sparkHtml = hist.length
     ? hist.map(r => {
         const c = _STATE_COLOR[r.state] || 'var(--dim)';
@@ -4575,72 +4632,23 @@ function _renderIntradayRegime(d) {
       }).join('')
     : '<span style="font-size:10px;color:var(--dim)">no 24h history yet</span>';
 
-  const modelTag = d.model && d.model.trained_at
-    ? \`model retrained \${new Date(d.model.trained_at).toISOString().slice(0,10)}\`
-    : '';
-
-  return \`
-    <div class="regime-panel-header" style="margin-bottom:10px">
-      Intraday Regime
-      <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">
-        live · 6-feature HMM · last tick \${age}\${modelTag ? ' · ' + modelTag : ''}
-      </span>
-    </div>
-    <div class="regime-top-row">
-      <span class="regime-state-badge \${stateClass}" style="font-size:15px;padding:6px 14px">\${L.state || 'UNKNOWN'}</span>
-      <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
-      <div class="regime-meta-item"><div class="regime-meta-label">Streak</div><div class="regime-meta-val">\${streak}</div></div>
-      <div class="regime-meta-item"><div class="regime-meta-label">Last Tick</div><div class="regime-meta-val">\${age}</div></div>
-      \${priorBadge}
-      \${carryFwdBadge}
-      \${staleBadge}
-    </div>
-    <div class="regime-bottom-row" style="margin-top:8px">
-      <div class="regime-feat-grid">\${featHtml}</div>
-      <div class="regime-prob-section" style="min-width:240px">
-        <div class="regime-prob-label">24h State Sparkline</div>
-        <div style="display:flex;gap:1px;align-items:center;height:18px;padding:2px 0">\${sparkHtml}</div>
-        <div style="display:flex;gap:10px;font-size:9px;color:var(--muted);margin-top:6px;flex-wrap:wrap">
-          \${['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s =>
-            \`<span><span style="display:inline-block;width:8px;height:8px;background:\${_STATE_COLOR[s]};border-radius:1px;margin-right:3px;vertical-align:middle"></span>\${_STATE_SHORT[s]}</span>\`
-          ).join('')}
-        </div>
-      </div>
-    </div>\`;
-}
-
-function _renderDailyRegimeCorrelation(d) {
-  if (!d || !d.available) {
-    return \`<div class="regime-daily-divider">Daily HMM <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(correlation)</span></div>
-      <div class="empty" style="padding:6px 0;font-size:11px">No daily regime data — runs at 9:00 AM ET on market days</div>\`;
-  }
-  const stateClass = _STATE_CLASS[d.state] || 'regime-state-NO_DATA';
-  const posScale   = d.position_scale != null ? Math.round(d.position_scale*100)+'%' : '—';
-  const conf       = d.confidence     != null ? Math.round(d.confidence*100)+'%'     : '—';
-  const days       = d.days_in_current_state != null ? d.days_in_current_state+'d in state' : '';
-  const alertBadge = d.regime_change_alert
-    ? \`<span class="regime-alert-badge">⚠ REGIME CHANGE ALERT</span>\` : '';
-
-  const stress    = Math.min(100, Math.max(0, d.stress_score ?? 0));
+  // Daily-only fields kept on the card.
+  const df = dly ? (dly.features || {}) : {};
+  const stress    = Math.min(100, Math.max(0, dly ? (dly.stress_score ?? 0) : 0));
   const stressClr = stress >= 70 ? 'var(--red)' : stress >= 40 ? 'var(--orange)' : 'var(--green)';
+  const roro      = dly ? Math.min(50, Math.max(-50, dly.roro_score ?? 0)) : 0;
+  const roroPct   = (Math.abs(roro)/50*50).toFixed(1);
+  const roroLeft  = roro < 0 ? \`left:\${50-roroPct}%;width:\${roroPct}%\` : \`left:50%;width:\${roroPct}%\`;
+  const roroClr   = roro >= 0 ? 'var(--green)' : 'var(--red)';
+  const roroLbl   = dly == null ? '—' : (roro >= 0 ? \`+\${(dly.roro_score||0).toFixed(1)} risk-on\` : \`\${(dly.roro_score||0).toFixed(1)} risk-off\`);
 
-  const roro     = Math.min(50, Math.max(-50, d.roro_score ?? 0));
-  const roroPct  = (Math.abs(roro)/50*50).toFixed(1);
-  const roroLeft = roro < 0 ? \`left:\${50-roroPct}%;width:\${roroPct}%\` : \`left:50%;width:\${roroPct}%\`;
-  const roroClr  = roro >= 0 ? 'var(--green)' : 'var(--red)';
-  const roroLbl  = roro >= 0 ? \`+\${(d.roro_score||0).toFixed(1)} risk-on\` : \`\${(d.roro_score||0).toFixed(1)} risk-off\`;
-
-  const f = d.features || {};
-  const featHtml = [
-    ['VIX',          f.vix           != null ? f.vix.toFixed(2)                                              : '—'],
-    ['VIX 5d Δ',     f.vix_5d_chg    != null ? (f.vix_5d_chg>=0?'+':'')+f.vix_5d_chg.toFixed(2)            : '—'],
-    ['SPX 5d Ret',   f.spx_5d_return != null ? (f.spx_5d_return>=0?'+':'')+(f.spx_5d_return*100).toFixed(2)+'%' : '—'],
-    ['SPX 20d RV',   f.spx_rv_20d    != null ? f.spx_rv_20d.toFixed(2)+'%'                                  : '—'],
-    ['HY/IG Spread', f.hy_ig_spread  != null ? f.hy_ig_spread.toFixed(4)                                    : '—'],
-    ['VIX Term',     f.vix_term_slope!= null ? f.vix_term_slope.toFixed(4)                                  : '—'],
+  const macroHtml = [
+    ['VIX 5d Δ',     df.vix_5d_chg   != null ? (df.vix_5d_chg>=0?'+':'')+df.vix_5d_chg.toFixed(2) : '—'],
+    ['SPX 20d RV',   df.spx_rv_20d   != null ? df.spx_rv_20d.toFixed(2)+'%'                       : '—'],
+    ['HY/IG Spread', df.hy_ig_spread != null ? df.hy_ig_spread.toFixed(4)                         : '—'],
   ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
 
-  const tp = d.transition_probs_tomorrow || {};
+  const tp = dly ? (dly.transition_probs_tomorrow || {}) : {};
   const probHtml = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s => {
     const pct = tp[s]!=null ? Math.round(tp[s]*100) : 0;
     return \`<div class="regime-prob-row">
@@ -4649,13 +4657,23 @@ function _renderDailyRegimeCorrelation(d) {
       <div class="regime-prob-pct">\${pct}%</div></div>\`;
   }).join('');
 
+  const modelTag = intraday.model && intraday.model.trained_at
+    ? \`model retrained \${new Date(intraday.model.trained_at).toISOString().slice(0,10)}\`
+    : '';
+
   return \`
-    <div class="regime-daily-divider">Daily HMM <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(correlation · as of \${d.date||'—'} · will be removed)</span></div>
-    <div class="regime-top-row" style="opacity:0.78">
-      <span class="regime-state-badge \${stateClass}">\${d.state}</span>
-      <div class="regime-meta-item"><div class="regime-meta-label">Position Scale</div><div class="regime-meta-val">\${posScale}</div></div>
+    <div class="regime-panel-header" style="margin-bottom:10px">
+      Volatility Regime Structure
+      <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">
+        intraday HMM · 6-feature · last tick \${age}\${modelTag ? ' · ' + modelTag : ''}
+      </span>
+    </div>
+    <div class="regime-top-row">
+      <span class="regime-state-badge \${stateClass}" style="font-size:15px;padding:6px 14px">\${L.state || 'UNKNOWN'}</span>
       <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
-      <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${days||'—'}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Streak</div><div class="regime-meta-val">\${streak}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Position Scale</div><div class="regime-meta-val">\${posScale}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${duration}</div></div>
       <div class="regime-bar-group">
         <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
         <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
@@ -4667,12 +4685,22 @@ function _renderDailyRegimeCorrelation(d) {
           <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
         </div>
       </div>
-      \${alertBadge}
+      \${priorBadge}
+      \${carryFwdBadge}
+      \${staleBadge}
     </div>
-    <div class="regime-bottom-row" style="margin-top:4px;opacity:0.78">
-      <div class="regime-feat-grid">\${featHtml}</div>
-      <div class="regime-prob-section">
-        <div class="regime-prob-label">Tomorrow's Probabilities</div>\${probHtml}
+    <div class="regime-bottom-row" style="margin-top:8px">
+      <div class="regime-feat-grid">\${featHtml}\${macroHtml}</div>
+      <div class="regime-prob-section" style="min-width:240px">
+        <div class="regime-prob-label">24h State Sparkline</div>
+        <div style="display:flex;gap:1px;align-items:center;height:18px;padding:2px 0">\${sparkHtml}</div>
+        <div style="display:flex;gap:10px;font-size:9px;color:var(--muted);margin-top:6px;flex-wrap:wrap">
+          \${['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s =>
+            \`<span><span style="display:inline-block;width:8px;height:8px;background:\${_STATE_COLOR[s]};border-radius:1px;margin-right:3px;vertical-align:middle"></span>\${_STATE_SHORT[s]}</span>\`
+          ).join('')}
+        </div>
+        <div class="regime-prob-label" style="margin-top:10px">Next-Day Transition Probabilities <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily HMM)</span></div>
+        \${probHtml}
       </div>
     </div>\`;
 }
@@ -4684,7 +4712,7 @@ async function loadRegime() {
     _safeFetch('/api/regime/intraday', { available: false }, { critical: true, label: 'regime-intraday' }),
     _safeFetch('/api/regime',          { available: false, state: 'NO_DATA' }, { critical: true, label: 'regime-daily' }),
   ]);
-  el.innerHTML = _renderIntradayRegime(intraday) + _renderDailyRegimeCorrelation(daily);
+  el.innerHTML = _renderRegimeStructure(intraday, daily);
 }
 
 // ── Ticker Detail ─────────────────────────────────────────────────────────────
