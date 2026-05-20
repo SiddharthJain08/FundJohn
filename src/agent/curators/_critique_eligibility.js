@@ -5,7 +5,7 @@
  * F3 Saturday critique pass.
  *
  * Eligibility: ≥1 closed trade in the last 7 calendar days, AND
- *               exit_date IS NOT NULL (i.e. realized P&L exists).
+ *               closed_at IS NOT NULL (i.e. realized P&L exists).
  *
  * Open positions alone do NOT trigger critique. Strategies are
  * allowed to complete their hold-period cadence before being judged.
@@ -28,8 +28,8 @@ async function filter() {
   const sql = `
     SELECT DISTINCT strategy_id
       FROM signal_pnl
-     WHERE exit_date IS NOT NULL
-       AND exit_date >= CURRENT_DATE - INTERVAL '7 days'
+     WHERE closed_at IS NOT NULL
+       AND closed_at >= CURRENT_DATE - INTERVAL '7 days'
      ORDER BY strategy_id
   `;
   const { rows } = await _query(sql);

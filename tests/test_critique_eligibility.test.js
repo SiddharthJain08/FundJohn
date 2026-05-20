@@ -15,10 +15,10 @@ test('filter returns sorted strategy IDs with ≥1 closed trade in last 7 days',
     { strategy_id: 'S5_max_pain' },
   ];
   mod._setQueryForTests(async (sql, params) => {
-    // Verify SQL shape includes signal_pnl + 7d window + IS NOT NULL exit_date
+    // Verify SQL shape includes signal_pnl + 7d window + IS NOT NULL closed_at
     assert.ok(sql.includes('signal_pnl'),                'should query signal_pnl');
-    assert.ok(sql.includes('exit_date IS NOT NULL'),      'should filter null exit_date');
-    assert.ok(sql.includes("INTERVAL '7 days'"),          'should use 7-day window');
+    assert.ok(sql.includes('closed_at IS NOT NULL'),     'should filter null closed_at');
+    assert.ok(sql.includes("INTERVAL '7 days'"),         'should use 7-day window');
     return { rows: fakeRows };
   });
   const result = await mod.filter();
