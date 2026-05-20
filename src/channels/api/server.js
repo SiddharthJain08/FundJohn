@@ -4587,7 +4587,6 @@ function _renderRegimeStructure(intraday, daily) {
 
   const stateClass = _STATE_CLASS[L.state] || 'regime-state-NO_DATA';
   const conf       = L.confidence != null ? Math.round(L.confidence*100)+'%' : '—';
-  const streak     = L.hysteresis_streak != null ? L.hysteresis_streak+' ticks' : '—';
   const age        = _ageStr(L.ts_utc);
   const posScale   = D.position_scale_pct != null ? Math.round(D.position_scale_pct*100)+'%' : '—';
   const duration   = _durationStr(D.duration_minutes);
@@ -4671,7 +4670,6 @@ function _renderRegimeStructure(intraday, daily) {
     <div class="regime-top-row">
       <span class="regime-state-badge \${stateClass}" style="font-size:15px;padding:6px 14px">\${L.state || 'UNKNOWN'}</span>
       <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
-      <div class="regime-meta-item"><div class="regime-meta-label">Streak</div><div class="regime-meta-val">\${streak}</div></div>
       <div class="regime-meta-item"><div class="regime-meta-label">Position Scale</div><div class="regime-meta-val">\${posScale}</div></div>
       <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${duration}</div></div>
       <div class="regime-bar-group">
