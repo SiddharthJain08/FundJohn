@@ -302,30 +302,25 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
-    // 4:00-20:55 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
+    // 9:00-19:55 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
     // Fire-and-forget detached spawn (matches the 10am pipeline pattern).
     // Each tick: collects 6 live features → appends parquet → scores HMM →
     // hysteresis(3)/confidence(<70%)/cooldown(60min) gates. Phase 2
     // (2026-05-19) wires confirmed transitions to scripts/redeploy_pipeline.py
     // (detached subprocess.Popen, never blocks this cron tick).
     //
-    // Window rationale (extended 2026-05-20 to cover premarket session):
-    //   • 4:00-9:30 ET  — premarket. SPY option market is closed (re-opens
-    //     9:30); the Alpaca chain returns YESTERDAY's last quotes, so
-    //     synthetic VIX values reflect the prior close rather than fresh
-    //     signal. We still score + record so the dashboard shows "last
-    //     tick 5m ago" instead of stale. Redeploys self-block outside RTH
-    //     via OPENCLAW_REDEPLOY_EXTENDED_HOURS (default OFF), so zero
-    //     execution risk from carry-forward classifications.
-    //   • 9:30-16:00 ET — RTH. Fresh chain quotes; this is the
-    //     real-signal window. Confirmed transitions can fire redeploys.
-    //   • 16:00-20:00 ET — after-hours. Option market closes 16:15;
-    //     quotes drift stale after that. Same logic as premarket.
+    // Window rationale: SPY option market trades 9:30-16:15 ET. We start
+    // the cron at 9:00 to score the open transition and extend through
+    // 19:55 to cover Alpaca's after-hours session (16:00-20:00). Outside
+    // 9:30-16:15 the chain returns prior-close quotes — the dashboard
+    // CARRY-FWD QUOTES badge surfaces this — so those ticks reflect
+    // carry-forward, not new signal. Premarket coverage (4:00-9:30) was
+    // tried 2026-05-20 and reverted: no new info, just noise.
     //
-    // After-hours redeploys (16:00-20:00) are RTH-only at the execution
-    // layer (alpaca_executor session-aware via Phase 3) and additionally
-    // gated by OPENCLAW_REDEPLOY_EXTENDED_HOURS=1 (default OFF).
-    cron.schedule('*/5 4-20 * * 1-5', () => {
+    // After-hours redeploys (16:00-20:00) are gated by
+    // OPENCLAW_REDEPLOY_EXTENDED_HOURS (default OFF). When ON, Phase 3
+    // alpaca_executor submits limit orders w/ extended-hours flag.
+    cron.schedule('*/5 9-19 * * 1-5', () => {
         try {
             const fs = require('fs');
             const path = require('path');
