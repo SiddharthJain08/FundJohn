@@ -4657,19 +4657,22 @@ function _renderRegimeStructure(intraday, daily) {
     if (idx >= 0 && idx < _BUCKETS) _buckets[idx].rows.push(r);
   }
   const sparkHtml = _buckets.map(b => {
-    if (b.rows.length === 0) {
-      const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC · no data\`;
-      // Match the prior look: dim gray at 0.25 opacity (same as how
-      // UNKNOWN-state ticks rendered in the pre-bucketing sparkline).
-      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.25" title="\${winLbl}"></span>\`;
+    // UNKNOWN is treated as no-data: the detector recorded a row but the
+    // classifier couldn't assign a real regime (model not loaded, bootstrap
+    // mode, etc.), so it carries no actionable information. Merge with
+    // truly-empty buckets — one visual group, one tooltip.
+    const useful = b.rows.filter(r => r.state && r.state !== 'UNKNOWN');
+    const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC\`;
+    if (useful.length === 0) {
+      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.25" title="\${winLbl} · no data"></span>\`;
     }
-    const states = b.rows.map(r => r.state);
+    const states = useful.map(r => r.state);
     const allSame = states.every(s => s === states[0]);
     const color = allSame ? (_STATE_COLOR[states[0]] || 'var(--dim)') : 'var(--muted)';
-    const avgConf = b.rows.reduce((a, r) => a + (Number(r.confidence) || 0), 0) / b.rows.length;
+    const avgConf = useful.reduce((a, r) => a + (Number(r.confidence) || 0), 0) / useful.length;
     const op = Math.max(0.3, Math.min(1, avgConf));
     const stateLbl = allSame ? states[0] : 'mixed (' + states.join('/') + ')';
-    const tt = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC · \${stateLbl} · \${b.rows.length}/3 ticks · avg conf \${Math.round(avgConf*100)}%\`;
+    const tt = \`\${winLbl} · \${stateLbl} · \${useful.length}/3 ticks · avg conf \${Math.round(avgConf*100)}%\`;
     return \`<span class="regime-spark-tick" style="background:\${color};opacity:\${op}" title="\${tt}"></span>\`;
   }).join('');
 
