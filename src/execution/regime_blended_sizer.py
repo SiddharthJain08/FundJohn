@@ -440,27 +440,62 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
                         len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
 
-    # Rebalance against current broker positions: delta = target − current.
-    # Tickers held but no longer in target → close (delta = −current).
+    # Rebalance against current broker positions. Each ticker is classified as
+    # one of four emission kinds:
+    #   • delta         — single order; close_only auto-detected downstream
+    #                     when the delta direction has no aligned bracket.
+    #   • orphan_close  — ticker held but absent from current targets;
+    #                     strategy_id='__close_orphan__', tier-0 in executor.
+    #   • flip_close    — current and target have OPPOSITE signs. Liquidates
+    #                     the existing position fully. Tier-1 in executor.
+    #                     Paired with flip_open below; flip_open must wait
+    #                     for the close to fill (executor polls). Alpaca
+    #                     bracket orders do not support auto-reverse so we
+    #                     CANNOT submit a single oversize bracket — the
+    #                     legacy delta path emitted exactly that and Alpaca
+    #                     silently rejected it (or filled only the close
+    #                     portion).
+    #   • flip_open     — the paired new-direction open following flip_close.
+    #                     Tier-2 (short) or tier-3 (long) in executor.
     broker = _load_broker_positions_usd()
-    delta_usd: dict[str, float] = {}
+
+    flip_tickers: set[str] = set()
     for tkr, target in target_usd.items():
-        delta = target - broker.get(tkr, 0.0)
-        if delta != 0.0:
-            delta_usd[tkr] = delta
+        current = broker.get(tkr, 0.0)
+        if current == 0.0 or target == 0.0:
+            continue
+        # Opposite-sign check
+        if (target > 0 > current) or (target < 0 < current):
+            flip_tickers.add(tkr)
+
+    emissions: list[tuple[str, float, str]] = []
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        if tkr in flip_tickers:
+            emissions.append((tkr, -current, 'flip_close'))
+            emissions.append((tkr,  target,  'flip_open'))
+        else:
+            delta = target - current
+            if delta != 0.0:
+                emissions.append((tkr, delta, 'delta'))
     for tkr, current in broker.items():
         if tkr in target_usd or current == 0.0:
             continue
-        delta_usd[tkr] = -current
+        emissions.append((tkr, -current, 'orphan_close'))
         if tkr not in ticker_meta:
             ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
                                 'brackets': []}
-    logger.info('regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, deltas=%d',
-                len(target_usd), len(broker), len(delta_usd))
+    logger.info(
+        'regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, emissions=%d (flips=%d)',
+        len(target_usd), len(broker), len(emissions), len(flip_tickers))
 
-    # TradeJohn keep|cancel (news veto only — never adjusts size).
-    # Operates on DELTAS now, not targets; cancels mean "leave the
-    # current position alone for this cycle".
+    # TradeJohn keep|cancel — proposed ONLY for new-exposure emissions
+    # (delta, flip_open). Closes (orphan_close, flip_close) always execute:
+    # orphan closes have no current signal to veto; flip closes are the
+    # first leg of an atomic flip and a cancel on the matched flip_open
+    # drops the flip_close below so the existing position is preserved.
+    exposure_emissions = [(tkr, usd, kind) for (tkr, usd, kind) in emissions
+                          if kind in ('delta', 'flip_open')]
     proposals = [{
         'ticker': tkr,
         'preliminary_size_usd': usd,
@@ -470,33 +505,55 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         'bracket': {'entry_price': None, 'stop_loss': None, 'take_profit_1': None},
         'context': {'news_headlines': [], '30d_veto_history_for_ticker': 0,
                     'sector': '', 'hv30d': None},
-    } for tkr, usd in delta_usd.items()]
+    } for (tkr, usd, kind) in exposure_emissions]
     actions = {}
     if confirmer:
         try:
             actions = confirmer(proposals) or {}
         except Exception as e:
             logger.warning('regime_blended_sizer.sharpe_cadence: confirmer failed (%s); keeping all', e)
-    for tkr in list(delta_usd.keys()):
-        # Orphan closes (no current signals) must always execute — confirmer cannot veto them.
-        if '__close_orphan__' in (ticker_meta.get(tkr) or {}).get('strategies', []):
-            continue
-        a = (actions.get(tkr) or {}).get('action', 'keep')
-        if a == 'cancel':
-            delta_usd.pop(tkr)
 
-    # Emit orders for the deltas. entry/stop/t1/t2 are picked from the
-    # winning-direction contributor's signal bracket (direction-leader
-    # rule, mirrors _consolidate_path). Orders whose direction has no
-    # matching contributor (e.g. orphan-closes) get no bracket and will
-    # be filtered by the live wrapper.
+    canceled_deltas = {tkr for (tkr, _, kind) in emissions
+                       if kind == 'delta' and (actions.get(tkr) or {}).get('action') == 'cancel'}
+    canceled_flips = {tkr for tkr in flip_tickers
+                      if (actions.get(tkr) or {}).get('action') == 'cancel'}
+    emissions = [e for e in emissions
+                 if not (e[2] == 'delta' and e[0] in canceled_deltas)
+                 and not (e[2] in ('flip_close', 'flip_open') and e[0] in canceled_flips)]
+    if canceled_flips:
+        logger.info('regime_blended_sizer.sharpe_cadence: %d flips canceled by confirmer; existing positions preserved',
+                    sorted(canceled_flips))
+
+    # Emit orders. flip_close uses a dedicated strategy_id ('__flip_close__')
+    # so the (run_date, strategy_id, ticker) UNIQUE constraint on
+    # alpaca_submissions never collides with the matched flip_open row
+    # (whose strategy_id is the real joined contributing IDs). The executor
+    # detects flip_close by strategy_id, polls Alpaca until the close fills,
+    # and only then submits the flip_open — Alpaca cannot transition
+    # long↔short in a single bracket order.
     orders = []
-    for tkr, usd in delta_usd.items():
+    for tkr, usd, kind in emissions:
         dir_sign = 1 if usd >= 0 else -1
-        bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
+        if kind in ('orphan_close', 'flip_close'):
+            bracket = {}     # forces close_only=True downstream
+        else:
+            bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
+        real_sid = '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120]
+        if kind == 'flip_close':
+            sid_out = '__flip_close__'
+            out_target = 0.0
+            out_current = broker.get(tkr, 0.0)
+        elif kind == 'flip_open':
+            sid_out = real_sid
+            out_target = target_usd.get(tkr, 0.0)
+            out_current = 0.0          # post-close perspective; matches the broker state the open will see
+        else:
+            sid_out = real_sid
+            out_target = target_usd.get(tkr, 0.0)
+            out_current = broker.get(tkr, 0.0)
         orders.append({
             'ticker':                  tkr,
-            'strategy_id':             '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120],
+            'strategy_id':             sid_out,
             'direction':               'long' if dir_sign > 0 else 'short',
             'notional_usd':            abs(usd),
             'pct_nav':                 abs(usd) / nav,
@@ -509,9 +566,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'ev':                      0.0,
             'p_t1':                    0.5,
             'source_mode':             'sharpe_cadence',
-            'target_usd':              target_usd.get(tkr, 0.0),  # audit: what we wanted
-            'current_usd':             broker.get(tkr, 0.0),       # audit: what we had
+            'target_usd':              out_target,
+            'current_usd':             out_current,
             'contributing_strategies': ticker_meta[tkr]['strategies'],
+            'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
         })
     return orders
 

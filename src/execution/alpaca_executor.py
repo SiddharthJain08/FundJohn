@@ -406,6 +406,63 @@ def _run_alpaca_cli(args, timeout=30):
     return False, None, err
 
 
+def _exec_priority_for_test(o: dict) -> tuple[int, float]:
+    """Tier-priority key used by the main loop's `sorted(orders, key=...)`.
+
+    Exposed at module scope so tests can pin the contract:
+      0 = orphan close   (strategy_id == '__close_orphan__')
+      1 = other close    (close_only=True; partial reduce OR flip close)
+      2 = short open
+      3 = long open
+    Secondary key = -notional so larger sizes sort first within a tier.
+    """
+    is_orphan = (o.get('strategy_id') or '') == '__close_orphan__'
+    is_close  = bool(o.get('close_only'))
+    is_short  = str(o.get('direction') or '').lower() in ('short', 'sell')
+    notional  = float(o.get('notional_usd') or 0.0)
+    if is_orphan:
+        tier = 0
+    elif is_close:
+        tier = 1
+    elif is_short:
+        tier = 2
+    else:
+        tier = 3
+    return (tier, -notional)
+
+
+def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
+    """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
+
+    Used by the main executor loop between a direction-flip's close-leg and
+    its matched open-leg: Alpaca cannot transition long↔short in a single
+    bracket order, so the close must FILL (not just be submitted) before
+    the open is sent. Returns True on filled; False on timeout, terminal
+    failure (canceled/rejected/expired), or CLI error. On False the caller
+    skips the matched open to avoid oversell against the still-existing
+    position.
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        proc = subprocess.run(
+            [ALPACA_CLI, 'order', 'get', order_id],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if proc.returncode == 0:
+            try:
+                o = json.loads(proc.stdout)
+            except json.JSONDecodeError:
+                return False
+            status = o.get('status', '')
+            if status == 'filled':
+                return True
+            if status in ('canceled', 'rejected', 'expired'):
+                return False
+        _time.sleep(poll_interval)
+    return False
+
+
 def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, coid,
                           order_type='market', extended_hours=False, limit_price=None):
     """Submit a single order via `alpaca order submit`.
@@ -1070,29 +1127,38 @@ def main():
     # Execution priority — must free capital before consuming it:
     #   0: orphan closes (ticker absent from current signals, strategy_id='__close_orphan__')
     #   1: other position reduces/closes (close_only=True, ticker still in signals)
+    #       — partial reduces (same direction, smaller target)
+    #       — flip closes (strategy_id='__flip_close__'; matched flip_open lives in tier 2/3)
     #   2: short opens / direction sells
     #   3: long opens / position increases
     # Within each tier: largest notional first to maximise freed buying power early.
-    def _exec_priority(o):
-        is_orphan = (o.get('strategy_id') or '') == '__close_orphan__'
-        is_close  = bool(o.get('close_only'))
-        is_short  = str(o.get('direction') or '').lower() in ('short', 'sell')
-        notional  = float(o.get('notional_usd') or 0.0)
-        if is_orphan:
-            tier = 0
-        elif is_close:
-            tier = 1
-        elif is_short:
-            tier = 2
-        else:
-            tier = 3
-        return (tier, -notional)
+    orders = sorted(orders, key=_exec_priority_for_test)
 
-    orders = sorted(orders, key=_exec_priority)
+    # Direction-flip tracking. The sizer emits flip_close (tier-1,
+    # strategy_id='__flip_close__') and flip_open (tier-2/3, real sid) as
+    # an atomic pair on the same ticker. Alpaca cannot reverse long↔short
+    # in a single bracket order, so the open MUST wait until the close
+    # has filled. If the close doesn't fill or is rejected, the matched
+    # open is skipped to avoid oversell against the still-existing position.
+    flip_tickers = {o['ticker'] for o in orders
+                    if (o.get('strategy_id') or '') == '__flip_close__'}
+    failed_flip_closes: set[str] = set()
+    if flip_tickers:
+        log(f'[executor] direction-flip pairs detected for {len(flip_tickers)} tickers: {sorted(flip_tickers)}')
 
     for order in orders:
         sid    = order.get('strategy_id') or 'unknown'
         ticker = order.get('ticker') or '???'
+
+        # Pair-skip: flip_open for a ticker whose flip_close didn't complete
+        # must not be submitted — it would oversell into the still-held
+        # current position and never establish the new direction.
+        is_flip_close = (sid == '__flip_close__')
+        is_flip_open  = (not is_flip_close) and (ticker in flip_tickers)
+        if is_flip_open and ticker in failed_flip_closes:
+            log(f'  SKIP {ticker} flip_open: matched flip_close did not complete')
+            skipped.append({'ticker': ticker, 'reason': 'flip_close did not fill — open skipped'})
+            continue
 
         if already_executed(conn, run_date, sid, ticker):
             skipped.append({'ticker': ticker, 'reason': 'already executed'})
@@ -1117,6 +1183,22 @@ def main():
                           result.get('tif') or 'day',
                           result.get('order_class') or ('bracket' if rth else 'simple'),
                           result.get('client_order_id') or '')
+
+        # Flip-close: block until the order fills so the matched flip_open
+        # sees a flat position when it arrives. Treat any non-fill outcome
+        # as failure so the matched open is skipped (set tracked above).
+        if is_flip_close:
+            if result.get('status') in ('submitted', 'recovered') and result.get('order_id'):
+                filled = _wait_for_fill(result['order_id'], timeout=15.0)
+                if not filled:
+                    failed_flip_closes.add(ticker)
+                    log(f'  WARN {ticker} flip_close did not fill within 15s; matched open will be skipped')
+                else:
+                    log(f'  ✓ {ticker} flip_close filled — matched open cleared to submit')
+            else:
+                failed_flip_closes.add(ticker)
+                log(f'  WARN {ticker} flip_close not submitted (status={result.get("status")}); matched open will be skipped')
+
         if result.get('status') in ('submitted', 'recovered'):
             submitted.append(result)
             new_notional_total += result.get('notional') or 0.0

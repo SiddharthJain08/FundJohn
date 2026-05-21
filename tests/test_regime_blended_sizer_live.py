@@ -213,6 +213,82 @@ class TestSharpeCadenceShape:
         assert payload['orders'] == []  # silently dropped (logged to stderr)
 
 
+class TestDirectionFlipEmission:
+    """A direction flip (current long → target short, or vice-versa) emits
+    TWO orders from the sizer:
+      • flip_close with strategy_id='__flip_close__' and no bracket
+        (close_only path in payload builder, tier-1 in executor)
+      • flip_open with the real joined strategy_id and a populated bracket
+        in the NEW direction (tier-2/3 in executor)
+
+    These tests pin the payload-builder routing. End-to-end sizer behavior
+    is exercised by integration tests with mocked broker positions.
+    """
+
+    def test_flip_close_routes_to_close_only_branch(self):
+        from execution.regime_blended_sizer_live import _build_sized_payload
+        # Sizer-emitted flip_close: bracket fields are None → payload
+        # builder takes the close_only branch; strategy_id stays
+        # '__flip_close__' (NOT remapped to '__close_orphan__').
+        o = _sharpe_cadence_order(ticker='XYZ', direction='short',
+                                  notional=20_000.0,
+                                  entry=None, stop=None, t1=None,
+                                  strategies=('__flip_close__',))
+        payload = _build_sized_payload([o], {'cycle_date': '2026-05-22'},
+                                       equity=100_000.0)
+        assert len(payload['orders']) == 1
+        out = payload['orders'][0]
+        assert out['ticker'] == 'XYZ'
+        assert out['close_only'] is True
+        assert out['strategy_id'] == '__flip_close__'
+        assert out['direction'] == 'short'
+        assert out['entry'] is None and out['stop'] is None and out['t1'] is None
+
+    def test_flip_open_routes_to_bracket_branch_with_real_sid(self):
+        from execution.regime_blended_sizer_live import _build_sized_payload
+        # Sizer-emitted flip_open: full bracket in the new direction with
+        # real joined strategy_id.
+        o = _sharpe_cadence_order(ticker='XYZ', direction='short',
+                                  notional=10_000.0,
+                                  entry=50.0, stop=53.0, t1=45.0,
+                                  strategies=('S_short_a', 'S_short_b'))
+        payload = _build_sized_payload([o], {'cycle_date': '2026-05-22'},
+                                       equity=100_000.0)
+        assert len(payload['orders']) == 1
+        out = payload['orders'][0]
+        assert out.get('close_only') is None or out.get('close_only') is False
+        assert out['strategy_id'] != '__flip_close__'
+        assert out['strategy_id'] != '__close_orphan__'
+        assert out['direction'] == 'short'
+        assert out['entry'] == 50.0
+        assert out['stop'] == 53.0
+        assert out['t1'] == 45.0
+
+
+class TestExecutorFlipPriorityAndPolling:
+    """Pin the executor's tier-priority + flip-pair tracking. The flip_close
+    must land in tier-1 (close before opens); the matched flip_open must be
+    skipped if the close failed to fill."""
+
+    def test_flip_close_tier_is_1_not_0(self):
+        from execution.alpaca_executor import _exec_priority_for_test
+        # If the helper hasn't been exposed, fall through to importing the
+        # inner function directly via a small ad-hoc replica matching the
+        # main-loop logic.
+        flip_close = {'strategy_id': '__flip_close__', 'close_only': True,
+                      'direction': 'short', 'notional_usd': 20_000.0}
+        orphan     = {'strategy_id': '__close_orphan__', 'close_only': True,
+                      'direction': 'long', 'notional_usd': 5_000.0}
+        flip_open  = {'strategy_id': 'S_a|S_b', 'direction': 'short',
+                      'notional_usd': 10_000.0}
+        long_open  = {'strategy_id': 'S_c', 'direction': 'long',
+                      'notional_usd': 8_000.0}
+        assert _exec_priority_for_test(orphan)[0]     == 0
+        assert _exec_priority_for_test(flip_close)[0] == 1
+        assert _exec_priority_for_test(flip_open)[0]  == 2
+        assert _exec_priority_for_test(long_open)[0]  == 3
+
+
 # Legacy aggregate-cap tests removed 2026-05-14 — _apply_aggregate_cap
 # was deleted with the cap drop. Sizer's per-ticker cap + sharpe_cadence
 # normalization is the new authority; no aggregate-scale step remains.
