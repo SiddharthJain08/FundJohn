@@ -758,7 +758,7 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
 
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
-    const [openRes, closedRes, tickerWinRes] = await Promise.all([
+    const [openRes, closedRes, alpacaPortfolio] = await Promise.all([
       dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
       dbQuery(`
         SELECT COUNT(*) AS closed_count,
@@ -768,42 +768,52 @@ app.get('/api/portfolio/summary', async (req, res) => {
                ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
         FROM signal_pnl WHERE status = 'closed'
       `),
-      // Per-ticker win rate (replaces per-signal). Aggregate every closed
-      // signal_pnl row by its execution_signals.ticker, weighting each
-      // signal's realized_pnl_pct by its position_size_pct so big positions
-      // dominate small ones — that matches the operator's "did this ticker
-      // make money for the book" framing. Strategy-level win rates live on
-      // the Strategies tab and intentionally don't double-count here.
-      dbQuery(`
-        WITH ticker_pnl AS (
-          SELECT es.ticker,
-                 SUM(sp.realized_pnl_pct
-                     * COALESCE(NULLIF(es.position_size_pct, 0), 1)) AS weighted_pnl,
-                 COUNT(*) AS n_closed_signals
-            FROM signal_pnl sp
-            JOIN execution_signals es ON es.id = sp.signal_id
-           WHERE sp.status = 'closed' AND sp.realized_pnl_pct IS NOT NULL
-           GROUP BY es.ticker
-        )
-        SELECT COUNT(*) AS ticker_count,
-               COUNT(*) FILTER (WHERE weighted_pnl > 0) AS ticker_wins
-          FROM ticker_pnl
-      `),
+      // Pull broker-truth daily P&L from Alpaca's account-portfolio
+      // endpoint. Alpaca doesn't expose a per-trade or per-ticker win
+      // rate, but they do publish the daily portfolio_value/profit_loss
+      // series — the standard "% of days the book was up" metric every
+      // broker dashboard surfaces. This is broker truth (matches the
+      // numbers Alpaca's own UI would show) and sidesteps the DB-based
+      // per-ticker computation which depends on signal_pnl marks
+      // refreshed only by the daily reconcile cron. 1A = 1-year window;
+      // long enough to be statistically meaningful, short enough to
+      // load fast.
+      runAlpaca(['account', 'portfolio', '--period', '1A', '--timeframe', '1D'],
+                { timeout: 10_000 }).catch(() => null),
     ]);
     const open         = openRes.rows[0];
     const closed       = closedRes.rows[0];
-    const tickerRow    = tickerWinRes.rows[0] || {};
     const closedCount  = parseInt(closed.closed_count) || 0;
-    const tickerCount  = parseInt(tickerRow.ticker_count) || 0;
-    const tickerWins   = parseInt(tickerRow.ticker_wins) || 0;
+
+    // Compute daily win rate from Alpaca portfolio history. Each entry
+    // in `profit_loss` is that day's P&L vs the prior day's close (or
+    // the base_value for the first entry). Days with profit_loss > 0
+    // are wins; days with == 0 (no marks / weekend artifact) excluded.
+    let dailyWins = 0;
+    let dailyTotal = 0;
+    if (alpacaPortfolio && alpacaPortfolio.ok && alpacaPortfolio.payload) {
+      const pl = alpacaPortfolio.payload.profit_loss;
+      if (Array.isArray(pl)) {
+        for (const v of pl) {
+          const n = Number(v);
+          if (!Number.isFinite(n) || n === 0) continue;
+          dailyTotal += 1;
+          if (n > 0) dailyWins += 1;
+        }
+      }
+    }
+
     res.json({
       open_count:        parseInt(open.open_count) || 0,
       closed_count:      closedCount,
-      ticker_count:      tickerCount,
-      ticker_wins:       tickerWins,
-      // win_rate is now per-ticker: count of distinct tickers whose
-      // size-weighted realized_pnl_pct sums positive / total tickers held.
-      win_rate:          tickerCount > 0 ? Math.round(tickerWins / tickerCount * 100) : null,
+      // Daily portfolio win rate from Alpaca account-portfolio (broker truth).
+      // Replaces the DB-derived per-ticker calc 2026-05-21 per operator
+      // request: prefer authoritative broker numbers over derived metrics
+      // when both are available.
+      win_rate:          dailyTotal > 0 ? Math.round(dailyWins / dailyTotal * 100) : null,
+      daily_wins:        dailyWins,
+      daily_total:       dailyTotal,
+      win_rate_source:   alpacaPortfolio && alpacaPortfolio.ok ? 'alpaca_1y_daily' : 'unavailable',
       avg_realized:      closed.avg_pnl,
       best_trade:        closed.best,
       worst_trade:       closed.worst,
@@ -3361,11 +3371,13 @@ body.rs-chat-locked{overflow:hidden}
 @media(max-width:920px){.pf-regime-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}}
 /* Squares-only layout (2026-05-21): each tile is a 1:1 square, area
-   encodes portfolio size_pct. Tiles wrap left-to-right; gaps are
-   expected and don't tile into a larger square. Largest first so the
-   heaviest positions anchor the top-left. */
-.pf-heatmap{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;padding:8px;background:var(--bg);align-items:flex-start;align-content:flex-start}
-.pf-heatmap.expanded{max-height:640px;overflow-y:auto}
+   encodes portfolio size_pct. Tiles are absolutely positioned by JS
+   (_packHeatmapShelves) using First-Fit Decreasing Height shelf
+   packing — small tiles slot into shelves opened by tall tiles so
+   the total vertical extent is minimized. Container height is set
+   to the last shelf's bottom edge so trailing whitespace stays tight. */
+.pf-heatmap{position:relative;padding:8px;background:var(--bg);overflow:hidden}
+.pf-heatmap.expanded{max-height:none;overflow-y:auto}
 /* Heatmap tile — option C: centered hero + dark footer strip. Hero is
  * ticker (big) + pct return / $ P&L (second line, centered as a pair).
  * Strip pins to bottom with size % left, days right. Size % is normalized
@@ -6171,16 +6183,18 @@ function renderPortfolioSummary(s, valCurve) {
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
   document.getElementById('pf-winrate').textContent = wr;
-  // Per-ticker framing: "X of Y tickers profitable" (strategy-level win
-  // rate is on the Strategies tab; this avoids double-counting tickers
-  // signaled by multiple strategies).
-  const tickerCount = s.ticker_count;
-  const tickerWins  = s.ticker_wins;
-  document.getElementById('pf-winrate-sub').textContent = tickerCount
-    ? tickerWins + ' of ' + tickerCount + ' tickers profitable'
-    : (s.closed_count
-        ? s.win_rate + '% of ' + s.closed_count + ' trades'  // legacy fallback
-        : 'No closed trades');
+  // Daily portfolio win rate from Alpaca (1Y daily series). Subtitle
+  // shows raw counts so the operator can sanity-check the percentage.
+  // Strategy win rates remain on the Strategies tab.
+  if (s.daily_total) {
+    document.getElementById('pf-winrate-sub').textContent =
+      s.daily_wins + ' of ' + s.daily_total + ' trading days up (1Y, Alpaca)';
+  } else if (s.closed_count) {
+    document.getElementById('pf-winrate-sub').textContent =
+      s.win_rate + '% across ' + s.closed_count + ' closed trades';
+  } else {
+    document.getElementById('pf-winrate-sub').textContent = 'No history';
+  }
 
   // Annualized Equity Realization % — Predicted | Lifetime.
   //   Lifetime  = annualization of the entire observed equity curve
@@ -6575,9 +6589,14 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
       const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      // data-side carries the computed side length for the client-side
+      // shelf packer (_packHeatmapShelves) to read after DOM insertion.
+      // Position becomes absolute via packer; until then tiles render
+      // off-screen so the user never sees the pre-pack stacked layout.
       return \`<div class="pf-tile \${isSel ? 'selected' : ''}"
                    data-ticker="\${g.ticker}"
-                   style="width:\${side}px;height:\${side}px;background:\${_pnlColor(pnl)};"
+                   data-side="\${side}"
+                   style="position:absolute;left:-9999px;top:0;width:\${side}px;height:\${side}px;background:\${_pnlColor(pnl)};"
                    title="\${tip}">
         <div class="pf-tile-hero">
           <div class="tk-symbol">\${g.ticker}</div>
@@ -6593,6 +6612,56 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       </div>\`;
     }).join('');
   return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${tilesHtml}</div>\`;
+}
+
+// Pack squares into shelves using First-Fit Decreasing Height (FFDH).
+// Each tile, in descending size order, is placed on the FIRST shelf
+// where it fits horizontally; otherwise a new shelf is opened at the
+// bottom. Since tiles are pre-sorted desc, the shelf height equals
+// the first (tallest) tile on that shelf — subsequent tiles fit
+// vertically without inflating the shelf. Total height = sum of
+// shelf heights + gaps. Minimizes vertical extent vs a naive flex-wrap
+// which leaves tall gaps under short tiles whenever a row wraps.
+function _packHeatmapShelves(container) {
+  if (!container) return;
+  const padding = parseFloat(getComputedStyle(container).paddingLeft) || 0;
+  const width   = (container.clientWidth || 0) - padding * 2;
+  if (width <= 0) return;
+  const gap     = 6;
+  const tileEls = Array.from(container.querySelectorAll('.pf-tile'));
+  if (!tileEls.length) { container.style.height = '0px'; return; }
+  const items = tileEls.map(el => ({ el, side: parseFloat(el.dataset.side) || 56 }));
+  items.sort((a, b) => b.side - a.side);
+  const shelves = [];   // {y, height, widthUsed}
+  for (const it of items) {
+    let placed = false;
+    for (const shelf of shelves) {
+      const need = (shelf.widthUsed > 0 ? gap : 0) + it.side;
+      if (shelf.widthUsed + need <= width) {
+        it.x = shelf.widthUsed + (shelf.widthUsed > 0 ? gap : 0);
+        it.y = shelf.y;
+        shelf.widthUsed += need;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      const y = shelves.length
+        ? shelves[shelves.length - 1].y + shelves[shelves.length - 1].height + gap
+        : 0;
+      shelves.push({ y, height: it.side, widthUsed: it.side });
+      it.x = 0;
+      it.y = y;
+    }
+  }
+  for (const it of items) {
+    it.el.style.left = (padding + it.x) + 'px';
+    it.el.style.top  = (padding + it.y) + 'px';
+  }
+  const total = shelves.length
+    ? shelves[shelves.length - 1].y + shelves[shelves.length - 1].height + padding * 2
+    : 0;
+  container.style.height = total + 'px';
 }
 
 // Browser-side mirror of src/channels/api/positions_grouped.js#groupByStrategy.
@@ -6985,6 +7054,25 @@ function renderPositions(rows) {
   const bars = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
 
   el.innerHTML = controls + heatmap + bars;
+
+  // Pack tiles via FFDH after DOM insertion so the actual container
+  // width is known. Re-pack on container resize so the layout stays
+  // tight at any viewport. The off-screen left:-9999px in the tile
+  // template ensures users never see a brief unpacked flicker.
+  const heatmapEl = el.querySelector('.pf-heatmap');
+  if (heatmapEl) {
+    _packHeatmapShelves(heatmapEl);
+    if (!heatmapEl._resizeObserver) {
+      let lastWidth = heatmapEl.clientWidth;
+      heatmapEl._resizeObserver = new ResizeObserver(() => {
+        if (heatmapEl.clientWidth !== lastWidth) {
+          lastWidth = heatmapEl.clientWidth;
+          _packHeatmapShelves(heatmapEl);
+        }
+      });
+      heatmapEl._resizeObserver.observe(heatmapEl);
+    }
+  }
 
   // Click handlers — wire up tiles + expand toggle. Tile click toggles
   // selection; clicking the already-selected tile collapses it. On open,
