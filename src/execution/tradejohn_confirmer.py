@@ -1,13 +1,19 @@
-"""TradeJohn confirmer — per-ticker approve/veto/scale LLM call.
+"""TradeJohn confirmer — per-ticker keep/cancel LLM call.
 
-Invoked ONLY in LOW_VOL/TRANSITIONING regimes after ticker_consolidator
-has produced per-ticker preliminary sizes. Outputs per-ticker
-{action: approve|veto|scale, multiplier, rationale}.
+Invoked by regime_blended_sizer's sharpe-cadence path on the
+new-exposure delta emissions (orphan closes and flip closes bypass
+the confirmer entirely — closes always execute). Outputs per-ticker
+{action: keep|cancel, rationale}.
+
+The legacy `scale` action was removed 2026-05-14 when the sizer
+became authoritative for size — the confirmer is news-veto-only.
+Legacy invocation from the LOW_VOL/TRANSITIONING consolidate path was
+deleted with the ticker_consolidator module 2026-05-21.
 
 Fail-OPEN behavior: any LLM failure (timeout, parse error, missing
-ticker in response) defaults the affected ticker to approve@multiplier=1.0
-so the formula-result rides through. The cycle continues; a :warning:
-is posted to #botjohn-log for operator awareness.
+ticker in response) defaults the affected ticker to keep so the
+formula-result rides through. The cycle continues; a :warning: is
+posted to #botjohn-log for operator awareness.
 
 Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §11
 """

@@ -32,10 +32,9 @@ from strategies.auto_backtest import run_backtest
 
 # dotenv load is deferred to _load_env() and called from main() ONLY.
 # Top-level load_dotenv pollutes the pytest os.environ across the whole
-# session, which caused the integration sizer tests to receive
-# OPENCLAW_SHARPE_CADENCE_SIZER=1 via inheritance and route through the
-# DB-reading sharpe_cadence path instead of the input-signal-only
-# independent path. See test-pollution bisect 2026-05-18.
+# session. (Historical note: this caused test-pollution before the legacy
+# OPENCLAW_SHARPE_CADENCE_SIZER gate was removed 2026-05-21; the deferred
+# pattern is preserved as a general best practice.)
 def _load_env() -> None:
     try:
         from dotenv import load_dotenv

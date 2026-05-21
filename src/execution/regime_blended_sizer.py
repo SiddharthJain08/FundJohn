@@ -1,36 +1,25 @@
-"""Regime-blended sizer: orchestrator + mode dispatcher.
+"""Regime-blended sizer.
 
-Pipeline orchestrator's `trade` step calls this. Invoked by
-regime_blended_sizer_live for production submission.
+Pipeline orchestrator's `trade` step calls this via regime_blended_sizer_live
+for production submission. Single path: sharpe_cadence — the per-(strategy,
+regime) daily_weight × direction aggregator with broker-position netting.
 
-Mode dispatch (binary, by regime state):
-  LOW_VOL, TRANSITIONING → consolidate path (formula + ticker_consolidator + tradejohn_confirmer)
-  HIGH_VOL, CRISIS       → independent path (mechanical: target_pct_nav × NAV × λ / entry)
+Legacy mode dispatch (consolidate / independent paths) and the
+OPENCLAW_SHARPE_CADENCE_SIZER feature flag were removed 2026-05-21 once
+sharpe_cadence had been LIVE since 2026-05-12 and validated through
+multiple production cycles. The historical paths and the ticker_consolidator
+module they used live in git history only.
 """
 from __future__ import annotations
 import logging
 import os
 from datetime import date
 
-from execution._kelly import enrich_with_kelly
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
-from execution.ticker_consolidator import consolidate
 from execution.tradejohn_confirmer import confirm as default_confirmer
 
 logger = logging.getLogger(__name__)
 
-CONSOLIDATE_REGIMES = ('LOW_VOL', 'TRANSITIONING')
-INDEPENDENT_REGIMES = ('HIGH_VOL', 'CRISIS')
-HIGH_VOL_FALLBACK_TARGET_PCT = 0.01  # 1% NAV when strategy missing from sizing recs
-
-
-def _select_mode(regime_state: str) -> str:
-    if regime_state in CONSOLIDATE_REGIMES:
-        return 'consolidate'
-    if regime_state in INDEPENDENT_REGIMES:
-        return 'independent'
-    logger.warning('regime_blended_sizer: unknown regime %r; defaulting to independent (safest)', regime_state)
-    return 'independent'
 
 def size_positions(
     signals: list[dict],
@@ -41,17 +30,26 @@ def size_positions(
     regime_params: dict,
     confirmer=None,
 ) -> list[dict]:
-    """Returns list of {ticker, direction, qty, notional_usd, bracket, contributions, source_mode}.
+    """Returns list of sized orders for the cycle.
 
-    Caller is responsible for writing orders to execution_signals,
-    consolidation_contributions to its table, and advancing strategy_state in DB.
+    Pipeline:
+      1. Cadence gate (filter_by_cadence) — drops signals from strategies
+         whose next_fire_date is still in the future. Bypassed for one
+         cycle when regime_liquidator sets regime:transition:fresh in Redis.
+      2. Sharpe-cadence path — pulls active-window signals from the DB,
+         aggregates ticker_w across contributing strategies, normalizes
+         to λ × NAV, delta-rebalances against current broker positions,
+         and routes flip cases through paired close/open emissions.
+
+    Caller (regime_blended_sizer_live) handles persistence to
+    execution_signals and the sized handoff downstream.
     """
     regime_state = regime['state']
 
-    # 1. Cadence gate (every path). When OPENCLAW_SHARPE_CADENCE_SIZER=1
-    # and the regime_liquidator just set regime:transition:fresh, the gate
-    # is bypassed for one cycle so every eligible strategy fires fresh.
-    force_all = _check_force_fire_flag() if os.environ.get('OPENCLAW_SHARPE_CADENCE_SIZER') == '1' else False
+    # Cadence gate. Bypassed for one cycle when the regime liquidator
+    # has set regime:transition:fresh in Redis (fresh post-transition
+    # cycle should run every eligible strategy without per-strategy gating).
+    force_all = _check_force_fire_flag()
     passed, skipped = filter_by_cadence(signals, strategy_state, run_date, force_all=force_all)
     if skipped:
         logger.info('regime_blended_sizer: cadence skipped %d signals', len(skipped))
@@ -61,28 +59,8 @@ def size_positions(
     if not passed:
         return []
 
-    # 2. Kelly enrichment — computes kelly_p from bracket geometry + p_t1.
-    passed = enrich_with_kelly(passed)
-
-    # 3. Path selection. New (flag-gated) path replaces the regime-routed
-    # consolidate/independent split: it uses the Sharpe×cadence weights
-    # engine from src/execution/strategy_weights.py for ALL regimes.
-    if os.environ.get('OPENCLAW_SHARPE_CADENCE_SIZER') == '1':
-        orders = _sharpe_cadence_path(passed, account_state, regime_state,
-                                      regime_params, confirmer or default_confirmer)
-    else:
-        mode = _select_mode(regime_state)
-        if mode == 'consolidate':
-            orders = _consolidate_path(passed, account_state, regime_params, confirmer or default_confirmer)
-        else:
-            orders = _independent_path(passed, account_state, regime_params)
-
-    # All position-level caps (legacy 25% aggregate-NAV cap, per-ticker 25%
-    # cap, $25 minimum, executor-side clamps) were removed 2026-05-14. The
-    # sharpe_cadence sizer's pure target_usd = ticker_w × (λ × NAV / Σ|ticker_w|)
-    # formulation is the sole deployment policy — high-conviction tickers
-    # (multi-strategy agreement) receive proportional allocation.
-    return orders
+    return _sharpe_cadence_path(passed, account_state, regime_state,
+                                regime_params, confirmer or default_confirmer)
 
 
 def _check_force_fire_flag() -> bool:
@@ -322,17 +300,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
-    # Effective leverage = global λ × per-regime liquidity_param. Mirrors
-    # how _consolidate_path / _independent_path apply liquidity_param —
-    # historically sharpe_cadence skipped it, so target gross was 2×NAV in
-    # TRANSITIONING instead of the operator-intended 1.5×. Operator flipped
-    # this 2026-05-16: prefer principled-target over execution-friction
-    # workaround, friction to be reduced separately.
+    # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
     # overnight rule, 50% initial margin). The 1.0 cap matches the DB CHECK
     # constraint on regime_sizer_params.liquidity_param so a misconfigured
-    # row can't slip past the sizer.
+    # row can't slip past the sizer. Historically sharpe_cadence skipped
+    # liquidity_param entirely; operator added it 2026-05-16 so per-regime
+    # target gross matches the documented intent (TRANSITIONING 1.5×, etc.).
     lam_global   = _load_lambda()
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
@@ -601,74 +576,3 @@ def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
         return {}
     usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
     return usable[0]
-
-def _consolidate_path(signals, account_state, params, confirmer):
-    regt_bp = float(account_state['regt_buying_power'])
-    proposals = consolidate(signals, regt_buying_power=regt_bp, params=params)
-    if not proposals:
-        return []
-
-    for p in proposals:
-        p.setdefault('context', {'news_headlines': [], '30d_veto_history_for_ticker': 0,
-                                  'sector': None, 'hv30d': None})
-
-    decisions = confirmer(proposals)
-
-    # tradejohn_confirmer.py contract changed 2026-05-14 (commit 14d369a):
-    # actions are now {keep, cancel} only — the scale path was dropped
-    # because the formula sizer owns sizing now, and the confirmer only
-    # decides whether to fire at all. Pre-2026-05-14 this checked 'veto'
-    # which the new confirmer NEVER emits; vetoed positions were silently
-    # passing through into orders[]. Safety fix: check 'cancel'.
-    orders = []
-    for p in proposals:
-        d = decisions.get(p['ticker'], {'action': 'keep'})
-        if d.get('action') == 'cancel':
-            continue
-        notional = p['preliminary_size_usd']
-        entry = p['bracket']['entry_price']
-        qty = (notional / entry) if entry > 0 else 0
-        orders.append({
-            'ticker': p['ticker'],
-            'direction': p['direction'],
-            'qty': qty,
-            'notional_usd': notional,
-            'bracket': p['bracket'],
-            'contributions': p['contributions'],
-            'source_mode': 'consolidate',
-            'tradejohn_decision': d,
-        })
-    return orders
-
-def _independent_path(signals, account_state, params):
-    nav = float(account_state['equity'])
-    lambda_regime = params['liquidity_param']
-    orders = []
-    for sig in signals:
-        target_pct = sig.get('target_pct_nav')
-        if target_pct is None:
-            logger.warning('regime_blended_sizer: missing_strategy_sizing for %s; falling back 1%% NAV',
-                           sig['strategy_id'])
-            target_pct = HIGH_VOL_FALLBACK_TARGET_PCT
-        if target_pct <= 0:
-            logger.info('regime_blended_sizer: opus_sized_to_zero %s; skipping', sig['strategy_id'])
-            continue
-
-        notional = target_pct * nav * lambda_regime
-        entry = sig['entry_price']
-        qty = (notional / entry) if entry > 0 else 0
-        orders.append({
-            'ticker': sig['ticker'],
-            'direction': sig['direction'],
-            'qty': qty,
-            'notional_usd': notional,
-            'bracket': {'entry_price': entry, 'stop_loss': sig['stop_loss'],
-                        'take_profit_1': sig['take_profit_1']},
-            'contributions': [{'contributing_signal_id': sig.get('signal_id'),
-                                'strategy_id': sig['strategy_id'],
-                                'signal_position_size_usd': notional,
-                                'attribution_weight': 1.0,
-                                'contributed_direction': sig['direction']}],
-            'source_mode': 'independent',
-        })
-    return orders

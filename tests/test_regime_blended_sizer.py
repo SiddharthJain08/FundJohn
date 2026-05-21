@@ -1,6 +1,20 @@
+"""Tests for regime_blended_sizer.size_positions wrapper.
+
+Legacy mode-dispatch tests (LOW_VOL consolidate / HIGH_VOL independent /
+_select_mode / tradejohn veto+scale / target_pct_nav fallback) were
+deleted 2026-05-21 along with the underlying _consolidate_path and
+_independent_path. Sharpe-cadence is now the sole sizer path; coverage
+for its wiring lives in tests/test_regime_blended_sizer_live.py
+(TestSharpeCadenceShape, TestDirectionFlipEmission,
+TestExecutorFlipPriorityAndPolling). Live behavior is exercised by the
+production cycle itself — _sharpe_cadence_path needs real DB rows from
+strategy_weights_by_regime + execution_signals which we don't mock here.
+
+What remains: the cadence-gate early-exit in size_positions, which is
+pure list manipulation and doesn't touch the DB.
+"""
 from __future__ import annotations
 
-import pytest
 import sys
 from datetime import date
 from pathlib import Path
@@ -9,140 +23,50 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
-from execution.regime_blended_sizer import size_positions, _select_mode  # noqa: E402
+from execution.regime_blended_sizer import size_positions  # noqa: E402
 
-def test_select_mode_low_vol_consolidate():
-    assert _select_mode('LOW_VOL') == 'consolidate'
-    assert _select_mode('TRANSITIONING') == 'consolidate'
 
-def test_select_mode_high_vol_independent():
-    assert _select_mode('HIGH_VOL') == 'independent'
-    assert _select_mode('CRISIS') == 'independent'
-
-def test_select_mode_unknown_defaults_independent():
-    # Defensive: unknown regime → safest mode (independent, no LLM, mechanical sizing).
-    assert _select_mode('UNKNOWN') == 'independent'
-
-def _sig(sid, ticker='AAPL', direction=1, kelly_p=0.4, memo_mult=1.0,
-         entry=100, stop=95, t1=110, target_pct_nav=0.05, p_t1=None):
-    # p_t1: probability of hitting t1. Derived from kelly_p if not given.
-    # With R=(t1-entry)/(entry-stop)=2, kelly=(3p-1)/2 → p=(2*kelly+1)/3.
-    if p_t1 is None:
-        p_t1 = (2.0 * kelly_p + 1.0) / 3.0
+def _sig(sid, ticker='AAPL', direction=1):
     return {
         'signal_id': hash((sid, ticker, direction)),
         'strategy_id': sid, 'ticker': ticker, 'direction': direction,
-        'kelly_p': kelly_p, 'strategy_memo_mult': memo_mult,
-        'target_pct_nav': target_pct_nav,
-        'entry_price': entry, 'stop_loss': stop,
-        'take_profit_1': t1,   # used by _independent_path and ticker_consolidator bracket
-        'target_1': t1,        # used by enrich_with_kelly (falls back from 't1')
-        'p_t1': p_t1,          # required by enrich_with_kelly to compute kelly_p
+        'entry_price': 100, 'stop_loss': 95,
+        'take_profit_1': 110, 'target_1': 110,
+        'p_t1': 0.6,
     }
 
-def _account(equity=100_000, regt_bp=400_000):
-    return {'equity': equity, 'regt_buying_power': regt_bp,
+
+def _account(equity=100_000):
+    return {'equity': equity, 'regt_buying_power': 2 * equity,
             'long_market_value': 0, 'cash': equity}
 
-def _params(regime):
-    base = {'min_signal_notional_usd': 100, 'position_circuit_breaker_pct': 0.02}
-    return {**base, 'liquidity_param':
-            {'LOW_VOL': 1.0, 'TRANSITIONING': 0.75, 'HIGH_VOL': 0.5, 'CRISIS': 0.25}[regime]}
 
-def test_low_vol_consolidate_calls_tradejohn_and_emits_per_ticker():
-    sigs = [_sig('S1', 'AAPL', 1, kelly_p=0.4),
-            _sig('S2', 'AAPL', 1, kelly_p=0.3)]
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None},
-             'S2': {'last_fire_date': None, 'next_fire_date': None}}
-    confirmer_called = []
-    def fake_confirmer(proposals, runner=None):
-        confirmer_called.append(proposals)
-        return {p['ticker']: {'action': 'keep', 'rationale': ''}
-                for p in proposals}
-    orders = size_positions(
-        signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('LOW_VOL'),
-        confirmer=fake_confirmer,
-    )
-    assert len(orders) == 1
-    assert orders[0]['ticker'] == 'AAPL'
-    assert len(confirmer_called) == 1
+def _params():
+    return {'liquidity_param': 1.0,
+            'min_signal_notional_usd': 100,
+            'position_circuit_breaker_pct': 0.02}
 
-def test_high_vol_independent_skips_tradejohn_uses_target_pct_nav():
-    sigs = [_sig('S1', 'AAPL', 1, target_pct_nav=0.05)]
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
-    orders = size_positions(
-        signals=sigs, account_state=_account(equity=100_000), regime={'state': 'HIGH_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('HIGH_VOL'),
-        confirmer=lambda p, runner=None: {},  # should not be called
-    )
-    assert len(orders) == 1
-    # qty = (target_pct_nav × NAV × λ) / entry = (0.05 × 100_000 × 0.5) / 100 = 25
-    assert orders[0]['qty'] == pytest.approx(25.0)
-
-def test_tradejohn_veto_zeroes_size():
-    """Per 2026-05-14 contract: confirmer action='cancel' suppresses the order."""
-    sigs = [_sig('S1', 'AAPL', 1, kelly_p=0.5)]
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
-    def vetoing(proposals, runner=None):
-        return {p['ticker']: {'action': 'cancel', 'rationale': 'earnings'}
-                for p in proposals}
-    orders = size_positions(
-        signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('LOW_VOL'), confirmer=vetoing,
-    )
-    assert orders == []
-
-def test_tradejohn_scale_applies_multiplier():
-    """Per 2026-05-14 contract: 'scale' is no longer a valid action.
-    The sizer is upstream and final; confirmer can only keep or cancel.
-    This test now verifies that the legacy 'scale' input (mapped to
-    'keep' by the confirmer's compat layer) does NOT modify notional."""
-    sigs = [_sig('S1', 'AAPL', 1, kelly_p=0.5, memo_mult=1.0)]
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
-    def keep_only(proposals, runner=None):
-        return {p['ticker']: {'action': 'keep', 'rationale': ''}
-                for p in proposals}
-    orders = size_positions(
-        signals=sigs, account_state=_account(regt_bp=400_000), regime={'state': 'LOW_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('LOW_VOL'), confirmer=keep_only,
-    )
-    # preliminary = 0.5 × 1.0 × 400_000 × 1.0 = 200_000; no scale applied.
-    assert orders[0]['notional_usd'] == pytest.approx(200_000.0)
 
 def test_cadence_pending_signal_skipped():
+    """Cadence gate: a signal from a strategy whose next_fire_date is in
+    the future returns an empty order list without invoking the
+    sharpe-cadence path or the confirmer."""
     sigs = [_sig('S1', 'AAPL', 1)]
     state = {'S1': {'last_fire_date': date(2026, 5, 11),
                     'next_fire_date': date(2026, 5, 14),
                     'avg_holding_days': 3.0, 'source': 'live_signal_pnl'}}
+    # Confirmer must NOT be called when cadence gate filters everything.
+    confirmer_calls = []
+
+    def fail_if_called(proposals, runner=None):
+        confirmer_calls.append(proposals)
+        return {}
+
     orders = size_positions(
         signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
         run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('LOW_VOL'),
-        confirmer=lambda p, runner=None: {},
+        regime_params=_params(),
+        confirmer=fail_if_called,
     )
     assert orders == []
-
-def test_high_vol_missing_target_pct_nav_falls_back_one_percent(caplog):
-    sig = _sig('S1', 'AAPL', 1)
-    sig.pop('target_pct_nav')  # simulate strategy missing from sizing recs
-    state = {'S1': {'last_fire_date': None, 'next_fire_date': None}}
-    orders = size_positions(
-        signals=[sig], account_state=_account(equity=100_000), regime={'state': 'HIGH_VOL'},
-        run_date=date(2026, 5, 12), strategy_state=state,
-        regime_params=_params('HIGH_VOL'),
-        confirmer=lambda p, runner=None: {},
-    )
-    # 1% NAV fallback × λ=0.5 / entry=100 = 5
-    assert orders[0]['qty'] == pytest.approx(5.0)
-    assert any('missing_strategy_sizing' in rec.message for rec in caplog.records)
-
-
-# Legacy aggregate-cap tests removed 2026-05-14 — the 25% available_NAV
-# aggregate cap was dropped per operator decision. Sizer policy is now
-# λ × NAV gross, per-ticker 25% cap, $25 minimum (sharpe_cadence) /
-# regt_bp × kelly × memo_mult (consolidate) — no extra aggregate scaler.
+    assert confirmer_calls == [], 'confirmer must not be invoked when all signals are cadence-skipped'
