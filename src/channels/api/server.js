@@ -6844,6 +6844,32 @@ function _packHeatmapShelves(container) {
     }
   }
 
+  // Right-compaction post-pass. Skyline-BL's "lowest y, leftmost x"
+  // placement can leave secondary tiles isolated within a wider column
+  // above them — e.g. WBD landing under APA's left edge while JBHT sits
+  // 27px to the right under CSCO. For each tile (processed right-to-left
+  // so the rightmost is settled before its leftward neighbor reads its
+  // position), find the nearest vertically-overlapping tile to its right
+  // and slide our tile rightward to gap distance from that neighbor.
+  // Tiles with no right neighbor on the same horizontal band stay put —
+  // we don't slide them to the wall because operator wants them anchored
+  // to whatever column above them placed them there.
+  const byXDesc = [...items].sort((a, b) => b.x - a.x);
+  for (const it of byXDesc) {
+    let nearestRight = Infinity;
+    for (const other of items) {
+      if (other === it) continue;
+      if (other.x < it.x + it.side + 0.5) continue;  // not strictly to the right
+      const vOverlap = !(other.y + other.side <= it.y || other.y >= it.y + it.side);
+      if (!vOverlap) continue;
+      if (other.x < nearestRight) nearestRight = other.x;
+    }
+    if (nearestRight < Infinity) {
+      const newX = nearestRight - gap - it.side;
+      if (newX > it.x) it.x = newX;
+    }
+  }
+
   for (const it of items) {
     it.el.style.left = (padding + it.x) + 'px';
     it.el.style.top  = (padding + it.y) + 'px';
