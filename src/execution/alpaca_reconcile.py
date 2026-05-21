@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import date, datetime
 from pathlib import Path
 
@@ -251,12 +252,19 @@ def cleanup_phantom_signals(conn, dry_run: bool, broker_tickers: set[str]) -> in
     return n_closed
 
 
-def reconcile(run_date: str, conn, dry_run: bool = False):
+def reconcile(run_date: str, conn, dry_run: bool = False,
+              poll_timeout_s: int = 30, poll_interval_s: int = 3):
     """Update alpaca_submissions rows for `run_date` with broker fill state.
 
     With dry_run=True: prints the would-be UPDATE statements and exits
     cleanly without touching the DB. Useful for development iteration
-    without polluting alpaca_submissions reconciled_at timestamps."""
+    without polluting alpaca_submissions reconciled_at timestamps.
+
+    `poll_timeout_s` controls how long to wait for orders still showing
+    as in-flight after the first pass. Ext-hours fills routinely lag the
+    activities API by 5-30 seconds; without polling, those rows would
+    stay broker_status=NULL until the NEXT reconcile run. Set to 0 to
+    disable polling entirely (legacy behavior)."""
     cur = conn.cursor()
 
     cur.execute("""
@@ -277,6 +285,29 @@ def reconcile(run_date: str, conn, dry_run: bool = False):
     n_filled = 0
     n_partial = 0
     n_rejected = 0
+    # Orders still in-flight after the first pass — we'll poll these
+    # before declaring them un-reconciled and leaving the row as submitted.
+    in_flight: list[tuple] = []
+
+    def _apply(sub_id_, ticker_, rec_):
+        nonlocal n_filled, n_partial
+        if dry_run:
+            log(f'  DRY: would mark sub={sub_id_} ({ticker_}) → {rec_["status"]} '
+                f'qty={rec_["qty"]} avg=${rec_["avg_price"]:.2f}')
+        else:
+            cur.execute("""
+                UPDATE alpaca_submissions
+                SET broker_status=%s,
+                    filled_qty=%s,
+                    filled_avg_price=%s,
+                    reconciled_at=NOW()
+                WHERE id=%s
+            """, (rec_['status'], rec_['qty'], rec_['avg_price'], sub_id_))
+        if rec_['status'] == 'filled':
+            n_filled += 1
+        else:
+            n_partial += 1
+
     for sub_id, alpaca_order_id, ticker, sub_qty in submissions:
         rec = by_oid.get(alpaca_order_id)
 
@@ -286,8 +317,8 @@ def reconcile(run_date: str, conn, dry_run: bool = False):
             # from "fill not propagated yet."
             order_rec = fetch_order_status(alpaca_order_id)
             if order_rec is None:
-                # Still in-flight or unfetchable — leave row as submitted.
-                log(f'  {ticker}: no fill activity, order in-flight — leaving as submitted')
+                # Still in-flight; defer to the poll pass below.
+                in_flight.append((sub_id, alpaca_order_id, ticker))
                 continue
             if order_rec['status'] == 'rejected':
                 if dry_run:
@@ -310,22 +341,42 @@ def reconcile(run_date: str, conn, dry_run: bool = False):
             if order_rec and order_rec['status'] == 'filled':
                 rec = order_rec  # upgrade to filled; don't downgrade
 
-        if dry_run:
-            log(f'  DRY: would mark sub={sub_id} ({ticker}) → {rec["status"]} '
-                f'qty={rec["qty"]} avg=${rec["avg_price"]:.2f}')
-        else:
-            cur.execute("""
-                UPDATE alpaca_submissions
-                SET broker_status=%s,
-                    filled_qty=%s,
-                    filled_avg_price=%s,
-                    reconciled_at=NOW()
-                WHERE id=%s
-            """, (rec['status'], rec['qty'], rec['avg_price'], sub_id))
-        if rec['status'] == 'filled':
-            n_filled += 1
-        else:
-            n_partial += 1
+        _apply(sub_id, ticker, rec)
+
+    # ── Poll-to-terminal pass for in-flight orders ──────────────────────────
+    if in_flight and poll_timeout_s > 0:
+        log(f'  polling {len(in_flight)} in-flight order(s) for up to {poll_timeout_s}s '
+            f'(interval={poll_interval_s}s) — ext-hours fills can lag activity API')
+        deadline = time.time() + poll_timeout_s
+        remaining = list(in_flight)
+        while remaining and time.time() < deadline:
+            time.sleep(poll_interval_s)
+            still_pending = []
+            for sub_id, oid, ticker in remaining:
+                order_rec = fetch_order_status(oid)
+                if order_rec is None:
+                    still_pending.append((sub_id, oid, ticker))
+                    continue
+                if order_rec['status'] == 'rejected':
+                    if dry_run:
+                        log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker (poll)')
+                    else:
+                        cur.execute("""
+                            UPDATE alpaca_submissions
+                            SET broker_status='rejected_by_broker',
+                                reconciled_at=NOW()
+                            WHERE id=%s
+                        """, (sub_id,))
+                    n_rejected += 1
+                else:
+                    log(f'  {ticker}: order terminal after poll → {order_rec["status"]}')
+                    _apply(sub_id, ticker, order_rec)
+            remaining = still_pending
+        for sub_id, oid, ticker in remaining:
+            log(f'  {ticker}: still in-flight after {poll_timeout_s}s poll — leaving as submitted')
+    elif in_flight:
+        for sub_id, oid, ticker in in_flight:
+            log(f'  {ticker}: no fill activity, order in-flight — leaving as submitted')
 
     if not dry_run:
         conn.commit()
@@ -340,6 +391,11 @@ def main():
     ap.add_argument('--date', default=str(date.today()))
     ap.add_argument('--dry-run', action='store_true',
                     help='Show what UPDATE statements would run without executing them.')
+    ap.add_argument('--poll-timeout-s', type=int, default=30,
+                    help='Seconds to poll in-flight orders before declaring them un-reconciled. '
+                         'Set to 0 to disable polling (legacy behavior).')
+    ap.add_argument('--poll-interval-s', type=int, default=3,
+                    help='Seconds between poll attempts for in-flight orders.')
     args = ap.parse_args()
 
     uri = os.environ.get('POSTGRES_URI', '')
@@ -350,7 +406,9 @@ def main():
     log(f'Reconciling {args.date}{" (DRY-RUN)" if args.dry_run else ""}')
     conn = psycopg2.connect(uri)
     try:
-        reconcile(args.date, conn, dry_run=args.dry_run)
+        reconcile(args.date, conn, dry_run=args.dry_run,
+                  poll_timeout_s=args.poll_timeout_s,
+                  poll_interval_s=args.poll_interval_s)
         # Phantom cleanup: stale 'open' execution_signals whose tickers the
         # broker no longer holds. Fail-open on broker fetch error (the
         # reconcile work above is the critical path).

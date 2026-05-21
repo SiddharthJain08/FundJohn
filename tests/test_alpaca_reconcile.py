@@ -194,9 +194,11 @@ class TestReconcile(unittest.TestCase):
         ])
         # Mock returns `[]` for BOTH calls (activity fetch + order-get fallback).
         # fetch_order_status sees a list (non-dict), returns None → leave-as-submitted.
+        # poll_timeout_s=0 disables the new poll pass so this test stays
+        # focused on the first-pass ambiguity contract.
         with patch('execution.alpaca_reconcile.subprocess.run',
                    return_value=_mock_proc(0, '[]', '')):
-            ar.reconcile('2026-04-28', conn)
+            ar.reconcile('2026-04-28', conn, poll_timeout_s=0)
         update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
         self.assertEqual(len(update_calls), 0,
                          'ambiguous unmatched submissions must not be updated; '
@@ -242,6 +244,103 @@ class TestReconcile(unittest.TestCase):
                    return_value=_mock_proc(1, '', 'authentication required')):
             with self.assertRaises(RuntimeError):
                 ar.reconcile('2026-04-28', conn)
+
+
+class TestReconcilePolling(unittest.TestCase):
+    """Fix 3 (2026-05-21): ext-hours fills routinely lag the activities
+    API by 5-30s. After the first pass leaves an order as in-flight, the
+    reconciler polls fetch_order_status every `poll_interval_s` until
+    terminal or timeout. Without this, broker_status stays NULL until the
+    NEXT cycle runs reconcile."""
+
+    def test_in_flight_then_filled_after_poll(self):
+        """First fetch_order_status returns None (in-flight); second returns
+        filled. Reconciler must upgrade the row to filled."""
+        conn = FakeConn(fetchall_rows=[
+            ('sub-uuid-W', 'broker-order-W', 'WBD', 1),
+        ])
+        # 1) activity list: empty
+        # 2) order get (first pass): still pending → CLI returns a non-dict shape so
+        #    fetch_order_status returns None → row goes to in_flight bucket
+        # 3) order get (poll pass): filled
+        filled_resp = json.dumps({
+            'id': 'broker-order-W', 'status': 'filled',
+            'filled_qty': '1', 'filled_avg_price': '27.15',
+        })
+        responses = [
+            _mock_proc(0, '[]', ''),          # activities
+            _mock_proc(0, '[]', ''),           # 1st order get → non-dict → None
+            _mock_proc(0, filled_resp, ''),    # poll → filled
+        ]
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   side_effect=responses), \
+             patch('execution.alpaca_reconcile.time.sleep'):
+            ar.reconcile('2026-05-21', conn,
+                         poll_timeout_s=10, poll_interval_s=1)
+
+        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
+        self.assertEqual(len(update_calls), 1,
+                         'poll-detected fill must produce an UPDATE')
+        sql, params = update_calls[0]
+        self.assertEqual(params[0], 'filled')
+        self.assertEqual(params[1], 1.0)
+        self.assertEqual(params[2], 27.15)
+        self.assertEqual(params[3], 'sub-uuid-W')
+
+    def test_in_flight_throughout_poll_stays_submitted(self):
+        """If the order stays in-flight for the entire poll window, the
+        row is left as submitted (legacy fail-open behavior)."""
+        conn = FakeConn(fetchall_rows=[
+            ('sub-uuid-X', 'broker-order-X', 'XYZ', 1),
+        ])
+        # All subprocess calls return `[]` → non-dict → None throughout.
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   return_value=_mock_proc(0, '[]', '')), \
+             patch('execution.alpaca_reconcile.time.sleep'):
+            ar.reconcile('2026-05-21', conn,
+                         poll_timeout_s=5, poll_interval_s=1)
+        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
+        self.assertEqual(len(update_calls), 0,
+                         'still-in-flight rows must be left as submitted')
+
+    def test_in_flight_then_rejected_after_poll(self):
+        """Order becomes terminal-rejected during the poll window → row
+        marked rejected_by_broker, no spurious "filled" write."""
+        conn = FakeConn(fetchall_rows=[
+            ('sub-uuid-R', 'broker-order-R', 'BAD', 1),
+        ])
+        rejected_resp = json.dumps({
+            'id': 'broker-order-R', 'status': 'rejected',
+            'filled_qty': '0', 'filled_avg_price': '0',
+        })
+        responses = [
+            _mock_proc(0, '[]', ''),          # activities
+            _mock_proc(0, '[]', ''),           # 1st order get → None
+            _mock_proc(0, rejected_resp, ''),  # poll → rejected
+        ]
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   side_effect=responses), \
+             patch('execution.alpaca_reconcile.time.sleep'):
+            ar.reconcile('2026-05-21', conn,
+                         poll_timeout_s=10, poll_interval_s=1)
+        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
+        self.assertEqual(len(update_calls), 1)
+        sql, _ = update_calls[0]
+        self.assertIn('rejected_by_broker', sql)
+
+    def test_poll_disabled_with_zero_timeout(self):
+        """poll_timeout_s=0 preserves legacy "no poll" behavior — in-flight
+        orders are immediately left as submitted with no time.sleep calls."""
+        conn = FakeConn(fetchall_rows=[
+            ('sub-uuid-Y', 'broker-order-Y', 'YYY', 1),
+        ])
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   return_value=_mock_proc(0, '[]', '')), \
+             patch('execution.alpaca_reconcile.time.sleep') as mock_sleep:
+            ar.reconcile('2026-05-21', conn, poll_timeout_s=0)
+        mock_sleep.assert_not_called()
+        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
+        self.assertEqual(len(update_calls), 0)
 
 
 if __name__ == '__main__':
