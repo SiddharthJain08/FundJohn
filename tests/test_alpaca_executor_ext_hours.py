@@ -354,5 +354,179 @@ class TestExecuteSingleSessions(unittest.TestCase):
         self.assertNotIn('--stop-loss', argv)
 
 
+class TestCloseOnlyOrderIdCapture(unittest.TestCase):
+    """Regression for the 2026-05-21 audit-drift bug: ext-hours close_only
+    submissions returned None for alpaca_order_id because the code read
+    `pay.get('order_id')` whereas `alpaca order submit` returns the ID
+    under key `id` (REST shape). This left the reconciler unable to match
+    the broker order back to the submission row even though the broker
+    actually filled."""
+
+    def setUp(self):
+        _reset_caches()
+
+    def test_ext_hours_close_only_returns_id_from_alpaca_payload(self):
+        sess = _mock_session()
+        asset_meta = json.dumps({
+            'symbol': 'STX', 'class': 'us_equity', 'tradable': True,
+            'shortable': True, 'easy_to_borrow': True,
+        })
+        quote_resp = json.dumps({'symbol': 'STX', 'quote': {'bp': 805.0, 'ap': 806.0}})
+        submit_resp = json.dumps({'id': 'cba12b85-real-broker-uuid', 'status': 'accepted'})
+        order = {
+            'ticker': 'STX', 'strategy_id': '__close_orphan__',
+            'direction': 'short',
+            'close_only': True,
+            'pct_nav': 0.0,
+            'notional_usd': 33000.0,
+            'current_usd': 33000.0,
+        }
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, submit_resp, ''),
+                   ]):
+            result = ae.execute_single(
+                sess, equity=100_000.0, order=order, run_date='2026-05-21',
+            )
+        self.assertEqual(result['status'], 'submitted')
+        self.assertEqual(result['order_id'], 'cba12b85-real-broker-uuid',
+                         f'order_id must come from response key `id`; '
+                         f'got {result.get("order_id")!r}')
+
+    def test_close_only_coid_distinct_from_open_coid(self):
+        """Regression for the 2026-05-21 22:58 redeploy crash: USO had an
+        open submitted at 22:24 with coid `AX..._USO_<strategy_combo>`,
+        and the TRANSITIONING redeploy tried to close USO using the same
+        combo (since the strategy IDs that *were* targeting USO are the
+        same set). Without the `_C` suffix the close attempt collided on
+        Alpaca's coid uniqueness check AND on the alpaca_submissions
+        DB unique constraint."""
+        sess = _mock_session()
+        asset_meta = json.dumps({
+            'symbol': 'USO', 'class': 'us_equity', 'tradable': True,
+            'shortable': True, 'easy_to_borrow': True,
+        })
+        quote_resp = json.dumps({'symbol': 'USO', 'quote': {'bp': 142.5, 'ap': 143.0}})
+        submit_resp = json.dumps({'id': 'open-uuid', 'status': 'accepted'})
+        common = {
+            'ticker': 'USO',
+            'strategy_id': 'S_barbell|S_cross_sectional|S_ptree',
+            'direction': 'long',
+            'pct_nav': 0.02,
+            'entry': 143.0, 'stop': 140.0, 't1': 150.0,
+        }
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, submit_resp, ''),
+                   ]):
+            open_res = ae.execute_single(sess, equity=100_000.0,
+                                          order=common, run_date='2026-05-21')
+
+        _reset_caches()
+
+        close_order = dict(common)
+        close_order['close_only'] = True
+        close_order['direction']  = 'short'
+        close_order['notional_usd'] = 5000.0
+        close_order['current_usd']  = 8300.0
+        close_resp = json.dumps({'id': 'close-uuid', 'status': 'accepted'})
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, close_resp, ''),
+                   ]):
+            close_res = ae.execute_single(sess, equity=100_000.0,
+                                           order=close_order, run_date='2026-05-21')
+
+        self.assertEqual(open_res['status'],  'submitted')
+        self.assertEqual(close_res['status'], 'submitted')
+        self.assertNotEqual(open_res['client_order_id'], close_res['client_order_id'],
+                            f'open + close for the same (date, ticker, strategy_combo) '
+                            f'must produce distinct client_order_ids; got '
+                            f'open={open_res["client_order_id"]!r} '
+                            f'close={close_res["client_order_id"]!r}')
+        # And specifically the close-coid must end in the close marker.
+        self.assertTrue(close_res['client_order_id'].endswith('_C'),
+                        f'close-only coid must end with the close-intent marker; '
+                        f'got {close_res["client_order_id"]!r}')
+
+    def test_close_only_coid_suffix_survives_truncation(self):
+        """The `_C` marker must survive the 128-char Alpaca cap, otherwise
+        a long strategy combo (joined IDs) silently strips the suffix and
+        the close coid collides with the matching open coid — exactly the
+        2026-05-21 USO failure mode."""
+        sess = _mock_session()
+        # Strategy combo deliberately long enough that the prefix + sid
+        # together exceed 128 chars without truncation.
+        long_sid = ('|'.join(
+            ['S_barbell_trend_horizon', 'S_cross_sectional_price_momentum',
+             'S_extreme_intraday_reversal_nasdaq', 'S_ptree_panel_tangency',
+             'S_some_other_strategy_with_a_long_name']))
+        asset_meta = json.dumps({
+            'symbol': 'USO', 'class': 'us_equity', 'tradable': True,
+            'shortable': True, 'easy_to_borrow': True,
+        })
+        quote_resp = json.dumps({'symbol': 'USO', 'quote': {'bp': 142.5, 'ap': 143.0}})
+        submit_resp = json.dumps({'id': 'cls-uuid', 'status': 'accepted'})
+        close_order = {
+            'ticker': 'USO',
+            'strategy_id': long_sid,
+            'direction': 'short',
+            'close_only': True,
+            'pct_nav': 0.0,
+            'notional_usd': 5000.0, 'current_usd': 8300.0,
+        }
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, submit_resp, ''),
+                   ]):
+            result = ae.execute_single(sess, equity=100_000.0,
+                                        order=close_order, run_date='2026-05-21')
+        coid = result['client_order_id']
+        self.assertLessEqual(len(coid), 128, f'coid exceeded 128 chars: {len(coid)}')
+        self.assertTrue(coid.endswith('_C'),
+                        f'close coid must end with _C even after truncation; got {coid!r}')
+
+    def test_ext_hours_close_only_returns_none_when_no_id(self):
+        """Defensive: if neither `id` nor `order_id` is present, return
+        None (not the literal '?') so reconcile's NOT NULL guard surfaces
+        the gap instead of silently linking to a bogus row."""
+        sess = _mock_session()
+        asset_meta = json.dumps({
+            'symbol': 'STX', 'class': 'us_equity', 'tradable': True,
+            'shortable': True, 'easy_to_borrow': True,
+        })
+        quote_resp = json.dumps({'symbol': 'STX', 'quote': {'bp': 805.0, 'ap': 806.0}})
+        submit_resp = json.dumps({'status': 'accepted'})  # no id at all
+        order = {
+            'ticker': 'STX', 'strategy_id': '__close_orphan__',
+            'direction': 'short', 'close_only': True,
+            'pct_nav': 0.0, 'notional_usd': 33000.0, 'current_usd': 33000.0,
+        }
+        with patch.object(ae, '_alpaca_session_kind', return_value='afterhours'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   side_effect=[
+                       _mock_proc(0, asset_meta, ''),
+                       _mock_proc(0, quote_resp, ''),
+                       _mock_proc(0, submit_resp, ''),
+                   ]):
+            result = ae.execute_single(
+                sess, equity=100_000.0, order=order, run_date='2026-05-21',
+            )
+        self.assertEqual(result['status'], 'submitted')
+        self.assertIsNone(result['order_id'])
+
+
 if __name__ == '__main__':
     unittest.main()

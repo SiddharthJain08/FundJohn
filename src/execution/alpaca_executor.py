@@ -742,11 +742,25 @@ def execute_single(sess, equity, order, run_date):
 
     # Compute coid up-front from the RAW ticker + strategy_id so SKIP rows
     # also get a unique key. Alpaca allows 128 chars on client_order_id.
+    # close_only orders get a distinguishing `_C` suffix so an open and a
+    # subsequent close for the same (date, ticker, strategy_combo) — common
+    # under an intraday regime redeploy that flips a position — don't
+    # collide on Alpaca's coid uniqueness check. Without this suffix, the
+    # CLI would reject with `client_order_id must be unique` AND the
+    # record_submission INSERT would crash on the alpaca_submissions
+    # coid unique-constraint (only the (run_date, strategy_id, ticker)
+    # constraint has ON CONFLICT handling).
     import re as _re
     _coid_ticker = (ticker or raw_ticker or 'UNKNOWN').replace(' ', '_')
     _coid_ticker = _re.sub(r'[^A-Za-z0-9._-]', '_', _coid_ticker)
     _sid_clean = _re.sub(r'[^A-Za-z0-9._-]', '_', order.get('strategy_id') or 'unknown')
-    coid = f'AX{run_date.replace("-","")}_{_coid_ticker}_{_sid_clean}'[:128]
+    _kind_tag = '_C' if order.get('close_only') else ''
+    # Apply truncation to the strategy-combo segment so the kind-tag suffix
+    # always lands at the end. Naively appending _C after a 128-char slice
+    # would truncate the marker off — exactly the 2026-05-21 USO crash.
+    _prefix  = f'AX{run_date.replace("-","")}_{_coid_ticker}_'
+    _budget  = max(1, 128 - len(_prefix) - len(_kind_tag))
+    coid     = _prefix + _sid_clean[:_budget] + _kind_tag
 
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',
@@ -789,7 +803,15 @@ def execute_single(sess, equity, order, run_date):
                 cli_args_oc += ['--percentage', str(pct_oc)]
             ok_co, pay_co, err_co = _run_alpaca_cli(cli_args_oc, timeout=15)
             if ok_co:
-                order_id = (pay_co or {}).get('id') or (pay_co or {}).get('order_id', '?')
+                # `alpaca position close` may return either a single order
+                # object ({id, qty, ...}) or a wrapper. Accept `id` first,
+                # `order_id` second; None when neither is present so the
+                # reconciler's NOT NULL guard flags the gap instead of
+                # silently writing the literal '?'.
+                order_id = (
+                    (pay_co or {}).get('id')
+                    or (pay_co or {}).get('order_id')
+                )
                 notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
                 qty_co_r = int((pay_co or {}).get('qty') or 0)
                 # Approximate entry from notional/qty for audit record (non-null required)
@@ -797,7 +819,7 @@ def execute_single(sess, equity, order, run_date):
                 kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
                 pct_tag = f' ({pct_oc}%)' if is_partial_reduce else ''
                 log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
-                    f'  order={order_id}')
+                    f'  order={order_id or "?"}')
                 return {'ticker': ticker, 'status': 'submitted',
                         'qty': qty_co_r, 'notional': notional_co, 'entry': entry_approx,
                         'order_id': order_id, 'http': 200,
@@ -828,11 +850,19 @@ def execute_single(sess, equity, order, run_date):
                 order_type='limit', extended_hours=True, limit_price=lp_co,
             )
             if ok_co:
+                # `alpaca order submit` returns the order under key `id` (REST shape).
+                # Accept both `id` and `order_id` defensively in case the CLI shape
+                # ever shifts; the missing-id case still falls back to '?' for the
+                # log line but writes None to the DB so reconcile can detect drift.
+                oid_co = (
+                    (pay_co or {}).get('id')
+                    or (pay_co or {}).get('order_id')
+                )
                 log(f'↩ {ticker} CLOSE x{qty_co} sh  LIMIT={lp_co:.2f}  notional=${qty_co*lp_co:,.0f}'
-                    f'  order={pay_co.get("order_id","?")}')
+                    f'  order={oid_co or "?"}')
                 return {'ticker': ticker, 'status': 'submitted', 'qty': qty_co,
                         'notional': qty_co * lp_co, 'entry': lp_co,
-                        'order_id': pay_co.get('order_id'), 'http': 200,
+                        'order_id': oid_co, 'http': 200,
                         'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
             log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only ext): {err_co.get("error","")}')
             return {'ticker': ticker, 'status': 'rejected',
