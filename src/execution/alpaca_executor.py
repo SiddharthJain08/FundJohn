@@ -713,17 +713,33 @@ def execute_single(sess, equity, order, run_date):
                     'reason': 'close_only: market closed',
                     'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
         if session_co == 'rth':
-            # RTH: `position close` flattens the exact broker position.
-            ok_co, pay_co, err_co = _run_alpaca_cli(
-                ['position', 'close', '--symbol-or-asset-id', ticker], timeout=15,
-            )
+            # RTH: `alpaca position close` flattens by default. For a partial
+            # REDUCE (ticker still in signals but target < |current|), the
+            # sizer emits close_only with notional_usd = |delta| < |current_usd|;
+            # we pass --percentage so only the delta portion is liquidated.
+            # Orphan closes (target_usd = 0 → |notional| == |current|) take
+            # the full-close branch (no --percentage flag).
+            notional_oc = abs(float(order.get('notional_usd') or 0))
+            current_oc  = abs(float(order.get('current_usd') or 0))
+            cli_args_oc = ['position', 'close', '--symbol-or-asset-id', ticker]
+            is_partial_reduce = (current_oc > 0 and notional_oc < current_oc * 0.999)
+            if is_partial_reduce:
+                pct_oc = round((notional_oc / current_oc) * 100.0, 2)
+                # Alpaca only liquidates whole units of percentage on stocks;
+                # cap at 99.99 so we never accidentally request 100% via
+                # floating-point ceiling, which would defeat the reduce intent.
+                pct_oc = max(0.01, min(99.99, pct_oc))
+                cli_args_oc += ['--percentage', str(pct_oc)]
+            ok_co, pay_co, err_co = _run_alpaca_cli(cli_args_oc, timeout=15)
             if ok_co:
                 order_id = (pay_co or {}).get('id') or (pay_co or {}).get('order_id', '?')
                 notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
                 qty_co_r = int((pay_co or {}).get('qty') or 0)
                 # Approximate entry from notional/qty for audit record (non-null required)
                 entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
-                log(f'↩ {ticker} CLOSE (position close)  notional≈${notional_co:,.0f}'
+                kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
+                pct_tag = f' ({pct_oc}%)' if is_partial_reduce else ''
+                log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
                     f'  order={order_id}')
                 return {'ticker': ticker, 'status': 'submitted',
                         'qty': qty_co_r, 'notional': notional_co, 'entry': entry_approx,
