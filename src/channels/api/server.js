@@ -3435,13 +3435,44 @@ body.rs-chat-locked{overflow:hidden}
 .pf-tile{position:relative;border:1px solid rgba(255,255,255,0.06);border-radius:6px;cursor:pointer;overflow:hidden;display:flex;flex-direction:column;min-width:0;color:#fff;transition:transform .12s,border-color .12s,box-shadow .12s;box-shadow:0 1px 3px rgba(0,0,0,0.35)}
 .pf-tile:hover{border-color:rgba(88,166,255,0.6);transform:translateY(-1px);z-index:3;box-shadow:0 6px 14px rgba(0,0,0,0.6)}
 .pf-tile.selected{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 6px 14px rgba(88,166,255,0.25);z-index:4}
-.pf-tile-hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px 6px 4px;text-align:center;gap:3px;min-height:0}
-.pf-tile-hero .tk-symbol{font-weight:800;font-size:14px;letter-spacing:.08em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-.pf-tile-hero .tk-row{display:flex;align-items:baseline;gap:8px;line-height:1.1}
-.pf-tile-hero .tk-pnl{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
-.pf-tile-hero .tk-dollar{font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;opacity:0.92;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
-.pf-tile-strip{display:flex;justify-content:space-between;align-items:center;padding:3px 8px;font-size:9.5px;font-weight:500;letter-spacing:.04em;background:rgba(0,0,0,0.32);border-top:1px solid rgba(255,255,255,0.07);color:rgba(255,255,255,0.85);flex-shrink:0}
+/* Tile interior — base styles (= medium tier defaults). Per-tier overrides
+   below tune font size, padding, and visibility so content fits cleanly
+   at every tile footprint from 56px (tiny) up to 168px (large). The
+   tier class (`pf-tile-large` / `pf-tile-medium` / `pf-tile-small` /
+   `pf-tile-tiny`) is set in _buildHeatmapHtml from the computed side. */
+.pf-tile-hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px;text-align:center;gap:2px;min-height:0}
+.pf-tile-hero .tk-symbol{font-weight:800;font-size:13px;letter-spacing:.04em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.pf-tile-hero .tk-row{display:flex;align-items:baseline;justify-content:center;gap:6px;line-height:1.1;max-width:100%}
+.pf-tile-hero .tk-pnl{font-size:11px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
+.pf-tile-hero .tk-dollar{font-size:10px;font-weight:600;font-variant-numeric:tabular-nums;opacity:0.92;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
+.pf-tile-strip{display:flex;justify-content:space-between;align-items:center;padding:2px 6px;font-size:9px;font-weight:500;letter-spacing:.04em;background:rgba(0,0,0,0.32);border-top:1px solid rgba(255,255,255,0.07);color:rgba(255,255,255,0.85);flex-shrink:0}
 .pf-tile-strip span{font-variant-numeric:tabular-nums}
+
+/* Large tier (side >= 140px) — generous spacing, prominent type. */
+.pf-tile.pf-tile-large .pf-tile-hero{padding:8px;gap:4px}
+.pf-tile.pf-tile-large .tk-symbol{font-size:18px;letter-spacing:.08em}
+.pf-tile.pf-tile-large .tk-row{gap:8px}
+.pf-tile.pf-tile-large .tk-pnl{font-size:15px}
+.pf-tile.pf-tile-large .tk-dollar{font-size:12px}
+.pf-tile.pf-tile-large .pf-tile-strip{font-size:10.5px;padding:3px 10px}
+
+/* Medium tier (100..139px) — uses the base sizes above. */
+
+/* Small tier (70..99px) — drop the dollar value (% + color carry direction),
+   tighten the strip. Fits ticker + pnl% + share% cleanly. */
+.pf-tile.pf-tile-small .pf-tile-hero{padding:3px;gap:1px}
+.pf-tile.pf-tile-small .tk-symbol{font-size:11px;letter-spacing:.02em}
+.pf-tile.pf-tile-small .tk-pnl{font-size:10px}
+.pf-tile.pf-tile-small .tk-dollar{display:none}
+.pf-tile.pf-tile-small .pf-tile-strip{font-size:8px;padding:1px 4px;letter-spacing:.02em}
+
+/* Tiny tier (<70px) — ticker + pnl% only, no strip. Color still encodes
+   direction so dropping the dollar + the days/share row stays readable. */
+.pf-tile.pf-tile-tiny .pf-tile-hero{padding:2px;gap:0}
+.pf-tile.pf-tile-tiny .tk-symbol{font-size:9.5px;letter-spacing:.01em;font-weight:700}
+.pf-tile.pf-tile-tiny .tk-pnl{font-size:8.5px;font-weight:700}
+.pf-tile.pf-tile-tiny .tk-dollar{display:none}
+.pf-tile.pf-tile-tiny .pf-tile-strip{display:none}
 
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
 .alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
@@ -6634,6 +6665,11 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
                             : ((nav && isFinite(nav) && g.contrib_pct != null)
                                 ? g.contrib_pct * nav : null);
       const side  = Math.max(MIN_SIDE, Math.min(MAX_SIDE, Math.round(Math.sqrt(share) * k)));
+      // Size tier drives per-element font/visibility via CSS rules:
+      // tiny (<70) shows ticker + pnl% only, small (70..99) drops $,
+      // medium (100..139) is the base layout, large (>=140) scales up.
+      // Cutoffs chosen so each tier's content fits without truncation.
+      const tier  = side >= 140 ? 'large' : side >= 100 ? 'medium' : side >= 70 ? 'small' : 'tiny';
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
       const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
@@ -6641,7 +6677,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       // shelf packer (_packHeatmapShelves) to read after DOM insertion.
       // Position becomes absolute via packer; until then tiles render
       // off-screen so the user never sees the pre-pack stacked layout.
-      return \`<div class="pf-tile \${isSel ? 'selected' : ''}"
+      return \`<div class="pf-tile pf-tile-\${tier} \${isSel ? 'selected' : ''}"
                    data-ticker="\${g.ticker}"
                    data-side="\${side}"
                    style="position:absolute;left:-9999px;top:0;width:\${side}px;height:\${side}px;background:\${_pnlColor(pnl)};"
