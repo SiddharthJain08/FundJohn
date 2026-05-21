@@ -47,6 +47,7 @@ from typing import Dict, List
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+from src.ingestion.alpaca_news import ingest_alpaca_news
 from src.ingestion.resolve_sentiment_universe import current_universe
 from src.ingestion.reddit_client import fetch_multiple_subreddits
 from src.ingestion.stocktwits_client import fetch_many_tickers
@@ -205,6 +206,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     news_rows = score_news_rows(news_rows_expanded)
     logger.info('sentiment: %d news rows scored', len(news_rows))
+
+    # Stage 6b: Alpaca News → ticker_sentiment_daily.alpaca_news_* (gate: ALPACA_NEWS_INGEST=1)
+    if not args.dry_run and os.environ.get('ALPACA_NEWS_INGEST') == '1':
+        try:
+            ingest_alpaca_news(symbols=universe)
+        except Exception as e:
+            logger.warning('alpaca_news non-fatal failure: %s', e)
 
     # Stage 7: merge
     merged = _merge_social_and_news(social_rows, news_rows)
