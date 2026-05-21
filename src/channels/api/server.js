@@ -310,12 +310,20 @@ app.get('/api/portfolio/positions', async (req, res) => {
         const avg  = parseFloat(p.avg_entry_price);
         const cur  = parseFloat(p.current_price);
         const plpc = parseFloat(p.unrealized_plpc);
+        // Capture the broker's actual position-lifetime $ P&L so the
+        // dashboard tile can display it directly (matching the % shown
+        // alongside). Without this field the client falls back to
+        // nav × contrib_pct, which is DB-derived from signal_pnl marks
+        // and disagrees with the live broker number whenever today's
+        // price has moved since the last reconcile.
+        const upl  = parseFloat(p.unrealized_pl);
         brokerPositions[p.symbol] = {
           qty:               Number.isFinite(qty)  ? qty  : null,
           market_value:      Number.isFinite(mv)   ? mv   : null,
           avg_entry_price:   Number.isFinite(avg)  ? avg  : null,
           current_price:     Number.isFinite(cur)  ? cur  : null,
           unrealized_plpc:   Number.isFinite(plpc) ? plpc : null,
+          unrealized_pl:     Number.isFinite(upl)  ? upl  : null,
           // size_pct = market_value / NAV, normalised to a fraction (0.05 = 5%).
           // Absolute value so shorts contribute positive size to the heatmap
           // tile area; direction (side) is the qty sign carrier.
@@ -750,30 +758,56 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
 
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
-    const [openRes, closedRes] = await Promise.all([
+    const [openRes, closedRes, tickerWinRes] = await Promise.all([
       dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
       dbQuery(`
         SELECT COUNT(*) AS closed_count,
-               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins,
                ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
                ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
                ROUND(MIN(realized_pnl_pct)::numeric, 4) AS worst,
                ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
         FROM signal_pnl WHERE status = 'closed'
       `),
+      // Per-ticker win rate (replaces per-signal). Aggregate every closed
+      // signal_pnl row by its execution_signals.ticker, weighting each
+      // signal's realized_pnl_pct by its position_size_pct so big positions
+      // dominate small ones — that matches the operator's "did this ticker
+      // make money for the book" framing. Strategy-level win rates live on
+      // the Strategies tab and intentionally don't double-count here.
+      dbQuery(`
+        WITH ticker_pnl AS (
+          SELECT es.ticker,
+                 SUM(sp.realized_pnl_pct
+                     * COALESCE(NULLIF(es.position_size_pct, 0), 1)) AS weighted_pnl,
+                 COUNT(*) AS n_closed_signals
+            FROM signal_pnl sp
+            JOIN execution_signals es ON es.id = sp.signal_id
+           WHERE sp.status = 'closed' AND sp.realized_pnl_pct IS NOT NULL
+           GROUP BY es.ticker
+        )
+        SELECT COUNT(*) AS ticker_count,
+               COUNT(*) FILTER (WHERE weighted_pnl > 0) AS ticker_wins
+          FROM ticker_pnl
+      `),
     ]);
-    const open        = openRes.rows[0];
-    const closed      = closedRes.rows[0];
-    const closedCount = parseInt(closed.closed_count) || 0;
-    const wins        = parseInt(closed.wins) || 0;
+    const open         = openRes.rows[0];
+    const closed       = closedRes.rows[0];
+    const tickerRow    = tickerWinRes.rows[0] || {};
+    const closedCount  = parseInt(closed.closed_count) || 0;
+    const tickerCount  = parseInt(tickerRow.ticker_count) || 0;
+    const tickerWins   = parseInt(tickerRow.ticker_wins) || 0;
     res.json({
-      open_count:   parseInt(open.open_count) || 0,
-      closed_count: closedCount,
-      win_rate:     closedCount > 0 ? Math.round(wins / closedCount * 100) : null,
-      avg_realized:   closed.avg_pnl,
-      best_trade:     closed.best,
-      worst_trade:    closed.worst,
-      avg_days_held:  closed.avg_days_held,
+      open_count:        parseInt(open.open_count) || 0,
+      closed_count:      closedCount,
+      ticker_count:      tickerCount,
+      ticker_wins:       tickerWins,
+      // win_rate is now per-ticker: count of distinct tickers whose
+      // size-weighted realized_pnl_pct sums positive / total tickers held.
+      win_rate:          tickerCount > 0 ? Math.round(tickerWins / tickerCount * 100) : null,
+      avg_realized:      closed.avg_pnl,
+      best_trade:        closed.best,
+      worst_trade:       closed.worst,
+      avg_days_held:     closed.avg_days_held,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -6121,8 +6155,16 @@ function renderPortfolioSummary(s, valCurve) {
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
   document.getElementById('pf-winrate').textContent = wr;
-  document.getElementById('pf-winrate-sub').textContent = s.closed_count
-    ? s.win_rate + '% of ' + s.closed_count + ' trades' : 'No closed trades';
+  // Per-ticker framing: "X of Y tickers profitable" (strategy-level win
+  // rate is on the Strategies tab; this avoids double-counting tickers
+  // signaled by multiple strategies).
+  const tickerCount = s.ticker_count;
+  const tickerWins  = s.ticker_wins;
+  document.getElementById('pf-winrate-sub').textContent = tickerCount
+    ? tickerWins + ' of ' + tickerCount + ' tickers profitable'
+    : (s.closed_count
+        ? s.win_rate + '% of ' + s.closed_count + ' trades'  // legacy fallback
+        : 'No closed trades');
 
   // Annualized Equity Realization % — Predicted | Lifetime.
   //   Lifetime  = annualization of the entire observed equity curve
@@ -6495,8 +6537,17 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
       const sharePct    = ((g.total_size_pct || 0) / sizeDenom) * 100;
       const rawNotional = (g.total_size_pct || 0) * 100;
-      const dollarPnl   = (nav && isFinite(nav) && g.contrib_pct != null)
-                            ? g.contrib_pct * nav : null;
+      // Prefer the broker's live unrealized_pl ($) over the DB-derived
+      // nav × contrib_pct fallback. The DB path uses signal_pnl marks
+      // (updated only by the daily reconcile cron) and the position_size_pct
+      // at signal time, so it diverges from broker truth as the day progresses
+      // AND can show the wrong sign on multi-strategy tickers where intent
+      // sizes don't sum to the actual broker share. unrealized_pl is the
+      // exact figure Alpaca reports for the consolidated position.
+      const dollarPnl   = (g.broker && Number.isFinite(g.broker.unrealized_pl))
+                            ? g.broker.unrealized_pl
+                            : ((nav && isFinite(nav) && g.contrib_pct != null)
+                                ? g.contrib_pct * nav : null);
       const widthPct = ((g.total_size_pct || 0) / rowSum) * 100;
       const isSel    = g.ticker === selectedTicker;
       const days     = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
