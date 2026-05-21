@@ -652,7 +652,7 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda_intraday'"),
       dbQuery(`SELECT regime_state, liquidity_param, min_signal_notional_usd,
                       min_signal_notional_pct, position_circuit_breaker_pct,
-                      updated_at
+                      min_cumulative_sharpe, updated_at
                FROM regime_sizer_params
                ORDER BY CASE regime_state
                           WHEN 'LOW_VOL' THEN 1
@@ -696,6 +696,10 @@ app.get('/api/config/regime-sizing', async (req, res) => {
         min_signal_notional_pct:        r.min_signal_notional_pct != null ? parseFloat(r.min_signal_notional_pct) : null,
         min_signal_notional_usd:        parseFloat(r.min_signal_notional_usd),
         position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
+        // Per-regime conviction floor for the sharpe-cadence sizer
+        // (migration 108). Bound to [1.0, 10.0] by table CHECK; the
+        // dashboard's Strategies-page sliders enforce the same range.
+        min_cumulative_sharpe:          r.min_cumulative_sharpe != null ? parseFloat(r.min_cumulative_sharpe) : 3.0,
         updated_at:                     r.updated_at,
       })),
     });
@@ -738,6 +742,15 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
       return res.status(400).json({ error: 'position_circuit_breaker_pct must be a number in [0.0, 0.5]' });
     }
     updates.position_circuit_breaker_pct = v;
+  }
+  if (body.min_cumulative_sharpe !== undefined) {
+    const v = parseFloat(body.min_cumulative_sharpe);
+    // Range matches the regime_sizer_params_min_cum_sharpe_check
+    // CHECK constraint and the Strategies-page slider's min/max.
+    if (!isFinite(v) || v < 1.0 || v > 10.0) {
+      return res.status(400).json({ error: 'min_cumulative_sharpe must be a number in [1.0, 10.0]' });
+    }
+    updates.min_cumulative_sharpe = v;
   }
   if (Object.keys(updates).length === 0) {
     return res.status(400).json({ error: 'no valid fields to update' });
@@ -3133,6 +3146,30 @@ body.rs-chat-locked{overflow:hidden}
 .pm-gate-outcome.buildable,.pm-gate-outcome.error{color:var(--yellow)}
 .pm-json{background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px 10px;font-family:'SF Mono',monospace;font-size:10px;max-height:260px;overflow:auto;color:var(--text);white-space:pre-wrap}
 #strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+/* Per-regime conviction-gate sliders on the Strategies page. Mirrors the
+   Portfolio-page leverage slider's visual language but stacked into a
+   4-card grid so each regime gets its own slider. Slider gradient
+   reverses the leverage one (red→green) because a HIGHER sharpe gate
+   = MORE restrictive = stronger conviction filter; the visual cue
+   suggests "raising the bar." */
+.st-sharpe-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:10px 4px 4px}
+.st-sharpe-card{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
+.st-sharpe-card.current-regime{border-color:var(--blue);box-shadow:0 0 0 1px rgba(88,166,255,0.35),0 4px 14px rgba(88,166,255,0.08)}
+.st-sharpe-card-head{display:flex;justify-content:space-between;align-items:baseline;gap:6px}
+.st-sharpe-card-regime{font-size:11px;font-weight:700;letter-spacing:.08em;color:var(--text);text-transform:uppercase}
+.st-sharpe-card-tag{font-size:9px;color:var(--blue);letter-spacing:.06em;text-transform:uppercase;font-weight:600;opacity:0;transition:opacity .12s}
+.st-sharpe-card.current-regime .st-sharpe-card-tag{opacity:1}
+.st-sharpe-card-value{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text);text-align:center;line-height:1;padding:4px 0 2px}
+.st-sharpe-card-slider{width:100%;height:8px;-webkit-appearance:none;appearance:none;background:linear-gradient(90deg,#f85149 0%,#d29922 35%,#2ea043 70%,#1f6f43 100%);border-radius:4px;outline:none;cursor:pointer;border:1px solid var(--border)}
+.st-sharpe-card-slider::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--bg);border:2px solid var(--blue);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,0.5)}
+.st-sharpe-card-slider::-webkit-slider-thumb:active{cursor:grabbing;background:var(--blue);box-shadow:0 0 0 4px rgba(88,166,255,0.18)}
+.st-sharpe-card-slider::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--bg);border:2px solid var(--blue);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,0.5)}
+.st-sharpe-card-range{display:flex;justify-content:space-between;font-size:9px;color:var(--dim);padding:0 2px;font-variant-numeric:tabular-nums;letter-spacing:.04em}
+.st-sharpe-card-status{font-size:9px;color:var(--muted);text-align:center;min-height:11px;line-height:1;letter-spacing:.04em}
+.st-sharpe-card-empty{grid-column:1/-1;text-align:center;color:var(--muted);font-size:11px;padding:18px}
+@media(max-width:920px){.st-sharpe-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.st-sharpe-grid{grid-template-columns:1fr}}
+
 .st-tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:4px}
 .st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
 .st-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px}
@@ -3458,21 +3495,27 @@ body.rs-chat-locked{overflow:hidden}
 
 /* Medium tier (100..139px) — uses the base sizes above. */
 
-/* Small tier (70..99px) — drop the dollar value (% + color carry direction),
-   tighten the strip. Fits ticker + pnl% + share% cleanly. */
+/* Small tier (70..99px) — drop the dollar (% + color carry direction)
+   and drop days held from the strip, but keep portfolio share% visible
+   (always-on per operator request: it's the primary "how big is this
+   bet" signal). Strip centers its single remaining value. */
 .pf-tile.pf-tile-small .pf-tile-hero{padding:3px;gap:1px}
 .pf-tile.pf-tile-small .tk-symbol{font-size:11px;letter-spacing:.02em}
 .pf-tile.pf-tile-small .tk-pnl{font-size:10px}
 .pf-tile.pf-tile-small .tk-dollar{display:none}
-.pf-tile.pf-tile-small .pf-tile-strip{font-size:8px;padding:1px 4px;letter-spacing:.02em}
+.pf-tile.pf-tile-small .pf-tile-strip{font-size:8px;padding:1px 4px;justify-content:center;letter-spacing:.02em}
+.pf-tile.pf-tile-small .pf-tile-strip .tk-days{display:none}
 
-/* Tiny tier (<70px) — ticker + pnl% only, no strip. Color still encodes
-   direction so dropping the dollar + the days/share row stays readable. */
-.pf-tile.pf-tile-tiny .pf-tile-hero{padding:2px;gap:0}
+/* Tiny tier (<70px) — ticker + pnl% in the hero, strip collapses to
+   just portfolio share% (always-on). Days held + dollar drop. Color
+   still encodes direction, so the remaining text reads cleanly even
+   at 56px square. */
+.pf-tile.pf-tile-tiny .pf-tile-hero{padding:2px 2px 0;gap:0}
 .pf-tile.pf-tile-tiny .tk-symbol{font-size:9.5px;letter-spacing:.01em;font-weight:700}
 .pf-tile.pf-tile-tiny .tk-pnl{font-size:8.5px;font-weight:700}
 .pf-tile.pf-tile-tiny .tk-dollar{display:none}
-.pf-tile.pf-tile-tiny .pf-tile-strip{display:none}
+.pf-tile.pf-tile-tiny .pf-tile-strip{font-size:7.5px;padding:0 3px;justify-content:center;letter-spacing:0;line-height:1.1}
+.pf-tile.pf-tile-tiny .pf-tile-strip .tk-days{display:none}
 
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
 .alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
@@ -3995,6 +4038,19 @@ body.rs-chat-locked{overflow:hidden}
         </thead>
         <tbody></tbody>
       </table>
+    </div>
+
+    <!-- Per-regime conviction-gate sliders (migration 108). Each card
+         binds to regime_sizer_params.min_cumulative_sharpe via debounced
+         PUT to /api/config/regime-sizing/:regime. Range 1..10 enforced
+         both by slider attr and DB CHECK constraint. -->
+    <div class="pf-section">
+      <div class="pf-section-header">
+        <span>🎯 Conviction Gates <span class="st-sub-label">min cumulative Sharpe per regime — drops tickers where the SIGNED sum of contributing strategies' Sharpe falls below the threshold</span></span>
+      </div>
+      <div class="st-sharpe-grid" id="st-sharpe-gates">
+        <div class="st-sharpe-card-empty">Loading conviction gates…</div>
+      </div>
     </div>
 
     <!-- Section 1: Active Stack (live + stale + waiting) -->
@@ -6690,8 +6746,8 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
           </div>
         </div>
         <div class="pf-tile-strip">
-          <span>\${sharePct.toFixed(1)}%</span>
-          <span>\${days}</span>
+          <span class="tk-share">\${sharePct.toFixed(1)}%</span>
+          <span class="tk-days">\${days}</span>
         </div>
       </div>\`;
     }).join('');
@@ -7338,6 +7394,87 @@ let _stActiveJobs = {};   // strategy_id → {job_id, phase, progress, payload}
 let _stLastFailures = {}; // strategy_id → {job_id, reason}  (persisted server-side; survives reload + restart)
 let _stDataUsage = null; // {parameters, strategies_total, categories_total}
 
+// Per-regime conviction-gate slider state. Debounced PUTs avoid spamming
+// the API while the operator drags; one in-flight PUT per regime is
+// enough since the server's UPDATE is idempotent on regime_state.
+const _sharpeGateDebounce = {};   // { LOW_VOL: timeoutId, ... }
+const _sharpeGateInflight = {};   // { LOW_VOL: bool }
+
+async function _loadSharpeGates() {
+  const host = document.getElementById('st-sharpe-gates');
+  if (!host) return;
+  let cfg;
+  try {
+    cfg = await fetch('/api/config/regime-sizing').then(r => r.json());
+  } catch (e) {
+    host.innerHTML = '<div class="st-sharpe-card-empty">Failed to load gate config</div>';
+    return;
+  }
+  const regimes = Array.isArray(cfg.regimes) ? cfg.regimes : [];
+  const current = (cfg.current_regime || '').toUpperCase();
+  if (!regimes.length) {
+    host.innerHTML = '<div class="st-sharpe-card-empty">No regime sizing rows in DB</div>';
+    return;
+  }
+  host.innerHTML = regimes.map(r => {
+    const v = (r.min_cumulative_sharpe != null && isFinite(r.min_cumulative_sharpe))
+      ? Number(r.min_cumulative_sharpe) : 3.0;
+    const tag = r.state === current ? '<span class="st-sharpe-card-tag">CURRENT</span>' : '';
+    const klass = 'st-sharpe-card' + (r.state === current ? ' current-regime' : '');
+    return `<div class="${klass}" data-regime="${r.state}">
+      <div class="st-sharpe-card-head">
+        <span class="st-sharpe-card-regime">${r.state}</span>
+        ${tag}
+      </div>
+      <div class="st-sharpe-card-value" id="st-sg-val-${r.state}">${v.toFixed(2)}</div>
+      <input type="range" class="st-sharpe-card-slider" id="st-sg-slider-${r.state}"
+             min="1" max="10" step="0.1" value="${v}" data-regime="${r.state}" />
+      <div class="st-sharpe-card-range"><span>1.0</span><span>10.0</span></div>
+      <div class="st-sharpe-card-status" id="st-sg-status-${r.state}"></div>
+    </div>`;
+  }).join('');
+  // Wire each slider — live label update on input, debounced PUT on
+  // change. 300ms is short enough to feel responsive without firing on
+  // every pixel of drag.
+  for (const r of regimes) {
+    const slider = document.getElementById('st-sg-slider-' + r.state);
+    const valEl  = document.getElementById('st-sg-val-' + r.state);
+    const statEl = document.getElementById('st-sg-status-' + r.state);
+    if (!slider || !valEl) continue;
+    slider.addEventListener('input', () => {
+      valEl.textContent = parseFloat(slider.value).toFixed(2);
+    });
+    slider.addEventListener('change', () => {
+      if (_sharpeGateDebounce[r.state]) clearTimeout(_sharpeGateDebounce[r.state]);
+      _sharpeGateDebounce[r.state] = setTimeout(() => _sharpeGatePut(r.state, parseFloat(slider.value), statEl), 300);
+    });
+  }
+}
+
+async function _sharpeGatePut(regime, value, statEl) {
+  if (_sharpeGateInflight[regime]) return;
+  _sharpeGateInflight[regime] = true;
+  if (statEl) statEl.textContent = 'saving…';
+  try {
+    const resp = await fetch('/api/config/regime-sizing/' + encodeURIComponent(regime), {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ min_cumulative_sharpe: value }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
+    } else if (statEl) {
+      statEl.textContent = '✓ saved · next cycle picks up ' + value.toFixed(2);
+      setTimeout(() => { if (statEl) statEl.textContent = ''; }, 4000);
+    }
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
+  } finally {
+    _sharpeGateInflight[regime] = false;
+  }
+}
+
 async function loadStrategies() {
   try {
     const [rows, jobs, failures, dataUsage, proposals, driftResp] = await Promise.all([
@@ -7348,6 +7485,9 @@ async function loadStrategies() {
       _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
     ]);
+    // Fire-and-forget — the gates section renders independently of the
+    // strategy list below. Errors are reflected inline in the section.
+    _loadSharpeGates();
     _rpRender(proposals?.proposals || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
     // edits Mastermind's weekly prompt — research-page-only entry).

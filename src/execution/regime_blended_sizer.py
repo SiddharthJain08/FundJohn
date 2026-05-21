@@ -116,25 +116,42 @@ def _load_lambda(default: float = 2.0) -> float:
         return default
 
 
-def _load_min_cumulative_sharpe(default: float = 3.0) -> float:
-    """Read min_cumulative_sharpe from pipeline_config; fall back to default.
+def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) -> float:
+    """Pick the conviction floor for the active regime.
 
     Used by _sharpe_cadence_path to drop tickers where the SIGNED sum of
     contributing strategies' effective_sharpe falls below this threshold.
     Naturally kills (a) low-conviction single-strategy bets and (b) tickers
     where opposing strategies nearly cancel out — the operator's
     'conflicting strategy information will cancel out' invariant.
+
+    Per-regime as of 2026-05-21 (migration 108) — stored on
+    regime_sizer_params.min_cumulative_sharpe, bound [1.0, 10.0] by the
+    table's CHECK constraint. The sizer reads the value from the
+    `params` dict already loaded for the active regime, so no extra DB
+    round-trip is needed. Falls back to the legacy
+    pipeline_config['min_cumulative_sharpe'] global if the per-regime
+    field is missing (e.g. brand-new DB before the migration runs),
+    then to `default` if that's also absent.
     """
+    if isinstance(params, dict):
+        v = params.get('min_cumulative_sharpe')
+        if v is not None:
+            try:
+                return max(1.0, min(10.0, float(v)))
+            except (TypeError, ValueError):
+                pass
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor() as cur:
                 cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_cumulative_sharpe'")
                 row = cur.fetchone()
-                v = float(row[0]) if row else default
-                return max(0.0, min(50.0, v))
+                if row is not None:
+                    return max(1.0, min(10.0, float(row[0])))
     except Exception:
-        return default
+        pass
+    return default
 
 
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
@@ -311,7 +328,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda()
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    min_cum_sharpe = _load_min_cumulative_sharpe()
+    min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
 
     # Fix A: aggregate across cadence-window, not today-only.
     active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
