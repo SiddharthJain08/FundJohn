@@ -205,12 +205,34 @@ class TestSharpeCadenceShape:
         assert sig['direction'] == 'short'
         assert sig['shares'] >= 1
 
-    def test_sharpe_cadence_missing_bracket_dropped(self):
-        """Orders with no entry/stop/t1 (orphan-close case) are skipped, not crashed."""
+    def test_sharpe_cadence_missing_bracket_emits_close_only(self):
+        """Orders with no entry/stop/t1 are NOT dropped — they're emitted as
+        close_only so the executor can act on them via `position close`.
+
+        Contract changed in ba2d4fe (orphan-close fix). Two upstream cases
+        produce a no-bracket order:
+          1. Orphan close — ticker in broker, absent from current signals.
+             Sizer sets strategy_id='__close_orphan__'.
+          2. Partial reduce / flip close — delta opposite to all contributing
+             signal directions, so `_select_bracket` returns {}. Sizer
+             preserves the real (or '__flip_close__') strategy_id.
+
+        Both must round-trip through _build_sized_payload as close_only=True
+        with strategy_id intact — the executor's tier-priority depends on
+        the strategy_id, and the close mechanism (`alpaca position close`
+        with optional --percentage) depends on close_only=True.
+        """
         from execution.regime_blended_sizer_live import _build_sized_payload
         o = _sharpe_cadence_order(entry=None, stop=None, t1=None)
         payload = _build_sized_payload([o], {'cycle_date': '2026-05-14'}, equity=100_000.0)
-        assert payload['orders'] == []  # silently dropped (logged to stderr)
+        assert len(payload['orders']) == 1, 'orphan-close must emit, not be dropped'
+        out = payload['orders'][0]
+        assert out['close_only'] is True
+        assert out['entry'] is None and out['stop'] is None and out['t1'] is None
+        # strategy_id passes through from sizer (here 'S_a' from the helper);
+        # the orphan/flip distinction is upstream in the sizer.
+        assert out['strategy_id'] == 'S_a'
+        assert out['ticker'] == 'AAPL'
 
 
 class TestDirectionFlipEmission:

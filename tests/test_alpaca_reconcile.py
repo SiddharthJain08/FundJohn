@@ -174,13 +174,53 @@ class TestReconcile(unittest.TestCase):
         self.assertEqual(update_calls[0][1][0], 'partial')
         self.assertEqual(update_calls[0][1][1], 4.0)
 
-    def test_unmatched_submission_marked_rejected(self):
+    def test_unmatched_submission_left_as_submitted_when_ambiguous(self):
+        """Post-ca3a589 contract: when no FILL activity is found AND the
+        order-status fallback is unfetchable (CLI failure, non-dict
+        response, still in-flight), the row is LEFT AS submitted rather
+        than aggressively marked rejected_by_broker.
+
+        Rationale: 2026-05-21 reconcile-lag incident showed that running
+        ~1s after order submission, only 32/52 FILL activities had
+        propagated. Two market-orders (APA, INTC) had no fill activity
+        and were wrongly flagged rejected, even though they were fully
+        filled at the broker. The new behavior gives ambiguous evidence
+        the benefit of the doubt — a subsequent reconcile pass (or the
+        operator's manual sweep) can re-evaluate once the broker has
+        caught up.
+        """
         conn = FakeConn(fetchall_rows=[
             ('sub-uuid-3', 'broker-order-rejected', 'TSLA', 5),
         ])
-        # No FILL activities returned
+        # Mock returns `[]` for BOTH calls (activity fetch + order-get fallback).
+        # fetch_order_status sees a list (non-dict), returns None → leave-as-submitted.
         with patch('execution.alpaca_reconcile.subprocess.run',
                    return_value=_mock_proc(0, '[]', '')):
+            ar.reconcile('2026-04-28', conn)
+        update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
+        self.assertEqual(len(update_calls), 0,
+                         'ambiguous unmatched submissions must not be updated; '
+                         'the row stays at status=submitted for the next reconcile pass')
+
+    def test_unmatched_submission_marked_rejected_when_broker_confirms(self):
+        """When the order-status fallback positively confirms a terminal
+        rejected/canceled/expired state, the row IS marked rejected_by_broker.
+        Distinct from the ambiguous case above: here we have evidence."""
+        conn = FakeConn(fetchall_rows=[
+            ('sub-uuid-3', 'broker-order-rejected', 'TSLA', 5),
+        ])
+        rejected_order_json = json.dumps({
+            'id': 'broker-order-rejected',
+            'status': 'rejected',
+            'filled_qty': '0',
+            'filled_avg_price': '0',
+        })
+        # 1st subprocess call: account activities → empty list.
+        # 2nd subprocess call: order get → rejected-status object.
+        responses = [_mock_proc(0, '[]', ''),
+                     _mock_proc(0, rejected_order_json, '')]
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   side_effect=responses):
             ar.reconcile('2026-04-28', conn)
         update_calls = [c for c in conn.cur.calls if 'UPDATE' in c[0]]
         self.assertEqual(len(update_calls), 1)

@@ -157,6 +157,13 @@ def fetch_order_status(order_id: str) -> dict | None:
         o = json.loads(proc.stdout)
     except json.JSONDecodeError:
         return None
+    # Defensive: `order get <id>` returns a single JSON object in production,
+    # but a mis-routed CLI call (or a test mock reusing the activities-list
+    # fixture) can return a list or other non-dict shape. Treat anything
+    # we can't interpret as "still in-flight" → caller leaves the row alone
+    # rather than aggressively marking rejected on ambiguous evidence.
+    if not isinstance(o, dict):
+        return None
     status = o.get('status', '')
     filled_qty = float(o.get('filled_qty') or 0)
     avg_price = float(o.get('filled_avg_price') or 0)

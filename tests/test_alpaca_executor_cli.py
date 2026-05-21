@@ -388,14 +388,40 @@ class TestInMarketHours(unittest.TestCase):
         self.assertEqual(argv, [ae.ALPACA_CLI, 'clock'])
 
     def test_in_market_hours_handles_closed(self):
+        """is_open=False with next_open=tomorrow → returns False.
+
+        _alpaca_session_kind() uses `datetime.now(ET)` for the cur_t
+        comparison, so the test must also pin `datetime.now` — otherwise
+        when this test runs during a real RTH window, _static_session
+        (the fallback branch) sees real cur_t in [09:30, 16:00) and
+        classifies as 'rth' regardless of the mocked clock payload.
+        """
+        from datetime import datetime as _dt
+        try:
+            from zoneinfo import ZoneInfo
+            et = ZoneInfo('America/New_York')
+        except Exception:
+            from datetime import timezone, timedelta
+            et = timezone(timedelta(hours=-4))
+        fixed_now_et = _dt(2026, 4, 28, 18, 0, tzinfo=et)  # Tue 18:00 ET — afterhours
         clock_json = json.dumps({
             'is_open':    False,
             'next_open':  '2026-04-29T09:30:00-04:00',
             'next_close': '2026-04-29T16:00:00-04:00',
             'timestamp':  '2026-04-28T18:00:00-04:00',
         })
+
+        # Subclass datetime so .now(tz) is fixed but every other classmethod
+        # (fromisoformat, astimezone, ...) inherits real behavior — the elif
+        # branch parses next_open via fromisoformat, which must stay functional.
+        class _FakeDT(_dt):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now_et if tz is None else fixed_now_et.astimezone(tz)
+
         with patch('execution.alpaca_executor.subprocess.run',
-                   return_value=_mock_proc(0, clock_json, '')):
+                   return_value=_mock_proc(0, clock_json, '')), \
+             patch('execution.alpaca_executor.datetime', _FakeDT):
             self.assertFalse(ae.in_market_hours())
 
     def test_in_market_hours_caches_60s(self):
