@@ -35,8 +35,8 @@ TASK_DIR = Path(f'workspaces/default/work/{TICKER}-diligence')
 DATA_DIR = TASK_DIR / 'data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-import yfinance as yf
 import fmp, yahoo, polygon
+sys.path.insert(0, str(Path('.').resolve()))
 
 manifest = {}
 errors   = []
@@ -246,53 +246,14 @@ except Exception as e:
 print(f'[tier-b] Fetching options chain...')
 options_summary = {}
 try:
-    tk   = yf.Ticker(TICKER)
-    exps = tk.options  # tuple of expiration date strings
-    if not exps:
-        raise ValueError('No options expirations found')
-
-    # Use nearest expiration (~30d if available, else first)
-    target_exp = exps[0]
-    for exp in exps:
-        import datetime
-        days = (datetime.date.fromisoformat(exp) - datetime.date.today()).days
-        if days >= 25:
-            target_exp = exp
-            break
-
-    chain = tk.option_chain(target_exp)
-    calls = chain.calls
-    puts  = chain.puts
-
-    # Current price from prices.parquet (already written in step 2)
-    prices_pq = DATA_DIR / 'prices.parquet'
-    prices_df = pd.read_parquet(prices_pq) if prices_pq.exists() else None
-    current   = float(prices_df['close'].iloc[-1]) if prices_df is not None else 0
-
-    # ATM IV from nearest 3 call strikes
-    if not calls.empty and 'strike' in calls.columns and 'impliedVolatility' in calls.columns:
-        calls = calls.copy()
-        calls['dist'] = (calls['strike'].astype(float) - current).abs()
-        atm  = calls.nsmallest(3, 'dist')
-        iv30 = float(atm['impliedVolatility'].mean()) * 100
-    else:
-        iv30 = 0
-
-    hv20     = float(prices_df['hv20'].iloc[-1]) if prices_df is not None and 'hv20' in prices_df.columns else 0
-    put_vol  = float(puts['volume'].fillna(0).sum())  if 'volume' in puts.columns  else 0
-    call_vol = float(calls['volume'].fillna(0).sum()) if 'volume' in calls.columns else 1
-
-    options_summary = {
-        'iv30':               round(iv30, 2),
-        'hv20':               round(hv20, 2),
-        'iv_rv_spread':       round(iv30 - hv20, 2),
-        'put_call_vol_ratio': round(put_vol / max(call_vol, 1), 3),
-        'expiration_used':    target_exp,
-        'n_calls':            len(calls),
-        'n_puts':             len(puts),
-    }
-    print(f'  options_summary.json — IV30={iv30:.1f} HV20={hv20:.1f} spread={iv30-hv20:+.1f}  calls={len(calls)} puts={len(puts)}')
-
+    # SP-1: yfinance options removed. Options data must come from Alpaca CLI or Polygon.
+    # Refactor to Alpaca CLI: `alpaca data option chain --underlying-symbol TICKER`
+    # or Polygon /v3/snapshot/options/{underlyingAsset}.
+    raise NotImplementedError(
+        'SP-1: yfinance options/history removed; refactor to Alpaca CLI + Polygon options chain'
+    )
+except NotImplementedError as e:
+    print(f'  options: {e} — writing empty')
 except Exception as e:
     print(f'  options: unavailable ({e}) — writing empty')
 

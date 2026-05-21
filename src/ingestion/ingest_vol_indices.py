@@ -41,7 +41,8 @@ from pathlib import Path
 
 import pandas as pd
 
-DATA_DIR = Path("/root/openclaw/data/master")
+ROOT = Path("/root/openclaw")
+DATA_DIR = ROOT / "data" / "master"
 OUT_PATH = DATA_DIR / "vol_indices.parquet"
 
 INDEX_TICKERS = {
@@ -50,20 +51,18 @@ INDEX_TICKERS = {
     'vix9d_close': '^VIX9D',
 }
 
+# Use cboe_vol_indices as the sole yfinance gateway for vol indices
+sys.path.insert(0, str(ROOT))
+from src.ingestion.cboe_vol_indices import _yf_download  # noqa: E402
+
 
 def yfinance_historical(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """Pull daily Close for a symbol from yfinance. Returns DataFrame with
-    columns ['date', 'close']. Empty DataFrame on failure."""
-    try:
-        import yfinance as yf
-    except ImportError as e:
-        print(f"  yfinance import failed: {e}", file=sys.stderr)
-        return pd.DataFrame(columns=['date', 'close'])
+    """Pull daily Close for a symbol via cboe_vol_indices._yf_download.
+    Returns DataFrame with columns ['date', 'close']. Empty DataFrame on failure."""
     try:
         # auto_adjust=False keeps Close as the raw closing value (matches
         # what FMP and the existing macro.parquet VIX rows record).
-        df = yf.download(symbol, start=start, end=end, progress=False,
-                         auto_adjust=False, threads=False)
+        df = _yf_download(symbol, period=None, start=start, end=end)
     except Exception as e:
         print(f"  yfinance download failed for {symbol}: {e}", file=sys.stderr)
         return pd.DataFrame(columns=['date', 'close'])

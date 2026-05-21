@@ -34,73 +34,96 @@ print(f'\n[market-state] Starting MARKET_STATE run — {TODAY}')
 
 print('[market-state] Step 1 — Fetching feature data...')
 
-import yfinance as yf
+sys.path.insert(0, str(Path('.').resolve()))
+# SP-1: yfinance is accessed ONLY through cboe_vol_indices (sole allowed importer).
+# HYG/LQD/SPY and RORO ETFs that lack an FMP path are either FMP-only or omitted.
+from src.ingestion.cboe_vol_indices import get_vix, get_vix3m  # noqa: E402
 
-def yf_close(symbol, period='1y'):
-    df = yf.download(symbol, period=period, interval='1d', auto_adjust=True, progress=False)
-    if df.empty:
-        raise ValueError(f'No data for {symbol}')
-    # Flatten MultiIndex columns (yfinance >= 0.2 returns ('Close', 'TICKER'))
+
+def _cboe_to_series(df, col_name):
+    """Flatten MultiIndex cboe_vol_indices DataFrame to named close series."""
+    if df is None or df.empty:
+        raise ValueError(f'Empty DataFrame for {col_name}')
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    col = symbol.replace('^','').replace('-','_').replace('=','').lower()
-    out = df[['Close']].rename(columns={'Close': col})
+    out = df[['Close']].rename(columns={'Close': col_name})
     out.index = pd.to_datetime(out.index).tz_localize(None)
     return out
 
+
+def _fmp_etf_close(fmp_mod, symbol, lookback, col_name):
+    """Fetch ETF price series from FMP, return Series indexed by date."""
+    raw = fmp_mod.get_historical_prices(symbol, limit=lookback)
+    if not raw:
+        raise ValueError(f'FMP returned no data for {symbol}')
+    df = pd.DataFrame(raw)[['date', 'close']].rename(columns={'close': col_name})
+    df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None)
+    return df.set_index('date').sort_index()
+
+
 try:
-    vix_df   = yf_close('^VIX')
-    vix3m_df = yf_close('^VIX3M')
-    hyg_df   = yf_close('HYG').rename(columns={'hyg':'hyg_price'})
-    lqd_df   = yf_close('LQD').rename(columns={'lqd':'lqd_price'})
+    vix_df   = _cboe_to_series(get_vix(period='1y'), 'vix')
+    vix3m_df = _cboe_to_series(get_vix3m(period='1y'), 'vix3m')
     print(f'  VIX: {vix_df.iloc[-1].values[0]:.2f}  VIX3M: {vix3m_df.iloc[-1].values[0]:.2f}')
 except Exception as e:
-    print(f'[ERROR] Core Yahoo fetch failed: {e}')
+    print(f'[ERROR] VIX/VIX3M fetch failed: {e}')
     sys.exit(1)
 
-# Put/call ratio — try multiple symbols, degrade gracefully if unavailable
+# Put/call ratio feature excluded: no spec-approved non-yfinance source.
 pcr_df = None
-for pcr_sym in ['^PCALL', '^PCE', '^VXST']:
-    try:
-        pcr_df = yf_close(pcr_sym).rename(columns={pcr_sym.replace('^','').lower(): 'put_call'})
-        print(f'  Put/call ratio: {pcr_sym} ✓')
-        break
-    except Exception:
-        continue
-if pcr_df is None:
-    print('  Put/call ratio: unavailable — feature excluded')
+print('  Put/call ratio: unavailable — feature excluded (SP-1: no approved source)')
 
-# SPY via FMP (has get_historical_prices)
+# SPY, HYG, LQD — FMP only.  If FMP fails, log + exit (no yfinance fallback per SP-1).
+import fmp  # noqa: E402 (already sys.path'd via TOOLS_DIR above)
 try:
-    import fmp
     spy_raw = fmp.get_historical_prices('SPY', limit=LOOKBACK)
     spx_df  = pd.DataFrame(spy_raw)[['date','close']].rename(columns={'close':'spx'})
     spx_df['date'] = pd.to_datetime(spx_df['date']).dt.tz_localize(None)
     spx_df = spx_df.set_index('date').sort_index()
     print(f'  SPY: {spx_df.iloc[-1].values[0]:.2f}  ({len(spx_df)} bars)')
 except Exception as e:
-    print(f'[WARN] FMP SPY fallback to yfinance: {e}')
-    spx_df = yf_close('SPY', period='2y').rename(columns={'spy':'spx'})
+    print(f'[ERROR] FMP SPY fetch failed — no yfinance fallback (SP-1): {e}')
+    sys.exit(1)
 
-# Align on common dates
+try:
+    hyg_df = _fmp_etf_close(fmp, 'HYG', LOOKBACK, 'hyg_price')
+    print(f'  HYG: {hyg_df.iloc[-1].values[0]:.2f}  ({len(hyg_df)} bars)')
+except Exception as e:
+    print(f'[WARN] FMP HYG fetch failed — skipping HYG/LQD spread feature (SP-1): {e}')
+    hyg_df = None
+
+try:
+    lqd_df = _fmp_etf_close(fmp, 'LQD', LOOKBACK, 'lqd_price')
+    print(f'  LQD: {lqd_df.iloc[-1].values[0]:.2f}  ({len(lqd_df)} bars)')
+except Exception as e:
+    print(f'[WARN] FMP LQD fetch failed — skipping HYG/LQD spread feature (SP-1): {e}')
+    lqd_df = None
+
+# Align on common dates (HYG/LQD are optional — FMP may not cover them)
 base = (vix_df
     .join(vix3m_df, how='inner')
-    .join(hyg_df,   how='inner')
-    .join(lqd_df,   how='inner')
     .join(spx_df,   how='inner')
 )
+if hyg_df is not None:
+    base = base.join(hyg_df, how='left')
+if lqd_df is not None:
+    base = base.join(lqd_df, how='left')
 if pcr_df is not None:
     base = base.join(pcr_df, how='inner')
 
-features = base.dropna().tail(LOOKBACK)
+features = base.dropna(subset=['vix', 'vix3m', 'spx']).tail(LOOKBACK)
 
 features['vix_5d_chg']     = features['vix'].diff(5)
 features['vix_term_slope'] = features['vix3m'] / features['vix']
 features['spx_rv_20d']     = features['spx'].pct_change().rolling(20).std() * np.sqrt(252) * 100
-features['hy_ig_spread']   = (features['hyg_price'].pct_change() - features['lqd_price'].pct_change()).rolling(5).mean() * -100
 features['spx_5d_return']  = features['spx'].pct_change(5)
 
-FEATURE_COLS = ['vix','vix_5d_chg','vix_term_slope','spx_rv_20d','hy_ig_spread','spx_5d_return']
+FEATURE_COLS = ['vix','vix_5d_chg','vix_term_slope','spx_rv_20d','spx_5d_return']
+if 'hyg_price' in features.columns and 'lqd_price' in features.columns:
+    features['hy_ig_spread'] = (features['hyg_price'].pct_change() - features['lqd_price'].pct_change()).rolling(5).mean() * -100
+    FEATURE_COLS.append('hy_ig_spread')
+else:
+    print('  [WARN] HYG/LQD unavailable — hy_ig_spread feature excluded')
 if pcr_df is not None and 'put_call' in features.columns:
     features['put_call_5d_ma'] = features['put_call'].rolling(5).mean()
     FEATURE_COLS.append('put_call_5d_ma')
@@ -191,23 +214,38 @@ def z5(series):
     std = s.pct_change(5).std()
     return float(ret / std) if std > 0 else 0.0
 
-tlt = yf_close('TLT', '2mo').values.flatten()
-hyg = features['hyg_price'].values
-lqd = features['lqd_price'].values
-btc = yf_close('BTC-USD', '2mo').values.flatten()
-iwm = yf_close('IWM', '2mo').values.flatten()
-jpy = yf_close('JPY=X', '2mo').values.flatten()
+# SP-1 RORO components: use FMP where possible; drop tickers with no spec-approved source.
+# TLT/IWM → FMP; BTC-USD/JPY=X → no FMP equivalent, excluded.
+# hyg/lqd pulled from features (already FMP-sourced above).
 spy = features['spx'].values
 
+def _fmp_roro_series(symbol, lookback=60):
+    """Return flattened close array for RORO calcs via FMP, or None on failure."""
+    try:
+        raw = fmp.get_historical_prices(symbol, limit=lookback)
+        if not raw:
+            return None
+        df = pd.DataFrame(raw)[['date','close']].sort_values('date')
+        return df['close'].values
+    except Exception as e:
+        print(f'  [WARN] FMP {symbol} fetch failed — excluded from RORO: {e}')
+        return None
+
+tlt = _fmp_roro_series('TLT')
+iwm = _fmp_roro_series('IWM')
+
 roro_components = {
-    'spx_vs_tlt':  z5(spy)  - z5(tlt),
-    'hyg_vs_lqd':  z5(hyg)  - z5(lqd),
-    'jpy_inverse': -z5(jpy),
-    'btc_return':  z5(btc)  * 0.5,
     'vix_inverse': -z5(features['vix'].values),
-    'iwm_vs_spy':  z5(iwm)  - z5(spy),
 }
-roro_score = float(np.mean([np.clip(v, -2, 2) for v in roro_components.values()]) * 50)
+if tlt is not None:
+    roro_components['spx_vs_tlt'] = z5(spy) - z5(tlt)
+if iwm is not None:
+    roro_components['iwm_vs_spy'] = z5(iwm) - z5(spy)
+if 'hyg_price' in features.columns and 'lqd_price' in features.columns:
+    roro_components['hyg_vs_lqd'] = z5(features['hyg_price'].values) - z5(features['lqd_price'].values)
+# BTC-USD and JPY=X: no spec-approved non-yfinance source → excluded from RORO.
+
+roro_score = float(np.mean([np.clip(v, -2, 2) for v in roro_components.values()]) * 50) if roro_components else 0.0
 print(f'  RORO: {roro_score:+.1f}  components: { {k: round(v,2) for k,v in roro_components.items()} }')
 
 # ── Step 4: Stress Score ──────────────────────────────────────────────────────
@@ -219,13 +257,23 @@ today_features = dict(zip(FEATURE_COLS, X[-1]))
 def pct_rank(series, value):
     return float(np.mean(series <= value) * 100)
 
-stress_score = int(
-    pct_rank(features['vix'].values,           today_features['vix'])           * 0.25 +
-    pct_rank(features['vix_5d_chg'].values,    today_features['vix_5d_chg'])    * 0.15 +
-    (100 - pct_rank(features['vix_term_slope'].values, today_features['vix_term_slope'])) * 0.20 +
-    pct_rank(features['hy_ig_spread'].values,  today_features['hy_ig_spread'])  * 0.25 +
-    (100 - pct_rank(features['spx_5d_return'].values,  today_features['spx_5d_return']))  * 0.15
-)
+_has_hy_ig = 'hy_ig_spread' in features.columns and 'hy_ig_spread' in today_features
+if _has_hy_ig:
+    stress_score = int(
+        pct_rank(features['vix'].values,           today_features['vix'])           * 0.25 +
+        pct_rank(features['vix_5d_chg'].values,    today_features['vix_5d_chg'])    * 0.15 +
+        (100 - pct_rank(features['vix_term_slope'].values, today_features['vix_term_slope'])) * 0.20 +
+        pct_rank(features['hy_ig_spread'].values,  today_features['hy_ig_spread'])  * 0.25 +
+        (100 - pct_rank(features['spx_5d_return'].values,  today_features['spx_5d_return']))  * 0.15
+    )
+else:
+    # HYG/LQD unavailable: redistribute hy_ig_spread weight to VIX (0.25→0.50)
+    stress_score = int(
+        pct_rank(features['vix'].values,           today_features['vix'])           * 0.50 +
+        pct_rank(features['vix_5d_chg'].values,    today_features['vix_5d_chg'])    * 0.15 +
+        (100 - pct_rank(features['vix_term_slope'].values, today_features['vix_term_slope'])) * 0.20 +
+        (100 - pct_rank(features['spx_5d_return'].values,  today_features['spx_5d_return']))  * 0.15
+    )
 print(f'  Stress: {stress_score}/100')
 print(f'  Features: VIX={today_features["vix"]:.1f}, term_slope={today_features["vix_term_slope"]:.3f}, rv20={today_features["spx_rv_20d"]:.1f}%')
 

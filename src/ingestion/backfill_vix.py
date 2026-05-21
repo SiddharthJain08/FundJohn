@@ -27,12 +27,12 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
-import yfinance as yf
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.data import parquet_store as ps  # noqa: E402
+from src.ingestion.cboe_vol_indices import _yf_download  # noqa: E402
 
 # Default backfill range: prices.parquet starts 2016-04-10; live macro starts 2021-04-19.
 DEFAULT_FROM = '2016-04-10'
@@ -46,11 +46,11 @@ VOL_INDICES = [
 
 
 def _fetch_series(ticker: str, start: str, end_inclusive: str) -> pd.DataFrame:
-    """yfinance treats `end` as exclusive; bump by one day so the user-given
+    """Fetch Close series via cboe_vol_indices._yf_download.
+    yfinance treats `end` as exclusive; bump by one day so the user-given
     end date is included in the result."""
     end_excl = (date.fromisoformat(end_inclusive) + timedelta(days=1)).isoformat()
-    df = yf.download(ticker, start=start, end=end_excl,
-                     progress=False, auto_adjust=True)
+    df = _yf_download(ticker, period=None, start=start, end=end_excl, auto_adjust=True)
     if df is None or df.empty:
         return pd.DataFrame(columns=['date', 'value'])
     if isinstance(df.columns, pd.MultiIndex):
