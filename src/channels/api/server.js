@@ -758,66 +758,62 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
 
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
-    const [openRes, closedRes, alpacaPortfolio] = await Promise.all([
+    // Per-position win rate at close: each closed signal_pnl row counts as
+    // one "position taken" (a strategy opening a ticker). Win = realized
+    // pnl > 0 at close. Two windows: lifetime (all closed positions) and
+    // 30d (closed in last 30 days). Alpaca doesn't expose a per-position
+    // win rate — verified via /v2/account/* surface — so we compute from
+    // the signal_pnl ledger which IS our position-close-of-record.
+    const [openRes, statsRes, winLifeRes, win30dRes] = await Promise.all([
       dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
       dbQuery(`
-        SELECT COUNT(*) AS closed_count,
-               ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
+        SELECT ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
                ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
                ROUND(MIN(realized_pnl_pct)::numeric, 4) AS worst,
                ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
-        FROM signal_pnl WHERE status = 'closed'
+          FROM signal_pnl WHERE status = 'closed'
       `),
-      // Pull broker-truth daily P&L from Alpaca's account-portfolio
-      // endpoint. Alpaca doesn't expose a per-trade or per-ticker win
-      // rate, but they do publish the daily portfolio_value/profit_loss
-      // series — the standard "% of days the book was up" metric every
-      // broker dashboard surfaces. This is broker truth (matches the
-      // numbers Alpaca's own UI would show) and sidesteps the DB-based
-      // per-ticker computation which depends on signal_pnl marks
-      // refreshed only by the daily reconcile cron. 1A = 1-year window;
-      // long enough to be statistically meaningful, short enough to
-      // load fast.
-      runAlpaca(['account', 'portfolio', '--period', '1A', '--timeframe', '1D'],
-                { timeout: 10_000 }).catch(() => null),
+      dbQuery(`
+        SELECT COUNT(*) AS closed_count,
+               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
+          FROM signal_pnl
+         WHERE status = 'closed' AND realized_pnl_pct IS NOT NULL
+      `),
+      dbQuery(`
+        SELECT COUNT(*) AS closed_count,
+               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
+          FROM signal_pnl
+         WHERE status = 'closed'
+           AND realized_pnl_pct IS NOT NULL
+           AND closed_at >= CURRENT_DATE - INTERVAL '30 days'
+      `),
     ]);
-    const open         = openRes.rows[0];
-    const closed       = closedRes.rows[0];
-    const closedCount  = parseInt(closed.closed_count) || 0;
-
-    // Compute daily win rate from Alpaca portfolio history. Each entry
-    // in `profit_loss` is that day's P&L vs the prior day's close (or
-    // the base_value for the first entry). Days with profit_loss > 0
-    // are wins; days with == 0 (no marks / weekend artifact) excluded.
-    let dailyWins = 0;
-    let dailyTotal = 0;
-    if (alpacaPortfolio && alpacaPortfolio.ok && alpacaPortfolio.payload) {
-      const pl = alpacaPortfolio.payload.profit_loss;
-      if (Array.isArray(pl)) {
-        for (const v of pl) {
-          const n = Number(v);
-          if (!Number.isFinite(n) || n === 0) continue;
-          dailyTotal += 1;
-          if (n > 0) dailyWins += 1;
-        }
-      }
-    }
+    const open       = openRes.rows[0];
+    const stats      = statsRes.rows[0];
+    const life       = winLifeRes.rows[0];
+    const w30        = win30dRes.rows[0];
+    const closedLife = parseInt(life.closed_count) || 0;
+    const winsLife   = parseInt(life.wins) || 0;
+    const closed30   = parseInt(w30.closed_count) || 0;
+    const wins30     = parseInt(w30.wins) || 0;
 
     res.json({
-      open_count:        parseInt(open.open_count) || 0,
-      closed_count:      closedCount,
-      // Daily portfolio win rate from Alpaca account-portfolio (broker truth).
-      // Replaces the DB-derived per-ticker calc 2026-05-21 per operator
-      // request: prefer authoritative broker numbers over derived metrics
-      // when both are available.
-      win_rate:          dailyTotal > 0 ? Math.round(dailyWins / dailyTotal * 100) : null,
-      daily_wins:        dailyWins,
-      daily_total:       dailyTotal,
-      win_rate_source:   alpacaPortfolio && alpacaPortfolio.ok ? 'alpaca_1y_daily' : 'unavailable',
-      avg_realized:      closed.avg_pnl,
-      best_trade:        closed.best,
-      worst_trade:       closed.worst,
-      avg_days_held:     closed.avg_days_held,
+      open_count:           parseInt(open.open_count) || 0,
+      // Closed-position counts: lifetime + 30d window.
+      closed_count:         closedLife,             // legacy alias = lifetime
+      closed_count_30d:     closed30,
+      // Wins and rates split by window. win_rate retained as alias for
+      // the lifetime value so any older client that only reads `win_rate`
+      // still shows a sensible number.
+      wins_lifetime:        winsLife,
+      wins_30d:             wins30,
+      win_rate_lifetime:    closedLife > 0 ? Math.round(winsLife / closedLife * 100) : null,
+      win_rate_30d:         closed30   > 0 ? Math.round(wins30   / closed30   * 100) : null,
+      win_rate:             closedLife > 0 ? Math.round(winsLife / closedLife * 100) : null,
+      avg_realized:         stats.avg_pnl,
+      best_trade:           stats.best,
+      worst_trade:          stats.worst,
+      avg_days_held:        stats.avg_days_held,
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3847,7 +3843,7 @@ body.rs-chat-locked{overflow:hidden}
   <div class="pf-summary-row" id="pf-summary">
     <div class="pf-stat-card"><div class="pf-stat-label">Open Positions</div><div class="pf-stat-value" id="pf-open">—</div></div>
     <div class="pf-stat-card"><div class="pf-stat-label">Closed Trades</div><div class="pf-stat-value" id="pf-closed">—</div></div>
-    <div class="pf-stat-card"><div class="pf-stat-label">Win Rate</div><div class="pf-stat-value" id="pf-winrate">—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
+    <div class="pf-stat-card" title="Per-position win rate at close = positions with realized P&L > 0 / total positions closed. 30d on the left, lifetime on the right."><div class="pf-stat-label">Win Rate<br><span style="font-size:9px;color:var(--dim);font-weight:400">30d&nbsp;|&nbsp;Lifetime</span></div><div class="pf-stat-value" id="pf-winrate">—&nbsp;|&nbsp;—</div><div class="pf-stat-sub" id="pf-winrate-sub"></div></div>
     <div class="pf-stat-card"><div class="pf-stat-label" title="Annualized equity-curve return: (1 + period_return)^(252 / trading_days) - 1. Predicted = last 30 trading days only. Lifetime = since account inception. Identical until 30 trading days of equity history have accumulated.">Annualized Equity Realization %<br><span style="font-size:9px;color:var(--dim);font-weight:400">Predicted&nbsp;|&nbsp;Lifetime</span></div><div class="pf-stat-value" id="pf-avgpnl">—</div><div class="pf-stat-sub" id="pf-pnl-sub"></div></div>
   </div>
   <div class="pf-chart-wrap">
@@ -6179,21 +6175,19 @@ function renderAccountRow(a) {
 }
 
 function renderPortfolioSummary(s, valCurve) {
-  const wr  = s.win_rate != null ? s.win_rate + '%' : '—';
   document.getElementById('pf-open').textContent    = s.open_count ?? '—';
   document.getElementById('pf-closed').textContent  = s.closed_count ?? '—';
-  document.getElementById('pf-winrate').textContent = wr;
-  // Daily portfolio win rate from Alpaca (1Y daily series). Subtitle
-  // shows raw counts so the operator can sanity-check the percentage.
-  // Strategy win rates remain on the Strategies tab.
-  if (s.daily_total) {
+  // Win Rate card now shows BOTH windows: 30d on the left, lifetime on
+  // the right. Mirrors the Annualized Return card pattern. Subtitle
+  // shows lifetime denominator so the operator can sanity-check.
+  const wr30 = s.win_rate_30d       != null ? s.win_rate_30d + '%'      : '—';
+  const wrL  = s.win_rate_lifetime  != null ? s.win_rate_lifetime + '%' : '—';
+  document.getElementById('pf-winrate').textContent = wr30 + ' | ' + wrL;
+  if (s.closed_count) {
     document.getElementById('pf-winrate-sub').textContent =
-      s.daily_wins + ' of ' + s.daily_total + ' trading days up (1Y, Alpaca)';
-  } else if (s.closed_count) {
-    document.getElementById('pf-winrate-sub').textContent =
-      s.win_rate + '% across ' + s.closed_count + ' closed trades';
+      s.wins_lifetime + ' of ' + s.closed_count + ' positions profitable lifetime';
   } else {
-    document.getElementById('pf-winrate-sub').textContent = 'No history';
+    document.getElementById('pf-winrate-sub').textContent = 'No closed positions';
   }
 
   // Annualized Equity Realization % — Predicted | Lifetime.
@@ -6614,14 +6608,17 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${tilesHtml}</div>\`;
 }
 
-// Pack squares into shelves using First-Fit Decreasing Height (FFDH).
-// Each tile, in descending size order, is placed on the FIRST shelf
-// where it fits horizontally; otherwise a new shelf is opened at the
-// bottom. Since tiles are pre-sorted desc, the shelf height equals
-// the first (tallest) tile on that shelf — subsequent tiles fit
-// vertically without inflating the shelf. Total height = sum of
-// shelf heights + gaps. Minimizes vertical extent vs a naive flex-wrap
-// which leaves tall gaps under short tiles whenever a row wraps.
+// Pack squares using Skyline Bottom-Left placement. For each tile (in
+// descending side order) we find the (x, y) where the local skyline is
+// LOWEST — ties broken by leftmost x — and place it there. The skyline
+// is the per-x upper boundary of placed tiles, represented as a sorted
+// list of {x, w, y} segments tiling [0, container_width). This packs
+// tighter than FFDH because small tiles slot into vertical gaps below
+// medium tiles within an existing shelf instead of spilling to a fresh
+// shelf at the bottom. For the typical Active Positions panel (1 huge
+// tile + several medium + a long tail of small), this is the
+// difference between "1 row of giants + 1 mostly-empty row of dwarfs"
+// and "1 row that absorbs all dwarfs into the giants' shadow."
 function _packHeatmapShelves(container) {
   if (!container) return;
   const padding = parseFloat(getComputedStyle(container).paddingLeft) || 0;
@@ -6632,35 +6629,84 @@ function _packHeatmapShelves(container) {
   if (!tileEls.length) { container.style.height = '0px'; return; }
   const items = tileEls.map(el => ({ el, side: parseFloat(el.dataset.side) || 56 }));
   items.sort((a, b) => b.side - a.side);
-  const shelves = [];   // {y, height, widthUsed}
+
+  // Skyline = sorted segments covering [0, width). Each segment.y is the
+  // upper boundary at that x range. Gaps between placed tiles are
+  // absorbed into the segment's width via the +gap below.
+  let skyline = [{ x: 0, w: width, y: 0 }];
+
   for (const it of items) {
-    let placed = false;
-    for (const shelf of shelves) {
-      const need = (shelf.widthUsed > 0 ? gap : 0) + it.side;
-      if (shelf.widthUsed + need <= width) {
-        it.x = shelf.widthUsed + (shelf.widthUsed > 0 ? gap : 0);
-        it.y = shelf.y;
-        shelf.widthUsed += need;
-        placed = true;
-        break;
+    const s = it.side;
+    if (s > width) {
+      // Tile wider than container — stack at the topmost current y.
+      const maxY = skyline.reduce((m, seg) => Math.max(m, seg.y), 0);
+      it.x = 0; it.y = maxY;
+      skyline = [{ x: 0, w: width, y: maxY + s + gap }];
+      continue;
+    }
+    // Try each segment's left edge as a candidate anchor. For each, the
+    // placement's y = max segment.y over [x, x+s). Pick lowest y, ties
+    // broken by leftmost x.
+    let bestX = -1, bestY = Infinity;
+    for (let i = 0; i < skyline.length; i++) {
+      const x = skyline[i].x;
+      if (x + s > width) continue;
+      let maxY = 0;
+      for (let j = i; j < skyline.length; j++) {
+        if (skyline[j].x >= x + s) break;
+        if (skyline[j].y > maxY) maxY = skyline[j].y;
+      }
+      if (maxY < bestY || (maxY === bestY && (bestX < 0 || x < bestX))) {
+        bestY = maxY; bestX = x;
       }
     }
-    if (!placed) {
-      const y = shelves.length
-        ? shelves[shelves.length - 1].y + shelves[shelves.length - 1].height + gap
-        : 0;
-      shelves.push({ y, height: it.side, widthUsed: it.side });
-      it.x = 0;
-      it.y = y;
+    if (bestX < 0) {
+      // No valid placement (shouldn't happen since s ≤ width). Stack
+      // at the current ceiling so nothing overlaps.
+      const maxY = skyline.reduce((m, seg) => Math.max(m, seg.y), 0);
+      bestX = 0; bestY = maxY;
+    }
+    it.x = bestX; it.y = bestY;
+
+    // Update skyline: the placed tile + a trailing gap occupy
+    // [bestX, bestX + s + gap) horizontally, with upper boundary
+    // bestY + s + gap (reserves vertical room for a next tile below).
+    const x1  = bestX;
+    const x2  = Math.min(bestX + s + gap, width);
+    const newY = bestY + s + gap;
+    const next = [];
+    for (const seg of skyline) {
+      const segEnd = seg.x + seg.w;
+      if (segEnd <= x1 || seg.x >= x2) {
+        next.push(seg);
+      } else {
+        if (seg.x < x1)  next.push({ x: seg.x, w: x1 - seg.x,        y: seg.y });
+        if (segEnd > x2) next.push({ x: x2,    w: segEnd - x2,       y: seg.y });
+      }
+    }
+    next.push({ x: x1, w: x2 - x1, y: newY });
+    next.sort((a, b) => a.x - b.x);
+    // Coalesce adjacent same-y segments
+    skyline = [];
+    for (const seg of next) {
+      const last = skyline[skyline.length - 1];
+      if (last && last.y === seg.y && last.x + last.w === seg.x) {
+        last.w += seg.w;
+      } else {
+        skyline.push({ ...seg });
+      }
     }
   }
+
   for (const it of items) {
     it.el.style.left = (padding + it.x) + 'px';
     it.el.style.top  = (padding + it.y) + 'px';
   }
-  const total = shelves.length
-    ? shelves[shelves.length - 1].y + shelves[shelves.length - 1].height + padding * 2
-    : 0;
+  // Total content height = highest skyline y minus the trailing gap that
+  // the bottommost tile's update added (we don't need padding below the
+  // last tile beyond the container's own bottom padding).
+  const maxY = skyline.reduce((m, seg) => Math.max(m, seg.y), 0);
+  const total = Math.max(maxY - gap, 0) + padding * 2;
   container.style.height = total + 'px';
 }
 
