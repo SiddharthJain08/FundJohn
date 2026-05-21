@@ -1,0 +1,12 @@
+# .github/workflows/lint-provider-guards.yml
+name: provider-guards (SP-1)
+on: [push, pull_request]
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: python3 scripts/lint_provider_guards.py
+        continue-on-error: true   # informational until Task 17; flip to false after.
