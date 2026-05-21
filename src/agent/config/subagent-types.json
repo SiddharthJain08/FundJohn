@@ -13,11 +13,9 @@
       "components": [],
       "tools": [
         "fmp",
-        "polygon",
         "alpaca",
         "sec_edgar",
-        "tavily",
-        "yahoo"
+        "tavily"
       ],
       "iterationLimit": 40,
       "timeoutSeconds": 600,
