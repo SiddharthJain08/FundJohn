@@ -3438,8 +3438,8 @@ body.rs-chat-locked{overflow:hidden}
 /* Tile interior — base styles (= medium tier defaults). Per-tier overrides
    below tune font size, padding, and visibility so content fits cleanly
    at every tile footprint from 56px (tiny) up to 168px (large). The
-   tier class (`pf-tile-large` / `pf-tile-medium` / `pf-tile-small` /
-   `pf-tile-tiny`) is set in _buildHeatmapHtml from the computed side. */
+   tier class (pf-tile-large / pf-tile-medium / pf-tile-small /
+   pf-tile-tiny) is set in _buildHeatmapHtml from the computed side. */
 .pf-tile-hero{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4px;text-align:center;gap:2px;min-height:0}
 .pf-tile-hero .tk-symbol{font-weight:800;font-size:13px;letter-spacing:.04em;line-height:1.1;text-shadow:0 1px 2px rgba(0,0,0,0.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .pf-tile-hero .tk-row{display:flex;align-items:baseline;justify-content:center;gap:6px;line-height:1.1;max-width:100%}
