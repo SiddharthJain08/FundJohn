@@ -7421,17 +7421,17 @@ async function _loadSharpeGates() {
       ? Number(r.min_cumulative_sharpe) : 3.0;
     const tag = r.state === current ? '<span class="st-sharpe-card-tag">CURRENT</span>' : '';
     const klass = 'st-sharpe-card' + (r.state === current ? ' current-regime' : '');
-    return `<div class="${klass}" data-regime="${r.state}">
+    return \`<div class="\${klass}" data-regime="\${r.state}">
       <div class="st-sharpe-card-head">
-        <span class="st-sharpe-card-regime">${r.state}</span>
-        ${tag}
+        <span class="st-sharpe-card-regime">\${r.state}</span>
+        \${tag}
       </div>
-      <div class="st-sharpe-card-value" id="st-sg-val-${r.state}">${v.toFixed(2)}</div>
-      <input type="range" class="st-sharpe-card-slider" id="st-sg-slider-${r.state}"
-             min="1" max="10" step="0.1" value="${v}" data-regime="${r.state}" />
+      <div class="st-sharpe-card-value" id="st-sg-val-\${r.state}">\${v.toFixed(2)}</div>
+      <input type="range" class="st-sharpe-card-slider" id="st-sg-slider-\${r.state}"
+             min="1" max="10" step="0.1" value="\${v}" data-regime="\${r.state}" />
       <div class="st-sharpe-card-range"><span>1.0</span><span>10.0</span></div>
-      <div class="st-sharpe-card-status" id="st-sg-status-${r.state}"></div>
-    </div>`;
+      <div class="st-sharpe-card-status" id="st-sg-status-\${r.state}"></div>
+    </div>\`;
   }).join('');
   // Wire each slider — live label update on input, debounced PUT on
   // change. 300ms is short enough to feel responsive without firing on
