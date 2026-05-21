@@ -3148,10 +3148,11 @@ body.rs-chat-locked{overflow:hidden}
 #strategies-inner{max-width:1400px;margin:0 auto;padding:20px;display:flex;flex-direction:column;gap:12px}
 /* Per-regime conviction-gate sliders on the Strategies page. Mirrors the
    Portfolio-page leverage slider's visual language but stacked into a
-   4-card grid so each regime gets its own slider. Slider gradient
-   reverses the leverage one (red→green) because a HIGHER sharpe gate
-   = MORE restrictive = stronger conviction filter; the visual cue
-   suggests "raising the bar." */
+   4-card grid so each regime gets its own slider. Gradient anchors:
+   yellow at value 1 (loose, frequent trades) → green at value 3
+   (the operator-approved default) → blue at value ~6.5 (tightening)
+   → purple at value 10 (extreme conviction filter). The hue progression
+   reads as "broader → focused" rather than "safe → dangerous". */
 .st-sharpe-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;padding:10px 4px 4px}
 .st-sharpe-card{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:8px}
 .st-sharpe-card.current-regime{border-color:var(--blue);box-shadow:0 0 0 1px rgba(88,166,255,0.35),0 4px 14px rgba(88,166,255,0.08)}
@@ -3160,7 +3161,7 @@ body.rs-chat-locked{overflow:hidden}
 .st-sharpe-card-tag{font-size:9px;color:var(--blue);letter-spacing:.06em;text-transform:uppercase;font-weight:600;opacity:0;transition:opacity .12s}
 .st-sharpe-card.current-regime .st-sharpe-card-tag{opacity:1}
 .st-sharpe-card-value{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--text);text-align:center;line-height:1;padding:4px 0 2px}
-.st-sharpe-card-slider{width:100%;height:8px;-webkit-appearance:none;appearance:none;background:linear-gradient(90deg,#f85149 0%,#d29922 35%,#2ea043 70%,#1f6f43 100%);border-radius:4px;outline:none;cursor:pointer;border:1px solid var(--border)}
+.st-sharpe-card-slider{width:100%;height:8px;-webkit-appearance:none;appearance:none;background:linear-gradient(90deg,#facc15 0%,#2ea043 22.2%,#58a6ff 61%,#a371f7 100%);border-radius:4px;outline:none;cursor:pointer;border:1px solid var(--border)}
 .st-sharpe-card-slider::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--bg);border:2px solid var(--blue);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,0.5)}
 .st-sharpe-card-slider::-webkit-slider-thumb:active{cursor:grabbing;background:var(--blue);box-shadow:0 0 0 4px rgba(88,166,255,0.18)}
 .st-sharpe-card-slider::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--bg);border:2px solid var(--blue);cursor:grab;box-shadow:0 1px 4px rgba(0,0,0,0.5)}
@@ -4046,7 +4047,7 @@ body.rs-chat-locked{overflow:hidden}
          both by slider attr and DB CHECK constraint. -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎯 Conviction Gates <span class="st-sub-label">min cumulative Sharpe per regime — drops tickers where the SIGNED sum of contributing strategies' Sharpe falls below the threshold</span></span>
+        <span>🎯 Conviction Gates <span class="st-sub-label">min cumulative daily Sharpe per regime over strategies (High: fewer trades + greater empirical conviction)</span></span>
       </div>
       <div class="st-sharpe-grid" id="st-sharpe-gates">
         <div class="st-sharpe-card-empty">Loading conviction gates…</div>
