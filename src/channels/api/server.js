@@ -756,14 +756,69 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// 30-trading-day threshold derived from Alpaca's NYSE calendar.
+// Cached for 1h — the calendar only changes daily and an extra CLI
+// shell-out per /api/portfolio/summary request would double its latency.
+let _last30TdCache = null;   // { fetchedAt: number, date: 'YYYY-MM-DD' }
+const _LAST_30_TD_TTL_MS = 60 * 60 * 1000;
+
+async function _last30TradingDayThreshold() {
+  if (_last30TdCache && (Date.now() - _last30TdCache.fetchedAt) < _LAST_30_TD_TTL_MS) {
+    return _last30TdCache.date;
+  }
+  // 50 calendar days back covers ~34 trading days (5/7 weekdays × 50 = 35.7,
+  // minus typical holiday). Asking for slightly more than 30 means we
+  // always have a valid 30th-most-recent date even across holiday-heavy
+  // months like November/December.
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(today.getDate() - 50);
+  const fmt = d => d.toISOString().slice(0, 10);
+  const resp = await runAlpaca(
+    ['calendar', '--start', fmt(start), '--end', fmt(today)],
+    { timeout: 10_000 },
+  ).catch(() => null);
+  if (!resp || !resp.ok || !Array.isArray(resp.payload) || resp.payload.length === 0) {
+    return null;
+  }
+  const dates = resp.payload
+    .map(e => e && e.date)
+    .filter(Boolean)
+    .sort()      // ascending YYYY-MM-DD
+    .reverse();  // most recent first
+  const date = dates.length >= 30 ? dates[29] : dates[dates.length - 1];
+  _last30TdCache = { fetchedAt: Date.now(), date };
+  return date;
+}
+
 app.get('/api/portfolio/summary', async (req, res) => {
   try {
     // Per-position win rate at close: each closed signal_pnl row counts as
     // one "position taken" (a strategy opening a ticker). Win = realized
     // pnl > 0 at close. Two windows: lifetime (all closed positions) and
-    // 30d (closed in last 30 days). Alpaca doesn't expose a per-position
-    // win rate — verified via /v2/account/* surface — so we compute from
-    // the signal_pnl ledger which IS our position-close-of-record.
+    // 30 trading days (closed_at >= the 30th-most-recent NYSE session).
+    // Alpaca doesn't expose a per-position win rate — verified via
+    // /v2/account/* surface — so we compute from signal_pnl which IS our
+    // position-close-of-record.
+    //
+    // 30-trading-day threshold comes from `alpaca calendar` (cached 1h);
+    // if Alpaca is unreachable we fall back to a 42-calendar-day
+    // approximation (~30 trading days when weekends + 1 holiday are
+    // averaged out) and mark the source field so the operator sees it.
+    const threshold30Td = await _last30TradingDayThreshold();
+    const fallback30TdInterval = "CURRENT_DATE - INTERVAL '42 days'";
+    const win30dSql = threshold30Td
+      ? `SELECT COUNT(*) AS closed_count,
+                COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
+           FROM signal_pnl
+          WHERE status='closed' AND realized_pnl_pct IS NOT NULL
+            AND closed_at >= $1::date`
+      : `SELECT COUNT(*) AS closed_count,
+                COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
+           FROM signal_pnl
+          WHERE status='closed' AND realized_pnl_pct IS NOT NULL
+            AND closed_at >= ${fallback30TdInterval}`;
+    const win30dArgs = threshold30Td ? [threshold30Td] : [];
     const [openRes, statsRes, winLifeRes, win30dRes] = await Promise.all([
       dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
       dbQuery(`
@@ -779,14 +834,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
           FROM signal_pnl
          WHERE status = 'closed' AND realized_pnl_pct IS NOT NULL
       `),
-      dbQuery(`
-        SELECT COUNT(*) AS closed_count,
-               COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
-          FROM signal_pnl
-         WHERE status = 'closed'
-           AND realized_pnl_pct IS NOT NULL
-           AND closed_at >= CURRENT_DATE - INTERVAL '30 days'
-      `),
+      dbQuery(win30dSql, win30dArgs),
     ]);
     const open       = openRes.rows[0];
     const stats      = statsRes.rows[0];
@@ -799,7 +847,7 @@ app.get('/api/portfolio/summary', async (req, res) => {
 
     res.json({
       open_count:           parseInt(open.open_count) || 0,
-      // Closed-position counts: lifetime + 30d window.
+      // Closed-position counts: lifetime + 30-trading-day window.
       closed_count:         closedLife,             // legacy alias = lifetime
       closed_count_30d:     closed30,
       // Wins and rates split by window. win_rate retained as alias for
@@ -810,6 +858,12 @@ app.get('/api/portfolio/summary', async (req, res) => {
       win_rate_lifetime:    closedLife > 0 ? Math.round(winsLife / closedLife * 100) : null,
       win_rate_30d:         closed30   > 0 ? Math.round(wins30   / closed30   * 100) : null,
       win_rate:             closedLife > 0 ? Math.round(winsLife / closedLife * 100) : null,
+      // Surface the trading-day threshold + source so the operator can
+      // sanity-check the window. 'alpaca_calendar' = strict NYSE 30
+      // trading days; 'calendar_42d_fallback' = Alpaca CLI unreachable,
+      // approximated 30 trading days as 42 calendar days.
+      win_30d_threshold:    threshold30Td || null,
+      win_30d_source:       threshold30Td ? 'alpaca_calendar' : 'calendar_42d_fallback',
       avg_realized:         stats.avg_pnl,
       best_trade:           stats.best,
       worst_trade:          stats.worst,
