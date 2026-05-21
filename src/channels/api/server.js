@@ -705,8 +705,8 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
   const updates = {};
   if (body.liquidity_param !== undefined) {
     const v = parseFloat(body.liquidity_param);
-    if (!isFinite(v) || v < 0.0 || v > 2.0) {
-      return res.status(400).json({ error: 'liquidity_param must be a number in [0.0, 2.0]' });
+    if (!isFinite(v) || v < 0.0 || v > 1.0) {
+      return res.status(400).json({ error: 'liquidity_param must be a number in [0.0, 1.0] (per-regime dampener; pairs with global lambda ≤ 2.0 to honor Reg T)' });
     }
     updates.liquidity_param = v;
   }
@@ -6660,7 +6660,7 @@ function renderRiskPanel(cfg) {
           <span class="pf-regime-param-label">liquidity_param</span>
           <span class="pf-regime-param-hint">Throttle — fraction of global Leverage that actually deploys in this regime.</span>
         </span>
-        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="2" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
+        <span><input type="number" class="pf-regime-param-input" data-regime="\${r.state}" data-field="liquidity_param" min="0" max="1" step="0.05" value="\${r.liquidity_param.toFixed(2)}" /></span>
       </div>
       <div class="pf-regime-param-row">
         <span class="pf-regime-param-label-block">

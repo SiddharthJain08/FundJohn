@@ -328,9 +328,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # TRANSITIONING instead of the operator-intended 1.5×. Operator flipped
     # this 2026-05-16: prefer principled-target over execution-friction
     # workaround, friction to be reduced separately.
+    # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
+    # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
+    # overnight rule, 50% initial margin). The 1.0 cap matches the DB CHECK
+    # constraint on regime_sizer_params.liquidity_param so a misconfigured
+    # row can't slip past the sizer.
     lam_global   = _load_lambda()
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
-    lam = lam_global * max(0.0, min(2.0, liq_regime))
+    lam = lam_global * max(0.0, min(1.0, liq_regime))
     min_cum_sharpe = _load_min_cumulative_sharpe()
 
     # Fix A: aggregate across cadence-window, not today-only.
