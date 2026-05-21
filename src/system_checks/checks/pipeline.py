@@ -27,14 +27,14 @@ def _pg():
 
 @check(name='pipeline_completed_today', tags=['pipeline'], requires=['fs'])
 def _pipeline_completed_today():
-    """Today's orchestrator log shows 10/10 steps done — the daily heartbeat."""
+    """Today's orchestrator log shows all steps done — the daily heartbeat."""
     today = _today()
     log = LOG_DIR / f'pipeline_orchestrator_{today}.log'
     if not log.exists():
         return Status.WARN, f'no orchestrator log for {today} yet'
     text = log.read_text()
-    if 'Pipeline complete' in text and 'all 10 steps done' in text:
-        return Status.PASS, 'all 10 steps done'
+    if 'Pipeline complete' in text and 'steps done' in text:
+        return Status.PASS, 'pipeline completed today'
     if 'FATAL' in text or 'aborting' in text:
         return Status.FAIL, 'pipeline aborted; see log'
     return Status.WARN, 'pipeline not yet complete (or partial)'

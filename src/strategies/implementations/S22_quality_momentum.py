@@ -38,7 +38,7 @@ class S22QualityMomentum(BaseStrategy):
     def _quality_scores_from_financials(self, universe: List[str], financials: pd.DataFrame) -> pd.Series:
         """Extract gross-margin-based quality scores from financials aux_data."""
         scores = {}
-        if financials is None or financials.empty:
+        if not isinstance(financials, pd.DataFrame) or financials.empty:
             return pd.Series(scores)
         # financials may be indexed by (date, ticker) or (ticker,) depending on data shape
         try:

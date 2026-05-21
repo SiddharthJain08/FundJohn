@@ -599,9 +599,18 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
     for strategy_id, signals in strategy_results.items():
         for sig in signals:
             try:
+                # Guard: skip signals with NaN/Inf in core price fields — they
+                # corrupt the sizer and break the no_new_nan_signals_after_fix check.
+                import math as _math
+                _price_fields = [sig.entry_price, sig.stop_loss, sig.target_1]
+                if any(v is not None and not _math.isfinite(float(v)) for v in _price_fields):
+                    logger.warning(
+                        f'[engine] Dropping NaN signal: {strategy_id}/{sig.ticker} '
+                        f'(entry={sig.entry_price}, stop={sig.stop_loss}, t1={sig.target_1})'
+                    )
+                    continue
                 # Serialize signal_params — convert numpy scalars to native Python
                 # and sanitize NaN/Infinity so Postgres JSON accepts the row.
-                import math as _math
                 def _to_native(v):
                     if hasattr(v, 'item'):
                         v = v.item()   # numpy scalar → Python scalar
@@ -659,6 +668,37 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                         sig.position_size_pct, regime_state,
                         json.dumps(params_clean), existing_row[0],
                     ))
+                    # Post-update geometry guard: when entry_price is frozen
+                    # (audit-trail invariant) but the new stop/target were
+                    # computed from a different current price (e.g. intraday
+                    # redeploy vs main pipeline running at different times),
+                    # the update can produce stop > entry for LONG or stop <
+                    # entry for SHORT.  Roll back the UPDATE in that case —
+                    # the pre-existing clean geometry is safer than an inverted
+                    # bracket.
+                    cur.execute("""
+                        SELECT entry_price, stop_loss, target_1, direction
+                          FROM execution_signals WHERE id = %s
+                    """, (existing_row[0],))
+                    _chk = cur.fetchone()
+                    if _chk:
+                        _ep, _sl, _t1, _dirn = (float(_chk[0]), float(_chk[1]),
+                                                 float(_chk[2]), _chk[3])
+                        _bad_geo = (
+                            all(_math.isfinite(v) for v in [_ep, _sl, _t1]) and (
+                                (_dirn.upper() == 'LONG'  and not (_t1 > _ep > _sl)) or
+                                (_dirn.upper() == 'SHORT' and not (_t1 < _ep < _sl))
+                            )
+                        )
+                        if _bad_geo:
+                            cur.execute("ROLLBACK TO SAVEPOINT sp_signal")
+                            cur.execute("RELEASE SAVEPOINT sp_signal")
+                            logger.warning(
+                                f'[engine] Skipping bracket-update: {strategy_id}/{sig.ticker} '
+                                f'would create inverted geometry '
+                                f'(entry={_ep:.4f} stop={_sl:.4f} t1={_t1:.4f})'
+                            )
+                            continue
                     rows_inserted = 0   # not a new emit; bracket refresh only
                 else:
                     cur.execute("""

@@ -85,7 +85,7 @@ class PTreePanelTangency(BaseStrategy):
         prof_s  = pd.Series(np.nan, index=tickers)
         inv_s   = pd.Series(np.nan, index=tickers)
 
-        if fin_df is not None and not fin_df.empty and 'ticker' in fin_df.columns:
+        if fin_df is not None and isinstance(fin_df, pd.DataFrame) and not fin_df.empty and 'ticker' in fin_df.columns:
             fin = fin_df[fin_df['ticker'].isin(tickers)].copy()
             if not fin.empty:
                 if 'date' in fin.columns:

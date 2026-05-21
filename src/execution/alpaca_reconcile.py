@@ -138,6 +138,37 @@ def collapse_fills(fills):
     return out
 
 
+def fetch_order_status(order_id: str) -> dict | None:
+    """Fetch a single order's definitive fill status directly from the broker.
+
+    Used as a fallback when fill activities haven't propagated yet (activity
+    API can lag 1-30s after a market-order fill) or when an activity record
+    shows 'partial' but the order may have since completed.
+
+    Returns {qty, avg_price, status} where status ∈ {'filled', 'partial', 'rejected'}.
+    Returns None for orders still in-flight (new/accepted/held/pending_new) or
+    when the CLI call fails — callers leave those rows untouched.
+    """
+    proc = subprocess.run([ALPACA_CLI, 'order', 'get', order_id],
+                          capture_output=True, text=True, timeout=30, check=False)
+    if proc.returncode != 0:
+        return None
+    try:
+        o = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    status = o.get('status', '')
+    filled_qty = float(o.get('filled_qty') or 0)
+    avg_price = float(o.get('filled_avg_price') or 0)
+    if status == 'filled':
+        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'filled'}
+    if status == 'partially_filled':
+        return {'qty': filled_qty, 'avg_price': avg_price, 'status': 'partial'}
+    if status in ('canceled', 'rejected', 'expired'):
+        return {'qty': 0.0, 'avg_price': 0.0, 'status': 'rejected'}
+    return None  # new / accepted / held / pending_new — still in flight
+
+
 def fetch_broker_tickers() -> set[str] | None:
     """Return the set of tickers the broker currently holds, or None
     if the CLI call fails (caller should skip phantom cleanup on None).
@@ -241,18 +272,37 @@ def reconcile(run_date: str, conn, dry_run: bool = False):
     n_rejected = 0
     for sub_id, alpaca_order_id, ticker, sub_qty in submissions:
         rec = by_oid.get(alpaca_order_id)
+
         if rec is None:
-            if dry_run:
-                log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker')
-            else:
-                cur.execute("""
-                    UPDATE alpaca_submissions
-                    SET broker_status='rejected_by_broker',
-                        reconciled_at=NOW()
-                    WHERE id=%s
-                """, (sub_id,))
-            n_rejected += 1
-            continue
+            # No fill activity found yet — the activity API can lag 1-30s after a
+            # market fill. Fetch the order directly to distinguish "truly rejected"
+            # from "fill not propagated yet."
+            order_rec = fetch_order_status(alpaca_order_id)
+            if order_rec is None:
+                # Still in-flight or unfetchable — leave row as submitted.
+                log(f'  {ticker}: no fill activity, order in-flight — leaving as submitted')
+                continue
+            if order_rec['status'] == 'rejected':
+                if dry_run:
+                    log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker (order status)')
+                else:
+                    cur.execute("""
+                        UPDATE alpaca_submissions
+                        SET broker_status='rejected_by_broker',
+                            reconciled_at=NOW()
+                        WHERE id=%s
+                    """, (sub_id,))
+                n_rejected += 1
+                continue
+            rec = order_rec
+
+        elif rec['status'] == 'partial':
+            # Activity shows partial — confirm whether order has since fully filled
+            # (common when reconcile runs before all fill chunks propagate).
+            order_rec = fetch_order_status(alpaca_order_id)
+            if order_rec and order_rec['status'] == 'filled':
+                rec = order_rec  # upgrade to filled; don't downgrade
+
         if dry_run:
             log(f'  DRY: would mark sub={sub_id} ({ticker}) → {rec["status"]} '
                 f'qty={rec["qty"]} avg=${rec["avg_price"]:.2f}')

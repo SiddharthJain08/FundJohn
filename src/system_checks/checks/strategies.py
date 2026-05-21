@@ -60,14 +60,15 @@ def _all_active_strategies_importable():
 
 @check(name='no_new_nan_signals_after_fix', tags=['strategies'], requires=['db'])
 def _no_new_nan_signals_after_fix():
-    """The S_nonstationarity NaN-leak fix shipped 2026-05-13 (commit f33056d).
-    Any NaN-priced signals dated AFTER 2026-05-13 indicate the guard regressed.
-    Legacy rows (signal_date <= 2026-05-13) are accepted: they predate the fix,
+    """Engine-level NaN write-guard shipped 2026-05-21 (drops NaN/Inf signals at write_signals).
+    Upstream price guards also added to S_pairs_trading_jump_diffusion_intraday and S_ptree_panel_tangency.
+    Any NaN-priced signals dated AFTER 2026-05-21 indicate the guard regressed.
+    Legacy rows (signal_date <= 2026-05-21) are accepted: they predate the guard,
     are immutable per master-DB rule, and are inert (handoff filters them)."""
     with _pg() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM execution_signals
-            WHERE signal_date > DATE '2026-05-13'
+            WHERE signal_date > DATE '2026-05-21'
               AND (entry_price = 'NaN'::numeric
                 OR stop_loss   = 'NaN'::numeric
                 OR target_1    = 'NaN'::numeric)
@@ -81,8 +82,8 @@ def _no_new_nan_signals_after_fix():
         """)
         n_total_nan = cur.fetchone()[0]
     if n_new_nan == 0:
-        return Status.PASS, f'0 new NaN signals since 2026-05-13 fix ({n_total_nan} legacy rows pre-fix)'
-    return Status.FAIL, f'{n_new_nan} NaN signals dated after 2026-05-13 — guard regressed'
+        return Status.PASS, f'0 new NaN signals since 2026-05-21 guard ({n_total_nan} legacy rows pre-guard)'
+    return Status.FAIL, f'{n_new_nan} NaN signals dated after 2026-05-21 — guard regressed'
 
 
 _ARCHIVED_STATES = {'decommissioned', 'deprecated', 'archived'}

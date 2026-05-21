@@ -92,7 +92,7 @@ class PairsTradingJumpDiffusionIntraday(BaseStrategy):
                 continue
             pi = float(cur_px[ti])
             pj = float(cur_px[tj])
-            if pi <= 0.0 or pj <= 0.0:
+            if not (np.isfinite(pi) and pi > 0.0 and np.isfinite(pj) and pj > 0.0):
                 continue
             dir_i = 'LONG' if zscore < -entry_z else 'SHORT'
             dir_j  = 'SHORT' if dir_i == 'LONG' else 'LONG'
