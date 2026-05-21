@@ -81,7 +81,9 @@ def _run_main(argv, *, redis_client, clock_ok=True, clock_is_open=True,
     def _fake_run(cmd, **kwargs):
         # Called for the orchestrator spawn AND the alpaca clock probe.
         # Tell them apart by the first arg.
-        popen_calls.append({'cmd': list(cmd), 'kwargs': kwargs})
+        popen_calls.append({'cmd': list(cmd),
+                            'kwargs': kwargs,
+                            'env': dict(kwargs.get('env') or {})})
         result = MagicMock()
         # alpaca clock CLI probe
         if cmd and len(cmd) >= 2 and 'clock' in cmd[1:]:
@@ -252,6 +254,26 @@ class TestSuccessSetsKeys:
         assert channel == 'intraday-regime'
         assert ':rocket:' in msg
         assert 'INTRADAY_HMM_LOW_VOL_HIGH_VOL' in msg
+
+
+class TestForceResizeEnv:
+    def test_orchestrator_spawned_with_force_resize(self, capsys):
+        """Redeploy must hand OPENCLAW_FORCE_RESIZE=1 to the orchestrator
+        so the sized handoff's idempotency guard doesn't refuse to
+        overwrite after the morning cycle has already submitted orders."""
+        rc, action, popen_calls, _ = _run_main(
+            ['--reason', 'INTRADAY_HMM_LOW_VOL_HIGH_VOL',
+             '--date', '2026-05-19'],
+            redis_client=_fake_redis_clear(),
+            clock_ok=True, clock_is_open=True,
+            orchestrator_rc=0,
+            capsys=capsys,
+        )
+        assert rc == 0
+        orch_calls = _orchestrator_calls(popen_calls)
+        assert orch_calls, 'orchestrator should have been spawned'
+        assert orch_calls[0]['env'].get('OPENCLAW_FORCE_RESIZE') == '1', \
+            f"FORCE_RESIZE missing from env: {orch_calls[0]['env']}"
 
 
 class TestFailurePath:

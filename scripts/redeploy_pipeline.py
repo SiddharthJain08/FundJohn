@@ -194,6 +194,14 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
     env = {**os.environ}
     if dry_run:
         env['PIPELINE_DRY_RUN'] = '1'
+    # Redeploys are *expected* to rewrite the sized handoff — the morning
+    # cycle has already populated `alpaca_submissions` for today, and
+    # sized_handoff.finalize_sized_payload would otherwise refuse to
+    # overwrite. The delta sizer (target - current_broker_position) nets
+    # against existing positions and the executor's per-order
+    # already_executed() guard prevents resubmitting filled orders, so
+    # opting into FORCE_RESIZE here is safe and necessary.
+    env['OPENCLAW_FORCE_RESIZE'] = '1'
     try:
         proc = subprocess.run(cmd, env=env, timeout=ORCHESTRATOR_TIMEOUT_S, check=False)
         return proc.returncode
