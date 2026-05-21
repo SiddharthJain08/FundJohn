@@ -206,6 +206,99 @@ def _enrich_with_daily_derived(features: dict) -> dict:
     return features
 
 
+def _sync_regime_to_consumers(
+    *,
+    conn,
+    new_state: str,
+    prior_state: str | None,
+    confidence: float,
+    state_probs: np.ndarray | None,
+    features: dict,
+    ts_utc,
+    transition_tag: str | None,
+) -> None:
+    """Propagate a confirmed intraday regime transition into the canonical
+    consumer surfaces: `market_regime` Postgres table and `regime_latest.json`.
+
+    The engine reads regime_latest.json (file-primary, with stale-gate);
+    the sizer reads it via the handoff's regime block; the dashboard reads
+    market_regime DB rows. Without this sync, the redeploy that fires
+    after a confirmed transition will read the stale daily-HMM regime
+    and effectively re-run with the OLD regime's sizer params and
+    strategy eligibility.
+
+    Both sinks are append/upsert; the next daily HMM run at 9 AM ET will
+    overwrite them with the daily-cadence state.
+    """
+    state_probs_map = {}
+    if state_probs is not None:
+        try:
+            for i, p in enumerate(state_probs):
+                state_probs_map[STATE_NAMES_BY_RANK.get(i, f's{i}')] = round(float(p), 4)
+        except Exception:
+            state_probs_map = {}
+
+    vix_intraday = features.get('vix_synth_30d')
+    try:
+        vix_curr = round(float(vix_intraday), 2) if vix_intraday is not None else None
+    except (TypeError, ValueError):
+        vix_curr = None
+
+    intraday_meta = {
+        'state_raw':           new_state,
+        'state_probabilities': state_probs_map,
+        'confidence':          round(float(confidence), 4),
+        'prior_state':         prior_state,
+        'source':              'intraday_hmm',
+        'transition_tag':      transition_tag,
+        'ts_utc':              str(ts_utc),
+    }
+
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO market_regime (state, vix_level, vix_percentile, regime_data)"
+            " VALUES (%s, %s, %s, %s)",
+            (new_state, vix_curr, None, json.dumps(intraday_meta)),
+        )
+        conn.commit()
+        cur.close()
+        logger.info('regime sync: market_regime row appended → %s (vix=%s)',
+                    new_state, vix_curr)
+    except Exception as e:
+        logger.warning('regime sync: market_regime write failed: %s', e)
+
+    regime_file = MODEL_DIR / 'regime_latest.json'
+    try:
+        existing = {}
+        if regime_file.exists():
+            try:
+                existing = json.loads(regime_file.read_text())
+            except json.JSONDecodeError:
+                existing = {}
+
+        updated = dict(existing)
+        updated['state']                = new_state
+        updated['state_raw']            = new_state
+        updated['confidence']           = round(float(confidence), 4)
+        updated['prior_state']          = prior_state
+        if state_probs_map:
+            updated['state_probabilities'] = state_probs_map
+        if vix_curr is not None:
+            updated['vix_level'] = vix_curr
+        updated['intraday_source']      = 'intraday_hmm'
+        updated['intraday_updated_at']  = str(ts_utc)
+        updated['intraday_transition']  = transition_tag
+
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = regime_file.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(updated, indent=2))
+        os.replace(tmp, regime_file)
+        logger.info('regime sync: regime_latest.json updated → %s', new_state)
+    except Exception as e:
+        logger.warning('regime sync: regime_latest.json write failed: %s', e)
+
+
 def _state_from_hmm(model, features: dict) -> tuple[str, float, np.ndarray]:
     """Score one feature dict against the trained HMM.
 
@@ -429,6 +522,7 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     model = None
     state_name = 'UNKNOWN'
     confidence = 0.0
+    state_probs = None
     if MODEL_PATH.exists():
         try:
             with open(MODEL_PATH, 'rb') as f:
@@ -436,7 +530,7 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
             # Skip scoring if synthetic VIX is NaN (collector failed)
             if not (isinstance(features.get('vix_synth_30d'), float)
                     and np.isnan(features.get('vix_synth_30d'))):
-                state_name, confidence, _probs = _state_from_hmm(model, features)
+                state_name, confidence, state_probs = _state_from_hmm(model, features)
                 # Apply confidence override
                 state_name = _maybe_apply_confidence_floor(state_name, confidence)
         except Exception as e:
@@ -489,12 +583,27 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
                         prior_state, state_name)
             transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_COOLDOWN'
         else:
+            transition_tag = (
+                f'INTRADAY_HMM_REDEPLOY_{prior_state}_{state_name}'
+            )
+            # Propagate the new regime to canonical consumer surfaces BEFORE
+            # spawning the redeploy — the redeploy's engine reads
+            # regime_latest.json (file-primary) and the sizer falls back to
+            # market_regime DB. Without this sync, the redeploy would size
+            # against the stale daily-HMM regime.
+            _sync_regime_to_consumers(
+                conn=conn,
+                new_state=state_name,
+                prior_state=prior_state,
+                confidence=confidence,
+                state_probs=state_probs,
+                features=features,
+                ts_utc=features['ts_utc'],
+                transition_tag=transition_tag,
+            )
             is_live = _is_live_intraday()
             spawn_kind = _spawn_redeploy(
                 prior_state, state_name, date_str, dry_run=(not is_live),
-            )
-            transition_tag = (
-                f'INTRADAY_HMM_REDEPLOY_{prior_state}_{state_name}'
             )
             fired_liquidation = True
             logger.info(

@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -240,6 +241,11 @@ def _run_tick_with_harness(harness, *, live: bool, force_dry_run=False):
     """Execute detector.run_one_tick() under harness mocks. Patches every
     external dependency at the module-level."""
     env = {'OPENCLAW_INTRADAY_HMM_LIVE': '1' if live else '0'}
+    # Capture _sync_regime_to_consumers calls so transition-path tests can
+    # assert the regime propagation happens before the redeploy spawn.
+    harness.sync_calls = []
+    def _fake_sync(**kwargs):
+        harness.sync_calls.append(kwargs)
     with patch.dict(os.environ, env, clear=False), \
          patch.object(detector, '_load_intraday_features_module',
                       return_value=harness.intraday_mod), \
@@ -251,6 +257,8 @@ def _run_tick_with_harness(harness, *, live: bool, force_dry_run=False):
                       return_value=harness.redis), \
          patch.object(detector, '_persist_state_row',
                       side_effect=harness.fake_persist), \
+         patch.object(detector, '_sync_regime_to_consumers',
+                      side_effect=_fake_sync), \
          patch.object(detector, '_post_to_discord'), \
          patch.object(detector, 'MODEL_PATH', MagicMock(
              exists=MagicMock(return_value=False))), \
@@ -327,3 +335,142 @@ class TestRedeploySpawn:
             'INTRADAY_HMM_LOW_VOL_HIGH_VOL_COOLDOWN'
         )
         assert h.persisted_kwargs['fired_liquidation'] is False
+        # Regime sync must NOT fire on cooldown — operator's flatten intent
+        # would otherwise be undermined by a stale-but-now-updated regime
+        # row pointing the next sizer at HIGH_VOL.
+        assert h.sync_calls == []
+
+
+class TestRegimeSyncOnTransition:
+    def test_regime_sync_fires_before_redeploy_spawn_live(self):
+        """A confirmed transition must push the new regime into
+        market_regime + regime_latest.json BEFORE the redeploy is spawned;
+        otherwise the redeploy's engine reads the stale daily-HMM regime."""
+        h = _RedeployHarness(cooldown_active=False)
+        _run_tick_with_harness(h, live=True)
+
+        assert len(h.sync_calls) == 1, (
+            f'expected exactly one regime sync call, got {len(h.sync_calls)}'
+        )
+        call = h.sync_calls[0]
+        assert call['new_state'] == 'HIGH_VOL'
+        assert call['prior_state'] == 'LOW_VOL'
+        assert call['transition_tag'] == 'INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL'
+        # Confidence must match what the (mocked) HMM returned
+        assert call['confidence'] == 0.92
+        # The redeploy spawn must follow the sync — both should have fired
+        assert len(h.popen_calls) == 1
+
+    def test_regime_sync_fires_in_dry_run_too(self):
+        """LIVE=0 dry-run still updates the regime sinks so the dashboard
+        and any out-of-band consumer reflect the intraday-detected state."""
+        h = _RedeployHarness(cooldown_active=False)
+        _run_tick_with_harness(h, live=False)
+
+        assert len(h.sync_calls) == 1
+        assert h.sync_calls[0]['new_state'] == 'HIGH_VOL'
+
+
+class TestSyncRegimeHelper:
+    """Direct unit tests for _sync_regime_to_consumers — covers the DB
+    INSERT shape and the regime_latest.json atomic-write merge logic."""
+
+    def _features(self, ts):
+        return {
+            'ts_utc':       ts,
+            'vix_synth_30d': 22.5,
+        }
+
+    def test_writes_market_regime_row_and_updates_json(self, tmp_path,
+                                                       monkeypatch):
+        ts = pd.Timestamp('2026-05-21 22:10:00', tz='UTC')
+        regime_file = tmp_path / 'regime_latest.json'
+        # Seed an existing file representing the daily-HMM-written state,
+        # so we can verify the merge preserves daily-only fields like
+        # stress_score / roro_score.
+        regime_file.write_text(json.dumps({
+            'date':         '2026-05-21',
+            'state':        'LOW_VOL',
+            'state_raw':    'LOW_VOL',
+            'confidence':   0.99,
+            'stress_score': 37,
+            'roro_score':   2.9,
+            'vix_level':    17.44,
+            'prior_state':  'LOW_VOL',
+        }))
+
+        monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path)
+
+        # Track DB cursor.execute calls
+        executed = []
+        cur = MagicMock()
+        cur.execute.side_effect = lambda sql, params: executed.append((sql, params))
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+
+        state_probs = np.array([0.04, 0.04, 0.92, 0.0])
+        detector._sync_regime_to_consumers(
+            conn=conn,
+            new_state='HIGH_VOL',
+            prior_state='LOW_VOL',
+            confidence=0.92,
+            state_probs=state_probs,
+            features=self._features(ts),
+            ts_utc=ts,
+            transition_tag='INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL',
+        )
+
+        # market_regime INSERT
+        assert len(executed) == 1
+        sql, params = executed[0]
+        assert 'INSERT INTO market_regime' in sql
+        assert params[0] == 'HIGH_VOL'
+        assert params[1] == 22.5     # vix_synth_30d → vix_level
+        # regime_data JSON blob — verify source + state_probs round-tripped
+        meta = json.loads(params[3])
+        assert meta['source'] == 'intraday_hmm'
+        assert meta['prior_state'] == 'LOW_VOL'
+        assert meta['confidence'] == 0.92
+        assert meta['state_probabilities']['HIGH_VOL'] == 0.92
+        assert meta['transition_tag'] == 'INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL'
+
+        # regime_latest.json — state-related fields mutated, daily-only
+        # fields preserved
+        updated = json.loads(regime_file.read_text())
+        assert updated['state']       == 'HIGH_VOL'
+        assert updated['state_raw']   == 'HIGH_VOL'
+        assert updated['confidence']  == 0.92
+        assert updated['prior_state'] == 'LOW_VOL'
+        assert updated['vix_level']   == 22.5
+        # Daily fields kept intact
+        assert updated['stress_score'] == 37
+        assert updated['roro_score']   == 2.9
+        # Intraday provenance stamped
+        assert updated['intraday_source'] == 'intraday_hmm'
+        assert updated['intraday_transition'] == (
+            'INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL'
+        )
+
+    def test_missing_regime_file_still_writes(self, tmp_path, monkeypatch):
+        """If regime_latest.json doesn't exist yet (very first intraday tick),
+        the helper must still write a valid file with the new state."""
+        ts = pd.Timestamp('2026-05-21 22:10:00', tz='UTC')
+        monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path)
+        conn = MagicMock()
+        conn.cursor.return_value = MagicMock()
+
+        detector._sync_regime_to_consumers(
+            conn=conn,
+            new_state='TRANSITIONING',
+            prior_state='LOW_VOL',
+            confidence=0.75,
+            state_probs=None,
+            features={'ts_utc': ts, 'vix_synth_30d': 19.0},
+            ts_utc=ts,
+            transition_tag='INTRADAY_HMM_REDEPLOY_LOW_VOL_TRANSITIONING',
+        )
+        regime_file = tmp_path / 'regime_latest.json'
+        assert regime_file.exists()
+        body = json.loads(regime_file.read_text())
+        assert body['state'] == 'TRANSITIONING'
+        assert body['vix_level'] == 19.0

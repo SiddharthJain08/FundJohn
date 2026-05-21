@@ -2602,7 +2602,11 @@ app.post('/api/events/data-updated', (req, res) => {
   res.json({ ok: true });
 });
 
-// Volatility regime — reads regime_latest.json written by run_market_state.py
+// Volatility regime — reads regime_latest.json. The file is written by
+// run_market_state.py (daily 9 AM ET) AND by run_intraday_market_state.py
+// on confirmed intraday transitions (2026-05-21 fix), so the returned
+// `state` reflects whichever cadence wrote most recently. /api/regime/intraday
+// below has the per-5-min audit trail when consumers need it.
 app.get('/api/regime', async (req, res) => {
   try {
     const raw = await fs.promises.readFile(REGIME_FILE, 'utf8');
