@@ -3360,9 +3360,12 @@ body.rs-chat-locked{overflow:hidden}
 .pf-regime-param-suffix{color:var(--dim);font-size:9.5px;margin-left:-4px}
 @media(max-width:920px){.pf-regime-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}}
-.pf-heatmap{display:flex;flex-direction:column;gap:3px;padding:6px;background:var(--bg)}
-.pf-heatmap.expanded{max-height:570px;overflow-y:auto}
-.pf-heatmap-row{display:flex;flex-direction:row;gap:3px;flex-shrink:0;width:100%}
+/* Squares-only layout (2026-05-21): each tile is a 1:1 square, area
+   encodes portfolio size_pct. Tiles wrap left-to-right; gaps are
+   expected and don't tile into a larger square. Largest first so the
+   heaviest positions anchor the top-left. */
+.pf-heatmap{display:flex;flex-direction:row;flex-wrap:wrap;gap:6px;padding:8px;background:var(--bg);align-items:flex-start;align-content:flex-start}
+.pf-heatmap.expanded{max-height:640px;overflow-y:auto}
 /* Heatmap tile — option C: centered hero + dark footer strip. Hero is
  * ticker (big) + pct return / $ P&L (second line, centered as a pair).
  * Strip pins to bottom with size % left, days right. Size % is normalized
@@ -4107,14 +4110,27 @@ async function loadMarket() {
   setInterval(() => {
     if (document.getElementById('regime-panel')) loadRegime();
   }, 60_000);
-  // Portfolio fallback refresh: SSE market_update already retriggers
-  // loadPortfolio on intraday PnL marks, but if the EventSource hiccups
-  // the heatmap can go stale. Re-poll every 60s while the page is open
-  // so unrealized P&L + days-held keep drifting forward.
+  // Portfolio refresh: pulls live broker truth (unrealized_pl + plpc per
+  // ticker) on every poll. 30s during RTH so the heatmap tracks intraday
+  // moves; 5min outside RTH since prices are static. Alpaca paper rate
+  // limit is 200/min — two CLI calls per request × 2/min during RTH is
+  // 4/min, well under the cap. SSE market_update still retriggers ad-hoc.
   setInterval(() => {
     const pp = document.getElementById('portfolio-page');
-    if (pp && pp.style.display === 'block') loadPortfolio();
-  }, 60_000);
+    if (!pp || pp.style.display !== 'block') return;
+    // Approximate RTH check on the client: weekday + 09:30-16:00 ET.
+    // Cheap; server-side _alpaca_session_kind would be more correct but
+    // requires an extra round-trip just to gate a poll.
+    const nowEt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const day   = nowEt.getDay();           // 0 = Sun, 6 = Sat
+    const mins  = nowEt.getHours() * 60 + nowEt.getMinutes();
+    const inRth = day >= 1 && day <= 5 && mins >= 570 && mins < 960;  // 9:30-16:00
+    const interval = inRth ? 30_000 : 300_000;
+    if (Date.now() - (window._lastPortfolioPoll || 0) >= interval) {
+      window._lastPortfolioPoll = Date.now();
+      loadPortfolio();
+    }
+  }, 15_000);
 
   // SSE with auto-reconnect. EventSource has a built-in retry but it won't
   // resubscribe cleanly after the process behind /events restarts; we
@@ -6499,23 +6515,24 @@ function _buildAlphaBarsHtml(group) {
   </div>\`;
 }
 
-// Slice-and-dice heatmap layout. Tiles sized by total_size_pct, packed
-// into rows. Each row's height ∝ its share of total size; each tile's
-// width ∝ its share of its row. Color encodes net_pnl. Click a tile to
-// reveal the per-strategy contribution bars below.
+// Squares-only heatmap layout (2026-05-21). Each tile is a 1:1 square
+// whose AREA encodes total_size_pct (so side = √(share) × k, clamped
+// to [MIN_SIDE, MAX_SIDE]). Tiles wrap left-to-right via flexbox; the
+// arrangement does NOT tile into a larger square — the operator
+// accepted gaps as the price of consistent aspect ratios on every
+// ticker. Color encodes net_pnl. Click a tile to reveal the
+// per-strategy contribution bars below.
 //
-// Two display modes: compact (top 12, 3×4) and expanded (all tickers,
-// adaptive rows of ~12). The compact view fits in the section without
-// scrolling; expanded grows the container and lets the small-cap tail
-// be visible.
+// Two display modes: compact (top 12) and expanded (all tickers,
+// scrollable within max-height). Replaces the prior slice-and-dice
+// row-based layout that gave the long-tail tiles unreadable aspect
+// ratios.
 const _heatmapSelected = {};   // { tableId: ticker | null }
 const _heatmapExpanded = {};   // { tableId: bool }
 
 function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const sorted = [...groups].sort((a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0));
-  const containerHeight = expanded ? 560 : 280;
-  const tilesPerRow     = expanded ? 12 : 4;
-  const shown           = expanded ? sorted : sorted.slice(0, 12);
+  const shown  = expanded ? sorted : sorted.slice(0, 12);
   // Size denominator: only tickers the broker actually holds. Phantom
   // intent-rollups from stale execution_signals (broker doesn't hold them)
   // would otherwise dilute the share %. 2026-05-19: GLW at 194% of NAV
@@ -6526,16 +6543,22 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const sizeDenom = (heldGroups.length
     ? heldGroups.reduce((s, g) => s + (g.total_size_pct || 0), 0)
     : sorted.reduce((s, g) => s + (g.total_size_pct || 0), 0)) || 1;
-  const overall   = shown.reduce((s, g) => s + (g.total_size_pct || 0), 0) || 1;
-  let rowsHtml = '';
-  for (let i = 0; i < shown.length; i += tilesPerRow) {
-    const slice  = shown.slice(i, i + tilesPerRow);
-    const rowSum = slice.reduce((s, g) => s + (g.total_size_pct || 0), 0);
-    if (rowSum <= 0) continue;
-    const rowHeight = Math.max(56, (rowSum / overall) * containerHeight);
-    const tiles = slice.map(g => {
+  // Square tiles (2026-05-21): each tile's AREA is proportional to its
+  // share of the book, so the SIDE = sqrt(share). Clamp the largest tile
+  // to MAX_SIDE so it doesn't dominate the panel, and the smallest to
+  // MIN_SIDE so micro-positions stay readable. Gaps via CSS flex-wrap;
+  // tiles do NOT tile into a larger square — per design, that constraint
+  // would force unreadable aspect ratios on the long tail.
+  const MIN_SIDE = 56;
+  const MAX_SIDE = 168;
+  const maxShare = shown.reduce((m, g) => Math.max(m, (g.total_size_pct || 0) / sizeDenom), 0) || 1;
+  // Pick a sqrt-scale such that the largest visible tile lands at MAX_SIDE.
+  // side(g) = sqrt(share(g)) × k, where k = MAX_SIDE / sqrt(maxShare).
+  const k = MAX_SIDE / Math.sqrt(maxShare);
+  const tilesHtml = shown.map(g => {
       const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
-      const sharePct    = ((g.total_size_pct || 0) / sizeDenom) * 100;
+      const share       = (g.total_size_pct || 0) / sizeDenom;
+      const sharePct    = share * 100;
       const rawNotional = (g.total_size_pct || 0) * 100;
       // Prefer the broker's live unrealized_pl ($) over the DB-derived
       // nav × contrib_pct fallback. The DB path uses signal_pnl marks
@@ -6548,13 +6571,13 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
                             ? g.broker.unrealized_pl
                             : ((nav && isFinite(nav) && g.contrib_pct != null)
                                 ? g.contrib_pct * nav : null);
-      const widthPct = ((g.total_size_pct || 0) / rowSum) * 100;
-      const isSel    = g.ticker === selectedTicker;
-      const days     = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+      const side  = Math.max(MIN_SIDE, Math.min(MAX_SIDE, Math.round(Math.sqrt(share) * k)));
+      const isSel = g.ticker === selectedTicker;
+      const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
       const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
       return \`<div class="pf-tile \${isSel ? 'selected' : ''}"
                    data-ticker="\${g.ticker}"
-                   style="flex-basis:\${widthPct.toFixed(3)}%; background:\${_pnlColor(pnl)};"
+                   style="width:\${side}px;height:\${side}px;background:\${_pnlColor(pnl)};"
                    title="\${tip}">
         <div class="pf-tile-hero">
           <div class="tk-symbol">\${g.ticker}</div>
@@ -6569,9 +6592,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
         </div>
       </div>\`;
     }).join('');
-    rowsHtml += \`<div class="pf-heatmap-row" style="height:\${rowHeight.toFixed(0)}px">\${tiles}</div>\`;
-  }
-  return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${rowsHtml}</div>\`;
+  return \`<div class="pf-heatmap \${expanded ? 'expanded' : ''}">\${tilesHtml}</div>\`;
 }
 
 // Browser-side mirror of src/channels/api/positions_grouped.js#groupByStrategy.
