@@ -84,6 +84,22 @@ function makeStepNode(STEP, scriptName) {
     traceBus.push({ runId, node: STEP, status: 'err', ts: Date.now(), rc, stderrTail });
     await pipelineLog.notifyFailure(STEP, state.runDate, rc, stderrTail);
 
+    // Persist full stderr so the abort root cause survives past the
+    // Discord notification (which truncates to 400 chars). The
+    // in-conversation incident 2026-05-22 LangGraph trade abort had no
+    // capturable stderr anywhere because nothing wrote it to disk.
+    try {
+      const fs = require('node:fs');
+      const path = require('node:path');
+      const logDir = path.join(ROOT, 'logs');
+      try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+      const logPath = path.join(logDir, `daily_cycle_aborts_${state.runDate}.log`);
+      const header = `\n=== ${new Date().toISOString()} step=${STEP} rc=${rc} timedOut=${timedOut || false} runId=${runId} ===\n`;
+      fs.appendFileSync(logPath, header + (stderrTail || '(stderr empty)') + '\n');
+    } catch (e) {
+      console.warn(`[daily_cycle_node] stderr persistence failed for ${STEP}: ${e.message}`);
+    }
+
     const err = new Error(`step ${STEP} exited rc=${rc}`);
     err.step       = STEP;
     err.rc         = rc;
