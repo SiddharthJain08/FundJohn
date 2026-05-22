@@ -133,13 +133,22 @@ ok "migration 115 applied"
 # ── 9. Doctor preflight green ────────────────────────────────────────────
 # rc=0 PASS / rc=1 WARN / rc=2 FAIL — pipeline_orchestrator accepts {0,1};
 # preflight matches that posture so non-Phase-B warnings don't block kickoff.
-python3 -m src.maintenance.doctor --required-only --json >/tmp/preflight_doctor.json 2>&1
+# stderr goes separately so the JSON file stays parseable (pandas SQLAlchemy
+# warning otherwise pollutes the JSON).
+python3 -m src.maintenance.doctor --required-only --json \
+  >/tmp/preflight_doctor.json 2>/tmp/preflight_doctor.stderr
 rc=$?
 case "$rc" in
   0) ok "doctor --required-only exit 0 (all checks pass)" ;;
-  1) warn "doctor --required-only exit 1 (warnings present but non-blocking) — review tail:"
-     python3 -c 'import json; d=json.load(open("/tmp/preflight_doctor.json"));
-[print(f"    {c[\"severity\"]:>4}: {c[\"name\"]}: {c[\"detail\"]}") for c in d["checks"] if c["severity"] in ("warn","fail")]' ;;
+  1) warn "doctor --required-only exit 1 (warnings present but non-blocking):"
+     python3 - <<'PY'
+import json
+d = json.load(open('/tmp/preflight_doctor.json'))
+for c in d['checks']:
+    if c['severity'] in ('warn', 'fail'):
+        print(f"    {c['severity']:>4}: {c['name']}: {c['detail']}")
+PY
+     ;;
   *) cat /tmp/preflight_doctor.json | tail -40
      fail "doctor preflight failed (rc=$rc) — see output above" ;;
 esac
