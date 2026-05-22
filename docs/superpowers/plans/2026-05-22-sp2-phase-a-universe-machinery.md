@@ -16,6 +16,25 @@
 
 ---
 
+## ⚠️ Codebase conventions (verified against actual files 2026-05-22)
+
+**Before executing any task**, the implementer MUST apply these substitutions to every code block below. The initial plan draft assumed conventions that don't match the codebase; this section is authoritative.
+
+| In the plan | Use instead | Source |
+|---|---|---|
+| `DATABASE_URL` env var | `POSTGRES_URI` | `src/maintenance/doctor.py:52` `REQUIRED_ENV = ['ALPACA_API_KEY', 'ALPACA_SECRET_KEY', 'POSTGRES_URI']` |
+| `DATABASE_URL_TEST` separate DB | `POSTGRES_URI` with cleanup-after-test discipline | No separate test DB exists; no `conftest.py`. Use unique `source_tag='test_<random_uuid>'` and `DELETE … WHERE source_tag=…` in finalizer |
+| `import psycopg` / `psycopg.connect(...)` | `import psycopg2` / `psycopg2.connect(...)` | `psycopg2-binary` 2.9.11 installed; `psycopg` (v3) is NOT installed. See `src/maintenance/doctor.py:257` |
+| `psql "$URL" -f migration.sql` per migration | ONCE: `node -e "require('./src/database/postgres').migrate().then(() => process.exit(0)).catch(e => {console.error(e); process.exit(1)})"` | `psql` binary not installed. Existing `src/database/postgres.js:migrate()` auto-discovers + runs all `*.sql` idempotently (already-exists errors swallowed) |
+| `freezegun.freeze_time("…")` (Task 10) | `monkeypatch.setattr('src.strategies.lifecycle.date', _FrozenDate)` style fake | `freezegun` not installed. See `tests/test_alpaca_executor_ext_hours.py:93` (`patch('execution.alpaca_executor.datetime')`) for the established pattern |
+| `@check(tag="x", name="y")` (Task 15) | `@check(name="y", tags=["x"])` | `src/system_checks/registry.py:23` actual signature: `def check(name: str, *, tags: list[str], requires: list[str] | None = None)` |
+| Test imports for lifecycle | `from strategies.lifecycle import LifecycleStateMachine` with `sys.path.insert(0, str(ROOT / 'src'))` | `tests/test_lifecycle_regime_gate.py:16` — established pattern |
+| Test imports for new `src/strategies/*` modules | Either `from src.strategies.X import Y` (works due to /root/openclaw on path) OR `from strategies.X import Y` (works with `sys.path.insert(0, ROOT/'src')`). Match nearby existing tests |
+
+If any substitution looks ambiguous in context, re-verify against the named source file before implementing.
+
+---
+
 ## Task 0: Branch + workspace setup
 
 **Files:** none (git scaffolding)
@@ -189,15 +208,15 @@ CREATE INDEX IF NOT EXISTS idx_meta_snapshots_date_active
 import os, psycopg
 import pytest
 
-DSN = os.environ["DATABASE_URL"]
+DSN = os.environ["POSTGRES_URI"]
 
 def test_table_exists():
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("SELECT to_regclass('public.ticker_metadata_snapshots')")
         assert cur.fetchone()[0] == "ticker_metadata_snapshots"
 
 def test_pk_and_indexes():
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("""
             SELECT indexname FROM pg_indexes
             WHERE tablename='ticker_metadata_snapshots' ORDER BY 1
@@ -208,7 +227,7 @@ def test_pk_and_indexes():
         assert "idx_meta_snapshots_date_active" in names
 
 def test_idempotent_upsert():
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("""
             INSERT INTO ticker_metadata_snapshots
               (snapshot_date, symbol, asset_class, status, source_tag)
@@ -226,22 +245,22 @@ def test_idempotent_upsert():
         cur.execute("DELETE FROM ticker_metadata_snapshots WHERE source_tag IN ('test', 'test_v2')")
 ```
 
-- [ ] **Step 3: Run migration in a test database**
+- [ ] **Step 3: Apply migration via the Node runner**
 
 ```bash
 cd /root/openclaw
-psql "$DATABASE_URL_TEST" -f src/database/migrations/111_ticker_metadata_snapshots.sql
+node -e "require('./src/database/postgres').migrate().then(() => process.exit(0)).catch(e => {console.error(e); process.exit(1)})"
 ```
 
-Expected: no errors; table + 2 indexes created.
+Expected: stdout shows `Running migration 111_ticker_metadata_snapshots.sql...`; exits 0. Re-runs are idempotent (the runner swallows "already exists" errors).
 
-- [ ] **Step 4: Run the test against test DB**
+- [ ] **Step 4: Run the test (against the live `openclaw` DB, with per-row cleanup)**
 
 ```bash
-DATABASE_URL="$DATABASE_URL_TEST" pytest tests/test_migration_111.py -v
+pytest tests/test_migration_111.py -v
 ```
 
-Expected: 3 passed.
+Expected: 3 passed. The `test_idempotent_upsert` test inserts AAPL with `source_tag='test'`/`'test_v2'` then cleans up by `DELETE … WHERE source_tag IN (...)` in the same transaction — never touches non-test rows.
 
 - [ ] **Step 5: Commit**
 
@@ -272,10 +291,10 @@ git commit -m "feat(sp2): migration 111 — ticker_metadata_snapshots"
 # tests/test_migrations_112_113_114.py
 import os, psycopg
 
-DSN = os.environ["DATABASE_URL"]
+DSN = os.environ["POSTGRES_URI"]
 
 def _exists(table):
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("SELECT to_regclass(%s)", (f"public.{table}",))
         return cur.fetchone()[0] == table
 
@@ -289,7 +308,7 @@ def test_quarantine_table():
     assert _exists("data_quarantine")
 
 def test_quarantine_lookup_index():
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("""
             SELECT indexdef FROM pg_indexes
             WHERE tablename='data_quarantine' AND indexname='idx_quarantine_lookup'
@@ -302,13 +321,11 @@ def test_quarantine_lookup_index():
 - [ ] **Step 5: Apply migrations + run tests**
 
 ```bash
-psql "$DATABASE_URL_TEST" -f src/database/migrations/112_strategy_universe_recommendations.sql
-psql "$DATABASE_URL_TEST" -f src/database/migrations/113_universe_resolution_audit.sql
-psql "$DATABASE_URL_TEST" -f src/database/migrations/114_data_quarantine.sql
-DATABASE_URL="$DATABASE_URL_TEST" pytest tests/test_migrations_112_113_114.py -v
+node -e "require('./src/database/postgres').migrate().then(() => process.exit(0)).catch(e => {console.error(e); process.exit(1)})"
+pytest tests/test_migrations_112_113_114.py -v
 ```
 
-Expected: 4 passed.
+Expected: migrations 112/113/114 each run; 4 tests passed.
 
 - [ ] **Step 6: Commit**
 
@@ -1297,13 +1314,21 @@ Expected: fails because transition currently does not sandbox-check.
 In `src/strategies/lifecycle.py`, inside `transition`, after applying `metadata.universe_filter_ref` to the record, before persisting:
 
 ```python
+# Replaces freezegun with monkey-patching of the date/datetime modules
+# inside the predicate's module namespace. Approach: import the module,
+# evaluate with real clock, then replace the module's `date` (and any
+# `datetime` ref) with a frozen-clock subclass and re-evaluate.
+
 def _sandbox_check_predicate(predicate_ref: str) -> None:
     """Evaluate the predicate with real and frozen clock; reject if outputs differ.
-    Requires `freezegun` (already a dev dep)."""
+
+    Uses runtime monkey-patching (no freezegun dep) to swap the predicate
+    module's `date`/`datetime` references for a clock-frozen subclass.
+    """
     if predicate_ref is None:
         return
-    import importlib, freezegun
-    from datetime import date as _d
+    import importlib
+    import datetime as _dt
     from src.strategies.universe_meta import TickerMetadata
     fixture = TickerMetadata(
         symbol="AAPL", asset_class="us_equity", exchange="NASDAQ",
@@ -1312,15 +1337,43 @@ def _sandbox_check_predicate(predicate_ref: str) -> None:
         market_cap=3.5e12, adv_usd_20d=1.8e10,
         sector="IT", industry="CE",
         options_eligible=True, in_sp500=True, in_r1000=True, in_r3000=True,
-        listed_date=_d(1980, 12, 12), delisted_date=None,
+        listed_date=_dt.date(1980, 12, 12), delisted_date=None,
     )
     mod_path, attr = predicate_ref.rsplit(":", 1)
     module = importlib.import_module(mod_path)
     fn = getattr(module, attr)
-    as_of = _d(2024, 1, 15)  # fixed historical date
+    as_of = _dt.date(2024, 1, 15)  # fixed historical date
+
+    # First evaluation: real clock
     real = fn(fixture, as_of)
-    with freezegun.freeze_time("2020-01-01"):
+
+    # Second evaluation: swap any `date` / `datetime` ref bound in the
+    # predicate's module to a frozen-at-2020-01-01 subclass, then re-eval.
+    FROZEN = _dt.datetime(2020, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+    class _FrozenDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return cls(2020, 1, 1)
+    class _FrozenDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return FROZEN if tz is None else FROZEN.astimezone(tz)
+        @classmethod
+        def utcnow(cls):
+            return FROZEN.replace(tzinfo=None)
+
+    saved = {}
+    for name in ("date", "datetime"):
+        if hasattr(module, name):
+            saved[name] = getattr(module, name)
+            setattr(module, name, _FrozenDate if name == "date" else _FrozenDateTime)
+    try:
         frozen = fn(fixture, as_of)
+    finally:
+        for name, val in saved.items():
+            setattr(module, name, val)
+
     if real != frozen:
         raise ValueError(
             f"predicate behavior differs between real ({real}) and frozen ({frozen}) clock — "
@@ -1390,11 +1443,11 @@ def test_build_metadata_rows(fake_sources):
 
 def test_idempotent_write_db(fake_sources):
     rows = build_metadata_rows(date(2026, 5, 22), *fake_sources, source_tag="test_idem")
-    n1 = write_snapshots(os.environ["DATABASE_URL_TEST"], rows)
-    n2 = write_snapshots(os.environ["DATABASE_URL_TEST"], rows)  # re-run
+    n1 = write_snapshots(os.environ["POSTGRES_URI"], rows)
+    n2 = write_snapshots(os.environ["POSTGRES_URI"], rows)  # re-run
     assert n1 == 1
     assert n2 == 1  # UPSERT returns 1 affected; same row
-    with psycopg.connect(os.environ["DATABASE_URL_TEST"]) as c, c.cursor() as cur:
+    with psycopg2.connect(os.environ["POSTGRES_URI"]) as c, c.cursor() as cur:
         cur.execute("SELECT count(*) FROM ticker_metadata_snapshots WHERE source_tag='test_idem'")
         assert cur.fetchone()[0] == 1
         cur.execute("DELETE FROM ticker_metadata_snapshots WHERE source_tag='test_idem'")
@@ -1412,7 +1465,7 @@ Expected: ImportError.
 from __future__ import annotations
 from datetime import date
 from typing import Iterable
-import psycopg
+import psycopg2
 
 # Hardcoded SP500 set, sourced from src/pipeline/universe.js
 # This is the documented current-state-as-history proxy for the in_sp500 field.
@@ -1492,7 +1545,7 @@ def build_metadata_rows(
 
 def write_snapshots(dsn: str, rows: list[dict]) -> int:
     written = 0
-    with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         for r in rows:
             cur.execute(UPSERT_SQL, r)
             written += 1
@@ -1563,17 +1616,17 @@ git commit -m "feat(sp2): ticker_metadata_writer + SP500 hardcoded set"
 from __future__ import annotations
 import os, sys, json
 from datetime import date
-import psycopg
+import psycopg2
 import pandas as pd
 from src.pipeline.ticker_metadata_writer import build_metadata_rows, write_snapshots
 
-DSN = os.environ["DATABASE_URL"]
+DSN = os.environ["POSTGRES_URI"]
 PRICES_PARQUET = "/root/openclaw/data/master/prices.parquet"
 FMP_PROFILE_CACHE = "/root/openclaw/data/.cache/fmp_profile.json"
 OPTIONS_ELIGIBILITY_CACHE = "/root/openclaw/data/.cache/options_eligibility.json"
 
 def fetch_alpaca_universe():
-    with psycopg.connect(DSN) as c, c.cursor() as cur:
+    with psycopg2.connect(DSN) as c, c.cursor() as cur:
         cur.execute("""
             SELECT symbol, asset_class, exchange, status, tradable, shortable,
                    fractionable, easy_to_borrow, first_seen_at, last_seen_at
@@ -1872,7 +1925,7 @@ Append to `src/strategies/universe_resolver.py`:
 if __name__ == "__main__":
     import argparse, json, os, sys
     from datetime import date as _d
-    import psycopg
+    import psycopg2
     ap = argparse.ArgumentParser()
     ap.add_argument("--as-of", required=True)
     ap.add_argument("--states", default="live")
@@ -1941,7 +1994,7 @@ from src.strategies.universe_meta import TickerMetadata
 class PostgresMetadataDB:
     def __init__(self, dsn): self._dsn = dsn
     def fetch_metadata_as_of(self, as_of):
-        with psycopg.connect(self._dsn) as c, c.cursor() as cur:
+        with psycopg2.connect(self._dsn) as c, c.cursor() as cur:
             cur.execute("""
                 SELECT DISTINCT ON (symbol)
                     snapshot_date, symbol, asset_class, exchange, status, tradable,
@@ -1998,7 +2051,7 @@ if __name__ == "__main__":
     args = ap.parse_args()
     as_of = _d.fromisoformat(args.as_of)
     states = tuple(args.states.split(","))
-    db = PostgresMetadataDB(os.environ["DATABASE_URL"])
+    db = PostgresMetadataDB(os.environ["POSTGRES_URI"])
     cov = ParquetCoverage()
     def manifest_loader():
         with open("/root/openclaw/src/strategies/manifest.json") as f:
@@ -2014,7 +2067,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Verify test passes**
 
 Run: `pytest tests/test_resolver_cli.py -v`
-Expected: passes (in environment with DATABASE_URL + populated test DB).
+Expected: passes (in environment with POSTGRES_URI set and ticker_metadata_snapshots populated by Task 11.2).
 
 - [ ] **Step 5: Commit**
 
@@ -2132,9 +2185,9 @@ Expected: ImportError.
 ```python
 # src/maintenance/doctor.py — add:
 def _latest_snapshot_age_days() -> int:
-    import psycopg, os
+    import psycopg2, os
     from datetime import date
-    with psycopg.connect(os.environ["DATABASE_URL"]) as c, c.cursor() as cur:
+    with psycopg2.connect(os.environ["POSTGRES_URI"]) as c, c.cursor() as cur:
         cur.execute("SELECT MAX(snapshot_date) FROM ticker_metadata_snapshots")
         last = cur.fetchone()[0]
     return (date.today() - last).days if last else 999
@@ -2184,7 +2237,7 @@ from .base import check
 import subprocess, json, time, os
 from datetime import date
 
-@check(tag="pipeline", name="universe_resolution")
+@check(name="universe_resolution", tags=["pipeline"])
 def run():
     t0 = time.monotonic()
     out = subprocess.check_output(
@@ -2206,9 +2259,9 @@ from .base import check
 import os, psycopg
 from datetime import date
 
-@check(tag="strategies", name="metadata_snapshot_freshness")
+@check(name="metadata_snapshot_freshness", tags=["strategies"])
 def run():
-    with psycopg.connect(os.environ["DATABASE_URL"]) as c, c.cursor() as cur:
+    with psycopg2.connect(os.environ["POSTGRES_URI"]) as c, c.cursor() as cur:
         cur.execute("SELECT MAX(snapshot_date) FROM ticker_metadata_snapshots")
         last = cur.fetchone()[0]
     if last is None:
@@ -2432,7 +2485,7 @@ When writing or modifying a `universe_filter(meta, as_of) -> bool` predicate:
 - No imports of `datetime`, `time`, `os`, `calendar` in the predicate module. Transitive imports also banned (lint follows first-order callees).
 - Read time/date *only* from `as_of`. Reading `datetime.today()` or env vars introduces look-ahead bias.
 
-**Why:** Backtests pass `as_of=bar_date`; predicates that read system clock instead of `as_of` would return today's truth at every historical bar — silent look-ahead bias. Lifecycle sandbox check evaluates the predicate with real clock and `freezegun.freeze_time("2020-01-01")`; outputs must match or the transition is rejected.
+**Why:** Backtests pass `as_of=bar_date`; predicates that read system clock instead of `as_of` would return today's truth at every historical bar — silent look-ahead bias. Lifecycle sandbox check evaluates the predicate with real clock and again with the predicate module's date/datetime monkey-patched to a frozen-at-2020-01-01 subclass; outputs must match or the transition is rejected.
 
 **How to apply:** All 12 candidate predicates in `src/strategies/universe_default.py` follow this contract. Use them as templates. When you write a new predicate for a strategy file, paste from there.
 
@@ -2581,9 +2634,7 @@ EOF
 ssh vps
 cd /root/openclaw
 git checkout main && git pull
-for m in 111 112 113 114; do
-  psql "$DATABASE_URL" -f "src/database/migrations/${m}_*.sql"
-done
+node -e "require('./src/database/postgres').migrate().then(() => process.exit(0)).catch(e => {console.error(e); process.exit(1)})"
 systemctl daemon-reload
 systemctl restart johnbot.service fundjohn-dashboard.service
 python3 -m src.maintenance.doctor --required-only
