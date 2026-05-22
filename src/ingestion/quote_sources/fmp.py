@@ -24,7 +24,7 @@ from src.ingestion.quote_monitor import Quote
 
 class FMPQuoteSource:
     name = 'fmp'
-    priority = 1  # second behind Polygon
+    priority = 2  # P2 in production chain: Alpaca P1, FMP P2 (Polygon removed in Task 17)
 
     BASE = 'https://financialmodelingprep.com/stable'
 
