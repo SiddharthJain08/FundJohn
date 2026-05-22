@@ -308,17 +308,16 @@ async function runSnapshots() {
 }
 
 // ── Phase 1b: Macro vol indices (VIX/VIX3M/VVIX) ─────────────────────────
-// Wraps src/ingestion/fetch_vol_indices.py. Pre-2026-04-29 this only ran
-// via operator-triggered backfills, so macro.parquet drifted between
-// runs. Strategies that read aux_data['macro'] depend on these series
-// being current. Fast (<10s wall-clock) since each series is incremental.
+// Wraps src/ingestion/cboe_vol_indices.py (SP-1: renamed from fetch_vol_indices
+// to mark it as the sole sanctioned yfinance importer). Strategies that read
+// aux_data['macro'] depend on these series being current. Fast (<10s wall-clock).
 async function runVolIndices() {
   const { execSync } = require('child_process');
   const start = Date.now();
   notify('📈 Macro vol indices: VIX/VIX3M/VVIX (bounded cboe_vol_indices module)');
   try {
     const out = execSync(
-      'python3 src/ingestion/fetch_vol_indices.py',
+      'python3 src/ingestion/cboe_vol_indices.py',
       { cwd: require('path').resolve(__dirname, '..', '..'), timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] },
     ).toString();
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);

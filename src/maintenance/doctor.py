@@ -215,15 +215,17 @@ def _check_options_archive_freshness():
 
 @_check('cboe_vol_indices_freshness')
 def _check_cboe_vol_indices_freshness():
-    """vol_indices.parquet should be ≤ 1 trading day stale (warn) / 2 (fail)."""
+    """vol_indices.parquet calendar-day staleness. Matches options_archive thresholds:
+    WARN >= 2 days (covers normal weekend gap Sat-Sun morning before refresh),
+    FAIL >= 4 days (covers long weekends + Mon morning before collector run)."""
     from datetime import date
     last = _parquet_last_date(str(ROOT / 'data' / 'master' / 'vol_indices.parquet'))
     if last is None:
         return _fail('cboe_vol_indices_freshness', 'parquet missing')
     days = (date.today() - last).days
-    if days >= 2:
+    if days >= 4:
         return _fail('cboe_vol_indices_freshness', f'last row {days} days old')
-    if days >= 1:
+    if days >= 2:
         return _warn('cboe_vol_indices_freshness', f'last row {days} days old')
     return _ok('cboe_vol_indices_freshness', f'last row {days} days old')
 
@@ -1290,6 +1292,8 @@ def main():
                     help='Skip slow checks (Redis, data_coverage, systemd)')
     ap.add_argument('--required-only', action='store_true',
                     help='Only the auth/config blockers — for orchestrator preflight')
+    ap.add_argument('--fail-only',     action='store_true',
+                    help='Exit 0 on WARN; only FAIL drives non-zero exit. For systemd ExecStartPre gates that must not be blocked by advisory warnings.')
     ap.add_argument('--json',          action='store_true',
                     help='Emit machine-readable JSON instead of human table')
     args = ap.parse_args()
@@ -1321,6 +1325,8 @@ def main():
         print(f'\n  {n_pass} pass, {n_warn} warn, {n_fail} fail  →  '
               + {0: 'OK', 1: 'WARN', 2: 'FAIL'}[exit_code])
 
+    if args.fail_only and exit_code == 1:
+        exit_code = 0
     sys.exit(exit_code)
 
 
