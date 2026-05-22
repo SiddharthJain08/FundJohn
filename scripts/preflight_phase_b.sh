@@ -135,8 +135,10 @@ ok "migration 115 applied"
 # preflight matches that posture so non-Phase-B warnings don't block kickoff.
 # stderr goes separately so the JSON file stays parseable (pandas SQLAlchemy
 # warning otherwise pollutes the JSON).
+# `|| true` defeats `set -e` so we can branch on rc below (else the script dies
+# on doctor's WARN exit before rc=$? executes).
 python3 -m src.maintenance.doctor --required-only --json \
-  >/tmp/preflight_doctor.json 2>/tmp/preflight_doctor.stderr
+  >/tmp/preflight_doctor.json 2>/tmp/preflight_doctor.stderr || true
 rc=$?
 case "$rc" in
   0) ok "doctor --required-only exit 0 (all checks pass)" ;;
