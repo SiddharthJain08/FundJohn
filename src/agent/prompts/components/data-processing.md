@@ -8,16 +8,16 @@ Never process financial data in context (LLM math). Write Python. Execute. Read 
 ```python
 import pandas as pd
 import numpy as np
-from tools.fmp import get_financial_statements, get_key_metrics, get_profile, get_peers
-from tools.polygon import get_prices, get_snapshot, get_rsi, get_sma, get_bbands, get_sector
-from tools.sec_edgar import get_filing, get_submissions
+from tools.fmp import get_financial_statements, get_key_metrics, get_profile, get_peers, get_ratios, get_historical_prices
+from tools.sec_edgar import get_filing, get_submissions, search_filings, get_company_facts  # SEC EDGAR is canonical for Form 4 / insider
 from tools.tavily import search
-from tools.yahoo import get_options, get_insider_transactions  # fallback only
 from tools.validate import validate_manifest
 from tools._rate_limiter import _call_mcp
-# Note: AlphaVantage was removed 2026-04-28. Technical indicators
-# (RSI/SMA/EMA/BBands) and sector data now come from Polygon. Macro /
-# economic calendar comes from FMP.
+# Note: Polygon + Yahoo removed 2026-05-22 (SP-1 cutover). Alpaca AAT Plus
+# is now P1 for equity quotes, options chain, news, screener, corp-actions
+# (via alpaca CLI subprocess — see src/channels/api/alpaca_cli.js).
+# FMP Starter is P2 for fundamentals, macro, sector performance, and
+# historical prices. SEC EDGAR is canonical for insider transactions / filings.
 ```
 
 ### Data Flow
