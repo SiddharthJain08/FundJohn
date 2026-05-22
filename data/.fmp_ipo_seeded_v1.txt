@@ -1,0 +1,10 @@
+fmp_ipo_seed_v1
+run_at_utc=2026-05-22T18:39:15.775066+00:00
+tickers_processed=404
+updated=404
+unchanged=0
+missing_profile=0
+no_ipo_date=0
+parse_error=0
+http_error=0
+median_years_backfilled=33.97
