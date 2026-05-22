@@ -66,7 +66,6 @@ def _build_steps() -> list[tuple[str, str]]:
         ('alpaca',               'alpaca_executor'),           # submit to Alpaca
         ('reconcile',            'alpaca_reconcile'),          # reconcile fills
         ('report',               'send_report'),               # post to Discord
-        ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # shadow alt-sizer (DEFAULT-OFF; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
         ('health',               'daily_health_digest'),       # daily health digest
     ]
     if os.environ.get('OPENCLAW_SENTIMENT_INGEST') == '1':

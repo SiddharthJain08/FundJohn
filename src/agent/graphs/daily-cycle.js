@@ -3,8 +3,7 @@
  * Unified daily-cycle LangGraph.
  *
  *   START → collect → sentiment → signals → ic_gate → handoff →
- *   trade → alpaca → reconcile → report → pyportfolioopt_shadow →
- *   health → END
+ *   trade → alpaca → reconcile → report → health → END
  *
  * One thread per runDate. PostgresSaver persists state after each
  * node (or MemorySaver in tests). traceBus events surface in dashboard
@@ -21,8 +20,7 @@ const { makeStepNode } = require('./daily_cycle_node');
 
 const STEPS_IN_ORDER = [
   'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
-  'trade', 'alpaca', 'reconcile', 'report',
-  'pyportfolioopt_shadow', 'health',
+  'trade', 'alpaca', 'reconcile', 'report', 'health',
 ];
 
 // Step name → script base name (matches pipeline_orchestrator.py:51-79 STEPS list).
@@ -40,7 +38,6 @@ const STEP_SCRIPTS = {
   'alpaca':                 'alpaca_executor',
   'reconcile':              'alpaca_reconcile',
   'report':                 'send_report',
-  'pyportfolioopt_shadow':  'pyportfolioopt_shadow',
   'health':                 'daily_health_digest',
 };
 

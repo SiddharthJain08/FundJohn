@@ -24,7 +24,6 @@ const STEP_FAILURE_CHANNEL = {
   'alpaca':                 'trade-reports',
   'reconcile':              'trade-reports',
   'report':                 'trade-reports',
-  'pyportfolioopt_shadow':  'pipeline-feed',
   'health':                 'pipeline-feed',
 };
 
@@ -40,7 +39,6 @@ const STEP_AGENTS = {
   'alpaca':                 'tradebot',
   'reconcile':              'tradebot',
   'report':                 'tradebot',
-  'pyportfolioopt_shadow':  'databot',
   'health':                 'databot',
 };
 
