@@ -525,26 +525,62 @@ print(json.dumps(bars))
 }
 
 
-// ── Phase 3: Options chains — Polygon Starter, Alpaca CLI, or Yahoo Finance ─
+// ── Phase 3: Options chains — direct Alpaca CLI with greeks-validity filter ─
 
 // Per-phase soft budget (default 30 min) — when exceeded, the options
 // phase logs the partial result and exits cleanly so signals/handoff/
 // trade/alpaca can still run on time. Override with OPTIONS_PHASE_BUDGET_S.
 const OPTIONS_PHASE_BUDGET_S = parseInt(process.env.OPTIONS_PHASE_BUDGET_S || '1800', 10);
 
-// Source dispatch:
-//   polygon  (default) — Polygon Options Starter (paid, full greeks + IV)
-//   alpaca             — `alpaca data option chain` via the CLI helper
-//                        (alpha preview; greeks may be 0 for thin strikes,
-//                        no IV field — caller must compute)
-//   yfinance           — direct yfinance fallback (no paid sources)
-const OPTIONS_DATA_SOURCE = (process.env.OPTIONS_DATA_SOURCE || 'polygon').toLowerCase();
+/**
+ * Greeks-validity filter for Alpaca chain snapshots.
+ *
+ * Returns false (drop silently) for:
+ *   - Expired contracts (expiry <= today)
+ *   - Zero-volume, zero-greek contracts (0-DTE or illiquid deep OTM/ITM)
+ *
+ * Returns false (drop with warning) for:
+ *   - Non-expired, non-zero-volume contracts with all-zero greeks
+ *     (unexpected — logged as sp1.greeks_anomaly for monitoring)
+ *
+ * Returns true to keep all others.
+ */
+function _optionsGreeksValid(row) {
+  const today = new Date().toISOString().slice(0, 10);
+  const allZero = (row.delta || 0) === 0 && (row.gamma || 0) === 0
+               && (row.theta || 0) === 0 && (row.vega  || 0) === 0;
+  if (!allZero) return true;
+
+  // All greeks are zero — determine whether to drop silently or warn.
+  if (row.expiration && row.expiration <= today) return false;  // expired — silent drop
+  if ((row.volume || 0) === 0) return false;                    // zero-volume — silent drop
+
+  // Non-expired, non-zero-volume with all-zero greeks: unexpected anomaly — warn and drop.
+  const label = row.underlying
+    ? `${row.underlying} ${row.expiration} ${row.strike}${row.option_type === 'call' ? 'C' : 'P'}`
+    : (row.contract_symbol || 'unknown');
+  console.warn('sp1.greeks_anomaly', label);
+  return false;
+}
+
+/**
+ * Fetch the full option chain for a single underlying via `alpaca data option chain`.
+ * Pages through next_page_token, applies the greeks-validity filter, and returns
+ * a flat array of rows (one per contract) in the collector's canonical format.
+ *
+ * Exported for testing; also called by runOptions per ticker.
+ */
+async function fetchOptionsChain(underlying) {
+  const { runOptionsAlpaca } = require('./alpaca_options');
+  const raw = await runOptionsAlpaca(underlying, { limit: 100 });
+  return raw.filter(_optionsGreeksValid);
+}
 
 async function runOptions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
   const today = new Date().toISOString().slice(0, 10);
-  notify(`🎲 Options chains: ${tickers.length} tickers (budget ${OPTIONS_PHASE_BUDGET_S}s, source=${OPTIONS_DATA_SOURCE})`);
-  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers (${OPTIONS_DATA_SOURCE})`);
+  notify(`🎲 Options chains: ${tickers.length} tickers (budget ${OPTIONS_PHASE_BUDGET_S}s, source=alpaca)`);
+  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers (alpaca)`);
   const phaseStart = Date.now();
   _progress = { phase: '🎲 Options', current: 0, total: tickers.length, ticker: null, phaseStart, rowsThisPhase: 0 };
 
@@ -563,18 +599,6 @@ async function runOptions(tickers = null) {
     return;
   }
 
-  // Source dispatch (Phase 2.1 of alpaca-cli integration). Each path falls
-  // back to the next on auth/permission failure so a misconfigured Alpaca
-  // account doesn't kill the whole phase.
-  if (OPTIONS_DATA_SOURCE === 'alpaca') {
-    return runOptionsAlpacaPath(needed, today, skipped, tickers.length, phaseStart);
-  }
-  if (OPTIONS_DATA_SOURCE === 'yfinance') {
-    return runOptionsYFinance(needed, today, skipped);
-  }
-
-  // Default: Polygon Options Starter (auth confirmed)
-  // Yahoo Finance fallback retained only for unexpected auth failures
   let budgetExceeded = false;
   let processed = 0;
   for (let i = 0; i < needed.length; i++) {
@@ -599,9 +623,23 @@ async function runOptions(tickers = null) {
     if (_paused) { while (_paused) await sleep(1000); }
     const start = Date.now();
     try {
-      const url = `https://api.polygon.io/v3/snapshot/options/${ticker}?limit=250&apiKey=${POLYGON_KEY}`;
-      const data = await rateLimitedCall(() => httpGet(url));
-      const contracts = data.results || [];
+      const rows = await fetchOptionsChain(ticker);
+      // Adapt flat row schema → the nested shape store._optionRow expects.
+      const contracts = rows.map(r => ({
+        details: {
+          expiration_date: r.expiration,
+          strike_price:    r.strike,
+          contract_type:   r.option_type,
+        },
+        greeks: {
+          delta: r.delta, gamma: r.gamma, theta: r.theta,
+          vega:  r.vega,  rho:   r.rho,
+        },
+        implied_volatility: r.implied_volatility,
+        day:                { last_price: r.last_price, volume: r.volume },
+        last_quote:         { bid: r.bid, ask: r.ask },
+        open_interest:      null,
+      }));
       const written = await store.upsertOptions(ticker, contracts, today);
       await store.updateCoverage(ticker, 'options', today, today, written);
       _stats.options += written;
@@ -617,24 +655,15 @@ async function runOptions(tickers = null) {
         notify(`🎲 Options progress — ${processed}/${needed.length} fetched, ${_progress.rowsThisPhase.toLocaleString()} contracts in ${phaseElapsed}s`);
       }
     } catch (err) {
-      // If we hit an auth error (plan changed / endpoint removed) fall back to YFinance for remainder
-      if (err.message.includes('403') || err.message.includes('NOT_AUTHORIZED')) {
-        notify(`🎲 Options: Polygon auth error on ${ticker} — switching to Yahoo Finance fallback`);
-        await runOptionsYFinance(needed.slice(i), today, skipped + i);
-        return;
-      }
       _stats.errors++;
       tickProgress('🎲 Options', skipped + i + 1, tickers.length, ticker, 0);
       await store.logRun(ticker, 'options', 'error', 0, err.message, Date.now() - start, 1);
     }
   }
-  // Flush the in-memory buffer to options_eod.parquet. The pre-2026-04-29
-  // code path skipped this — `upsertOptions` only buffers, and without a
-  // matching `flushOptions` the rows were dropped on collector exit while
-  // data_coverage was still being marked fresh. Resulted in 8 days of
-  // silent options-data drift: parquet max_date stuck at 2026-04-21,
-  // but every cycle reported "Options chains complete". Same bug shape
-  // as 2026-04-28 regime drift — coverage table healthy, real store stale.
+
+  // Flush the in-memory buffer to options_eod.parquet. Without flushOptions,
+  // rows buffered by upsertOptions are dropped on collector exit while
+  // data_coverage is still marked fresh (the 2026-04-29 silent drift bug).
   try {
     const flushed = await store.flushOptions();
     if (flushed && flushed.flushed) {
@@ -652,245 +681,6 @@ async function runOptions(tickers = null) {
     notify(`✅ Options chains complete — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s`);
     if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${_progress.rowsThisPhase.toLocaleString()} option contracts stored`);
   }
-}
-
-// Yahoo Finance options fallback — fetches nearest 3 expiries per ticker via yfinance
-async function runOptionsYFinance(tickers, today, alreadySkipped = 0) {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
-  const script = `/tmp/yf_options_${Date.now()}.py`;
-  const tickerList = JSON.stringify(tickers);
-
-  fs.writeFileSync(script, `
-import yfinance as yf, json, math
-from datetime import date as _date
-
-tickers = ${tickerList}
-today_str = "${today}"
-today = _date.fromisoformat(today_str)
-RISK_FREE_RATE = 0.05
-results = []
-
-def f(v):
-    try:
-        x = float(v)
-        return None if (math.isnan(x) or math.isinf(x)) else x
-    except: return None
-
-def i(v):
-    x = f(v)
-    return None if x is None else int(x)
-
-def _ncdf(x):
-    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-def _npdf(x):
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-
-def bs_greeks(S, K, T, r, sigma, option_type):
-    """Black-Scholes Greeks; returns dict or None on bad inputs."""
-    if None in (S, K, T, sigma) or S <= 0 or K <= 0 or T <= 0 or sigma <= 0 or sigma > 10:
-        return None
-    try:
-        d1  = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2  = d1 - sigma * math.sqrt(T)
-        nd1 = _ncdf(d1)
-        nd2 = _ncdf(d2)
-        pdf1 = _npdf(d1)
-        gamma = pdf1 / (S * sigma * math.sqrt(T))
-        vega  = S * pdf1 * math.sqrt(T) / 100.0   # per 1% IV
-        if option_type == 'call':
-            delta = nd1
-            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
-                     - r * K * math.exp(-r * T) * nd2) / 365.0
-            rho   = K * T * math.exp(-r * T) * nd2 / 100.0
-        else:
-            delta = nd1 - 1.0
-            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
-                     + r * K * math.exp(-r * T) * (1 - nd2)) / 365.0
-            rho   = -K * T * math.exp(-r * T) * (1 - nd2) / 100.0
-        return {
-            'delta': round(delta, 6), 'gamma': round(gamma, 6),
-            'theta': round(theta, 6), 'vega':  round(vega, 6),
-            'rho':   round(rho,   6),
-        }
-    except Exception:
-        return None
-
-for ticker in tickers:
-    try:
-        t = yf.Ticker(ticker)
-        # Underlying price for Greek computation
-        S = None
-        try:
-            fi = t.fast_info
-            S = f(getattr(fi, 'last_price', None) or getattr(fi, 'regularMarketPrice', None))
-        except Exception:
-            pass
-        if S is None:
-            try:
-                hist = t.history(period='1d')
-                if not hist.empty:
-                    S = f(hist['Close'].iloc[-1])
-            except Exception:
-                pass
-
-        exps = (t.options or [])[:3]
-        contracts = []
-        for exp in exps:
-            try:
-                T = (_date.fromisoformat(exp) - today).days / 365.0
-                if T <= 0:
-                    continue
-                chain = t.option_chain(exp)
-                for side, df in [('call', chain.calls), ('put', chain.puts)]:
-                    for _, row in df.iterrows():
-                        strike = f(row.get('strike'))
-                        iv     = f(row.get('impliedVolatility'))
-                        g      = bs_greeks(S, strike, T, RISK_FREE_RATE, iv, side)
-                        contracts.append({
-                            'expiry':        exp,
-                            'strike':        strike,
-                            'contract_type': side,
-                            'iv':            iv,
-                            'open_interest': i(row.get('openInterest')),
-                            'volume':        i(row.get('volume')),
-                            'last_price':    f(row.get('lastPrice')),
-                            'bid':           f(row.get('bid')),
-                            'ask':           f(row.get('ask')),
-                            'delta':         g['delta'] if g else None,
-                            'gamma':         g['gamma'] if g else None,
-                            'theta':         g['theta'] if g else None,
-                            'vega':          g['vega']  if g else None,
-                            'rho':           g['rho']   if g else None,
-                        })
-            except Exception:
-                pass
-        results.append({'ticker': ticker, 'contracts': contracts})
-    except Exception as e:
-        results.append({'ticker': ticker, 'error': str(e)})
-
-print(json.dumps(results))
-`);
-
-  notify(`🎲 Options (YFinance): fetching ${tickers.length} tickers — nearest 3 expiries each`);
-
-  try {
-    const output = execSync(`python3 ${script}`, { timeout: 600_000, maxBuffer: 64 * 1024 * 1024 }).toString();
-    const results = JSON.parse(output);
-    let totalWritten = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (_paused) { while (_paused) await sleep(1000); }
-      if (r.error || !r.contracts?.length) {
-        tickProgress('🎲 Options', alreadySkipped + i + 1, alreadySkipped + tickers.length, r.ticker, 0);
-        if (r.error) await store.logRun(r.ticker, 'options', 'error', 0, r.error, 0, 0);
-        continue;
-      }
-
-      // Flat format — upsertOptions handles both flat and Polygon-nested
-      const contracts = r.contracts.map(c => ({
-        expiry_date:        c.expiry,
-        strike_price:       c.strike,
-        contract_type:      c.contract_type,
-        greeks:             { delta: c.delta, gamma: c.gamma, theta: c.theta, vega: c.vega, rho: c.rho },
-        implied_volatility: c.iv,
-        open_interest:      c.open_interest,
-        day:                { volume: c.volume, last_price: c.last_price },
-        bid:                c.bid,
-        ask:                c.ask,
-      }));
-
-      const written = await store.upsertOptions(r.ticker, contracts, today);
-      await store.updateCoverage(r.ticker, 'options', today, today, written);
-      _stats.options += written;
-      totalWritten += written;
-      tickProgress('🎲 Options', alreadySkipped + i + 1, alreadySkipped + tickers.length, r.ticker, written);
-      await store.logRun(r.ticker, 'options', 'success', written, null, 0, 0);
-    }
-
-    const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
-    try {
-      const flushed = await store.flushOptions();
-      if (flushed && flushed.flushed) {
-        console.log(`[collector] Options flush: ${flushed.flushed} rows → options_eod.parquet (total ${flushed.total_after})`);
-      }
-    } catch (err) {
-      console.error(`[collector] Options flush FAILED: ${err.message}`);
-    }
-    notify(`✅ Options (YFinance) complete — ${totalWritten.toLocaleString()} contracts | ${alreadySkipped} skipped (already covered) in ${elapsed}s`);
-    if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${totalWritten.toLocaleString()} option contracts stored via Yahoo Finance (IV, strike, bid/ask, OI)`);
-  } catch (err) {
-    notify(`⚠️ Options YFinance error: ${err.message}`);
-    if (_alertPost) _alertPost(`⚠️ **Phase 3 error** — options fetch failed: ${err.message}`);
-  } finally {
-    try { fs.unlinkSync(script); } catch {}
-  }
-}
-
-// ── Phase 3 (alpaca-cli path): fetch chains via `alpaca data option chain` ─
-//
-// Used when OPTIONS_DATA_SOURCE=alpaca. Adapts the alpaca_options.js
-// helper's flat row output to the contract-dict shape store._optionRow
-// expects, so the parquet schema is identical regardless of source.
-async function runOptionsAlpacaPath(needed, today, alreadySkipped, totalTickers, phaseStart) {
-  const { runOptionsAlpaca } = require('./alpaca_options');
-  let processed = 0;
-  let budgetExceeded = false;
-  for (let i = 0; i < needed.length; i++) {
-    const elapsedS = (Date.now() - phaseStart) / 1000;
-    if (elapsedS > OPTIONS_PHASE_BUDGET_S) {
-      const remaining = needed.length - i;
-      notify(`⏰ Options budget exceeded (alpaca) — processed ${processed}/${needed.length}, deferring ${remaining}`);
-      budgetExceeded = true;
-      break;
-    }
-    const ticker = needed[i];
-    if (_paused) { while (_paused) await sleep(1000); }
-    const start = Date.now();
-    try {
-      const rows = await runOptionsAlpaca(ticker, { limit: 100 });
-      // Adapt our flat schema → the c.details / c.greeks / c.day shape that
-      // store._optionRow already understands. Keeps the parquet schema
-      // identical between Polygon and Alpaca sources.
-      const contracts = rows.map(r => ({
-        details: {
-          expiration_date: r.expiration,
-          strike_price:    r.strike,
-          contract_type:   r.option_type,
-        },
-        greeks: {
-          delta: r.delta, gamma: r.gamma, theta: r.theta,
-          vega:  r.vega,  rho:   r.rho,
-        },
-        implied_volatility: r.implied_volatility,
-        day:                { last_price: r.last_price, volume: null },
-        last_quote:         { bid: r.bid, ask: r.ask },
-        open_interest:      null,
-      }));
-      const written = await store.upsertOptions(ticker, contracts, today);
-      await store.updateCoverage(ticker, 'options', today, today, written);
-      _stats.options += written;
-      tickProgress('🎲 Options', alreadySkipped + i + 1, totalTickers, ticker, written);
-      await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
-      processed++;
-    } catch (err) {
-      const msg = err.message || String(err);
-      // 403/permission → fall back to yfinance for the remainder so a
-      // misconfigured Alpaca account doesn't kill the whole phase.
-      if (msg.includes('403') || msg.toLowerCase().includes('not enabled')) {
-        notify(`🎲 Options: alpaca permission error on ${ticker} — falling back to yfinance for remainder`);
-        await runOptionsYFinance(needed.slice(i), today, alreadySkipped + i);
-        return;
-      }
-      _stats.errors++;
-      notify(`⚠️ Options ${ticker} (alpaca): ${msg.slice(0, 120)}`);
-      await store.logRun(ticker, 'options', 'error', 0, msg.slice(0, 200), Date.now() - start, 1);
-    }
-  }
-  await store.flushOptions();
-  notify(`✅ Options (alpaca): ${processed}/${needed.length} processed${budgetExceeded ? ' (budget hit)' : ''}`);
 }
 
 // ── Phase 4: Fundamentals via FMP ────────────────────────────────────────────
@@ -2021,4 +1811,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };

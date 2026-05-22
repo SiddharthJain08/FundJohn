@@ -1,23 +1,17 @@
 'use strict';
 
 /**
- * alpaca_options.js — Phase 2.1 of alpaca-cli integration.
+ * alpaca_options.js — Alpaca CLI options-chain helper.
  *
  * Thin Node wrapper around `alpaca data option chain` so collector.js
  * (and any future caller) can pull broker-canonical option-chain
- * snapshots without going through the yfinance/Polygon HTTP plumbing.
+ * snapshots directly from Alpaca without going through any third-party
+ * data provider.
  *
- * Default behavior is GATED OFF: collector.js still routes through
- * runOptionsYFinance / runOptions(Polygon) until the env flag
- *   OPTIONS_DATA_SOURCE=alpaca
- * is set. Reason: the alpha-preview CLI's greeks have been observed to
- * return zero for thinly-traded strikes, and it does not surface an
- * implied-volatility field (our parquet schema requires `iv`). When
- * the quality is validated against yfinance, flip the flag.
- *
- * This module's job is to be the SINGLE place where the Alpaca chain
- * payload is parsed → a flat row array matching the keys our existing
- * options_eod.parquet schema uses.
+ * This module is the SINGLE place where the Alpaca chain payload is
+ * parsed → a flat row array matching the keys our existing
+ * options_eod.parquet schema uses. Zero-greek contracts are filtered
+ * upstream in collector.js (fetchOptionsChain) before parquet writes.
  */
 
 const { runAlpaca } = require('../channels/api/alpaca_cli');
@@ -46,6 +40,7 @@ function flattenSnapshot(occSymbol, snap) {
   const lq = snap.latestQuote || {};
   const lt = snap.latestTrade || {};
   const g  = snap.greeks      || {};
+  const db = snap.dailyBar    || {};
   return {
     contract_symbol:  occSymbol,
     underlying:       decoded ? decoded.root       : null,
@@ -58,6 +53,8 @@ function flattenSnapshot(occSymbol, snap) {
     ask_size:         typeof lq.as === 'number' ? lq.as : null,
     last_price:       typeof lt.p  === 'number' ? lt.p  : null,
     last_trade_at:    lt.t || null,
+    close:            typeof db.c  === 'number' ? db.c  : null,
+    volume:           typeof db.v  === 'number' ? db.v  : null,
     delta:            typeof g.delta === 'number' ? g.delta : null,
     gamma:            typeof g.gamma === 'number' ? g.gamma : null,
     theta:            typeof g.theta === 'number' ? g.theta : null,
@@ -65,7 +62,7 @@ function flattenSnapshot(occSymbol, snap) {
     rho:              typeof g.rho   === 'number' ? g.rho   : null,
     // implied_volatility: not surfaced by the alpha CLI as of v0.0.9.
     // Caller must compute it from bid/ask + reference price if needed.
-    implied_volatility: null,
+    implied_volatility: snap.impliedVolatility != null ? snap.impliedVolatility : null,
     quote_at:         lq.t || null,
   };
 }

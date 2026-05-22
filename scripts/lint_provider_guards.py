@@ -15,8 +15,10 @@ FORBIDDEN_PATTERNS = [
     (r'\bOPTIONS_DATA_SOURCE\b', 'OPTIONS_DATA_SOURCE', set()),
 ]
 
-# Skip dirs: git, node_modules, docs, worktrees (.claude/), auto-gen MCP tools (workspaces/), self
-SKIP_PATHS = ('.git/', 'node_modules/', 'docs/', '.claude/', 'workspaces/', 'scripts/lint_provider_guards.py')
+# Skip dirs: git, node_modules, docs, worktrees (.claude/), auto-gen MCP tools (workspaces/), self.
+# tests/ is also skipped — test files legitimately reference forbidden identifiers to assert their
+# absence from production code (e.g. "OPTIONS_DATA_SOURCE must not appear in collector.js").
+SKIP_PATHS = ('.git/', 'node_modules/', 'docs/', '.claude/', 'workspaces/', 'tests/', 'scripts/lint_provider_guards.py')
 
 
 def scan(root: Path) -> int:
