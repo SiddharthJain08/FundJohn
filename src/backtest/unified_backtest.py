@@ -685,5 +685,22 @@ def main() -> int:
     return 1
 
 
+def run_backtest_with_resolver(strategy, start, end, resolver, **kwargs):
+    """SP-2 Phase A: per-bar universe resolution.
+
+    Strategies invoked via this entry point receive a fresh `universe` list
+    each bar from `resolver.resolve(strategy.id, as_of=bar_date)`. Existing
+    `run_backtest` keeps its current signature for backward compat.
+    Returns list[{"date": d, "signals": [...]}].
+    """
+    from src.backtest._trading_calendar import trading_days
+    results = []
+    for bar_date in trading_days(start, end):
+        universe = resolver.resolve(strategy.id, as_of=bar_date)
+        signals = strategy.generate(bar_date, universe)
+        results.append({"date": bar_date, "signals": signals})
+    return results
+
+
 if __name__ == '__main__':
     sys.exit(main())
