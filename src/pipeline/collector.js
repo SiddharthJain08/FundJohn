@@ -57,6 +57,51 @@ async function getActiveTickers() {
   return getUniverse('SP100');
 }
 
+// ── SP-2 Phase B Task 5: quarantine set ──────────────────────────────────────
+// Bootstrapped once at start(). Downstream parquet-row consumers (e.g. any
+// future JS-side prices.parquet reader) can consult _quarantineSet to drop
+// "<ticker>|<date>" rows that were quarantined by the backfill audit.
+// We seed the prices.parquet master_table here because that is the only
+// JS-readable parquet today; extend to other tables by adding entries to
+// QUARANTINE_TABLES below.
+const QUARANTINE_TABLES = ['prices.parquet'];
+const _quarantineSet = new Set();
+
+function isQuarantined(ticker, date) {
+  return _quarantineSet.has(`${ticker}|${date}`);
+}
+
+function loadQuarantineSet() {
+  // Synchronous spawn so the set is populated before the snapshot loop
+  // and runDailyCollection can begin. The Python CLI prints a JSON array
+  // of [symbol, date_iso] pairs. Failures are logged + non-fatal — we
+  // prefer to run with an empty set than block collection on a transient
+  // PG hiccup at boot.
+  const { spawnSync } = require('child_process');
+  for (const table of QUARANTINE_TABLES) {
+    try {
+      const proc = spawnSync('python3', [
+        '-m', 'src.pipeline.quarantine_filter',
+        '--master-table', table, '--json',
+      ], {
+        cwd: '/root/openclaw',
+        encoding: 'utf8',
+        timeout: 30_000,
+        env: process.env,
+      });
+      if (proc.status !== 0) {
+        console.warn(`[collector] quarantine_filter ${table} exited ${proc.status}: ${proc.stderr || '(no stderr)'}`);
+        continue;
+      }
+      const pairs = JSON.parse(proc.stdout || '[]');
+      for (const [sym, dt] of pairs) _quarantineSet.add(`${sym}|${dt}`);
+      console.log(`[collector] Loaded ${pairs.length} quarantined (ticker,date) pairs for ${table}`);
+    } catch (err) {
+      console.warn(`[collector] quarantine_filter ${table} bootstrap failed: ${err.message}`);
+    }
+  }
+}
+
 let _paused = false;
 let _running = false;
 let _sleeping = false;
@@ -992,6 +1037,10 @@ async function start() {
   if (_running) { console.log('[collector] Already running'); return; }
   _running = true;
 
+  // SP-2 Phase B Task 5: bootstrap the quarantine set so downstream
+  // parquet-row consumers can drop unsuperseded bad (ticker,date) rows.
+  loadQuarantineSet();
+
   // Integrity check on boot — log + SSE alert on mismatch, never blocks pipeline
   await runIntegrityCheck();
 
@@ -1447,4 +1496,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, loadQuarantineSet, isQuarantined, _quarantineSet };
