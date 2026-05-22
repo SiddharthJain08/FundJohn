@@ -31,7 +31,7 @@ def _universe_resolution():
 
     floor = int(os.environ.get('UNIVERSE_RESOLVER_MIN_LIVE_TICKERS', '200'))
     if elapsed > 2.0:
-        return Status.WARN, f'resolver slow {elapsed:.1f}s (union={n})'
+        return Status.FAIL, f'resolver slow {elapsed:.1f}s'
     if n < floor:
         return Status.FAIL, f'union={n} < {floor}'
     return Status.PASS, f'union={n}, {elapsed * 1000:.0f}ms'

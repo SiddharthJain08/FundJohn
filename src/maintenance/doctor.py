@@ -1080,7 +1080,7 @@ def check_metadata_snapshot_freshness():
     return [_ok, _warn, _fail][code](name, msg)
 
 
-@_check('union_universe_size')
+@_check('union_universe_size', slow=True)
 def check_union_universe_size():
     """Verify the live-strategy union universe meets the floor.
     PASS ≥UNIVERSE_RESOLVER_MIN_LIVE_TICKERS (default 200),

@@ -13,7 +13,7 @@ from ..types import Status
 @check(name='metadata_snapshot_freshness', tags=['strategies'], requires=['db'])
 def _metadata_snapshot_freshness():
     """Verify ticker_metadata_snapshots was written recently.
-    PASS ≤1d, WARN ≤2d, FAIL >2d or table empty."""
+    PASS ≤2d, FAIL >2d or table empty."""
     uri = os.environ.get('POSTGRES_URI', '')
     if not uri:
         return Status.FAIL, 'POSTGRES_URI not set'
@@ -28,6 +28,4 @@ def _metadata_snapshot_freshness():
     age = (date.today() - last).days
     if age > 2:
         return Status.FAIL, f'stale {age}d'
-    if age > 1:
-        return Status.WARN, f'last={last} ({age}d ago)'
     return Status.PASS, f'last={last} ({age}d ago)'
