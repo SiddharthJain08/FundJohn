@@ -127,6 +127,54 @@ test('fillPricesAlpaca: non-400 errors throw', async () => {
   );
 });
 
+test('fillPricesAlpaca: BRK-B is normalized to BRK.B at API boundary', async () => {
+  // Use a fake CLI that records argv to a temp file so we can assert the rewrite.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'alpaca-bars-argv-'));
+  const bin   = path.join(dir, 'alpaca');
+  const argvFile = path.join(dir, '.argv');
+  const stdout = JSON.stringify({ symbol: 'BRK.B', next_page_token: '', bars: [] });
+  fs.writeFileSync(bin,
+    `#!/bin/bash\nprintf '%s\\n' "$@" > "${argvFile}"\nprintf '%s' ${JSON.stringify(stdout)}\n`);
+  fs.chmodSync(bin, 0o755);
+
+  const collector = loadCollectorWithStub(bin, async () => 0);
+  await collector.fillPricesAlpaca('BRK-B', '2026-05-22', '2026-05-22');
+  const argv = fs.readFileSync(argvFile, 'utf8').split('\n');
+  assert.ok(argv.includes('BRK.B'), 'API symbol rewritten BRK-B → BRK.B');
+  assert.ok(!argv.includes('BRK-B'), 'universe form must NOT be sent to API');
+
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+});
+
+test('fillPricesAlpacaCrypto: parses bars-by-symbol object', async () => {
+  const stdout = JSON.stringify({
+    next_page_token: '',
+    bars: { 'BTC/USD': [
+      { t: '2026-05-22T00:00:00Z', o: 77539.3, h: 77835.7, l: 74876.85, c: 75917.97, v: 2.285, vw: 76802.48, n: 523 },
+    ] },
+  });
+  const captured = [];
+  const collector = loadCollectorWithStub(makeFakeCli(stdout),
+    async (ticker, bars, source) => { captured.push({ ticker, bars, source }); return bars.length; });
+
+  const written = await collector.fillPricesAlpacaCrypto('BTC-USD', '2026-05-22', '2026-05-22');
+  assert.equal(written, 1);
+  assert.equal(captured[0].ticker, 'BTC-USD', 'parquet row keyed by universe ticker');
+  assert.equal(captured[0].source, 'alpaca-crypto');
+  assert.equal(captured[0].bars[0].c, 75917.97);
+});
+
+test('fillPricesAlpacaCrypto: missing key for symbol returns 0', async () => {
+  // Different symbol key in payload — should NOT silently write rows under wrong ticker.
+  const stdout = JSON.stringify({ next_page_token: '', bars: { 'ETH/USD': [{ t: '2026-05-22T00:00:00Z', c: 1 }] } });
+  let called = false;
+  const collector = loadCollectorWithStub(makeFakeCli(stdout),
+    async () => { called = true; return 1; });
+  const written = await collector.fillPricesAlpacaCrypto('BTC-USD', '2026-05-22', '2026-05-22');
+  assert.equal(written, 0);
+  assert.equal(called, false);
+});
+
 test('fillPricesAlpaca: pagination loops until next_page_token empty', async () => {
   const { bin, dir } = makeMultiCli([
     { stdout: JSON.stringify({
