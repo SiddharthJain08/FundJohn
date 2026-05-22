@@ -63,6 +63,12 @@ logger = logging.getLogger(__name__)
 SUBREDDITS = ('wallstreetbets', 'stocks', 'investing')
 
 
+# SP-2 Phase A: sentiment ingestion union (LIVE + CANDIDATE so we can
+# pre-warm sentiment for candidates entering rotation).
+def _select_sentiment_universe(as_of, resolver):
+    return resolver.union_universe(as_of, states=("live", "candidate"))
+
+
 def _load_todays_news(postgres_uri: str, run_date: str,
                       universe: List[str]) -> List[Dict]:
     """Pull today's market_news rows scoped to the universe.

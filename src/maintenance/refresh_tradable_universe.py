@@ -274,6 +274,15 @@ def main() -> int:
             _log(f'  newly listed (first 10): {", ".join(recent_listed)}')
         conn2.close()
 
+    # SP-2 Phase A: Chain ticker_metadata_writer after a successful refresh
+    # so the daily snapshot stays fresh. Non-fatal: doctor will detect
+    # staleness if this fails.
+    import subprocess
+    subprocess.run(
+        ["python3", "-m", "src.pipeline.run_ticker_metadata_step"],
+        check=False,
+    )
+
     return 0
 
 

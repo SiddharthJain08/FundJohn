@@ -291,5 +291,22 @@ def _main():
     return 0
 
 
+def run_with_resolver(strategy, start, end, resolver, **kwargs):
+    """SP-2 Phase A: per-bar resolver opt-in stub.
+
+    Phase A acceptance is "the option exists". This iterates trading days
+    and calls resolver.resolve(strategy.id, as_of=bar_date) so callers
+    can wire per-bar universes through this engine. Phase B/C will join
+    this universe up to the engine's existing logic (which is shaped
+    differently across engines — manifest-driven, features-driven, etc.).
+    """
+    from src.backtest._trading_calendar import trading_days
+    results = []
+    for bar_date in trading_days(start, end):
+        universe = resolver.resolve(strategy.id, as_of=bar_date)
+        results.append({"date": bar_date, "universe": universe})
+    return results
+
+
 if __name__ == '__main__':
     raise SystemExit(_main())

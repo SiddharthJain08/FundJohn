@@ -61,7 +61,32 @@ const DailyCycleState = Annotation.Root({
   abortedAt:      Annotation(),
   lastError:      Annotation(),
   env:            Annotation(),
+  perStrategyUniverse: Annotation({
+    default: () => ({}),
+    // No reducer — last writer wins (single per-cycle population)
+  }),
 });
+
+// ── SP-2 Phase A: per-strategy universe pre-resolution ────────────────────────
+function loadPerStrategyUniverse(today, liveStrategies, opts = {}) {
+  const { execSync } = require('child_process');
+  const timeout = opts.timeout || 15000;
+  const cwd = opts.cwd || '/root/openclaw';
+  const result = {};
+  for (const sid of liveStrategies) {
+    try {
+      const out = execSync(
+        `python3 -m src.strategies.universe_resolver --as-of ${today} --strategy ${sid}`,
+        { encoding: 'utf8', timeout, cwd },
+      );
+      result[sid] = JSON.parse(out);
+    } catch (e) {
+      console.warn(`[daily-cycle] loadPerStrategyUniverse failed for ${sid}: ${e.message}`);
+      result[sid] = [];
+    }
+  }
+  return result;
+}
 
 // ── Checkpointer ─────────────────────────────────────────────────────────────
 let _checkpointer = null;
@@ -233,4 +258,5 @@ module.exports = {
   DailyCycleState,
   getCompiled,
   _acquireRunLock,
+  loadPerStrategyUniverse,
 };

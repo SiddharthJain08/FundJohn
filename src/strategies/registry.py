@@ -81,7 +81,7 @@ _IMPL_MAP = {
     'low_volatility_us':                      ('strategies.implementations.low_volatility_us',                      'LowVolatilityUS'),
     'S_cross_sectional_price_momentum':       ('strategies.implementations.S_cross_sectional_price_momentum',       'CrossSectionalPriceMomentum'),
     'S_pairs_trading_jump_diffusion_intraday': ('strategies.implementations.S_pairs_trading_jump_diffusion_intraday', 'PairsTradingJumpDiffusionIntraday'),
-    'S_ivol_mispricing_asymmetry': ('strategies.implementations.S_ivol_mispricing_asymmetry', 'IvolMispricingAsymmetry'),
+    'S_ivol_mispricing_asymmetry': ('strategies.implementations.s_ivol_mispricing_asymmetry', 'IvolMispricingAsymmetry'),
     'S_conditional_coskewness_factor': ('strategies.implementations.S_conditional_coskewness_factor', 'ConditionalCoskewnessFactor'),
     'S_daily_high_ml_classifier':      ('strategies.implementations.S_daily_high_ml_classifier',      'DailyHighMLClassifier'),
     'S_extreme_intraday_reversal_nasdaq': ('strategies.implementations.S_extreme_intraday_reversal_nasdaq', 'ExtremeIntradayReversalNasdaq'),

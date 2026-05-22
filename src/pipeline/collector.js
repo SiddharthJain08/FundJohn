@@ -94,6 +94,33 @@ function apiQuotaRemaining(api, dailyLimit) {
   return dailyLimit - (_apiCalls[api] || 0);
 }
 
+// SP-2 Phase A: read the resolved union from Redis (populated by the daily
+// cycle) or shell out to the resolver CLI as a fallback. Legacy SP500 path
+// kicks in if both fail.
+async function readUnionUniverseFromRedis(redis, dateStr, states = 'live') {
+  const key = `universe:union:${dateStr}:${states}`;
+  try {
+    const cached = await redis.get(key);
+    if (cached) return JSON.parse(cached);
+  } catch (e) {
+    console.warn(`[collector] redis universe read failed: ${e.message}`);
+  }
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync(
+      `python3 -m src.strategies.universe_resolver --as-of ${dateStr} --states ${states} --json`,
+      { encoding: 'utf8', timeout: 30000, cwd: '/root/openclaw' },
+    );
+    const tickers = JSON.parse(out);
+    try { await redis.set(key, JSON.stringify(tickers), { EX: 14400 }); } catch {}
+    return tickers;
+  } catch (e) {
+    console.warn(`[collector] union_universe resolution failed, falling back to SP500: ${e.message}`);
+    const { getUniverse } = require('./universe');
+    return getUniverse('SP500');
+  }
+}
+
 // ── Market-hours detection (ET, Mon–Fri 9:30–16:00) ─────────────────────────
 function isMarketHours() {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -1413,4 +1440,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis };

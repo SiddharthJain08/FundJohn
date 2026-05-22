@@ -1,0 +1,13 @@
+# .github/workflows/lint-universe-predicates.yml
+name: universe-predicate-lint (SP-2)
+on: [push, pull_request]
+jobs:
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: python3 scripts/lint_universe_predicates.py
+        # SP-2 Phase A blocking gate — keeps universe_filter predicates
+        # signature- and import-clean (no datetime/time/os in predicate modules).

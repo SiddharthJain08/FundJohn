@@ -116,6 +116,12 @@
     <div class="body" id="data-health"></div>
     <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="data-health-footer"></div>
   </section>
+
+  <section class="card span-12">
+    <header><h2>Universe Slice (SP-2)</h2><span class="count" id="uni-slice-count"></span></header>
+    <div class="body" id="uni-slice"></div>
+    <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="uni-slice-footer"></div>
+  </section>
 </main>
 
 <footer>
@@ -343,11 +349,48 @@ async function refreshGraphs() {
   `).join('') || '<div class="muted">— none —</div>';
 }
 
+async function refreshUniverseSlice() {
+  const rows = await fetchJSON('/api/universe-slice');
+  const el = $('uni-slice');
+  const footer = $('uni-slice-footer');
+  if (rows.error) {
+    el.innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(rows.error)}</div>`;
+    return;
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    el.innerHTML = '<div class="muted">— no resolution runs yet —</div>';
+    $('uni-slice-count').textContent = '0 rows';
+    return;
+  }
+  $('uni-slice-count').textContent = `${rows.length} rows`;
+  // Summary row: today's latest
+  const latest = rows[0];
+  const perSizes = latest.per_strategy_sizes || {};
+  const strategyRows = Object.entries(perSizes)
+    .map(([name, size]) => `<tr><td title="${esc(name)}">${esc(name)}</td><td style="font-family:var(--mono)">${size}</td></tr>`)
+    .join('');
+  el.innerHTML = `
+    <div style="margin-bottom:8px">
+      <span style="font-size:13px;font-weight:600">Latest:</span>
+      <span style="font-family:var(--mono);margin-left:8px">${esc(latest.resolved_for_date)}</span>
+      <span class="pill ok" style="margin-left:8px">union ${latest.union_size} tickers</span>
+      <span class="muted" style="margin-left:8px;font-family:var(--mono);font-size:11px">resolver ${latest.resolver_ms ?? '—'}ms</span>
+    </div>
+    ${strategyRows ? `
+      <div style="margin-bottom:6px;font-size:11px;color:var(--muted)">Per-strategy sizes (today)</div>
+      <div style="max-height:120px;overflow:auto">
+        <table><thead><tr><th>Strategy</th><th>Resolved</th></tr></thead><tbody>${strategyRows}</tbody></table>
+      </div>` : '<div class="muted" style="font-size:11px">No per-strategy breakdown yet.</div>'}
+    <div style="margin-top:10px;font-size:11px;color:var(--muted)">30-day union sizes: ${rows.map(r => r.union_size).join(', ')}</div>
+  `;
+  footer.textContent = `generated ${new Date().toLocaleTimeString()} · ${rows.length} audit rows`;
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
-    refreshGraphs(), refreshHealth(), refreshDataHealth(),
+    refreshGraphs(), refreshHealth(), refreshDataHealth(), refreshUniverseSlice(),
   ]);
 }
 
