@@ -96,3 +96,17 @@ class UniverseResolver:
                 "resolver_ms": int((time.monotonic() - t0) * 1000),
             })
         return union
+
+
+if __name__ == "__main__":
+    import argparse, json
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--as-of", required=True)
+    ap.add_argument("--states", default="live")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--strategy", help="Resolve a single strategy instead of union")
+    args = ap.parse_args()
+    # Placeholder — Task 13.1 replaces this block with concrete
+    # PostgresMetadataDB + ParquetCoverage adapters from
+    # src/strategies/_db_adapters.py.
+    print(json.dumps(["AAPL", "MSFT"]))

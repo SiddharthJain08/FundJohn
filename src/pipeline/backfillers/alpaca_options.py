@@ -55,6 +55,20 @@ def _redis():
     )
 
 
+# SP-2 Phase A: union-universe consumer (Phase A scope = helper exists;
+# Phase C wires the production call site).
+def _select_archive_universe(as_of, resolver, meta_lookup):
+    """Restrict the LIVE union universe to symbols that are options-eligible.
+
+    Caller is expected to invoke this from the daily options-archive loop
+    in place of "iterate alpaca_tradable_universe WHERE active". For Phase A
+    the existing call site is unchanged — this helper just exists so the
+    daily-cycle graph + Task 13.1's resolver CLI can wire it in.
+    """
+    union = resolver.union_universe(as_of, states=("live",))
+    return [s for s in union if meta_lookup(s, as_of).options_eligible]
+
+
 def _redis_checkpoint_done(ticker: str, date: str) -> bool:
     return bool(_redis().get(f'options_archive:done:{date}:{ticker}'))
 
