@@ -1158,10 +1158,9 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
 }
 
 
-// ── News collection — Alpaca News API (SP-1: yfinance removed) ───────────────
-// Note: Alpaca News (src/ingestion/alpaca_news.py) populates ticker_sentiment_daily.
-// runNewsCollection (below) writes to market_news table — migration to Alpaca/FMP
-// news API or RSS feeds is TODO Task 15+.
+// ── News collection — Alpaca News API (SP-1 Task 15a, 2026-05-22) ────────────
+// alpaca_news.py dual-writes ticker_sentiment_daily.alpaca_news_* + market_news
+// from one fetch. runNewsCollection (below) is now a 30-day prune-only phase.
 
 async function runInsiderTransactions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
@@ -1258,13 +1257,12 @@ async function runInsiderTransactions(tickers = null) {
 }
 
 async function runNewsCollection(equityTickers) {
-  // SP-1 Task 14: yfinance news path removed. market_news ingest via
-  // alternative provider (Alpaca News API or RSS) is TODO Task 15+.
-  // Alpaca News already populates ticker_sentiment_daily via
-  // src/ingestion/alpaca_news.py (different table, different call site).
-  notify(`📰 News: collection deferred — SP-1 yfinance removed, Task 15 will wire Alpaca/FMP news to market_news table`);
-
-  // Prune articles older than 30 days (maintenance still runs)
+  // SP-1 Task 15a (2026-05-22): market_news ingestion now happens in the
+  // sentiment step via src/ingestion/alpaca_news.py, which dual-writes to
+  // both ticker_sentiment_daily.alpaca_news_* AND market_news. One Alpaca
+  // fetch feeds both consumers. This phase is now a pure maintenance prune
+  // so the daily-cycle phase ordering + Discord progress posts don't change.
+  notify(`📰 News: ingestion runs in sentiment step (alpaca_news.py dual-write); pruning market_news older than 30d`);
   try {
     const { query: dbQuery } = require('../database/postgres');
     await dbQuery(`DELETE FROM market_news WHERE published_at < NOW() - INTERVAL '30 days'`).catch(() => null);
