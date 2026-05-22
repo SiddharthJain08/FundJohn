@@ -1,11 +1,22 @@
 """SP-1: Replace Massive S3 flatfiles for daily options EOD archive.
 
-Each Mon-Fri 16:30 ET, iterate every active ticker in alpaca_tradable_universe,
+Each Mon-Fri 16:30 ET, iterate the universe_config S&P 500 tickers,
 paginate the full Alpaca options chain, flatten into rows, and append to
 options_eod.parquet (deduped on (date, contract_symbol)). Per-ticker Redis
 checkpoint makes the job idempotent.
 
 Run via systemd timer openclaw-options-archive.timer (Task 8).
+
+Known gap — open_interest is NULL for new rows:
+    Alpaca's options chain snapshot + bars endpoints do not expose open
+    interest (verified 2026-05-22 deploy probe). FMP Starter options
+    endpoints all return "Legacy not available". The master parquet was
+    already 99.95% NULL on `open_interest` from the Polygon era (28 of
+    59,797 rows populated), so no strategy was relying on it in
+    production. engine.py:354 degrades gracefully when OI is absent
+    (iv_rank falls back to 50.0 default; no crash). If a future strategy
+    needs OI, source it via the bounded yfinance allowlist
+    (cboe_vol_indices.py) rather than re-introducing Polygon.
 """
 from __future__ import annotations
 
@@ -57,10 +68,27 @@ def _fetch_chain_page(ticker: str, page_token: str | None = None) -> dict:
             '--underlying-symbol', ticker, '--limit', '100']
     if page_token:
         args.extend(['--page-token', page_token])
-    res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        _record_call('alpaca', 'options_chain', success=False, error=f'subprocess: {e}')
+        raise
     if res.returncode != 0:
-        raise RuntimeError(f'alpaca chain rc={res.returncode}: {res.stderr.strip()}')
+        err = res.stderr.strip()
+        _record_call('alpaca', 'options_chain', success=False,
+                     error=f'rc={res.returncode}: {err[:160]}')
+        raise RuntimeError(f'alpaca chain rc={res.returncode}: {err}')
+    _record_call('alpaca', 'options_chain', success=True)
     return json.loads(res.stdout)
+
+
+# Lazy import so test contexts that don't have psycopg2 still work.
+def _record_call(provider, endpoint, *, success, error=None):
+    try:
+        from src.maintenance.provider_health import record
+        record(provider, endpoint, success=success, error=error)
+    except Exception:
+        pass
 
 
 def _decode_occ(symbol: str) -> dict:

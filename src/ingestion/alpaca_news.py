@@ -36,13 +36,32 @@ def _chunk_symbols(symbols: list[str], chunk_size: int = 50) -> Iterable[list[st
 
 
 def _call_alpaca_cli(args: list[str]) -> str:
-    """Run alpaca CLI; raise RuntimeError on non-zero or rate-limit text."""
-    res = subprocess.run([ALPACA_BIN] + args, capture_output=True, text=True, timeout=30)
+    """Run alpaca CLI; raise RuntimeError on non-zero or rate-limit text.
+    Records each call into data_provider_health for the dashboard tile.
+    """
+    try:
+        res = subprocess.run([ALPACA_BIN] + args, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        _record_call('alpaca', 'news', success=False, error=f'subprocess: {e}')
+        raise
     if res.returncode != 0:
-        raise RuntimeError(f'alpaca cli rc={res.returncode}: {res.stderr.strip()}')
+        err = (res.stderr or '').strip()
+        _record_call('alpaca', 'news', success=False, error=f'rc={res.returncode}: {err[:160]}')
+        raise RuntimeError(f'alpaca cli rc={res.returncode}: {err}')
     if '429' in (res.stderr or '') or 'rate limit' in (res.stderr or '').lower():
+        _record_call('alpaca', 'news', success=False, error='429 rate limit')
         raise RuntimeError(f'429 rate limit: {res.stderr.strip()}')
+    _record_call('alpaca', 'news', success=True)
     return res.stdout
+
+
+def _record_call(provider, endpoint, *, success, error=None):
+    """Lazy-imported provider_health recorder. Best-effort; never raises."""
+    try:
+        from src.maintenance.provider_health import record
+        record(provider, endpoint, success=success, error=error)
+    except Exception:
+        pass
 
 
 def _fetch_news_chunk(symbols: list[str], start: str, retries: int = 3) -> list[dict]:

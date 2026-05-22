@@ -54,6 +54,7 @@ def _yf_download(ticker: str, *, period: str | None = '1y', interval: str = '1d'
 
     Accepts either period= OR start=/end= kwargs (never both).
     auto_adjust=False by default (raw Close); pass True for adjusted prices.
+    Records each fetch into data_provider_health for the dashboard tile.
     """
     kw: dict = {'interval': interval, 'progress': False, 'auto_adjust': auto_adjust}
     if start is not None:
@@ -62,7 +63,25 @@ def _yf_download(ticker: str, *, period: str | None = '1y', interval: str = '1d'
             kw['end'] = end
     else:
         kw['period'] = period or '1y'
-    return yf.download(ticker, **kw)
+    try:
+        df = yf.download(ticker, **kw)
+        # yfinance returns an empty DataFrame on failure rather than raising
+        empty = df is None or (hasattr(df, 'empty') and df.empty)
+        _record_call('yfinance', 'vol_indices', success=not empty,
+                     error=('empty result' if empty else None))
+        return df
+    except Exception as e:
+        _record_call('yfinance', 'vol_indices', success=False, error=str(e))
+        raise
+
+
+def _record_call(provider, endpoint, *, success, error=None):
+    """Lazy-imported provider_health recorder. Best-effort; never raises."""
+    try:
+        from src.maintenance.provider_health import record
+        record(provider, endpoint, success=success, error=error)
+    except Exception:
+        pass
 
 
 def _fetch_with_retry(ticker: str, *, retries: int = 1, **kw) -> pd.DataFrame:

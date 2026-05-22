@@ -2915,48 +2915,130 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 
 /* Pipeline Diagnostics — LangGraph run inspector */
 #pipeline-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
-#pipeline-inner{max-width:1600px;margin:0 auto;padding:14px;display:flex;flex-direction:column;gap:12px}
+#pipeline-inner{max-width:1600px;margin:0 auto;padding:14px 16px 28px;display:flex;flex-direction:column;gap:14px}
+.pl-page-intro{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;padding:2px 2px 0}
+.pl-page-intro h2{font-size:15px;font-weight:600;color:var(--text);margin:0 0 2px;letter-spacing:.01em}
+.pl-page-intro .pl-sub{font-size:11px;color:var(--muted);max-width:720px;line-height:1.45}
+.pl-page-intro .pl-sub code{background:var(--border2);padding:1px 5px;border-radius:3px;font-size:10px}
+.pl-actions{display:flex;gap:6px;align-items:center;font-size:10px;color:var(--dim)}
+
 .pl-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-.pl-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
-.pl-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px}
-.pl-tile-value{font-size:22px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
-.pl-tile-sub{font-size:10px;color:var(--dim);margin-top:2px}
+.pl-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:2px;position:relative;overflow:hidden;transition:border-color .15s ease}
+.pl-tile::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent,var(--border2));opacity:.7}
+.pl-tile[data-state="warn"]{border-color:#71421b}
+.pl-tile[data-state="warn"]::before{background:#f59e0b;opacity:1}
+.pl-tile[data-state="err"]{border-color:#5a2222}
+.pl-tile[data-state="err"]::before{background:#ef4444;opacity:1}
+.pl-tile[data-state="ok"]::before{background:#22c55e;opacity:.85}
+.pl-tile[data-state="live"]::before{background:#3b82f6;opacity:1}
+.pl-tile-row{display:flex;align-items:center;gap:8px}
+.pl-tile-icon{font-size:14px;line-height:1;opacity:.85}
+.pl-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:500}
+.pl-tile-value{font-size:24px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.1;margin-top:2px}
+.pl-tile-sub{font-size:10px;color:var(--dim);margin-top:1px}
+
 .pl-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
-.pl-card>header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
-.pl-card>header h3{font-size:11px;font-weight:700;color:var(--text);letter-spacing:.04em;margin:0}
-.pl-card .pl-body{padding:6px 0;max-height:540px;overflow:auto}
+.pl-card>header{background:#0d1117;border-bottom:1px solid var(--border2);padding:8px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pl-card>header h3{font-size:11px;font-weight:700;color:var(--text);letter-spacing:.04em;margin:0;display:flex;align-items:center;gap:6px}
+.pl-card .pl-body{padding:0;max-height:540px;overflow:auto}
+
 .pl-runs-table{width:100%;font-size:11px;border-collapse:collapse}
-.pl-runs-table th{text-align:left;padding:6px 12px;color:var(--muted);font-weight:500;text-transform:uppercase;font-size:10px;letter-spacing:.04em;border-bottom:1px solid var(--border2);position:sticky;top:0;background:var(--panel)}
-.pl-runs-table td{padding:6px 12px;border-bottom:1px solid #14181d;font-variant-numeric:tabular-nums}
-.pl-runs-table tbody tr{cursor:pointer}
+.pl-runs-table th{text-align:left;padding:7px 12px;color:var(--muted);font-weight:500;text-transform:uppercase;font-size:10px;letter-spacing:.04em;border-bottom:1px solid var(--border2);position:sticky;top:0;background:var(--panel);z-index:1}
+.pl-runs-table td{padding:7px 12px;border-bottom:1px solid #14181d;font-variant-numeric:tabular-nums;vertical-align:middle}
+.pl-runs-table tbody tr{cursor:pointer;transition:background .12s ease}
 .pl-runs-table tbody tr:hover{background:#11161c}
 .pl-runs-table tbody tr.selected{background:#0e2540}
+.pl-runs-table tbody tr.selected td:first-child{box-shadow:inset 3px 0 0 var(--blue)}
 .pl-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.pl-status{display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.pl-status.running{background:#0e3a52;color:#7dd3fc}
-.pl-status.success,.pl-status.done,.pl-status.completed{background:#0d3520;color:#86efac}
-.pl-status.error,.pl-status.failed{background:#4a1212;color:#fca5a5}
-.pl-status.unknown,.pl-status.persisted{background:#222;color:var(--muted)}
-.pl-graph-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;background:var(--border2);color:var(--text)}
-.pl-detail{padding:10px 14px;min-height:60px;font-size:11px;color:var(--muted)}
-.pl-timeline{display:flex;flex-direction:column;gap:4px;margin:8px 0 10px}
-.pl-node-row{display:flex;align-items:center;gap:8px;padding:4px 8px;background:#11161c;border-radius:4px;font-size:11px}
-.pl-node-row .pl-node-name{flex:1;color:var(--text);font-weight:500}
-.pl-node-row .pl-node-status{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
-.pl-node-row.ok{border-left:3px solid #16a34a}
-.pl-node-row.err{border-left:3px solid #b91c1c}
-.pl-node-row.run{border-left:3px solid #3b82f6}
-.pl-state-pre{background:#0a0d12;border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:10px;color:var(--text);overflow:auto;max-height:320px;white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-.pl-stream{background:#0a0d12;border:1px solid var(--border2);border-radius:4px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--text);max-height:260px;overflow:auto}
-.pl-stream-line{padding:1px 0;white-space:pre-wrap;word-break:break-word}
+.pl-thread-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--text)}
+
+/* Status pills */
+.pl-status{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:10px;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;line-height:1.4}
+.pl-status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.pl-status.running{background:rgba(59,130,246,.18);color:#7dd3fc}
+.pl-status.running::before{animation:pl-pulse 1.4s ease-in-out infinite}
+.pl-status.success,.pl-status.done,.pl-status.completed,.pl-status.ok{background:rgba(34,197,94,.15);color:#86efac}
+.pl-status.error,.pl-status.failed,.pl-status.aborted{background:rgba(239,68,68,.16);color:#fca5a5}
+.pl-status.unknown,.pl-status.persisted{background:rgba(148,163,184,.15);color:#94a3b8}
+.pl-status.warn{background:rgba(245,158,11,.16);color:#fcd34d}
+@keyframes pl-pulse{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(125,211,252,.6)}50%{opacity:.6;box-shadow:0 0 0 4px rgba(125,211,252,0)}}
+
+/* Graph pills — color per registered graph name */
+.pl-graph-pill{display:inline-block;padding:2px 9px;border-radius:10px;font-size:10px;font-weight:500;background:var(--border2);color:var(--text);letter-spacing:.02em}
+.pl-graph-pill[data-graph="daily-cycle"]{background:rgba(59,130,246,.18);color:#7dd3fc}
+.pl-graph-pill[data-graph="paperhunter"]{background:rgba(168,85,247,.18);color:#d8b4fe}
+.pl-graph-pill[data-graph="cycle"]{background:rgba(20,184,166,.18);color:#5eead4}
+.pl-graph-pill[data-graph="unknown"]{background:rgba(148,163,184,.12);color:var(--muted)}
+
+/* Detail panel */
+.pl-detail{padding:14px 16px;min-height:60px;font-size:11px;color:var(--muted)}
+.pl-detail-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid var(--border2)}
+.pl-detail-head .pl-thread-mono{font-size:11px;color:var(--text);user-select:all}
+.pl-detail-meta{display:flex;gap:14px;font-size:10px;color:var(--muted);align-items:center;flex-wrap:wrap}
+.pl-detail-meta b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+.pl-section-title{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:600;margin:14px 0 6px}
+.pl-section-title:first-child{margin-top:0}
+
+/* Gantt-style timeline */
+.pl-timeline{display:flex;flex-direction:column;gap:3px;background:#0a0d12;border:1px solid var(--border2);border-radius:5px;padding:8px}
+.pl-node-row{display:grid;grid-template-columns:130px 1fr 60px;align-items:center;gap:10px;padding:3px 6px;border-radius:3px;font-size:11px}
+.pl-node-row:hover{background:#10151b}
+.pl-node-row .pl-node-name{color:var(--text);font-weight:500;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px}
+.pl-node-row .pl-node-bar-cell{position:relative;height:14px;background:#0d1117;border-radius:2px;overflow:hidden}
+.pl-node-row .pl-node-bar{position:absolute;top:0;bottom:0;left:0;border-radius:2px;min-width:2px}
+.pl-node-row.ok .pl-node-bar{background:linear-gradient(90deg,#16a34a 0%,#22c55e 100%)}
+.pl-node-row.err .pl-node-bar{background:linear-gradient(90deg,#b91c1c 0%,#ef4444 100%)}
+.pl-node-row.run .pl-node-bar{background:linear-gradient(90deg,#1d4ed8 0%,#3b82f6 100%);animation:pl-shimmer 1.6s linear infinite}
+.pl-node-row.skip .pl-node-bar{background:#334155;opacity:.5}
+.pl-node-row .pl-node-time{font-size:10px;color:var(--dim);text-align:right;font-variant-numeric:tabular-nums}
+@keyframes pl-shimmer{0%{background-position:0% 0%}100%{background-position:100% 0%}}
+
+/* Collapsible JSON viewer */
+.pl-collapsible{border:1px solid var(--border2);border-radius:4px;background:#0a0d12;overflow:hidden}
+.pl-collapsible-head{padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none}
+.pl-collapsible-head:hover{color:var(--text)}
+.pl-collapsible-head::after{content:"▾";font-size:9px;transition:transform .15s ease}
+.pl-collapsible.collapsed .pl-collapsible-head::after{transform:rotate(-90deg)}
+.pl-collapsible-body{padding:0 10px 8px;display:block}
+.pl-collapsible.collapsed .pl-collapsible-body{display:none}
+.pl-state-pre{font-size:10px;color:var(--text);overflow:auto;max-height:320px;white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.45;margin:0;padding:4px 0}
+
+/* Live stream */
+.pl-stream{background:#0a0d12;border:1px solid var(--border2);border-radius:5px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;color:var(--text);max-height:300px;overflow:auto;line-height:1.55}
+.pl-stream-line{padding:1px 0;white-space:pre-wrap;word-break:break-word;display:flex;gap:8px}
+.pl-stream-line .pl-stream-ts{color:var(--dim);flex-shrink:0;font-size:10px}
 .pl-stream-line.evt{color:#7dd3fc}
 .pl-stream-line.run{color:#86efac}
 .pl-stream-line.err{color:#fca5a5}
+.pl-stream-line.sys{color:var(--dim);font-style:italic}
+
 .pl-dim{color:var(--dim)}
+.pl-empty{padding:30px 20px;text-align:center;color:var(--muted);font-size:11px;line-height:1.6}
+.pl-empty .pl-empty-icon{font-size:24px;opacity:.4;margin-bottom:8px}
+.pl-empty code{background:var(--border2);padding:1px 6px;border-radius:3px;font-size:10px;color:var(--text)}
 .pl-controls{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
-.pl-controls select,.pl-controls input{background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 7px;font-size:11px;font-family:inherit}
-.pl-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit;padding:2px 8px;border-radius:4px}
-.pl-btn:hover{color:var(--text);border-color:var(--blue)}
+.pl-controls label{display:flex;align-items:center;gap:4px;font-size:10px;text-transform:none;letter-spacing:0}
+.pl-controls select,.pl-controls input{background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 8px;font-size:11px;font-family:inherit}
+.pl-controls select:focus,.pl-controls input:focus{outline:none;border-color:var(--blue)}
+.pl-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit;padding:3px 9px;border-radius:4px;transition:all .12s ease;display:inline-flex;align-items:center;gap:4px}
+.pl-btn:hover:not(:disabled){color:var(--text);border-color:var(--blue)}
+.pl-btn:disabled{opacity:.5;cursor:not-allowed}
+.pl-btn.primary{background:rgba(59,130,246,.12);border-color:rgba(59,130,246,.4);color:#7dd3fc}
+.pl-btn.primary:hover{background:rgba(59,130,246,.2)}
+.pl-btn.danger:hover{border-color:#ef4444;color:#fca5a5}
+.pl-spinner{display:inline-block;width:10px;height:10px;border:1.5px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:pl-spin .8s linear infinite;vertical-align:middle}
+@keyframes pl-spin{to{transform:rotate(360deg)}}
+
+@media (max-width:900px){
+  .pl-tiles{grid-template-columns:repeat(2,1fr)}
+  .pl-page-intro{flex-direction:column;align-items:flex-start}
+  .pl-runs-table th:nth-child(4),.pl-runs-table td:nth-child(4){display:none}
+}
+@media (max-width:560px){
+  .pl-tiles{grid-template-columns:1fr}
+  .pl-runs-table th:nth-child(5),.pl-runs-table td:nth-child(5){display:none}
+  .pl-node-row{grid-template-columns:90px 1fr 50px}
+}
 #research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden}
 .rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -4253,24 +4335,32 @@ body.rs-chat-locked{overflow:hidden}
 <!-- Pipeline Diagnostics — LangGraph run inspector -->
 <div id="pipeline-page">
   <div id="pipeline-inner">
+    <div class="pl-page-intro">
+      <div>
+        <h2>Pipeline Diagnostics</h2>
+        <div class="pl-sub">Live + historical view of every LangGraph run. The daily-cycle graph fires at <code>10:00 ET Mon-Fri</code>; paperhunter runs ad-hoc. Click a row to see node-by-node timing, checkpoint state, and live traces.</div>
+      </div>
+      <div class="pl-actions" id="pl-last-updated">—</div>
+    </div>
+
     <div class="pl-tiles">
-      <div class="pl-tile">
-        <div class="pl-tile-label">Active runs</div>
+      <div class="pl-tile" id="pl-tile-card-active">
+        <div class="pl-tile-row"><span class="pl-tile-icon">⚡</span><span class="pl-tile-label">Active runs</span></div>
         <div class="pl-tile-value" id="pl-tile-active">—</div>
         <div class="pl-tile-sub">currently in-flight</div>
       </div>
-      <div class="pl-tile">
-        <div class="pl-tile-label">Started today</div>
+      <div class="pl-tile" id="pl-tile-card-today">
+        <div class="pl-tile-row"><span class="pl-tile-icon">📅</span><span class="pl-tile-label">Started today</span></div>
         <div class="pl-tile-value" id="pl-tile-today">—</div>
         <div class="pl-tile-sub">since 00:00 local</div>
       </div>
-      <div class="pl-tile">
-        <div class="pl-tile-label">Failures (24h)</div>
+      <div class="pl-tile" id="pl-tile-card-failures">
+        <div class="pl-tile-row"><span class="pl-tile-icon">⚠</span><span class="pl-tile-label">Failures · 24h</span></div>
         <div class="pl-tile-value" id="pl-tile-failures">—</div>
-        <div class="pl-tile-sub">error / failed status</div>
+        <div class="pl-tile-sub">error / aborted status</div>
       </div>
-      <div class="pl-tile">
-        <div class="pl-tile-label">Durable threads</div>
+      <div class="pl-tile" id="pl-tile-card-durable">
+        <div class="pl-tile-row"><span class="pl-tile-icon">💾</span><span class="pl-tile-label">Durable threads</span></div>
         <div class="pl-tile-value" id="pl-tile-durable">—</div>
         <div class="pl-tile-sub">in langgraph.checkpoints</div>
       </div>
@@ -4278,17 +4368,13 @@ body.rs-chat-locked{overflow:hidden}
 
     <div class="pl-card">
       <header>
-        <h3>Recent runs</h3>
+        <h3>Recent runs <span class="pl-dim" id="pl-runs-count" style="text-transform:none;letter-spacing:0;font-weight:400">—</span></h3>
         <div class="pl-controls">
-          <label>Graph
-            <select id="pl-filter-graph"><option value="">All</option></select>
-          </label>
-          <label>Limit
-            <select id="pl-filter-limit">
+          <label>Graph <select id="pl-filter-graph"><option value="">All</option></select></label>
+          <label>Show <select id="pl-filter-limit">
               <option>25</option><option selected>50</option><option>100</option><option>200</option>
-            </select>
-          </label>
-          <button class="pl-btn" id="pl-refresh">↺ Reload</button>
+            </select></label>
+          <button class="pl-btn" id="pl-refresh" title="Reload runs + summary"><span id="pl-refresh-icon">↺</span> Reload</button>
         </div>
       </header>
       <div class="pl-body">
@@ -4296,11 +4382,13 @@ body.rs-chat-locked{overflow:hidden}
           <thead>
             <tr>
               <th>Graph</th><th>Thread</th><th>Status</th><th>Last node</th>
-              <th>Started</th><th>Duration</th><th>Events / Checkpoints</th>
+              <th>Started</th><th>Duration</th><th>Activity</th>
             </tr>
           </thead>
           <tbody id="pl-runs-tbody">
-            <tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">Loading…</td></tr>
+            <tr><td colspan="7" class="pl-empty">
+              <div class="pl-empty-icon">⏳</div>Loading runs…
+            </td></tr>
           </tbody>
         </table>
       </div>
@@ -4309,24 +4397,30 @@ body.rs-chat-locked{overflow:hidden}
     <div class="pl-card">
       <header>
         <h3>Run detail</h3>
-        <div class="pl-controls"><span id="pl-detail-title" class="pl-dim">Select a run above</span></div>
+        <div class="pl-controls">
+          <button class="pl-btn" id="pl-detail-copy" title="Copy thread id" disabled>📋 Copy ID</button>
+        </div>
       </header>
       <div class="pl-detail" id="pl-detail-body">
-        <span class="pl-dim">Click a row to load checkpoint timeline + live trace + final state.</span>
+        <div class="pl-empty">
+          <div class="pl-empty-icon">👆</div>
+          Click a row above to load the node-by-node timeline, checkpoint metadata, and any live trace events for that run.
+        </div>
       </div>
     </div>
 
     <div class="pl-card">
       <header>
-        <h3>Live stream</h3>
+        <h3>Live stream <span class="pl-dim" id="pl-stream-count" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h3>
         <div class="pl-controls">
-          <span id="pl-stream-status" class="pl-dim">disconnected</span>
-          <button class="pl-btn" id="pl-stream-toggle">Connect</button>
-          <button class="pl-btn" id="pl-stream-clear">Clear</button>
+          <span class="pl-status persisted" id="pl-stream-status">disconnected</span>
+          <button class="pl-btn primary" id="pl-stream-toggle">▶ Connect</button>
+          <button class="pl-btn" id="pl-stream-pause" disabled title="Pause incoming events">⏸ Pause</button>
+          <button class="pl-btn danger" id="pl-stream-clear">Clear</button>
         </div>
       </header>
       <div class="pl-stream" id="pl-stream-pane">
-        <div class="pl-stream-line pl-dim">Connect to subscribe to traceBus events…</div>
+        <div class="pl-stream-line sys"><span class="pl-stream-ts">—</span>Stream idle. Click <b>Connect</b> to subscribe to traceBus events.</div>
       </div>
     </div>
   </div>
@@ -9507,6 +9601,8 @@ let _pipelineState = {
   runs:        [],
   selected:    null,
   sse:         null,
+  paused:      false,
+  streamCount: 0,
   refreshTimer: null,
 };
 
@@ -9520,13 +9616,21 @@ async function showPipelines() {
 
 function _initPipelines() {
   _pipelineState.initialized = true;
-  document.getElementById('pl-refresh').onclick = _refreshPipelines;
-  document.getElementById('pl-filter-graph').onchange = _refreshPipelines;
-  document.getElementById('pl-filter-limit').onchange = _refreshPipelines;
+  document.getElementById('pl-refresh').onclick = () => _refreshPipelines();
+  document.getElementById('pl-filter-graph').onchange = () => _refreshPipelines();
+  document.getElementById('pl-filter-limit').onchange = () => _refreshPipelines();
   document.getElementById('pl-stream-toggle').onclick = _togglePipelineStream;
+  document.getElementById('pl-stream-pause').onclick = _togglePipelineStreamPause;
   document.getElementById('pl-stream-clear').onclick = () => {
     document.getElementById('pl-stream-pane').innerHTML =
-      '<div class="pl-stream-line pl-dim">cleared</div>';
+      '<div class="pl-stream-line sys"><span class="pl-stream-ts">—</span>Stream cleared.</div>';
+    _pipelineState.streamCount = 0;
+    _updateStreamCount();
+  };
+  document.getElementById('pl-detail-copy').onclick = () => {
+    if (_pipelineState.selected) {
+      navigator.clipboard?.writeText(_pipelineState.selected).catch(()=>{});
+    }
   };
   // Soft polling so tiles stay current even without SSE connected
   _pipelineState.refreshTimer = setInterval(() => {
@@ -9542,7 +9646,10 @@ function _fmtDuration(ms) {
   const s = ms / 1000;
   if (s < 60) return s.toFixed(1) + 's';
   const m = Math.floor(s / 60);
-  return m + 'm ' + Math.round(s - m*60) + 's';
+  const rem = Math.round(s - m*60);
+  if (m < 60) return m + 'm ' + rem + 's';
+  const h = Math.floor(m/60);
+  return h + 'h ' + (m - h*60) + 'm';
 }
 function _fmtAgo(ts) {
   if (!ts) return '—';
@@ -9554,16 +9661,36 @@ function _fmtAgo(ts) {
 }
 function _fmtShortThread(t) {
   if (!t) return '—';
-  return t.length > 12 ? t.slice(0, 8) + '…' + t.slice(-3) : t;
+  return t.length > 16 ? t.slice(0, 10) + '…' + t.slice(-4) : t;
+}
+function _tileState(el, n, kind) {
+  // kind = 'failures' (warn>0, err≥5) | 'live' (any>0 = live) | 'ok' (always neutral-good)
+  if (!el) return;
+  let state = 'neutral';
+  if (kind === 'failures') {
+    if (n >= 5) state = 'err';
+    else if (n >= 1) state = 'warn';
+    else state = 'ok';
+  } else if (kind === 'live') {
+    state = n >= 1 ? 'live' : 'neutral';
+  } else {
+    state = 'ok';
+  }
+  el.setAttribute('data-state', state);
 }
 
 async function _refreshPipelineSummary() {
   try {
     const d = await fetch('/api/pipelines/summary').then(r=>r.json());
-    document.getElementById('pl-tile-active').textContent = d.active ?? '0';
-    document.getElementById('pl-tile-today').textContent = d.today ?? '0';
-    document.getElementById('pl-tile-failures').textContent = d.failures_24h ?? '0';
-    document.getElementById('pl-tile-durable').textContent = d.durable_total ?? '—';
+    const setTile = (id, val) => { const e = document.getElementById(id); if (e) e.textContent = (val ?? '—'); };
+    setTile('pl-tile-active', d.active ?? 0);
+    setTile('pl-tile-today', d.today ?? 0);
+    setTile('pl-tile-failures', d.failures_24h ?? 0);
+    setTile('pl-tile-durable', d.durable_total ?? '—');
+    _tileState(document.getElementById('pl-tile-card-active'), d.active||0, 'live');
+    _tileState(document.getElementById('pl-tile-card-today'), d.today||0, 'ok');
+    _tileState(document.getElementById('pl-tile-card-failures'), d.failures_24h||0, 'failures');
+    _tileState(document.getElementById('pl-tile-card-durable'), d.durable_total||0, 'ok');
 
     // Populate graph filter dropdown if not present yet
     const sel = document.getElementById('pl-filter-graph');
@@ -9577,10 +9704,15 @@ async function _refreshPipelineSummary() {
       }
     }
     sel.value = current;
+
+    const t = document.getElementById('pl-last-updated');
+    if (t) t.textContent = 'last refreshed ' + new Date().toLocaleTimeString();
   } catch (e) { /* tile failure non-fatal */ }
 }
 
 async function _refreshPipelines() {
+  const icon = document.getElementById('pl-refresh-icon');
+  if (icon) icon.innerHTML = '<span class="pl-spinner"></span>';
   await _refreshPipelineSummary();
   const limit = document.getElementById('pl-filter-limit').value;
   const graph = document.getElementById('pl-filter-graph').value;
@@ -9591,30 +9723,46 @@ async function _refreshPipelines() {
   try {
     const d = await fetch('/api/pipelines/runs?' + q.toString()).then(r=>r.json());
     _pipelineState.runs = d.runs || [];
+    document.getElementById('pl-runs-count').textContent =
+      _pipelineState.runs.length ? '· ' + _pipelineState.runs.length + ' shown' : '';
+
     if (!_pipelineState.runs.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">No runs yet — kick off a LangGraph cycle to see entries here.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="pl-empty">' +
+        '<div class="pl-empty-icon">🌱</div>' +
+        '<div>No runs yet for this filter.</div>' +
+        '<div class="pl-dim" style="margin-top:6px">Trigger a graph from the shell:</div>' +
+        '<div style="margin-top:4px"><code>node bin/run-graph.js cycle \\'{"runDate":"\${new Date().toISOString().slice(0,10)}"}\\'</code></div>' +
+        '</td></tr>';
       return;
     }
-    tbody.innerHTML = _pipelineState.runs.map((r,i) => {
+    tbody.innerHTML = _pipelineState.runs.map((r) => {
       const status = (r.status || 'persisted').toLowerCase();
-      const evtOrCp = r.eventCount != null
-        ? \`\${r.eventCount} evt\`
-        : (r.checkpointCount != null ? \`\${r.checkpointCount} cp\` : '—');
-      return \`<tr data-idx="\${i}" data-thread="\${r.threadId || ''}">
-        <td><span class="pl-graph-pill">\${escapeHtml(r.graph || 'unknown')}</span></td>
-        <td class="pl-mono" title="\${escapeHtml(r.threadId || '')}">\${_fmtShortThread(r.threadId)}</td>
+      const graphName = r.graph || 'unknown';
+      const activity = r.eventCount != null
+        ? \`\${r.eventCount} <span class="pl-dim">evt</span>\`
+        : (r.checkpointCount != null ? \`\${r.checkpointCount} <span class="pl-dim">cp</span>\` : '<span class="pl-dim">—</span>');
+      return \`<tr data-thread="\${escapeHtml(r.threadId || '')}">
+        <td><span class="pl-graph-pill" data-graph="\${escapeHtml(graphName)}">\${escapeHtml(graphName)}</span></td>
+        <td class="pl-thread-mono" title="\${escapeHtml(r.threadId || '')}">\${_fmtShortThread(r.threadId)}</td>
         <td><span class="pl-status \${status}">\${status}</span></td>
-        <td class="pl-mono">\${escapeHtml(r.lastNode || '—')}</td>
+        <td class="pl-mono pl-dim" style="font-size:10.5px">\${escapeHtml(r.lastNode || '—')}</td>
         <td>\${_fmtAgo(r.startedAt || r.updatedAt)}</td>
         <td>\${_fmtDuration(r.durationMs)}</td>
-        <td>\${evtOrCp}</td>
+        <td>\${activity}</td>
       </tr>\`;
     }).join('');
     tbody.querySelectorAll('tr').forEach(tr => {
       tr.onclick = () => _selectPipelineRun(tr.dataset.thread);
     });
+    // Re-highlight the selected run if it's still in the list
+    if (_pipelineState.selected) {
+      const sel = tbody.querySelector(\`tr[data-thread="\${_pipelineState.selected}"]\`);
+      if (sel) sel.classList.add('selected');
+    }
   } catch (e) {
-    tbody.innerHTML = \`<tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">Error: \${escapeHtml(e.message)}</td></tr>\`;
+    tbody.innerHTML = \`<tr><td colspan="7" class="pl-empty"><div class="pl-empty-icon">⚠</div>Failed to load runs: \${escapeHtml(e.message)}</td></tr>\`;
+  } finally {
+    if (icon) icon.textContent = '↺';
   }
 }
 
@@ -9624,110 +9772,184 @@ async function _selectPipelineRun(threadId) {
   const tr = document.querySelector('#pl-runs-tbody tr[data-thread="'+threadId+'"]');
   if (tr) tr.classList.add('selected');
   _pipelineState.selected = threadId;
+  document.getElementById('pl-detail-copy').disabled = false;
 
   const body = document.getElementById('pl-detail-body');
-  document.getElementById('pl-detail-title').textContent = threadId;
-  body.innerHTML = '<span class="pl-dim">Loading…</span>';
+  body.innerHTML = '<div class="pl-empty"><div class="pl-spinner" style="margin-bottom:8px"></div>Loading run detail…</div>';
 
   try {
     const d = await fetch('/api/pipelines/runs/' + encodeURIComponent(threadId)).then(r=>r.json());
-    if (d.error) { body.innerHTML = '<span class="pl-dim">'+escapeHtml(d.error)+'</span>'; return; }
+    if (d.error) {
+      body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>'+escapeHtml(d.error)+'</div>';
+      return;
+    }
 
     let html = '';
+    const graphName = d.live?.graph || (d.checkpoints?.[0]?.metadata?.graph) || 'unknown';
+
+    // Header: thread + graph + status + duration meta strip
+    html += '<div class="pl-detail-head">';
+    html += '<span class="pl-graph-pill" data-graph="'+escapeHtml(graphName)+'">'+escapeHtml(graphName)+'</span>';
     if (d.live) {
-      const ev = d.live.events || [];
-      html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
-            + 'graph <span class="pl-graph-pill">'+escapeHtml(d.live.graph)+'</span> · '
-            + '<span class="pl-status '+ (d.live.status||'unknown') +'">'+ (d.live.status||'unknown') +'</span> · '
-            + _fmtDuration(d.live.durationMs) + ' · ' + ev.length + ' events</div>';
-      if (d.live.error) {
-        html += '<div style="color:#fca5a5;font-size:11px;margin-bottom:6px">⚠ ' + escapeHtml(String(d.live.error)) + '</div>';
-      }
-      html += '<div class="pl-tile-label" style="margin-top:8px">Node timeline</div>';
-      html += '<div class="pl-timeline">';
-      // Group events by node to compute durations
+      html += '<span class="pl-status '+ escapeHtml(d.live.status || 'unknown') +'">'+ escapeHtml(d.live.status || 'unknown') +'</span>';
+    } else {
+      html += '<span class="pl-status persisted">persisted</span>';
+    }
+    html += '<span class="pl-thread-mono">'+escapeHtml(threadId)+'</span>';
+    html += '<div class="pl-detail-meta">';
+    if (d.live) {
+      html += '<span>duration <b>'+_fmtDuration(d.live.durationMs)+'</b></span>';
+      html += '<span>events <b>'+(d.live.events?.length || 0)+'</b></span>';
+      if (d.live.lastNode) html += '<span>last node <b class="pl-mono">'+escapeHtml(d.live.lastNode)+'</b></span>';
+    }
+    if (d.checkpoints?.length) html += '<span>checkpoints <b>'+d.checkpoints.length+'</b></span>';
+    html += '</div></div>';
+
+    if (d.live?.error) {
+      html += '<div class="pl-section-title" style="color:#fca5a5">Error</div>';
+      html += '<div style="background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);color:#fca5a5;padding:8px 10px;border-radius:4px;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace">'+escapeHtml(String(d.live.error))+'</div>';
+    }
+
+    // Node timeline (gantt-style)
+    if (d.live) {
+      const events = d.live.events || [];
       const byNode = new Map();
-      for (const e of ev) {
+      for (const e of events) {
         if (!e.node) continue;
         if (!byNode.has(e.node)) byNode.set(e.node, { first: e.ts, last: e.ts, status: e.status });
         const n = byNode.get(e.node);
-        n.last = e.ts; if (e.status) n.status = e.status;
+        n.last = e.ts;
+        if (e.status) n.status = e.status;
       }
-      if (byNode.size === 0) {
-        html += '<div class="pl-dim" style="padding:6px 8px">No node events recorded in memory.</div>';
-      } else {
+      if (byNode.size > 0) {
+        // Compute max duration for bar scaling
+        let maxMs = 0;
+        for (const n of byNode.values()) maxMs = Math.max(maxMs, n.last - n.first);
+        if (maxMs === 0) maxMs = 1;
+        html += '<div class="pl-section-title">Node timeline</div>';
+        html += '<div class="pl-timeline">';
         for (const [name, n] of byNode.entries()) {
-          const klass = n.status === 'error' ? 'err' : (n.status === 'running' ? 'run' : 'ok');
-          html += '<div class="pl-node-row '+klass+'">'
-                +   '<span class="pl-node-name pl-mono">'+escapeHtml(name)+'</span>'
-                +   '<span class="pl-node-status">'+escapeHtml(n.status||'done')+'</span>'
-                +   '<span class="pl-node-status">'+ _fmtDuration((n.last-n.first)) +'</span>'
-                + '</div>';
+          const dur = n.last - n.first;
+          const widthPct = Math.max(2, (dur / maxMs) * 100);
+          let klass = 'ok';
+          if (n.status === 'error') klass = 'err';
+          else if (n.status === 'running') klass = 'run';
+          else if (n.status === 'skipped') klass = 'skip';
+          html += '<div class="pl-node-row '+klass+'">';
+          html += '<span class="pl-node-name">'+escapeHtml(name)+'</span>';
+          html += '<div class="pl-node-bar-cell"><div class="pl-node-bar" style="width:'+widthPct.toFixed(1)+'%"></div></div>';
+          html += '<span class="pl-node-time">'+_fmtDuration(dur)+'</span>';
+          html += '</div>';
         }
+        html += '</div>';
+      } else {
+        html += '<div class="pl-empty" style="padding:14px"><div class="pl-empty-icon">📝</div>No node events in memory for this run.</div>';
       }
-      html += '</div>';
-    } else {
-      html += '<div class="pl-dim" style="font-size:11px;margin-bottom:6px">No in-memory trace for this run. Showing durable checkpoints only.</div>';
     }
 
-    if (d.checkpoints && d.checkpoints.length) {
-      html += '<div class="pl-tile-label" style="margin-top:6px">Checkpoints ('+ d.checkpoints.length +')</div>';
-      html += '<div class="pl-state-pre">' + escapeHtml(JSON.stringify(d.checkpoints.slice(-10).map(c => ({
-        id: c.checkpointId, type: c.type, channels: c.channels, metadata: c.metadata,
-      })), null, 2)) + '</div>';
+    // Durable checkpoints (collapsible)
+    if (d.checkpoints?.length) {
+      const lastTen = d.checkpoints.slice(-10).map(c => ({
+        id: (c.checkpointId || '').slice(0, 18) + '…',
+        type: c.type,
+        channels: c.channels,
+        metadata: c.metadata,
+      }));
+      html += '<div class="pl-collapsible collapsed" id="pl-cps-block">';
+      html += '<div class="pl-collapsible-head" onclick="document.getElementById(\\'pl-cps-block\\').classList.toggle(\\'collapsed\\')">'+
+              'Checkpoints · '+d.checkpoints.length+' total (showing last '+lastTen.length+')</div>';
+      html += '<div class="pl-collapsible-body"><pre class="pl-state-pre">'+escapeHtml(JSON.stringify(lastTen, null, 2))+'</pre></div>';
+      html += '</div>';
     }
-    body.innerHTML = html || '<span class="pl-dim">No detail available.</span>';
+
+    if (!html) html = '<div class="pl-empty"><div class="pl-empty-icon">📭</div>No detail available for this run.</div>';
+    body.innerHTML = html;
   } catch (e) {
-    body.innerHTML = '<span class="pl-dim">Error: ' + escapeHtml(e.message) + '</span>';
+    body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>Error: '+escapeHtml(e.message)+'</div>';
   }
+}
+
+function _updateStreamCount() {
+  const el = document.getElementById('pl-stream-count');
+  if (el) el.textContent = _pipelineState.streamCount > 0
+    ? '· ' + _pipelineState.streamCount + ' event' + (_pipelineState.streamCount === 1 ? '' : 's')
+    : '';
+}
+
+function _togglePipelineStreamPause() {
+  _pipelineState.paused = !_pipelineState.paused;
+  const btn = document.getElementById('pl-stream-pause');
+  btn.textContent = _pipelineState.paused ? '▶ Resume' : '⏸ Pause';
+  btn.classList.toggle('primary', _pipelineState.paused);
 }
 
 function _togglePipelineStream() {
   const btn = document.getElementById('pl-stream-toggle');
+  const pauseBtn = document.getElementById('pl-stream-pause');
   const status = document.getElementById('pl-stream-status');
   const pane = document.getElementById('pl-stream-pane');
+
   if (_pipelineState.sse) {
     _pipelineState.sse.close();
     _pipelineState.sse = null;
-    btn.textContent = 'Connect';
-    status.textContent = 'disconnected'; status.className = 'pl-dim';
+    btn.textContent = '▶ Connect';
+    btn.classList.add('primary');
+    pauseBtn.disabled = true;
+    status.textContent = 'disconnected';
+    status.className = 'pl-status persisted';
     return;
   }
+
   const es = new EventSource('/api/pipelines/stream');
   _pipelineState.sse = es;
-  btn.textContent = 'Disconnect';
-  status.textContent = 'connecting…'; status.className = 'pl-dim';
-  const append = (kls, text) => {
+  _pipelineState.paused = false;
+  btn.textContent = '⏹ Disconnect';
+  btn.classList.remove('primary');
+  pauseBtn.disabled = false;
+  pauseBtn.textContent = '⏸ Pause';
+  pauseBtn.classList.remove('primary');
+  status.textContent = 'connecting…';
+  status.className = 'pl-status warn';
+
+  const append = (kls, ts, text) => {
+    if (_pipelineState.paused) return;
     const div = document.createElement('div');
     div.className = 'pl-stream-line ' + kls;
-    div.textContent = text;
+    div.innerHTML = '<span class="pl-stream-ts">'+escapeHtml(ts)+'</span><span>'+escapeHtml(text)+'</span>';
     pane.appendChild(div);
     while (pane.childElementCount > 400) pane.removeChild(pane.firstChild);
     pane.scrollTop = pane.scrollHeight;
+    _pipelineState.streamCount++;
+    _updateStreamCount();
   };
-  es.onopen  = () => { status.textContent = 'connected'; status.className = ''; };
-  es.onerror = () => { status.textContent = 'error/reconnecting'; status.className = 'pl-dim'; };
+  const tsNow = () => new Date().toLocaleTimeString();
+
+  es.onopen = () => { status.textContent = 'connected'; status.className = 'pl-status running'; };
+  es.onerror = () => { status.textContent = 'reconnecting…'; status.className = 'pl-status warn'; };
   es.onmessage = (m) => {
-    try { const d = JSON.parse(m.data); if (d.type === 'connected') append('pl-dim', '[connected]'); }
-    catch (_) { append('evt', m.data); }
+    try {
+      const d = JSON.parse(m.data);
+      if (d.type === 'connected') append('sys', tsNow(), 'stream connected');
+    } catch (_) { append('evt', tsNow(), m.data); }
   };
   es.addEventListener('trace', (m) => {
     try {
       const d = JSON.parse(m.data);
-      const t = new Date(d.ts || Date.now()).toLocaleTimeString();
-      append('evt', '['+t+'] '+(d.graph||'?')+':'+_fmtShortThread(d.runId)+' → '+(d.node||'?')+' ['+(d.status||'')+']');
-    } catch (_) { append('evt', m.data); }
+      const ts = new Date(d.ts || Date.now()).toLocaleTimeString();
+      const text = (d.graph || '?') + ':' + _fmtShortThread(d.runId) + ' → ' +
+                   (d.node || '?') + (d.status ? ' [' + d.status + ']' : '');
+      append('evt', ts, text);
+    } catch (_) { append('evt', tsNow(), m.data); }
   });
   es.addEventListener('run', (m) => {
     try {
       const d = JSON.parse(m.data);
-      const t = new Date(d.updatedAt || Date.now()).toLocaleTimeString();
-      const cls = d.status === 'error' ? 'err' : 'run';
-      append(cls, '['+t+'] run '+_fmtShortThread(d.runId)+' ('+d.graph+') status='+d.status);
-      // Refresh table when a run state changes
+      const ts = new Date(d.updatedAt || Date.now()).toLocaleTimeString();
+      const cls = (d.status === 'error' || d.status === 'aborted') ? 'err' : 'run';
+      append(cls, ts, 'run ' + _fmtShortThread(d.runId) + ' (' + (d.graph || '?') + ') → ' + (d.status || '?'));
       if (document.getElementById('pipeline-page').style.display === 'block') {
         clearTimeout(_pipelineState._debounce);
-        _pipelineState._debounce = setTimeout(_refreshPipelines, 500);
+        _pipelineState._debounce = setTimeout(() => _refreshPipelines(), 500);
       }
     } catch (_) {}
   });
