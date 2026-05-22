@@ -1138,31 +1138,61 @@ def _backfill_audit_status_counts():
             return {row[0]: int(row[1]) for row in cur.fetchall()}
 
 
+def _backfill_poisoning_quarantine_count():
+    """Return count of quarantined backfill_audit rows that indicate REAL
+    data-poisoning risk (validation failures), excluding pure overlap-
+    protection refusals.
+
+    Overlap-protection ("overlap with existing X rows under v1...") is a
+    safety mechanism that REFUSES to overwrite — it produces no master
+    parquet writes, just a conservative skip. Treating those as poisoning
+    indicators caused a false-positive doctor FAIL after the first real
+    backfill run (1362 overlap-quarantines in v1's 404-ticker pass)."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM backfill_audit "
+                "WHERE status='quarantined' "
+                "AND started_at > NOW() - INTERVAL '7 days' "
+                "AND (error_text IS NULL OR error_text NOT LIKE 'overlap with existing%')"
+            )
+            return int(cur.fetchone()[0])
+
+
 def _check_backfill_progress():
     """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
-    FAIL if quarantined > 100 (data poisoning indicator),
-    WARN if quarantined > 0, PASS otherwise.
 
-    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), this
-    check PASSes with an "n/a" message and never blocks the cycle. The
-    operator sets the gate AFTER the first production backfill so the
-    audit table reflects real state, not test residue from Tasks 7-9
-    (currently ≈4162 quarantined rows in the live DB)."""
+    Two-axis evaluation:
+      - REAL poisoning quarantines (validation failures): >100 → FAIL,
+        >0 → WARN. These indicate the validator caught bad fetches —
+        the system worked AS DESIGNED but operator should investigate
+        what's producing bad data.
+      - Pure OVERLAP quarantines (conservative refusal to overwrite):
+        included in the summary but never trigger FAIL. A v1 backfill
+        against partially-priced tickers naturally produces lots of
+        these (1362 in the 404-ticker pass).
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1."""
     if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
         return (0, 'gate off; n/a')
     try:
         counts = _backfill_audit_status_counts()
+        poisoning = _backfill_poisoning_quarantine_count()
     except Exception as exc:
         return (1, f'audit query failed: {type(exc).__name__}: {exc}')
     if not counts:
         return (0, 'no backfill activity in last 7d')
     summary = ', '.join(f'{k}={v}' for k, v in sorted(counts.items()))
-    quarantined = int(counts.get('quarantined', 0))
-    if quarantined > 100:
-        return (2, f'quarantined={quarantined} > 100 (data poisoning) [{summary}]')
-    if quarantined > 0:
-        return (1, f'quarantined={quarantined} [{summary}]')
-    return (0, summary)
+    overlap = int(counts.get('quarantined', 0)) - poisoning
+    if poisoning > 100:
+        return (2, f'poisoning_quarantined={poisoning} > 100 (validation failures) [{summary}, overlap_refusals={overlap}]')
+    if poisoning > 0:
+        return (1, f'poisoning_quarantined={poisoning} (validation failures) [{summary}, overlap_refusals={overlap}]')
+    return (0, f'{summary} (overlap_refusals={overlap}, 0 validation failures)')
 
 
 @_check('backfill_progress', slow=True)

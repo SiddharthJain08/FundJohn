@@ -46,10 +46,20 @@ def _backfill_progress():
                 "SELECT count(*) FROM backfill_audit WHERE status='quarantined'"
             )
             quarantined = int(cur.fetchone()[0])
+            # Distinguish real validation failures from conservative
+            # overlap-protection refusals (the latter is normal v1 behavior
+            # when backfilling tickers that already have partial coverage).
+            cur.execute(
+                "SELECT count(*) FROM backfill_audit "
+                "WHERE status='quarantined' "
+                "AND (error_text IS NULL OR error_text NOT LIKE 'overlap with existing%')"
+            )
+            poisoning = int(cur.fetchone()[0])
     except Exception as exc:
         return Status.FAIL, f'DB query failed: {exc}'
+    overlap = quarantined - poisoning
     if stuck > 0:
-        return Status.FAIL, f'{stuck} chunk(s) stuck in_progress >24h, quarantined={quarantined}'
-    if quarantined > 0:
-        return Status.WARN, f'quarantined={quarantined}'
-    return Status.PASS, f'no stuck chunks, quarantined=0'
+        return Status.FAIL, f'{stuck} chunk(s) stuck in_progress >24h, poisoning_quarantined={poisoning}, overlap_refusals={overlap}'
+    if poisoning > 0:
+        return Status.WARN, f'poisoning_quarantined={poisoning} (validation failures), overlap_refusals={overlap}'
+    return Status.PASS, f'no stuck chunks, no validation-failure quarantines (overlap_refusals={overlap})'

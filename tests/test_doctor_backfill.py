@@ -107,26 +107,54 @@ def test_check_backfill_progress_pass_on_empty_audit(monkeypatch, gate_on, clean
     assert 'no backfill activity' in msg
 
 
-def test_check_backfill_progress_warn_on_quarantined(monkeypatch, gate_on, clean_audit):
-    """With at least one quarantined row in last 7d, returns WARN (code=1)."""
+def test_check_backfill_progress_warn_on_poisoning_quarantined(monkeypatch, gate_on, clean_audit):
+    """With at least one POISONING (validation-failure) quarantined row in
+    last 7d, returns WARN. Overlap-protection refusals don't count."""
     monkeypatch.setattr(
         'src.maintenance.doctor._backfill_audit_status_counts',
         lambda: {'quarantined': 3, 'validated': 50},
     )
+    monkeypatch.setattr(
+        'src.maintenance.doctor._backfill_poisoning_quarantine_count',
+        lambda: 3,
+    )
     code, msg = _check_backfill_progress()
     assert code == 1
-    assert 'quarantined=3' in msg
+    assert 'poisoning_quarantined=3' in msg
+
+
+def test_check_backfill_progress_pass_when_only_overlap_refusals(monkeypatch, gate_on, clean_audit):
+    """With many quarantined rows BUT all of them overlap-protection refusals
+    (poisoning count = 0), returns PASS — these are conservative noops, not
+    data poisoning."""
+    monkeypatch.setattr(
+        'src.maintenance.doctor._backfill_audit_status_counts',
+        lambda: {'quarantined': 1362, 'promoted': 1062, 'validated': 5},
+    )
+    monkeypatch.setattr(
+        'src.maintenance.doctor._backfill_poisoning_quarantine_count',
+        lambda: 0,
+    )
+    code, msg = _check_backfill_progress()
+    assert code == 0
+    assert 'overlap_refusals=1362' in msg
+    assert '0 validation failures' in msg
 
 
 def test_check_backfill_progress_fail_on_data_poisoning(monkeypatch, gate_on, clean_audit):
-    """With quarantined > 100, returns FAIL (code=2) as data poisoning signal."""
+    """With poisoning_quarantined > 100, returns FAIL — real validation
+    failures exceed the data-poisoning threshold."""
     monkeypatch.setattr(
         'src.maintenance.doctor._backfill_audit_status_counts',
         lambda: {'quarantined': 250},
     )
+    monkeypatch.setattr(
+        'src.maintenance.doctor._backfill_poisoning_quarantine_count',
+        lambda: 250,
+    )
     code, msg = _check_backfill_progress()
     assert code == 2
-    assert 'quarantined=250' in msg
+    assert 'poisoning_quarantined=250' in msg
 
 
 def test_check_backfill_progress_warn_when_real_quarantined_row(gate_on, clean_audit):
