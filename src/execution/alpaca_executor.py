@@ -355,7 +355,19 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           alpaca_status   = EXCLUDED.alpaca_status,
           alpaca_http     = EXCLUDED.alpaca_http,
           alpaca_error    = EXCLUDED.alpaca_error,
-          submitted_at    = EXCLUDED.submitted_at
+          submitted_at    = EXCLUDED.submitted_at,
+          -- 2026-05-22 followup to the bracket-on-cover incident: also
+          -- refresh the order-shape columns so retry attempts that
+          -- downgrade bracket→simple (or change qty/price) leave an
+          -- accurate audit trail instead of the original-attempt values.
+          order_class     = EXCLUDED.order_class,
+          time_in_force   = EXCLUDED.time_in_force,
+          qty             = EXCLUDED.qty,
+          entry_price     = EXCLUDED.entry_price,
+          stop_price      = EXCLUDED.stop_price,
+          target_price    = EXCLUDED.target_price,
+          notional_usd    = EXCLUDED.notional_usd,
+          pct_nav         = EXCLUDED.pct_nav
     """, (
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
         (order.get('direction') or 'long').lower(),
