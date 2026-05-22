@@ -129,7 +129,86 @@ class LifecycleError(Exception):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5.  State machine
+# 5.  Sandbox predicate check (SP-2 Phase A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sandbox_check_predicate(predicate_ref: "str | None") -> None:
+    """SP-2 Phase A: evaluate a candidate universe_filter under real clock
+    and again under a frozen clock pinned to 2020-01-01; reject if outputs
+    differ.
+
+    Defends against predicates that read system clock / env vars (silent
+    look-ahead bias). Linted at write time; sandbox-checked at transition.
+    """
+    if predicate_ref is None:
+        return
+    import importlib
+    import datetime as _dt
+
+    # Lazy import — try both import roots (src.strategies.* and strategies.*)
+    try:
+        from src.strategies.universe_meta import TickerMetadata
+    except ImportError:
+        from strategies.universe_meta import TickerMetadata  # type: ignore
+
+    fixture = TickerMetadata(
+        symbol="AAPL", asset_class="us_equity", exchange="NASDAQ",
+        status="active", tradable=True, shortable=True,
+        fractionable=True, easy_to_borrow=True,
+        market_cap=3.5e12, adv_usd_20d=1.8e10,
+        sector="IT", industry="CE",
+        options_eligible=True, in_sp500=True, in_r1000=True, in_r3000=True,
+        listed_date=_dt.date(1980, 12, 12), delisted_date=None,
+    )
+
+    mod_path, attr = predicate_ref.rsplit(":", 1)
+    module = importlib.import_module(mod_path)
+    fn = getattr(module, attr)
+    as_of = _dt.date(2024, 1, 15)  # fixed historical date
+
+    real = fn(fixture, as_of)
+
+    FROZEN = _dt.datetime(2020, 1, 1, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+    class _FrozenDate(_dt.date):
+        @classmethod
+        def today(cls):
+            return cls(2020, 1, 1)
+
+    class _FrozenDateTime(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return FROZEN if tz is None else FROZEN.astimezone(tz)
+        @classmethod
+        def utcnow(cls):
+            return FROZEN.replace(tzinfo=None)
+
+    # Patch every module-level name that resolves to datetime.date or
+    # datetime.datetime — this catches aliased imports like
+    # `from datetime import date as _d` where the attr name differs.
+    saved = {}
+    for attr_name, attr_val in list(vars(module).items()):
+        if attr_val is _dt.date and attr_val is not _dt.datetime:
+            saved[attr_name] = attr_val
+            setattr(module, attr_name, _FrozenDate)
+        elif attr_val is _dt.datetime:
+            saved[attr_name] = attr_val
+            setattr(module, attr_name, _FrozenDateTime)
+    try:
+        frozen = fn(fixture, as_of)
+    finally:
+        for attr_name, val in saved.items():
+            setattr(module, attr_name, val)
+
+    if real != frozen:
+        raise ValueError(
+            f"predicate behavior differs between real ({real}) and frozen ({frozen}) clock — "
+            f"likely reads today()/now()/env. Predicate: {predicate_ref}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  State machine
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LifecycleStateMachine:
@@ -349,8 +428,21 @@ class LifecycleStateMachine:
         Execute a lifecycle transition.
 
         Raises LifecycleError when the move is invalid or blocked by a guard.
+        Raises ValueError when a candidate universe_filter_ref predicate reads
+        the system clock (look-ahead bias detection via sandbox check).
         Returns the updated StrategyRecord.
         """
+        # SP-2 Phase A: sandbox-check any new universe_filter_ref BEFORE running
+        # can_transition / mutating any record state. Sandbox check raises
+        # ValueError on clock-dependent predicates.
+        new_ref = (metadata or {}).get("universe_filter_ref")
+        if new_ref is not None:
+            # Only check if the ref is actually changing; idempotent set is fine
+            current = self._records.get(strategy_id)
+            current_ref = current.universe_filter_ref if current else None
+            if new_ref != current_ref:
+                _sandbox_check_predicate(new_ref)
+
         ok, msg = self.can_transition(strategy_id, to_state, metadata)
         if not ok:
             raise LifecycleError(msg)
@@ -368,6 +460,13 @@ class LifecycleStateMachine:
         rec.history.append(event)
         rec.state       = to_state
         rec.state_since = now
+
+        # SP-2 Phase A: apply the new universe_filter_ref after transition succeeds
+        if new_ref is not None:
+            rec.universe_filter_ref = new_ref
+            # Mirror into rec.metadata so to_dict round-trips it
+            rec.metadata["universe_filter_ref"] = new_ref
+
         logger.info(
             "lifecycle[%s]: %s → %s  actor=%s",
             strategy_id, event.from_state, to_state.value, actor,
