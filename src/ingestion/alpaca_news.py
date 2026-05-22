@@ -154,6 +154,55 @@ def _aggregate_per_ticker(articles: list[dict]) -> dict[str, dict]:
     return out
 
 
+def _upsert_market_news(articles: list[dict]) -> int:
+    """Persist raw Alpaca News articles into the market_news table.
+
+    Single fetch feeds two consumers: the FinBERT-scored aggregates land in
+    ticker_sentiment_daily, the raw articles land in market_news for downstream
+    BotJohn lookups / dashboards. uuid is the Alpaca article id cast to text;
+    ON CONFLICT (uuid) DO NOTHING because articles are immutable once published.
+
+    Returns the number of rows inserted (excluding ON CONFLICT skips).
+    """
+    import psycopg2
+    if not articles:
+        return 0
+    pg_uri = os.environ['POSTGRES_URI']
+    inserted = 0
+    with psycopg2.connect(pg_uri) as conn:
+        with conn.cursor() as cur:
+            for a in articles:
+                aid = a.get('id')
+                if aid is None:
+                    continue
+                symbols = a.get('symbols') or []
+                primary = symbols[0] if symbols else None
+                # Alpaca's created_at is RFC3339 with trailing Z; psycopg2
+                # accepts it as a TIMESTAMPTZ literal.
+                cur.execute(
+                    """
+                    INSERT INTO market_news
+                      (uuid, primary_ticker, title, publisher, url,
+                       published_at, summary, related_tickers)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (uuid) DO NOTHING
+                    """,
+                    (
+                        str(aid),
+                        primary,
+                        (a.get('headline') or '')[:1000],
+                        a.get('source'),
+                        a.get('url'),
+                        a.get('created_at'),
+                        (a.get('summary') or '')[:2000],
+                        symbols,
+                    ),
+                )
+                inserted += cur.rowcount or 0
+        conn.commit()
+    return inserted
+
+
 def _upsert_ticker_sentiment(rows: list[dict]) -> None:
     """Upsert alpaca_news_* columns into ticker_sentiment_daily on (ticker, date).
 
@@ -205,6 +254,16 @@ def ingest_alpaca_news(symbols: list[str]) -> None:
     all_articles: list[dict] = []
     for chunk in _chunk_symbols(symbols, chunk_size=50):
         all_articles.extend(_fetch_news_chunk(chunk, start=start))
+
+    # Dual-write: raw articles → market_news (idempotent on uuid); aggregates
+    # → ticker_sentiment_daily. Persisting raw articles BEFORE scoring keeps
+    # the market_news table populated even if FinBERT is briefly unavailable.
+    try:
+        market_news_inserted = _upsert_market_news(all_articles)
+    except Exception as e:  # noqa: BLE001  raw-news persist is best-effort
+        log.warning('alpaca_news: market_news upsert failed (non-fatal): %s', e)
+        market_news_inserted = 0
+
     scored = _score_with_finbert(all_articles)
     agg = _aggregate_per_ticker(scored)
 
@@ -222,4 +281,5 @@ def ingest_alpaca_news(symbols: list[str]) -> None:
             'alpaca_news_top_headlines': agg_for.get('top_headlines', []),
         })
     _upsert_ticker_sentiment(rows)
-    log.info('alpaca_news: ingested %d symbols, %d articles', len(symbols), len(all_articles))
+    log.info('alpaca_news: ingested %d symbols, %d articles (%d new market_news rows)',
+             len(symbols), len(all_articles), market_news_inserted)
