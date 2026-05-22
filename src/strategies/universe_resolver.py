@@ -99,14 +99,25 @@ class UniverseResolver:
 
 
 if __name__ == "__main__":
-    import argparse, json
+    import argparse, json, os, sys
+    from datetime import date as _d
+    from src.strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
     ap = argparse.ArgumentParser()
     ap.add_argument("--as-of", required=True)
     ap.add_argument("--states", default="live")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strategy", help="Resolve a single strategy instead of union")
     args = ap.parse_args()
-    # Placeholder — Task 13.1 replaces this block with concrete
-    # PostgresMetadataDB + ParquetCoverage adapters from
-    # src/strategies/_db_adapters.py.
-    print(json.dumps(["AAPL", "MSFT"]))
+    as_of = _d.fromisoformat(args.as_of)
+    states = tuple(args.states.split(","))
+    db = PostgresMetadataDB(os.environ["POSTGRES_URI"])
+    cov = ParquetCoverage()
+    def manifest_loader():
+        with open("/root/openclaw/src/strategies/manifest.json") as f:
+            return json.load(f)
+    resolver = UniverseResolver(db=db, coverage=cov, manifest_loader=manifest_loader)
+    if args.strategy:
+        out = resolver.resolve(args.strategy, as_of=as_of)
+    else:
+        out = resolver.union_universe(as_of=as_of, states=states)
+    print(json.dumps(out))
