@@ -8,8 +8,8 @@ node_modules/
 # === Runtime / Generated Data ===
 workspaces/
 logs/
-data/
-# SP-2 Phase B frozen artifacts — committed, exempt from blanket data/ ignore
+data/*
+# SP-2 Phase B frozen artifacts — committed, exempt from blanket data/* ignore
 !data/.backfill_universe_v1.txt
 !data/sp500_historical_membership_v1.csv
 output/
