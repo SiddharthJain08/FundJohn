@@ -589,27 +589,29 @@ def _enumerate_month_ends(years: list[int]) -> list[_date]:
 def _validate_metadata(df, snapshot_date: _date) -> tuple[bool, Optional[str]]:
     """Validation gate before promotion. Returns (ok, error_str_or_None).
 
-    Defensive against missing market_cap (Phase B Task 8 caveat: historical
-    market_cap is None across the board until shares-out backfill ships, so
-    `top10_market_cap_implausible` will trip for now — that's the intended
-    operator signal that historical snapshots are landing without caps).
+    Two thresholds are calibrated to Phase B v1 reality:
+      1. row_count >= 30 — backfill universe is 404 tickers (v1 floor).
+         Earliest snapshots (pre-1990) will only have a few dozen tickers
+         that had IPO'd by then, which is still useful for historical
+         in_sp500 + sector data.
+      2. market_cap top-10 floor only fires when market_cap is populated.
+         FMP Starter 403s on historical-market-capitalization, so v1
+         historical snapshots have market_cap=None. Allow None-only
+         snapshots to land rather than quarantine the entire history.
     """
     if df is None or df.empty:
         return False, 'empty'
-    if len(df) < 1500:
+    if len(df) < 30:
         return False, f'row_count_too_low ({len(df)})'
     if df['symbol'].duplicated().any():
         return False, 'duplicate_symbol'
 
-    # Top-10 market cap sanity floor: at least one mega-cap should be present.
-    # nlargest skips NaN automatically. dropna() first so an all-None column
-    # produces a sensible "implausible" error instead of an exception.
+    # Market-cap sanity floor only when we have caps to evaluate.
     caps = df['market_cap'].dropna() if 'market_cap' in df.columns else None
-    if caps is None or caps.empty:
-        return False, 'top10_market_cap_implausible'
-    top10 = caps.nlargest(10)
-    if top10.empty or float(top10.max()) < 1e11:
-        return False, 'top10_market_cap_implausible'
+    if caps is not None and not caps.empty:
+        top10 = caps.nlargest(10)
+        if float(top10.max()) < 1e11:
+            return False, 'top10_market_cap_implausible'
 
     return True, None
 

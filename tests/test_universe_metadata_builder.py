@@ -183,10 +183,13 @@ def _import_validate_metadata():
 
 
 def test_validate_rejects_low_row_count():
+    """Floor lowered to 30 for v1's 404-ticker universe (was 1500 for the
+    hypothetical 3000-ticker universe). Earliest IPOs are pre-1990 — those
+    snapshots will have ~40-50 tickers."""
     _validate_metadata = _import_validate_metadata()
     df = pd.DataFrame({
-        'symbol': [f'T{i}' for i in range(100)],
-        'market_cap': [1e12] * 100,
+        'symbol': [f'T{i}' for i in range(20)],
+        'market_cap': [1e12] * 20,
     })
     ok, err = _validate_metadata(df, date(2024, 8, 31))
     assert not ok
@@ -195,11 +198,11 @@ def test_validate_rejects_low_row_count():
 
 def test_validate_rejects_duplicate_symbols():
     _validate_metadata = _import_validate_metadata()
-    # 1500 rows total — clears the row-count floor — but symbol T0 duplicated.
-    symbols = ['T0'] + [f'T{i}' for i in range(1, 1500)]
+    # Clear row-count floor (>30) but T0 duplicated.
+    symbols = ['T0'] + [f'T{i}' for i in range(1, 50)]
     df = pd.DataFrame({
-        'symbol': symbols + ['T0'],  # 1501 rows; T0 appears twice
-        'market_cap': [1e12] * 1501,
+        'symbol': symbols + ['T0'],  # 51 rows; T0 appears twice
+        'market_cap': [1e12] * 51,
     })
     ok, err = _validate_metadata(df, date(2024, 8, 31))
     assert not ok
@@ -208,14 +211,27 @@ def test_validate_rejects_duplicate_symbols():
 
 def test_validate_rejects_implausible_top10_cap():
     _validate_metadata = _import_validate_metadata()
-    # 1500 unique symbols, all market_cap < $100B.
+    # 50 unique symbols, all market_cap < $100B — top10 floor fires.
     df = pd.DataFrame({
-        'symbol': [f'T{i}' for i in range(1500)],
-        'market_cap': [5e10] * 1500,  # all $50B
+        'symbol': [f'T{i}' for i in range(50)],
+        'market_cap': [5e10] * 50,  # all $50B
     })
     ok, err = _validate_metadata(df, date(2024, 8, 31))
     assert not ok
     assert err == 'top10_market_cap_implausible'
+
+
+def test_validate_accepts_when_market_cap_all_none():
+    """v1 historical reality: FMP Starter 403s on historical-market-cap.
+    Snapshots with universal None market_cap should still LAND (they're
+    useful for in_sp500 + sector data even without ranks)."""
+    _validate_metadata = _import_validate_metadata()
+    df = pd.DataFrame({
+        'symbol': [f'T{i}' for i in range(50)],
+        'market_cap': [None] * 50,
+    })
+    ok, err = _validate_metadata(df, date(2024, 8, 31))
+    assert ok, f'expected accept on all-None market_cap, got {err}'
 
 
 def test_validate_accepts_healthy_snapshot():
