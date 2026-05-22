@@ -247,15 +247,10 @@ def test_validate_accepts_healthy_snapshot():
     assert err is None
 
 
-def test_validate_rejects_all_none_market_cap():
-    _validate_metadata = _import_validate_metadata()
-    df = pd.DataFrame({
-        'symbol': [f'T{i}' for i in range(2000)],
-        'market_cap': [None] * 2000,
-    })
-    ok, err = _validate_metadata(df, date(2024, 8, 31))
-    assert not ok
-    assert err == 'top10_market_cap_implausible'
+# Removed test_validate_rejects_all_none_market_cap — superseded by
+# test_validate_accepts_when_market_cap_all_none (Phase B v1 calibration:
+# all-None market_cap is acceptable; historical snapshots still useful
+# for in_sp500 + sector even without cap-based ranks).
 
 
 # ── DRY regression — writer must delegate to the shared builder ───────────────
