@@ -317,6 +317,21 @@ app.get('/api/data-health', async (_req, res) => {
   }
 });
 
+// ─────────────────────────── Universe Resolution ─────────────────────────────
+app.get('/api/universe-slice', async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT resolved_for_date, union_size, per_strategy_sizes, resolver_ms
+      FROM universe_resolution_audit
+      ORDER BY resolved_at DESC
+      LIMIT 30
+    `);
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─────────────────────────── Health ──────────────────────────────────────────
 app.get('/api/health', async (_req, res) => {
   const health = { ok: true, ts: Date.now(), postgres: 'unknown', redis: 'unknown' };

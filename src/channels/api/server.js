@@ -4423,6 +4423,18 @@ body.rs-chat-locked{overflow:hidden}
         <div class="pl-stream-line sys"><span class="pl-stream-ts">—</span>Stream idle. Click <b>Connect</b> to subscribe to traceBus events.</div>
       </div>
     </div>
+
+    <div class="pl-card">
+      <header>
+        <h3>Universe Inflation <span class="pl-dim" id="pl-uni-inf-count" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h3>
+        <div class="pl-controls">
+          <span class="pl-dim" id="pl-uni-inf-ts"></span>
+        </div>
+      </header>
+      <div class="pl-body" id="pl-uni-inf-body">
+        <div class="pl-empty"><div class="pl-spinner"></div>Loading…</div>
+      </div>
+    </div>
   </div>
 </div><!-- #pipeline-page -->
 
@@ -9714,6 +9726,7 @@ async function _refreshPipelines() {
   const icon = document.getElementById('pl-refresh-icon');
   if (icon) icon.innerHTML = '<span class="pl-spinner"></span>';
   await _refreshPipelineSummary();
+  _refreshUniverseInflation();
   const limit = document.getElementById('pl-filter-limit').value;
   const graph = document.getElementById('pl-filter-graph').value;
   const q = new URLSearchParams({ limit });
@@ -9953,6 +9966,55 @@ function _togglePipelineStream() {
       }
     } catch (_) {}
   });
+}
+
+async function _refreshUniverseInflation() {
+  const body = document.getElementById('pl-uni-inf-body');
+  const count = document.getElementById('pl-uni-inf-count');
+  const ts    = document.getElementById('pl-uni-inf-ts');
+  if (!body) return;
+  try {
+    const rows = await fetch('/api/pipelines/universe-inflation').then(r => r.json());
+    if (rows.error) {
+      body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>' + escapeHtml(rows.error) + '</div>';
+      return;
+    }
+    if (!Array.isArray(rows) || !rows.length) {
+      body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">🌱</div>No universe resolution runs yet.</div>';
+      if (count) count.textContent = '';
+      return;
+    }
+    if (count) count.textContent = '· ' + rows.length + ' days';
+    if (ts)    ts.textContent    = 'refreshed ' + new Date().toLocaleTimeString();
+
+    const latest = rows[0];
+    const pct    = latest.pct != null ? latest.pct + '%' : '—';
+    const tileHtml = '<div class="pl-tiles" style="margin-bottom:12px">' +
+      '<div class="pl-tile"><div class="pl-tile-row"><span class="pl-tile-icon">🎯</span><span class="pl-tile-label">Union size (latest)</span></div>' +
+      '<div class="pl-tile-value">' + escapeHtml(String(latest.u ?? '—')) + '</div>' +
+      '<div class="pl-tile-sub">' + escapeHtml(String(latest.d ?? '')) + '</div></div>' +
+      '<div class="pl-tile"><div class="pl-tile-row"><span class="pl-tile-icon">📐</span><span class="pl-tile-label">Alpaca total (latest)</span></div>' +
+      '<div class="pl-tile-value">' + escapeHtml(String(latest.total ?? '—')) + '</div>' +
+      '<div class="pl-tile-sub">broker universe</div></div>' +
+      '<div class="pl-tile"><div class="pl-tile-row"><span class="pl-tile-icon">📊</span><span class="pl-tile-label">Inflation % (latest)</span></div>' +
+      '<div class="pl-tile-value">' + escapeHtml(pct) + '</div>' +
+      '<div class="pl-tile-sub">union / total × 100</div></div>' +
+      '</div>';
+
+    const tableRows = rows.map(r =>
+      '<tr><td class="pl-mono" style="font-size:11px">' + escapeHtml(String(r.d ?? '')) + '</td>' +
+      '<td class="pl-mono" style="font-size:11px">' + escapeHtml(String(r.u ?? '—')) + '</td>' +
+      '<td class="pl-mono" style="font-size:11px">' + escapeHtml(String(r.total ?? '—')) + '</td>' +
+      '<td class="pl-mono" style="font-size:11px">' + escapeHtml(r.pct != null ? r.pct + '%' : '—') + '</td></tr>'
+    ).join('');
+    const tableHtml = '<div style="overflow:auto;max-height:220px"><table class="pl-runs-table">' +
+      '<thead><tr><th>Date</th><th>Union</th><th>Total</th><th>Inflation %</th></tr></thead>' +
+      '<tbody>' + tableRows + '</tbody></table></div>';
+
+    body.innerHTML = tileHtml + tableHtml;
+  } catch (e) {
+    if (body) body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>Error: ' + escapeHtml(e.message) + '</div>';
+  }
 }
 
 function escapeHtml(s) {

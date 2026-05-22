@@ -214,6 +214,24 @@ router.get('/runs/:thread_id', async (req, res) => {
   }
 });
 
+// GET /api/pipelines/universe-inflation — 30-day union size vs total universe
+router.get('/universe-inflation', async (_req, res) => {
+  try {
+    const result = await dbQuery(`
+      SELECT resolved_for_date AS d,
+             union_size AS u,
+             alpaca_universe_size AS total,
+             ROUND(union_size::numeric / NULLIF(alpaca_universe_size,0) * 100, 2) AS pct
+      FROM universe_resolution_audit
+      ORDER BY resolved_at DESC
+      LIMIT 30
+    `);
+    res.json(result.rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/pipelines/stream — SSE live trace events
 router.get('/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
