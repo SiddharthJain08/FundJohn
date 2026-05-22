@@ -2719,6 +2719,9 @@ app.get('/events', (req, res) => {
 // ── Research page ──────────────────────────────────────────────────────────────
 app.use('/api/research', require('./routes_research'));
 
+// ── Pipeline Diagnostics — LangGraph run inspector ────────────────────────────
+app.use('/api/pipelines', require('./routes_pipelines'));
+
 // ── Regime eligibility (operator trim/expand) ─────────────────────────────────
 app.use('/api/regime-eligibility', require('./routes_regime_eligibility'));
 
@@ -2909,6 +2912,51 @@ body{background:var(--bg);color:var(--text);font-family:'SF Mono','Fira Code',mo
 #portfolio-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #strategies-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
 #research-page{display:none;position:absolute;inset:0;overflow:hidden;background:var(--bg)}
+
+/* Pipeline Diagnostics — LangGraph run inspector */
+#pipeline-page{display:none;position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;background:var(--bg)}
+#pipeline-inner{max-width:1600px;margin:0 auto;padding:14px;display:flex;flex-direction:column;gap:12px}
+.pl-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.pl-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px 14px}
+.pl-tile-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px}
+.pl-tile-value{font-size:22px;font-weight:600;color:var(--text);font-variant-numeric:tabular-nums}
+.pl-tile-sub{font-size:10px;color:var(--dim);margin-top:2px}
+.pl-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
+.pl-card>header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pl-card>header h3{font-size:11px;font-weight:700;color:var(--text);letter-spacing:.04em;margin:0}
+.pl-card .pl-body{padding:6px 0;max-height:540px;overflow:auto}
+.pl-runs-table{width:100%;font-size:11px;border-collapse:collapse}
+.pl-runs-table th{text-align:left;padding:6px 12px;color:var(--muted);font-weight:500;text-transform:uppercase;font-size:10px;letter-spacing:.04em;border-bottom:1px solid var(--border2);position:sticky;top:0;background:var(--panel)}
+.pl-runs-table td{padding:6px 12px;border-bottom:1px solid #14181d;font-variant-numeric:tabular-nums}
+.pl-runs-table tbody tr{cursor:pointer}
+.pl-runs-table tbody tr:hover{background:#11161c}
+.pl-runs-table tbody tr.selected{background:#0e2540}
+.pl-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.pl-status{display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.pl-status.running{background:#0e3a52;color:#7dd3fc}
+.pl-status.success,.pl-status.done,.pl-status.completed{background:#0d3520;color:#86efac}
+.pl-status.error,.pl-status.failed{background:#4a1212;color:#fca5a5}
+.pl-status.unknown,.pl-status.persisted{background:#222;color:var(--muted)}
+.pl-graph-pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;background:var(--border2);color:var(--text)}
+.pl-detail{padding:10px 14px;min-height:60px;font-size:11px;color:var(--muted)}
+.pl-timeline{display:flex;flex-direction:column;gap:4px;margin:8px 0 10px}
+.pl-node-row{display:flex;align-items:center;gap:8px;padding:4px 8px;background:#11161c;border-radius:4px;font-size:11px}
+.pl-node-row .pl-node-name{flex:1;color:var(--text);font-weight:500}
+.pl-node-row .pl-node-status{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.pl-node-row.ok{border-left:3px solid #16a34a}
+.pl-node-row.err{border-left:3px solid #b91c1c}
+.pl-node-row.run{border-left:3px solid #3b82f6}
+.pl-state-pre{background:#0a0d12;border:1px solid var(--border2);border-radius:4px;padding:8px;font-size:10px;color:var(--text);overflow:auto;max-height:320px;white-space:pre;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.pl-stream{background:#0a0d12;border:1px solid var(--border2);border-radius:4px;padding:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;color:var(--text);max-height:260px;overflow:auto}
+.pl-stream-line{padding:1px 0;white-space:pre-wrap;word-break:break-word}
+.pl-stream-line.evt{color:#7dd3fc}
+.pl-stream-line.run{color:#86efac}
+.pl-stream-line.err{color:#fca5a5}
+.pl-dim{color:var(--dim)}
+.pl-controls{display:flex;gap:8px;align-items:center;font-size:11px;color:var(--muted)}
+.pl-controls select,.pl-controls input{background:#0d1117;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 7px;font-size:11px;font-family:inherit}
+.pl-btn{background:none;border:1px solid var(--border);color:var(--muted);font-size:10px;cursor:pointer;font-family:inherit;padding:2px 8px;border-radius:4px}
+.pl-btn:hover{color:var(--text);border-color:var(--blue)}
 #research-inner{height:100%;max-width:1600px;margin:0 auto;padding:12px;display:flex;flex-direction:column;gap:10px;overflow-y:auto;overflow-x:hidden}
 .rs-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;overflow:hidden;min-height:0}
 .rs-card header{background:#0d1117;border-bottom:1px solid var(--border2);padding:7px 12px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -3927,6 +3975,7 @@ body.rs-chat-locked{overflow:hidden}
   <button class="nav-btn" id="nav-portfolio" onclick="showPortfolio()">Portfolio</button>
   <button class="nav-btn" id="nav-strategies" onclick="showStrategies()">Strategies</button>
   <button class="nav-btn" id="nav-research" onclick="showResearch()">Research</button>
+  <button class="nav-btn" id="nav-pipelines" onclick="showPipelines()">Pipeline Diagnostics</button>
   <span id="pipeline-badge">Loading pipeline...</span>
   <button class="refresh-btn" onclick="loadMarket();refreshPipeline()" title="Refresh data">↺ Refresh</button>
   <span id="clock"></span>
@@ -4200,6 +4249,88 @@ body.rs-chat-locked{overflow:hidden}
     </div>
   </div>
 </div><!-- #research-page -->
+
+<!-- Pipeline Diagnostics — LangGraph run inspector -->
+<div id="pipeline-page">
+  <div id="pipeline-inner">
+    <div class="pl-tiles">
+      <div class="pl-tile">
+        <div class="pl-tile-label">Active runs</div>
+        <div class="pl-tile-value" id="pl-tile-active">—</div>
+        <div class="pl-tile-sub">currently in-flight</div>
+      </div>
+      <div class="pl-tile">
+        <div class="pl-tile-label">Started today</div>
+        <div class="pl-tile-value" id="pl-tile-today">—</div>
+        <div class="pl-tile-sub">since 00:00 local</div>
+      </div>
+      <div class="pl-tile">
+        <div class="pl-tile-label">Failures (24h)</div>
+        <div class="pl-tile-value" id="pl-tile-failures">—</div>
+        <div class="pl-tile-sub">error / failed status</div>
+      </div>
+      <div class="pl-tile">
+        <div class="pl-tile-label">Durable threads</div>
+        <div class="pl-tile-value" id="pl-tile-durable">—</div>
+        <div class="pl-tile-sub">in langgraph.checkpoints</div>
+      </div>
+    </div>
+
+    <div class="pl-card">
+      <header>
+        <h3>Recent runs</h3>
+        <div class="pl-controls">
+          <label>Graph
+            <select id="pl-filter-graph"><option value="">All</option></select>
+          </label>
+          <label>Limit
+            <select id="pl-filter-limit">
+              <option>25</option><option selected>50</option><option>100</option><option>200</option>
+            </select>
+          </label>
+          <button class="pl-btn" id="pl-refresh">↺ Reload</button>
+        </div>
+      </header>
+      <div class="pl-body">
+        <table class="pl-runs-table">
+          <thead>
+            <tr>
+              <th>Graph</th><th>Thread</th><th>Status</th><th>Last node</th>
+              <th>Started</th><th>Duration</th><th>Events / Checkpoints</th>
+            </tr>
+          </thead>
+          <tbody id="pl-runs-tbody">
+            <tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="pl-card">
+      <header>
+        <h3>Run detail</h3>
+        <div class="pl-controls"><span id="pl-detail-title" class="pl-dim">Select a run above</span></div>
+      </header>
+      <div class="pl-detail" id="pl-detail-body">
+        <span class="pl-dim">Click a row to load checkpoint timeline + live trace + final state.</span>
+      </div>
+    </div>
+
+    <div class="pl-card">
+      <header>
+        <h3>Live stream</h3>
+        <div class="pl-controls">
+          <span id="pl-stream-status" class="pl-dim">disconnected</span>
+          <button class="pl-btn" id="pl-stream-toggle">Connect</button>
+          <button class="pl-btn" id="pl-stream-clear">Clear</button>
+        </div>
+      </header>
+      <div class="pl-stream" id="pl-stream-pane">
+        <div class="pl-stream-line pl-dim">Connect to subscribe to traceBus events…</div>
+      </div>
+    </div>
+  </div>
+</div><!-- #pipeline-page -->
 
 <!-- Data usage panel (opened from the strategies page Data tile) -->
 <div class="paper-modal data-usage-modal" id="data-usage-modal">
@@ -5306,7 +5437,7 @@ let regime90dData  = null;    // [{date, regime}]
 let regime1yData   = null;    // [{date, regime}]
 
 function _setNavActive(which) {
-  for (const k of ['market','portfolio','strategies','research']) {
+  for (const k of ['market','portfolio','strategies','research','pipelines']) {
     const el = document.getElementById('nav-'+k);
     if (!el) continue;
     if (k === which) el.classList.add('active'); else el.classList.remove('active');
@@ -5319,6 +5450,8 @@ function _hideAllPages() {
   if (st) st.style.display = 'none';
   const rp = document.getElementById('research-page');
   if (rp) rp.style.display = 'none';
+  const pl = document.getElementById('pipeline-page');
+  if (pl) pl.style.display = 'none';
 }
 
 function showMarket() {
@@ -9366,6 +9499,243 @@ async function refreshPipeline() {
   const total = Object.values(universeData).flat().length || 456;
   document.getElementById('pipeline-badge').textContent =
     \`📡 prices:\${cov.price_coverage} options:\${cov.options_coverage} tech:\${cov.tech_coverage} fund:\${cov.fund_coverage}\`;
+}
+
+// ── Pipeline Diagnostics ─────────────────────────────────────────────────────
+let _pipelineState = {
+  initialized: false,
+  runs:        [],
+  selected:    null,
+  sse:         null,
+  refreshTimer: null,
+};
+
+async function showPipelines() {
+  _hideAllPages();
+  document.getElementById('pipeline-page').style.display = 'block';
+  _setNavActive('pipelines');
+  if (!_pipelineState.initialized) _initPipelines();
+  await _refreshPipelines();
+}
+
+function _initPipelines() {
+  _pipelineState.initialized = true;
+  document.getElementById('pl-refresh').onclick = _refreshPipelines;
+  document.getElementById('pl-filter-graph').onchange = _refreshPipelines;
+  document.getElementById('pl-filter-limit').onchange = _refreshPipelines;
+  document.getElementById('pl-stream-toggle').onclick = _togglePipelineStream;
+  document.getElementById('pl-stream-clear').onclick = () => {
+    document.getElementById('pl-stream-pane').innerHTML =
+      '<div class="pl-stream-line pl-dim">cleared</div>';
+  };
+  // Soft polling so tiles stay current even without SSE connected
+  _pipelineState.refreshTimer = setInterval(() => {
+    if (document.getElementById('pipeline-page').style.display === 'block') {
+      _refreshPipelineSummary();
+    }
+  }, 15000);
+}
+
+function _fmtDuration(ms) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '—';
+  if (ms < 1000) return ms + 'ms';
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(1) + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm ' + Math.round(s - m*60) + 's';
+}
+function _fmtAgo(ts) {
+  if (!ts) return '—';
+  const diff = (Date.now() - ts) / 1000;
+  if (diff < 60) return Math.round(diff) + 's ago';
+  if (diff < 3600) return Math.round(diff/60) + 'm ago';
+  if (diff < 86400) return Math.round(diff/3600) + 'h ago';
+  return Math.round(diff/86400) + 'd ago';
+}
+function _fmtShortThread(t) {
+  if (!t) return '—';
+  return t.length > 12 ? t.slice(0, 8) + '…' + t.slice(-3) : t;
+}
+
+async function _refreshPipelineSummary() {
+  try {
+    const d = await fetch('/api/pipelines/summary').then(r=>r.json());
+    document.getElementById('pl-tile-active').textContent = d.active ?? '0';
+    document.getElementById('pl-tile-today').textContent = d.today ?? '0';
+    document.getElementById('pl-tile-failures').textContent = d.failures_24h ?? '0';
+    document.getElementById('pl-tile-durable').textContent = d.durable_total ?? '—';
+
+    // Populate graph filter dropdown if not present yet
+    const sel = document.getElementById('pl-filter-graph');
+    const current = sel.value;
+    const have = new Set([...sel.options].map(o => o.value));
+    for (const g of (d.graphs || [])) {
+      if (!have.has(g)) {
+        const opt = document.createElement('option');
+        opt.value = g; opt.textContent = g;
+        sel.appendChild(opt);
+      }
+    }
+    sel.value = current;
+  } catch (e) { /* tile failure non-fatal */ }
+}
+
+async function _refreshPipelines() {
+  await _refreshPipelineSummary();
+  const limit = document.getElementById('pl-filter-limit').value;
+  const graph = document.getElementById('pl-filter-graph').value;
+  const q = new URLSearchParams({ limit });
+  if (graph) q.set('graph', graph);
+
+  const tbody = document.getElementById('pl-runs-tbody');
+  try {
+    const d = await fetch('/api/pipelines/runs?' + q.toString()).then(r=>r.json());
+    _pipelineState.runs = d.runs || [];
+    if (!_pipelineState.runs.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">No runs yet — kick off a LangGraph cycle to see entries here.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = _pipelineState.runs.map((r,i) => {
+      const status = (r.status || 'persisted').toLowerCase();
+      const evtOrCp = r.eventCount != null
+        ? \`\${r.eventCount} evt\`
+        : (r.checkpointCount != null ? \`\${r.checkpointCount} cp\` : '—');
+      return \`<tr data-idx="\${i}" data-thread="\${r.threadId || ''}">
+        <td><span class="pl-graph-pill">\${escapeHtml(r.graph || 'unknown')}</span></td>
+        <td class="pl-mono" title="\${escapeHtml(r.threadId || '')}">\${_fmtShortThread(r.threadId)}</td>
+        <td><span class="pl-status \${status}">\${status}</span></td>
+        <td class="pl-mono">\${escapeHtml(r.lastNode || '—')}</td>
+        <td>\${_fmtAgo(r.startedAt || r.updatedAt)}</td>
+        <td>\${_fmtDuration(r.durationMs)}</td>
+        <td>\${evtOrCp}</td>
+      </tr>\`;
+    }).join('');
+    tbody.querySelectorAll('tr').forEach(tr => {
+      tr.onclick = () => _selectPipelineRun(tr.dataset.thread);
+    });
+  } catch (e) {
+    tbody.innerHTML = \`<tr><td colspan="7" class="pl-dim" style="padding:18px;text-align:center">Error: \${escapeHtml(e.message)}</td></tr>\`;
+  }
+}
+
+async function _selectPipelineRun(threadId) {
+  if (!threadId) return;
+  document.querySelectorAll('#pl-runs-tbody tr').forEach(tr => tr.classList.remove('selected'));
+  const tr = document.querySelector('#pl-runs-tbody tr[data-thread="'+threadId+'"]');
+  if (tr) tr.classList.add('selected');
+  _pipelineState.selected = threadId;
+
+  const body = document.getElementById('pl-detail-body');
+  document.getElementById('pl-detail-title').textContent = threadId;
+  body.innerHTML = '<span class="pl-dim">Loading…</span>';
+
+  try {
+    const d = await fetch('/api/pipelines/runs/' + encodeURIComponent(threadId)).then(r=>r.json());
+    if (d.error) { body.innerHTML = '<span class="pl-dim">'+escapeHtml(d.error)+'</span>'; return; }
+
+    let html = '';
+    if (d.live) {
+      const ev = d.live.events || [];
+      html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">'
+            + 'graph <span class="pl-graph-pill">'+escapeHtml(d.live.graph)+'</span> · '
+            + '<span class="pl-status '+ (d.live.status||'unknown') +'">'+ (d.live.status||'unknown') +'</span> · '
+            + _fmtDuration(d.live.durationMs) + ' · ' + ev.length + ' events</div>';
+      if (d.live.error) {
+        html += '<div style="color:#fca5a5;font-size:11px;margin-bottom:6px">⚠ ' + escapeHtml(String(d.live.error)) + '</div>';
+      }
+      html += '<div class="pl-tile-label" style="margin-top:8px">Node timeline</div>';
+      html += '<div class="pl-timeline">';
+      // Group events by node to compute durations
+      const byNode = new Map();
+      for (const e of ev) {
+        if (!e.node) continue;
+        if (!byNode.has(e.node)) byNode.set(e.node, { first: e.ts, last: e.ts, status: e.status });
+        const n = byNode.get(e.node);
+        n.last = e.ts; if (e.status) n.status = e.status;
+      }
+      if (byNode.size === 0) {
+        html += '<div class="pl-dim" style="padding:6px 8px">No node events recorded in memory.</div>';
+      } else {
+        for (const [name, n] of byNode.entries()) {
+          const klass = n.status === 'error' ? 'err' : (n.status === 'running' ? 'run' : 'ok');
+          html += '<div class="pl-node-row '+klass+'">'
+                +   '<span class="pl-node-name pl-mono">'+escapeHtml(name)+'</span>'
+                +   '<span class="pl-node-status">'+escapeHtml(n.status||'done')+'</span>'
+                +   '<span class="pl-node-status">'+ _fmtDuration((n.last-n.first)) +'</span>'
+                + '</div>';
+        }
+      }
+      html += '</div>';
+    } else {
+      html += '<div class="pl-dim" style="font-size:11px;margin-bottom:6px">No in-memory trace for this run. Showing durable checkpoints only.</div>';
+    }
+
+    if (d.checkpoints && d.checkpoints.length) {
+      html += '<div class="pl-tile-label" style="margin-top:6px">Checkpoints ('+ d.checkpoints.length +')</div>';
+      html += '<div class="pl-state-pre">' + escapeHtml(JSON.stringify(d.checkpoints.slice(-10).map(c => ({
+        id: c.checkpointId, type: c.type, channels: c.channels, metadata: c.metadata,
+      })), null, 2)) + '</div>';
+    }
+    body.innerHTML = html || '<span class="pl-dim">No detail available.</span>';
+  } catch (e) {
+    body.innerHTML = '<span class="pl-dim">Error: ' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+function _togglePipelineStream() {
+  const btn = document.getElementById('pl-stream-toggle');
+  const status = document.getElementById('pl-stream-status');
+  const pane = document.getElementById('pl-stream-pane');
+  if (_pipelineState.sse) {
+    _pipelineState.sse.close();
+    _pipelineState.sse = null;
+    btn.textContent = 'Connect';
+    status.textContent = 'disconnected'; status.className = 'pl-dim';
+    return;
+  }
+  const es = new EventSource('/api/pipelines/stream');
+  _pipelineState.sse = es;
+  btn.textContent = 'Disconnect';
+  status.textContent = 'connecting…'; status.className = 'pl-dim';
+  const append = (kls, text) => {
+    const div = document.createElement('div');
+    div.className = 'pl-stream-line ' + kls;
+    div.textContent = text;
+    pane.appendChild(div);
+    while (pane.childElementCount > 400) pane.removeChild(pane.firstChild);
+    pane.scrollTop = pane.scrollHeight;
+  };
+  es.onopen  = () => { status.textContent = 'connected'; status.className = ''; };
+  es.onerror = () => { status.textContent = 'error/reconnecting'; status.className = 'pl-dim'; };
+  es.onmessage = (m) => {
+    try { const d = JSON.parse(m.data); if (d.type === 'connected') append('pl-dim', '[connected]'); }
+    catch (_) { append('evt', m.data); }
+  };
+  es.addEventListener('trace', (m) => {
+    try {
+      const d = JSON.parse(m.data);
+      const t = new Date(d.ts || Date.now()).toLocaleTimeString();
+      append('evt', '['+t+'] '+(d.graph||'?')+':'+_fmtShortThread(d.runId)+' → '+(d.node||'?')+' ['+(d.status||'')+']');
+    } catch (_) { append('evt', m.data); }
+  });
+  es.addEventListener('run', (m) => {
+    try {
+      const d = JSON.parse(m.data);
+      const t = new Date(d.updatedAt || Date.now()).toLocaleTimeString();
+      const cls = d.status === 'error' ? 'err' : 'run';
+      append(cls, '['+t+'] run '+_fmtShortThread(d.runId)+' ('+d.graph+') status='+d.status);
+      // Refresh table when a run state changes
+      if (document.getElementById('pipeline-page').style.display === 'block') {
+        clearTimeout(_pipelineState._debounce);
+        _pipelineState._debounce = setTimeout(_refreshPipelines, 500);
+      }
+    } catch (_) {}
+  });
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 </script>
 </body>
