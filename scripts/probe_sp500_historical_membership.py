@@ -42,10 +42,12 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import io
 import sys
 from pathlib import Path
 
 import pandas as pd
+import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / 'data' / 'sp500_historical_membership_v1.csv'
@@ -129,8 +131,9 @@ def _parse_changes(table: pd.DataFrame) -> pd.DataFrame:
     for ticker, ev in events.items():
         # Process remove events; pair each with most-recent prior add date.
         add_dates_so_far: list[str] = []
-        # Sort by date ascending (empty date sorts first => oldest unknown).
-        for d, kind in sorted(ev, key=lambda x: x[0]):
+        # Sort by date ascending; empties LAST so an unknown-date add can't
+        # falsely bind to a later real remove ('' < '1976-...' in plain sort).
+        for d, kind in sorted(ev, key=lambda x: (x[0] == '', x[0])):
             if kind == 'add':
                 add_dates_so_far.append(d)
             else:  # remove
@@ -157,14 +160,48 @@ def build_membership(tables: list[pd.DataFrame]) -> pd.DataFrame:
     return out[['ticker', 'added_on', 'removed_on']]
 
 
+_USER_AGENT = (
+    'OpenClaw-Backfill/1.0 '
+    '(https://github.com/SiddharthJain08/FundJohn; admin@fundjohn.local)'
+)
+
+
 def _fetch_tables() -> list[pd.DataFrame]:
+    """Fetch Wikipedia page with a real UA + timeout, then parse tables.
+
+    Why this isn't a bare `pd.read_html(URL)`: pandas falls back to urllib's
+    default User-Agent (``Python-urllib/...``), which Wikipedia 403s under
+    load. A polite identifying UA + an explicit 30s timeout makes the
+    operator-run scrape reliable and easy to contact-trace.
+    """
+    headers = {'User-Agent': _USER_AGENT}
     try:
-        return pd.read_html(URL)
+        r = requests.get(URL, headers=headers, timeout=30)
     except Exception as exc:  # pragma: no cover -- live network failure path
         raise RuntimeError(
-            f"Failed to fetch Wikipedia page {URL!r}: {exc}. "
+            f"Failed to reach Wikipedia page {URL!r}: {exc}. "
             "This script is operator-run; it requires outbound HTTP access "
             "to en.wikipedia.org. Re-run from a host with network access."
+        ) from exc
+    if r.status_code == 403:
+        raise RuntimeError(
+            f"Wikipedia returned 403 Forbidden for {URL!r}. "
+            f"This usually means the User-Agent {_USER_AGENT!r} is being "
+            "rate-limited or blocked. Wait a few minutes and retry, or "
+            "update the UA contact string to something Wikipedia accepts."
+        )
+    try:
+        r.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Wikipedia HTTP {r.status_code} for {URL!r}: {exc}."
+        ) from exc
+    try:
+        return pd.read_html(io.StringIO(r.text))
+    except Exception as exc:  # pragma: no cover -- parser failure path
+        raise RuntimeError(
+            f"Fetched {URL!r} OK but could not parse tables: {exc}. "
+            "The page layout may have changed -- update the parser."
         ) from exc
 
 

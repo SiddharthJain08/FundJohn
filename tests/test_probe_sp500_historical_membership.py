@@ -258,3 +258,104 @@ def test_idempotency_guard_does_not_block_dry_run(monkeypatch, tmp_path, sample_
     assert out_path.read_text() == 'PRE_EXISTING\n', (
         '--dry-run must not touch the existing file'
     )
+
+
+# --- HTTP fetch hardening ----------------------------------------------------
+
+class _FakeResponse:
+    """Minimal stand-in for requests.Response used by monkeypatched fetches."""
+
+    def __init__(self, text: str = '', status_code: int = 200):
+        self.text = text
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            # Mimic requests' HTTPError shape closely enough for the script's
+            # error-wrapping path to surface a useful message.
+            raise RuntimeError(f'HTTP {self.status_code}')
+
+
+def test_fetch_tables_sets_user_agent(monkeypatch):
+    """Wikipedia 403s the default urllib UA; the script MUST send a real one
+    plus an explicit timeout so the operator-run scrape doesn't hang or block."""
+    captured: dict = {}
+
+    def _fake_get(url, headers=None, timeout=None):
+        captured['url'] = url
+        captured['headers'] = headers or {}
+        captured['timeout'] = timeout
+        # Return a minimal HTML payload pandas can parse to at least one table.
+        html = '<html><body><table><tr><th>a</th></tr><tr><td>1</td></tr></table></body></html>'
+        return _FakeResponse(text=html, status_code=200)
+
+    monkeypatch.setattr(probe.requests, 'get', _fake_get)
+    probe._fetch_tables()
+
+    ua = captured['headers'].get('User-Agent', '')
+    assert ua, 'User-Agent header must be set explicitly'
+    # Default urllib UA looks like 'Python-urllib/3.X'; assert ours is different
+    # and identifies the project so Wikipedia ops can contact-trace it.
+    assert 'Python-urllib' not in ua, (
+        f'UA must not be the urllib default; got {ua!r}'
+    )
+    assert 'OpenClaw' in ua or 'FundJohn' in ua, (
+        f'UA must identify the project; got {ua!r}'
+    )
+    assert captured['timeout'] is not None and captured['timeout'] > 0, (
+        f'timeout must be set to a positive number; got {captured["timeout"]!r}'
+    )
+
+
+def test_fetch_tables_raises_on_403(monkeypatch):
+    """A 403 from Wikipedia must surface a clear, actionable RuntimeError --
+    not a cryptic urllib/HTTPError traceback."""
+    def _fake_get(url, headers=None, timeout=None):
+        return _FakeResponse(text='Forbidden', status_code=403)
+
+    monkeypatch.setattr(probe.requests, 'get', _fake_get)
+    with pytest.raises(RuntimeError) as exc_info:
+        probe._fetch_tables()
+    msg = str(exc_info.value)
+    assert '403' in msg, f'error must mention 403 explicitly; got {msg!r}'
+    # Should hint at the cause + remediation, not just dump a stack frame.
+    assert 'User-Agent' in msg or 'UA' in msg or 'block' in msg.lower(), (
+        f'error must explain *why* 403 happens (UA / block); got {msg!r}'
+    )
+
+
+# --- sort-sentinel regression ------------------------------------------------
+
+def test_empty_date_sort_does_not_corrupt_pairing():
+    """An 'unknown add' (empty added_on) must NOT bind to a later real remove
+    when a real add exists in between.
+
+    Regression for the bug where `sorted(ev, key=lambda x: x[0])` placed
+    empty-string dates BEFORE real ISO dates ('' < '1976-...'), causing
+    `add_dates_so_far[-1]` to return '' instead of the real prior add date.
+    """
+    # Wikipedia order: an 'unknown add' row (no date), then a real add later,
+    # then a remove. Without the sort fix the empty-date add sorts first, gets
+    # appended to add_dates_so_far first, and when the real add follows it
+    # overwrites correctly -- but in a more adversarial ordering (real add
+    # MIDDLE, unknown add LAST timestamp-wise) the empty would be picked.
+    # Construct that adversarial case directly:
+    changes = _changes_table([
+        # Real add of FOO -- 2018.
+        {'date': '2018-01-15', 'added_ticker': 'FOO', 'added_security': 'Foo Co'},
+        # 'Unknown add' of FOO -- no date (Wikipedia edit artifact).
+        {'date': '', 'added_ticker': 'FOO', 'added_security': 'Foo Co'},
+        # Real remove of FOO -- 2022. Must pair with the 2018 add, NOT the blank.
+        {'date': '2022-06-30', 'removed_ticker': 'FOO', 'removed_security': 'Foo Co'},
+    ])
+    current = _current_table([('AAPL', '1982-11-30')])
+    df = probe.build_membership([current, changes])
+
+    foo = df[df['ticker'] == 'FOO']
+    assert len(foo) == 1, f'expected exactly one FOO span; got {len(foo)}'
+    row = foo.iloc[0]
+    assert row['removed_on'] == '2022-06-30'
+    assert row['added_on'] == '2018-01-15', (
+        f'remove must bind to the real prior add (2018-01-15), '
+        f'not to the unknown-date add; got added_on={row["added_on"]!r}'
+    )
