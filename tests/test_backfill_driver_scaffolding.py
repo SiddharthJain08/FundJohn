@@ -69,27 +69,33 @@ def test_driver_refuses_v2_without_gate():
 def test_driver_accepts_v2_with_gate():
     """With OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1, the gate must let v2 past.
 
-    Task 8 implemented --target metadata, so we pivot this scaffolding test to
-    --target options (Task 9 stub) — same gate-bypass contract, but the runner
-    still raises NotImplementedError so we can assert we made it past the gate
-    by looking for the stub's marker text in the traceback, NOT for the
-    REFUSED string.
+    Task 9 implemented --target options, so all three runners are now real
+    (no more NotImplementedError stub to lean on). We assert the gate is
+    bypassed by checking that REFUSED does NOT appear in the output AND that
+    the script proceeded into the per-target runner (we look for the runner's
+    banner '[options]'). We pass an explicit narrow window so the test
+    completes quickly: the runner will issue a few alpaca chain calls then
+    quarantine + exit cleanly.
     """
     env_extra = {'OPENCLAW_BACKFILL_ALLOW_OVERWRITE': '1'}
     r = _run(
         '--target', 'options',
         '--source-tag', 'backfill_5y_v2',
+        '--tickers', 'SPY',
+        '--start-date', '2026-05-12',
+        '--end-date', '2026-05-12',
         '--dry-run',
         env_extra=env_extra,
     )
-    # Failure expected, but it must be NotImplementedError, not the safety gate.
-    assert r.returncode != 0
     combined = (r.stderr or '') + (r.stdout or '')
     assert 'REFUSED' not in combined, (
         f'safety gate fired when it should have been bypassed:\n{combined}'
     )
-    assert 'NotImplementedError' in combined or 'Task 9' in combined, (
-        f'expected stub NotImplementedError, got:\n{combined}'
+    # The runner printed its banner → we got past the gate. rc may be 0 on
+    # a successful dry-run, or non-zero if Alpaca/Redis aren't available
+    # — either way, the gate did not fire.
+    assert '[options]' in combined, (
+        f'expected options runner banner, got:\n{combined}'
     )
 
 

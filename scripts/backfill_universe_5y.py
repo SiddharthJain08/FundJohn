@@ -57,6 +57,10 @@ UNIVERSE_FILE = ROOT / 'data' / '.backfill_universe_v1.txt'
 # file→directory shape mid-flight and risk silent reader-behavior changes
 # across the live pipeline. Spec deviation flagged in DONE report.
 MASTER_PRICES = ROOT / 'data' / 'master' / 'prices.parquet'
+# Single-file master, NOT a partitioned dataset — matches the master shape
+# discovered in Task 7 + the existing alpaca_options._append_parquet writer
+# (dedupes on (date, contract_symbol) under a thread lock).
+MASTER_OPTIONS = ROOT / 'data' / 'master' / 'options_eod.parquet'
 
 # Cache-invalidation hook. The src/data/parquet_store.py untracked file looks
 # like the consumer-side cache (see git status). Best-effort import — if not
@@ -118,6 +122,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action='store_true',
         default=False,
         help='If set, validated rows are allowed to overwrite a previously-quarantined chunk.',
+    )
+    # Options-only date window. Ignored by prices/metadata which use --years.
+    p.add_argument(
+        '--start-date',
+        default=None,
+        help='YYYY-MM-DD (--target options only). Defaults to 14 days ago.',
+    )
+    p.add_argument(
+        '--end-date',
+        default=None,
+        help='YYYY-MM-DD (--target options only). Defaults to yesterday.',
     )
     return p
 
@@ -725,10 +740,136 @@ def _run_metadata(args: argparse.Namespace, pg) -> None:
     )
 
 
+def _options_date_window(args: argparse.Namespace) -> list[_date]:
+    """Build the [start, end] inclusive date list for options backfill.
+
+    Defaults (when neither flag set): last 14 days ending yesterday — matches
+    the typical cutover-gap operator window. Calendar dates only; weekends
+    fall through naturally because the validate() step rejects empty chunks
+    (no bars on Sat/Sun → quarantined → moves on).
+    """
+    from datetime import timedelta
+    today = _date.today()
+    if args.end_date:
+        end = _date.fromisoformat(args.end_date)
+    else:
+        end = today - timedelta(days=1)
+    if args.start_date:
+        start = _date.fromisoformat(args.start_date)
+    else:
+        start = end - timedelta(days=13)  # inclusive 14-day window
+    if start > end:
+        raise SystemExit(f'--start-date {start} after --end-date {end}')
+    out: list[_date] = []
+    d = start
+    while d <= end:
+        out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
 def _run_options(args: argparse.Namespace, pg) -> None:
-    """Options-EOD 5y backfill — implemented in Task 9."""
-    raise NotImplementedError(
-        '_run_options is implemented in Task 9 (sp2-b options backfill).'
+    """Options-EOD backfill — per (date, ticker) stage→validate→promote loop.
+
+    Scope: this is the cutover-gap path generalized. Phase B does NOT do a
+    full 5y options backfill (deferred to SP-3). The narrow gap is the
+    revocation-to-self-archive window for options_eligible tickers, typically
+    0-14 days.
+
+    Idempotency contract (matches _run_prices):
+      - Redis status='promoted' chunks skipped under --resume.
+      - Redis status='quarantined' chunks skipped unless --supersede-quarantine.
+      - Promotion uses alpaca_options._append_parquet which itself dedupes on
+        (date, contract_symbol), so re-runs after Redis loss are also safe.
+    """
+    from src.pipeline.backfillers import universe_options as uo
+    from src.pipeline.backfillers.alpaca_options import _append_parquet
+
+    rclient = _redis()
+    universe = _load_universe(args)
+    dates = _options_date_window(args)
+    source_tag = args.source_tag
+
+    print(
+        f'[options] universe={len(universe)} dates={dates[0]}..{dates[-1]} '
+        f'({len(dates)} days) source_tag={source_tag} dry_run={args.dry_run}'
+    )
+
+    promoted_total = 0
+    quarantined_total = 0
+    skipped_total = 0
+
+    for d in dates:
+        for symbol in universe:
+            chunk_key = f'{d.isoformat()}:{symbol}'
+            redis_key = f'backfill:5y:options:{chunk_key}'
+            current_status = rclient.get(redis_key)
+
+            if args.resume and current_status == 'promoted':
+                skipped_total += 1
+                continue
+            if (
+                current_status == 'quarantined'
+                and not args.supersede_quarantine
+            ):
+                skipped_total += 1
+                continue
+
+            audit_id = _audit_start(pg, 'options', chunk_key, source_tag)
+            try:
+                contracts = uo.enumerate_contracts_for_date(d, [symbol])
+                if not contracts:
+                    err = 'no contracts enumerated'
+                    sys.stderr.write(f'  [quarantine] {chunk_key}: {err}\n')
+                    _audit_finish(pg, audit_id, status='quarantined', err=err)
+                    rclient.set(redis_key, 'quarantined')
+                    quarantined_total += 1
+                    continue
+                df = uo.fetch_eod_for_contracts(contracts, d)
+            except Exception as e:
+                err = f'fetch failed: {e}'
+                sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+                _audit_finish(pg, audit_id, status='failed', err=err)
+                _notify_discord(f'[backfill options] FAILED {chunk_key}: {err}')
+                continue
+
+            ok, err = uo.validate(df, d)
+            if not ok:
+                sys.stderr.write(f'  [quarantine] {chunk_key}: {err}\n')
+                _audit_finish(pg, audit_id, status='quarantined', err=err)
+                rclient.set(redis_key, 'quarantined')
+                _notify_discord(
+                    f'[backfill options] QUARANTINED {chunk_key}: {err}'
+                )
+                quarantined_total += 1
+                continue
+
+            if args.dry_run:
+                print(f'[dry-run] {chunk_key}: {len(df)} rows valid')
+                _audit_finish(
+                    pg, audit_id, status='validated', rows=len(df),
+                )
+                continue
+
+            # PROMOTE — _append_parquet handles dedupe on (date, contract_symbol).
+            try:
+                _append_parquet(df.to_dict('records'), parquet_path=MASTER_OPTIONS)
+            except Exception as e:
+                err = f'append failed: {e}'
+                sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+                _audit_finish(pg, audit_id, status='failed', err=err)
+                _notify_discord(f'[backfill options] FAILED {chunk_key}: {err}')
+                continue
+
+            _audit_finish(pg, audit_id, status='promoted', rows=len(df))
+            rclient.set(redis_key, 'promoted')
+            _invalidate_cache('options_eod.parquet')
+            print(f'  [{chunk_key}] promoted {len(df)} rows')
+            promoted_total += 1
+
+    print(
+        f'[options] DONE promoted={promoted_total} '
+        f'quarantined={quarantined_total} skipped={skipped_total}'
     )
 
 

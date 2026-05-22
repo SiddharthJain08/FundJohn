@@ -5,122 +5,84 @@ Window: [polygon revocation date + 1] through [yesterday]. Operator runs ONCE
 after SP-1 PR deploys and before Monday open. Re-runnable; deduped by the
 underlying _append_parquet helper on (date, contract_symbol).
 
+Refactored 2026-05-22 (SP-2 Phase B Task 9) — now a thin wrapper around
+`scripts/backfill_universe_5y.py --target options`. Original CLI surface
+(`--from-date`, `--to-date`) preserved for operator muscle-memory. The
+universe is loaded from `universe_config WHERE active=TRUE` here (the
+driver's default reads `data/.backfill_universe_v1.txt` which is the 5y
+backfill universe, not the live tradeable universe) and passed explicitly
+via `--tickers`.
+
 Strategy: per missing date D, enumerate contract symbols from the current
 chain (those with expiry >= D existed back then), batch alpaca data option bars
-100 at a time for D.
+100 at a time for D. Each (date, ticker) is one chunk in the audit + Redis
+checkpoint stream.
 """
 from __future__ import annotations
 
 import argparse
-import json
-import logging
 import os
-import subprocess
-from datetime import date, timedelta
+import sys
 from pathlib import Path
-from typing import Iterable
-
-import pandas as pd
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-log = logging.getLogger(__name__)
-
-ALPACA_BIN = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
 
-def _chunk(xs: list, n: int) -> Iterable[list]:
-    for i in range(0, len(xs), n):
-        yield xs[i:i + n]
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
-def _alpaca(args: list[str]) -> dict:
-    res = subprocess.run([ALPACA_BIN] + args, capture_output=True, text=True, timeout=60)
-    if res.returncode != 0:
-        raise RuntimeError(f'alpaca rc={res.returncode}: {res.stderr.strip()}')
-    return json.loads(res.stdout)
+def _load_active_universe() -> list[str]:
+    """Read the live tradeable universe from universe_config.
 
-
-def enumerate_contracts_for_date(d: date, universe: list[str]) -> list[str]:
-    """For each ticker, pull current chain, filter to contracts with expiry >= d."""
-    contracts = []
-    for ticker in universe:
-        try:
-            page = _alpaca(['data', 'option', 'chain', '--underlying-symbol', ticker, '--limit', '100'])
-            for sym in (page.get('snapshots') or {}).keys():
-                # Parse YYMMDD from OCC symbol (root + YYMMDD + C/P + 8-digit strike)
-                for i, ch in enumerate(sym):
-                    if ch.isdigit():
-                        try:
-                            yy, mm, dd = sym[i:i+2], sym[i+2:i+4], sym[i+4:i+6]
-                            expiry = date(2000 + int(yy), int(mm), int(dd))
-                        except (ValueError, IndexError):
-                            expiry = None
-                        break
-                else:
-                    expiry = None
-                if expiry is not None and expiry >= d:
-                    contracts.append(sym)
-        except Exception as e:
-            log.warning('chain enum failed for %s: %s', ticker, e)
-    return contracts
-
-
-def fetch_bars_batch(symbols: list[str], d: date) -> list[dict]:
-    rows = []
-    for chunk in _chunk(symbols, 100):
-        try:
-            payload = _alpaca([
-                'data', 'option', 'bars',
-                '--symbols', ','.join(chunk),
-                '--start', d.isoformat(),
-                '--end', d.isoformat(),
-                '--timeframe', '1Day',
-            ])
-            for sym, bars in (payload.get('bars') or {}).items():
-                for b in bars:
-                    rows.append({
-                        'date': d.isoformat(),
-                        'contract_symbol': sym,
-                        'open': b.get('o'), 'high': b.get('h'),
-                        'low': b.get('l'), 'close': b.get('c'),
-                        'volume': b.get('v'), 'vwap': b.get('vw'),
-                        'transactions': b.get('n'),
-                        'data_source': 'alpaca_aat_plus_backfill',
-                    })
-        except Exception as e:
-            log.warning('bars batch fail %s: %s', chunk[:3], e)
-    return rows
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--from-date', required=True, help='YYYY-MM-DD (Polygon revocation date + 1)')
-    ap.add_argument('--to-date', required=True, help='YYYY-MM-DD (yesterday)')
-    args = ap.parse_args()
-
-    from_d = date.fromisoformat(args.from_date)
-    to_d = date.fromisoformat(args.to_date)
-
+    Matches the legacy cutover-gap behavior (the driver's default reads a
+    different file — the 5y backfill universe — which would silently widen
+    or narrow what gets backfilled).
+    """
     import psycopg2
     with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT ticker FROM universe_config WHERE active = TRUE ORDER BY ticker")
-        universe = [r[0] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT DISTINCT ticker FROM universe_config WHERE active = TRUE ORDER BY ticker"
+        )
+        return [r[0] for r in cur.fetchall()]
 
-    log.info('cutover backfill window=%s..%s universe=%d', from_d, to_d, len(universe))
 
-    d = from_d
-    while d <= to_d:
-        log.info('backfill date=%s', d)
-        contracts = enumerate_contracts_for_date(d, universe)
-        log.info('  contracts to fetch: %d', len(contracts))
-        rows = fetch_bars_batch(contracts, d)
-        log.info('  rows fetched: %d', len(rows))
-        if rows:
-            from src.pipeline.backfillers.alpaca_options import _append_parquet
-            _append_parquet(rows)
-        d += timedelta(days=1)
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(
+        description='SP-1 cutover-gap options backfill (thin wrapper around '
+                    'backfill_universe_5y.py --target options).',
+    )
+    ap.add_argument('--from-date', required=True,
+                    help='YYYY-MM-DD (Polygon revocation date + 1)')
+    ap.add_argument('--to-date', required=True,
+                    help='YYYY-MM-DD (yesterday)')
+    ap.add_argument('--tickers', default=None,
+                    help='Comma-separated ticker override (default: '
+                         'all active rows in universe_config).')
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Plan + audit only; no parquet writes.')
+    args = ap.parse_args(argv)
 
-    log.info('cutover backfill complete')
+    if args.tickers:
+        tickers = args.tickers
+    else:
+        tickers = ','.join(_load_active_universe())
+        if not tickers:
+            sys.stderr.write('ERROR: universe_config empty — pass --tickers explicitly.\n')
+            sys.exit(2)
+
+    driver_argv = [
+        '--target', 'options',
+        '--tickers', tickers,
+        '--start-date', args.from_date,
+        '--end-date', args.to_date,
+    ]
+    if args.dry_run:
+        driver_argv.append('--dry-run')
+
+    # Late import: keeps `--help` fast and avoids loading psycopg2 paths at
+    # import time of the wrapper.
+    import backfill_universe_5y as driver
+    driver.main(driver_argv)
 
 
 if __name__ == '__main__':
