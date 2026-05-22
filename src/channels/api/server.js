@@ -4435,6 +4435,18 @@ body.rs-chat-locked{overflow:hidden}
         <div class="pl-empty"><div class="pl-spinner"></div>Loading…</div>
       </div>
     </div>
+
+    <div class="pl-card">
+      <header>
+        <h3>Backfill History <span class="pl-dim" id="pl-bfh-count" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h3>
+        <div class="pl-controls">
+          <span class="pl-dim" id="pl-bfh-ts"></span>
+        </div>
+      </header>
+      <div class="pl-body" id="pl-bfh-body">
+        <div class="pl-empty"><div class="pl-spinner"></div>Loading…</div>
+      </div>
+    </div>
   </div>
 </div><!-- #pipeline-page -->
 
@@ -9727,6 +9739,7 @@ async function _refreshPipelines() {
   if (icon) icon.innerHTML = '<span class="pl-spinner"></span>';
   await _refreshPipelineSummary();
   _refreshUniverseInflation();
+  _refreshBackfillHistory();
   const limit = document.getElementById('pl-filter-limit').value;
   const graph = document.getElementById('pl-filter-graph').value;
   const q = new URLSearchParams({ limit });
@@ -10012,6 +10025,67 @@ async function _refreshUniverseInflation() {
       '<tbody>' + tableRows + '</tbody></table></div>';
 
     body.innerHTML = tileHtml + tableHtml;
+  } catch (e) {
+    if (body) body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function _refreshBackfillHistory() {
+  const body  = document.getElementById('pl-bfh-body');
+  const count = document.getElementById('pl-bfh-count');
+  const ts    = document.getElementById('pl-bfh-ts');
+  if (!body) return;
+  try {
+    const rows = await fetch('/api/pipelines/backfill-history').then(r => r.json());
+    if (rows && rows.error) {
+      body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>' + escapeHtml(rows.error) + '</div>';
+      if (count) count.textContent = '';
+      return;
+    }
+    if (!Array.isArray(rows) || !rows.length) {
+      body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">🌱</div>No backfilled metadata snapshots yet (since 2021-05-01).</div>';
+      if (count) count.textContent = '';
+      return;
+    }
+
+    if (count) count.textContent = '· ' + rows.length + ' months';
+    if (ts)    ts.textContent    = 'refreshed ' + new Date().toLocaleTimeString();
+
+    // Sparkline (inline SVG) — months on x-axis, row_count on y.
+    const W = 480, H = 60, PAD = 4;
+    const counts = rows.map(r => Number(r.row_count) || 0);
+    const maxCount = Math.max(1, ...counts);
+    const stepX = rows.length > 1 ? (W - 2 * PAD) / (rows.length - 1) : 0;
+    const pts = counts.map((c, i) => {
+      const x = PAD + i * stepX;
+      const y = H - PAD - (c / maxCount) * (H - 2 * PAD);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    const last = rows[rows.length - 1];
+    const first = rows[0];
+    const total = counts.reduce((s, c) => s + c, 0);
+
+    const spark =
+      '<svg width="100%" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block;height:80px">' +
+        '<polyline fill="none" stroke="#6fd1a7" stroke-width="1.5" points="' + pts + '"/>' +
+      '</svg>';
+
+    const tableRows = rows.slice().reverse().map(r =>
+      '<tr><td class="pl-mono" style="font-size:11px">' + escapeHtml(String(r.month)) + '</td>' +
+      '<td class="pl-mono" style="font-size:11px;text-align:right">' + escapeHtml(String(r.row_count.toLocaleString())) + '</td></tr>'
+    ).join('');
+
+    body.innerHTML =
+      '<div style="margin-bottom:8px;display:flex;gap:20px;flex-wrap:wrap;font-family:var(--mono);font-size:11px;color:var(--muted)">' +
+        '<span><b style="color:var(--fg)">' + total.toLocaleString() + '</b> total rows</span>' +
+        '<span><b style="color:var(--fg)">' + rows.length + '</b> months covered</span>' +
+        '<span>first: <b style="color:var(--fg)">' + escapeHtml(String(first.month)) + '</b></span>' +
+        '<span>latest: <b style="color:var(--fg)">' + escapeHtml(String(last.month)) + '</b> (' + last.row_count.toLocaleString() + ' rows)</span>' +
+      '</div>' +
+      '<div style="border:1px solid var(--border);border-radius:4px;padding:6px;margin-bottom:10px">' + spark + '</div>' +
+      '<div style="overflow:auto;max-height:200px"><table class="pl-runs-table">' +
+        '<thead><tr><th>Month</th><th style="text-align:right">Rows</th></tr></thead>' +
+        '<tbody>' + tableRows + '</tbody></table></div>';
   } catch (e) {
     if (body) body.innerHTML = '<div class="pl-empty"><div class="pl-empty-icon">⚠</div>Error: ' + escapeHtml(e.message) + '</div>';
   }

@@ -232,6 +232,31 @@ router.get('/universe-inflation', async (_req, res) => {
   }
 });
 
+// GET /api/pipelines/backfill-history — monthly row counts in
+// ticker_metadata_snapshots since 2021-05-01 (SP-2 Phase B 5y backfill).
+// Returns: [{ month: 'YYYY-MM-01', row_count: N }, ...] sorted ascending.
+router.get('/backfill-history', async (_req, res) => {
+  try {
+    const result = await dbQuery(`
+      SELECT date_trunc('month', snapshot_date)::date AS month,
+             count(*)::bigint AS row_count
+      FROM ticker_metadata_snapshots
+      WHERE snapshot_date >= '2021-05-01'
+      GROUP BY 1
+      ORDER BY 1
+    `);
+    const rows = (result.rows || result).map(r => ({
+      month: r.month instanceof Date
+        ? r.month.toISOString().slice(0, 10)
+        : String(r.month).slice(0, 10),
+      row_count: Number(r.row_count),
+    }));
+    res.json(rows);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/pipelines/stream — SSE live trace events
 router.get('/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
