@@ -26,6 +26,11 @@ __pycache__/
 .agents/verdict-cache/
 .agents/portfolio.json
 .agents/watchlist.json
+# Symlink to workspaces/default/.agents/user — VPS-absolute path, was tracked
+# in error and broke CI checkouts (PermissionError on /root/ from non-root
+# runner users). Recreate locally with:
+#   ln -s "$(pwd)/workspaces/default/.agents/user" .agents/user
+.agents/user
 .claude/
 
 # === Security (auto-generated, machine-specific) ===
