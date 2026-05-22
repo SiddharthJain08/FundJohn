@@ -87,12 +87,15 @@ esac
 
 # ── 5. FMP day-quota headroom ────────────────────────────────────────────
 # FMP doesn't expose usage in headers; rely on data_provider_health rows
-# from SP-1 (see CLAUDE.md). WARN if usage > 50% of 250k/day.
+# from SP-1. Schema (verified): success_count + error_count per
+# (provider, endpoint, window_start). WARN if today's combined calls > 50%
+# of 250k/day.
 python3 - <<'PY'
 import os, psycopg2
 c = psycopg2.connect(os.environ['POSTGRES_URI']); cur = c.cursor()
-cur.execute("""SELECT coalesce(sum(call_count),0) FROM data_provider_health
-               WHERE provider='fmp' AND ts > date_trunc('day', NOW())""")
+cur.execute("""SELECT coalesce(sum(success_count + error_count), 0)
+               FROM data_provider_health
+               WHERE provider='fmp' AND window_start >= date_trunc('day', NOW())""")
 used = int(cur.fetchone()[0])
 cap = 250000
 pct = used * 100.0 / cap
