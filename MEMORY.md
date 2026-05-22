@@ -33,12 +33,10 @@ DataPipeline: hardcoded
 
 ### Strategy Lifecycle
 Managed by `src/strategies/lifecycle.py` + `src/strategies/manifest.json`
-States: candidate → paper → live → monitoring → deprecated → archived
+States: `staging → candidate → live → monitoring → deprecated → archived`. `paper` is frozen legacy (no outbound transitions except safety-valve `paper → archived`) since 2026-04-27 fused-approval rewrite.
 
-### Active Strategies (as of 2026-04-15)
-- **Live (6):** S5_max_pain, S9_dual_momentum, S10_quality_value, S12_insider, S15_iv_rv_arb, S_custom_jt_momentum_12mo
-- **Paper (3):** S23_regime_momentum, S24_52wk_high_proximity, S25_dual_momentum_v2
-- **Deprecated (1):** S_custom_momentum_trend_v1 (audit F3 — pending archive)
+### Active Strategies
+Drifts fast — don't pin a count or per-strategy list here. Read `src/strategies/manifest.json` for current state. Authoritative; dual-written to Postgres `strategy_registry`.
 
 ### Key File Paths (VPS: /root/openclaw/)
 - Strategy lifecycle: `src/strategies/lifecycle.py`

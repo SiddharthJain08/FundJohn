@@ -62,7 +62,8 @@ test('STEP_FAILURE_CHANNEL and STEP_AGENTS maps are exported and complete', () =
   const { mod } = makeStubbedLogger();
   const expectedSteps = [
     'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
-    'trade', 'alpaca', 'reconcile', 'report', 'health',
+    'trade', 'alpaca', 'reconcile', 'report',
+    'pyportfolioopt_shadow', 'health',
   ];
   for (const step of expectedSteps) {
     assert.ok(mod.STEP_FAILURE_CHANNEL[step], `STEP_FAILURE_CHANNEL missing: ${step}`);

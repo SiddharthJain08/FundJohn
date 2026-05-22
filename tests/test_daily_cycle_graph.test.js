@@ -13,7 +13,8 @@ const TRACEBUS_PATH    = path.join(ROOT, 'src/agent/traceBus.js');
 
 const STEPS_IN_ORDER = [
   'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
-  'trade', 'alpaca', 'reconcile', 'report', 'health',
+  'trade', 'alpaca', 'reconcile', 'report',
+  'pyportfolioopt_shadow', 'health',
 ];
 
 // Stub makeStepNode so each "node" just records its invocation and appends to completedSteps

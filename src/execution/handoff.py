@@ -26,8 +26,9 @@ gate is ON, so a future subscriber can react to new handoffs without
 polling.
 
 This default-OFF discipline matches the precedent set by Phase 2D
-(``OPENCLAW_UNIFIED_QUOTES=1``) and the live sizer
-(``OPENCLAW_REGIME_BLENDED_LIVE=1``).
+(``OPENCLAW_UNIFIED_QUOTES=1``), the live sizer
+(``OPENCLAW_REGIME_BLENDED_LIVE=1``), and Phase 1's PyPortfolioOpt
+shadow (``OPENCLAW_PYPORTFOLIOOPT_SHADOW=1``).
 """
 
 import os, json
