@@ -254,6 +254,38 @@ REGIME_POSITION_SCALE = {
 }
 ```
 
+### 7.7 Per-Strategy Universe Resolution (SP-2 Phase A)
+
+Each strategy can declare its own ticker universe by implementing:
+
+```python
+def universe_filter(meta: TickerMetadata, as_of: date) -> bool:
+```
+
+Strategies that do not override the method inherit the default `sp500` predicate. The `(meta, as_of)` signature is mandatory — all predicates must be point-in-time safe (no live clock reads).
+
+**`TickerMetadata`** is a frozen dataclass (`src/strategies/universe_metadata.py`) capturing the fields stored in the `ticker_metadata_snapshots` table (migration 111): ticker, name, exchange, sector, industry, market_cap, shares_outstanding, avg_volume_20d, sp500_member, options_eligible, as_of date. The table is append-only; each daily snapshot is a new row, enabling exact point-in-time reconstruction.
+
+**`UniverseResolver`** (`src/strategies/universe_resolver.py`) takes `(strategy_records, as_of)` and, for each strategy, selects the metadata snapshot with `snapshot_date ≤ as_of` (latest available) and runs the strategy's predicate against it. It returns a per-strategy dict of ticker lists. `union_universe(as_of, lifecycle_states)` aggregates across all strategies in the given states (e.g. `['live']`) to produce the broadest envelope needed for any given day.
+
+**Look-ahead defences** operate at two layers:
+
+- **Static lint** (`src/strategies/universe_lint.py`, CI gate `.github/workflows/lint-universe-predicates.yml`): enforces the `(meta, as_of)` signature; bans `import datetime`, `import time`, and `import os` inside any predicate module. Runs on every PR as a blocking gate.
+- **Lifecycle sandbox check**: at each `candidate → live` (or any forward) transition, `LifecycleStateMachine` runs the predicate twice — once with a frozen clock (`as_of = fixed_past_date`) and once with `datetime.today()`. If the outputs differ, the transition is rejected and the operator sees an explicit error.
+
+**Daily cycle integration**: `union_universe(today, ['live'])` is computed at the start of the daily pipeline and passed as the data-fetch envelope into:
+
+- `collector.js` — equity bar and quote collection scope
+- `alpaca_options.js` — options-chain archive scope
+- News and sentiment ingestion (`run_sentiment_step.py`, Alpaca News ingest)
+- Per-strategy backtest runs — each backtest engine (`unified`, `quick`, `regime_blended`, `intraday_regime`, `regime_performance_analyzer`) accepts the resolver and calls it per bar with the bar date as `as_of`, so simulated universes are point-in-time correct throughout the backtest.
+
+**Candidate predicate catalogue** (`src/strategies/universe_default.py`): 12 built-in predicates — `sp500`, `large_cap`, `mid_cap`, `small_cap`, `etfs_only`, `options_eligible`, `high_vol_20d`, `tech_sector`, `value_quintile`, `momentum_quintile`, `low_corr`, `defensive`. All 102 existing strategies default to `sp500`; byte-identical behavior at deploy.
+
+**Doctor checks** (added migrations 112-114): `metadata_snapshot_freshness` (asserts daily snapshot landed) and `union_universe_size` (`slow=True`, asserts count ≥ `UNIVERSE_RESOLVER_MIN_LIVE_TICKERS`). Two new `system_checks`: `universe_resolution` (pipeline tag, 15 s latency gate) and `metadata_snapshot_freshness` (strategies tag). Dashboard endpoints: operator `/api/universe-slice`, user `/api/pipelines/universe-inflation`.
+
+Phase B (5-year historical backfill of `ticker_metadata_snapshots`), Phase C (Mastermind universe-recs feeding `OPENCLAW_UNIVERSE_RECS`), and Phase D (research hooks) are out of scope for Phase A and follow on separate plans. Spec: `docs/superpowers/specs/2026-05-22-sp2-universe-expansion-design.md`.
+
 ---
 
 ## 8. Database schema
