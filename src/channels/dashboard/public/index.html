@@ -110,6 +110,12 @@
     <header><h2>Registered Graphs</h2><span class="count" id="graphs-count"></span></header>
     <div class="body" id="graphs"></div>
   </section>
+
+  <section class="card span-12">
+    <header><h2>Data Provider Health (24h)</h2><span class="count" id="data-health-count"></span></header>
+    <div class="body" id="data-health"></div>
+    <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="data-health-footer"></div>
+  </section>
 </main>
 
 <footer>
@@ -284,6 +290,29 @@ async function refreshHealth() {
   el.className = 'live' + (h.ok ? '' : ' down');
 }
 
+async function refreshDataHealth() {
+  const { providers = [], generated_at, error } = await fetchJSON('/api/data-health');
+  $('data-health-count').textContent = `${providers.length} provider/endpoint rows`;
+  if (error) {
+    $('data-health').innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(error)}</div>`;
+    return;
+  }
+  $('data-health').innerHTML = table([
+    { key: 'provider', label: 'provider' },
+    { key: 'endpoint', label: 'endpoint' },
+    { key: 'success_24h', label: 'ok (24h)' },
+    { key: 'error_24h', label: 'err (24h)' },
+    { key: 'success_pct', label: 'success%', get: r => r.success_pct !== null ? r.success_pct.toFixed(1) + '%' : '—' },
+    { key: 'status', label: 'status', html: true, get: r => {
+        const cls = r.status === 'green' ? 'ok' : r.status === 'yellow' ? 'warn' : 'err';
+        return pill(r.status, cls);
+      }},
+    { key: 'last_error_at', label: 'last err at', get: r => r.last_error_at ? new Date(r.last_error_at).toLocaleString() : '—' },
+    { key: 'last_error', label: 'last error' },
+  ], providers);
+  $('data-health-footer').textContent = generated_at ? `generated ${new Date(generated_at).toLocaleTimeString()}` : '';
+}
+
 let liveCount = 0;
 function startSSE() {
   const es = new EventSource('/api/stream');
@@ -318,12 +347,13 @@ async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
-    refreshGraphs(), refreshHealth(),
+    refreshGraphs(), refreshHealth(), refreshDataHealth(),
   ]);
 }
 
 refreshAll();
 setInterval(refreshAll, 10_000);
+setInterval(refreshDataHealth, 60_000);
 startSSE();
 </script>
 </body>
