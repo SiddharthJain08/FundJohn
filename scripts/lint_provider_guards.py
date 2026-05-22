@@ -18,7 +18,10 @@ FORBIDDEN_PATTERNS = [
 # Skip dirs: git, node_modules, docs, worktrees (.claude/), auto-gen MCP tools (workspaces/), self.
 # tests/ is also skipped — test files legitimately reference forbidden identifiers to assert their
 # absence from production code (e.g. "OPTIONS_DATA_SOURCE must not appear in collector.js").
-SKIP_PATHS = ('.git/', 'node_modules/', 'docs/', '.claude/', 'workspaces/', 'tests/', 'scripts/lint_provider_guards.py')
+# .agents/ holds runtime state (verdict-cache, market-state) plus a symlink to workspaces/ that
+# breaks stat() on CI runners — neither contains source code worth scanning.
+SKIP_PATHS = ('.git/', 'node_modules/', 'docs/', '.claude/', 'workspaces/', 'tests/',
+              '.agents/', 'scripts/lint_provider_guards.py')
 
 
 def scan(root: Path) -> int:
@@ -29,7 +32,14 @@ def scan(root: Path) -> int:
     scanned = 0
     skipped = 0
     for path in root.rglob('*'):
-        if not path.is_file():
+        # is_file() can raise PermissionError on symlinks whose target the
+        # runner can't traverse (e.g. tracked symlinks to absolute VPS paths
+        # that don't resolve on CI). Treat as non-file and skip.
+        try:
+            if not path.is_file():
+                continue
+        except (PermissionError, OSError) as exc:
+            print(f'[lint] stat skipped {path}: {exc}', file=sys.stderr)
             continue
         rel = path.relative_to(root).as_posix()
         if any(rel.startswith(s) for s in SKIP_PATHS):
