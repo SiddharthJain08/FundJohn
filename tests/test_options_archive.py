@@ -115,3 +115,51 @@ def test_decode_occ_rejects_adjusted_symbol():
     assert occ['expiry'] is None
     # Strike also None since we bail before strike parse
     assert occ['strike'] is None
+
+
+def test_flatten_snapshot_writes_legacy_field_aliases():
+    """SP-1 deploy regression: engine.py hardcodes 'option_type', 'ticker', and
+    'implied_volatility' column names. The new archiver must write those legacy
+    aliases alongside the new names, or engine.py reads of new rows yield NaN
+    where master rows yielded actual values."""
+    from src.pipeline.backfillers.alpaca_options import _flatten_snapshot
+    snap = SAMPLE_CHAIN_PAGE_1['snapshots']['SPY260618C00742000']
+    row = _flatten_snapshot('SPY260618C00742000', snap, date='2026-05-21', underlying='SPY')
+    # New names (canonical)
+    assert row['type'] == 'call'
+    assert row['underlying'] == 'SPY'
+    assert row['iv_implied'] == 0.13
+    # Legacy aliases (engine.py compat)
+    assert row['option_type'] == row['type']
+    assert row['ticker'] == row['underlying']
+    assert row['implied_volatility'] == row['iv_implied']
+
+
+def test_load_universe_uses_canonical_sp500_table(monkeypatch):
+    """SP-1 deploy regression: _load_universe must hit universe_config, not
+    alpaca_tradable_universe. The original implementer mis-read the spec and
+    pointed at the 12k-ticker broker table; SP-1 stays on S&P 500."""
+    from src.pipeline.backfillers import alpaca_options
+    captured = {}
+
+    class FakeCursor:
+        def execute(self, sql):
+            captured['sql'] = sql
+
+        def fetchall(self):
+            return [('AAPL',), ('MSFT',)]
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://noop')
+    monkeypatch.setattr('psycopg2.connect', lambda *_a, **_kw: FakeConn())
+    universe = alpaca_options._load_universe()
+    assert universe == ['AAPL', 'MSFT']
+    assert 'universe_config' in captured['sql']
+    assert 'alpaca_tradable_universe' not in captured['sql']

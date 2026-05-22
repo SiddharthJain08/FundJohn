@@ -103,7 +103,7 @@ def main():
 
     import psycopg2
     with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM alpaca_tradable_universe WHERE active = true")
+        cur.execute("SELECT DISTINCT ticker FROM universe_config WHERE active = TRUE ORDER BY ticker")
         universe = [r[0] for r in cur.fetchall()]
 
     log.info('cutover backfill window=%s..%s universe=%d', from_d, to_d, len(universe))

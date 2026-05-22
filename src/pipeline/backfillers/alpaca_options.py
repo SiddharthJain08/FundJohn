@@ -104,17 +104,28 @@ def _decode_occ(symbol: str) -> dict:
 
 
 def _flatten_snapshot(contract_symbol: str, snap: dict, *, date: str, underlying: str) -> dict:
+    """Flatten one Alpaca chain snapshot into a master-parquet-compatible row.
+
+    Writes both new (`type`, `underlying`, `iv_implied`) and legacy (`option_type`,
+    `ticker`, `implied_volatility`) field names so engine.py's hardcoded column
+    references continue to resolve. The Alpaca chain endpoint does not return
+    open_interest — that field stays NULL for new rows (master parquet was
+    already 99.9% NULL on this column from the Polygon era; no real regression).
+    """
     occ = _decode_occ(contract_symbol)
     bar = snap.get('dailyBar') or {}
     quote = snap.get('latestQuote') or {}
     greeks = snap.get('greeks') or {}
+    iv = snap.get('impliedVolatility')
     return {
         'date': date,
         'underlying': underlying,
+        'ticker': underlying,  # legacy alias for engine.py compat
         'contract_symbol': contract_symbol,
         'strike': occ['strike'],
         'expiry': occ['expiry'],
         'type': occ['type'],
+        'option_type': occ['type'],  # legacy alias for engine.py compat
         'open': bar.get('o'),
         'high': bar.get('h'),
         'low': bar.get('l'),
@@ -129,7 +140,8 @@ def _flatten_snapshot(contract_symbol: str, snap: dict, *, date: str, underlying
         'theta': greeks.get('theta'),
         'vega': greeks.get('vega'),
         'rho': greeks.get('rho'),
-        'iv_implied': snap.get('impliedVolatility'),
+        'iv_implied': iv,
+        'implied_volatility': iv,  # legacy alias for engine.py compat
         'data_source': 'alpaca_aat_plus',
     }
 
@@ -176,10 +188,15 @@ def archive_ticker_chain(ticker: str, *, date: str) -> int:
 
 
 def _load_universe() -> list[str]:
-    """Read alpaca_tradable_universe WHERE active=true."""
+    """Read the canonical S&P 500 universe from universe_config.
+
+    SP-1 keeps the S&P 500 scope — broader alpaca_tradable_universe expansion
+    lands in SP-2. universe_config.ticker is the canonical accessor (matches
+    src/pipeline/backfillers/fmp.py:_active_universe).
+    """
     import psycopg2
     with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
-        cur.execute("SELECT ticker FROM alpaca_tradable_universe WHERE active = true ORDER BY ticker")
+        cur.execute("SELECT DISTINCT ticker FROM universe_config WHERE active = TRUE ORDER BY ticker")
         return [r[0] for r in cur.fetchall()]
 
 
