@@ -1025,12 +1025,21 @@ def _latest_snapshot_age_days() -> int:
     row, or 999 if the table is empty."""
     import psycopg2
     from datetime import date
-    with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        raise RuntimeError('POSTGRES_URI not set')  # surfaces cleanly in the check error harness
+    with psycopg2.connect(uri) as c, c.cursor() as cur:
         cur.execute('SELECT MAX(snapshot_date) FROM ticker_metadata_snapshots')
         last = cur.fetchone()[0]
     return (date.today() - last).days if last else 999
 
 
+# Preflight thresholds are intentionally MORE LENIENT than the maintenance
+# digest system_check (src/system_checks/checks/metadata_snapshot_freshness.py
+# uses PASS<=2, FAIL>2). Preflight runs before each pipeline cycle — a 2-day
+# gap on a Monday after a long weekend should not block the cycle. The
+# system_check runs in the daily maintenance digest and is the stricter
+# ongoing-health signal.
 def _check_metadata_snapshot_freshness():
     """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
     Thresholds: ≤1d → pass, ≤3d → warn, >3d → fail."""
@@ -1042,11 +1051,8 @@ def _check_metadata_snapshot_freshness():
     return (2, f'snapshot stale {age}d (FAIL)')
 
 
-def _union_universe_size() -> int:
-    """Return the number of tickers the resolver returns for today's live
-    strategies, or 0 on any error."""
-    import subprocess
-    import json
+def _union_universe_size():
+    """Return (n_tickers, error_str_or_None). On failure, n=0 and err carries the exception."""
     from datetime import date
     try:
         out = subprocess.check_output(
@@ -1054,16 +1060,22 @@ def _union_universe_size() -> int:
              '--as-of', str(date.today()), '--states', 'live'],
             text=True, timeout=20,
         )
-        return len(json.loads(out))
-    except Exception:
-        return 0
+        return (len(json.loads(out)), None)
+    except subprocess.TimeoutExpired:
+        return (0, 'resolver timeout (>20s)')
+    except subprocess.CalledProcessError as e:
+        return (0, f'resolver exit={e.returncode}')
+    except Exception as e:
+        return (0, f'{type(e).__name__}: {e}')
 
 
 def _check_union_universe_size():
     """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
     Thresholds: ≥floor → pass, ≥50 → warn, <50 → fail."""
     floor = int(os.environ.get('UNIVERSE_RESOLVER_MIN_LIVE_TICKERS', '200'))
-    n = _union_universe_size()
+    n, err = _union_universe_size()
+    if err:
+        return (2, f'union={n} ({err})')
     if n >= floor:
         return (0, f'union={n} ≥ {floor}')
     if n >= 50:
@@ -1077,7 +1089,12 @@ def check_metadata_snapshot_freshness():
     PASS ≤1d, WARN ≤3d, FAIL >3d."""
     code, msg = _check_metadata_snapshot_freshness()
     name = 'metadata_snapshot_freshness'
-    return [_ok, _warn, _fail][code](name, msg)
+    if code == 0:
+        return _ok(name, msg)
+    elif code == 1:
+        return _warn(name, msg)
+    else:
+        return _fail(name, msg)
 
 
 @_check('union_universe_size', slow=True)
@@ -1087,7 +1104,13 @@ def check_union_universe_size():
     WARN ≥50, FAIL <50."""
     code, msg = _check_union_universe_size()
     name = 'union_universe_size'
-    return [_ok, _warn, _fail][code](name, msg)
+    if code == 0:
+        return _ok(name, msg)
+    elif code == 1:
+        return _warn(name, msg)
+    else:
+        return _fail(name, msg)
+
 
 def _drift_summary():
     """Indirection seam for the drift-alerts check."""

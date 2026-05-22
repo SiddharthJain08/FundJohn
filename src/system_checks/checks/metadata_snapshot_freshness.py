@@ -10,6 +10,11 @@ from ..registry import check
 from ..types import Status
 
 
+# Two-bucket on purpose. The doctor.py preflight peer
+# (_check_metadata_snapshot_freshness) is three-bucket and more lenient
+# (PASS<=1, WARN<=3, FAIL>3) so a single-day gap doesn't block a cycle.
+# This system_check runs in the maintenance digest and is the stricter
+# ongoing-health signal.
 @check(name='metadata_snapshot_freshness', tags=['strategies'], requires=['db'])
 def _metadata_snapshot_freshness():
     """Verify ticker_metadata_snapshots was written recently.
