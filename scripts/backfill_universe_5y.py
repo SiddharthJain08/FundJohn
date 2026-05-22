@@ -26,19 +26,47 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
 import urllib.request
 import urllib.error
+from datetime import date as _date
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 import psycopg2
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[1]
+# Inject ROOT so `from src.pipeline.backfillers import universe_prices` resolves
+# when this script is launched via `python3 scripts/backfill_universe_5y.py`
+# (subprocess test + systemd ExecStart contexts both lack PYTHONPATH).
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 STAGING = ROOT / 'data' / '.staging'
 CHECKPOINTS = ROOT / 'data' / '.checkpoints' / 'backfill_5y'
 UNIVERSE_FILE = ROOT / 'data' / '.backfill_universe_v1.txt'
+
+# Master parquet path is a module constant so tests can monkeypatch it. We
+# follow the existing single-file pattern (alpaca_options.py:_append_parquet,
+# run_tier_b.py:305 — read-concat-dedupe-rewrite). The spec (§2.1) called for
+# pyarrow.parquet.write_to_dataset partitioned by (year, ticker), but the live
+# file is a single 394k-row parquet that every reader treats as a file via
+# pd.read_parquet(path). Migrating to a partitioned dataset would change the
+# file→directory shape mid-flight and risk silent reader-behavior changes
+# across the live pipeline. Spec deviation flagged in DONE report.
+MASTER_PRICES = ROOT / 'data' / 'master' / 'prices.parquet'
+
+# Cache-invalidation hook. The src/data/parquet_store.py untracked file looks
+# like the consumer-side cache (see git status). Best-effort import — if not
+# wired in yet, we just skip.
+def _invalidate_cache(name: str) -> None:
+    try:
+        from src.data.parquet_store import invalidate as _inv  # type: ignore
+        _inv(name)
+    except Exception:
+        pass
 
 # Source-tag versioning. Anything other than the canonical v1 tag requires an
 # explicit env override so the operator can't accidentally overwrite a clean
@@ -211,11 +239,314 @@ def _notify_discord(msg: str) -> None:
         pass  # silent — this is a notifier, not a critical path
 
 
-# ── Per-target runners (stubs — Tasks 7/8/9) ─────────────────────────────────
+# ── Per-target runners ───────────────────────────────────────────────────────
+def _load_universe(args: argparse.Namespace) -> list[str]:
+    if args.tickers:
+        return [t.strip().upper() for t in args.tickers.split(',') if t.strip()]
+    if not UNIVERSE_FILE.exists():
+        raise SystemExit(f'universe file not found: {UNIVERSE_FILE}')
+    return [
+        line.strip().upper()
+        for line in UNIVERSE_FILE.read_text().splitlines()
+        if line.strip() and not line.startswith('#')
+    ]
+
+
+def _load_years(args: argparse.Namespace) -> list[int]:
+    if args.years:
+        return sorted({int(y.strip()) for y in args.years.split(',') if y.strip()})
+    today = _date.today()
+    return list(range(2021, today.year + 1))
+
+
+def _existing_dates_for(master_path: Path, symbol: str, year: int) -> set[str]:
+    """Returns the set of `date` strings already present in master for (symbol, year)."""
+    if not master_path.exists():
+        return set()
+    try:
+        import pandas as pd
+        df = pd.read_parquet(
+            master_path,
+            columns=['ticker', 'date'],
+        )
+    except Exception:
+        return set()
+    if df.empty:
+        return set()
+    year_start = f'{year}-01-01'
+    year_end = f'{year}-12-31'
+    mask = (
+        (df['ticker'] == symbol)
+        & (df['date'] >= year_start)
+        & (df['date'] <= year_end)
+    )
+    return set(df.loc[mask, 'date'].astype(str).tolist())
+
+
+def _quarantine_chunk(
+    pg,
+    master_table: str,
+    symbol: str,
+    year: int,
+    source_tag: str,
+    reason: str,
+) -> None:
+    """Insert a single data_quarantine row covering Jan 1 of `year`.
+
+    A whole (symbol, year) chunk's "affected date" can't be a date *range*
+    in the current schema (affected_date is a single DATE). We choose
+    year-01-01 as the sentinel and stash the year + chunk semantics in
+    `reason`. Consumer queries that filter by exact (symbol, date) will
+    miss this row — but the explicit purpose of a chunk-level quarantine
+    is operator-visible drift detection (doctor + dashboard), not row-level
+    filtering, so the (symbol, date) precision isn't required here.
+
+    Note schema remap: data_quarantine uses `symbol` + `affected_date`
+    where prices.parquet uses `ticker` + `date`.
+    """
+    with pg.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO data_quarantine
+                (master_table, symbol, affected_date, source_tag,
+                 reason, flagged_by)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (
+                master_table,
+                symbol,
+                f'{year}-01-01',
+                source_tag,
+                f'chunk {symbol}:{year}: {reason}',
+                'auto:backfill_5y_prices',
+            ),
+        )
+    pg.commit()
+
+
+def _promote_chunk(
+    df,
+    symbol: str,
+    year: int,
+    source_tag: str,
+    master_path: Path,
+) -> int:
+    """Read-concat-dedupe-rewrite the master parquet with the new chunk.
+
+    Returns the number of NEW rows written (after dedupe). Uses the existing
+    single-file pattern (matches alpaca_options.py:_append_parquet,
+    run_tier_b.py:305) rather than the spec's write_to_dataset because the
+    live prices.parquet is a single file, not a partitioned dataset; switching
+    formats mid-flight would force every downstream reader to re-validate.
+
+    Caller must have already filtered `df` against `_existing_dates_for` so
+    `df` contains only rows not present in master.
+    """
+    import pandas as pd
+
+    if df is None or df.empty:
+        return 0
+
+    # Stamp source_tag into the existing 'source' column (currently all <NA>).
+    df = df.copy()
+    df['source'] = source_tag
+
+    master_path.parent.mkdir(parents=True, exist_ok=True)
+    if master_path.exists():
+        existing = pd.read_parquet(master_path)
+        # Cast new rows' column dtypes to match existing where possible to
+        # avoid surprising consumers (volume is int64 in master).
+        for col in ('volume',):
+            if col in df.columns and col in existing.columns:
+                try:
+                    df[col] = df[col].astype(existing[col].dtype)
+                except Exception:
+                    pass
+        merged = pd.concat([existing, df], ignore_index=True)
+    else:
+        merged = df
+
+    # Idempotency guard: dedupe on (ticker, date) — last-write-wins. Because
+    # we filtered against _existing_dates_for upstream, the only duplicates
+    # this catches are within `df` itself (Alpaca shouldn't return them, but
+    # defensive).
+    before = len(merged)
+    merged = merged.drop_duplicates(subset=['ticker', 'date'], keep='last')
+    after_dedupe = len(merged)
+    if before != after_dedupe:
+        sys.stderr.write(
+            f'  [warn] dedupe collapsed {before - after_dedupe} duplicate rows in {symbol}:{year}\n'
+        )
+
+    merged.to_parquet(master_path, index=False)
+    return len(df)
+
+
 def _run_prices(args: argparse.Namespace, pg) -> None:
-    """Daily-bar 5y backfill — implemented in Task 7."""
-    raise NotImplementedError(
-        '_run_prices is implemented in Task 7 (sp2-b prices backfill).'
+    """Daily-bar 5y backfill — stage→validate→promote per (ticker, year) chunk.
+
+    Idempotency contract:
+      - Redis status='promoted' chunks are skipped under --resume.
+      - Redis status='quarantined' chunks are skipped unless --supersede-quarantine.
+      - Master parquet writes filter against _existing_dates_for, so re-running
+        a promoted chunk after Redis loss is also safe (zero new rows written).
+
+    Overlap policy (per Task 7 plan, more conservative than spec §2.2.1):
+      - If staged data overlaps any existing (ticker, date) rows AND source_tag
+        is the canonical v1, REFUSE (quarantine the chunk).
+      - With a v2+ source_tag AND OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1, overlap
+        is allowed (used for quarantine recovery flow per spec §2.3).
+    """
+    from src.pipeline.backfillers import universe_prices as up
+
+    rclient = _redis()
+    universe = _load_universe(args)
+    years = _load_years(args)
+    source_tag = args.source_tag
+    allow_overwrite = (
+        os.environ.get('OPENCLAW_BACKFILL_ALLOW_OVERWRITE') == '1'
+    )
+
+    print(
+        f'[prices] universe={len(universe)} years={years} '
+        f'source_tag={source_tag} dry_run={args.dry_run}'
+    )
+
+    promoted_total = 0
+    quarantined_total = 0
+    skipped_total = 0
+
+    for symbol in universe:
+        for year in years:
+            chunk_key = f'{symbol}:{year}'
+            redis_key = f'backfill:5y:prices:{chunk_key}'
+            current_status = rclient.get(redis_key)
+
+            if args.resume and current_status == 'promoted':
+                skipped_total += 1
+                continue
+            if (
+                current_status == 'quarantined'
+                and not args.supersede_quarantine
+            ):
+                skipped_total += 1
+                continue
+
+            audit_id = _audit_start(pg, 'prices', chunk_key, source_tag)
+            try:
+                df = up.fetch_ticker_year(symbol, year)
+            except Exception as e:
+                err = f'fetch failed: {e}'
+                sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+                _audit_finish(pg, audit_id, status='failed', err=err)
+                _notify_discord(f'[backfill prices] FAILED {chunk_key}: {err}')
+                continue
+
+            ok, err = up.validate(df, symbol, year)
+            if not ok:
+                sys.stderr.write(
+                    f'  [quarantine] {chunk_key}: {err}\n'
+                )
+                _quarantine_chunk(
+                    pg, 'prices.parquet', symbol, year, source_tag, err or 'unknown',
+                )
+                _audit_finish(pg, audit_id, status='quarantined', err=err)
+                rclient.set(redis_key, 'quarantined')
+                _notify_discord(
+                    f'[backfill prices] QUARANTINED {chunk_key}: {err}'
+                )
+                quarantined_total += 1
+                continue
+
+            chunk_sha = up.sha256(df)
+
+            if args.dry_run:
+                print(f'[dry-run] {chunk_key}: {len(df)} rows valid')
+                _audit_finish(
+                    pg, audit_id, status='validated',
+                    rows=len(df), sha=chunk_sha,
+                )
+                continue
+
+            # PROMOTE — overlap policy gate.
+            existing_dates = _existing_dates_for(MASTER_PRICES, symbol, year)
+            df_new = df[~df['date'].isin(existing_dates)]
+            had_overlap = (len(df_new) < len(df))
+
+            if had_overlap and source_tag == CANONICAL_SOURCE_TAG and not allow_overwrite:
+                reason = (
+                    f'overlap with existing {len(df) - len(df_new)} rows '
+                    f'under v1 source_tag; refusing to overwrite'
+                )
+                sys.stderr.write(f'  [quarantine] {chunk_key}: {reason}\n')
+                _quarantine_chunk(
+                    pg, 'prices.parquet', symbol, year, source_tag, reason,
+                )
+                _audit_finish(pg, audit_id, status='quarantined', err=reason)
+                rclient.set(redis_key, 'quarantined')
+                _notify_discord(
+                    f'[backfill prices] QUARANTINED {chunk_key}: {reason}'
+                )
+                quarantined_total += 1
+                continue
+
+            if df_new.empty:
+                # Already-promoted — Redis-status restore case.
+                print(f'  [{chunk_key}] no new rows; marking promoted')
+                _audit_finish(
+                    pg, audit_id, status='promoted',
+                    rows=0, sha=chunk_sha,
+                )
+                rclient.set(redis_key, 'promoted')
+                promoted_total += 1
+                continue
+
+            # If overlap was allowed (v2 + env gate), drop the overlapping rows
+            # from the existing master AND write df (which includes the
+            # corrected rows). Otherwise just append df_new.
+            if had_overlap and allow_overwrite:
+                import pandas as pd
+                existing_full = pd.read_parquet(MASTER_PRICES)
+                year_start = f'{year}-01-01'
+                year_end = f'{year}-12-31'
+                drop_mask = (
+                    (existing_full['ticker'] == symbol)
+                    & (existing_full['date'] >= year_start)
+                    & (existing_full['date'] <= year_end)
+                    & (existing_full['date'].isin(df['date']))
+                )
+                kept = existing_full[~drop_mask]
+                df_stamped = df.copy()
+                df_stamped['source'] = source_tag
+                # Match dtype of volume to existing
+                if 'volume' in kept.columns and 'volume' in df_stamped.columns:
+                    try:
+                        df_stamped['volume'] = df_stamped['volume'].astype(
+                            kept['volume'].dtype
+                        )
+                    except Exception:
+                        pass
+                merged = pd.concat([kept, df_stamped], ignore_index=True)
+                MASTER_PRICES.parent.mkdir(parents=True, exist_ok=True)
+                merged.to_parquet(MASTER_PRICES, index=False)
+                rows_written = len(df_stamped)
+            else:
+                rows_written = _promote_chunk(
+                    df_new, symbol, year, source_tag, MASTER_PRICES,
+                )
+
+            _audit_finish(
+                pg, audit_id, status='promoted',
+                rows=rows_written, sha=chunk_sha,
+            )
+            rclient.set(redis_key, 'promoted')
+            _invalidate_cache('prices.parquet')
+            print(f'  [{chunk_key}] promoted {rows_written} rows')
+            promoted_total += 1
+
+    print(
+        f'[prices] DONE promoted={promoted_total} '
+        f'quarantined={quarantined_total} skipped={skipped_total}'
     )
 
 
