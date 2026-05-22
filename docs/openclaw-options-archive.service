@@ -1,0 +1,18 @@
+[Unit]
+Description=SP-1 Alpaca options EOD self-archive (daily 16:30 ET Mon-Fri)
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStartPre=/usr/bin/python3 /root/openclaw/src/maintenance/doctor.py --required-only --quick
+ExecStart=/usr/bin/python3 -m pipeline.backfillers.alpaca_options
+StandardOutput=append:/var/log/openclaw-options-archive.log
+StandardError=append:/var/log/openclaw-options-archive.log
+TimeoutStartSec=2400
+
+[Install]
+WantedBy=multi-user.target

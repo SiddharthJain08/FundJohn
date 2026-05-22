@@ -103,6 +103,31 @@ def _fail(name, detail):
     return {'name': name, 'severity': FAIL, 'detail': detail}
 
 
+# ── Shared helpers (module-level so monkeypatching works in tests) ─────────
+
+def _run_alpaca_cli(args: list) -> dict:
+    """Single seam for monkeypatching in tests."""
+    res = subprocess.run(
+        [ALPACA_CLI] + args,
+        capture_output=True, text=True, timeout=10,
+    )
+    if res.returncode != 0:
+        raise RuntimeError(f'alpaca cli rc={res.returncode}: {res.stderr}')
+    return json.loads(res.stdout)
+
+
+def _parquet_last_date(path: str):
+    """Return last date in a parquet's 'date' column, or None if file missing."""
+    import pandas as pd
+    p = Path(path)
+    if not p.exists():
+        return None
+    df = pd.read_parquet(p, columns=['date'])
+    if df.empty:
+        return None
+    return pd.to_datetime(df['date']).max().date()
+
+
 # ── Individual checks ──────────────────────────────────────────────────────
 
 @_check('alpaca_cli_binary')
@@ -143,6 +168,64 @@ def check_alpaca_auth():
     if equity == 0:
         return _warn('alpaca_auth', 'equity=0 (paper account just funded?)')
     return _ok('alpaca_auth', f'equity=${equity:,.2f}')
+
+
+@_check('alpaca_aat_plus_tier')
+def _check_alpaca_aat_plus_tier():
+    """Probe SPY 30-DTE chain + 1 news fetch. Confirms paid AAT Plus tier active."""
+    try:
+        chain = _run_alpaca_cli([
+            'data', 'option', 'chain',
+            '--underlying-symbol', 'SPY',
+            '--expiration-date-gte', '2026-06-15',
+            '--expiration-date-lte', '2026-06-30',
+            '--strike-price-gte', '740',
+            '--strike-price-lte', '750',
+            '--type', 'call',
+            '--limit', '5',
+        ])
+        snaps = chain.get('snapshots', {})
+        any_nonzero = any(
+            (s.get('greeks') or {}).get('delta', 0) != 0
+            for s in snaps.values()
+        )
+        if not any_nonzero:
+            return _fail('alpaca_aat_plus_tier',
+                         'all SPY 30-DTE ATM greeks zero — AAT Plus may be inactive')
+        _run_alpaca_cli(['data', 'news', '--symbols', 'AAPL', '--limit', '1'])
+        return _ok('alpaca_aat_plus_tier', 'greeks present + news OK')
+    except Exception as exc:
+        return _fail('alpaca_aat_plus_tier', str(exc)[:200])
+
+
+@_check('options_archive_freshness')
+def _check_options_archive_freshness():
+    """options_eod.parquet last row should be ≤ 2 trading days old (warn) / 4 (fail)."""
+    from datetime import date
+    last = _parquet_last_date(str(ROOT / 'data' / 'master' / 'options_eod.parquet'))
+    if last is None:
+        return _fail('options_archive_freshness', 'parquet missing')
+    days = (date.today() - last).days
+    if days >= 4:
+        return _fail('options_archive_freshness', f'last row {days} days old')
+    if days >= 2:
+        return _warn('options_archive_freshness', f'last row {days} days old')
+    return _ok('options_archive_freshness', f'last row {days} days old')
+
+
+@_check('cboe_vol_indices_freshness')
+def _check_cboe_vol_indices_freshness():
+    """vol_indices.parquet should be ≤ 1 trading day stale (warn) / 2 (fail)."""
+    from datetime import date
+    last = _parquet_last_date(str(ROOT / 'data' / 'master' / 'vol_indices.parquet'))
+    if last is None:
+        return _fail('cboe_vol_indices_freshness', 'parquet missing')
+    days = (date.today() - last).days
+    if days >= 2:
+        return _fail('cboe_vol_indices_freshness', f'last row {days} days old')
+    if days >= 1:
+        return _warn('cboe_vol_indices_freshness', f'last row {days} days old')
+    return _ok('cboe_vol_indices_freshness', f'last row {days} days old')
 
 
 @_check('alpaca_clock')

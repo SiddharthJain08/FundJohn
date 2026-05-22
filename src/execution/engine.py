@@ -58,6 +58,44 @@ def get_db():
 
 
 # ──────────────────────────────────────────────────────────
+# SP-1: options EOD parquet helpers
+# ──────────────────────────────────────────────────────────
+
+def _drop_zero_greeks(df: 'pd.DataFrame') -> 'pd.DataFrame':
+    """Drop rows where ALL four greeks are zero (degenerate contracts).
+
+    options_eod.parquet is kept as an immutable record by the archive job
+    (Task 6/alpaca_options.py) — it intentionally preserves zero-greek rows
+    so that the parquet reflects the raw chain snapshot (0-DTE expired
+    contracts, deep-ITM no-flow rows, etc.).  Consumers that aggregate the
+    chain (like this engine) must filter them out before aggregation to avoid
+    contaminating IV-rank, ATM-greek, and put/call ratio calculations.
+
+    This is the SECOND line of defence:
+      1st — alpaca_options.js (Task 13) drops zero-greek rows during the live
+            intraday snapshot before they ever reach the signal stage.
+      2nd — this function, applied immediately after pd.read_parquet(), for
+            rows that may exist in the historical archive.
+    """
+    if df.empty:
+        return df
+    greek_cols = ('delta', 'gamma', 'theta', 'vega')
+    present = [c for c in greek_cols if c in df.columns]
+    if not present:
+        # No greek columns at all — nothing to filter on; return unchanged.
+        return df
+    zero_mask = pd.Series(True, index=df.index)
+    for col in present:
+        zero_mask = zero_mask & (df[col].fillna(0) == 0)
+    # Columns that are absent are treated as 0 (conservative: only drop if
+    # ALL present columns are also zero).
+    dropped = int(zero_mask.sum())
+    if dropped > 0:
+        logger.info('sp1.engine.options_filter dropped=%d degenerate rows (of %d total)', dropped, len(df))
+    return df[~zero_mask].copy()
+
+
+# ──────────────────────────────────────────────────────────
 # 1. LOAD REGIME
 # ──────────────────────────────────────────────────────────
 
@@ -268,6 +306,8 @@ def load_aux_data(universe: list) -> dict:
                 logger.warning(f"HV20 pre-compute failed: {_e}")
 
             opts = pd.read_parquet(opts_path)
+            # SP-1: drop degenerate (all-zero-greek) rows before any aggregation.
+            opts = _drop_zero_greeks(opts)
             today = pd.Timestamp.today().normalize()
 
             # Ensure expiry is datetime

@@ -289,6 +289,34 @@ app.get('/api/stream', (req, res) => {
   });
 });
 
+// ─────────────────────────── Data Provider Health ────────────────────────────
+app.get('/api/data-health', async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT provider, endpoint,
+             SUM(success_count) AS success_24h,
+             SUM(error_count)   AS error_24h,
+             MAX(last_error_at) AS last_error_at,
+             MAX(last_error)    AS last_error
+      FROM data_provider_health
+      WHERE window_start >= NOW() - INTERVAL '24 hours'
+      GROUP BY provider, endpoint
+      ORDER BY provider, endpoint
+    `);
+    const enriched = rows.map(r => {
+      const total = (+r.success_24h) + (+r.error_24h);
+      const success_pct = total > 0 ? (+r.success_24h) / total * 100 : null;
+      let status = 'green';
+      if (success_pct !== null && success_pct < 95) status = 'red';
+      else if (success_pct !== null && success_pct < 99) status = 'yellow';
+      return { ...r, success_pct, status };
+    });
+    res.json({ providers: enriched, generated_at: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─────────────────────────── Health ──────────────────────────────────────────
 app.get('/api/health', async (_req, res) => {
   const health = { ok: true, ts: Date.now(), postgres: 'unknown', redis: 'unknown' };

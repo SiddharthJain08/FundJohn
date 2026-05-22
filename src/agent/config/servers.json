@@ -5,7 +5,7 @@
       "enabled": true,
       "exposure": "summary",
       "tier": 1,
-      "fallback": "yahoo",
+      "fallback": null,
       "description": "Financial Modeling Prep — financials, ratios, peers, earnings, price targets, company profiles",
       "tool_count": 18,
       "import_path": "from tools.fmp import ...",
@@ -18,35 +18,20 @@
       ]
     },
     {
-      "name": "polygon",
-      "enabled": true,
-      "exposure": "summary",
-      "tier": 1,
-      "fallback": "yahoo",
-      "description": "Polygon — OHLCV prices, snapshots, market movers, trading signals, technical indicators (RSI/SMA/EMA/MACD/BBands)",
-      "tool_count": 12,
-      "import_path": "from tools.polygon import ...",
-      "unit_cost_per_request": 0.00005,
-      "covered_columns": [
-        "prices", "close", "open", "high", "low", "volume",
-        "vwap", "sma", "ema", "atr", "rsi", "macd", "bollinger",
-        "market_cap", "shares_outstanding"
-      ]
-    },
-    {
       "name": "alpaca",
       "enabled": true,
       "exposure": "summary",
       "tier": 1,
       "fallback": null,
-      "description": "Alpaca CLI (broker side) — account state, positions, fills, watchlists, screener (movers/most-actives), corporate actions, options chain (no greeks/IV in alpha-preview).",
-      "tool_count": 8,
+      "description": "Alpaca CLI (broker side) — account state, positions, fills, watchlists, screener (movers/most-actives), corporate actions, options chain (no greeks/IV in alpha-preview), news.",
+      "tool_count": 10,
       "import_path": "alpaca subprocess (see src/channels/api/alpaca_cli.js / src/execution/alpaca_executor.py)",
       "unit_cost_per_request": 0.0,
       "covered_columns": [
         "account_equity", "buying_power", "positions", "fills",
         "watchlist", "screener_movers", "screener_most_actives",
-        "corporate_actions", "forward_split", "reverse_split"
+        "corporate_actions", "forward_split", "reverse_split",
+        "option_chain", "news"
       ]
     },
     {
@@ -76,23 +61,6 @@
       "unit_cost_per_request": 0.001,
       "covered_columns": [
         "news", "sentiment", "press_releases", "earnings_transcripts"
-      ]
-    },
-    {
-      "name": "yahoo",
-      "enabled": true,
-      "exposure": "summary",
-      "tier": 2,
-      "fallback": null,
-      "description": "Yahoo Finance (Tier 2 fallback) — options chains, VIX, insider transactions, short interest, real-time quotes",
-      "tool_count": 6,
-      "import_path": "from tools.yahoo import ...",
-      "unit_cost_per_request": 0.0,
-      "covered_columns": [
-        "options_eod", "iv_rank", "iv_spread", "call_iv_atm_30d", "put_iv_atm_30d",
-        "gamma", "theta", "delta", "vega", "gex", "open_interest",
-        "short_interest", "short_float", "implied_volatility_skew_25delta",
-        "iv_term_structure", "vrp", "realized_vol"
       ]
     }
   ]

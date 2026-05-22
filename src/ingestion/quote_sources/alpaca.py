@@ -29,7 +29,7 @@ from src.ingestion.quote_monitor import Quote
 
 class AlpacaQuoteSource:
     name = 'alpaca'
-    priority = 2  # third behind Polygon + FMP
+    priority = 1  # P1 in production chain: Alpaca beats FMP (Polygon removed in Task 17)
 
     BASE = 'https://data.alpaca.markets'
 

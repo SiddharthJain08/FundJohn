@@ -7,7 +7,12 @@ Supported column_name values:
   vol_indices                                             → wide-format
                                                             vol_indices.parquet (^VIX, ^VVIX, ^VIX9D)
   earnings_calendar                                       → forward earnings calendar
-                                                            from yfinance per-ticker
+                                                            via yfinance per-ticker
+
+SP-1 note: earnings (historical) backfill moved to FMP-only path.
+  Use scripts/backfill_earnings.py or src/pipeline/backfillers/fmp.py
+  for historical earnings data. The yfinance _backfill_earnings path has
+  been removed per SP-1 provider cutover.
 """
 from __future__ import annotations
 
@@ -23,12 +28,8 @@ sys.path.insert(0, str(ROOT / 'src'))
 PRICE_COLUMNS = {'prices', 'price_data', 'close', 'open', 'high', 'low', 'volume'}
 VOL_INDICES   = {'VIX', 'VVIX', 'VIX3M'}
 
-# Per-ticker quarterly EPS surprises + revenue. FMP's /earnings-surprises and
-# /earning_calendar endpoints both 404/403 on the current Massive plan, so
-# `earnings` was retargeted from FMP to yfinance 2026-04-30. yfinance returns
-# the last 4 quarters of EPS actual/estimate via Ticker.earnings_history and
-# revenue via Ticker.quarterly_income_stmt['Total Revenue'].
-EARNINGS_COLUMNS = {'earnings', 'earnings_surprise_pct', 'earnings_date'}
+# SP-1: EARNINGS_COLUMNS removed — earnings backfill is FMP-only.
+# Callers should use scripts/backfill_earnings.py or src/pipeline/backfillers/fmp.py.
 
 # Columns delegated to standalone src/ingestion/ingest_*.py scripts via
 # subprocess — their argparse-driven main() reads sys.argv, which the
@@ -45,12 +46,17 @@ def backfill(column_name: str, from_date: date, to_date: date) -> int:
         return _backfill_prices(from_date, to_date)
     if column_name in VOL_INDICES:
         return _backfill_vol_index(column_name, from_date, to_date)
-    if column_name in EARNINGS_COLUMNS:
-        return _backfill_earnings()
     if column_name in DELEGATED_INGEST_SCRIPTS:
         return _delegate_to_ingest_script(
             DELEGATED_INGEST_SCRIPTS[column_name],
             ROOT / 'data' / 'master' / f'{column_name}.parquet',
+        )
+    # SP-1: earnings backfill is FMP-only (see scripts/backfill_earnings.py).
+    _fmp_earnings = {'earnings', 'earnings_surprise_pct', 'earnings_date'}
+    if column_name in _fmp_earnings:
+        raise NotImplementedError(
+            f'SP-1: yfinance earnings backfill removed; use FMP path '
+            f'(scripts/backfill_earnings.py or src/pipeline/backfillers/fmp.py)'
         )
     raise NotImplementedError(
         f'yfinance backfiller has no handler for column={column_name!r}'
@@ -74,120 +80,12 @@ def _backfill_prices(from_date: date, to_date: date) -> int:
     return total
 
 
-def _active_universe():
-    """Active tickers for fan-out backfills. Prefers universe_config table,
-    falls back to prices.parquet."""
-    import os
-    try:
-        import psycopg2
-        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT ticker FROM universe_config WHERE active = TRUE ORDER BY ticker")
-        rows = [r[0] for r in cur.fetchall()]
-        conn.close()
-        if rows:
-            return rows
-    except Exception as e:
-        print(f'  [yfinance] universe_config unreachable ({e}); falling back to prices.parquet')
-    import pandas as pd
-    df = pd.read_parquet(ROOT / 'data' / 'master' / 'prices.parquet', columns=['ticker'])
-    return sorted(df['ticker'].astype(str).unique().tolist())
-
-
-def _backfill_earnings() -> int:
-    """Per-ticker quarterly EPS + revenue via yfinance. Writes to
-    earnings.parquet (ticker, date, eps_actual, eps_estimated,
-    revenue_actual, revenue_estimated). yfinance doesn't expose forward
-    revenue consensus — `revenue_estimated` stays NaN, matching the
-    pre-existing parquet's mixed-fill state."""
-    import time
-    import pandas as pd
-    import sys as _sys
-    sys.path.insert(0, str(ROOT / 'src'))
-    from data.parquet_store import MASTER_DIR, append_dedup
-
-    try:
-        import yfinance as yf
-    except ImportError as e:
-        raise RuntimeError(f'yfinance not installed: {e}')
-
-    earn_path = MASTER_DIR / 'earnings.parquet'
-    tickers = _active_universe()
-    print(f'  [yfinance] earnings: {len(tickers)} tickers')
-
-    rows = []
-    failed = 0
-    for i, ticker in enumerate(tickers, 1):
-        try:
-            tk = yf.Ticker(ticker)
-            hist = tk.earnings_history
-        except Exception as e:
-            failed += 1
-            if failed <= 5:
-                print(f'  [yfinance] {ticker} earnings_history: {e}', file=_sys.stderr)
-            time.sleep(1.0)
-            continue
-        if hist is None or hist.empty:
-            time.sleep(1.0)
-            continue
-
-        # quarterly_income_stmt is optional — used only for revenue join.
-        # Several tickers (ETFs, indices) raise here; fall through to
-        # revenue=NaN rather than skipping the EPS rows.
-        revenue_by_q = {}
-        try:
-            qi = tk.quarterly_income_stmt
-            if qi is not None and not qi.empty and 'Total Revenue' in qi.index:
-                rev = qi.loc['Total Revenue']
-                for q, v in rev.items():
-                    revenue_by_q[pd.Timestamp(q).date().isoformat()] = float(v) if v == v else None
-        except Exception:
-            pass
-
-        today_iso = pd.Timestamp.today().date().isoformat()
-        for q, r in hist.iterrows():
-            try:
-                d_ts = pd.Timestamp(q)
-                d_iso = d_ts.date().isoformat()
-            except Exception:
-                continue
-            rows.append({
-                'ticker':             ticker,
-                'date':               d_ts,        # match existing parquet datetime64[us] dtype
-                'eps_actual':         _safe_float(r.get('epsActual')),
-                'eps_estimated':      _safe_float(r.get('epsEstimate')),
-                'revenue_actual':     revenue_by_q.get(d_iso),
-                'revenue_estimated':  None,  # yfinance has no forward consensus
-                'last_updated':       today_iso,   # match existing schema
-            })
-
-        if i % 25 == 0:
-            print(f'  [yfinance] earnings progress: {i}/{len(tickers)} tickers, {len(rows)} rows')
-        time.sleep(1.0)
-
-    if not rows:
-        print(f'  [yfinance] no earnings rows fetched (failed={failed}/{len(tickers)})')
-        return 0
-    df = pd.DataFrame(rows)
-    total = append_dedup(earn_path, df, ['ticker', 'date'], mode='replace')
-    print(f'  [yfinance] earnings merged — {len(rows)} rows written, total={total}, failed={failed}')
-    return len(rows)
-
-
-def _safe_float(v):
-    try:
-        f = float(v)
-        return f if f == f else None  # NaN check
-    except (TypeError, ValueError):
-        return None
-
-
 def _backfill_vol_index(name: str, from_date: date, to_date: date) -> int:
-    # Delegate to the existing fetch_vol_indices.main() — it is incremental
-    # and idempotent by (series_name, date). For deep history backfills (no
-    # existing rows) it uses BACKFILL_DAYS (5 years) which covers our needs.
+    # Delegate to cboe_vol_indices.main() — it is incremental and idempotent
+    # by (series_name, date). For deep history backfills (no existing rows) it
+    # uses BACKFILL_DAYS (5 years) which covers our needs.
     import importlib
-    mod = importlib.import_module('ingestion.fetch_vol_indices')
+    mod = importlib.import_module('src.ingestion.cboe_vol_indices')
     results = mod.main()
     return sum(v for v in results.values() if isinstance(v, int) and v > 0)
 

@@ -151,34 +151,43 @@ Adjacent but not part of the 9-layer stack:
 
 ---
 
-## 6. MCP providers (market data layer)
+## 6. Data providers (market data layer) — post-SP-1
 
-`src/agent/config/servers.json` lists six providers, each with tier + fallback:
+> **SP-1 cutover shipped 2026-05-22.** Polygon, Massive S3, and Yahoo Finance (except CBOE vol indices) are fully removed. Alpaca AAT Plus is now P1 for most data. FMP Starter is P2 for fundamentals + macro. yfinance is bounded to a single file by CI lint.
 
-| Provider | Tier | Fallback | Tool count | Typical use |
-|---|---|---|---|---|
-| **FMP** | 1 | yahoo | 18 | Financials, ratios, peers, earnings, price targets |
-| **Polygon / Massive** | 1 | alpha_vantage | 12 | **Options only** — chain, snapshots, S3 flat files (EOD), live `OA.*` WebSocket. Same service/key. |
-| **SEC EDGAR** | 1 | — | 5 | 10-K / 10-Q / 8-K / Form 4 full text + structured |
-| **Tavily** | 1 | — | 2 | News search, press releases, transcripts |
-| **Alpha Vantage** | 2 | — | 15 | Macro (GDP, CPI, rates), technical indicators, intraday |
-| **Yahoo / yfinance** | 2 | — | 6 | **All stock OHLCV** (yfinance bulk download), VIX, short interest |
+| Data type | P1 source | P2 / fallback | Notes |
+|---|---|---|---|
+| Equity real-time quotes | **Alpaca AAT Plus** | FMP | Alpaca `GET /v2/stocks/quotes/latest` |
+| Options chain + greeks | **Alpaca CLI** (`alpaca option chain`) | — | OPTIONS_DATA_SOURCE env var removed; no more provider dispatch |
+| Historical options EOD | **Alpaca self-archive** (daily 16:30 ET via `openclaw-options-archive.timer`) | — | Massive S3 flatfiles retired; archive writes `options_eod.parquet` |
+| CBOE vol indices (VIX/VVIX/VIX3M/VIX9D) | **yfinance** via `src/ingestion/cboe_vol_indices.py` | — | Only file allowed to import yfinance (CI lint `scripts/lint_provider_guards.py`, blocking GHA gate) |
+| Macro daily series (TLT/HYG/GLD/DXY) | **FMP** | — | No yfinance fallback post-SP-1 |
+| Fundamentals / ratios / earnings | **FMP Starter** | — | Unchanged from pre-SP-1 |
+| Insider flags (Form 4) | **FMP** | — | SEC EDGAR direct for full text |
+| Universe ref (S&P 500) | **FMP** | — | Universe expansion is SP-2 scope |
+| News (ticker-attributed) | **Alpaca News API** | — | Stored in `ticker_sentiment_daily.alpaca_news_*` (migration 109) |
+| Screener / corp-actions / watchlist | **Alpaca CLI** | — | Unchanged from pre-SP-1 |
+| Filings (10-K/10-Q/8-K/Form 4 text) | **SEC EDGAR** | — | Unchanged |
 
-> ⚠️ **Polygon = Massive**: same service, same API key. The "options starter" plan grants options S3 + options WebSocket only. Stock data (OHLCV) is provided exclusively by yfinance (`master_dataset.py::refresh_prices_bulk`, `collector.js`). Never route stock price requests to Polygon/Massive — they will 403.
+> ⚠️ **Greeks-validity filter**: zero-greek options rows are filtered at two boundaries — JS inline (`src/pipeline/alpaca_options.js:_optionsGreeksValid`) at live chain pull, and Python read (`src/execution/engine.py:_drop_zero_greeks`) at `options_eod.parquet` load. The archive intentionally keeps all rows; consumers filter at read.
+
+> ⚠️ **Known gap (Task 14a)**: `collector.js:runMarketPricesYFinance` and `runNewsCollection` are STUBBED. Index/ETF bars and `market_news` table population are paused until Alpaca-bars wiring is added in a follow-up.
 
 Each provider has a Node-side generator at `src/agent/tools/mcp/<name>.js`. `generatePython(server)` produces a Python module (`tools/<name>.py`) exporting rate-limited callables. All providers share `tools/_rate_limiter.py` which enforces per-provider token-bucket limits via `_acquire_token(_PROVIDER)`.
 
 Generation entry point: `src/agent/tools/registry.js::generateToolModules(workspaceDir)`. Called at startup; writes to `workspaces/default/tools/`.
 
-### 6.1 Environment variables (`.env.example`)
+### 6.1 Environment variables (`.env`) — post-SP-1
 
-**LLM + MCPs**: `ANTHROPIC_API_KEY`, `FMP_API_KEY`, `POLYGON_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `TAVILY_API_KEY`, `SEC_USER_AGENT`.
+**LLM**: `ANTHROPIC_API_KEY`.
+
+**Data providers**: `FMP_API_KEY`, `TAVILY_API_KEY`, `SEC_USER_AGENT`. **Removed**: `POLYGON_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `MASSIVE_SECRET_KEY`, `MASSIVE_WS_REALTIME_BASE`, `MASSIVE_WS_DELAYED_BASE`, `OPTIONS_DATA_SOURCE`, `OPENCLAW_OPTIONS_BACKFILL_DAYS`.
 
 **Infra**: `POSTGRES_URI`, `REDIS_URL`, `DISCORD_BOT_TOKEN`, `WORKSPACE_ID`.
 
-**Broker (Alpaca paper trading)**: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` (`https://paper-api.alpaca.markets` for paper mode).
+**Broker (Alpaca)**: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`.
 
-**Massive WebSocket (options flow)**: `MASSIVE_SECRET_KEY` (same value as `POLYGON_API_KEY`), `MASSIVE_WS_REALTIME_BASE` (`wss://socket.massive.com`), `MASSIVE_WS_DELAYED_BASE` (`wss://delayed.massive.com`). Note: Massive = Polygon — same service, same key, clearer name. Options starter plan authorises options S3 and `OA.*` WebSocket only. **Stock data is not available via Massive/Polygon on this plan; use yfinance.**
+**SP-1 gates**: `ALPACA_NEWS_INGEST=1`, `ALPACA_OPTIONS_ARCHIVE=1`, `ALPACA_DATA_TIER=algo_trader_plus`, `ALPACA_SOAK_MODE_UNTIL=2026-05-30` (tightened alert thresholds during soak window).
 
 ---
 

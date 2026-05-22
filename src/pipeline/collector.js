@@ -315,7 +315,7 @@ async function runSnapshots() {
 async function runVolIndices() {
   const { execSync } = require('child_process');
   const start = Date.now();
-  notify('📈 Macro vol indices: VIX/VIX3M/VVIX via yfinance');
+  notify('📈 Macro vol indices: VIX/VIX3M/VVIX (bounded cboe_vol_indices module)');
   try {
     const out = execSync(
       'python3 src/ingestion/fetch_vol_indices.py',
@@ -339,8 +339,7 @@ async function runVolIndices() {
   }
 }
 
-// ── Daily-collection wrappers for the 4 ingest scripts that staging-approval
-// also backfills via the yfinance/polygon dispatchers. Each phase is non-fatal
+// ── Daily-collection wrappers for the 4 ingest scripts. Each phase is non-fatal
 // (matches runVolIndices): a script failure logs a [WARN] and continues. ──
 
 const ROOT_DIR = require('path').resolve(__dirname, '..', '..');
@@ -416,10 +415,10 @@ async function runIvHistory() {
   );
 }
 
-// Forward earnings calendar via per-ticker yfinance fan-out (1s throttle).
+// Forward earnings calendar via ingest_earnings_calendar.py (throttled per-ticker).
 async function runEarningsCalendar() {
   return _runIngestPhase(
-    '📅', 'Earnings calendar (yfinance, 1s throttle)',
+    '📅', 'Earnings calendar (per-ticker, 1s throttle)',
     ['src/ingestion/ingest_earnings_calendar.py', '--throttle', '1.0'],
     'earnings_calendar', 15 * 60_000,
   );
@@ -436,7 +435,7 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 
   let skipped = 0;
   let totalCalls = 0;
-  // Massive/Polygon is options-only — all stock OHLCV comes from Yahoo Finance
+  // SP-1: equity OHLCV source is Alpaca P1 (yfinance removed; Task 15 wires the bars API)
   const usePolygonOHLCV = false;
 
   for (let i = 0; i < tickers.length; i++) {
@@ -457,7 +456,7 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 
     for (const gap of gaps) {
       try {
-        const written = await fillPricesYFinance(ticker, gap.from, gap.to);
+        const written = await fillPricesAlpaca(ticker, gap.from, gap.to);
         await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
         totalWritten += written;
         totalCalls++;
@@ -491,60 +490,75 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
   await checkCompletionStatus(tickers, fromDate, toDate);
 }
 
-// ── YFinance price gap-fill (Polygon OHLCV not in Options Starter) ────────────
+// ── Equity price gap-fill — Alpaca daily bars (SP-1: yfinance removed) ────────
+// TODO Task 15+: implement Alpaca /v2/stocks/{T}/bars OHLCV gap-fill here.
+// yfinance path removed in Task 14 (SP-1 provider cutover).
 
-async function fillPricesYFinance(ticker, fromDate, toDate) {
-  const { execSync: _ex } = require('child_process');
-  const _fs = require('fs');
-  // yfinance end is EXCLUSIVE on the date passed. Pass toDate+1d so
-  // today's close (when toDate is today) is actually included. Without
-  // this bump, the EOD refresh asking for end=today returns 0 rows
-  // because yfinance treats end=today as exclusive of today.
-  const _endExclusive = new Date(new Date(toDate + 'T00:00:00Z').getTime() + 86400_000)
-                          .toISOString().slice(0, 10);
-  const script = `/tmp/yf_prices_${Date.now()}.py`;
-  _fs.writeFileSync(script, `
-import yfinance as yf, json, sys
-tk = yf.Ticker("${ticker}")
-hist = tk.history(start="${fromDate}", end="${_endExclusive}", auto_adjust=True)
-bars = []
-for dt, row in hist.iterrows():
-    bars.append({
-        "t": int(dt.timestamp() * 1000),
-        "o": float(row["Open"]), "h": float(row["High"]),
-        "l": float(row["Low"]),  "c": float(row["Close"]),
-        "v": float(row["Volume"])
-    })
-print(json.dumps(bars))
-`);
-  const out  = _ex(`python3 ${script}`, { timeout: 30_000, stdio: 'pipe' }).toString().trim();
-  _fs.unlinkSync(script);
-  const bars   = JSON.parse(out);
-  const written = bars.length > 0 ? await store.upsertPrices(ticker, bars) : 0;
-  return written;
+async function fillPricesAlpaca(ticker, fromDate, toDate) {
+  // NotImplementedError: Alpaca daily bars ingestion not yet wired.
+  // Equity OHLCV gap-fill will be implemented in Task 15.
+  // For now, log and return 0 so the collection phase continues without crashing.
+  console.warn(`[collector] fillPricesAlpaca: NOT IMPLEMENTED — ${ticker} ${fromDate}→${toDate} (Task 15)`);
+  return 0;
 }
 
 
-// ── Phase 3: Options chains — Polygon Starter, Alpaca CLI, or Yahoo Finance ─
+// ── Phase 3: Options chains — direct Alpaca CLI with greeks-validity filter ─
 
 // Per-phase soft budget (default 30 min) — when exceeded, the options
 // phase logs the partial result and exits cleanly so signals/handoff/
 // trade/alpaca can still run on time. Override with OPTIONS_PHASE_BUDGET_S.
 const OPTIONS_PHASE_BUDGET_S = parseInt(process.env.OPTIONS_PHASE_BUDGET_S || '1800', 10);
 
-// Source dispatch:
-//   polygon  (default) — Polygon Options Starter (paid, full greeks + IV)
-//   alpaca             — `alpaca data option chain` via the CLI helper
-//                        (alpha preview; greeks may be 0 for thin strikes,
-//                        no IV field — caller must compute)
-//   yfinance           — direct yfinance fallback (no paid sources)
-const OPTIONS_DATA_SOURCE = (process.env.OPTIONS_DATA_SOURCE || 'polygon').toLowerCase();
+/**
+ * Greeks-validity filter for Alpaca chain snapshots.
+ *
+ * Returns false (drop silently) for:
+ *   - Expired contracts (expiry <= today)
+ *   - Zero-volume, zero-greek contracts (0-DTE or illiquid deep OTM/ITM)
+ *
+ * Returns false (drop with warning) for:
+ *   - Non-expired, non-zero-volume contracts with all-zero greeks
+ *     (unexpected — logged as sp1.greeks_anomaly for monitoring)
+ *
+ * Returns true to keep all others.
+ */
+function _optionsGreeksValid(row) {
+  const today = new Date().toISOString().slice(0, 10);
+  const allZero = (row.delta || 0) === 0 && (row.gamma || 0) === 0
+               && (row.theta || 0) === 0 && (row.vega  || 0) === 0;
+  if (!allZero) return true;
+
+  // All greeks are zero — determine whether to drop silently or warn.
+  if (row.expiration && row.expiration <= today) return false;  // expired — silent drop
+  if ((row.volume || 0) === 0) return false;                    // zero-volume — silent drop
+
+  // Non-expired, non-zero-volume with all-zero greeks: unexpected anomaly — warn and drop.
+  const label = row.underlying
+    ? `${row.underlying} ${row.expiration} ${row.strike}${row.option_type === 'call' ? 'C' : 'P'}`
+    : (row.contract_symbol || 'unknown');
+  console.warn('sp1.greeks_anomaly', label);
+  return false;
+}
+
+/**
+ * Fetch the full option chain for a single underlying via `alpaca data option chain`.
+ * Pages through next_page_token, applies the greeks-validity filter, and returns
+ * a flat array of rows (one per contract) in the collector's canonical format.
+ *
+ * Exported for testing; also called by runOptions per ticker.
+ */
+async function fetchOptionsChain(underlying) {
+  const { runOptionsAlpaca } = require('./alpaca_options');
+  const raw = await runOptionsAlpaca(underlying, { limit: 100 });
+  return raw.filter(_optionsGreeksValid);
+}
 
 async function runOptions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
   const today = new Date().toISOString().slice(0, 10);
-  notify(`🎲 Options chains: ${tickers.length} tickers (budget ${OPTIONS_PHASE_BUDGET_S}s, source=${OPTIONS_DATA_SOURCE})`);
-  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers (${OPTIONS_DATA_SOURCE})`);
+  notify(`🎲 Options chains: ${tickers.length} tickers (budget ${OPTIONS_PHASE_BUDGET_S}s, source=alpaca)`);
+  if (_alertPost) _alertPost(`🎲 **Phase 3: Options** starting — ${tickers.length} tickers (alpaca)`);
   const phaseStart = Date.now();
   _progress = { phase: '🎲 Options', current: 0, total: tickers.length, ticker: null, phaseStart, rowsThisPhase: 0 };
 
@@ -563,18 +577,6 @@ async function runOptions(tickers = null) {
     return;
   }
 
-  // Source dispatch (Phase 2.1 of alpaca-cli integration). Each path falls
-  // back to the next on auth/permission failure so a misconfigured Alpaca
-  // account doesn't kill the whole phase.
-  if (OPTIONS_DATA_SOURCE === 'alpaca') {
-    return runOptionsAlpacaPath(needed, today, skipped, tickers.length, phaseStart);
-  }
-  if (OPTIONS_DATA_SOURCE === 'yfinance') {
-    return runOptionsYFinance(needed, today, skipped);
-  }
-
-  // Default: Polygon Options Starter (auth confirmed)
-  // Yahoo Finance fallback retained only for unexpected auth failures
   let budgetExceeded = false;
   let processed = 0;
   for (let i = 0; i < needed.length; i++) {
@@ -599,9 +601,23 @@ async function runOptions(tickers = null) {
     if (_paused) { while (_paused) await sleep(1000); }
     const start = Date.now();
     try {
-      const url = `https://api.polygon.io/v3/snapshot/options/${ticker}?limit=250&apiKey=${POLYGON_KEY}`;
-      const data = await rateLimitedCall(() => httpGet(url));
-      const contracts = data.results || [];
+      const rows = await fetchOptionsChain(ticker);
+      // Adapt flat row schema → the nested shape store._optionRow expects.
+      const contracts = rows.map(r => ({
+        details: {
+          expiration_date: r.expiration,
+          strike_price:    r.strike,
+          contract_type:   r.option_type,
+        },
+        greeks: {
+          delta: r.delta, gamma: r.gamma, theta: r.theta,
+          vega:  r.vega,  rho:   r.rho,
+        },
+        implied_volatility: r.implied_volatility,
+        day:                { last_price: r.last_price, volume: r.volume },
+        last_quote:         { bid: r.bid, ask: r.ask },
+        open_interest:      null,
+      }));
       const written = await store.upsertOptions(ticker, contracts, today);
       await store.updateCoverage(ticker, 'options', today, today, written);
       _stats.options += written;
@@ -617,24 +633,15 @@ async function runOptions(tickers = null) {
         notify(`🎲 Options progress — ${processed}/${needed.length} fetched, ${_progress.rowsThisPhase.toLocaleString()} contracts in ${phaseElapsed}s`);
       }
     } catch (err) {
-      // If we hit an auth error (plan changed / endpoint removed) fall back to YFinance for remainder
-      if (err.message.includes('403') || err.message.includes('NOT_AUTHORIZED')) {
-        notify(`🎲 Options: Polygon auth error on ${ticker} — switching to Yahoo Finance fallback`);
-        await runOptionsYFinance(needed.slice(i), today, skipped + i);
-        return;
-      }
       _stats.errors++;
       tickProgress('🎲 Options', skipped + i + 1, tickers.length, ticker, 0);
       await store.logRun(ticker, 'options', 'error', 0, err.message, Date.now() - start, 1);
     }
   }
-  // Flush the in-memory buffer to options_eod.parquet. The pre-2026-04-29
-  // code path skipped this — `upsertOptions` only buffers, and without a
-  // matching `flushOptions` the rows were dropped on collector exit while
-  // data_coverage was still being marked fresh. Resulted in 8 days of
-  // silent options-data drift: parquet max_date stuck at 2026-04-21,
-  // but every cycle reported "Options chains complete". Same bug shape
-  // as 2026-04-28 regime drift — coverage table healthy, real store stale.
+
+  // Flush the in-memory buffer to options_eod.parquet. Without flushOptions,
+  // rows buffered by upsertOptions are dropped on collector exit while
+  // data_coverage is still marked fresh (the 2026-04-29 silent drift bug).
   try {
     const flushed = await store.flushOptions();
     if (flushed && flushed.flushed) {
@@ -652,245 +659,6 @@ async function runOptions(tickers = null) {
     notify(`✅ Options chains complete — ${_progress.rowsThisPhase.toLocaleString()} contracts in ${elapsed}s`);
     if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${_progress.rowsThisPhase.toLocaleString()} option contracts stored`);
   }
-}
-
-// Yahoo Finance options fallback — fetches nearest 3 expiries per ticker via yfinance
-async function runOptionsYFinance(tickers, today, alreadySkipped = 0) {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
-  const script = `/tmp/yf_options_${Date.now()}.py`;
-  const tickerList = JSON.stringify(tickers);
-
-  fs.writeFileSync(script, `
-import yfinance as yf, json, math
-from datetime import date as _date
-
-tickers = ${tickerList}
-today_str = "${today}"
-today = _date.fromisoformat(today_str)
-RISK_FREE_RATE = 0.05
-results = []
-
-def f(v):
-    try:
-        x = float(v)
-        return None if (math.isnan(x) or math.isinf(x)) else x
-    except: return None
-
-def i(v):
-    x = f(v)
-    return None if x is None else int(x)
-
-def _ncdf(x):
-    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-def _npdf(x):
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-
-def bs_greeks(S, K, T, r, sigma, option_type):
-    """Black-Scholes Greeks; returns dict or None on bad inputs."""
-    if None in (S, K, T, sigma) or S <= 0 or K <= 0 or T <= 0 or sigma <= 0 or sigma > 10:
-        return None
-    try:
-        d1  = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2  = d1 - sigma * math.sqrt(T)
-        nd1 = _ncdf(d1)
-        nd2 = _ncdf(d2)
-        pdf1 = _npdf(d1)
-        gamma = pdf1 / (S * sigma * math.sqrt(T))
-        vega  = S * pdf1 * math.sqrt(T) / 100.0   # per 1% IV
-        if option_type == 'call':
-            delta = nd1
-            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
-                     - r * K * math.exp(-r * T) * nd2) / 365.0
-            rho   = K * T * math.exp(-r * T) * nd2 / 100.0
-        else:
-            delta = nd1 - 1.0
-            theta = (-(S * pdf1 * sigma) / (2 * math.sqrt(T))
-                     + r * K * math.exp(-r * T) * (1 - nd2)) / 365.0
-            rho   = -K * T * math.exp(-r * T) * (1 - nd2) / 100.0
-        return {
-            'delta': round(delta, 6), 'gamma': round(gamma, 6),
-            'theta': round(theta, 6), 'vega':  round(vega, 6),
-            'rho':   round(rho,   6),
-        }
-    except Exception:
-        return None
-
-for ticker in tickers:
-    try:
-        t = yf.Ticker(ticker)
-        # Underlying price for Greek computation
-        S = None
-        try:
-            fi = t.fast_info
-            S = f(getattr(fi, 'last_price', None) or getattr(fi, 'regularMarketPrice', None))
-        except Exception:
-            pass
-        if S is None:
-            try:
-                hist = t.history(period='1d')
-                if not hist.empty:
-                    S = f(hist['Close'].iloc[-1])
-            except Exception:
-                pass
-
-        exps = (t.options or [])[:3]
-        contracts = []
-        for exp in exps:
-            try:
-                T = (_date.fromisoformat(exp) - today).days / 365.0
-                if T <= 0:
-                    continue
-                chain = t.option_chain(exp)
-                for side, df in [('call', chain.calls), ('put', chain.puts)]:
-                    for _, row in df.iterrows():
-                        strike = f(row.get('strike'))
-                        iv     = f(row.get('impliedVolatility'))
-                        g      = bs_greeks(S, strike, T, RISK_FREE_RATE, iv, side)
-                        contracts.append({
-                            'expiry':        exp,
-                            'strike':        strike,
-                            'contract_type': side,
-                            'iv':            iv,
-                            'open_interest': i(row.get('openInterest')),
-                            'volume':        i(row.get('volume')),
-                            'last_price':    f(row.get('lastPrice')),
-                            'bid':           f(row.get('bid')),
-                            'ask':           f(row.get('ask')),
-                            'delta':         g['delta'] if g else None,
-                            'gamma':         g['gamma'] if g else None,
-                            'theta':         g['theta'] if g else None,
-                            'vega':          g['vega']  if g else None,
-                            'rho':           g['rho']   if g else None,
-                        })
-            except Exception:
-                pass
-        results.append({'ticker': ticker, 'contracts': contracts})
-    except Exception as e:
-        results.append({'ticker': ticker, 'error': str(e)})
-
-print(json.dumps(results))
-`);
-
-  notify(`🎲 Options (YFinance): fetching ${tickers.length} tickers — nearest 3 expiries each`);
-
-  try {
-    const output = execSync(`python3 ${script}`, { timeout: 600_000, maxBuffer: 64 * 1024 * 1024 }).toString();
-    const results = JSON.parse(output);
-    let totalWritten = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (_paused) { while (_paused) await sleep(1000); }
-      if (r.error || !r.contracts?.length) {
-        tickProgress('🎲 Options', alreadySkipped + i + 1, alreadySkipped + tickers.length, r.ticker, 0);
-        if (r.error) await store.logRun(r.ticker, 'options', 'error', 0, r.error, 0, 0);
-        continue;
-      }
-
-      // Flat format — upsertOptions handles both flat and Polygon-nested
-      const contracts = r.contracts.map(c => ({
-        expiry_date:        c.expiry,
-        strike_price:       c.strike,
-        contract_type:      c.contract_type,
-        greeks:             { delta: c.delta, gamma: c.gamma, theta: c.theta, vega: c.vega, rho: c.rho },
-        implied_volatility: c.iv,
-        open_interest:      c.open_interest,
-        day:                { volume: c.volume, last_price: c.last_price },
-        bid:                c.bid,
-        ask:                c.ask,
-      }));
-
-      const written = await store.upsertOptions(r.ticker, contracts, today);
-      await store.updateCoverage(r.ticker, 'options', today, today, written);
-      _stats.options += written;
-      totalWritten += written;
-      tickProgress('🎲 Options', alreadySkipped + i + 1, alreadySkipped + tickers.length, r.ticker, written);
-      await store.logRun(r.ticker, 'options', 'success', written, null, 0, 0);
-    }
-
-    const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
-    try {
-      const flushed = await store.flushOptions();
-      if (flushed && flushed.flushed) {
-        console.log(`[collector] Options flush: ${flushed.flushed} rows → options_eod.parquet (total ${flushed.total_after})`);
-      }
-    } catch (err) {
-      console.error(`[collector] Options flush FAILED: ${err.message}`);
-    }
-    notify(`✅ Options (YFinance) complete — ${totalWritten.toLocaleString()} contracts | ${alreadySkipped} skipped (already covered) in ${elapsed}s`);
-    if (_alertPost) _alertPost(`✅ **Phase 3 complete** — ${totalWritten.toLocaleString()} option contracts stored via Yahoo Finance (IV, strike, bid/ask, OI)`);
-  } catch (err) {
-    notify(`⚠️ Options YFinance error: ${err.message}`);
-    if (_alertPost) _alertPost(`⚠️ **Phase 3 error** — options fetch failed: ${err.message}`);
-  } finally {
-    try { fs.unlinkSync(script); } catch {}
-  }
-}
-
-// ── Phase 3 (alpaca-cli path): fetch chains via `alpaca data option chain` ─
-//
-// Used when OPTIONS_DATA_SOURCE=alpaca. Adapts the alpaca_options.js
-// helper's flat row output to the contract-dict shape store._optionRow
-// expects, so the parquet schema is identical regardless of source.
-async function runOptionsAlpacaPath(needed, today, alreadySkipped, totalTickers, phaseStart) {
-  const { runOptionsAlpaca } = require('./alpaca_options');
-  let processed = 0;
-  let budgetExceeded = false;
-  for (let i = 0; i < needed.length; i++) {
-    const elapsedS = (Date.now() - phaseStart) / 1000;
-    if (elapsedS > OPTIONS_PHASE_BUDGET_S) {
-      const remaining = needed.length - i;
-      notify(`⏰ Options budget exceeded (alpaca) — processed ${processed}/${needed.length}, deferring ${remaining}`);
-      budgetExceeded = true;
-      break;
-    }
-    const ticker = needed[i];
-    if (_paused) { while (_paused) await sleep(1000); }
-    const start = Date.now();
-    try {
-      const rows = await runOptionsAlpaca(ticker, { limit: 100 });
-      // Adapt our flat schema → the c.details / c.greeks / c.day shape that
-      // store._optionRow already understands. Keeps the parquet schema
-      // identical between Polygon and Alpaca sources.
-      const contracts = rows.map(r => ({
-        details: {
-          expiration_date: r.expiration,
-          strike_price:    r.strike,
-          contract_type:   r.option_type,
-        },
-        greeks: {
-          delta: r.delta, gamma: r.gamma, theta: r.theta,
-          vega:  r.vega,  rho:   r.rho,
-        },
-        implied_volatility: r.implied_volatility,
-        day:                { last_price: r.last_price, volume: null },
-        last_quote:         { bid: r.bid, ask: r.ask },
-        open_interest:      null,
-      }));
-      const written = await store.upsertOptions(ticker, contracts, today);
-      await store.updateCoverage(ticker, 'options', today, today, written);
-      _stats.options += written;
-      tickProgress('🎲 Options', alreadySkipped + i + 1, totalTickers, ticker, written);
-      await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
-      processed++;
-    } catch (err) {
-      const msg = err.message || String(err);
-      // 403/permission → fall back to yfinance for the remainder so a
-      // misconfigured Alpaca account doesn't kill the whole phase.
-      if (msg.includes('403') || msg.toLowerCase().includes('not enabled')) {
-        notify(`🎲 Options: alpaca permission error on ${ticker} — falling back to yfinance for remainder`);
-        await runOptionsYFinance(needed.slice(i), today, alreadySkipped + i);
-        return;
-      }
-      _stats.errors++;
-      notify(`⚠️ Options ${ticker} (alpaca): ${msg.slice(0, 120)}`);
-      await store.logRun(ticker, 'options', 'error', 0, msg.slice(0, 200), Date.now() - start, 1);
-    }
-  }
-  await store.flushOptions();
-  notify(`✅ Options (alpaca): ${processed}/${needed.length} processed${budgetExceeded ? ' (budget hit)' : ''}`);
 }
 
 // ── Phase 4: Fundamentals via FMP ────────────────────────────────────────────
@@ -923,7 +691,7 @@ async function runFundamentals(tickers = null) {
 
     // Stop if quota exhausted OR we've used our daily allowance this session
     if (quotaExhausted || apiQuotaRemaining('fmp', FMP_PER_DAY) <= 0) {
-      if (!quotaExhausted) { quotaExhausted = true; notify(`⚠️ FMP daily quota (${FMP_PER_DAY}) reached — switching to yfinance`); }
+      if (!quotaExhausted) { quotaExhausted = true; notify(`⚠️ FMP daily quota (${FMP_PER_DAY}) reached — skipping remaining tickers (SP-1: yfinance fallback removed)`); }
       tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
       continue;
     }
@@ -960,10 +728,10 @@ async function runFundamentals(tickers = null) {
           data = await httpGet(url);
           await sleep(FMP_INTERVAL);
         } catch (retryErr) {
-          // Persistent 429 or 402 = quota exhausted — stop FMP entirely, fall back to yfinance
+          // Persistent 429 or 402 = quota exhausted — stop FMP entirely
           quotaExhausted = true;
-          notify(`⚠️ FMP persistently rate-limited — switching to Yahoo Finance fallback`);
-          if (_alertPost) _alertPost(`⚠️ **FMP quota/rate-limit exhausted** — switching to Yahoo Finance for remaining tickers`);
+          notify(`⚠️ FMP persistently rate-limited — stopping fundamentals for this cycle (SP-1: yfinance fallback removed)`);
+          if (_alertPost) _alertPost(`⚠️ **FMP quota/rate-limit exhausted** — fundamentals stopping for this cycle`);
           tickProgress('💹 Fundamentals', i + 1, tickers.length, ticker, 0);
           continue;
         }
@@ -1033,11 +801,8 @@ async function runFundamentals(tickers = null) {
       await store.logRun(ticker, 'fundamentals', 'error', 0, err.message, Date.now() - start, 1);
     }
   }
-  // If FMP quota was exhausted and tickers remain uncovered, fall back to yfinance
-  const uncovered = tickers.filter(async (tk) => {
-    const gaps = await store.getGaps(tk, 'fundamentals', thirtyDaysAgo, today).catch(() => [null]);
-    return gaps.length > 0;
-  });
+  // SP-1: yfinance fundamentals fallback removed. When FMP quota is exhausted,
+  // uncovered tickers resume on the next daily cycle.
   if (quotaExhausted) {
     const stillNeeded = [];
     for (const tk of tickers) {
@@ -1045,9 +810,7 @@ async function runFundamentals(tickers = null) {
       if (gaps.length > 0) stillNeeded.push(tk);
     }
     if (stillNeeded.length > 0) {
-      notify(`💹 FMP quota exhausted — falling back to Yahoo Finance for ${stillNeeded.length} remaining tickers`);
-      await runFundamentalsYFinance(stillNeeded, today);
-      return;
+      notify(`💹 FMP quota exhausted — ${stillNeeded.length} tickers deferred to next cycle (SP-1: no yfinance fallback)`);
     }
   }
 
@@ -1065,233 +828,27 @@ async function runFundamentals(tickers = null) {
   if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${_progress.rowsThisPhase} fundamental records added | ${skipped} skipped`);
 }
 
-// Yahoo Finance fundamentals fallback — quarterly income statement via yfinance
-async function runFundamentalsYFinance(tickers, today) {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
-  const script = `/tmp/yf_fundamentals_${Date.now()}.py`;
-  const tickerList = JSON.stringify(tickers);
-
-  fs.writeFileSync(script, `
-import yfinance as yf, json, math
-
-tickers = ${tickerList}
-results = []
-
-def f(v):
-    try:
-        x = float(v)
-        return None if (math.isnan(x) or math.isinf(x)) else x
-    except: return None
-
-for ticker in tickers:
-    try:
-        t = yf.Ticker(ticker)
-        q = t.quarterly_income_stmt
-        if q is None or q.empty:
-            results.append({'ticker': ticker, 'error': 'no data'})
-            continue
-
-        records = []
-        for col in q.columns[:4]:  # last 4 quarters
-            period_end = col.strftime('%Y-%m-%d')
-            rev   = f(q.loc['Total Revenue', col])    if 'Total Revenue'    in q.index else None
-            gp    = f(q.loc['Gross Profit', col])     if 'Gross Profit'     in q.index else None
-            ebit  = f(q.loc['EBITDA', col])           if 'EBITDA'           in q.index else None
-            ni    = f(q.loc['Net Income', col])       if 'Net Income'       in q.index else None
-            eps   = f(q.loc['Basic EPS', col])        if 'Basic EPS'        in q.index else None
-            oi    = f(q.loc['Operating Income', col]) if 'Operating Income' in q.index else None
-            gm    = (gp / rev) if (rev and gp) else None
-            om    = (oi / rev) if (rev and oi) else None
-            nm    = (ni / rev) if (rev and ni) else None
-            # Period label: e.g. 2025Q4
-            year  = col.year
-            month = col.month
-            qnum  = (month - 1) // 3 + 1
-            period = f'{year}Q{qnum}'
-            records.append({
-                'period': period, 'period_end': period_end,
-                'revenue': rev, 'gross_profit': gp, 'ebitda': ebit,
-                'net_income': ni, 'eps': eps,
-                'gross_margin': gm, 'operating_margin': om, 'net_margin': nm,
-            })
-        results.append({'ticker': ticker, 'records': records})
-    except Exception as e:
-        results.append({'ticker': ticker, 'error': str(e)})
-
-print(json.dumps(results))
-`);
-
-  notify(`💹 Fundamentals (YFinance): fetching ${tickers.length} tickers`);
-  if (_alertPost) _alertPost(`💹 **Fundamentals fallback** — fetching ${tickers.length} tickers via Yahoo Finance (quarterly income statements)`);
-
-  try {
-    const output = execSync(`python3 ${script}`, { timeout: 300_000, maxBuffer: 16 * 1024 * 1024 }).toString();
-    const results = JSON.parse(output);
-    let totalWritten = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.error || !r.records?.length) {
-        if (r.error) await store.logRun(r.ticker, 'fundamentals', 'error', 0, `yfinance: ${r.error}`, 0, 0);
-        continue;
-      }
-      const records = r.records.map(rec => ({ ...rec, revenue_growth_yoy: null, pe_ratio: null, market_cap: null, source: 'yfinance' }));
-      await store.upsertFundamentals(r.ticker, records);
-      await store.updateCoverage(r.ticker, 'fundamentals', records.at(-1)?.period_end || today, records[0]?.period_end || today, records.length);
-      _stats.fundamentals += records.length;
-      totalWritten += records.length;
-      await store.logRun(r.ticker, 'fundamentals', 'success', records.length, null, 0, 0);
-    }
-
-    // Flush the YFinance fallback's buffer to financials.parquet — same
-    // bug shape as the Polygon options path: upsert is in-memory only.
-    try {
-      const flushed = await store.flushFundamentals();
-      if (flushed && flushed.flushed) {
-        console.log(`[collector] Fundamentals (YFinance) flush: ${flushed.flushed} rows → financials.parquet (total ${flushed.total_after})`);
-      }
-    } catch (err) {
-      console.error(`[collector] Fundamentals (YFinance) flush FAILED: ${err.message}`);
-      notify(`[ERROR] Fundamentals YFinance flush failed: ${err.message}`);
-    }
-
-    const elapsed = Math.round((Date.now() - _progress.phaseStart) / 1000);
-    notify(`✅ Fundamentals (YFinance) complete — ${totalWritten} records for ${results.filter(r => !r.error).length} tickers in ${elapsed}s`);
-    if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${totalWritten} fundamental records via Yahoo Finance | ${results.filter(r => r.error).length} tickers had no data`);
-  } catch (err) {
-    notify(`⚠️ Fundamentals YFinance error: ${err.message}`);
-    if (_alertPost) _alertPost(`⚠️ **Phase 5 error** — yfinance fundamentals failed: ${err.message}`);
-  } finally {
-    try { fs.unlinkSync(script); } catch {}
-  }
-}
-
-// ── Market price history via yfinance batch (indices, ETFs, crypto, commodities, forex) ──
+// ── Market price history — Alpaca/FMP stub (SP-1: yfinance removed) ──────────
+// TODO Task 15+: implement Alpaca bars + FMP OHLCV for indices/ETFs/crypto/forex.
 
 async function runMarketPricesYFinance(tickers, historyDays = 3650) {
   if (!tickers || tickers.length === 0) return;
-  const { execSync } = require('child_process');
-  const fs = require('fs');
 
   const toDate   = new Date().toISOString().slice(0, 10);
   const fromDate = new Date(Date.now() - historyDays * 86400_000).toISOString().slice(0, 10);
-  notify(`🌐 Market prices: checking gaps for ${tickers.length} instruments (${fromDate} → ${toDate})`);
+  // SP-1: yfinance removed. Market instrument bars (indices, ETFs, crypto, forex)
+  // not yet migrated to Alpaca/FMP. Log and skip — Task 15 implements the replacement.
+  notify(`🌐 Market prices: ${tickers.length} instruments deferred — SP-1 Task 14 stub (${fromDate}→${toDate}) — implement via Alpaca/FMP in Task 15`);
   _progress = { phase: '🌐 Market Prices', current: 0, total: tickers.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
-
-  // Gap detection: only fetch tickers that have gaps
-  const needed = [];
-  let skipped = 0;
-  for (const ticker of tickers) {
-    const gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
-    if (gaps.length === 0) { skipped++; } else { needed.push(ticker); }
-  }
-
-  if (needed.length === 0) {
-    notify(`✅ Market prices complete — all ${skipped} instruments already current`);
-    return;
-  }
-
-  // Batch download via yfinance — one API call for all tickers
-  const script = `/tmp/yf_market_${Date.now()}.py`;
-  const tickerJson = JSON.stringify(needed);
-
-  fs.writeFileSync(script, `
-import yfinance as yf, pandas as pd, json, math
-
-def f(v):
-    try:
-        x = float(v)
-        return None if (math.isnan(x) or math.isinf(x)) else x
-    except: return None
-
-tickers = ${tickerJson}
-from_date = "${fromDate}"
-# yf.download end is EXCLUSIVE — pass toDate+1 so today's close
-# (when toDate is today) is actually included.
-to_date   = "${(new Date(new Date(toDate + 'T00:00:00Z').getTime() + 86400_000).toISOString().slice(0, 10))}"
-results = {}
-
-try:
-    raw = yf.download(tickers, start=from_date, end=to_date,
-                      auto_adjust=True, progress=False, group_by='ticker')
-    for ticker in tickers:
-        try:
-            if len(tickers) == 1:
-                df = raw
-            elif isinstance(raw.columns, pd.MultiIndex):
-                df = raw[ticker] if ticker in raw.columns.get_level_values(0) else pd.DataFrame()
-            else:
-                df = raw
-            df = df.dropna(subset=['Close']) if not df.empty else df
-            if df.empty:
-                results[ticker] = {"error": "no data"}
-                continue
-            rows = []
-            for date_idx, row in df.iterrows():
-                vol = row.get('Volume')
-                rows.append({
-                    "date":   str(date_idx.date()),
-                    "open":   f(row.get('Open')),
-                    "high":   f(row.get('High')),
-                    "low":    f(row.get('Low')),
-                    "close":  f(row.get('Close')),
-                    "volume": int(vol) if f(vol) is not None else None
-                })
-            results[ticker] = {"bars": rows}
-        except Exception as e:
-            results[ticker] = {"error": str(e)}
-except Exception as e:
-    for t in tickers:
-        results[t] = {"error": str(e)}
-
-print(json.dumps(results))
-`);
-
-  try {
-    const output = execSync(`python3 ${script}`, {
-      timeout: 300_000, maxBuffer: 128 * 1024 * 1024
-    }).toString();
-    const results = JSON.parse(output);
-
-    let totalWritten = 0;
-    for (const ticker of needed) {
-      const r = results[ticker];
-      if (!r || r.error) {
-        _stats.errors++;
-        notify(`⚠️ Market prices: ${ticker} — ${r?.error || 'no result'}`);
-        continue;
-      }
-      const written = await store.upsertPrices(ticker, r.bars, 'yfinance');
-      if (written > 0) {
-        const dates = r.bars.filter(b => b.date).map(b => b.date).sort();
-        await store.updateCoverage(ticker, 'prices', dates[0], dates[dates.length - 1], written);
-      }
-      _stats.prices += written;
-      totalWritten += written;
-      tickProgress('🌐 Market Prices', needed.indexOf(ticker) + 1, needed.length, ticker, written);
-    }
-    try {
-      const flushed = await store.flushPrices();
-      if (flushed && flushed.flushed) {
-        console.log(`[collector] Market prices flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
-      }
-    } catch (err) {
-      console.error(`[collector] Market prices flush FAILED: ${err.message}`);
-    }
-    notify(`✅ Market prices complete — ${totalWritten.toLocaleString()} rows for ${needed.length} instruments (${skipped} already current)`);
-    if (_alertPost) _alertPost(`✅ **Market Prices** — ${totalWritten.toLocaleString()} rows | ${skipped} skipped | ${needed.length} fetched`);
-  } catch (err) {
-    _stats.errors++;
-    notify(`⚠️ Market prices batch error: ${err.message}`);
-  } finally {
-    try { fs.unlinkSync(script); } catch {}
-  }
+  // NotImplementedError: yfinance path removed. Market instrument bars
+  // (indices, ETFs, crypto, commodities, forex) will be wired via
+  // Alpaca bars API + FMP in Task 15.
 }
 
-// ── News collection via yfinance ──────────────────────────────────────────────
-// Fetches articles for key market instruments + all SP100 equities.
-// Deduped by UUID in DB — safe to run on every cycle.
+// ── News collection — Alpaca News API (SP-1: yfinance removed) ───────────────
+// Note: Alpaca News (src/ingestion/alpaca_news.py) populates ticker_sentiment_daily.
+// runNewsCollection (below) writes to market_news table — migration to Alpaca/FMP
+// news API or RSS feeds is TODO Task 15+.
 
 async function runInsiderTransactions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
@@ -1388,175 +945,20 @@ async function runInsiderTransactions(tickers = null) {
 }
 
 async function runNewsCollection(equityTickers) {
-  const { execSync } = require('child_process');
-  const fs = require('fs');
+  // SP-1 Task 14: yfinance news path removed. market_news ingest via
+  // alternative provider (Alpaca News API or RSS) is TODO Task 15+.
+  // Alpaca News already populates ticker_sentiment_daily via
+  // src/ingestion/alpaca_news.py (different table, different call site).
+  notify(`📰 News: collection deferred — SP-1 yfinance removed, Task 15 will wire Alpaca/FMP news to market_news table`);
 
-  // Broad market tickers to anchor global/macro news
-  const marketSeed = [
-    '^GSPC','^DJI','^IXIC','^RUT','^VIX','^TNX','^TYX',
-    'SPY','QQQ','TLT','GLD','GC=F','CL=F','BTC-USD','ETH-USD',
-    '^STOXX50E','^N225','^HSI','^FTSE','EFA','EEM','USO','HYG'
-  ];
-  const allTickers = [...new Set([...marketSeed, ...equityTickers])];
-  notify(`📰 News: fetching for ${allTickers.length} instruments`);
-
-  const script = `/tmp/yf_news_${Date.now()}.py`;
-  const tickerJson = JSON.stringify(allTickers);
-
-  fs.writeFileSync(script, `
-import yfinance as yf, json
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-tickers = ${tickerJson}
-
-def parse(article, primary):
-    c = article.get('content', {})
-    if not c:
-        return None
-    uid     = c.get('id') or article.get('id', '')
-    if not uid:
-        return None
-    title   = c.get('title', '').strip()
-    if not title:
-        return None
-    summary = c.get('summary', '').strip()[:600]
-    pub_obj = c.get('provider', {})
-    publisher = pub_obj.get('displayName', '') if isinstance(pub_obj, dict) else ''
-    url_obj = c.get('canonicalUrl') or c.get('clickThroughUrl', {})
-    url     = url_obj.get('url', '') if isinstance(url_obj, dict) else ''
-    pub_date = c.get('pubDate') or c.get('displayTime', '')
-    # Normalise related tickers
-    rel_raw = c.get('relatedTickers', [])
-    related = []
-    if isinstance(rel_raw, list):
-        for r in rel_raw:
-            sym = r.get('symbol','') if isinstance(r, dict) else str(r)
-            if sym: related.append(sym.upper())
-    return {
-        'uuid': uid, 'primary_ticker': primary,
-        'title': title, 'summary': summary,
-        'publisher': publisher, 'url': url,
-        'published_at': pub_date, 'related_tickers': related
-    }
-
-def score(a):
-    # Higher = more informative: reward long summary, related tickers, real URL
-    return (len(a.get('summary') or '') * 2
-            + len(a.get('related_tickers') or []) * 10
-            + (50 if a.get('url') else 0))
-
-def best_for_ticker(candidates):
-    if not candidates:
-        return None
-    return max(candidates, key=score)
-
-def fetch(ticker):
-    candidates = []
-    try:
-        t = yf.Ticker(ticker)
-        for a in (t.news or [])[:12]:
-            parsed = parse(a, ticker)
-            if parsed:
-                candidates.append(parsed)
-    except:
-        pass
-    if not candidates:
-        return None
-    # Sort by score descending — best article first, rest stored compactly
-    ranked = sorted(candidates, key=score, reverse=True)
-    primary = ranked[0]
-    # Pack remaining articles as compact JSONB (drop primary_ticker — redundant)
-    rest = [{'uuid': a['uuid'], 'title': a['title'], 'publisher': a['publisher'],
-              'url': a['url'], 'published_at': a['published_at'], 'summary': a['summary']}
-            for a in ranked[1:] if a.get('title')]
-    primary['related_articles'] = rest
-    return primary
-
-articles = []
-with ThreadPoolExecutor(max_workers=8) as ex:
-    futures = {ex.submit(fetch, t): t for t in tickers}
-    for fut in futures:
-        item = fut.result()
-        if item:
-            articles.append(item)
-
-print(json.dumps(articles))
-`);
-
+  // Prune articles older than 30 days (maintenance still runs)
   try {
-    const output = execSync(`python3 ${script}`, {
-      timeout: 180_000, maxBuffer: 32 * 1024 * 1024
-    }).toString();
-    const articles = JSON.parse(output);
-    const inserted = await store.upsertNews(articles);
-    notify(`✅ News: ${inserted} new articles (${articles.length} fetched, deduped)`);
-
-    // Prune articles older than 30 days
     const { query: dbQuery } = require('../database/postgres');
     await dbQuery(`DELETE FROM market_news WHERE published_at < NOW() - INTERVAL '30 days'`).catch(() => null);
-  } catch (err) {
-    _stats.errors++;
-    notify(`⚠️ News collection error: ${err.message?.slice(0,120)}`);
-  } finally {
-    try { fs.unlinkSync(script); } catch {}
-  }
+  } catch (_) {}
 }
 
-// ── YFinance fallback for missing data ────────────────────────────────────────
-
-async function fillMissingWithYFinance(tickers) {
-  notify(`🔄 YFinance fallback for ${tickers.length} tickers`);
-  // This writes a Python script and executes it via shell
-  const { execSync } = require('child_process');
-  const script = `/tmp/yf_fill_${Date.now()}.py`;
-  const tickerList = JSON.stringify(tickers);
-
-  require('fs').writeFileSync(script, `
-import yfinance as yf, json, math
-
-def f(v):
-    try:
-        x = float(v)
-        return None if (math.isnan(x) or math.isinf(x)) else x
-    except: return None
-
-tickers = ${tickerList}
-results = []
-for ticker in tickers:
-    try:
-        t = yf.Ticker(ticker)
-        hist = t.history(period="1y")
-        if hist.empty:
-            continue
-        rows = []
-        for date, row in hist.iterrows():
-            rows.append({
-                "date": str(date.date()),
-                "open": f(row["Open"]), "high": f(row["High"]),
-                "low": f(row["Low"]), "close": f(row["Close"]),
-                "volume": int(row["Volume"]) if not math.isnan(float(row["Volume"])) else None
-            })
-        results.append({"ticker": ticker, "bars": rows})
-    except Exception as e:
-        results.append({"ticker": ticker, "error": str(e)})
-
-print(json.dumps(results))
-`);
-
-  try {
-    const output = execSync(`python3 ${script}`, { timeout: 300_000 }).toString();
-    const results = JSON.parse(output);
-    for (const r of results) {
-      if (r.error) continue;
-      await store.upsertPrices(r.ticker, r.bars, 'yfinance');
-    }
-    notify(`✅ YFinance fill complete: ${results.filter(r => !r.error).length}/${tickers.length}`);
-  } catch (err) {
-    notify(`⚠️ YFinance fill error: ${err.message}`);
-  } finally {
-    require('fs').unlinkSync(script);
-  }
-}
+// fillMissingWithYFinance removed in SP-1 Task 14 — function was never called externally.
 
 // ── Main loop ─────────────────────────────────────────────────────────────────
 
@@ -1701,26 +1103,20 @@ async function runDailyCollection() {
   // Phase 1: Snapshots — always runs (live price refresh)
   await runSnapshots();
 
-  // Phase 1b: Macro / vol indices — VIX, VIX3M, VVIX via yfinance
+  // Phase 1b: Macro / vol indices — VIX, VIX3M, VVIX via bounded cboe_vol_indices module.
   // (incremental fetch keyed off macro.parquet max_date per series).
-  // Pre-2026-04-29 the daily cycle never refreshed these, so
-  // macro.parquet would drift by however many days passed between
-  // operator-triggered runs. Strategies that read from
-  // `aux_data['macro']` (e.g., VVIX early-warning, VIX-term-slope)
-  // were silently using stale data.
   if (cfg.collect_macro !== 'false') {
     await runVolIndices();
   }
 
-  // Phase 1c: Wide-format vol_indices.parquet — yfinance ^VIX/^VVIX/^VIX9D
-  // pulled into a date-indexed wide frame (vix_close, vvix_close,
-  // vix9d_close). Distinct from macro.parquet (long-format) — strategies
-  // str01_vvix_early_warning et al read this file directly. Default-on.
+  // Phase 1c: Wide-format vol_indices.parquet (vix_close, vvix_close, vix9d_close).
+  // Distinct from macro.parquet (long-format) — strategies str01_vvix_early_warning
+  // et al read this file directly. Default-on.
   if (cfg.collect_vol_indices_wide !== 'false') {
     await runVolIndicesWide();
   }
 
-  // Phase 2a: S&P 100 equity prices — only tickers with gaps (yfinance fallback if Polygon 403)
+  // Phase 2a: S&P 100 equity prices — only tickers with gaps (Alpaca P1; Task 15 wires bars API)
   const priceEquityNeeded = gaps?.prices.tickers.filter(t => equityTickers.includes(t)) ?? equityTickers;
   const priceMarketNeeded = gaps?.prices.tickers.filter(t => marketTickers.includes(t)) ?? marketTickers;
   if (cfg.collect_prices !== 'false' && priceEquityNeeded.length > 0) {
@@ -1729,7 +1125,7 @@ async function runDailyCollection() {
     notify('✅ Prices (equity): all current — skipped');
   }
 
-  // Phase 2b: Market instrument prices — yfinance batch
+  // Phase 2b: Market instrument prices (stub — SP-1 yfinance removed; Task 15 wires Alpaca/FMP)
   if (cfg.collect_market_prices !== 'false' && priceMarketNeeded.length > 0) {
     await runMarketPricesYFinance(priceMarketNeeded, historyDays);
   } else if (priceMarketNeeded.length === 0) {
@@ -1770,10 +1166,8 @@ async function runDailyCollection() {
     notify('✅ Fundamentals: all current — skipped');
   }
 
-  // Phase 4b: Forward earnings calendar via per-ticker yfinance fan-out
-  // (1s throttle to avoid yfinance rate limits). Runs after fundamentals
-  // because they hit the same provider universe in opposite directions
-  // (FMP fundamentals + yfinance calendar).
+  // Phase 4b: Forward earnings calendar (per-ticker, 1s throttle).
+  // Runs after fundamentals because they share the same provider universe.
   if (cfg.collect_earnings_calendar !== 'false') {
     await runEarningsCalendar();
   }
@@ -1799,10 +1193,9 @@ async function runDailyCollection() {
   const durationMs = Date.now() - cycleStart;
   const cycleMins  = Math.round(durationMs / 60000);
 
-  // yfinance call count: market prices batch (1) + options fallback + fundamentals fallback
-  const yfinanceCalls = (marketTickers.length > 0 ? 1 : 0)
-                      + (_stats.options - before.options > 0 ? 1 : 0)
-                      + (_stats.fundamentals - before.fundamentals > 0 && (_apiCalls.fmp || 0) - apiAtStart.fmp === 0 ? 1 : 0);
+  // SP-1: yfinance paths removed from collector — yfinanceCalls is always 0 after Task 14.
+  // Vol indices still use cboe_vol_indices.py (bounded, separate counter) — not tracked here.
+  const yfinanceCalls = 0;
 
   // Save completed cycle record and get back the full row for the notification
   let cycleRow = null;
@@ -1840,7 +1233,7 @@ async function runDailyCollection() {
       `Total rows: **${fmtN(r?.total_rows)}** | Errors: **${r?.errors ?? _stats.errors}**`,
       ``,
       `**API calls this cycle**`,
-      `Polygon: **${fmtN(r?.polygon_calls)}** · FMP: **${fmtN(r?.fmp_calls)}** · YFinance: **${fmtN(r?.yfinance_calls)}**`,
+      `Polygon: **${fmtN(r?.polygon_calls)}** · FMP: **${fmtN(r?.fmp_calls)}** · Alpaca: (quotes via QuoteMonitor)`,
       ``,
       `*Full history: \`!john /pipeline cycles\`*`,
     ];
@@ -1944,7 +1337,7 @@ async function runEodRefresh() {
   const equityTickers = fullUniverse.filter(u => u.category === 'equity').map(u => u.ticker);
   const marketTickers = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
   const tickerSet     = new Set([...equityTickers, ...marketTickers]);
-  const historyDays   = 7;  // small lookback — yfinance gap calc needs only a few days
+  const historyDays   = 7;  // small lookback for EOD gap detection
 
   // Snapshot coverage state BEFORE the run so we can diff per-ticker after
   // and build an accurate "gaps filled" report. Map: ticker → 'YYYY-MM-DD'.
@@ -1971,7 +1364,7 @@ async function runEodRefresh() {
   }
 
   // Group: per "new date_to" how many tickers landed there?
-  // Also: tickers whose date_to didn't advance (yfinance gave nothing).
+  // Also: tickers whose date_to didn't advance (no new bars fetched).
   const advancedByDate = new Map();   // newDate → ticker[]
   const stagnant       = [];           // [{ticker, date}]
   let advancedCount = 0;
@@ -2021,4 +1414,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh };

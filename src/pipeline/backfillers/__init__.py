@@ -37,7 +37,6 @@ SCHEMA_REGISTRY_PATH = OPENCLAW_DIR / 'data' / 'master' / 'schema_registry.json'
 
 _BACKFILLER_MODULES = {
     'fmp':          'src.pipeline.backfillers.fmp',
-    'polygon':      'src.pipeline.backfillers.polygon',
     'yfinance':     'src.pipeline.backfillers.yfinance',
     'edgar':        'src.pipeline.backfillers.edgar',
     'tavily':       'src.pipeline.backfillers.tavily',

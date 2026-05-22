@@ -80,23 +80,22 @@ def _earliest_future_date(raw, today: date) -> date | None:
 
 def yfinance_calendar(tickers: list[str], today: date,
                       throttle_s: float = 0.25) -> pd.DataFrame:
-    """Per-ticker Ticker(t).calendar fan-out. Slow but quota-free."""
-    try:
-        import yfinance as yf
-    except ImportError as e:
-        print(f"  yfinance import failed: {e}", file=sys.stderr)
-        return pd.DataFrame()
+    """Per-ticker Ticker(t).calendar fan-out via cboe_vol_indices.
+
+    SP-1: yfinance access is routed through src/ingestion/cboe_vol_indices
+    (sole allowed importer). throttle_s is passed for CLI compat but
+    throttling now happens inside get_forward_earnings_calendar."""
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from src.ingestion.cboe_vol_indices import get_forward_earnings_calendar
+
+    raw_df = get_forward_earnings_calendar(tickers)
 
     rows: list[dict] = []
     failed = 0
-    for i, t in enumerate(tickers, 1):
-        try:
-            cal = yf.Ticker(t).calendar
-        except Exception as e:
-            failed += 1
-            if failed <= 5:
-                print(f"  [yf] {t} failed: {e}", file=sys.stderr)
-            continue
+    for _, row in raw_df.iterrows():
+        t = row['ticker']
+        cal = row['calendar']
         if not cal:
             continue
         nxt = _earliest_future_date(cal.get('Earnings Date'), today)
@@ -110,10 +109,10 @@ def yfinance_calendar(tickers: list[str], today: date,
             'revenue_estimate':  cal.get('Revenue Average'),
             'fiscal_period':     None,
         })
-        if i % 100 == 0:
-            print(f"  [yf] progress: {i}/{len(tickers)} tickers, {len(rows)} with upcoming earnings")
-        if throttle_s > 0:
-            _time.sleep(throttle_s)
+
+    failed = len(tickers) - len(raw_df)
+    if failed > 0:
+        print(f"  [yf] {failed}/{len(tickers)} tickers returned no calendar data", file=sys.stderr)
 
     if not rows:
         return pd.DataFrame()
