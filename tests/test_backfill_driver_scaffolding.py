@@ -69,15 +69,15 @@ def test_driver_refuses_v2_without_gate():
 def test_driver_accepts_v2_with_gate():
     """With OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1, the gate must let v2 past.
 
-    Task 7 implemented --target prices, so we pivot this scaffolding test to
-    --target metadata (Task 8 stub) — same gate-bypass contract, but the
-    runner still raises NotImplementedError so we can assert we made it past
-    the gate by looking for the stub's marker text in the traceback, NOT
-    for the REFUSED string.
+    Task 8 implemented --target metadata, so we pivot this scaffolding test to
+    --target options (Task 9 stub) — same gate-bypass contract, but the runner
+    still raises NotImplementedError so we can assert we made it past the gate
+    by looking for the stub's marker text in the traceback, NOT for the
+    REFUSED string.
     """
     env_extra = {'OPENCLAW_BACKFILL_ALLOW_OVERWRITE': '1'}
     r = _run(
-        '--target', 'metadata',
+        '--target', 'options',
         '--source-tag', 'backfill_5y_v2',
         '--dry-run',
         env_extra=env_extra,
@@ -88,7 +88,7 @@ def test_driver_accepts_v2_with_gate():
     assert 'REFUSED' not in combined, (
         f'safety gate fired when it should have been bypassed:\n{combined}'
     )
-    assert 'NotImplementedError' in combined or 'Task 8' in combined, (
+    assert 'NotImplementedError' in combined or 'Task 9' in combined, (
         f'expected stub NotImplementedError, got:\n{combined}'
     )
 

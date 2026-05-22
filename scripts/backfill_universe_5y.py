@@ -550,10 +550,178 @@ def _run_prices(args: argparse.Namespace, pg) -> None:
     )
 
 
+def _enumerate_month_ends(years: list[int]) -> list[_date]:
+    """Return the last calendar day of each month within `years`, capped at
+    today (we never produce a snapshot for a future date).
+
+    Note: "last calendar day", not "last trading day". The downstream resolver
+    reads with snapshot_date <= as_of so producing month-ends on Saturday/
+    Sunday is harmless (the row will still be the most-recent snapshot for
+    Monday morning queries). Using calendar-ends keeps the driver pure (no
+    market-calendar dependency) — the spec calls this an acceptable proxy.
+    """
+    from calendar import monthrange
+    today = _date.today()
+    out: list[_date] = []
+    for y in sorted(set(years)):
+        for m in range(1, 13):
+            d = _date(y, m, monthrange(y, m)[1])
+            if d <= today:
+                out.append(d)
+    return out
+
+
+def _validate_metadata(df, snapshot_date: _date) -> tuple[bool, Optional[str]]:
+    """Validation gate before promotion. Returns (ok, error_str_or_None).
+
+    Defensive against missing market_cap (Phase B Task 8 caveat: historical
+    market_cap is None across the board until shares-out backfill ships, so
+    `top10_market_cap_implausible` will trip for now — that's the intended
+    operator signal that historical snapshots are landing without caps).
+    """
+    if df is None or df.empty:
+        return False, 'empty'
+    if len(df) < 1500:
+        return False, f'row_count_too_low ({len(df)})'
+    if df['symbol'].duplicated().any():
+        return False, 'duplicate_symbol'
+
+    # Top-10 market cap sanity floor: at least one mega-cap should be present.
+    # nlargest skips NaN automatically. dropna() first so an all-None column
+    # produces a sensible "implausible" error instead of an exception.
+    caps = df['market_cap'].dropna() if 'market_cap' in df.columns else None
+    if caps is None or caps.empty:
+        return False, 'top10_market_cap_implausible'
+    top10 = caps.nlargest(10)
+    if top10.empty or float(top10.max()) < 1e11:
+        return False, 'top10_market_cap_implausible'
+
+    return True, None
+
+
 def _run_metadata(args: argparse.Namespace, pg) -> None:
-    """Quarterly metadata snapshot backfill — implemented in Task 8."""
-    raise NotImplementedError(
-        '_run_metadata is implemented in Task 8 (sp2-b metadata backfill).'
+    """Monthly metadata snapshot backfill — Task 8.
+
+    For each calendar-month-end in `--years` (capped at today) we:
+      1. Build a structurally-complete snapshot via build_month_snapshot.
+      2. Validate row count / dup-symbol / top-10 mega-cap floor.
+      3. dry-run → audit('validated'); otherwise bulk-insert with
+         ON CONFLICT DO NOTHING (historical rows are append-only — first
+         promotion wins, contra the daily writer which UPSERTs today's row).
+      4. Mark Redis status='promoted' so --resume can skip it.
+
+    Note: historical market_cap is None across the board until FMP
+    historical-market-capitalization access is restored (2026-05-22 probe:
+    403 on Starter tier). _validate_metadata will therefore report
+    `top10_market_cap_implausible` for every month at the moment — this is
+    the documented degradation and a real signal worth landing in audit.
+    """
+    from src.pipeline.backfillers.universe_metadata import build_month_snapshot
+
+    rclient = _redis()
+    universe = _load_universe(args)
+    years = _load_years(args)
+    months = _enumerate_month_ends(years)
+    source_tag = args.source_tag
+
+    print(
+        f'[metadata] universe={len(universe)} years={years} '
+        f'months={len(months)} source_tag={source_tag} dry_run={args.dry_run}'
+    )
+
+    promoted_total = 0
+    quarantined_total = 0
+    skipped_total = 0
+
+    for snapshot_date in months:
+        chunk_key = f'{snapshot_date.isoformat()}:metadata'
+        redis_key = f'backfill:5y:metadata:{chunk_key}'
+        current_status = rclient.get(redis_key)
+
+        if args.resume and current_status == 'promoted':
+            skipped_total += 1
+            continue
+        if (
+            current_status == 'quarantined'
+            and not args.supersede_quarantine
+        ):
+            skipped_total += 1
+            continue
+
+        audit_id = _audit_start(pg, 'metadata', chunk_key, source_tag)
+        try:
+            df = build_month_snapshot(snapshot_date, universe, pg)
+        except Exception as e:
+            err = f'build_month_snapshot failed: {e}'
+            sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+            _audit_finish(pg, audit_id, status='failed', err=err)
+            _notify_discord(f'[backfill metadata] FAILED {chunk_key}: {err}')
+            continue
+
+        ok, err = _validate_metadata(df, snapshot_date)
+        if not ok:
+            sys.stderr.write(f'  [quarantine] {chunk_key}: {err}\n')
+            # No master parquet for metadata — the row just doesn't land.
+            _audit_finish(pg, audit_id, status='quarantined', err=err)
+            rclient.set(redis_key, 'quarantined')
+            _notify_discord(
+                f'[backfill metadata] QUARANTINED {chunk_key}: {err}'
+            )
+            quarantined_total += 1
+            continue
+
+        if args.dry_run:
+            print(f'[dry-run] {chunk_key}: {len(df)} rows valid')
+            _audit_finish(pg, audit_id, status='validated', rows=len(df))
+            continue
+
+        # Bulk INSERT — DO NOTHING preserves first promotion for historical rows.
+        rows_data = [
+            (
+                r.snapshot_date, r.symbol, r.asset_class, r.exchange, r.status,
+                bool(r.tradable), bool(r.shortable), bool(r.fractionable),
+                bool(r.easy_to_borrow), r.market_cap, r.adv_usd_20d,
+                r.sector, r.industry, bool(r.options_eligible),
+                bool(r.in_sp500), bool(r.in_r1000), bool(r.in_r3000),
+                r.listed_date, r.delisted_date, source_tag,
+            )
+            for r in df.itertuples(index=False)
+        ]
+        try:
+            with pg.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO ticker_metadata_snapshots (
+                        snapshot_date, symbol, asset_class, exchange, status,
+                        tradable, shortable, fractionable, easy_to_borrow,
+                        market_cap, adv_usd_20d, sector, industry,
+                        options_eligible, in_sp500, in_r1000, in_r3000,
+                        listed_date, delisted_date, source_tag
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s
+                    )
+                    ON CONFLICT (snapshot_date, symbol) DO NOTHING
+                    """,
+                    rows_data,
+                )
+            pg.commit()
+        except Exception as e:
+            pg.rollback()
+            err = f'insert failed: {e}'
+            sys.stderr.write(f'  [error] {chunk_key}: {err}\n')
+            _audit_finish(pg, audit_id, status='failed', err=err)
+            _notify_discord(f'[backfill metadata] FAILED {chunk_key}: {err}')
+            continue
+
+        _audit_finish(pg, audit_id, status='promoted', rows=len(df))
+        rclient.set(redis_key, 'promoted')
+        print(f'  [{chunk_key}] promoted {len(df)} rows')
+        promoted_total += 1
+
+    print(
+        f'[metadata] DONE promoted={promoted_total} '
+        f'quarantined={quarantined_total} skipped={skipped_total}'
     )
 
 
