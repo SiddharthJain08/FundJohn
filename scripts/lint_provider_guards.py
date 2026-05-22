@@ -22,18 +22,26 @@ SKIP_PATHS = ('.git/', 'node_modules/', 'docs/', '.claude/', 'workspaces/', 'tes
 
 
 def scan(root: Path) -> int:
+    import os
+    print(f'[lint] python={sys.version.split()[0]} root={root}', file=sys.stderr)
+    print(f'[lint] cwd={os.getcwd()}', file=sys.stderr)
     violations = []
+    scanned = 0
+    skipped = 0
     for path in root.rglob('*'):
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
         if any(rel.startswith(s) for s in SKIP_PATHS):
+            skipped += 1
             continue
         if path.suffix not in ('.py', '.js', '.ts'):
             continue
+        scanned += 1
         try:
             text = path.read_text()
-        except (UnicodeDecodeError, PermissionError):
+        except (UnicodeDecodeError, PermissionError) as exc:
+            print(f'[lint] read failed for {rel}: {exc}', file=sys.stderr)
             continue
         for pattern, name, allowlist in FORBIDDEN_PATTERNS:
             for m in re.finditer(pattern, text, re.MULTILINE):
@@ -41,6 +49,7 @@ def scan(root: Path) -> int:
                     continue
                 line = text[:m.start()].count('\n') + 1
                 violations.append(f'{rel}:{line}: forbidden {name} reference: {m.group()!r}')
+    print(f'[lint] scanned={scanned} py/js/ts files, {skipped} skipped, {len(violations)} violation(s)', file=sys.stderr)
     if violations:
         print('SP-1 provider lint failed:', file=sys.stderr)
         for v in violations:
