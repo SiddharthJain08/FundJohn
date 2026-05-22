@@ -110,56 +110,13 @@ Config: iter cap 15, budget $0.30/call, no MCP tool access (reads files only).
 
 ## Active strategies
 
-### Live (6)
+Counts and per-strategy state drift fast. **Authoritative source: `src/strategies/manifest.json`** (file-system truth, dual-written to Postgres `strategy_registry` via `LifecycleStateMachine.transition()`).
 
-| ID | Class | File | Thesis |
-|---|---|---|---|
-| `S5_max_pain` | `MaxPainGravity` | `s5_max_pain.py` | Options-derived price attractor — underlying gravitates toward max-pain strike at expiry |
-| `S9_dual_momentum` | `DualMomentum` | `s09_dual_momentum.py` | Cross-asset absolute + relative momentum (Antonacci 2012) |
-| `S10_quality_value` | `QualityValue` | `s10_quality_value.py` | Quality-value factor composite: ROE × gross margin × low debt × low P/B |
-| `S12_insider` | `InsiderClusterBuy` | `s12_insider.py` | SEC Form 4 cluster buys — ≥ 3 insiders buy within 30 days, dollar-weighted |
-| `S15_iv_rv_arb` | `IVRVArb` | `s15_iv_rv_arb.py` | IV / RV spread arbitrage — sell vol when IV > 1.25× RV |
-| `S_custom_jt_momentum_12mo` | `JTMomentum12Mo` | `S_custom_jt_momentum_12mo.py` | Jegadeesh-Titman 12-month momentum with 1-month skip |
+**Lifecycle:** `staging → candidate → live → monitoring → deprecated → archived`. `paper` is a frozen legacy state since 2026-04-27 — every former PAPER row was migrated to CANDIDATE; no outbound transitions remain except a safety-valve `paper → archived` for any orphan that slipped the migration.
 
-### Paper — v2 / hybrid (3)
+**Promotion gate** (candidate → live): **Sharpe ≥ 0.5** AND **max drawdown ≤ 20%**. Enforced in `src/strategies/lifecycle.py::LifecycleStateMachine`. Operator approves on the dashboard.
 
-| ID | Class | Thesis |
-|---|---|---|
-| `S23_regime_momentum` | `RegimeMomentumStrategy` | Regime-conditioned momentum — long only in LOW_VOL, exit in CRISIS |
-| `S24_52wk_high_proximity` | `FiftyTwoWeekHighProximityStrategy` | 52-week-high breakout — buy within 2% of high, stop below high |
-| `S25_dual_momentum_v2` | `DualMomentum` | S9 successor candidate with extended lookback periods |
-
-### Paper — HV (volatility-first, 13 strategies)
-
-All are pure vol/options strategies derived from peer-reviewed literature. No S_HV18.
-
-| ID | Class | Thesis / citation |
-|---|---|---|
-| `S_HV7_iv_crush_fade` | `IVCrushFade` | Sell vol after peak IV rank (Stein 1989) |
-| `S_HV8_gamma_theta_carry` | `GammaThetaCarry` | BUY_VOL when gamma/|theta| ≥ 1.5 ATM |
-| `S_HV9_rv_momentum_div` | `RVMomentumDivergence` | Price/RV divergence (Bollerslev 2009) |
-| `S_HV11_cross_stock_dispersion` | `CrossStockDispersion` | Decorrelated high-IV (Drechsler 2011) |
-| `S_HV12_vrp_normalization` | `VRPNormalization` | VRP z-score mean-reversion (Carr & Wu 2009) |
-| `S_HV13_call_put_iv_spread` | `CallPutIVSpread` | ATM call − put IV (Cremers & Weinbaum 2010) |
-| `S_HV14_otm_skew_factor` | `OTMSkewFactor` | OTM put skew vs ATM call IV (Xing, Zhang & Zhao 2010) |
-| `S_HV15_iv_term_structure` | `IVTermStructure` | IV term-structure backwardation/contango |
-| `S_HV16_gex_regime` | `GEXRegime` | Dealer gamma exposure regime (Bollen & Whaley 2004) |
-| `S_HV17_earnings_straddle_fade` | `EarningsStraddleFade` | SELL_VOL when implied > 1.20× realised near earnings (Muravyev & Pearson 2020) |
-| `S_HV19_iv_surface_tilt` | `IVSurfaceTilt` | Vega·OI-weighted surface centroid tilt (Carr & Wu 2009) |
-| `S_HV20_iv_dispersion_reversion` | `IVDispersionReversion` | Cross-section IV rank z-score mean-reversion (Driessen 2009, Goyal & Saretto 2009) |
-
-### Staging / Deprecated
-
-| ID | State | Notes |
-|---|---|---|
-| `S_HV10_triple_gate_fear` | staging | Blocked: needs `unusual_flow` from Massive WS Redis cache — fires when `massive-ws.service` is active |
-| `S_custom_momentum_trend_v1` | deprecated | Orphaned; flagged by Audit R3 (2026-04-13); no DB registry row |
-
-Lifecycle source of truth: `src/strategies/manifest.json` + Postgres `strategy_registry` (dual-write via `LifecycleStateMachine.transition()`).
-
-**Promotion gate** (paper → live): **Sharpe ≥ 0.5** AND **max drawdown ≤ 20%**. Enforced in `src/strategies/lifecycle.py::LifecycleStateMachine`.
-
-States: `candidate → paper → live → monitoring → deprecated → archived`.
+Strategies live under `src/strategies/implementations/` — one Python file + one `.requirements.json` per strategy. The `manifest.json` `canonical_file` field is the load source-of-truth. Read it for the current per-strategy state, regime eligibility, and parameters.
 
 ---
 

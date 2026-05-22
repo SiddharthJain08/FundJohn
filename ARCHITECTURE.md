@@ -195,46 +195,18 @@ Generation entry point: `src/agent/tools/registry.js::generateToolModules(worksp
 
 Full list at `src/strategies/manifest.json`. Grouped by origin:
 
-### 7.1 Canonical live (6)
+### 7.1 Authoritative inventory
 
-| ID | Class | File | Thesis |
-|---|---|---|---|
-| `S5_max_pain` | `MaxPainGravity` | `s5_max_pain.py` | Options-derived price attractor |
-| `S9_dual_momentum` | `DualMomentum` | `s09_dual_momentum.py` | Cross-asset absolute + relative momentum |
-| `S10_quality_value` | `QualityValue` | `s10_quality_value.py` | Quality-value factor composite |
-| `S12_insider` | `InsiderClusterBuy` | `s12_insider.py` | SEC Form 4 cluster-buy signal |
-| `S15_iv_rv_arb` | `IVRVArb` | `s15_iv_rv_arb.py` | IV / RV spread arbitrage |
-| `S_custom_jt_momentum_12mo` | `JTMomentum12Mo` | `S_custom_jt_momentum_12mo.py` | Jegadeesh-Titman 12-month momentum |
+The strategy roster drifts fast — pinning specific IDs and counts in this file goes stale within weeks. **Read `src/strategies/manifest.json`** for the current set, per-strategy lifecycle state, regime eligibility, and parameter values. The manifest is the file-system source of truth, dual-written to Postgres `strategy_registry` via `LifecycleStateMachine.transition()`.
 
-### 7.2 Paper — v2 / hybrid (3)
+### 7.2 Lifecycle
 
-- `S23_regime_momentum` — `RegimeMomentumStrategy` — regime-conditioned momentum.
-- `S24_52wk_high_proximity` — `FiftyTwoWeekHighProximityStrategy` — 52-week-high breakout.
-- `S25_dual_momentum_v2` — `DualMomentum` in `S25_dual_momentum.py` — successor candidate to S9.
+`staging → candidate → live → monitoring → deprecated → archived`. `paper` is a frozen legacy state since 2026-04-27 (fused-approval rewrite) — every former PAPER row was migrated to CANDIDATE; the only outbound transition remaining is a safety-valve `paper → archived`.
 
-### 7.3 Paper — HV (volatility-first) (13)
+**Promotion gate** (candidate → live): Sharpe ≥ 0.5 AND max drawdown ≤ 20%. Enforced in `src/strategies/lifecycle.py::LifecycleStateMachine`; operator approves on the dashboard.
 
-`S_HV7` … `S_HV20` (no S_HV18). Each is a peer-reviewed vol/options thesis:
+### 7.3 Decommissioned predecessors
 
-| ID | Class | Thesis / citation |
-|---|---|---|
-| `S_HV7_iv_crush_fade` | `IVCrushFade` | Sell vol after peak iv_rank (Stein 1989) |
-| `S_HV8_gamma_theta_carry` | `GammaThetaCarry` | BUY_VOL when gamma/|theta| ≥ 1.5 ATM |
-| `S_HV9_rv_momentum_div` | `RVMomentumDivergence` | Price/RV divergence (Bollerslev 2009) |
-| `S_HV10_triple_gate_fear` | `TripleGateFear` | **staging** — needs `unusual_flow` data |
-| `S_HV11_cross_stock_dispersion` | `CrossStockDispersion` | Decorrelated high-IV (Drechsler 2011) |
-| `S_HV12_vrp_normalization` | `VRPNormalization` | VRP z-score mean-reversion (Carr & Wu 2009) |
-| `S_HV13_call_put_iv_spread` | `CallPutIVSpread` | ATM call - put IV (Cremers & Weinbaum 2010) |
-| `S_HV14_otm_skew_factor` | `OTMSkewFactor` | OTM put skew vs ATM call IV (Xing, Zhang & Zhao 2010) |
-| `S_HV15_iv_term_structure` | `IVTermStructure` | IV term-structure backwardation/contango |
-| `S_HV16_gex_regime` | `GEXRegime` | Dealer gamma exposure regime (Bollen & Whaley 2004) |
-| `S_HV17_earnings_straddle_fade` | `EarningsStraddleFade` | SELL_VOL when implied > 1.20× realised near earnings (Muravyev & Pearson 2020) |
-| `S_HV19_iv_surface_tilt` | `IVSurfaceTilt` | Vega·OI-weighted surface centroid tilt (Carr & Wu 2009) |
-| `S_HV20_iv_dispersion_reversion` | `IVDispersionReversion` | Cross-section iv_rank z-score mean-reversion (Driessen 2009, Goyal & Saretto 2009) |
-
-### 7.4 Deprecated / decommissioned
-
-- `S_custom_momentum_trend_v1` — deprecated 2026-04-13 by Audit R3 (orphan file, no DB registry row, no HOLDING_PERIOD entry).
 - `decommissioned/`: `dual_momentum.py`, `quality_value.py`, `insider_cluster_buy.py`, `iv_rv_arb.py`, `max_pain.py` — predecessors of the canonical `sXX_` versions. Retained for backtest reproducibility only; not imported anywhere.
 
 ### 7.5 Execution math (engine vs trade_agent split)
