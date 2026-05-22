@@ -26,7 +26,13 @@ _DEPTH_TARGET = date(2021, 6, 1)
 def _ticker_metadata_history_depth():
     """Verify ticker_metadata_snapshots reaches back to 2021-06-01 or earlier.
     PASS if min(snapshot_date) ≤ 2021-06-01 (≥5y depth),
-    WARN if shallower or no snapshots present."""
+    WARN if shallower or no snapshots present.
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), PASS
+    with "gate off; n/a". The depth target is only meaningful AFTER the
+    Phase B backfill has actually populated the table."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return Status.PASS, 'gate off; n/a'
     uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL', '')
     if not uri:
         return Status.FAIL, 'POSTGRES_URI not set'

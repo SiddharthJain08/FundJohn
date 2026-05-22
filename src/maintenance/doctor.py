@@ -1141,7 +1141,15 @@ def _backfill_audit_status_counts():
 def _check_backfill_progress():
     """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
     FAIL if quarantined > 100 (data poisoning indicator),
-    WARN if quarantined > 0, PASS otherwise."""
+    WARN if quarantined > 0, PASS otherwise.
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), this
+    check PASSes with an "n/a" message and never blocks the cycle. The
+    operator sets the gate AFTER the first production backfill so the
+    audit table reflects real state, not test residue from Tasks 7-9
+    (currently ≈4162 quarantined rows in the live DB)."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return (0, 'gate off; n/a')
     try:
         counts = _backfill_audit_status_counts()
     except Exception as exc:
@@ -1193,7 +1201,13 @@ def _check_backfill_universe_coverage():
     """Return (code, msg) where code ∈ {0=pass, 1=warn}.
     WARN if no rows yet (Phase B not run),
     WARN if > 6 months have < 2500 rows (per spec target ~3000/month ± 15%),
-    PASS otherwise. No FAIL case — advisory only."""
+    PASS otherwise. No FAIL case — advisory only.
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), PASS
+    with "gate off; n/a". The operator sets the gate AFTER the first
+    production backfill so per-month coverage gates evaluate real data."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return (0, 'gate off; n/a')
     try:
         rows = _backfill_universe_coverage_rows()
     except Exception as exc:

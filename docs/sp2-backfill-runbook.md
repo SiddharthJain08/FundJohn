@@ -34,6 +34,19 @@ reads at all) and are documented as unfilterable in
 
 ## Pre-flight checklist
 
+> **Phase B doctor + system_checks gate.** The new
+> `backfill_progress` / `backfill_universe_coverage` doctor checks AND
+> their `system_checks` peers (`backfill_progress`,
+> `ticker_metadata_history_depth`) are gated on
+> `OPENCLAW_BACKFILL_5Y_ACTIVE=1`. **Set this only AFTER you have run
+> the backfill at least once and the audit table reflects production
+> state, otherwise the checks will surface test residue (currently
+> ≈4162 quarantined rows from Tasks 7-9 smoke passes) as alarms** and
+> the daily 10am cron will abort on preflight. Default-OFF preserves
+> the pre-Phase-B behavior; the operator flips it as part of the
+> "production activation" step after the first real backfill drains
+> the test-tag rows.
+
 Run `bash scripts/preflight_phase_b.sh` (committed in `14fa573`). It exits
 0 if every gate passes, non-zero with explanation on first failure. It
 performs zero state mutations.

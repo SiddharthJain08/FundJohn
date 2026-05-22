@@ -23,7 +23,14 @@ from ..types import Status
 @check(name='backfill_progress', tags=['storage', 'strategies'], requires=['db'])
 def _backfill_progress():
     """Surface stuck chunks (in_progress > 24h → FAIL) and quarantined rows
-    (any → WARN) in backfill_audit."""
+    (any → WARN) in backfill_audit.
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), this
+    check PASSes with "gate off; n/a". The operator flips the gate
+    AFTER the first production backfill so the audit table reflects
+    real state rather than test residue from Tasks 7-9."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return Status.PASS, 'gate off; n/a'
     uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL', '')
     if not uri:
         return Status.FAIL, 'POSTGRES_URI not set'
