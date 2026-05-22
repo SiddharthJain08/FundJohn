@@ -117,6 +117,7 @@ class StrategyRecord:
     # attribute and the from_manifest/to_dict plumbing can be deleted in
     # a follow-up commit.
     eligible_regimes: Optional[List[str]] = None
+    universe_filter_ref: Optional[str] = None   # SP-2 Phase A — predicate import path "mod.path:attr"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,6 +177,7 @@ class LifecycleStateMachine:
                 history=history,
                 metadata=rec.get("metadata", {}),
                 eligible_regimes=rec.get("eligible_regimes"),
+                universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
             )
         decom_raw = data.get("decommissioned", {}) or {}
         decom_clean: Dict = {}
@@ -193,6 +195,7 @@ class LifecycleStateMachine:
                         history=history,
                         metadata=rec.get("metadata", {}),
                         eligible_regimes=rec.get("eligible_regimes"),
+                        universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
                     )
                     logger.warning(
                         "lifecycle: rescued misrouted active strategy %s "
@@ -480,10 +483,15 @@ class LifecycleStateMachine:
     def to_dict(self) -> dict:
         strategies = {}
         for sid, rec in self._records.items():
+            metadata_out = dict(rec.metadata)  # shallow copy
+            if rec.universe_filter_ref is not None:
+                metadata_out["universe_filter_ref"] = rec.universe_filter_ref
+            else:
+                metadata_out.pop("universe_filter_ref", None)
             entry = {
                 "state":       rec.state.value,
                 "state_since": rec.state_since,
-                "metadata":    rec.metadata,
+                "metadata":    metadata_out,
                 "history": [
                     {
                         "from_state": e.from_state,
