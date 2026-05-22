@@ -22,12 +22,14 @@ class _CoverageProtocol(Protocol):
 class UniverseResolver:
     def __init__(self, db: _DBProtocol, coverage: _CoverageProtocol,
                  manifest_loader: Callable[[], dict] | None = None,
-                 today_fn: Callable[[], _date] = _date.today):
+                 today_fn: Callable[[], _date] = _date.today,
+                 audit_writer: Callable[[dict], None] | None = None):
         self._db = db
         self._coverage = coverage
         self._cache: dict[tuple[str, _date], list[str]] = {}
         self._manifest_loader = manifest_loader
         self._today_fn = today_fn
+        self._audit_writer = audit_writer
 
     def _load_predicate(self, strategy_id: str) -> Callable[[TickerMetadata, _date], bool]:
         if self._manifest_loader is None:
@@ -62,3 +64,35 @@ class UniverseResolver:
         out.sort()
         self._cache[key] = out
         return out
+
+    def _live_strategy_ids(self, states: tuple[str, ...]) -> list[str]:
+        if self._manifest_loader is None:
+            return []
+        manifest = self._manifest_loader()
+        return [sid for sid, rec in manifest.get("strategies", {}).items()
+                if rec.get("state") in states]
+
+    def _alpaca_universe_size(self) -> int:
+        # Overridden in production with a DB count; default 0 for tests
+        return 0
+
+    def union_universe(self, as_of: _date, states: tuple[str, ...] = ("live",)) -> list[str]:
+        import time
+        t0 = time.monotonic()
+        per_strategy: dict[str, int] = {}
+        seen: set[str] = set()
+        for sid in self._live_strategy_ids(states):
+            tickers = self.resolve(sid, as_of)
+            per_strategy[sid] = len(tickers)
+            seen.update(tickers)
+        union = sorted(seen)
+        if self._audit_writer:
+            self._audit_writer({
+                "resolved_for_date": as_of,
+                "lifecycle_states": list(states),
+                "union_size": len(union),
+                "per_strategy_sizes": per_strategy,
+                "alpaca_universe_size": self._alpaca_universe_size(),
+                "resolver_ms": int((time.monotonic() - t0) * 1000),
+            })
+        return union

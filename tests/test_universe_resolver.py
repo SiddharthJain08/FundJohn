@@ -70,3 +70,31 @@ def test_resolve_excludes_no_coverage(db, monkeypatch):
     monkeypatch.setattr(resolver, "_load_predicate", lambda sid: sp500)
     result = resolver.resolve("S5", as_of=date(2026, 6, 1))
     assert result == []
+
+
+def test_union_universe_aggregates(db, monkeypatch):
+    from datetime import date
+    resolver = UniverseResolver(db=db, coverage=FakeCoverage({}),
+                                today_fn=lambda: date(2026, 7, 1))
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: sp500)
+    monkeypatch.setattr(resolver, "_live_strategy_ids", lambda states: ["S5", "S15"])
+    result = resolver.union_universe(date(2026, 6, 1), states=("live",))
+    assert result == ["AAPL"]  # both S5 and S15 resolve to {AAPL}, union dedupes
+
+
+def test_union_universe_writes_audit(db, monkeypatch):
+    from datetime import date
+    audit_rows = []
+    resolver = UniverseResolver(db=db, coverage=FakeCoverage({}),
+                                today_fn=lambda: date(2026, 7, 1),
+                                audit_writer=lambda row: audit_rows.append(row))
+    monkeypatch.setattr(resolver, "_load_predicate", lambda sid: sp500)
+    monkeypatch.setattr(resolver, "_live_strategy_ids", lambda states: ["S5"])
+    monkeypatch.setattr(resolver, "_alpaca_universe_size", lambda: 8421)
+    resolver.union_universe(date(2026, 6, 1), states=("live",))
+    assert len(audit_rows) == 1
+    a = audit_rows[0]
+    assert a["resolved_for_date"] == date(2026, 6, 1)
+    assert a["union_size"] == 1
+    assert a["per_strategy_sizes"] == {"S5": 1}
+    assert a["alpaca_universe_size"] == 8421
