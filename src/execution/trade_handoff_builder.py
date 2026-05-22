@@ -938,5 +938,10 @@ def build(run_date: str) -> dict:
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=str(date.today()))
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Skip work and exit 0 — for PIPELINE_DRY_RUN=1 cycles')
     args = ap.parse_args()
+    if args.dry_run:
+        print(f'[handoff] dry-run skip for {args.date}')
+        sys.exit(0)
     build(args.date)

@@ -173,7 +173,12 @@ def main():
         description='Phase 3 LIVE sizer — use regime_blended_sizer with real LLM confirmer',
     )
     ap.add_argument('--date', default=date.today().isoformat())
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Skip sizing work and exit 0 — for PIPELINE_DRY_RUN=1 cycles')
     args = ap.parse_args()
+    if args.dry_run:
+        print(f'[regime_blended_sizer_live] dry-run skip for {args.date}')
+        return 0
     run_date     = date.fromisoformat(args.date)
     run_date_str = run_date.isoformat()
 
