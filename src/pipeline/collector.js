@@ -26,6 +26,7 @@
 
 const https = require('https');
 const store = require('./store');
+const { runAlpaca } = require('../channels/api/alpaca_cli');
 
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const FMP_KEY     = process.env.FMP_API_KEY;
@@ -561,16 +562,71 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
   await checkCompletionStatus(tickers, fromDate, toDate);
 }
 
-// ── Equity price gap-fill — Alpaca daily bars (SP-1: yfinance removed) ────────
-// TODO Task 15+: implement Alpaca /v2/stocks/{T}/bars OHLCV gap-fill here.
-// yfinance path removed in Task 14 (SP-1 provider cutover).
+// ── Equity / ETF price gap-fill — Alpaca daily bars (SP-1 Task 15) ────────────
+// Hits `alpaca data bars` (data.alpaca.markets/v2/stocks/{T}/bars). Matches the
+// pre-cutover yfinance `auto_adjust=True` behavior via `--adjustment all`
+// (splits + dividends), so the new bars line up with historical rows already in
+// prices.parquet. Caller (runHistoricalPrices) owns the flush via
+// store.flushPrices() — we only buffer via store.upsertPrices.
+//
+// Symbols Alpaca's stocks endpoint can't serve (indices ^X, futures =F,
+// crypto -USD, forex =X) get an HTTP 400 "invalid symbol" — those are warned
+// and skipped with rows=0 so the phase keeps going. They flow through
+// runMarketPricesYFinance which fans the ETF subset back here.
 
 async function fillPricesAlpaca(ticker, fromDate, toDate) {
-  // NotImplementedError: Alpaca daily bars ingestion not yet wired.
-  // Equity OHLCV gap-fill will be implemented in Task 15.
-  // For now, log and return 0 so the collection phase continues without crashing.
-  console.warn(`[collector] fillPricesAlpaca: NOT IMPLEMENTED — ${ticker} ${fromDate}→${toDate} (Task 15)`);
-  return 0;
+  // Share-class separator: universe convention is `BRK-B` (yfinance style);
+  // Alpaca expects `BRK.B`. Translate the API symbol only — rows stay keyed
+  // by the universe ticker so downstream consumers don't drift.
+  const apiSymbol = /^[A-Z]+-[A-Z]$/.test(ticker) ? ticker.replace('-', '.') : ticker;
+
+  const baseArgs = [
+    'data', 'bars',
+    '--symbol',     apiSymbol,
+    '--start',      fromDate,
+    '--end',        toDate,
+    '--timeframe',  '1Day',
+    '--adjustment', 'all',
+    '--feed',       'sip',
+    '--limit',      '1000',
+  ];
+
+  let written  = 0;
+  let pageToken = null;
+  let pages = 0;
+
+  while (true) {
+    const args = pageToken ? [...baseArgs, '--page-token', pageToken] : baseArgs;
+    const r = await runAlpaca(args, { timeout: 30_000 });
+
+    if (!r.ok) {
+      const status = r.error?.status;
+      const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+      // "invalid symbol" 400s — non-stock tickers (indices/futures/crypto/forex)
+      // routed here by mistake. Warn once and return 0; don't blow the phase.
+      if (status === 400 && /invalid symbol/i.test(errMsg)) {
+        console.warn(`[collector] fillPricesAlpaca: skip non-stock symbol ${ticker}${apiSymbol !== ticker ? `→${apiSymbol}` : ''} (${errMsg})`);
+        return written;
+      }
+      throw new Error(`alpaca data bars ${ticker}${apiSymbol !== ticker ? `→${apiSymbol}` : ''} (${fromDate}→${toDate}): ${errMsg}`);
+    }
+
+    const bars = r.payload?.bars;
+    if (Array.isArray(bars) && bars.length > 0) {
+      written += await store.upsertPrices(ticker, bars, 'alpaca');
+    }
+
+    pageToken = r.payload?.next_page_token || null;
+    pages++;
+    if (!pageToken) break;
+    // Hard cap so a malformed pagination token can't pin us.
+    if (pages >= 20) {
+      console.warn(`[collector] fillPricesAlpaca: ${ticker} hit 20-page cap, stopping early`);
+      break;
+    }
+  }
+
+  return written;
 }
 
 
@@ -899,21 +955,81 @@ async function runFundamentals(tickers = null) {
   if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${_progress.rowsThisPhase} fundamental records added | ${skipped} skipped`);
 }
 
-// ── Market price history — Alpaca/FMP stub (SP-1: yfinance removed) ──────────
-// TODO Task 15+: implement Alpaca bars + FMP OHLCV for indices/ETFs/crypto/forex.
+// ── Market price history — ETFs via Alpaca; others deferred (SP-1 Task 15) ───
+// Alpaca's /v2/stocks endpoint serves equities AND ETFs (SPY, GLD, TLT, …).
+// Indices (^VIX, ^GSPC), futures (CL=F), crypto (BTC-USD) and forex (EURUSD=X)
+// need their own data-stream paths (alpaca data crypto / forex / cboe_vol_indices).
+// We route the ETF subset through the same fillPricesAlpaca + flushPrices the
+// equity phase uses, and notify on the rest so the gap is visible.
+
+const _MARKET_DEFERRED_PATTERN = /^\^|=F$|-USD$|=X$|\.NYB$/;
 
 async function runMarketPricesYFinance(tickers, historyDays = 3650) {
   if (!tickers || tickers.length === 0) return;
 
   const toDate   = new Date().toISOString().slice(0, 10);
   const fromDate = new Date(Date.now() - historyDays * 86400_000).toISOString().slice(0, 10);
-  // SP-1: yfinance removed. Market instrument bars (indices, ETFs, crypto, forex)
-  // not yet migrated to Alpaca/FMP. Log and skip — Task 15 implements the replacement.
-  notify(`🌐 Market prices: ${tickers.length} instruments deferred — SP-1 Task 14 stub (${fromDate}→${toDate}) — implement via Alpaca/FMP in Task 15`);
-  _progress = { phase: '🌐 Market Prices', current: 0, total: tickers.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
-  // NotImplementedError: yfinance path removed. Market instrument bars
-  // (indices, ETFs, crypto, commodities, forex) will be wired via
-  // Alpaca bars API + FMP in Task 15.
+
+  const etfTickers     = tickers.filter(t => !_MARKET_DEFERRED_PATTERN.test(t));
+  const nonStockTickers = tickers.filter(t =>  _MARKET_DEFERRED_PATTERN.test(t));
+
+  if (nonStockTickers.length > 0) {
+    notify(`🌐 Market prices: ${nonStockTickers.length} non-stock instruments deferred (indices/futures/crypto/forex; ${fromDate}→${toDate})`);
+  }
+
+  if (etfTickers.length === 0) return;
+
+  notify(`🌐 Market prices: ${etfTickers.length} ETF(s) → Alpaca bars (${fromDate}→${toDate})`);
+  _progress = { phase: '🌐 Market Prices', current: 0, total: etfTickers.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
+
+  // Identical control flow to runHistoricalPrices: per-ticker gap detection,
+  // upsertPrices buffering, single flush at end. Don't pre-flush — we share the
+  // prices buffer with the equity phase that already flushed (or will flush)
+  // separately. Call flushPrices() here too so this phase's writes land
+  // atomically before downstream phases run.
+  let skipped = 0;
+  let totalCalls = 0;
+  for (let i = 0; i < etfTickers.length; i++) {
+    const ticker = etfTickers[i];
+    if (_paused) { notify('⏸️ Paused — waiting...'); while (_paused) await sleep(1000); }
+
+    const gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
+    if (gaps.length === 0) {
+      skipped++;
+      tickProgress('🌐 Market Prices', i + 1, etfTickers.length, ticker, 0);
+      continue;
+    }
+    const start = Date.now();
+    let totalWritten = 0;
+    for (const gap of gaps) {
+      try {
+        const written = await fillPricesAlpaca(ticker, gap.from, gap.to);
+        await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
+        totalWritten += written;
+        totalCalls++;
+      } catch (err) {
+        _stats.errors++;
+        await store.logRun(ticker, 'prices', 'error', 0, err.message, Date.now() - start, 1);
+        notify(`⚠️ ${ticker} market-prices error: ${err.message}`);
+      }
+    }
+    _stats.prices += totalWritten;
+    tickProgress('🌐 Market Prices', i + 1, etfTickers.length, ticker, totalWritten);
+    if (totalWritten > 0) {
+      await store.logRun(ticker, 'prices', 'success', totalWritten, null, Date.now() - start, gaps.length);
+    }
+  }
+
+  try {
+    const flushed = await store.flushPrices();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Market-prices flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Market-prices flush FAILED: ${err.message}`);
+  }
+
+  notify(`✅ Market prices complete — ${_progress.rowsThisPhase.toLocaleString()} new rows | ${skipped}/${etfTickers.length} ETFs skipped (no gaps) | ${totalCalls} API calls`);
 }
 
 // ── News collection — Alpaca News API (SP-1: yfinance removed) ───────────────
@@ -1496,4 +1612,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, loadQuarantineSet, isQuarantined, _quarantineSet };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, loadQuarantineSet, isQuarantined, _quarantineSet, fillPricesAlpaca };
