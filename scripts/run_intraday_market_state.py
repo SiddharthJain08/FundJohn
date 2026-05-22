@@ -54,6 +54,12 @@ CONFIDENCE_FLOOR       = 0.70
 TRANSITIONING_FALLBACK = 'TRANSITIONING'
 STATE_NAMES_BY_RANK    = {0: 'LOW_VOL', 1: 'TRANSITIONING',
                           2: 'HIGH_VOL', 3: 'CRISIS'}
+# How many rows of state history to fetch when deciding whether a
+# confirmed transition has happened. Must be > HYSTERESIS_N so that the
+# previously CONFIRMED regime stays visible past any short noise tick.
+# 120 ticks ≈ 10h of 5-min ticks — spans a full trading session plus
+# yesterday's last confirmed state through the overnight gap.
+LOOKBACK_FOR_CONFIRMED = 120
 
 # HMM input feature ordering — fixed for compatibility with stored pickles.
 # When new features are added later (e.g., PCR/0DTE once we wire Polygon
@@ -360,23 +366,39 @@ def _confirmed_transition(history: list[dict], current_state: str,
     A "confirmed transition" requires:
       - The current state has been observed for ≥ N_required ticks in a row
         (this tick included; that's `streak >= N_required`).
-      - The state IMMEDIATELY before the streak started was different.
+      - The most recent row in history that was itself confirmed
+        (`hysteresis_streak >= N_required`) belongs to a DIFFERENT state.
 
-    Returns (fired, prior_state). prior_state is the state we're
-    transitioning FROM, derived from the first row whose state differs
-    from current_state in the newest-first history.
+    The second clause is what protects against single transient ticks
+    creating phantom transitions: a noisy 1-tick excursion never reaches
+    its own hysteresis threshold, so it cannot register as the "prior"
+    confirmed state we're transitioning away from.
+
+    Walk newest→oldest and return on the FIRST confirmed row encountered.
+    If that row's state matches current_state, we're still in the same
+    regime (e.g., re-confirming after a noisy excursion, or any tick
+    after the original transition firing) and no transition fires.
+    If it differs, we have a real regime change. If no confirmed row
+    exists anywhere in the lookback window, return False (defensive —
+    happens at cold-start before any regime has ever been confirmed).
     """
     if streak < n_required:
         return False, None
-    prior = None
     for row in history:
-        if row.get('state') != current_state:
-            prior = row.get('state')
-            break
-    if prior is None:
-        # First-time observation — no prior state recorded; not a transition.
-        return False, None
-    return True, prior
+        try:
+            row_streak = int(row.get('hysteresis_streak') or 0)
+        except (TypeError, ValueError):
+            row_streak = 0
+        if row_streak < n_required:
+            continue
+        # First confirmed row in the lookback. If same state, we're just
+        # continuing the regime (or this is a post-fire repeat tick); if
+        # different, this is a real transition out of that regime.
+        prior = row.get('state')
+        if prior == current_state:
+            return False, None
+        return True, prior
+    return False, None
 
 
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
@@ -539,8 +561,12 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         logger.info('HMM model not yet trained (no %s) — accumulating data only',
                     MODEL_PATH.name)
 
-    # 3) Hysteresis lookback
-    history = _last_n_states(conn, HYSTERESIS_N)
+    # 3) Hysteresis lookback. Fetch wider than HYSTERESIS_N so that
+    # _confirmed_transition can see past short noise ticks to the most
+    # recent CONFIRMED state. _hysteresis_streak still stops at the
+    # first non-match so the extra rows are only used by the
+    # confirmed-prior search.
+    history = _last_n_states(conn, LOOKBACK_FOR_CONFIRMED)
     streak = _hysteresis_streak(history, state_name)
     fired, prior_state = _confirmed_transition(
         history, state_name, streak, HYSTERESIS_N,

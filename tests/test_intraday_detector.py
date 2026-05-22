@@ -45,10 +45,10 @@ class TestHysteresis:
         """LOW_VOL...LOW_VOL → HIGH_VOL ... HIGH_VOL (just 2 in row)."""
         # newest-first
         history = [
-            {'state': 'HIGH_VOL'},
-            {'state': 'LOW_VOL'},
-            {'state': 'LOW_VOL'},
-            {'state': 'LOW_VOL'},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 5},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 4},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 3},
         ]
         streak = detector._hysteresis_streak(history, 'HIGH_VOL')
         fired, prior = detector._confirmed_transition(
@@ -59,12 +59,14 @@ class TestHysteresis:
         assert not fired
 
     def test_three_ticks_in_new_state_fires(self):
-        """LOW_VOL...LOW_VOL → HIGH_VOL × 2 + new HIGH_VOL → 3 streak → fire."""
+        """LOW_VOL (confirmed, streak=high) → HIGH_VOL × 2 + new HIGH_VOL
+        → 3 streak → fire. Prior LV must have its own confirmed streak
+        in history for the new transition to be considered real."""
         history = [
-            {'state': 'HIGH_VOL'},
-            {'state': 'HIGH_VOL'},
-            {'state': 'LOW_VOL'},
-            {'state': 'LOW_VOL'},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 2},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 7},  # was confirmed
+            {'state': 'LOW_VOL',  'hysteresis_streak': 6},
         ]
         streak = detector._hysteresis_streak(history, 'HIGH_VOL')
         fired, prior = detector._confirmed_transition(
@@ -74,16 +76,19 @@ class TestHysteresis:
         assert fired
         assert prior == 'LOW_VOL'
 
-    def test_intermittent_states_break_streak(self):
+    def test_intermittent_unconfirmed_prior_does_not_fire(self):
         """LOW_VOL → HIGH_VOL → LOW_VOL → HIGH_VOL → HIGH_VOL → HIGH_VOL.
-        Streak only counts consecutive matches from the newest end."""
-        # Newest first; current tick is HIGH_VOL
+        Streak counts consecutive matches from newest end (=3), but none
+        of the intermittent LOW_VOL ticks ever met their own hysteresis
+        threshold — there is no CONFIRMED prior state to transition from,
+        so the function must NOT fire. This is the protection that today's
+        13:30/13:45 false-positive was missing."""
         history = [
-            {'state': 'HIGH_VOL'},
-            {'state': 'HIGH_VOL'},
-            {'state': 'LOW_VOL'},   # streak breaker
-            {'state': 'HIGH_VOL'},
-            {'state': 'LOW_VOL'},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 2},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 1},  # transient
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 1},  # transient
         ]
         streak = detector._hysteresis_streak(history, 'HIGH_VOL')
         # current(1) + 2 matching = 3
@@ -91,15 +96,15 @@ class TestHysteresis:
         fired, prior = detector._confirmed_transition(
             history, 'HIGH_VOL', streak, n_required=3,
         )
-        assert fired
-        assert prior == 'LOW_VOL'
+        assert not fired
+        assert prior is None
 
     def test_no_prior_state_no_fire(self):
         """If history is exhausted with all matches and no prior-state
         marker, we don't have a transition."""
         history = [
-            {'state': 'LOW_VOL'},
-            {'state': 'LOW_VOL'},
+            {'state': 'LOW_VOL', 'hysteresis_streak': 2},
+            {'state': 'LOW_VOL', 'hysteresis_streak': 1},
         ]
         streak = detector._hysteresis_streak(history, 'LOW_VOL')
         # current + 2 matches = 3
@@ -108,6 +113,63 @@ class TestHysteresis:
             history, 'LOW_VOL', streak, n_required=3,
         )
         # No different state in history → no prior → not a transition.
+        assert not fired
+        assert prior is None
+
+    def test_single_transient_tick_does_not_re_fire(self):
+        """Regression for 2026-05-22 13:30/13:45 false positive.
+
+        Real production sequence (newest-first):
+            13:40 TRANSITIONING streak=2   ← current_state matching ticks
+            13:35 TRANSITIONING streak=1
+            13:30 LOW_VOL       streak=1   ← single noisy tick
+            13:25 TRANSITIONING streak=4   ← previously confirmed regime
+            13:20 TRANSITIONING streak=3
+            ...
+
+        Old logic fired INTRADAY_HMM_REDEPLOY_LOW_VOL_TRANSITIONING
+        because it picked the noisy LOW_VOL row as "prior." New logic
+        finds the most-recent confirmed row (13:25 TRANSITIONING, streak=4)
+        first, sees it matches current_state, and correctly declines to
+        fire."""
+        history = [
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 2},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',       'hysteresis_streak': 1},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 4},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 3},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 2},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 1},
+        ]
+        streak = detector._hysteresis_streak(history, 'TRANSITIONING')
+        assert streak == 3
+        fired, prior = detector._confirmed_transition(
+            history, 'TRANSITIONING', streak, n_required=3,
+        )
+        assert not fired
+        assert prior is None
+
+    def test_post_fire_idempotent(self):
+        """After a real fire, subsequent same-state ticks must NOT
+        re-fire — the immediately-prior row's confirmed streak matches
+        current, so the search returns no-transition on the very first
+        history row inspected."""
+        # Real LV→TR fire just happened: row[0] is that firing tick.
+        history = [
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 3},  # fired tick
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 2},
+            {'state': 'TRANSITIONING', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',       'hysteresis_streak': 10},  # prior confirmed
+            {'state': 'LOW_VOL',       'hysteresis_streak': 9},
+        ]
+        streak = detector._hysteresis_streak(history, 'TRANSITIONING')
+        # current(1) + 3 matching = 4
+        assert streak == 4
+        fired, prior = detector._confirmed_transition(
+            history, 'TRANSITIONING', streak, n_required=3,
+        )
+        # First confirmed row is row[0] (TR, streak=3) — matches current
+        # → not a transition. The older confirmed LV row is never reached.
         assert not fired
         assert prior is None
 
@@ -198,13 +260,14 @@ class _RedeployHarness:
         # Stub postgres connection (must not blow up on persist)
         self.pg_conn = MagicMock()
         self.pg_conn.cursor.return_value = MagicMock()
-        # History (newest first): 2 prior HIGH_VOL ticks above a LOW_VOL one
-        # → confirmed LOW_VOL→HIGH_VOL transition on this tick.
+        # History (newest first): 2 prior HIGH_VOL ticks above a CONFIRMED
+        # LOW_VOL regime (streak >= HYSTERESIS_N) → confirmed
+        # LOW_VOL→HIGH_VOL transition on this tick.
         self.history = [
-            {'state': 'HIGH_VOL'},
-            {'state': 'HIGH_VOL'},
-            {'state': 'LOW_VOL'},
-            {'state': 'LOW_VOL'},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 2},
+            {'state': 'HIGH_VOL', 'hysteresis_streak': 1},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 8},
+            {'state': 'LOW_VOL',  'hysteresis_streak': 7},
         ]
 
         # Stub redis. cooldown gate keyed on liquidate:cooldown:{date_str}.
