@@ -71,8 +71,63 @@ _unsupported_assets: set[str] = set()
 # status (tradable/active) can flip between cycles.
 _asset_cache: dict[str, dict] = {}
 
+# Per-run cache of current broker positions {symbol: signed_qty}. Populated
+# once per main() invocation via `alpaca position list`. Used to detect
+# close/reverse orders (e.g. buy on existing short, sell on existing long)
+# so we can drop bracket→simple, since Alpaca rejects "bracket orders must
+# be entry orders" on buys-to-close. Empty dict on fetch failure means
+# "treat all orders as opens" — degrades gracefully to existing behavior.
+_broker_positions_cache: dict[str, float] = {}
+_broker_positions_loaded: bool = False
+
 # Alpaca CLI binary. Override with ALPACA_CLI_BIN env var if installed elsewhere.
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
+
+
+def _load_broker_positions() -> None:
+    """One-shot loader for the broker-positions cache. Called from main()."""
+    global _broker_positions_loaded
+    _broker_positions_cache.clear()
+    try:
+        proc = subprocess.run(
+            [ALPACA_CLI, 'position', 'list'],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        if proc.returncode == 0 and proc.stdout:
+            for p in json.loads(proc.stdout) or []:
+                sym = p.get('symbol')
+                if not sym:
+                    continue
+                qty = float(p.get('qty') or 0)
+                # Alpaca returns qty as signed (negative for short). Be defensive.
+                if p.get('side') == 'short' and qty > 0:
+                    qty = -qty
+                _broker_positions_cache[sym] = qty
+            log(f'broker positions loaded: {len(_broker_positions_cache)} symbols')
+        else:
+            log(f'broker positions fetch rc={proc.returncode}: {proc.stderr[:200]}')
+    except Exception as exc:
+        log(f'broker positions fetch failed ({type(exc).__name__}: {exc})')
+    _broker_positions_loaded = True
+
+
+def _current_broker_qty(ticker: str) -> float:
+    """Return signed current broker qty for ticker (0.0 if unknown/no position)."""
+    return float(_broker_positions_cache.get(ticker, 0.0))
+
+
+def _would_close_or_reverse(side: str, ticker: str) -> bool:
+    """True if a new order on this side would close or reverse an existing
+    position in the opposite direction. Alpaca rejects bracket orders on
+    these because the entry leg isn't an opening fill."""
+    cur = _current_broker_qty(ticker)
+    if cur == 0.0:
+        return False
+    if side == 'buy' and cur < 0:
+        return True   # buy-to-close (or buy-to-reverse) an existing short
+    if side == 'sell' and cur > 0:
+        return True   # sell-to-close (or sell-to-reverse) an existing long
+    return False
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -937,6 +992,17 @@ def execute_single(sess, equity, order, run_date):
         log(f'  ↓ {ticker}: short → simple order_class (bracket-on-short rejected by Alpaca paper)')
         order_class = 'simple'
 
+    # 2026-05-22 incident fix: buys that would close/reverse an existing
+    # short (or sells that would close/reverse an existing long) also get
+    # rejected by Alpaca with "bracket orders must be entry orders" because
+    # the entry leg isn't an opening fill. Detect via broker-positions
+    # cache and drop bracket→simple. Cache-miss (load failure or no
+    # position) is treated as "open" and stays on bracket.
+    if order_class == 'bracket' and _would_close_or_reverse(side, ticker):
+        cur_q = _current_broker_qty(ticker)
+        log(f'  ↓ {ticker}: {side} would close/reverse current qty={cur_q:+.0f} → simple order_class')
+        order_class = 'simple'
+
     # Pre-flight bracket recompute: re-anchor entry/stop/target to current
     # market quote while preserving the SIGNAL'S ratio shape (stop_pct =
     # |entry-stop|/entry, target_pct = |target-entry|/entry). This both
@@ -1146,6 +1212,9 @@ def main():
     # Reset per-run unsupported-asset + asset-meta caches.
     _unsupported_assets.clear()
     _asset_cache.clear()
+
+    # Load current broker positions once per run for close/reverse detection.
+    _load_broker_positions()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
     log(f'[executor] session={session}, submitting {len(orders)} orders (pure sizer output — no executor-side cap)')

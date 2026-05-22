@@ -239,6 +239,86 @@ class TestBasePriceRetry(unittest.TestCase):
         self.assertEqual(result['order_class'], 'simple')
         self.assertEqual(result['side'], 'sell')
 
+    def test_buy_to_cover_existing_short_drops_to_simple(self):
+        """2026-05-22 incident fix: a buy on a ticker the broker currently
+        holds SHORT closes/reverses the position. Alpaca rejects bracket
+        orders here with 'bracket orders must be entry orders'. The fix
+        loads positions once per run and switches bracket→simple before
+        submit. This locks the behavior in."""
+        sess = _mock_session(quote_bid=24.5, quote_ask=24.6)
+        order = {
+            'ticker': 'T', 'strategy_id': 'S_long', 'direction': 'long',
+            'pct_nav': 0.005, 'entry': 25.0, 'stop': 24.0, 't1': 27.0,
+        }
+        success_stdout = json.dumps({'id': 'cover-simple', 'status': 'accepted'})
+        # Pre-load the positions cache with T short. Bypass the CLI fetch
+        # path; the real loader's behavior is covered separately in
+        # test_load_broker_positions_signed_qty below.
+        ae._broker_positions_cache.clear()
+        ae._broker_positions_cache['T'] = -340.0
+        ae._broker_positions_loaded = True
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(0, success_stdout, '')) as mock_run:
+            result = ae.execute_single(sess, equity=100_000.0,
+                                       order=order, run_date='2026-05-22')
+        argv = mock_run.call_args[0][0]
+        self.assertEqual(argv[argv.index('--side') + 1], 'buy')
+        # Bracket flags MUST NOT appear — would-close drops to simple.
+        self.assertNotIn('--order-class', argv)
+        self.assertNotIn('--take-profit', argv)
+        self.assertNotIn('--stop-loss', argv)
+        self.assertEqual(result['order_class'], 'simple')
+        ae._broker_positions_cache.clear()
+
+    def test_buy_on_no_position_keeps_bracket(self):
+        """Sanity check the gate: with no current position the buy still
+        rides a bracket (the normal long-open path)."""
+        sess = _mock_session(quote_bid=149.9, quote_ask=150.1)
+        order = {
+            'ticker': 'AAPL', 'strategy_id': 'S_long', 'direction': 'long',
+            'pct_nav': 0.01, 'entry': 150.0, 'stop': 145.0, 't1': 160.0,
+        }
+        success_stdout = json.dumps({'id': 'open-bracket', 'status': 'accepted'})
+        ae._broker_positions_cache.clear()
+        ae._broker_positions_loaded = True
+        with patch.object(ae, '_alpaca_session_kind', return_value='rth'), \
+             patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(0, success_stdout, '')) as mock_run:
+            result = ae.execute_single(sess, equity=100_000.0,
+                                       order=order, run_date='2026-05-22')
+        argv = mock_run.call_args[0][0]
+        self.assertIn('--order-class', argv)
+        self.assertEqual(result['order_class'], 'bracket')
+
+
+class TestBrokerPositionsLoader(unittest.TestCase):
+    def test_load_broker_positions_signed_qty(self):
+        """Loader normalizes Alpaca's `qty` field — long stays positive,
+        short comes back negative (regardless of whether the payload says
+        side='short' or returns a negative qty)."""
+        positions_payload = json.dumps([
+            {'symbol': 'AAPL', 'qty': '100', 'side': 'long'},
+            {'symbol': 'T',    'qty': '340', 'side': 'short'},
+            {'symbol': 'TSLA', 'qty': '-50', 'side': 'short'},
+        ])
+        ae._broker_positions_cache.clear()
+        ae._broker_positions_loaded = False
+        with patch('execution.alpaca_executor.subprocess.run',
+                   return_value=_mock_proc(0, positions_payload, '')):
+            ae._load_broker_positions()
+        self.assertEqual(ae._current_broker_qty('AAPL'),  100.0)
+        self.assertEqual(ae._current_broker_qty('T'),    -340.0)
+        self.assertEqual(ae._current_broker_qty('TSLA'),  -50.0)
+        self.assertEqual(ae._current_broker_qty('UNKNOWN'), 0.0)
+        # Helpers derived from the cache
+        self.assertTrue(ae._would_close_or_reverse('buy',  'T'))     # buy on short
+        self.assertTrue(ae._would_close_or_reverse('sell', 'AAPL'))  # sell on long
+        self.assertFalse(ae._would_close_or_reverse('buy',  'AAPL')) # buy on long → adds
+        self.assertFalse(ae._would_close_or_reverse('sell', 'T'))    # sell on short → adds
+        self.assertFalse(ae._would_close_or_reverse('buy', 'UNKNOWN'))
+        ae._broker_positions_cache.clear()
+
 
 class TestDupCoidRecovery(unittest.TestCase):
     def test_422_dup_coid_recovers_via_get_by_client_id(self):

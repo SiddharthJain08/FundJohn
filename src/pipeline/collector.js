@@ -1267,12 +1267,19 @@ async function runDailyCollection() {
   }
 
   // ── Post-collection: spawn orchestrator ────────────────────────────────────
-  // In the parquet-primary architecture each collector phase already writes
-  // directly to master parquets (prices/options/fundamentals/insider/macro),
-  // so the legacy DB→parquet sync step is gone. The orchestrator is idempotent
-  // per day via the Redis key pipeline:completed:{date} so repeat triggers
-  // (external cron, boot-time catch-up) exit cleanly.
-  (() => {
+  // SKIPPED when OPENCLAW_LANGGRAPH_ORCHESTRATOR=1: under LangGraph, the
+  // `collect` node is just ONE step of the graph — spawning the Python
+  // orchestrator here races it against the same daily-cycle thread and
+  // corrupts the trade step (incident 2026-05-22: dual execution caused
+  // bracket-on-cover rejections + LangGraph trade abort at 14:12:39).
+  //
+  // Legacy path retained for environments without LangGraph: parquet-primary
+  // collector phases write to master parquets directly, so this spawn drives
+  // the downstream signals→trade→alpaca cycle. Idempotent per day via Redis
+  // key pipeline:completed:{date}.
+  if (process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1') {
+    console.log('[collector] LangGraph orchestrator gate ON — skipping legacy pipeline_orchestrator.py spawn');
+  } else {
     const { spawn: _spawn } = require('child_process');
     const _rootDir          = require('path').resolve(__dirname, '..', '..');
     const _orchestratorPath = require('path').join(__dirname, '..', 'execution', 'pipeline_orchestrator.py');
@@ -1286,7 +1293,7 @@ async function runDailyCollection() {
     });
     _proc.unref();
     console.log(`[collector] Pipeline orchestrator spawned (pid ${_proc.pid}) for ${_runDate}`);
-  })();
+  }
 
   enterSleepMode(_nextRunAt);
 }
