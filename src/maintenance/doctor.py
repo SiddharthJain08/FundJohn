@@ -1016,6 +1016,79 @@ def check_regime_correlation_coverage():
 # weekly research process has been retired in favor of the research-page
 # entry points (papers / sources / hand-developed strategies).
 
+# ── SP-2 Phase A: universe-resolver + metadata-snapshot helpers ───────────
+# These are module-level functions (not wrapped in a class) so that
+# monkeypatch can target them via dotted-path in unit tests.
+
+def _latest_snapshot_age_days() -> int:
+    """Return calendar-day age of the most recent ticker_metadata_snapshots
+    row, or 999 if the table is empty."""
+    import psycopg2
+    from datetime import date
+    with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+        cur.execute('SELECT MAX(snapshot_date) FROM ticker_metadata_snapshots')
+        last = cur.fetchone()[0]
+    return (date.today() - last).days if last else 999
+
+
+def _check_metadata_snapshot_freshness():
+    """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
+    Thresholds: ≤1d → pass, ≤3d → warn, >3d → fail."""
+    age = _latest_snapshot_age_days()
+    if age <= 1:
+        return (0, f'snapshot fresh ({age}d)')
+    if age <= 3:
+        return (1, f'snapshot stale {age}d (warn)')
+    return (2, f'snapshot stale {age}d (FAIL)')
+
+
+def _union_universe_size() -> int:
+    """Return the number of tickers the resolver returns for today's live
+    strategies, or 0 on any error."""
+    import subprocess
+    import json
+    from datetime import date
+    try:
+        out = subprocess.check_output(
+            ['python3', '-m', 'src.strategies.universe_resolver',
+             '--as-of', str(date.today()), '--states', 'live'],
+            text=True, timeout=20,
+        )
+        return len(json.loads(out))
+    except Exception:
+        return 0
+
+
+def _check_union_universe_size():
+    """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
+    Thresholds: ≥floor → pass, ≥50 → warn, <50 → fail."""
+    floor = int(os.environ.get('UNIVERSE_RESOLVER_MIN_LIVE_TICKERS', '200'))
+    n = _union_universe_size()
+    if n >= floor:
+        return (0, f'union={n} ≥ {floor}')
+    if n >= 50:
+        return (1, f'union={n} < {floor} (warn)')
+    return (2, f'union={n} < 50 (FAIL)')
+
+
+@_check('metadata_snapshot_freshness')
+def check_metadata_snapshot_freshness():
+    """Verify ticker_metadata_snapshots was written recently.
+    PASS ≤1d, WARN ≤3d, FAIL >3d."""
+    code, msg = _check_metadata_snapshot_freshness()
+    name = 'metadata_snapshot_freshness'
+    return [_ok, _warn, _fail][code](name, msg)
+
+
+@_check('union_universe_size')
+def check_union_universe_size():
+    """Verify the live-strategy union universe meets the floor.
+    PASS ≥UNIVERSE_RESOLVER_MIN_LIVE_TICKERS (default 200),
+    WARN ≥50, FAIL <50."""
+    code, msg = _check_union_universe_size()
+    name = 'union_universe_size'
+    return [_ok, _warn, _fail][code](name, msg)
+
 def _drift_summary():
     """Indirection seam for the drift-alerts check."""
     sys.path.insert(0, str(ROOT / 'src'))
