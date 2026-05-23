@@ -6842,7 +6842,10 @@ function _fmtDollar(v, withSign) {
 // Returns an rgba() so the tile keeps a dark base on zero, gradient-fades
 // to green for winners and red for losers.
 function _pnlColor(pct) {
-  if (pct == null || !isFinite(pct) || pct === 0) return 'rgba(48,54,61,0.55)';
+  // Snap to grey for any P&L that displays as "0.00%" — matches the
+  // 2-decimal formatting in _fmtPctSigned. Prevents the faint green/red
+  // tint on rounding-noise positions where the visible number reads zero.
+  if (pct == null || !isFinite(pct) || Math.abs(pct) < 0.005) return 'rgba(48,54,61,0.55)';
   const t = Math.max(-1, Math.min(1, pct / 5));
   if (t > 0) return 'rgba(63,185,80,'  + (0.18 + 0.72 * t).toFixed(2) + ')';
   return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
