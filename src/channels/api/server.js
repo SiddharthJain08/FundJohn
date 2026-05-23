@@ -3712,13 +3712,6 @@ body.rs-chat-locked{overflow:hidden}
 .regime-feat{display:flex;flex-direction:column;gap:2px;min-width:90px}
 .regime-feat-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .regime-feat-val{font-size:12px;font-weight:600;color:var(--text)}
-.regime-prob-section{min-width:180px}
-.regime-prob-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
-.regime-prob-row{display:flex;align-items:center;gap:6px;margin-bottom:4px}
-.regime-prob-name{font-size:10px;color:var(--muted);width:80px;flex-shrink:0}
-.regime-prob-track{flex:1;background:var(--border2);border-radius:3px;height:6px;overflow:hidden}
-.regime-prob-bar{height:100%;border-radius:3px;transition:width .4s}
-.regime-prob-pct{font-size:10px;color:var(--muted);width:34px;text-align:right;flex-shrink:0}
 .regime-alert-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
 
 /* ── Mobile-only overrides (≤768px = iPhone-class width) ────────────────────
@@ -4993,8 +4986,10 @@ function showOverview() {
 // "Volatility Regime Structure" — single consolidated card. State + features +
 // position_scale + duration come from the intraday HMM (6-feature, 5-min
 // cadence, scored against hmm_intraday_latest.pkl). A few daily-only fields
-// (Stress, RORO, VIX 5d Δ, SPX 20d RV, HY/IG spread, next-day transition
-// probs) are pulled from /api/regime — these have no intraday equivalent.
+// (Stress, RORO, VIX 5d Δ, SPX 20d RV, HY/IG spread) are pulled from
+// /api/regime — these have no intraday equivalent. Next-day transition
+// probabilities removed 2026-05-23: HMM is not predictive, the daily
+// transition matrix gave operators a false sense of forecasting.
 // loadRegime() fetches both endpoints in parallel and composes the panel;
 // re-polled every 60s so freshness drift below the 5-min cron is visible.
 const _STATE_COLOR  = {LOW_VOL:'var(--green)',TRANSITIONING:'var(--yellow)',HIGH_VOL:'var(--orange)',CRISIS:'var(--red)'};
@@ -5136,15 +5131,6 @@ function _renderRegimeStructure(intraday, daily) {
     ['HY/IG Spread', df.hy_ig_spread != null ? df.hy_ig_spread.toFixed(4)                         : '—'],
   ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
 
-  const tp = dly ? (dly.transition_probs_tomorrow || {}) : {};
-  const probHtml = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s => {
-    const pct = tp[s]!=null ? Math.round(tp[s]*100) : 0;
-    return \`<div class="regime-prob-row">
-      <div class="regime-prob-name">\${_STATE_SHORT[s]}</div>
-      <div class="regime-prob-track"><div class="regime-prob-bar" style="width:\${pct}%;background:\${_STATE_COLOR[s]}"></div></div>
-      <div class="regime-prob-pct">\${pct}%</div></div>\`;
-  }).join('');
-
   const modelTag = intraday.model && intraday.model.trained_at
     ? \`model retrained \${new Date(intraday.model.trained_at).toISOString().slice(0,10)}\`
     : '';
@@ -5170,25 +5156,8 @@ function _renderRegimeStructure(intraday, daily) {
     <!-- TWO-COLUMN BODY: what's driving (left) + what's happening (right) -->
     <div class="regime-body-grid">
 
-      <!-- LEFT: stress backdrop, model inputs, corroborating macro -->
+      <!-- LEFT: model inputs + corroborating macro -->
       <div>
-        <div class="regime-section">
-          <div class="regime-section-header">Market Stress</div>
-          <div style="display:flex;gap:18px;flex-wrap:wrap">
-            <div class="regime-bar-group" style="flex:1;min-width:200px">
-              <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
-              <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
-            </div>
-            <div class="regime-bar-group" style="flex:1;min-width:200px">
-              <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
-              <div class="regime-roro-track">
-                <div class="regime-roro-center"></div>
-                <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div class="regime-section">
           <div class="regime-section-header">HMM Model Inputs <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(6 features driving the classification)</span></div>
           <div class="regime-feat-grid">\${featHtml}</div>
@@ -5200,7 +5169,7 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
       </div>
 
-      <!-- RIGHT: recent path + forward outlook -->
+      <!-- RIGHT: recent path + market stress -->
       <div>
         <div class="regime-section">
           <div class="regime-section-header">24h State Path</div>
@@ -5213,8 +5182,18 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
 
         <div class="regime-section">
-          <div class="regime-section-header">Next-Day Transition Probabilities <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily HMM)</span></div>
-          \${probHtml}
+          <div class="regime-section-header">Market Stress</div>
+          <div class="regime-bar-group" style="margin-bottom:12px">
+            <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
+            <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
+          </div>
+          <div class="regime-bar-group">
+            <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
+            <div class="regime-roro-track">
+              <div class="regime-roro-center"></div>
+              <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
+            </div>
+          </div>
         </div>
       </div>
 
