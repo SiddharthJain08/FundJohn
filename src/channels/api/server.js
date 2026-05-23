@@ -3700,7 +3700,7 @@ body.rs-chat-locked{overflow:hidden}
 .regime-meta-item{display:flex;flex-direction:column;gap:2px}
 .regime-meta-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .regime-meta-val{font-size:13px;font-weight:600;color:var(--text)}
-.regime-bar-group{flex:1;min-width:160px;max-width:260px}
+.regime-bar-group{width:100%}
 .regime-bar-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:3px;display:flex;justify-content:space-between}
 .regime-bar-track{background:var(--border2);border-radius:4px;height:8px;overflow:hidden}
 .regime-bar-fill{height:100%;border-radius:4px;transition:width .4s}
