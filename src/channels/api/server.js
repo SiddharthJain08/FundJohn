@@ -3652,25 +3652,36 @@ body.rs-chat-locked{overflow:hidden}
 .pf-tile.pf-tile-tiny .pf-tile-strip{font-size:7.5px;padding:0 3px;justify-content:center;letter-spacing:0;line-height:1.1}
 .pf-tile.pf-tile-tiny .pf-tile-strip .tk-days{display:none}
 
-/* Open Positions: two-column LONG/SHORT layout (replaces variable-area
-   heatmap for the live positions view). Uniform tile sizes via CSS Grid
-   auto-fill so the layout works at any column width without a JS packer.
-   Color still encodes unrealized P&L via _pnlColor on the tile bg.
-   Closed-trade history still uses the legacy heatmap (renderHistory). */
+/* Open Positions: two-column LONG/SHORT layout with size-encoded tiles.
+   Tile AREA = position share of NAV (3 tiers via grid-row/column span);
+   color = unrealized P&L. CSS Grid auto-flow:dense packs smaller tiles
+   into the gaps left by larger ones — no JS packer needed, works at
+   any column width. Closed-trade history still uses the legacy
+   variable-area heatmap (renderHistory). */
 .pf-pos-twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:10px}
 .pf-poscol{min-width:0;background:var(--bg);border-radius:6px;padding:8px}
 .pf-poscol-header{display:flex;justify-content:space-between;align-items:baseline;padding:2px 4px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;border-bottom:1px solid var(--border2);margin-bottom:8px}
 .pf-poscol-long .pf-poscol-header{color:var(--green)}
 .pf-poscol-short .pf-poscol-header{color:var(--red)}
 .pf-poscol-meta{color:var(--dim);font-weight:500;font-size:9px;letter-spacing:.04em}
-.pf-poscol-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(82px,1fr));gap:6px}
-.pf-postile{aspect-ratio:1.35;border-radius:5px;padding:6px;display:flex;flex-direction:column;justify-content:space-between;color:#fff;cursor:pointer;border:1px solid rgba(255,255,255,0.06);transition:transform .12s,border-color .12s,box-shadow .12s;box-shadow:0 1px 3px rgba(0,0,0,0.4);min-width:0;overflow:hidden}
+.pf-poscol-grid{display:grid;grid-template-columns:repeat(auto-fill,64px);grid-auto-rows:64px;grid-auto-flow:dense;gap:5px;justify-content:space-between}
+.pf-postile{border-radius:5px;padding:5px;display:flex;flex-direction:column;justify-content:space-between;color:#fff;cursor:pointer;border:1px solid rgba(255,255,255,0.06);transition:transform .12s,border-color .12s,box-shadow .12s;box-shadow:0 1px 3px rgba(0,0,0,0.4);min-width:0;overflow:hidden}
 .pf-postile:hover{transform:translateY(-1px);border-color:rgba(88,166,255,0.6);box-shadow:0 4px 10px rgba(0,0,0,0.5);z-index:2}
 .pf-postile.selected{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 4px 10px rgba(88,166,255,0.25);z-index:3}
-.pf-postile-sym{font-size:11px;font-weight:700;letter-spacing:.05em;text-shadow:0 1px 2px rgba(0,0,0,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pf-postile-sym{font-size:11px;font-weight:700;letter-spacing:.04em;text-shadow:0 1px 2px rgba(0,0,0,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums}
 .pf-postile-pnl{font-size:10px;font-weight:600;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
 .pf-postile-share{font-size:9px;opacity:0.82}
+/* Tier 2: 132x132 (span 2) — 2-5% NAV positions */
+.pf-postile-t2{padding:8px}
+.pf-postile-t2 .pf-postile-sym{font-size:15px;letter-spacing:.05em}
+.pf-postile-t2 .pf-postile-pnl{font-size:13px}
+.pf-postile-t2 .pf-postile-share{font-size:11px}
+/* Tier 3: 200x200 (span 3) — >=5% NAV positions */
+.pf-postile-t3{padding:10px}
+.pf-postile-t3 .pf-postile-sym{font-size:20px;letter-spacing:.06em}
+.pf-postile-t3 .pf-postile-pnl{font-size:17px}
+.pf-postile-t3 .pf-postile-share{font-size:12px}
 @media(max-width:760px){.pf-pos-twocol{grid-template-columns:1fr}}
 
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
@@ -6948,6 +6959,17 @@ function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
   longs.sort(sortFn);
   shorts.sort(sortFn);
 
+  // Tile area encodes position share of NAV via grid span (1/2/3).
+  // Tier 3 = visual anchor for the largest positions (>=5% NAV, ~2-5 per
+  // column); tier 2 = the meaningful middle (>=2%, ~10-20 per column);
+  // tier 1 = the long tail (<2%) packed into gaps via auto-flow:dense.
+  // Visual area ratio 9:4:1 roughly matches the 5%:2%:<2% size ratios.
+  const tierForShare = (sharePct) => {
+    if (sharePct >= 5.0) return 3;
+    if (sharePct >= 2.0) return 2;
+    return 1;
+  };
+
   const buildTile = (g) => {
     const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
     const dollarPnl = (g.broker && Number.isFinite(g.broker.unrealized_pl))
@@ -6958,8 +6980,11 @@ function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
       : (g.total_size_pct || 0) * 100;
     const isSel = g.ticker === selectedTicker;
     const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+    const tier  = tierForShare(sharePct);
+    const tierClass = tier > 1 ? \` pf-postile-t\${tier}\` : '';
+    const spanStyle = tier > 1 ? \`grid-column:span \${tier};grid-row:span \${tier};\` : '';
     const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
-    return \`<div class="pf-postile \${isSel ? 'selected' : ''}" data-ticker="\${g.ticker}" style="background:\${_pnlColor(pnl)}" title="\${tip}">
+    return \`<div class="pf-postile\${tierClass}\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" style="\${spanStyle}background:\${_pnlColor(pnl)}" title="\${tip}">
       <div class="pf-postile-sym">\${g.ticker}</div>
       <div class="pf-postile-bottom">
         <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
@@ -7559,8 +7584,14 @@ function renderPositions(rows) {
     return _renderPositionsByStrategy(el, rows);
   }
   const groups = _groupByTicker(rows, 'open');
+  // Count = actual broker positions (consolidated per ticker), NOT the
+  // per-strategy intent rows. A 56-position book with ~6 strategies per
+  // ticker has ~343 intent rows behind it; showing "343 positions" is
+  // misleading — the operator wants the broker-truth count.
+  const longCnt  = groups.filter(g => g.broker && g.broker.side === 'long').length;
+  const shortCnt = groups.filter(g => g.broker && g.broker.side === 'short').length;
   document.getElementById('pf-pos-count').textContent =
-    rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
+    groups.length ? \`\${groups.length} open · \${longCnt} long · \${shortCnt} short\` : '';
   if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
   const selectedTicker = _heatmapSelected['pf-positions'] || null;
   // Re-validate selection — if the operator's previously-selected ticker
