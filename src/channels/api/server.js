@@ -3652,6 +3652,27 @@ body.rs-chat-locked{overflow:hidden}
 .pf-tile.pf-tile-tiny .pf-tile-strip{font-size:7.5px;padding:0 3px;justify-content:center;letter-spacing:0;line-height:1.1}
 .pf-tile.pf-tile-tiny .pf-tile-strip .tk-days{display:none}
 
+/* Open Positions: two-column LONG/SHORT layout (replaces variable-area
+   heatmap for the live positions view). Uniform tile sizes via CSS Grid
+   auto-fill so the layout works at any column width without a JS packer.
+   Color still encodes unrealized P&L via _pnlColor on the tile bg.
+   Closed-trade history still uses the legacy heatmap (renderHistory). */
+.pf-pos-twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:10px}
+.pf-poscol{min-width:0;background:var(--bg);border-radius:6px;padding:8px}
+.pf-poscol-header{display:flex;justify-content:space-between;align-items:baseline;padding:2px 4px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;border-bottom:1px solid var(--border2);margin-bottom:8px}
+.pf-poscol-long .pf-poscol-header{color:var(--green)}
+.pf-poscol-short .pf-poscol-header{color:var(--red)}
+.pf-poscol-meta{color:var(--dim);font-weight:500;font-size:9px;letter-spacing:.04em}
+.pf-poscol-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(82px,1fr));gap:6px}
+.pf-postile{aspect-ratio:1.35;border-radius:5px;padding:6px;display:flex;flex-direction:column;justify-content:space-between;color:#fff;cursor:pointer;border:1px solid rgba(255,255,255,0.06);transition:transform .12s,border-color .12s,box-shadow .12s;box-shadow:0 1px 3px rgba(0,0,0,0.4);min-width:0;overflow:hidden}
+.pf-postile:hover{transform:translateY(-1px);border-color:rgba(88,166,255,0.6);box-shadow:0 4px 10px rgba(0,0,0,0.5);z-index:2}
+.pf-postile.selected{border-color:var(--blue);box-shadow:0 0 0 1px var(--blue),0 4px 10px rgba(88,166,255,0.25);z-index:3}
+.pf-postile-sym{font-size:11px;font-weight:700;letter-spacing:.05em;text-shadow:0 1px 2px rgba(0,0,0,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums}
+.pf-postile-pnl{font-size:10px;font-weight:600;text-shadow:0 1px 2px rgba(0,0,0,0.55)}
+.pf-postile-share{font-size:9px;opacity:0.82}
+@media(max-width:760px){.pf-pos-twocol{grid-template-columns:1fr}}
+
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
 .alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
 .alpha-bars.empty{color:var(--dim);font-size:11px;padding:14px;text-align:center}
@@ -6903,6 +6924,67 @@ function _buildAlphaBarsHtml(group) {
 const _heatmapSelected = {};   // { tableId: ticker | null }
 const _heatmapExpanded = {};   // { tableId: bool }
 
+// Open positions — two-column LONG/SHORT grid of uniform tiles.
+// Replaces the variable-area heatmap + custom packer for the live
+// positions view: CSS Grid auto-fill handles layout natively, tile
+// size is uniform (color still encodes P&L), columns are split by
+// broker.side. Closed-trade history (renderHistory) still uses
+// _buildHeatmapHtml below since the variable-area view conveys past
+// position size more usefully there.
+function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
+  const longs  = groups.filter(g => g.broker && g.broker.side === 'long');
+  const shorts = groups.filter(g => g.broker && g.broker.side === 'short');
+  // No broker side (degraded mode) → bucket by DB direction as fallback so
+  // the panel never collapses to empty when Alpaca is unreachable.
+  for (const g of groups) {
+    if (!g.broker || !g.broker.side) {
+      const sigs = (g.signals || []);
+      const longCnt  = sigs.filter(s => (s.direction || '').toUpperCase() === 'LONG').length;
+      const shortCnt = sigs.filter(s => (s.direction || '').toUpperCase() === 'SHORT').length;
+      (longCnt >= shortCnt ? longs : shorts).push(g);
+    }
+  }
+  const sortFn = (a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0);
+  longs.sort(sortFn);
+  shorts.sort(sortFn);
+
+  const buildTile = (g) => {
+    const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
+    const dollarPnl = (g.broker && Number.isFinite(g.broker.unrealized_pl))
+      ? g.broker.unrealized_pl
+      : ((nav && isFinite(nav) && g.contrib_pct != null) ? g.contrib_pct * nav : null);
+    const sharePct = (g.broker && g.broker.size_pct != null)
+      ? g.broker.size_pct * 100
+      : (g.total_size_pct || 0) * 100;
+    const isSel = g.ticker === selectedTicker;
+    const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+    return \`<div class="pf-postile \${isSel ? 'selected' : ''}" data-ticker="\${g.ticker}" style="background:\${_pnlColor(pnl)}" title="\${tip}">
+      <div class="pf-postile-sym">\${g.ticker}</div>
+      <div class="pf-postile-bottom">
+        <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+        <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
+      </div>
+    </div>\`;
+  };
+
+  const buildCol = (label, rows) => {
+    const totalMv = rows.reduce((s, g) => s + Math.abs((g.broker && g.broker.market_value) || 0), 0);
+    const tiles = rows.map(buildTile).join('');
+    const sideClass = label === 'LONG' ? 'pf-poscol-long' : 'pf-poscol-short';
+    const meta = \`\${rows.length} · \${totalMv > 0 ? _fmtDollar(totalMv, false) : '—'}\`;
+    const body = rows.length
+      ? \`<div class="pf-poscol-grid">\${tiles}</div>\`
+      : '<div class="empty" style="padding:12px;font-size:11px">none</div>';
+    return \`<div class="pf-poscol \${sideClass}">
+      <div class="pf-poscol-header"><span>\${label}</span><span class="pf-poscol-meta">\${meta}</span></div>
+      \${body}
+    </div>\`;
+  };
+
+  return \`<div class="pf-pos-twocol">\${buildCol('LONG', longs)}\${buildCol('SHORT', shorts)}</div>\`;
+}
+
 function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const sorted = [...groups].sort((a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0));
   const shown  = expanded ? sorted : sorted.slice(0, 12);
@@ -7480,7 +7562,6 @@ function renderPositions(rows) {
   document.getElementById('pf-pos-count').textContent =
     rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
   if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
-  const expanded = !!_heatmapExpanded['pf-positions'];
   const selectedTicker = _heatmapSelected['pf-positions'] || null;
   // Re-validate selection — if the operator's previously-selected ticker
   // dropped out of the recent slice (closed, fell past the 90d window),
@@ -7488,39 +7569,14 @@ function renderPositions(rows) {
   const selectedGroup = selectedTicker ? groups.find(g => g.ticker === selectedTicker) : null;
   if (!selectedGroup) _heatmapSelected['pf-positions'] = null;
 
-  const controls = \`<div class="pf-heatmap-controls">
-    <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
-    <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
-  </div>\`;
-  const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
-  const bars = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
+  const twocol = _buildPositionsTwoColumnHtml(groups, selectedGroup ? selectedGroup.ticker : null, _navCache);
+  const bars   = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
+  el.innerHTML = twocol + bars;
 
-  el.innerHTML = controls + heatmap + bars;
-
-  // Pack tiles via FFDH after DOM insertion so the actual container
-  // width is known. Re-pack on container resize so the layout stays
-  // tight at any viewport. The off-screen left:-9999px in the tile
-  // template ensures users never see a brief unpacked flicker.
-  const heatmapEl = el.querySelector('.pf-heatmap');
-  if (heatmapEl) {
-    _packHeatmapShelves(heatmapEl);
-    if (!heatmapEl._resizeObserver) {
-      let lastWidth = heatmapEl.clientWidth;
-      heatmapEl._resizeObserver = new ResizeObserver(() => {
-        if (heatmapEl.clientWidth !== lastWidth) {
-          lastWidth = heatmapEl.clientWidth;
-          _packHeatmapShelves(heatmapEl);
-        }
-      });
-      heatmapEl._resizeObserver.observe(heatmapEl);
-    }
-  }
-
-  // Click handlers — wire up tiles + expand toggle. Tile click toggles
-  // selection; clicking the already-selected tile collapses it. On open,
-  // kick off the per-ticker alpha fetch; re-render when the response
-  // lands so the bars panel hydrates without a full reload.
-  el.querySelectorAll('.pf-tile').forEach(tile => {
+  // Tile click toggles per-ticker selection → fetches alpha decomposition
+  // → re-renders to surface the bars panel below. Same flow as the legacy
+  // heatmap, just with the .pf-postile selector for the new tile DOM.
+  el.querySelectorAll('.pf-postile').forEach(tile => {
     tile.addEventListener('click', () => {
       const tk = tile.dataset.ticker;
       const cur = _heatmapSelected['pf-positions'];
@@ -7538,14 +7594,6 @@ function renderPositions(rows) {
       });
     });
   });
-  const hmToggle = el.querySelector('#pf-hm-toggle');
-  if (hmToggle) hmToggle.addEventListener('click', () => {
-    _heatmapExpanded['pf-positions'] = !expanded;
-    renderPositions(_rawDataCache['pf-positions']);
-  });
-  // Lambda slider relocated to the full-width Risk & Sizing panel above
-  // (renderRiskPanel()); kept the cache in _lambdaCache so other callers
-  // that still reference it see the operator's last-saved value.
 }
 
 function renderHistory(rows) {
