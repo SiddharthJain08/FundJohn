@@ -5183,9 +5183,9 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
 
         <div class="regime-section">
-          <div class="regime-section-header">Market Stress <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></div>
+          <div class="regime-section-header">Market Stress</div>
           <div class="regime-bar-group" style="margin-bottom:12px">
-            <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
+            <div class="regime-bar-label"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stress}/100</span></div>
             <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
           </div>
           <div class="regime-bar-group">
