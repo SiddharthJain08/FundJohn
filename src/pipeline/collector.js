@@ -26,6 +26,7 @@
 
 const https = require('https');
 const store = require('./store');
+const { runAlpaca } = require('../channels/api/alpaca_cli');
 
 const POLYGON_KEY = process.env.POLYGON_API_KEY;
 const FMP_KEY     = process.env.FMP_API_KEY;
@@ -561,16 +562,218 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
   await checkCompletionStatus(tickers, fromDate, toDate);
 }
 
-// ── Equity price gap-fill — Alpaca daily bars (SP-1: yfinance removed) ────────
-// TODO Task 15+: implement Alpaca /v2/stocks/{T}/bars OHLCV gap-fill here.
-// yfinance path removed in Task 14 (SP-1 provider cutover).
+// ── Equity / ETF price gap-fill — Alpaca daily bars (SP-1 Task 15) ────────────
+// Hits `alpaca data bars` (data.alpaca.markets/v2/stocks/{T}/bars). Matches the
+// pre-cutover yfinance `auto_adjust=True` behavior via `--adjustment all`
+// (splits + dividends), so the new bars line up with historical rows already in
+// prices.parquet. Caller (runHistoricalPrices) owns the flush via
+// store.flushPrices() — we only buffer via store.upsertPrices.
+//
+// Symbols Alpaca's stocks endpoint can't serve (indices ^X, futures =F,
+// crypto -USD, forex =X) get an HTTP 400 "invalid symbol" — those are warned
+// and skipped with rows=0 so the phase keeps going. They flow through
+// runMarketPricesNonEquity which fans the ETF subset back here.
 
 async function fillPricesAlpaca(ticker, fromDate, toDate) {
-  // NotImplementedError: Alpaca daily bars ingestion not yet wired.
-  // Equity OHLCV gap-fill will be implemented in Task 15.
-  // For now, log and return 0 so the collection phase continues without crashing.
-  console.warn(`[collector] fillPricesAlpaca: NOT IMPLEMENTED — ${ticker} ${fromDate}→${toDate} (Task 15)`);
-  return 0;
+  // Share-class separator: universe convention is `BRK-B` (yfinance style);
+  // Alpaca expects `BRK.B`. Translate the API symbol only — rows stay keyed
+  // by the universe ticker so downstream consumers don't drift.
+  const apiSymbol = /^[A-Z]+-[A-Z]$/.test(ticker) ? ticker.replace('-', '.') : ticker;
+
+  const baseArgs = [
+    'data', 'bars',
+    '--symbol',     apiSymbol,
+    '--start',      fromDate,
+    '--end',        toDate,
+    '--timeframe',  '1Day',
+    '--adjustment', 'all',
+    '--feed',       'sip',
+    '--limit',      '1000',
+  ];
+
+  let written  = 0;
+  let pageToken = null;
+  let pages = 0;
+
+  while (true) {
+    const args = pageToken ? [...baseArgs, '--page-token', pageToken] : baseArgs;
+    const r = await runAlpaca(args, { timeout: 30_000 });
+
+    if (!r.ok) {
+      const status = r.error?.status;
+      const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+      // "invalid symbol" 400s — non-stock tickers (indices/futures/crypto/forex)
+      // routed here by mistake. Warn once and return 0; don't blow the phase.
+      if (status === 400 && /invalid symbol/i.test(errMsg)) {
+        console.warn(`[collector] fillPricesAlpaca: skip non-stock symbol ${ticker}${apiSymbol !== ticker ? `→${apiSymbol}` : ''} (${errMsg})`);
+        return written;
+      }
+      throw new Error(`alpaca data bars ${ticker}${apiSymbol !== ticker ? `→${apiSymbol}` : ''} (${fromDate}→${toDate}): ${errMsg}`);
+    }
+
+    const bars = r.payload?.bars;
+    if (Array.isArray(bars) && bars.length > 0) {
+      written += await store.upsertPrices(ticker, bars, 'alpaca');
+    }
+
+    pageToken = r.payload?.next_page_token || null;
+    pages++;
+    if (!pageToken) break;
+    // Hard cap so a malformed pagination token can't pin us.
+    if (pages >= 20) {
+      console.warn(`[collector] fillPricesAlpaca: ${ticker} hit 20-page cap, stopping early`);
+      break;
+    }
+  }
+
+  return written;
+}
+
+// ── Crypto bars (SP-1 Task 15a) — `alpaca data crypto bars` ──────────────────
+// Universe convention is `BTC-USD` (yfinance/coinbase style); Alpaca's crypto
+// endpoint wants `BTC/USD`. Translate at the API boundary only — parquet rows
+// stay keyed by the universe ticker. Response shape is bars-by-symbol object
+// (`{bars: {BTC/USD: [...]}}`) instead of the flat array returned by stocks.
+
+function _alpacaCryptoSymbol(ticker) {
+  // BTC-USD → BTC/USD, ETH-USD → ETH/USD, etc.
+  return ticker.replace(/-/g, '/');
+}
+
+async function fillPricesAlpacaCrypto(ticker, fromDate, toDate) {
+  const apiSymbol = _alpacaCryptoSymbol(ticker);
+  const baseArgs = [
+    'data', 'crypto', 'bars',
+    '--symbols',    apiSymbol,
+    '--start',      fromDate,
+    '--end',        toDate,
+    '--timeframe',  '1Day',
+    '--limit',      '1000',
+  ];
+
+  let written   = 0;
+  let pageToken = null;
+  let pages     = 0;
+
+  while (true) {
+    const args = pageToken ? [...baseArgs, '--page-token', pageToken] : baseArgs;
+    const r = await runAlpaca(args, { timeout: 30_000 });
+
+    if (!r.ok) {
+      const status = r.error?.status;
+      const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+      if (status === 400 && /invalid symbol/i.test(errMsg)) {
+        console.warn(`[collector] fillPricesAlpacaCrypto: skip ${ticker}→${apiSymbol} (${errMsg})`);
+        return written;
+      }
+      throw new Error(`alpaca data crypto bars ${ticker}→${apiSymbol} (${fromDate}→${toDate}): ${errMsg}`);
+    }
+
+    // Crypto endpoint returns bars-by-symbol object; pick the requested key.
+    const barsBySym = r.payload?.bars || {};
+    const bars      = barsBySym[apiSymbol];
+    if (Array.isArray(bars) && bars.length > 0) {
+      written += await store.upsertPrices(ticker, bars, 'alpaca-crypto');
+    }
+
+    pageToken = r.payload?.next_page_token || null;
+    pages++;
+    if (!pageToken) break;
+    if (pages >= 20) {
+      console.warn(`[collector] fillPricesAlpacaCrypto: ${ticker} hit 20-page cap`);
+      break;
+    }
+  }
+
+  return written;
+}
+
+// ── FMP historical-price-eod (SP-1 Task 15a) — indices + forex ───────────────
+// Alpaca's stocks endpoint can't serve indices (^GSPC, ^DJI, …) and the
+// account isn't authorized for FX (403). FMP Starter still has both at the
+// `stable/historical-price-eod/full` endpoint. Futures (CL=F, GC=F) require
+// FMP Premium and are NOT covered — those stay deferred at the dispatch layer.
+
+const _FMP_KEY = process.env.FMP_API_KEY || '';
+
+function _httpsGetJson(url, timeoutMs = 15_000) {
+  return new Promise((resolve) => {
+    const u = new URL(url);
+    const req = https.request(
+      {
+        hostname: u.hostname,
+        path:     u.pathname + u.search,
+        method:   'GET',
+        timeout:  timeoutMs,
+        headers:  { Accept: 'application/json' },
+      },
+      (res) => {
+        let chunks = '';
+        res.on('data', (c) => { chunks += c; });
+        res.on('end',  () => {
+          // FMP returns plain text starting with "Premium" or "Special Endpoint"
+          // when a symbol is gated behind a higher subscription tier — surface
+          // this distinctly so callers can warn-and-skip instead of throwing on
+          // parse-error.
+          const body = chunks || '';
+          try {
+            resolve({ ok: true, status: res.statusCode, json: body ? JSON.parse(body) : null });
+          } catch (_) {
+            const head = body.slice(0, 200);
+            const tier = /^(Premium|Special)/i.test(body.trim());
+            resolve({ ok: !tier, status: res.statusCode, body: head, tierGated: tier });
+          }
+        });
+      },
+    );
+    req.on('error',   (e) => resolve({ ok: false, error: e.message }));
+    req.on('timeout', () => { req.destroy(); resolve({ ok: false, error: 'timeout' }); });
+    req.end();
+  });
+}
+
+function _fmpSymbol(ticker) {
+  // yfinance forex (`EURUSD=X`, `USDJPY=X`) → FMP's bare `EURUSD`, `USDJPY`.
+  // Indices (`^GSPC`, `^DJI`) carry through unchanged.
+  if (/=X$/.test(ticker)) return ticker.replace(/=X$/, '');
+  return ticker;
+}
+
+async function fillPricesFmpHistorical(ticker, fromDate, toDate) {
+  if (!_FMP_KEY) {
+    console.warn(`[collector] fillPricesFmpHistorical: FMP_API_KEY unset; skip ${ticker}`);
+    return 0;
+  }
+  const apiSymbol = _fmpSymbol(ticker);
+  const url = `https://financialmodelingprep.com/stable/historical-price-eod/full`
+    + `?symbol=${encodeURIComponent(apiSymbol)}`
+    + `&from=${fromDate}&to=${toDate}`
+    + `&apikey=${encodeURIComponent(_FMP_KEY)}`;
+
+  const r = await _httpsGetJson(url);
+  if (r.tierGated) {
+    // FMP returns "Premium Query Parameter: …" plain-text for symbols gated
+    // behind a higher subscription tier (^TNX, ^GDAXI, DX-Y.NYB on Starter).
+    // Warn and skip — same posture as Alpaca's 400-invalid-symbol path.
+    console.warn(`[collector] fillPricesFmpHistorical: skip ${ticker}→${apiSymbol} (tier-gated on current FMP subscription)`);
+    return 0;
+  }
+  if (!r.ok) {
+    throw new Error(`fmp historical-price-eod ${ticker}→${apiSymbol}: ${r.error || 'parse: ' + (r.body || '').slice(0, 80)}`);
+  }
+  if (r.status !== 200) {
+    throw new Error(`fmp historical-price-eod ${ticker}→${apiSymbol}: HTTP ${r.status}`);
+  }
+  if (r.json && typeof r.json === 'object' && !Array.isArray(r.json) && r.json['Error Message']) {
+    // FMP encodes auth/quota/symbol errors as a JSON object with "Error Message".
+    console.warn(`[collector] fillPricesFmpHistorical: skip ${ticker}→${apiSymbol} (${r.json['Error Message'].slice(0, 120)})`);
+    return 0;
+  }
+  if (!Array.isArray(r.json) || r.json.length === 0) return 0;
+
+  // FMP rows already use the long-key form _priceRow accepts (date/open/...).
+  // upsertPrices handles missing vwap/transactions gracefully.
+  return await store.upsertPrices(ticker, r.json, 'fmp');
 }
 
 
@@ -899,27 +1102,110 @@ async function runFundamentals(tickers = null) {
   if (_alertPost) _alertPost(`✅ **Phase 5 complete** — ${_progress.rowsThisPhase} fundamental records added | ${skipped} skipped`);
 }
 
-// ── Market price history — Alpaca/FMP stub (SP-1: yfinance removed) ──────────
-// TODO Task 15+: implement Alpaca bars + FMP OHLCV for indices/ETFs/crypto/forex.
+// ── Market price history — ETFs/crypto via Alpaca; indices/forex via FMP ─────
+// Universe is mixed-asset: ETFs (SPY/QQQ/…), indices (^GSPC/^DJI/…), crypto
+// (BTC-USD/…), forex (EURUSD=X/…), futures (CL=F/…). Each goes to its own
+// provider/endpoint. Futures stay deferred — FMP Starter doesn't serve them
+// and Alpaca has no futures feed; resolve once a paid provider is added.
+//
+// Dispatch (suffix-based, no DB roundtrip needed):
+//   ^X     → index    → fillPricesFmpHistorical   (source='fmp')
+//   -USD   → crypto   → fillPricesAlpacaCrypto    (source='alpaca-crypto')
+//   =X|NYB → forex    → fillPricesFmpHistorical   (source='fmp', `=X` stripped)
+//   =F     → futures  → deferred (no provider)
+//   else   → ETF      → fillPricesAlpaca          (source='alpaca')
 
-async function runMarketPricesYFinance(tickers, historyDays = 3650) {
+function _classifyMarketTicker(ticker) {
+  if (/^\^/.test(ticker))             return 'index';
+  if (/=F$/.test(ticker))             return 'futures';
+  if (/-USD$/.test(ticker))           return 'crypto';
+  if (/=X$|\.NYB$/.test(ticker))      return 'forex';
+  return 'etf';
+}
+
+async function _fillMarketTicker(category, ticker, fromDate, toDate) {
+  switch (category) {
+    case 'etf':     return fillPricesAlpaca(ticker, fromDate, toDate);
+    case 'crypto':  return fillPricesAlpacaCrypto(ticker, fromDate, toDate);
+    case 'index':
+    case 'forex':   return fillPricesFmpHistorical(ticker, fromDate, toDate);
+    case 'futures': return 0; // no provider; caller logs the deferral once
+    default:        return 0;
+  }
+}
+
+async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
   if (!tickers || tickers.length === 0) return;
 
   const toDate   = new Date().toISOString().slice(0, 10);
   const fromDate = new Date(Date.now() - historyDays * 86400_000).toISOString().slice(0, 10);
-  // SP-1: yfinance removed. Market instrument bars (indices, ETFs, crypto, forex)
-  // not yet migrated to Alpaca/FMP. Log and skip — Task 15 implements the replacement.
-  notify(`🌐 Market prices: ${tickers.length} instruments deferred — SP-1 Task 14 stub (${fromDate}→${toDate}) — implement via Alpaca/FMP in Task 15`);
-  _progress = { phase: '🌐 Market Prices', current: 0, total: tickers.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
-  // NotImplementedError: yfinance path removed. Market instrument bars
-  // (indices, ETFs, crypto, commodities, forex) will be wired via
-  // Alpaca bars API + FMP in Task 15.
+
+  // Bucket by category so we can log one summary per-class up front.
+  const buckets = { etf: [], crypto: [], index: [], forex: [], futures: [] };
+  for (const t of tickers) buckets[_classifyMarketTicker(t)].push(t);
+
+  const futuresCount = buckets.futures.length;
+  if (futuresCount > 0) {
+    notify(`🌐 Market prices: ${futuresCount} futures contract(s) deferred — no provider available (FMP Premium not subscribed; Alpaca has no futures feed)`);
+  }
+
+  // Tickers we will actually fetch.
+  const fetchable = [...buckets.etf, ...buckets.crypto, ...buckets.index, ...buckets.forex];
+  if (fetchable.length === 0) return;
+
+  notify(`🌐 Market prices: ${buckets.etf.length} ETF + ${buckets.crypto.length} crypto + ${buckets.index.length} index + ${buckets.forex.length} forex (${fromDate}→${toDate})`);
+  _progress = { phase: '🌐 Market Prices', current: 0, total: fetchable.length, ticker: null, phaseStart: Date.now(), rowsThisPhase: 0 };
+
+  let skipped = 0;
+  let totalCalls = 0;
+  for (let i = 0; i < fetchable.length; i++) {
+    const ticker = fetchable[i];
+    const category = _classifyMarketTicker(ticker);
+    if (_paused) { notify('⏸️ Paused — waiting...'); while (_paused) await sleep(1000); }
+
+    const gaps = await store.getGaps(ticker, 'prices', fromDate, toDate);
+    if (gaps.length === 0) {
+      skipped++;
+      tickProgress('🌐 Market Prices', i + 1, fetchable.length, ticker, 0);
+      continue;
+    }
+    const start = Date.now();
+    let totalWritten = 0;
+    for (const gap of gaps) {
+      try {
+        const written = await _fillMarketTicker(category, ticker, gap.from, gap.to);
+        await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
+        totalWritten += written;
+        totalCalls++;
+      } catch (err) {
+        _stats.errors++;
+        await store.logRun(ticker, 'prices', 'error', 0, err.message, Date.now() - start, 1);
+        notify(`⚠️ ${ticker} (${category}) market-prices error: ${err.message}`);
+      }
+    }
+    _stats.prices += totalWritten;
+    tickProgress('🌐 Market Prices', i + 1, fetchable.length, ticker, totalWritten);
+    if (totalWritten > 0) {
+      await store.logRun(ticker, 'prices', 'success', totalWritten, null, Date.now() - start, gaps.length);
+    }
+  }
+
+  try {
+    const flushed = await store.flushPrices();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Market-prices flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Market-prices flush FAILED: ${err.message}`);
+  }
+
+  notify(`✅ Market prices complete — ${_progress.rowsThisPhase.toLocaleString()} new rows | ${skipped}/${fetchable.length} skipped (no gaps) | ${totalCalls} API calls`);
 }
 
-// ── News collection — Alpaca News API (SP-1: yfinance removed) ───────────────
-// Note: Alpaca News (src/ingestion/alpaca_news.py) populates ticker_sentiment_daily.
-// runNewsCollection (below) writes to market_news table — migration to Alpaca/FMP
-// news API or RSS feeds is TODO Task 15+.
+
+// ── News collection — Alpaca News API (SP-1 Task 15a, 2026-05-22) ────────────
+// alpaca_news.py dual-writes ticker_sentiment_daily.alpaca_news_* + market_news
+// from one fetch. runNewsCollection (below) is now a 30-day prune-only phase.
 
 async function runInsiderTransactions(tickers = null) {
   if (!tickers) tickers = await getActiveTickers();
@@ -1016,13 +1302,12 @@ async function runInsiderTransactions(tickers = null) {
 }
 
 async function runNewsCollection(equityTickers) {
-  // SP-1 Task 14: yfinance news path removed. market_news ingest via
-  // alternative provider (Alpaca News API or RSS) is TODO Task 15+.
-  // Alpaca News already populates ticker_sentiment_daily via
-  // src/ingestion/alpaca_news.py (different table, different call site).
-  notify(`📰 News: collection deferred — SP-1 yfinance removed, Task 15 will wire Alpaca/FMP news to market_news table`);
-
-  // Prune articles older than 30 days (maintenance still runs)
+  // SP-1 Task 15a (2026-05-22): market_news ingestion now happens in the
+  // sentiment step via src/ingestion/alpaca_news.py, which dual-writes to
+  // both ticker_sentiment_daily.alpaca_news_* AND market_news. One Alpaca
+  // fetch feeds both consumers. This phase is now a pure maintenance prune
+  // so the daily-cycle phase ordering + Discord progress posts don't change.
+  notify(`📰 News: ingestion runs in sentiment step (alpaca_news.py dual-write); pruning market_news older than 30d`);
   try {
     const { query: dbQuery } = require('../database/postgres');
     await dbQuery(`DELETE FROM market_news WHERE published_at < NOW() - INTERVAL '30 days'`).catch(() => null);
@@ -1202,7 +1487,7 @@ async function runDailyCollection() {
 
   // Phase 2b: Market instrument prices (stub — SP-1 yfinance removed; Task 15 wires Alpaca/FMP)
   if (cfg.collect_market_prices !== 'false' && priceMarketNeeded.length > 0) {
-    await runMarketPricesYFinance(priceMarketNeeded, historyDays);
+    await runMarketPricesNonEquity(priceMarketNeeded, historyDays);
   } else if (priceMarketNeeded.length === 0) {
     notify('✅ Prices (market): all current — skipped');
   }
@@ -1436,7 +1721,7 @@ async function runEodRefresh() {
   }
 
   await runHistoricalPrices(historyDays, equityTickers);
-  await runMarketPricesYFinance(marketTickers, historyDays);
+  await runMarketPricesNonEquity(marketTickers, historyDays);
 
   // Diff coverage AFTER the run.
   const afterRows = await store.getAllCoverage('prices').catch(() => []);
@@ -1496,4 +1781,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, loadQuarantineSet, isQuarantined, _quarantineSet };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet };

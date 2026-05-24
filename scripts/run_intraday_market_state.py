@@ -55,6 +55,27 @@ TRANSITIONING_FALLBACK = 'TRANSITIONING'
 STATE_NAMES_BY_RANK    = {0: 'LOW_VOL', 1: 'TRANSITIONING',
                           2: 'HIGH_VOL', 3: 'CRISIS'}
 
+# Tiered hysteresis: (required_ticks_to_fire, required_confidence_at_fire).
+# Higher-severity upward transitions get faster confirmation (fewer ticks)
+# but tighter confidence floors to counterbalance noise. Downward transitions
+# always use the conservative (3, 0.70) — no urgency to re-add risk, and
+# whipsaw protection matters more than speed.
+HYSTERESIS_TIERS       = {
+    'CRISIS':        (1, 0.90),
+    'HIGH_VOL':      (2, 0.80),
+    'TRANSITIONING': (3, 0.70),
+    'LOW_VOL':       (3, 0.70),
+}
+_DOWNWARD_TIER         = (3, 0.70)
+_STATE_RANK            = {'LOW_VOL': 0, 'TRANSITIONING': 1,
+                          'HIGH_VOL': 2, 'CRISIS': 3}
+# How many rows of state history to fetch when deciding whether a
+# confirmed transition has happened. Must be > HYSTERESIS_N so that the
+# previously CONFIRMED regime stays visible past any short noise tick.
+# 120 ticks ≈ 10h of 5-min ticks — spans a full trading session plus
+# yesterday's last confirmed state through the overnight gap.
+LOOKBACK_FOR_CONFIRMED = 120
+
 # HMM input feature ordering — fixed for compatibility with stored pickles.
 # When new features are added later (e.g., PCR/0DTE once we wire Polygon
 # enrichment), append at the END so prior pickles still work. Order matters.
@@ -353,30 +374,83 @@ def _hysteresis_streak(history: list[dict], current_state: str) -> int:
     return n + 1   # +1 because the new tick itself counts
 
 
+def _is_upward(prior_state: str | None, new_state: str) -> bool:
+    """True if new_state has higher severity rank than prior_state."""
+    if prior_state is None:
+        return False
+    return _STATE_RANK.get(new_state, -1) > _STATE_RANK.get(prior_state, -1)
+
+
+def _tier_for_transition(prior_state: str | None, new_state: str) -> tuple[int, float]:
+    """Return (required_ticks, required_confidence) for transition into new_state.
+    Upward transitions use HYSTERESIS_TIERS; downward/same use _DOWNWARD_TIER."""
+    if _is_upward(prior_state, new_state):
+        return HYSTERESIS_TIERS.get(new_state, _DOWNWARD_TIER)
+    return _DOWNWARD_TIER
+
+
+def _find_settled_regime(history: list[dict]) -> str | None:
+    """Find the regime the system is currently 'in' — the settled regime.
+
+    Two ways a regime row counts as settled:
+      1. The row's `fired_liquidation` is True — a confirmed transition
+         was acted on, definitively establishing this state as the
+         current regime (until the next transition fires).
+      2. The row's `hysteresis_streak` >= 3 — the state has been
+         continuously observed for at least 3 ticks (15 min). 3 is the
+         most conservative tier minimum and serves as the "no recent
+         fire" fallback for cold-starts or post-cooldown ticks.
+
+    Walk newest→oldest and return the first matching row's state. This
+    decouples "what regime are we in" from "what tier triggers a fire"
+    so downward transitions (which require 3 ticks per _DOWNWARD_TIER)
+    can fire even when the destination state has a shorter upward tier
+    (e.g., HIGH_VOL upward = 2 ticks; CRISIS→HIGH_VOL downward = 3 ticks
+    still works because we never recognize HIGH_VOL as settled at 2 ticks).
+    """
+    for row in history:
+        state = row.get('state')
+        if not state:
+            continue
+        if row.get('fired_liquidation'):
+            return state
+        try:
+            row_streak = int(row.get('hysteresis_streak') or 0)
+        except (TypeError, ValueError):
+            row_streak = 0
+        if row_streak >= 3:
+            return state
+    return None
+
+
 def _confirmed_transition(history: list[dict], current_state: str,
-                           streak: int, n_required: int) -> tuple[bool, str | None]:
+                           streak: int, current_confidence: float) -> tuple[bool, str | None]:
     """Decide whether this tick is a confirmed transition.
 
-    A "confirmed transition" requires:
-      - The current state has been observed for ≥ N_required ticks in a row
-        (this tick included; that's `streak >= N_required`).
-      - The state IMMEDIATELY before the streak started was different.
+    Find the SETTLED regime (most recent fired row, or oldest long-streak
+    row as fallback). If it differs from current_state, look up the tier
+    for (settled → current_state) and fire only if both `streak` and
+    `current_confidence` meet the tier thresholds.
 
-    Returns (fired, prior_state). prior_state is the state we're
-    transitioning FROM, derived from the first row whose state differs
-    from current_state in the newest-first history.
+    Tier rules:
+      - Upward (less severe → more severe): destination state's tier
+        from HYSTERESIS_TIERS (CRISIS=1/0.90, HIGH_VOL=2/0.80,
+        TRANSITIONING & LOW_VOL=3/0.70)
+      - Downward or same: _DOWNWARD_TIER (3, 0.70) — no urgency to
+        re-add risk on regime normalization; whipsaw protection.
+
+    Cold-start (no settled regime in lookback) → no fire.
     """
+    settled = _find_settled_regime(history)
+    if settled is None or settled == current_state:
+        return False, None
+
+    n_required, conf_required = _tier_for_transition(settled, current_state)
     if streak < n_required:
         return False, None
-    prior = None
-    for row in history:
-        if row.get('state') != current_state:
-            prior = row.get('state')
-            break
-    if prior is None:
-        # First-time observation — no prior state recorded; not a transition.
+    if current_confidence < conf_required:
         return False, None
-    return True, prior
+    return True, settled
 
 
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
@@ -539,11 +613,15 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         logger.info('HMM model not yet trained (no %s) — accumulating data only',
                     MODEL_PATH.name)
 
-    # 3) Hysteresis lookback
-    history = _last_n_states(conn, HYSTERESIS_N)
+    # 3) Hysteresis lookback. Fetch wider than HYSTERESIS_N so that
+    # _confirmed_transition can see past short noise ticks to the most
+    # recent CONFIRMED state. _hysteresis_streak still stops at the
+    # first non-match so the extra rows are only used by the
+    # confirmed-prior search.
+    history = _last_n_states(conn, LOOKBACK_FOR_CONFIRMED)
     streak = _hysteresis_streak(history, state_name)
     fired, prior_state = _confirmed_transition(
-        history, state_name, streak, HYSTERESIS_N,
+        history, state_name, streak, confidence,
     )
 
     transition_tag = None
