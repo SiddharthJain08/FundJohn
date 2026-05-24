@@ -122,6 +122,12 @@
     <div class="body" id="uni-slice"></div>
     <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="uni-slice-footer"></div>
   </section>
+
+  <section class="card span-12">
+    <header><h2>Backfill Progress (SP-2 Phase B · last 7d)</h2><span class="count" id="bfp-count"></span></header>
+    <div class="body" id="bfp"></div>
+    <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="bfp-footer"></div>
+  </section>
 </main>
 
 <footer>
@@ -386,17 +392,86 @@ async function refreshUniverseSlice() {
   footer.textContent = `generated ${new Date().toLocaleTimeString()} · ${rows.length} audit rows`;
 }
 
+// Color-coded segment palette for backfill statuses
+const BFP_COLORS = {
+  promoted:    '#6fd1a7',  // green  (--ok)
+  validated:   '#5ca0f2',  // blue
+  in_progress: '#f2c057',  // yellow (--warn)
+  failed:      '#f29a4a',  // orange
+  quarantined: '#f27878',  // red    (--err)
+};
+const BFP_ORDER = ['promoted', 'validated', 'in_progress', 'failed', 'quarantined'];
+const BFP_TARGETS = ['prices', 'metadata', 'options'];
+
+async function refreshBackfillProgress() {
+  const data = await fetchJSON('/api/backfill-progress');
+  const el = $('bfp');
+  const footer = $('bfp-footer');
+  const count = $('bfp-count');
+  if (data.error) {
+    el.innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(data.error)}</div>`;
+    if (count) count.textContent = '';
+    return;
+  }
+
+  let grandTotal = 0;
+  const sections = BFP_TARGETS.map(target => {
+    const buckets = data[target] || {};
+    const total = BFP_ORDER.reduce((s, k) => s + (buckets[k] || 0), 0);
+    grandTotal += total;
+    // Stacked horizontal bar: zero-total target → muted placeholder
+    const segs = total > 0
+      ? BFP_ORDER
+          .filter(k => (buckets[k] || 0) > 0)
+          .map(k => {
+            const pct = ((buckets[k] || 0) / total) * 100;
+            return `<div style="height:18px;width:${pct.toFixed(2)}%;background:${BFP_COLORS[k]}"
+              title="${esc(k)}: ${buckets[k]} (${pct.toFixed(1)}%)"></div>`;
+          })
+          .join('')
+      : '<div style="height:18px;width:100%;background:rgba(124,135,148,0.15)" title="no rows"></div>';
+
+    const legend = BFP_ORDER.map(k => {
+      const v = buckets[k] || 0;
+      return `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px">
+        <span style="display:inline-block;width:10px;height:10px;background:${BFP_COLORS[k]};border-radius:2px"></span>
+        <span class="muted" style="font-family:var(--mono);font-size:11px">${esc(k)}=${v}</span>
+      </span>`;
+    }).join('');
+
+    return `
+      <div style="margin-bottom:14px">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+          <div><b>${esc(target)}</b> <span class="muted" style="font-family:var(--mono);font-size:11px">${total} chunks</span></div>
+        </div>
+        <div style="display:flex;border:1px solid var(--border);border-radius:3px;overflow:hidden">${segs}</div>
+        <div style="margin-top:4px">${legend}</div>
+      </div>
+    `;
+  }).join('');
+
+  if (count) count.textContent = `${grandTotal} chunks · 7d`;
+  el.innerHTML = sections;
+  if (footer) {
+    footer.textContent = data.generated_at
+      ? `generated ${new Date(data.generated_at).toLocaleTimeString()}`
+      : '';
+  }
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
     refreshGraphs(), refreshHealth(), refreshDataHealth(), refreshUniverseSlice(),
+    refreshBackfillProgress(),
   ]);
 }
 
 refreshAll();
 setInterval(refreshAll, 10_000);
 setInterval(refreshDataHealth, 60_000);
+setInterval(refreshBackfillProgress, 30_000);
 startSSE();
 </script>
 </body>

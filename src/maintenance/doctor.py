@@ -1112,6 +1112,156 @@ def check_union_universe_size():
         return _fail(name, msg)
 
 
+# ── SP-2 Phase B: 5y backfill health ───────────────────────────────────────
+# These are slow=True because they hit Postgres with aggregating queries
+# that scan the backfill_audit + ticker_metadata_snapshots tables. They are
+# advisory — the daily cycle does not depend on the backfill having
+# completed (it operates on the live data path), so the more severe
+# thresholds are WARN, not FAIL. The system_check peers (in
+# src/system_checks/checks/) provide the stricter ongoing-health signal.
+
+def _backfill_audit_status_counts():
+    """Return {status: count} for backfill_audit rows started in the last 7d.
+    Indirection seam: tests monkeypatch this to inject fake state."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, count(*) "
+                "FROM backfill_audit "
+                "WHERE started_at > NOW() - INTERVAL '7 days' "
+                "GROUP BY status"
+            )
+            return {row[0]: int(row[1]) for row in cur.fetchall()}
+
+
+def _backfill_poisoning_quarantine_count():
+    """Return count of quarantined backfill_audit rows that indicate REAL
+    data-poisoning risk (validation failures), excluding pure overlap-
+    protection refusals.
+
+    Overlap-protection ("overlap with existing X rows under v1...") is a
+    safety mechanism that REFUSES to overwrite — it produces no master
+    parquet writes, just a conservative skip. Treating those as poisoning
+    indicators caused a false-positive doctor FAIL after the first real
+    backfill run (1362 overlap-quarantines in v1's 404-ticker pass)."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM backfill_audit "
+                "WHERE status='quarantined' "
+                "AND started_at > NOW() - INTERVAL '7 days' "
+                "AND (error_text IS NULL OR error_text NOT LIKE 'overlap with existing%')"
+            )
+            return int(cur.fetchone()[0])
+
+
+def _check_backfill_progress():
+    """Return (code, msg) where code ∈ {0=pass, 1=warn, 2=fail}.
+
+    Two-axis evaluation:
+      - REAL poisoning quarantines (validation failures): >100 → FAIL,
+        >0 → WARN. These indicate the validator caught bad fetches —
+        the system worked AS DESIGNED but operator should investigate
+        what's producing bad data.
+      - Pure OVERLAP quarantines (conservative refusal to overwrite):
+        included in the summary but never trigger FAIL. A v1 backfill
+        against partially-priced tickers naturally produces lots of
+        these (1362 in the 404-ticker pass).
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return (0, 'gate off; n/a')
+    try:
+        counts = _backfill_audit_status_counts()
+        poisoning = _backfill_poisoning_quarantine_count()
+    except Exception as exc:
+        return (1, f'audit query failed: {type(exc).__name__}: {exc}')
+    if not counts:
+        return (0, 'no backfill activity in last 7d')
+    summary = ', '.join(f'{k}={v}' for k, v in sorted(counts.items()))
+    overlap = int(counts.get('quarantined', 0)) - poisoning
+    if poisoning > 100:
+        return (2, f'poisoning_quarantined={poisoning} > 100 (validation failures) [{summary}, overlap_refusals={overlap}]')
+    if poisoning > 0:
+        return (1, f'poisoning_quarantined={poisoning} (validation failures) [{summary}, overlap_refusals={overlap}]')
+    return (0, f'{summary} (overlap_refusals={overlap}, 0 validation failures)')
+
+
+@_check('backfill_progress', slow=True)
+def check_backfill_progress():
+    """SP-2 Phase B: surface backfill quarantine counts from last 7 days.
+    FAIL >100 quarantined (data poisoning indicator), WARN >0, PASS otherwise."""
+    code, msg = _check_backfill_progress()
+    name = 'backfill_progress'
+    if code == 0:
+        return _ok(name, msg)
+    if code == 1:
+        return _warn(name, msg)
+    return _fail(name, msg)
+
+
+def _backfill_universe_coverage_rows():
+    """Return list of (month_date, row_count) tuples for each month
+    in ticker_metadata_snapshots since 2021-05-01.
+    Indirection seam: tests monkeypatch this."""
+    import psycopg2
+    uri = (os.environ.get('DATABASE_URL')
+           or os.environ.get('POSTGRES_URI')
+           or 'postgresql://openclaw:password@localhost:5432/openclaw')
+    with psycopg2.connect(uri) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT date_trunc('month', snapshot_date)::date AS m, count(*) "
+                "FROM ticker_metadata_snapshots "
+                "WHERE snapshot_date >= '2021-05-01' "
+                "GROUP BY m ORDER BY m"
+            )
+            return [(row[0], int(row[1])) for row in cur.fetchall()]
+
+
+def _check_backfill_universe_coverage():
+    """Return (code, msg) where code ∈ {0=pass, 1=warn}.
+    WARN if no rows yet (Phase B not run),
+    WARN if > 6 months have < 2500 rows (per spec target ~3000/month ± 15%),
+    PASS otherwise. No FAIL case — advisory only.
+
+    Gated on OPENCLAW_BACKFILL_5Y_ACTIVE=1 — when unset (default), PASS
+    with "gate off; n/a". The operator sets the gate AFTER the first
+    production backfill so per-month coverage gates evaluate real data."""
+    if os.environ.get('OPENCLAW_BACKFILL_5Y_ACTIVE') != '1':
+        return (0, 'gate off; n/a')
+    try:
+        rows = _backfill_universe_coverage_rows()
+    except Exception as exc:
+        return (1, f'coverage query failed: {type(exc).__name__}: {exc}')
+    if not rows:
+        return (1, 'no metadata snapshots since 2021-05-01 (Phase B not run)')
+    low = [(m, n) for (m, n) in rows if n < 2500]
+    total_months = len(rows)
+    if len(low) > 6:
+        return (1, f'{len(low)}/{total_months} months < 2500 rows (target ~3000±15%)')
+    return (0, f'{total_months} months covered, {len(low)} thin (<2500)')
+
+
+@_check('backfill_universe_coverage', slow=True)
+def check_backfill_universe_coverage():
+    """SP-2 Phase B: surface per-month row coverage in ticker_metadata_snapshots.
+    WARN if empty (Phase B not run) or >6 months with <2500 rows, PASS otherwise."""
+    code, msg = _check_backfill_universe_coverage()
+    name = 'backfill_universe_coverage'
+    if code == 0:
+        return _ok(name, msg)
+    return _warn(name, msg)
+
+
 def _drift_summary():
     """Indirection seam for the drift-alerts check."""
     sys.path.insert(0, str(ROOT / 'src'))

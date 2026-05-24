@@ -168,6 +168,11 @@ def load_prices_panels() -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
         for the bracket walk-forward
     """
     p = pd.read_parquet(PRICES_PARQUET)
+    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows before any
+    # downstream conversion. Filter expects string dates (compares against
+    # PG affected_date::TEXT), so it must run BEFORE pd.to_datetime below.
+    from src.pipeline.quarantine_filter import filter_quarantined
+    p = filter_quarantined(p, 'prices.parquet')
     p['date'] = pd.to_datetime(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.

@@ -261,6 +261,11 @@ def _load_prices() -> pd.DataFrame:
     prices, so applying our adjuster on top would double-adjust pre-split
     data. Master parquet is never mutated — adjustments are read-side."""
     long = pd.read_parquet(os.path.join(PARQUET_ROOT, "prices.parquet"))
+    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows. Must run
+    # before pivot_table/pd.to_datetime so the filter compares strings to
+    # strings (matches data_quarantine.affected_date::TEXT).
+    from src.pipeline.quarantine_filter import filter_quarantined
+    long = filter_quarantined(long, "prices.parquet")
     if os.environ.get("OPENCLAW_APPLY_SPLIT_ADJUSTMENT") == "1":
         try:
             from backtest.adjust_for_corporate_actions import adjust_dataframe

@@ -317,6 +317,40 @@ app.get('/api/data-health', async (_req, res) => {
   }
 });
 
+// ─────────────────────────── Backfill Progress (SP-2 Phase B) ───────────────
+// Aggregates backfill_audit rows by (target, status) over the last 7 days.
+// Returns:
+//   {
+//     prices:   {in_progress:N, validated:N, promoted:N, quarantined:N, failed:N},
+//     metadata: {...},
+//     options:  {...},
+//     generated_at: ISO
+//   }
+app.get('/api/backfill-progress', async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT target, status, COUNT(*)::int AS n
+        FROM backfill_audit
+       WHERE started_at >= NOW() - INTERVAL '7 days'
+       GROUP BY target, status
+    `);
+    const TARGETS = ['prices', 'metadata', 'options'];
+    const STATUSES = ['in_progress', 'validated', 'promoted', 'quarantined', 'failed'];
+    const out = {};
+    for (const t of TARGETS) {
+      out[t] = {};
+      for (const s of STATUSES) out[t][s] = 0;
+    }
+    for (const r of rows) {
+      if (!out[r.target]) out[r.target] = {};
+      out[r.target][r.status] = Number(r.n);
+    }
+    res.json({ ...out, generated_at: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─────────────────────────── Universe Resolution ─────────────────────────────
 app.get('/api/universe-slice', async (_req, res) => {
   try {

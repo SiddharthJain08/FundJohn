@@ -56,6 +56,12 @@ class ParquetCoverage:
             self._counts_by_month[month] = {}
             return self._counts_by_month[month]
         df = pd.read_parquet(self._path, columns=["ticker", "date"])
+        # SP-2 Phase B Task 5: drop quarantined (ticker, date) pairs so a
+        # ticker whose unsuperseded bars push it below MIN_BARS_FOR_INCLUSION
+        # is correctly excluded from the universe. The filter is a no-op
+        # when data_quarantine has zero unsuperseded rows for prices.parquet.
+        from src.pipeline.quarantine_filter import filter_quarantined
+        df = filter_quarantined(df, "prices.parquet")
         # date column is stored as ISO string (YYYY-MM-DD); string comparison is correct
         df = df[df["date"] <= as_of.isoformat()]
         counts = df.groupby("ticker").size().to_dict()
