@@ -351,8 +351,14 @@ def aggregate_metrics(trades: list[dict]) -> dict:
         sharpe = float((daily_returns.mean() - RISK_FREE_DAILY) / std_dr *
                        math.sqrt(TRADING_DAYS_PER_YEAR))
 
-    # Sortino ratio (annualized, target=0, downside semi-deviation).
-    # Only the negative daily returns contribute to downside deviation.
+    # Sortino ratio (annualized, target=0).
+    # Convention: downside_dev = RMS of negative-only daily returns,
+    # i.e. sqrt(mean(r_i**2)) over all r_i < 0. This is equivalent to
+    # the full-N denominator form used by many practitioners (only negative
+    # return days contribute; the denominator is the total number of
+    # *negative* return days, not the total sample size). This differs from
+    # the textbook semi-deviation which uses the full-N denominator. Both
+    # conventions annualize by multiplying by sqrt(252).
     sortino: Optional[float] = None
     if len(daily_returns) >= 2:
         downside = daily_returns[daily_returns < 0.0]
@@ -399,61 +405,51 @@ def aggregate_per_regime(trades: list[dict], regimes: pd.Series) -> dict[str, di
         agg = aggregate_metrics(regime_trades)
         agg['trade_count']        = agg.pop('total_trades')
         agg['oos_days_in_regime'] = int(regime_day_counts.get(regime, 0))
-        # NULL the sharpe under low-sample regimes to avoid noise downstream
+        # NULL the sharpe/sortino/calmar under low-sample regimes to avoid noise downstream
         if agg['trade_count'] < 5:
             agg['sharpe'] = None
+            agg['sortino'] = None
+            agg['calmar'] = None
         out[regime] = agg
     return out
 
 
-# ── Main run ─────────────────────────────────────────────────────────────────
+# ── Per-bar simulation core (shared by run_backtest and universe_grid_cli) ────
 
-def run_backtest(strategy_id: str, *,
-                 filepath: Optional[str] = None,
-                 start_date: str = DEFAULT_START_DATE,
-                 end_date: Optional[str] = None,
-                 max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
-                 conn: Optional[psycopg2.extensions.connection] = None,
-                 commit: bool = True,
-                 resolver=None) -> str:
-    """Execute the unified backtest for one strategy. Returns the run_id (UUID).
+def _per_bar_simulate(
+    instance,
+    close_wide: pd.DataFrame,
+    bars_by_ticker: dict,
+    regimes: pd.Series,
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    *,
+    strategy_id: Optional[str] = None,
+    resolver=None,
+    max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+) -> dict:
+    """Single source-of-truth for the per-bar simulation loop.
 
-    Side effect: writes one row to strategy_backtest_runs, up to 4 rows
-    to strategy_backtest_regimes (one per regime that produced trades),
-    and N rows to strategy_backtest_trades.
+    Encapsulates: min_lookback gate, regime_payload construction,
+    generate_signals 4-arg→3-arg fallback, entry_regime tagging,
+    stop/target sanity skips, simulate_trade, and per-bar universe-size
+    tracking.
 
-    SP-2 Phase C: optional ``resolver`` kwarg. When set (not None), the per-bar
-    universe is resolved via ``resolver.resolve(strategy_id, as_of=cur_d)``
-    instead of the static universe computed once from close_wide columns.
-    The mean of per-bar universe sizes is stored in ``_universe_sizes_out``
-    on the resolver object after the run, and also returned via the
-    ``run_backtest_grid`` wrapper. When resolver is None the function is
-    byte-identical to the pre-resolver implementation.
+    Returns a dict with keys:
+      - trades: list[dict]
+      - universe_sizes: list[int]  (non-empty only when resolver is not None)
+      - days_processed: int
+      - days_with_signals: int
+      - static_universe: list[str]  (computed from close_wide columns)
+      - min_lookback: int           (taken from instance attr or 20)
+
+    ``instance`` must already have ``active_in_regimes`` set to cover all
+    regimes (discovery mode); callers are responsible for this.
+    ``strategy_id`` is only required when ``resolver`` is not None.
     """
-    filepath = filepath or find_strategy_file(strategy_id)
-    if not filepath:
-        raise FileNotFoundError(f'no implementation file for {strategy_id}')
-    strategy_cls = load_strategy_class(filepath)
-    _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
-
-    # Discovery mode: bypass should_run() by widening active_in_regimes on
-    # the instance. Strategies that branch on regime['state'] *inside*
-    # generate_signals still see the live regime; they just don't get to
-    # early-exit on it.
-    instance = strategy_cls()
-    instance.active_in_regimes = list(CANONICAL_REGIMES)
-
-    close_wide, bars_by_ticker = load_prices_panels()
-    regimes = load_regimes()
-    _log(f'prices: {close_wide.shape[0]} dates × {close_wide.shape[1]} tickers; '
-         f'regimes: {len(regimes)} days')
-
-    start_dt = pd.Timestamp(start_date)
-    end_dt   = pd.Timestamp(end_date) if end_date else close_wide.index.max()
-    oos_dates = close_wide.loc[start_dt:end_dt].index
-
-    universe = [c for c in close_wide.columns
-                if not c.startswith('^') and '-USD' not in c and '=F' not in c]
+    # Static universe: equity tickers only (no indices, crypto, futures).
+    static_universe = [c for c in close_wide.columns
+                       if not c.startswith('^') and '-USD' not in c and '=F' not in c]
     min_lookback = getattr(instance, 'min_lookback', 20)
 
     # Aux-data loader — strategies that need options/financials get it.
@@ -462,10 +458,12 @@ def run_backtest(strategy_id: str, *,
     except Exception:
         load_aux_data = None
 
+    oos_dates = close_wide.loc[start_dt:end_dt].index
+
     trades: list[dict] = []
     days_processed = 0
     days_with_signals = 0
-    # SP-2 Phase C: track per-bar universe sizes when resolver is active.
+    # Track per-bar universe sizes when resolver is active.
     universe_sizes: list[int] = []
 
     for current_date in oos_dates:
@@ -485,7 +483,7 @@ def run_backtest(strategy_id: str, *,
             bar_universe = resolver.resolve(strategy_id, as_of=cur_d)
             universe_sizes.append(len(bar_universe))
         else:
-            bar_universe = universe
+            bar_universe = static_universe
 
         regime_payload = {
             'state':            str(regime_state),
@@ -559,6 +557,74 @@ def run_backtest(strategy_id: str, *,
                 'signal_target':  target_1,
             })
 
+    return {
+        'trades':           trades,
+        'universe_sizes':   universe_sizes,
+        'days_processed':   days_processed,
+        'days_with_signals': days_with_signals,
+        'static_universe':  static_universe,
+        'min_lookback':     min_lookback,
+    }
+
+
+# ── Main run ─────────────────────────────────────────────────────────────────
+
+def run_backtest(strategy_id: str, *,
+                 filepath: Optional[str] = None,
+                 start_date: str = DEFAULT_START_DATE,
+                 end_date: Optional[str] = None,
+                 max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+                 conn: Optional[psycopg2.extensions.connection] = None,
+                 commit: bool = True,
+                 resolver=None) -> str:
+    """Execute the unified backtest for one strategy. Returns the run_id (UUID).
+
+    Side effect: writes one row to strategy_backtest_runs, up to 4 rows
+    to strategy_backtest_regimes (one per regime that produced trades),
+    and N rows to strategy_backtest_trades.
+
+    SP-2 Phase C: optional ``resolver`` kwarg. When set (not None), the per-bar
+    universe is resolved via ``resolver.resolve(strategy_id, as_of=cur_d)``
+    instead of the static universe computed once from close_wide columns.
+    The mean of per-bar universe sizes is stored in ``_universe_sizes_out``
+    on the resolver object after the run, and also returned via the
+    ``run_backtest_grid`` wrapper. When resolver is None the function is
+    byte-identical to the pre-resolver implementation.
+    """
+    filepath = filepath or find_strategy_file(strategy_id)
+    if not filepath:
+        raise FileNotFoundError(f'no implementation file for {strategy_id}')
+    strategy_cls = load_strategy_class(filepath)
+    _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
+
+    # Discovery mode: bypass should_run() by widening active_in_regimes on
+    # the instance. Strategies that branch on regime['state'] *inside*
+    # generate_signals still see the live regime; they just don't get to
+    # early-exit on it.
+    instance = strategy_cls()
+    instance.active_in_regimes = list(CANONICAL_REGIMES)
+
+    close_wide, bars_by_ticker = load_prices_panels()
+    regimes = load_regimes()
+    _log(f'prices: {close_wide.shape[0]} dates × {close_wide.shape[1]} tickers; '
+         f'regimes: {len(regimes)} days')
+
+    start_dt = pd.Timestamp(start_date)
+    end_dt   = pd.Timestamp(end_date) if end_date else close_wide.index.max()
+
+    sim = _per_bar_simulate(
+        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+        strategy_id=strategy_id,
+        resolver=resolver,
+        max_hold_days=max_hold_days,
+    )
+    trades         = sim['trades']
+    universe_sizes = sim['universe_sizes']
+    days_processed = sim['days_processed']
+    days_with_signals = sim['days_with_signals']
+    universe       = sim['static_universe']
+    min_lookback   = sim['min_lookback']
+
     _log(f'simulation: {days_processed} active days, {days_with_signals} signal days, {len(trades)} trades')
 
     # SP-2 Phase C: store mean universe size on resolver for caller retrieval.
@@ -602,7 +668,9 @@ def run_backtest(strategy_id: str, *,
                 'min_lookback':   min_lookback,
                 'start_date':     start_dt.date().isoformat(),
                 'end_date':       end_dt.date().isoformat(),
-                'universe_size':  len(universe),
+                'universe_size':  (round(sum(universe_sizes) / len(universe_sizes), 2)
+                                   if resolver is not None and universe_sizes
+                                   else len(universe)),
                 'methodology':    'discovery',
             }),
             None,

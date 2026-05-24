@@ -147,19 +147,14 @@ def _simulate_grid(
 ) -> tuple[dict, Optional[float]]:
     """Run the simulation core (no DB writes) and return (per_regime, mean_universe_size).
 
-    NOTE: This intentionally mirrors the per-bar loop in
-    ``backtest.unified_backtest.run_backtest``.  If you change signal
-    generation, trade simulation, or universe dispatch there, keep this
-    loop in sync.  The two paths are separate because run_backtest
-    writes to Postgres; grid runs must never pollute the DB.
+    Delegates to ``_per_bar_simulate`` from ``backtest.unified_backtest`` —
+    the single source of truth for the per-bar loop. Grid runs never write
+    to Postgres; ``run_backtest`` adds DB persistence on top of the same loop.
     """
     import pandas as pd
-    import numpy as np
     from backtest.unified_backtest import (
         load_prices_panels, load_regimes, load_strategy_class,
-        find_strategy_file, aggregate_per_regime, CANONICAL_REGIMES as CR,
-        _signal_to_long_short, simulate_trade, _log, DEFAULT_MAX_HOLD_DAYS,
-        aggregate_metrics,
+        find_strategy_file, aggregate_per_regime, _log, _per_bar_simulate,
     )
     from strategies.base import CANONICAL_REGIMES
 
@@ -169,7 +164,6 @@ def _simulate_grid(
     strategy_cls = load_strategy_class(filepath)
     instance = strategy_cls()
     instance.active_in_regimes = list(CANONICAL_REGIMES)
-    min_lookback = getattr(instance, 'min_lookback', 20)
 
     close_wide, bars_by_ticker = load_prices_panels()
     regimes = load_regimes()
@@ -178,116 +172,23 @@ def _simulate_grid(
     end_dt = pd.Timestamp(end_date)
     oos_dates = close_wide.loc[start_dt:end_dt].index
 
-    try:
-        from strategies.aux_data_loader import load_aux_data
-    except Exception:
-        load_aux_data = None
+    sim = _per_bar_simulate(
+        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+        strategy_id=strategy_id,
+        resolver=resolver,
+    )
+    trades         = sim['trades']
+    universe_sizes = sim['universe_sizes']
 
-    trades: list[dict] = []
-    universe_sizes: list[int] = []
-
-    for current_date in oos_dates:
-        prices_to_date = close_wide.loc[:current_date]
-        if len(prices_to_date) < min_lookback + 5:
-            continue
-        cur_d = current_date.date() if hasattr(current_date, 'date') else current_date
-        regime_state = regimes.get(current_date, None)
-        if regime_state is None or pd.isna(regime_state):
-            continue
-
-        bar_universe = resolver.resolve(strategy_id, as_of=cur_d)
-        universe_sizes.append(len(bar_universe))
-
-        regime_payload = {
-            'state': str(regime_state),
-            'date': cur_d.isoformat(),
-            'one_hot': {r: (1.0 if r == regime_state else 0.0) for r in CANONICAL_REGIMES},
-            'transition_probs': {
-                r1: {r2: (1.0 if r1 == r2 else 0.0) for r2 in CANONICAL_REGIMES}
-                for r1 in CANONICAL_REGIMES
-            },
-        }
-
-        aux = {'options': {}}
-        if load_aux_data is not None:
-            try:
-                aux = load_aux_data(current_date)
-            except Exception:
-                aux = {'options': {}}
-
-        try:
-            signals = instance.generate_signals(prices_to_date, regime_payload, bar_universe, aux_data=aux)
-        except TypeError:
-            try:
-                signals = instance.generate_signals(prices_to_date, regime_payload, bar_universe)
-            except Exception:
-                continue
-        except Exception:
-            continue
-
-        if not signals:
-            continue
-
-        for sig in signals[:instance.MAX_SIGNALS]:
-            direction = _signal_to_long_short(sig.direction)
-            if direction == 0:
-                continue
-            ticker = sig.ticker
-            if ticker not in bars_by_ticker:
-                continue
-            ticker_bars = bars_by_ticker[ticker]
-            if current_date not in ticker_bars.index:
-                continue
-            entry_price = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
-                else float(ticker_bars.loc[current_date, 'close'])
-            stop_loss = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
-                else (entry_price * 0.93 if direction > 0 else entry_price * 1.07)
-            target_1 = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
-                else (entry_price * 1.08 if direction > 0 else entry_price * 0.92)
-            if direction > 0 and (stop_loss >= entry_price or target_1 <= entry_price):
-                continue
-            if direction < 0 and (stop_loss <= entry_price or target_1 >= entry_price):
-                continue
-            exit_info = simulate_trade(ticker_bars, current_date, direction,
-                                       entry_price, stop_loss, target_1, DEFAULT_MAX_HOLD_DAYS)
-            trades.append({
-                'ticker': ticker,
-                'direction': 'long' if direction > 0 else 'short',
-                'entry_date': cur_d,
-                'entry_price': entry_price,
-                'exit_date': (exit_info['exit_date'].date()
-                              if hasattr(exit_info['exit_date'], 'date')
-                              else exit_info['exit_date']),
-                'exit_price': exit_info['exit_price'],
-                'exit_reason': exit_info['exit_reason'],
-                'holding_days': exit_info['holding_days'],
-                'pnl_pct': exit_info['pnl_pct'],
-                'entry_regime': str(regime_state),
-                'signal_stop': stop_loss,
-                'signal_target': target_1,
-            })
-
+    _pred = getattr(resolver, '_forced_predicate', type(resolver))
+    _pred_name = getattr(_pred, '__name__', repr(_pred))
     _log(f'grid sim: {len(oos_dates)} bars, {len(trades)} trades, '
-         f'{len(universe_sizes)} universe samples for {strategy_id}/{resolver._forced_predicate.__name__}')
+         f'{len(universe_sizes)} universe samples for {strategy_id}/{_pred_name}')
 
+    # aggregate_per_regime calls aggregate_metrics internally and copies all keys
+    # (including sortino/calmar) into out[regime]=agg. Low-sample regimes (<5 trades)
+    # have sharpe/sortino/calmar nulled inside aggregate_per_regime itself.
     per_regime = aggregate_per_regime(trades, regimes.loc[start_dt:end_dt])
-    # Inject sortino/calmar into per_regime (aggregate_metrics already computes them;
-    # aggregate_per_regime calls aggregate_metrics internally, but we need to add the
-    # new keys that aggregate_per_regime doesn't copy out).
-    # Re-compute per-regime trades to get sortino/calmar per regime.
-    _by_regime: dict[str, list[dict]] = {r: [] for r in CANONICAL_REGIMES}
-    for t in trades:
-        r = t.get('entry_regime')
-        if r in CANONICAL_REGIMES:
-            _by_regime[r].append(t)
-    for r in CANONICAL_REGIMES:
-        agg_full = aggregate_metrics(_by_regime[r])
-        per_regime[r]['sortino'] = agg_full.get('sortino')
-        per_regime[r]['calmar'] = agg_full.get('calmar')
-        # Also zero-out sortino/calmar for low-sample regimes (same threshold as sharpe)
-        if per_regime[r].get('trade_count', 0) < 5:
-            per_regime[r]['sortino'] = None
-            per_regime[r]['calmar'] = None
 
     mean_universe_size: Optional[float] = None
     if universe_sizes:

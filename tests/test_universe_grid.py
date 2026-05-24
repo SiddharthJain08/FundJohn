@@ -239,8 +239,9 @@ class TestAggregateMetricsExtensions:
             trades.append({"pnl_pct": 0.02, "holding_days": 3,
                            "entry_date": f"2024-03-{d:02d}"})
         m = aggregate_metrics(trades)
-        if m["max_dd_pct"] > 0 and m["calmar"] is not None:
-            assert m["calmar"] != 0
+        assert m["max_dd_pct"] > 0, "test data should produce a drawdown"
+        assert m["calmar"] is not None, "test data should produce a finite calmar"
+        assert m["calmar"] != 0
 
 
 # ---------------------------------------------------------------------------
@@ -311,48 +312,30 @@ class TestRunBacktestResolverNone:
             bars_by_ticker[t] = df
         return close_wide, bars_by_ticker, regimes
 
-    def _run_with_stubs(self, resolver_kwarg, mock_conn):
+    def _run_with_stubs(self, resolver, mock_conn):
+        """Run run_backtest with fully stubbed IO; return (run_id, recorded_universes).
+
+        ``recorded_universes`` is the list of universe args the stub strategy
+        received across all bars. This is the regression vector: with
+        resolver=None, every bar must receive the static equity-only universe
+        derived from close_wide columns.
+        """
         import backtest.unified_backtest as ub
-        from strategies.base import CANONICAL_REGIMES
+        from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES
 
         cls = self._make_stub_strategy_cls()
         close_wide, bars_by_ticker, regimes = self._make_prices_regimes()
 
-        with (
-            patch("backtest.unified_backtest.load_prices_panels",
-                  return_value=(close_wide, bars_by_ticker)),
-            patch("backtest.unified_backtest.load_regimes",
-                  return_value=regimes),
-            patch("backtest.unified_backtest.load_strategy_class",
-                  return_value=cls),
-            patch("backtest.unified_backtest.find_strategy_file",
-                  return_value="/fake/stub_for_regression.py"),
-            patch("backtest.unified_backtest._code_sha",
-                  return_value="abc123"),
-        ):
-            try:
-                result = ub.run_backtest(
-                    "stub_for_regression",
-                    conn=mock_conn,
-                    commit=False,
-                    **resolver_kwarg,
-                )
-            except Exception:
-                result = None
+        recorded_universes: list[list] = []
 
-        return result
+        # Wrap the strategy class to capture per-bar universe arguments.
+        original_generate = cls.generate_signals
 
-    def test_resolver_none_does_not_crash(self):
-        """run_backtest with resolver=None must accept the kwarg without error."""
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_conn.cursor.return_value = mock_cur
-        mock_conn.__enter__ = lambda s: s
-        mock_conn.__exit__ = MagicMock(return_value=False)
+        def recording_generate(self_inst, prices, regime, universe, aux_data=None):
+            recorded_universes.append(list(universe))
+            return original_generate(self_inst, prices, regime, universe, aux_data=aux_data)
 
-        import backtest.unified_backtest as ub
-        cls = self._make_stub_strategy_cls()
-        close_wide, bars_by_ticker, regimes = self._make_prices_regimes()
+        cls.generate_signals = recording_generate
 
         with (
             patch("backtest.unified_backtest.load_prices_panels",
@@ -367,13 +350,159 @@ class TestRunBacktestResolverNone:
                   return_value="abc123"),
             patch("backtest.unified_backtest.psycopg2.extras.execute_values"),
         ):
-            # Should not raise
-            ub.run_backtest(
+            run_id = ub.run_backtest(
                 "stub_for_regression",
                 conn=mock_conn,
                 commit=False,
-                resolver=None,
+                resolver=resolver,
             )
+
+        return run_id, recorded_universes, close_wide
+
+    def _make_mock_conn(self):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+        return mock_conn
+
+    def test_resolver_none_universe_equals_static(self):
+        """run_backtest(resolver=None): every bar's universe equals the static
+        equity-only column list derived from close_wide, i.e. the pre-resolver
+        behaviour is unchanged."""
+        mock_conn = self._make_mock_conn()
+        _, recorded_universes, close_wide = self._run_with_stubs(None, mock_conn)
+
+        expected_static = sorted([
+            c for c in close_wide.columns
+            if not c.startswith('^') and '-USD' not in c and '=F' not in c
+        ])
+        assert len(recorded_universes) > 0, "stub strategy should have fired on at least one bar"
+        for bar_universe in recorded_universes:
+            assert sorted(bar_universe) == expected_static, (
+                f"resolver=None bar universe {sorted(bar_universe)} "
+                f"!= static {expected_static}"
+            )
+
+    def test_resolver_none_does_not_crash(self):
+        """run_backtest with resolver=None must accept the kwarg without error."""
+        mock_conn = self._make_mock_conn()
+        run_id, _, _ = self._run_with_stubs(None, mock_conn)
+        assert run_id is not None
+
+
+# ---------------------------------------------------------------------------
+# 3b. run_backtest(resolver=<MockResolver>) coverage: resolver-provided universe
+# ---------------------------------------------------------------------------
+
+class TestRunBacktestWithResolver:
+    """Verifies that run_backtest with a real MockResolver passes the
+    resolver-provided universe to generate_signals on every bar."""
+
+    def _make_prices_regimes(self):
+        """Build a minimal set of prices and regimes (same as regression fixture)."""
+        dates = pd.date_range("2024-01-01", periods=60, freq="B")
+        tickers = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+        prices = {}
+        rng = np.random.default_rng(99)
+        for t in tickers:
+            base = 100.0
+            changes = rng.normal(0, 0.01, len(dates))
+            prices[t] = base * np.cumprod(1 + changes)
+        close_wide = pd.DataFrame(prices, index=dates)
+        close_wide.index.name = "date"
+        regime_list = ["LOW_VOL", "TRANSITIONING", "HIGH_VOL", "CRISIS"]
+        regimes = pd.Series({d: regime_list[i % 4] for i, d in enumerate(dates)})
+        bars_by_ticker = {}
+        for t in tickers:
+            bars_by_ticker[t] = pd.DataFrame({
+                "open": close_wide[t] * 0.99,
+                "high": close_wide[t] * 1.01,
+                "low": close_wide[t] * 0.98,
+                "close": close_wide[t],
+            }, index=dates)
+        return close_wide, bars_by_ticker, regimes
+
+    def test_run_backtest_uses_resolver_universe(self):
+        """run_backtest with a MockResolver: each bar's universe comes from the
+        resolver (not the static close_wide columns). We assert that the
+        resolver's _universe_sizes_out is recorded and that bars received
+        only the resolver-provided tickers."""
+        import backtest.unified_backtest as ub
+        from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES
+        from strategies.universe_resolver import MockResolver
+        from datetime import date as _date
+
+        close_wide, bars_by_ticker, regimes = self._make_prices_regimes()
+
+        # Cap-independent predicate: only AAPL and MSFT pass.
+        RESOLVER_TICKERS = ["AAPL", "MSFT"]
+
+        def only_two(meta, as_of):
+            return meta.symbol in RESOLVER_TICKERS
+
+        db = _make_fake_db(
+            [(t, True, False) for t in ["AAPL", "MSFT", "GOOGL", "AMZN"]]
+        )
+        cov = _make_fake_coverage(set(["AAPL", "MSFT", "GOOGL", "AMZN"]))
+        # today_fn must be >= any date we resolve
+        resolver = MockResolver(
+            db=db,
+            coverage=cov,
+            predicate=only_two,
+            today_fn=lambda: _date(2030, 1, 1),
+        )
+
+        recorded_universes: list[list] = []
+
+        class RecordingStrategy(BaseStrategy):
+            id = "stub_with_resolver"
+            min_lookback = 5
+            active_in_regimes = list(CANONICAL_REGIMES)
+
+            def generate_signals(self, prices, regime, universe, aux_data=None):
+                recorded_universes.append(list(universe))
+                return []
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        mock_conn.__enter__ = lambda s: s
+        mock_conn.__exit__ = MagicMock(return_value=False)
+
+        with (
+            patch("backtest.unified_backtest.load_prices_panels",
+                  return_value=(close_wide, bars_by_ticker)),
+            patch("backtest.unified_backtest.load_regimes",
+                  return_value=regimes),
+            patch("backtest.unified_backtest.load_strategy_class",
+                  return_value=RecordingStrategy),
+            patch("backtest.unified_backtest.find_strategy_file",
+                  return_value=str(ROOT / "src/strategies/implementations/momentum_12_1.py")),
+            patch("backtest.unified_backtest._code_sha",
+                  return_value="abc123"),
+            patch("backtest.unified_backtest.psycopg2.extras.execute_values"),
+        ):
+            ub.run_backtest(
+                "stub_with_resolver",
+                conn=mock_conn,
+                commit=False,
+                resolver=resolver,
+            )
+
+        # Every bar's universe must be exactly the resolver's output.
+        assert len(recorded_universes) > 0, "should have processed bars"
+        for bar_universe in recorded_universes:
+            assert sorted(bar_universe) == sorted(RESOLVER_TICKERS), (
+                f"expected resolver tickers {RESOLVER_TICKERS}, got {bar_universe}"
+            )
+
+        # universe_sizes_out must be recorded on the resolver.
+        assert hasattr(resolver, '_universe_sizes_out'), \
+            "resolver._universe_sizes_out should be set after run"
+        assert len(resolver._universe_sizes_out) > 0
+        assert all(s == len(RESOLVER_TICKERS) for s in resolver._universe_sizes_out)
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +691,12 @@ class TestCLIIntegration:
         assert set(data.keys()) == expected_keys
 
     def test_cli_3_candidates_distinct_outputs(self):
-        """sp500, no_adr, and no_otc each produce distinct metric objects."""
+        """sp500, no_adr, and no_otc each produce distinct metric objects.
+
+        sp500 is a strict subset of no_adr (sp500 adds in_sp500=True on top of
+        no_adr's tradable+active+no-ADR filter). They must therefore produce
+        different mean_universe_size values AND different metric dicts.
+        """
         results = {}
         for candidate in ["sp500", "no_adr", "no_otc"]:
             r = self._run_cli(
@@ -575,14 +709,17 @@ class TestCLIIntegration:
         # All three must have the 8 keys
         for candidate, data in results.items():
             assert "sharpe" in data, f"sharpe missing for {candidate}"
-        # sp500 vs no_adr should differ (sp500 is subset of no_adr → different universes)
-        # At minimum the mean_universe_size should differ
+        # sp500 ⊂ no_adr → different universes → mean_universe_size MUST differ
         sp500_size = results["sp500"].get("mean_universe_size")
         no_adr_size = results["no_adr"].get("mean_universe_size")
-        # These could be equal if universe filtering is the same, but likely differ
-        # because no_adr includes non-sp500 tradable tickers
-        # We just assert all 3 have valid structure
-        assert results["sp500"] != {} and results["no_adr"] != {} and results["no_otc"] != {}
+        assert sp500_size != no_adr_size, (
+            f"sp500 mean_universe_size ({sp500_size}) == no_adr ({no_adr_size}): "
+            "resolver override is being ignored or predicates are identical"
+        )
+        # Full metric dicts must differ (different universe → different signals → different metrics)
+        assert results["sp500"] != results["no_adr"], (
+            "sp500 and no_adr produced identical metrics — resolver override not taking effect"
+        )
 
     def test_cli_determinism(self):
         """Same args → byte-identical JSON output."""
