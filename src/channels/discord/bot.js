@@ -12,7 +12,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env') });
 
-const { Client, GatewayIntentBits, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, AttachmentBuilder, Partials } = require('discord.js');
 const { parseUniverseRecReaction } = require('./_universe_rec_reaction');
 const fs   = require('fs');
 const path = require('path');
@@ -73,7 +73,9 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: ['CHANNEL', 'MESSAGE', 'REACTION'],
+  // Numeric Partials enum required by discord.js v14 — string forms are no-ops
+  // and would silently prevent messageReactionAdd from firing on uncached messages.
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
 
 // ── Agent pipeline ────────────────────────────────────────────────────────────

@@ -360,7 +360,7 @@ app.get('/api/universe-recs', async (_req, res) => {
     const { rows } = await query(`
       SELECT id, strategy_id, current_predicate, candidate_predicate,
              backtest_summary->>'grid_sha256' AS grid_sha256,
-             rationale, approved, adopted, recommended_at, mastermind_cost_usd
+             rationale, approved, approved_by, adopted, recommended_at, mastermind_cost_usd
         FROM strategy_universe_recommendations
        WHERE recommended_at > NOW() - INTERVAL '14 days'
        ORDER BY recommended_at DESC
@@ -376,6 +376,9 @@ app.post('/api/universe-recs/:id/:action', async (req, res) => {
   if (!['approve', 'reject', 'defer'].includes(action)) {
     return res.status(400).json({ error: "action must be one of: approve, reject, defer" });
   }
+  if (!/^\d+$/.test(String(id))) {
+    return res.status(400).json({ error: 'id must be numeric' });
+  }
   try {
     if (action === 'approve') {
       const repoRoot = path.resolve(__dirname, '../../..');
@@ -383,7 +386,7 @@ app.post('/api/universe-recs/:id/:action', async (req, res) => {
       execFileSync(
         'python3',
         ['-m', 'src.strategies.lifecycle_universe_adoption', 'adopt', '--rec-id', String(id)],
-        { cwd: repoRoot, stdio: 'pipe' }
+        { cwd: repoRoot, stdio: 'pipe', timeout: 30000 }
       );
     } else if (action === 'reject') {
       await query(

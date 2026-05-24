@@ -485,7 +485,12 @@ async function refreshUniverseRecs() {
     if (r.adopted)            return ['adopted',  'ok'];
     if (r.approved === true)  return ['approved', 'ok'];
     if (r.approved === false) return ['rejected', 'err'];
-    if (r.approved === null)  return ['deferred', 'warn'];
+    if (r.approved === null) {
+      // Distinguish genuine initial state from operator-deferred:
+      // defer action writes approved_by='operator:dashboard:defer'; new recs have approved_by=null.
+      if (r.approved_by && r.approved_by.includes('defer')) return ['deferred', 'warn'];
+      return ['pending', 'muted'];
+    }
     return ['pending', 'muted'];
   }
 
