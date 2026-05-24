@@ -94,8 +94,9 @@ async function _liveStrategies() {
   // WHERE status='live'. No deprecated_at column referenced.
   // (comprehensive_review.js uses deprecated_at but the task spec says omit it;
   // using status='live' alone is safe and correct here.)
+  // implementation_path included so rows are directly usable by _readStrategyCode fallback.
   const { rows } = await _query(
-    `SELECT id, name, description FROM strategy_registry WHERE status = 'live' ORDER BY id`
+    `SELECT id, name, description, implementation_path FROM strategy_registry WHERE status = 'live' ORDER BY id`
   );
   return rows;
 }
@@ -277,16 +278,18 @@ function _packPrompt(strategy, code, currentPredicate, grid, templateText) {
     }).join('');
   }
 
-  // Replace all {{var}} placeholders then splice in the rendered grid block
+  // Replace all {{var}} placeholders then splice in the rendered grid block.
+  // {{source_code}} is substituted LAST so a strategy file containing literal
+  // {{...}} tokens cannot be expanded as additional prompt variables.
   let prompt = templateText
     .replace(eachRe, gridSection)
     .replace(/\{\{strategy_id\}\}/g, strategy.id)
     .replace(/\{\{strategy_name\}\}/g, strategy.name || strategy.id)
     .replace(/\{\{thesis\}\}/g, strategy.description || '(no description)')
     .replace(/\{\{loc\}\}/g, String(loc))
-    .replace(/\{\{source_code\}\}/g, sourceCode || '(source unavailable)')
     .replace(/\{\{current_predicate\}\}/g, currentPredicate)
-    .replace(/\{\{candidate_names\}\}/g, candidateNames);
+    .replace(/\{\{candidate_names\}\}/g, candidateNames)
+    .replace(/\{\{source_code\}\}/g, sourceCode || '(source unavailable)');
 
   return prompt;
 }
@@ -408,11 +411,7 @@ async function run({ dryRun = false, strategyId = null, weekEnding = null,
     }
     strategies = rows;
   } else {
-    const { rows } = await _query(
-      `SELECT id, name, description, implementation_path FROM strategy_registry
-        WHERE status = 'live' ORDER BY id`
-    );
-    strategies = rows;
+    strategies = await _liveStrategies();
   }
 
   notify(`[universe-recs] ${strategies.length} strategies to evaluate`);

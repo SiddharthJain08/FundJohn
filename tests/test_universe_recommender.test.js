@@ -24,6 +24,7 @@ const {
   _packPrompt,
   _currentPredicate,
   _templateSha,
+  _formatDiscordMessage,
 } = require('../src/agent/curators/universe_recommender');
 
 // ── _gridSha ──────────────────────────────────────────────────────────────────
@@ -220,4 +221,66 @@ test('_templateSha differs for different inputs', () => {
   const sha1 = _templateSha('text A');
   const sha2 = _templateSha('text B');
   assert.notStrictEqual(sha1, sha2);
+});
+
+// ── _formatDiscordMessage ─────────────────────────────────────────────────────
+
+const SAMPLE_STRATEGY_FOR_MSG = { id: 'momentum_12_1', name: 'Momentum 12-1', description: 'Long 12mo winners' };
+const SAMPLE_DECISION = {
+  choice: 'no_adr',
+  confidence: 0.85,
+  rationale: 'no_adr has better Sharpe with similar drawdown',
+};
+const SAMPLE_GRID_FOR_MSG = [
+  { name: 'sp500',    sharpe: 1.2, max_dd_pct: 5.0, win_rate: 0.6, trades_n: 50, sortino: 1.5, calmar: 0.8 },
+  { name: 'no_adr',  sharpe: 1.4, max_dd_pct: 4.5, win_rate: 0.62, trades_n: 55, sortino: 1.6, calmar: 0.9 },
+  { name: 'no_otc',  sharpe: null, max_dd_pct: null, win_rate: null, trades_n: null, sortino: null, calmar: null },
+  { name: 'options_eligible_only', sharpe: null, max_dd_pct: null, win_rate: null, trades_n: null, sortino: null, calmar: null },
+];
+
+test('_formatDiscordMessage: footer is always present and matches Task 6 parse regex', () => {
+  const recId = 42;
+  const msg = _formatDiscordMessage(SAMPLE_STRATEGY_FOR_MSG, 'sp500', SAMPLE_DECISION, SAMPLE_GRID_FOR_MSG, recId);
+  // Footer must be present
+  assert.ok(msg.includes(`_footer: universe-rec:${recId}_`), `footer not found. Message:\n${msg}`);
+  // Task 6 reaction handler regex: /universe-rec:(\d+)/
+  const match = msg.match(/universe-rec:(\d+)/);
+  assert.ok(match !== null, 'Task 6 parse regex /universe-rec:(\\d+)/ did not match');
+  assert.strictEqual(Number(match[1]), recId, `extracted recId should be ${recId}, got ${match[1]}`);
+});
+
+test('_formatDiscordMessage: footer SURVIVES truncation with 5000-char rationale', () => {
+  // A 5000-char rationale would be truncated to 400 chars by the slice(0,400) inside
+  // _formatDiscordMessage, so the total message stays well under 1900 chars and the
+  // footer is preserved. This test verifies the footer contract is honoured regardless.
+  const longDecision = {
+    choice: 'no_adr',
+    confidence: 0.9,
+    rationale: 'x'.repeat(5000),
+  };
+  const recId = 99;
+  const msg = _formatDiscordMessage(SAMPLE_STRATEGY_FOR_MSG, 'sp500', longDecision, SAMPLE_GRID_FOR_MSG, recId);
+  // Message must be ≤ 1900 chars (Discord limit applied by the formatter)
+  assert.ok(msg.length <= 1900, `message exceeds 1900 chars: ${msg.length}`);
+  // Footer must still be present at the end
+  assert.ok(msg.includes(`_footer: universe-rec:${recId}_`),
+    `footer missing after long-rationale truncation. Message tail:\n${msg.slice(-200)}`);
+  // Task 6 regex still resolves the correct recId
+  const match = msg.match(/universe-rec:(\d+)/);
+  assert.ok(match !== null, 'Task 6 parse regex did not match after long rationale');
+  assert.strictEqual(Number(match[1]), recId, `recId mismatch after long rationale`);
+});
+
+test('_formatDiscordMessage: grid rows render (one row per candidate)', () => {
+  const recId = 7;
+  const msg = _formatDiscordMessage(SAMPLE_STRATEGY_FOR_MSG, 'sp500', SAMPLE_DECISION, SAMPLE_GRID_FOR_MSG, recId);
+  // Each candidate name must appear in the rendered message
+  for (const row of SAMPLE_GRID_FOR_MSG) {
+    assert.ok(msg.includes(row.name), `grid row '${row.name}' not found in message`);
+  }
+  // Non-null metrics for sp500 row should appear
+  assert.ok(msg.includes('1.2'), 'sp500 sharpe 1.2 should appear');
+  assert.ok(msg.includes('1.4'), 'no_adr sharpe 1.4 should appear');
+  // Null metrics should render as 'n/a'
+  assert.ok(msg.includes('n/a'), 'null metric cells should render as n/a');
 });
