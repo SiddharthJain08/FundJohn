@@ -25,6 +25,7 @@ const {
   _currentPredicate,
   _templateSha,
   _formatDiscordMessage,
+  _liveStrategies,
 } = require('../src/agent/curators/universe_recommender');
 
 // ── _gridSha ──────────────────────────────────────────────────────────────────
@@ -283,4 +284,68 @@ test('_formatDiscordMessage: grid rows render (one row per candidate)', () => {
   assert.ok(msg.includes('1.4'), 'no_adr sharpe 1.4 should appear');
   // Null metrics should render as 'n/a'
   assert.ok(msg.includes('n/a'), 'null metric cells should render as n/a');
+});
+
+// ── _liveStrategies ───────────────────────────────────────────────────────────
+// Tests assert invariants against the real manifest (MANIFEST_PATH is hardcoded
+// in universe_recommender.js). We verify counts match and no non-live strategies
+// leak through.
+
+const fs_test   = require('fs');
+const path_test = require('path');
+
+// Use the same OPENCLAW_DIR the module uses so both read the same manifest file.
+// The module resolves: path.join(OPENCLAW_DIR, 'src/strategies/manifest.json')
+// where OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw'.
+const OPENCLAW_DIR_TEST  = process.env.OPENCLAW_DIR || '/root/openclaw';
+const MANIFEST_FILE = path_test.join(OPENCLAW_DIR_TEST, 'src', 'strategies', 'manifest.json');
+
+test('_liveStrategies returns only manifest state=live strategies (count matches manifest)', async () => {
+  const manifest = JSON.parse(fs_test.readFileSync(MANIFEST_FILE, 'utf-8'));
+  const strategies = manifest.strategies || {};
+
+  // Count live strategies directly from manifest
+  const manifestLiveCount = Object.values(strategies).filter(s => s.state === 'live').length;
+  assert.ok(manifestLiveCount > 0, 'manifest must have at least one live strategy');
+
+  const live = await _liveStrategies();
+  assert.strictEqual(live.length, manifestLiveCount,
+    `_liveStrategies() returned ${live.length} but manifest has ${manifestLiveCount} live strategies`);
+});
+
+test('_liveStrategies returns no non-live strategies', async () => {
+  const manifest = JSON.parse(fs_test.readFileSync(MANIFEST_FILE, 'utf-8'));
+  const strategies = manifest.strategies || {};
+
+  const live = await _liveStrategies();
+  for (const entry of live) {
+    const record = strategies[entry.id];
+    assert.ok(record !== undefined, `returned id '${entry.id}' not found in manifest`);
+    assert.strictEqual(record.state, 'live',
+      `strategy '${entry.id}' has state='${record.state}', not 'live'`);
+  }
+});
+
+test('_liveStrategies entries have required shape (id, name, description, implementation_path)', async () => {
+  const live = await _liveStrategies();
+  assert.ok(live.length > 0, 'need at least one live strategy to test shape');
+
+  const sample = live[0];
+  assert.ok(typeof sample.id === 'string' && sample.id.length > 0,
+    `id must be a non-empty string, got: ${JSON.stringify(sample.id)}`);
+  assert.ok(typeof sample.name === 'string',
+    `name must be a string, got: ${JSON.stringify(sample.name)}`);
+  assert.ok(typeof sample.description === 'string',
+    `description must be a string, got: ${JSON.stringify(sample.description)}`);
+  // implementation_path may be null (if canonical_file absent) but must be present as key
+  assert.ok(Object.prototype.hasOwnProperty.call(sample, 'implementation_path'),
+    'implementation_path key must be present (may be null)');
+});
+
+test('_liveStrategies result is sorted by id (localeCompare)', async () => {
+  const live = await _liveStrategies();
+  for (let i = 1; i < live.length; i++) {
+    assert.ok(live[i - 1].id.localeCompare(live[i].id) <= 0,
+      `entries not sorted: '${live[i - 1].id}' > '${live[i].id}' at index ${i}`);
+  }
 });

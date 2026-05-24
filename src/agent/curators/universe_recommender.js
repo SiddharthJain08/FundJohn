@@ -39,10 +39,10 @@
  * and the file's own sys.path manipulation conflicts. We use the direct file
  * path per the verified working pattern.
  *
- * deprecated_at note: comprehensive_review.js line 62 uses
- * `AND (deprecated_at IS NULL)` in its strategy_registry query, which means
- * the column exists despite task instruction 3 saying it doesn't. Our query
- * uses `status='live'` only (per instruction), which is safe regardless.
+ * Live-strategy source: manifest.json (state==='live'), NOT strategy_registry.
+ * strategy_registry.status only holds approved/pending_approval/deprecated —
+ * there is no 'live' status. The manifest is the authoritative live/trading
+ * set (same source as the resolver and sizer).
  */
 
 const fs          = require('fs');
@@ -89,16 +89,46 @@ async function _query(sql, params = []) {
 
 // ── Strategy list ────────────────────────────────────────────────────────────
 
+/**
+ * Build a strategy descriptor from a loaded manifest, keyed by id.
+ * Returns { id, name, description, implementation_path } or null if the
+ * strategy does not exist in the manifest.
+ */
+function _strategyFromManifest(strategyId, manifest) {
+  const record = (manifest.strategies || {})[strategyId];
+  if (!record) return null;
+  return {
+    id:                  strategyId,
+    name:                strategyId,
+    description:         record.metadata?.description || '',
+    implementation_path: record.metadata?.canonical_file || null,
+  };
+}
+
+/**
+ * Return all manifest strategies whose state === 'live', shaped as
+ * { id, name, description, implementation_path }.
+ *
+ * NOTE: strategy_registry.status has no 'live' value — the authoritative
+ * live/trading set is manifest.strategies[id].state. The resolver and sizer
+ * both key off manifest state; we follow the same source of truth here.
+ * Kept async so callers may use `await _liveStrategies()` unchanged.
+ */
 async function _liveStrategies() {
-  // Instruction 3: SELECT id, name, description FROM strategy_registry
-  // WHERE status='live'. No deprecated_at column referenced.
-  // (comprehensive_review.js uses deprecated_at but the task spec says omit it;
-  // using status='live' alone is safe and correct here.)
-  // implementation_path included so rows are directly usable by _readStrategyCode fallback.
-  const { rows } = await _query(
-    `SELECT id, name, description, implementation_path FROM strategy_registry WHERE status = 'live' ORDER BY id`
-  );
-  return rows;
+  const manifest = _loadManifest();
+  const result = [];
+  for (const [id, record] of Object.entries(manifest.strategies || {})) {
+    if (record.state === 'live') {
+      result.push({
+        id,
+        name:                id,
+        description:         record.metadata?.description || '',
+        implementation_path: record.metadata?.canonical_file || null,
+      });
+    }
+  }
+  result.sort((a, b) => a.id.localeCompare(b.id));
+  return result;
 }
 
 // ── Manifest helpers ─────────────────────────────────────────────────────────
@@ -401,15 +431,13 @@ async function run({ dryRun = false, strategyId = null, weekEnding = null,
   // Determine strategy list
   let strategies;
   if (strategyId) {
-    const { rows } = await _query(
-      `SELECT id, name, description, implementation_path
-         FROM strategy_registry WHERE id = $1 LIMIT 1`,
-      [strategyId]
-    );
-    if (!rows.length) {
-      return { error: `strategy '${strategyId}' not found in strategy_registry`, processed: 0 };
+    // Operator override: look up by id in manifest (any state — operator may target
+    // candidate/live/archived; manifest is the authoritative registry).
+    const entry = _strategyFromManifest(strategyId, manifest);
+    if (!entry) {
+      return { error: `strategy '${strategyId}' not found in manifest`, processed: 0 };
     }
-    strategies = rows;
+    strategies = [entry];
   } else {
     strategies = await _liveStrategies();
   }
@@ -606,6 +634,7 @@ module.exports = {
   _currentPredicate,
   _readStrategyCode,
   _liveStrategies,
+  _strategyFromManifest,
   _templateSha,
   _formatDiscordMessage,
 };
