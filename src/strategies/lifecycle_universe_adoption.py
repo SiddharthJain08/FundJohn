@@ -127,7 +127,10 @@ def adopt_universe_recommendation(
                 )
 
             strategy_id = row["strategy_id"]
-            candidate = row["candidate_predicate"]  # bare name, e.g. "large_cap"
+            # Normalize candidate to bare name in case a full module:attr ref leaked
+            # in (e.g. "src.strategies.universe_default:large_cap" from a no_change
+            # adoption before the JS-side _currentPredicate fix was deployed).
+            candidate = row["candidate_predicate"].rsplit(":", 1)[-1]
 
             # Validate candidate is a known predicate before doing anything else.
             if candidate not in CANDIDATE_PREDICATES:

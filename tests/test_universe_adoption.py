@@ -579,3 +579,82 @@ def test_revert_raises_when_neither_strategy_id_nor_do_all():
 
     with pytest.raises(ValueError, match="Provide strategy_id or do_all=True"):
         revert_universe_recommendation(strategy_id=None, do_all=False)
+
+
+def test_adopt_round_trip_full_ref_candidate_predicate(pg_conn, tmp_manifest, test_strategy_id):
+    """Round-trip: rec whose candidate_predicate is the FULL ref (e.g. from a no_change
+    after a prior adoption before the JS _currentPredicate fix) must adopt correctly.
+
+    This covers the predicate-form inconsistency bug: if the stored candidate_predicate
+    is 'src.strategies.universe_default:large_cap' (full ref) instead of 'large_cap'
+    (bare), the adopt function must still succeed via the rsplit normalization.
+    """
+    _skip_if_no_db()
+    _ensure_strategy_in_manifest(tmp_manifest, test_strategy_id)
+
+    # Insert rec with FULL ref as candidate_predicate (simulating a no_change adoption
+    # written by the pre-fix JS recommender).
+    full_ref_candidate = "src.strategies.universe_default:large_cap"
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO strategy_universe_recommendations
+              (strategy_id, candidate_predicate, candidate_set_id, backtest_summary)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                test_strategy_id,
+                full_ref_candidate,
+                "test_set_fullref",
+                json.dumps({"sharpe": 1.0, "trades": 20}),
+            ),
+        )
+        rec_id = cur.fetchone()[0]
+    pg_conn.commit()
+
+    try:
+        from src.strategies.lifecycle_universe_adoption import adopt_universe_recommendation
+        from src.strategies.universe_resolver import UniverseResolver
+
+        # Must succeed — no ValueError from "unknown candidate predicate".
+        result = adopt_universe_recommendation(rec_id, actor="test_fullref_runner")
+
+        # Manifest must have the correct full module:attr ref written by _ref_for_candidate.
+        with open(tmp_manifest) as f:
+            manifest = json.load(f)
+        written_ref = manifest["strategies"][test_strategy_id]["metadata"]["universe_filter_ref"]
+        assert written_ref == "src.strategies.universe_default:large_cap", (
+            f"Manifest should get full module:attr ref, got: {written_ref!r}"
+        )
+
+        # The resolver must be able to load the written ref without error.
+        def manifest_loader():
+            with open(tmp_manifest) as f:
+                return json.load(f)
+
+        class _StubDB:
+            def fetch_metadata_as_of(self, as_of):
+                return []
+
+        class _StubCoverage:
+            def has_floor(self, symbol, as_of):
+                return True
+
+        resolver = UniverseResolver(
+            db=_StubDB(),
+            coverage=_StubCoverage(),
+            manifest_loader=manifest_loader,
+        )
+        predicate = resolver._load_predicate(test_strategy_id)
+        # Should resolve to large_cap function (same object from universe_default module).
+        from src.strategies.universe_default import large_cap
+        assert predicate is large_cap, (
+            f"Expected large_cap predicate after full-ref adopt, got {predicate!r}"
+        )
+
+        # Return value must include the after_ref.
+        assert result["after_ref"] == "src.strategies.universe_default:large_cap"
+
+    finally:
+        _cleanup(pg_conn, test_strategy_id, [rec_id])

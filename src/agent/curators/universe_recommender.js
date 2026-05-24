@@ -179,10 +179,18 @@ function _readStrategyCode(strategyId, manifest, implPath = null) {
 
 /**
  * Instruction 5: current predicate from manifest or default 'sp500'.
+ *
+ * Returns the BARE predicate name (e.g. 'sp500', 'large_cap').  The manifest
+ * stores the full module:attr form after a prior adoption
+ * ("src.strategies.universe_default:large_cap"), so we strip the prefix if
+ * a colon is present.  This keeps current_predicate and the no_change
+ * candidate_predicate consistent with CANDIDATE_PREDICATES bare keys.
  */
 function _currentPredicate(strategyId, manifest) {
   const stratRecord = (manifest.strategies || {})[strategyId] || {};
-  return stratRecord.metadata?.universe_filter_ref || 'sp500';
+  const ref = stratRecord.metadata?.universe_filter_ref || 'sp500';
+  // Strip module prefix: "src.strategies.universe_default:large_cap" → "large_cap"
+  return ref.includes(':') ? ref.split(':').pop() : ref;
 }
 
 // ── Grid building ─────────────────────────────────────────────────────────────
@@ -396,13 +404,19 @@ async function _persist(strategyId, currentPredicate, decision, candidateSetId,
  */
 async function run({ dryRun = false, strategyId = null, weekEnding = null,
                      notify = () => {} } = {}) {
-  const weekEndIso   = weekEnding || new Date().toISOString().slice(0, 10);
-  const candidateSetId = `sp2c-v1-${weekEndIso}`;
+  // Use ET date for the week tag so Sat 20:00 ET is not mis-tagged as Sunday UTC.
+  const weekEndIso = weekEnding ||
+    new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
-  // Backtest window: trailing 12 months from weekEnding
+  // Candidate-set version from env (default 'v1'), e.g. "sp2c-v1-2026-05-24".
+  const candidateSetVersion = process.env.UNIVERSE_RECS_CANDIDATE_SET_VERSION || 'v1';
+  const candidateSetId = `sp2c-${candidateSetVersion}-${weekEndIso}`;
+
+  // Backtest window: configurable lookback in days from weekEnding (default 365).
+  const lookbackDays = parseInt(process.env.UNIVERSE_RECS_LOOKBACK_DAYS || '365', 10);
   const endDate   = new Date(weekEndIso);
   const startDate = new Date(endDate);
-  startDate.setFullYear(startDate.getFullYear() - 1);
+  startDate.setDate(startDate.getDate() - lookbackDays);
   const startIso = startDate.toISOString().slice(0, 10);
   const endIso   = weekEndIso;
 

@@ -205,6 +205,22 @@ test('_currentPredicate defaults to sp500 when strategy not in manifest', () => 
   assert.strictEqual(_currentPredicate('unknown', manifest), 'sp500');
 });
 
+test('_currentPredicate strips module prefix from full-ref (no_change round-trip regression)', () => {
+  // After a prior adoption the manifest holds the full module:attr form.
+  // _currentPredicate must return the bare name so that a subsequent no_change
+  // recommendation stores a bare candidate_predicate, preventing adopt ValueError.
+  const manifest = {
+    strategies: {
+      my_strat: {
+        state: 'live',
+        metadata: { universe_filter_ref: 'src.strategies.universe_default:large_cap' },
+      },
+    },
+  };
+  assert.strictEqual(_currentPredicate('my_strat', manifest), 'large_cap',
+    'full-ref should be stripped to bare predicate name');
+});
+
 // ── _templateSha ──────────────────────────────────────────────────────────────
 
 test('_templateSha produces a 64-char hex string', () => {

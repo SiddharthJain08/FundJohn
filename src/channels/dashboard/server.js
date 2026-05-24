@@ -389,20 +389,57 @@ app.post('/api/universe-recs/:id/:action', async (req, res) => {
         { cwd: repoRoot, stdio: 'pipe', timeout: 30000 }
       );
     } else if (action === 'reject') {
-      await query(
+      // Only act on a not-yet-adopted rec (guard against rejecting live strategy).
+      const rejectResult = await query(
         `UPDATE strategy_universe_recommendations
             SET approved=false, adopted=false, approved_at=NOW(), approved_by='operator:dashboard'
-          WHERE id=$1`,
+          WHERE id=$1 AND adopted=false`,
         [id]
       );
+      if (rejectResult.rowCount === 0) {
+        return res.status(409).json({ error: 'rec already adopted or not found' });
+      }
+      // Audit trail — failure does not 500 the main action.
+      try {
+        const { rows: recRows } = await query(
+          `SELECT strategy_id FROM strategy_universe_recommendations WHERE id=$1`, [id]
+        );
+        if (recRows.length > 0) {
+          await query(
+            `INSERT INTO lifecycle_audit_log (event, strategy_id, before_state, after_state, actor)
+             VALUES ('universe_filter_rejected', $1, NULL, NULL, 'operator:dashboard')`,
+            [recRows[0].strategy_id]
+          );
+        }
+      } catch (auditErr) {
+        console.error(`[dashboard] universe-recs reject audit insert failed (non-fatal):`, auditErr.message);
+      }
     } else {
-      // defer — soft no-op; stays eligible
-      await query(
+      // defer — only defer a still-pending rec (approved IS NULL).
+      const deferResult = await query(
         `UPDATE strategy_universe_recommendations
             SET approved=NULL, approved_by='operator:dashboard:defer'
-          WHERE id=$1`,
+          WHERE id=$1 AND approved IS NULL`,
         [id]
       );
+      if (deferResult.rowCount === 0) {
+        return res.status(409).json({ error: 'rec already adopted or not found' });
+      }
+      // Audit trail — failure does not 500 the main action.
+      try {
+        const { rows: recRows } = await query(
+          `SELECT strategy_id FROM strategy_universe_recommendations WHERE id=$1`, [id]
+        );
+        if (recRows.length > 0) {
+          await query(
+            `INSERT INTO lifecycle_audit_log (event, strategy_id, before_state, after_state, actor)
+             VALUES ('universe_filter_deferred', $1, NULL, NULL, 'operator:dashboard')`,
+            [recRows[0].strategy_id]
+          );
+        }
+      } catch (auditErr) {
+        console.error(`[dashboard] universe-recs defer audit insert failed (non-fatal):`, auditErr.message);
+      }
     }
     res.json({ ok: true });
   } catch (err) {

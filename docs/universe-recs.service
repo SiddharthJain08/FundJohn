@@ -15,8 +15,11 @@ WorkingDirectory=/root/openclaw
 ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode universe-recs
 StandardOutput=journal
 StandardError=journal
-# Calls Opus per-strategy (NOT deterministic) — allow up to 1 hour.
-TimeoutStartSec=3600
+# Calls Opus per-strategy (grid spawns + Opus) — allow up to 4 hours.
+# Per-strategy cost: 4 CLI grid spawns (~5 min each) + 1 Opus call (~5 min) ≈ 25 min/strategy.
+# 52 live strategies × ~25 min worst-case = ~21 h theoretical max, but most run faster.
+# If even 4 h is routinely exceeded, consider batching a subset per Saturday run.
+TimeoutStartSec=14400
 
 [Install]
 WantedBy=multi-user.target
