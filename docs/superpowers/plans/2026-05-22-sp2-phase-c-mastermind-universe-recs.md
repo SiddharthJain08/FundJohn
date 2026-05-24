@@ -39,6 +39,86 @@ Same Phase A substitutions apply (POSTGRES_URI, psycopg2, node migrate, monkeypa
 
 ---
 
+## ⚠️ Pre-execution corrections (2026-05-24) — READ BEFORE ANY TASK
+
+Grounding against the actual Phase C branch (`8e2b56c`, based on Phase A merge `ef33271`) found the plan's core grid mechanism rests on machinery Phase A explicitly deferred and never built (confirmed unbuilt on Phase B's tip too). These corrections are **authoritative**; where they conflict with Tasks 1–3 as originally written, follow the corrections. Operator decisions captured 2026-05-24.
+
+### C0 — Branch base: wait for Phase B → main
+Task 0 Step 2 is **replaced**. Do NOT branch/rebase now. Phase C execution is gated on **PR #9 (Phase B) merging to `main`**. The current branch sits on the Phase A merge (`ef33271`) and lacks ALL Phase B code (5y backfill, quarantine wiring, frozen SP500 history). Once Phase B is on main: `git checkout feat/sp2-phase-c-mastermind-universe-recs && git rebase main`. Land no feature commits on this branch until rebased.
+
+### C1 — The 12-candidate × 8-metric grid must be BUILT first (new Task 0.5)
+The plan assumes `regime_blended_backtest --resolver-override --metrics-json` yields 8 metrics. It does **not** exist:
+- `regime_blended_backtest.run_with_resolver`, `unified_backtest.run_backtest_with_resolver`, `quick_backtest.run_with_resolver` are all **Phase-A stubs** returning `[{date, universe|signals}]` — no P&L, no metrics. Their docstrings defer the engine join to "Phase B/C".
+- `regime_blended_backtest.main()` (line 233) takes **no args** — it ignores argv and only blends precomputed `strategy_regime_backtests` rows. The plan's `--strategy/--start/--end/--resolver-override/--metrics-json` flags would be silently ignored.
+- Reachable metrics anywhere = `{sharpe, max_dd, total_return_pct, trade_count}` (4); plan needs 8.
+
+Build the real path in **Task 0.5** (below), hosted in `unified_backtest.py` (it has the only real per-strategy simulation + `aggregate_metrics`). Tasks 1 & 3 then **consume** it.
+
+### C2 — MockResolver: correct shape
+Real `UniverseResolver.__init__(db, coverage, manifest_loader=None, today_fn=_date.today, audit_writer=None)` — there is **no** `_load_snapshot`/`coverage_floor`. `resolve()` loads the predicate via `_load_predicate()`, fetches rows via `self._db.fetch_metadata_as_of(as_of)`, floors via `self._coverage.has_floor(symbol, as_of)`, guards look-ahead (`as_of > today` → `AsOfInFutureError`), sorts, caches. The plan's MockResolver (in Task 1 Step 1) is wrong — use this instead:
+
+```python
+# src/strategies/universe_resolver.py — append
+class MockResolver(UniverseResolver):
+    """Phase C grid helper: force a candidate predicate, bypassing the
+    manifest-registered one. Reuses resolve()'s db-fetch / coverage-floor /
+    look-ahead-guard / sort / cache unchanged."""
+    def __init__(self, db, coverage, predicate, **kw):
+        super().__init__(db=db, coverage=coverage, **kw)
+        self._forced_predicate = predicate
+    def _load_predicate(self, strategy_id: str):
+        return self._forced_predicate
+```
+
+### C3 — Metric set + REGIME-BLENDED definition (operator decision)
+`unified_backtest.aggregate_metrics` already emits 5 of 8 (rename at the grid boundary: `hit_rate→win_rate`, `total_trades→trades_n`, `avg_holding_days→mean_holding_days`). Add `sortino` (downside-deviation of the existing `daily_returns`) and `calmar` (annualized `return_pct` ÷ `max_dd_pct`) to `aggregate_metrics`; thread `mean_universe_size` through the run loop. **Grid metrics are regime-blended** (operator chose "match the live sizer" over plain total-period): compute per-regime via the existing `aggregate_per_regime`, then **day-frequency-blend** across the four canonical regimes using the same weighting as `regime_blended_backtest.aggregate_across_regimes`.
+
+### C4 — Cap-predicate caveat (historical market_cap empty)
+Until the shares-outstanding backfill lands (Phase B v1 known gap: FMP Starter 403 on historical market-cap), 8 of 12 candidates resolve to **empty universes for historical dates** and would silently select nothing: `r1000, r3000, large_cap, mid_cap, small_cap_liquid, large_cap_options, mid_cap_options, top500_by_adv`. The Task 0.5/T1 grid runs only the **4 cap-independent candidates** (`sp500, options_eligible_only, no_adr, no_otc`) and emits `cap_unverified: true` for the rest. The first supervised Saturday (Task 9) reads cap-gated cells as unverified, not as real recommendations.
+
+---
+
+## Task 0.5: Build resolver→regime-blended 8-metric grid (PREREQUISITE for Tasks 1 & 3)
+
+**Files:**
+- Modify: `src/strategies/universe_resolver.py` (MockResolver — C2)
+- Modify: `src/backtest/unified_backtest.py` (resolver param + sortino/calmar/mean_universe_size)
+- Create: `src/backtest/universe_grid_cli.py` (the CLI Tasks 1/3 shell out to)
+- Create: `tests/test_universe_grid.py`
+
+- [ ] **Step 1: MockResolver** — append to `universe_resolver.py` per C2.
+
+- [ ] **Step 2: Resolver injection in `run_backtest`** — add keyword `resolver=None`. When set, inside the `for current_date in oos_dates` loop replace the static `universe` (currently computed once at ~line 412) with `universe = resolver.resolve(strategy_id, as_of=cur_d)` and append `len(universe)` to a `universe_sizes` list. When `resolver is None`, behavior is **byte-identical** (regression-tested). Look-ahead is already guarded inside `resolve()`.
+
+- [ ] **Step 3: Extend `aggregate_metrics`** — add `sortino` (downside-deviation of the existing `daily_returns`; `None` when no downside or <2 points) and `calmar` (annualized `return_pct` ÷ `max_dd_pct`; `None` when `max_dd_pct==0`). Preserve existing keys for back-compat; add new ones alongside. Thread `mean_universe_size = mean(universe_sizes)` into the returned dict.
+
+- [ ] **Step 4: Regime-blend helper** — given the per-regime aggregates from `aggregate_per_regime(trades, regimes)` (trades are already tagged `entry_regime`, verified line 503) and the regime day-frequency over `[start,end]`, produce the blended 8-metric dict. **Blending is per-metric, NOT one rule** (`aggregate_across_regimes` itself day-freq-weights sharpe/return but `max`-es DD and `sum`s trades):
+
+  | Metric | Blend rule across the 4 regimes |
+  |---|---|
+  | `sharpe`, `sortino`, `calmar` | day-frequency-weighted: `Σ day_freq[r] × m[r]` (ratio-metric convention, matches existing sharpe blend) |
+  | `max_dd_pct` | `max` across regimes (worst-case; matches existing) |
+  | `trades_n` | `sum` across regimes (matches existing `trade_count`) |
+  | `win_rate`, `mean_holding_days` | **trade-count-weighted** across regimes (NOT day-freq — a 2-trade regime must not equal a 200-trade regime) |
+  | `mean_universe_size` | day-frequency-weighted (time-average of universe size) |
+
+  Low-sample regimes already NULL their sharpe in `aggregate_per_regime` (`trade_count < 5`); the blender must skip `None` cells and renormalize weights over the contributing regimes.
+
+- [ ] **Step 5: `universe_grid_cli.py`** — argparse `--strategy --start --end --resolver-override <candidate> --metrics-json --seed 42`. Builds `MockResolver(db, coverage, CANDIDATE_PREDICATES[name])` (KeyError on unknown → `sys.exit(2)`), runs unified-with-resolver → `aggregate_per_regime` → blend, prints the 8-key blended JSON to stdout. This is the module Task 1's smoke + Task 3's `_buildGrid` invoke (NOT `regime_blended_backtest`). Note: `unified_backtest` has no random ops today, so `--seed` is accepted for forward-compat/determinism-contract but is currently a no-op — keep it so Task 3's grid command and the determinism test stay stable.
+
+- [ ] **Step 6: Tests (`tests/test_universe_grid.py`)**
+  - MockResolver forces predicate (ignores manifest ref).
+  - `run_backtest(resolver=None)` unchanged vs a known strategy (regression).
+  - CLI emits exactly the 8 keys for `sp500`.
+  - 3 cap-independent candidates → 3 distinct metric outputs.
+  - Determinism: same `--seed`/window → byte-identical JSON.
+
+- [ ] **Step 7: Commit** — `feat(sp2-c): resolver→regime-blended 8-metric grid (unified_backtest + MockResolver + universe_grid_cli)`
+
+> **Tasks 1 & 3 are amended by this task:** Task 1's MockResolver + CLI flag work now lives here (its Step-1 code block is superseded by C2; its `regime_blended_backtest --resolver-override` smoke becomes `python3 -m src.backtest.universe_grid_cli ...`). Task 3's `_buildGrid` (plan line ~284) must spawn `src.backtest.universe_grid_cli` and iterate **only the 4 cap-independent candidates** (C4) until the cap backfill lands.
+
+---
+
 ## Task 0: Branch + workspace setup
 
 **Files:** none (git scaffolding)
