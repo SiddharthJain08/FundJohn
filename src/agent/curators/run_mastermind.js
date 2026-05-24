@@ -20,6 +20,18 @@
  *   --mode position-recs          Sizing recs from latest memos (Sat 19:00 ET).
  *   --mode paper-expansion        LEGACY Opus paper hunt. Subsumed by
  *                                 saturday-brain Phase 1; kept for back-compat.
+ *   --mode universe-recs          Per-strategy universe-predicate recommendation
+ *                                 (Sat 20:00 ET timer). Builds a regime-blended
+ *                                 backtest grid over the cap-independent candidate
+ *                                 predicates, asks Opus 4.7 to pick the best slice,
+ *                                 persists to strategy_universe_recommendations and
+ *                                 posts to #universe-recs. Gated on
+ *                                 OPENCLAW_UNIVERSE_RECS=1 (--dry-run bypasses).
+ *
+ * Universe-recs flags:
+ *   --dry-run           Build grids + grid_sha only; no Opus/Discord/persist.
+ *   --strategy-id ID    Run a single strategy instead of all live strategies.
+ *   --week YYYY-MM-DD   Week-ending date for candidate_set_id + backtest window.
  *
  * Saturday-brain flags:
  *   --dry-run           Build context + tier mock candidates, no DB writes,
@@ -147,6 +159,32 @@ async function runPositionRecs() {
   console.log(JSON.stringify({ mode: 'position-recs', dry_run: dryRun, ...result }, null, 2));
 }
 
+async function runUniverseRecs() {
+  // SP-2 Phase C. Gate: refuse a live run unless OPENCLAW_UNIVERSE_RECS=1.
+  // --dry-run bypasses the gate (builds grids + grid_sha only; no Opus/
+  // Discord/persist), matching the runCritique gate pattern.
+  const dryRun     = !!getArg('--dry-run', false);
+  if (!dryRun && process.env.OPENCLAW_UNIVERSE_RECS !== '1') {
+    console.log(JSON.stringify({ mode: 'universe-recs', skipped: true,
+                                  reason: 'OPENCLAW_UNIVERSE_RECS not set (use --dry-run to bypass)' }));
+    return;
+  }
+  const { run } = require('./universe_recommender');
+  const strategyId = getArg('--strategy-id');
+  const week       = getArg('--week');
+  console.error(`[mastermind:universe-recs] Starting${dryRun ? ' (DRY RUN)' : ''}...`);
+  const t0 = Date.now();
+  const result = await run({
+    dryRun,
+    strategyId: (typeof strategyId === 'string' && strategyId !== 'true') ? strategyId : null,
+    weekEnding: (typeof week === 'string' && week !== 'true') ? week : null,
+    notify: (m) => console.error(`[mastermind:universe-recs] ${m}`),
+  });
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.error(`[mastermind:universe-recs] Done in ${elapsed}s — $${(result.total_cost_usd || 0).toFixed(4)}.`);
+  console.log(JSON.stringify({ mode: 'universe-recs', dry_run: dryRun, ...result }, null, 2));
+}
+
 async function runPaperExpansion() {
   const { run } = require('./paper_expansion_ingestor');
   const dryRun = !!getArg('--dry-run', false);
@@ -264,7 +302,8 @@ async function runSaturdayBrain() {
   if (mode === 'position-recs')         return runPositionRecs();
   if (mode === 'paper-expansion')       return runPaperExpansion();
   if (mode === 'critique')              return runCritique();
-  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion | critique`);
+  if (mode === 'universe-recs')         return runUniverseRecs();
+  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion | critique | universe-recs`);
   process.exit(2);
 })()
   // Force-exit after the mode finishes. Multiple sub-curators open pg
