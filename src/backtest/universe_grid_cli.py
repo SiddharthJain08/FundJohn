@@ -139,78 +139,20 @@ def blend_metrics(
     return result
 
 
-def run_grid(
-    strategy_id: str,
-    start_date: str,
-    end_date: str,
-    candidate: str,
-) -> dict:
-    """Run the resolver→regime-blended grid for one strategy + candidate.
-
-    Returns a dict with the 8 required keys. Does NOT write to Postgres.
-    """
-    import psycopg2
-
-    predicate = CANDIDATE_PREDICATES[candidate]
-    uri = os.environ.get('POSTGRES_URI')
-    if not uri:
-        raise RuntimeError('POSTGRES_URI not set')
-
-    db = PostgresMetadataDB(uri)
-    cov = ParquetCoverage()
-    resolver = MockResolver(
-        db=db,
-        coverage=cov,
-        predicate=predicate,
-        manifest_loader=_manifest_loader,
-    )
-
-    # Run backtest without writing to DB (commit=False + in-memory conn mock).
-    # We create a real connection but rollback immediately after — this avoids
-    # polluting strategy_backtest_runs with grid-exploration runs.
-    conn = psycopg2.connect(uri)
-    try:
-        from backtest.unified_backtest import (
-            run_backtest,
-            aggregate_per_regime,
-            load_prices_panels,
-            load_regimes,
-            load_strategy_class,
-            find_strategy_file,
-            aggregate_metrics,
-        )
-        # We need the per-regime trades. Re-run the simulation directly
-        # rather than going through the DB write path.
-        run_backtest(
-            strategy_id,
-            start_date=start_date,
-            end_date=end_date,
-            conn=conn,
-            commit=False,
-            resolver=resolver,
-        )
-    finally:
-        conn.rollback()
-        conn.close()
-
-    # Retrieve the per-regime metrics from the resolver's internal state.
-    # We need to re-run the simulation to get trades + per_regime without DB.
-    # Actually, run_backtest wrote nothing (rollback). We need per_regime dict
-    # directly. Re-use the simulation core but capture trades.
-    # → Use a thin internal helper that returns (per_regime, mean_universe_size).
-    per_regime, mus = _simulate_grid(strategy_id, start_date, end_date, resolver)
-
-    day_freq = regime_day_frequency(REGIMES_PARQUET)
-    return blend_metrics(per_regime, day_freq, mean_universe_size=mus)
-
-
 def _simulate_grid(
     strategy_id: str,
     start_date: str,
     end_date: str,
     resolver,
 ) -> tuple[dict, Optional[float]]:
-    """Run the simulation core (no DB writes) and return (per_regime, mean_universe_size)."""
+    """Run the simulation core (no DB writes) and return (per_regime, mean_universe_size).
+
+    NOTE: This intentionally mirrors the per-bar loop in
+    ``backtest.unified_backtest.run_backtest``.  If you change signal
+    generation, trade simulation, or universe dispatch there, keep this
+    loop in sync.  The two paths are separate because run_backtest
+    writes to Postgres; grid runs must never pollute the DB.
+    """
     import pandas as pd
     import numpy as np
     from backtest.unified_backtest import (
