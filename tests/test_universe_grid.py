@@ -512,8 +512,6 @@ class TestRunBacktestWithResolver:
 class TestBlendMetrics:
     def _make_per_regime(self, trade_counts=None):
         """Build a minimal per_regime dict with the expected unified_backtest shape."""
-        from backtest.unified_backtest import CANONICAL_REGIMES as CR
-        # CANONICAL_REGIMES is defined in strategies.base, imported by unified_backtest
         from strategies.base import CANONICAL_REGIMES
         tc = trade_counts or {"LOW_VOL": 10, "TRANSITIONING": 5, "HIGH_VOL": 3, "CRISIS": 2}
         per_regime = {}
