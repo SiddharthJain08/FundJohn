@@ -1,0 +1,22 @@
+[Unit]
+# Runs self-gated: if OPENCLAW_UNIVERSE_RECS != 1 the script prints "skipped"
+# and exits 0 — safe to install at any time.
+# Installed name: openclaw-universe-recs.service
+Description=MastermindJohn — per-strategy universe recs (Saturday 20:00 ET)
+After=network.target postgresql.service openclaw-strategy-review.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode universe-recs
+StandardOutput=journal
+StandardError=journal
+# Calls Opus per-strategy (NOT deterministic) — allow up to 1 hour.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target
