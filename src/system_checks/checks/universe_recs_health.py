@@ -17,7 +17,15 @@ from ..types import Status
 def _universe_recs_health():
     """Verify strategy_universe_recommendations was written within last 14 days.
     PASS when gate off. FAIL if 0 recs in last 14d. WARN if <3 recs in last 14d.
-    PASS otherwise."""
+    PASS otherwise.
+
+    This check is intentionally count-based (recs in last 14d) — it answers the
+    operational health question "did the recommender produce output recently?".
+    The companion time-based check `_check_universe_recs_freshness` in
+    src/maintenance/doctor.py uses the timestamp of the latest rec directly;
+    that check targets sub-second pre-flight use (different audience/latency
+    budget) while this check targets the daily maintenance health digest.
+    """
     if os.environ.get('OPENCLAW_UNIVERSE_RECS') != '1':
         return Status.PASS, 'gate off; n/a'
     uri = os.environ.get('POSTGRES_URI', '')

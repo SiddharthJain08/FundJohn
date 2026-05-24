@@ -89,6 +89,24 @@ def test_doctor_gate_on_stale_14d_returns_fail(monkeypatch):
     assert r['severity'] == 'fail', f'expected fail, got {r}'
 
 
+def test_doctor_gate_on_exactly_14d_returns_warn(monkeypatch):
+    """Gate on, recommended_at exactly 14d ago → warn.
+
+    The check uses strictly-greater-than 14d for fail, so 14d is still warn.
+    This locks the boundary so the threshold cannot drift silently.
+    """
+    monkeypatch.setenv('OPENCLAW_UNIVERSE_RECS', '1')
+    exactly_14d = datetime.now(timezone.utc) - timedelta(days=14)
+    monkeypatch.setattr(
+        'src.maintenance.doctor._universe_recs_latest_recommended_at',
+        lambda: exactly_14d,
+    )
+    r = _check_universe_recs_freshness()
+    assert r['severity'] == 'warn', (
+        f'expected warn at exactly 14d boundary, got {r}'
+    )
+
+
 def test_doctor_gate_on_db_error_returns_warn(monkeypatch):
     """Gate on, DB query raises → warn (never propagates)."""
     monkeypatch.setenv('OPENCLAW_UNIVERSE_RECS', '1')
@@ -115,8 +133,14 @@ def test_system_check_gate_off_exits_zero(monkeypatch):
     from system_checks.types import Status
 
     result = run_one('universe_recs_health')
-    assert result.status is Status.PASS, f'expected PASS, got {result}'
-    assert 'gate off' in result.detail
+    # When POSTGRES_URI is set the gate-off branch runs and returns PASS.
+    # When POSTGRES_URI is unset the runner returns SKIP before the function
+    # body executes (requires=['db']).  Either way must never be WARN/FAIL.
+    assert result.status in (Status.PASS, Status.SKIP), (
+        f'expected PASS or SKIP, got {result}'
+    )
+    if result.status is Status.PASS:
+        assert 'gate off' in result.detail
 
 
 def test_system_check_cli_gate_off_exits_zero():
