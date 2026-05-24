@@ -380,3 +380,202 @@ def test_list_pending_returns_only_unapproved(pg_conn, tmp_manifest, test_strate
 
     finally:
         _cleanup(pg_conn, test_strategy_id, [rec_id_pending, rec_id_to_adopt])
+
+
+# ---------------------------------------------------------------------------
+# New tests (code-review findings)
+# ---------------------------------------------------------------------------
+
+
+def _insert_audit_row(conn, strategy_id: str, event: str, before_state, after_state: str, actor: str = "test") -> int:
+    """Directly insert a lifecycle_audit_log row; return its id."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO lifecycle_audit_log
+              (event, strategy_id, before_state, after_state, actor)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (event, strategy_id, before_state, after_state, actor),
+        )
+        row_id = cur.fetchone()[0]
+    conn.commit()
+    return row_id
+
+
+def test_adopt_crash_recovery_before_state(pg_conn, tmp_manifest, test_strategy_id):
+    """Crash-recovery: manifest is pre-seeded to new_ref but no committed audit row
+    exists for this cycle — adopt must record before_state = original ref (from last
+    committed audit row), NOT new_ref from the manifest.
+    """
+    _ensure_strategy_in_manifest(tmp_manifest, test_strategy_id)
+
+    original_ref = "src.strategies.universe_default:sp500"
+    new_ref = "src.strategies.universe_default:r1000"
+
+    # Simulate the state after a crash: the manifest already has new_ref written,
+    # but the audit row for that attempt was rolled back (so no committed row for it).
+    # The last *committed* audit row records the true original state as its after_state.
+    audit_row_id = _insert_audit_row(
+        pg_conn,
+        test_strategy_id,
+        event="universe_filter_adopted",
+        before_state=None,
+        after_state=original_ref,
+        actor="prior_run",
+    )
+
+    # Pre-seed manifest to new_ref (simulating the crashed rename).
+    with open(tmp_manifest) as f:
+        m = json.load(f)
+    m["strategies"][test_strategy_id]["metadata"]["universe_filter_ref"] = new_ref
+    with open(tmp_manifest, "w") as f:
+        json.dump(m, f, indent=2)
+
+    # Insert a fresh pending rec for r1000.
+    rec_id = _insert_rec(pg_conn, test_strategy_id, "r1000")
+
+    try:
+        from src.strategies.lifecycle_universe_adoption import adopt_universe_recommendation
+
+        result = adopt_universe_recommendation(rec_id, actor="crash_recovery_run")
+
+        # The new audit row's before_state must be original_ref (from last committed
+        # audit row), NOT new_ref (from the manifest).
+        with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT before_state, after_state
+                FROM lifecycle_audit_log
+                WHERE strategy_id = %s AND event = 'universe_filter_adopted'
+                  AND actor = 'crash_recovery_run'
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT 1
+                """,
+                (test_strategy_id,),
+            )
+            audit = cur.fetchone()
+
+        assert audit is not None, "Audit row should exist after crash-recovery adopt"
+        assert audit["before_state"] == original_ref, (
+            f"before_state should be {original_ref!r} (from last committed audit row), "
+            f"got {audit['before_state']!r}"
+        )
+        assert audit["after_state"] == new_ref
+
+    finally:
+        _cleanup(pg_conn, test_strategy_id, [rec_id])
+        # _cleanup deletes all audit rows for this strategy_id, including audit_row_id.
+
+
+def test_adopt_raises_on_unknown_candidate(pg_conn, tmp_manifest, test_strategy_id):
+    """adopt raises ValueError if the candidate_predicate is not in CANDIDATE_PREDICATES."""
+    _ensure_strategy_in_manifest(tmp_manifest, test_strategy_id)
+    rec_id = _insert_rec(pg_conn, test_strategy_id, "definitely_not_a_real_predicate")
+
+    try:
+        from src.strategies.lifecycle_universe_adoption import adopt_universe_recommendation
+
+        with pytest.raises(ValueError, match="unknown candidate predicate"):
+            adopt_universe_recommendation(rec_id, actor="test_runner")
+
+        # Confirm nothing was written to the manifest or DB.
+        with open(tmp_manifest) as f:
+            m = json.load(f)
+        meta = m["strategies"][test_strategy_id].get("metadata", {})
+        assert "universe_filter_ref" not in meta, (
+            "Manifest should not be mutated when candidate is unknown"
+        )
+
+        with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT approved FROM strategy_universe_recommendations WHERE id = %s",
+                (rec_id,),
+            )
+            row = cur.fetchone()
+        assert row["approved"] is None, "rec should still be pending after failed adopt"
+
+    finally:
+        _cleanup(pg_conn, test_strategy_id, [rec_id])
+
+
+def test_adopt_raises_when_strategy_not_in_manifest(pg_conn, tmp_manifest, test_strategy_id):
+    """adopt raises ValueError when strategy_id is not in the manifest."""
+    # Intentionally do NOT add test_strategy_id to the manifest.
+    rec_id = _insert_rec(pg_conn, test_strategy_id, "large_cap")
+
+    try:
+        from src.strategies.lifecycle_universe_adoption import adopt_universe_recommendation
+
+        with pytest.raises(ValueError, match="not found in manifest"):
+            adopt_universe_recommendation(rec_id, actor="test_runner")
+
+    finally:
+        _cleanup(pg_conn, test_strategy_id, [rec_id])
+
+
+def test_revert_do_all_multiple_strategies(pg_conn, tmp_manifest):
+    """do_all=True reverts all strategies that have adoption audit rows."""
+    sid_a = f"S_test_doall_a_{uuid.uuid4().hex[:8]}"
+    sid_b = f"S_test_doall_b_{uuid.uuid4().hex[:8]}"
+
+    _ensure_strategy_in_manifest(tmp_manifest, sid_a)
+    _ensure_strategy_in_manifest(tmp_manifest, sid_b)
+
+    # Give both strategies a pre-existing ref.
+    with open(tmp_manifest) as f:
+        m = json.load(f)
+    m["strategies"][sid_a]["metadata"]["universe_filter_ref"] = "src.strategies.universe_default:sp500"
+    m["strategies"][sid_b]["metadata"]["universe_filter_ref"] = "src.strategies.universe_default:sp500"
+    with open(tmp_manifest, "w") as f:
+        json.dump(m, f, indent=2)
+
+    rec_id_a = _insert_rec(pg_conn, sid_a, "large_cap")
+    rec_id_b = _insert_rec(pg_conn, sid_b, "r1000")
+
+    try:
+        from src.strategies.lifecycle_universe_adoption import (
+            adopt_universe_recommendation,
+            revert_universe_recommendation,
+        )
+
+        adopt_universe_recommendation(rec_id_a, actor="test_runner")
+        adopt_universe_recommendation(rec_id_b, actor="test_runner")
+
+        results = revert_universe_recommendation(do_all=True, actor="test_reverter")
+
+        reverted_sids = {r["strategy_id"] for r in results}
+        assert sid_a in reverted_sids, f"{sid_a} should be in do_all revert results"
+        assert sid_b in reverted_sids, f"{sid_b} should be in do_all revert results"
+
+        # Both manifest entries should be restored to sp500.
+        with open(tmp_manifest) as f:
+            m = json.load(f)
+        assert m["strategies"][sid_a]["metadata"]["universe_filter_ref"] == "src.strategies.universe_default:sp500"
+        assert m["strategies"][sid_b]["metadata"]["universe_filter_ref"] == "src.strategies.universe_default:sp500"
+
+        # Two revert audit rows should exist.
+        with pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT strategy_id FROM lifecycle_audit_log
+                WHERE strategy_id = ANY(%s) AND event = 'universe_filter_reverted'
+                """,
+                ([sid_a, sid_b],),
+            )
+            revert_rows = {r["strategy_id"] for r in cur.fetchall()}
+        assert sid_a in revert_rows
+        assert sid_b in revert_rows
+
+    finally:
+        _cleanup(pg_conn, sid_a, [rec_id_a])
+        _cleanup(pg_conn, sid_b, [rec_id_b])
+
+
+def test_revert_raises_when_neither_strategy_id_nor_do_all():
+    """revert raises ValueError when neither strategy_id nor do_all=True is supplied."""
+    from src.strategies.lifecycle_universe_adoption import revert_universe_recommendation
+
+    with pytest.raises(ValueError, match="Provide strategy_id or do_all=True"):
+        revert_universe_recommendation(strategy_id=None, do_all=False)

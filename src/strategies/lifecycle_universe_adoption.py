@@ -42,17 +42,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import tempfile
 from pathlib import Path
-from typing import Any
 
 import psycopg2
 import psycopg2.extras
 
-ROOT = Path(__file__).resolve().parents[2]
+from src.strategies.universe_default import CANDIDATE_PREDICATES
 
-# Override via OPENCLAW_MANIFEST_PATH for tests so the real manifest is never mutated.
-MANIFEST = Path(os.environ.get("OPENCLAW_MANIFEST_PATH", ROOT / "src" / "strategies" / "manifest.json"))
+ROOT = Path(__file__).resolve().parents[2]
 
 # The module prefix used by universe_default predicates (must match importlib.import_module path).
 PREDICATE_MODULE = "src.strategies.universe_default"
@@ -80,17 +77,6 @@ def _ref_for_candidate(candidate: str) -> str:
 def _read_manifest(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
-
-
-def _write_manifest_atomic(manifest: dict, path: Path) -> None:
-    """Write manifest to a .tmp sibling, fsync, then rename into place."""
-    tmp_path = path.with_suffix(".tmp")
-    content = json.dumps(manifest, indent=2, ensure_ascii=False)
-    with open(tmp_path, "w") as fh:
-        fh.write(content)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.rename(tmp_path, path)
 
 
 # ---------------------------------------------------------------------------
@@ -142,15 +128,45 @@ def adopt_universe_recommendation(
 
             strategy_id = row["strategy_id"]
             candidate = row["candidate_predicate"]  # bare name, e.g. "large_cap"
+
+            # Validate candidate is a known predicate before doing anything else.
+            if candidate not in CANDIDATE_PREDICATES:
+                raise ValueError(f"unknown candidate predicate: {candidate!r}")
+
             new_ref = _ref_for_candidate(candidate)
 
-            # Read current manifest and capture before_state.
+            # Derive before_state as the last KNOWN-GOOD ref from the audit log.
+            # This survives crash-recovery: if a crash happened between rename and
+            # commit, approved is still NULL so re-adopt is allowed, but the
+            # manifest already holds new_ref.  The last *committed* audit row still
+            # reflects the true prior state (the crashed attempt's row was rolled
+            # back), so we read from there.  Fall back to the current manifest only
+            # when no committed audit row exists (genuine first adoption).
+            cur.execute(
+                """
+                SELECT after_state
+                FROM lifecycle_audit_log
+                WHERE strategy_id = %s
+                  AND event IN ('universe_filter_adopted', 'universe_filter_reverted')
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT 1
+                """,
+                (strategy_id,),
+            )
+            last_audit_row = cur.fetchone()
+
+            # Read current manifest (needed for strategy existence check + update).
             manifest = _read_manifest(manifest_path)
             strategy_entry = manifest.get("strategies", {}).get(strategy_id)
             if strategy_entry is None:
                 raise ValueError(f"Strategy {strategy_id!r} not found in manifest")
 
-            before_state = strategy_entry.get("metadata", {}).get("universe_filter_ref")
+            if last_audit_row is not None:
+                # Use the committed audit log's last known-good ref.
+                before_state = last_audit_row["after_state"]
+            else:
+                # No prior audit row — genuine first adoption; manifest ref is correct.
+                before_state = strategy_entry.get("metadata", {}).get("universe_filter_ref")
 
             # Write the updated ref into the manifest (only touch this one field).
             strategy_entry.setdefault("metadata", {})["universe_filter_ref"] = new_ref
