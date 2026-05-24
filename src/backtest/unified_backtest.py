@@ -307,11 +307,16 @@ def aggregate_metrics(trades: list[dict]) -> dict:
 
     Sharpe, max_dd, and return_pct all derive from the daily portfolio
     return series; hit_rate and avg_pnl_pct stay per-trade for interpretability.
+
+    SP-2 Phase C: also emits sortino and calmar alongside existing keys.
+    - sortino: annualized Sortino ratio (downside semi-deviation target=0);
+               None if <2 daily points or no downside deviation.
+    - calmar: annualized_return_pct / max_dd_pct; None if max_dd_pct==0.
     """
     if not trades:
         return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
                 'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
-                'avg_pnl_pct': 0.0}
+                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None}
 
     pnl = np.array([t['pnl_pct'] for t in trades], dtype=float)
     avg_hold = float(np.mean([t['holding_days'] for t in trades]) or 1.0)
@@ -329,6 +334,8 @@ def aggregate_metrics(trades: list[dict]) -> dict:
             'hit_rate':         round(hit_rate, 4),
             'avg_holding_days': round(avg_hold, 2),
             'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
+            'sortino':          None,
+            'calmar':           None,
         }
 
     eq = np.cumprod(1.0 + daily_returns)
@@ -344,6 +351,26 @@ def aggregate_metrics(trades: list[dict]) -> dict:
         sharpe = float((daily_returns.mean() - RISK_FREE_DAILY) / std_dr *
                        math.sqrt(TRADING_DAYS_PER_YEAR))
 
+    # Sortino ratio (annualized, target=0, downside semi-deviation).
+    # Only the negative daily returns contribute to downside deviation.
+    sortino: Optional[float] = None
+    if len(daily_returns) >= 2:
+        downside = daily_returns[daily_returns < 0.0]
+        if len(downside) > 0:
+            downside_dev = float(np.sqrt(np.mean(downside ** 2)))
+            if downside_dev > 1e-9:
+                sortino = float(daily_returns.mean() / downside_dev *
+                                math.sqrt(TRADING_DAYS_PER_YEAR))
+
+    # Calmar ratio: annualized return / max drawdown.
+    # Annualized return derived from the equity curve's CAGR over the sample.
+    calmar: Optional[float] = None
+    if max_dd > 1e-9:
+        n_days = len(daily_returns)
+        if n_days > 0:
+            annualized_return_pct = float((eq[-1] ** (TRADING_DAYS_PER_YEAR / n_days) - 1.0) * 100.0)
+            calmar = float(annualized_return_pct / (max_dd * 100.0))
+
     return {
         'sharpe':           None if sharpe is None else round(sharpe, 4),
         'max_dd_pct':       round(max_dd * 100.0, 4),
@@ -352,6 +379,8 @@ def aggregate_metrics(trades: list[dict]) -> dict:
         'hit_rate':         round(hit_rate, 4),
         'avg_holding_days': round(avg_hold, 2),
         'avg_pnl_pct':      round(mean_pnl * 100.0, 4),
+        'sortino':          None if sortino is None else round(sortino, 4),
+        'calmar':           None if calmar is None else round(calmar, 4),
     }
 
 
@@ -385,12 +414,21 @@ def run_backtest(strategy_id: str, *,
                  end_date: Optional[str] = None,
                  max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
                  conn: Optional[psycopg2.extensions.connection] = None,
-                 commit: bool = True) -> str:
+                 commit: bool = True,
+                 resolver=None) -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
     to strategy_backtest_regimes (one per regime that produced trades),
     and N rows to strategy_backtest_trades.
+
+    SP-2 Phase C: optional ``resolver`` kwarg. When set (not None), the per-bar
+    universe is resolved via ``resolver.resolve(strategy_id, as_of=cur_d)``
+    instead of the static universe computed once from close_wide columns.
+    The mean of per-bar universe sizes is stored in ``_universe_sizes_out``
+    on the resolver object after the run, and also returned via the
+    ``run_backtest_grid`` wrapper. When resolver is None the function is
+    byte-identical to the pre-resolver implementation.
     """
     filepath = filepath or find_strategy_file(strategy_id)
     if not filepath:
@@ -427,6 +465,8 @@ def run_backtest(strategy_id: str, *,
     trades: list[dict] = []
     days_processed = 0
     days_with_signals = 0
+    # SP-2 Phase C: track per-bar universe sizes when resolver is active.
+    universe_sizes: list[int] = []
 
     for current_date in oos_dates:
         # Need at least min_lookback days of history before strategy can run
@@ -438,6 +478,15 @@ def run_backtest(strategy_id: str, *,
         regime_state = regimes.get(current_date, None)
         if regime_state is None or pd.isna(regime_state):
             continue
+
+        # SP-2 Phase C: when resolver is set, replace the static universe with
+        # a point-in-time resolved one for this specific bar.
+        if resolver is not None:
+            bar_universe = resolver.resolve(strategy_id, as_of=cur_d)
+            universe_sizes.append(len(bar_universe))
+        else:
+            bar_universe = universe
+
         regime_payload = {
             'state':            str(regime_state),
             'date':             cur_d.isoformat(),
@@ -455,10 +504,10 @@ def run_backtest(strategy_id: str, *,
                 aux = {'options': {}}
 
         try:
-            signals = instance.generate_signals(prices_to_date, regime_payload, universe, aux_data=aux)
+            signals = instance.generate_signals(prices_to_date, regime_payload, bar_universe, aux_data=aux)
         except TypeError:
             try:
-                signals = instance.generate_signals(prices_to_date, regime_payload, universe)
+                signals = instance.generate_signals(prices_to_date, regime_payload, bar_universe)
             except Exception:
                 continue
         except Exception:
@@ -511,6 +560,12 @@ def run_backtest(strategy_id: str, *,
             })
 
     _log(f'simulation: {days_processed} active days, {days_with_signals} signal days, {len(trades)} trades')
+
+    # SP-2 Phase C: store mean universe size on resolver for caller retrieval.
+    if resolver is not None and universe_sizes:
+        resolver._universe_sizes_out = universe_sizes
+    elif resolver is not None:
+        resolver._universe_sizes_out = []
 
     # ── Aggregate metrics ────────────────────────────────────────────────
     total_metrics = aggregate_metrics(trades)
