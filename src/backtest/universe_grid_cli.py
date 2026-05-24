@@ -35,10 +35,8 @@ sys.path.insert(0, str(ROOT))
 from strategies.universe_default import CANDIDATE_PREDICATES
 from strategies.universe_resolver import MockResolver
 from strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
-from backtest.regime_blended_backtest import (
-    CANONICAL_REGIMES,
-    regime_day_frequency,
-)
+from strategies.base import CANONICAL_REGIMES
+from backtest.regime_blended_backtest import regime_day_frequency
 
 REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
 MANIFEST_PATH = ROOT / 'src' / 'strategies' / 'manifest.json'
@@ -156,7 +154,6 @@ def _simulate_grid(
         load_prices_panels, load_regimes, load_strategy_class,
         find_strategy_file, aggregate_per_regime, _log, _per_bar_simulate,
     )
-    from strategies.base import CANONICAL_REGIMES
 
     filepath = find_strategy_file(strategy_id)
     if not filepath:
