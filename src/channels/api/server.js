@@ -832,8 +832,24 @@ app.get('/api/portfolio/summary', async (req, res) => {
           WHERE status='closed' AND realized_pnl_pct IS NOT NULL
             AND closed_at >= ${fallback30TdInterval}`;
     const win30dArgs = threshold30Td ? [threshold30Td] : [];
+    // Broker-truth open position count via Alpaca. The previous DB-only
+    // count (SELECT COUNT(*) FROM execution_signals WHERE status='open')
+    // included phantom intent rows the reconcile sweep hadn't cleaned —
+    // a 56-position book typically had ~1000 phantom rows, displaying
+    // "1032 open" on the dashboard. Now: query Alpaca for the actual
+    // position list and count rows. Fail-soft → fall back to DB count
+    // if Alpaca is unreachable (operator sees something rather than '—').
+    let openCountAlpaca = null;
+    try {
+      const apos = await runAlpaca(['position', 'list'], { timeout: 8_000 });
+      if (apos && apos.ok && Array.isArray(apos.payload)) {
+        openCountAlpaca = apos.payload.length;
+      }
+    } catch (_) { /* fall back to DB below */ }
     const [openRes, statsRes, winLifeRes, win30dRes] = await Promise.all([
-      dbQuery(`SELECT COUNT(*) AS open_count FROM execution_signals WHERE status = 'open'`),
+      openCountAlpaca != null
+        ? Promise.resolve({ rows: [{ open_count: openCountAlpaca }] })
+        : dbQuery(`SELECT COUNT(DISTINCT ticker) AS open_count FROM execution_signals WHERE status = 'open' AND signal_date >= CURRENT_DATE - INTERVAL '90 days'`),
       dbQuery(`
         SELECT ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
                ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
@@ -3652,6 +3668,54 @@ body.rs-chat-locked{overflow:hidden}
 .pf-tile.pf-tile-tiny .pf-tile-strip{font-size:7.5px;padding:0 3px;justify-content:center;letter-spacing:0;line-height:1.1}
 .pf-tile.pf-tile-tiny .pf-tile-strip .tk-days{display:none}
 
+/* Open Positions: two-column LONG/SHORT layout with size-encoded tiles.
+   Tile AREA = position share of NAV (3 tiers via grid-row/column span);
+   color = unrealized P&L. CSS Grid auto-flow:dense packs smaller tiles
+   into the gaps left by larger ones — no JS packer needed, works at
+   any column width. Closed-trade history still uses the legacy
+   variable-area heatmap (renderHistory). */
+.pf-pos-twocol{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:10px}
+.pf-poscol{min-width:0;background:var(--bg);border-radius:6px;padding:8px}
+.pf-poscol-header{display:flex;justify-content:space-between;align-items:baseline;padding:2px 4px 8px;font-size:10px;text-transform:uppercase;letter-spacing:.1em;font-weight:600;border-bottom:1px solid var(--border2);margin-bottom:8px}
+.pf-poscol-long .pf-poscol-header{color:var(--green)}
+.pf-poscol-short .pf-poscol-header{color:var(--red)}
+.pf-poscol-meta{color:var(--dim);font-weight:500;font-size:9px;letter-spacing:.04em}
+/* Treemap container — squarified algorithm fills it with rectangles
+   whose area is exactly proportional to position size. JS computes the
+   layout after the container width is known; ResizeObserver re-runs on
+   width change. Fixed height keeps total area constant so the long and
+   short columns are visually comparable. */
+.pf-poscol-tm{position:relative;width:100%;height:540px;background:rgba(13,17,23,0.4);border-radius:4px;overflow:hidden}
+.pf-postile{position:absolute;border-radius:3px;display:flex;flex-direction:column;justify-content:space-between;color:#fff;cursor:pointer;border:1px solid rgba(0,0,0,0.35);overflow:hidden;box-sizing:border-box;transition:filter .12s,box-shadow .12s,border-color .12s}
+.pf-postile:hover{filter:brightness(1.18);border-color:rgba(88,166,255,0.7);z-index:5;box-shadow:0 4px 12px rgba(0,0,0,0.55)}
+.pf-postile.selected{border-color:var(--blue);box-shadow:0 0 0 2px var(--blue),0 4px 12px rgba(88,166,255,0.3);z-index:6}
+.pf-postile-sym{font-weight:700;letter-spacing:.04em;text-shadow:0 1px 1px rgba(0,0,0,0.55);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.15}
+.pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;line-height:1.1}
+.pf-postile-pnl{font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
+.pf-postile-share{opacity:0.8}
+/* Per-size typography — JS sets data-size based on min(width,height) so
+   text scales with tile area. Tiny tiles drop text entirely (color +
+   tooltip carry the meaning). */
+.pf-postile[data-size="huge"]{padding:10px}
+.pf-postile[data-size="huge"] .pf-postile-sym{font-size:22px;letter-spacing:.06em}
+.pf-postile[data-size="huge"] .pf-postile-pnl{font-size:17px}
+.pf-postile[data-size="huge"] .pf-postile-share{font-size:12px}
+.pf-postile[data-size="large"]{padding:7px}
+.pf-postile[data-size="large"] .pf-postile-sym{font-size:15px;letter-spacing:.05em}
+.pf-postile[data-size="large"] .pf-postile-pnl{font-size:12px}
+.pf-postile[data-size="large"] .pf-postile-share{font-size:10px}
+.pf-postile[data-size="medium"]{padding:4px}
+.pf-postile[data-size="medium"] .pf-postile-sym{font-size:11px}
+.pf-postile[data-size="medium"] .pf-postile-pnl{font-size:10px}
+.pf-postile[data-size="medium"] .pf-postile-share{display:none}
+.pf-postile[data-size="small"]{padding:2px 3px;justify-content:center;align-items:center}
+.pf-postile[data-size="small"] .pf-postile-sym{font-size:9px;letter-spacing:0}
+.pf-postile[data-size="small"] .pf-postile-bottom{display:none}
+.pf-postile[data-size="tiny"]{padding:0}
+.pf-postile[data-size="tiny"] .pf-postile-sym{display:none}
+.pf-postile[data-size="tiny"] .pf-postile-bottom{display:none}
+@media(max-width:760px){.pf-pos-twocol{grid-template-columns:1fr}.pf-poscol-tm{height:420px}}
+
 /* ── Alpha contribution bars ─────────────────────────────────────────────── */
 .alpha-bars{padding:12px 14px;background:rgba(13,17,23,0.55);border-top:1px solid var(--border)}
 .alpha-bars.empty{color:var(--dim);font-size:11px;padding:14px;text-align:center}
@@ -3700,8 +3764,9 @@ body.rs-chat-locked{overflow:hidden}
 .regime-meta-item{display:flex;flex-direction:column;gap:2px}
 .regime-meta-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .regime-meta-val{font-size:13px;font-weight:600;color:var(--text)}
-.regime-bar-group{flex:1;min-width:160px;max-width:260px}
+.regime-bar-group{width:100%}
 .regime-bar-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:3px;display:flex;justify-content:space-between}
+.regime-bar-label span:last-child{color:var(--muted)}
 .regime-bar-track{background:var(--border2);border-radius:4px;height:8px;overflow:hidden}
 .regime-bar-fill{height:100%;border-radius:4px;transition:width .4s}
 .regime-roro-track{background:var(--border2);border-radius:4px;height:8px;overflow:hidden;position:relative}
@@ -3712,13 +3777,6 @@ body.rs-chat-locked{overflow:hidden}
 .regime-feat{display:flex;flex-direction:column;gap:2px;min-width:90px}
 .regime-feat-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
 .regime-feat-val{font-size:12px;font-weight:600;color:var(--text)}
-.regime-prob-section{min-width:180px}
-.regime-prob-label{font-size:9px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
-.regime-prob-row{display:flex;align-items:center;gap:6px;margin-bottom:4px}
-.regime-prob-name{font-size:10px;color:var(--muted);width:80px;flex-shrink:0}
-.regime-prob-track{flex:1;background:var(--border2);border-radius:3px;height:6px;overflow:hidden}
-.regime-prob-bar{height:100%;border-radius:3px;transition:width .4s}
-.regime-prob-pct{font-size:10px;color:var(--muted);width:34px;text-align:right;flex-shrink:0}
 .regime-alert-badge{font-size:10px;padding:2px 8px;border-radius:4px;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
 
 /* ── Mobile-only overrides (≤768px = iPhone-class width) ────────────────────
@@ -5005,8 +5063,10 @@ function showOverview() {
 // "Volatility Regime Structure" — single consolidated card. State + features +
 // position_scale + duration come from the intraday HMM (6-feature, 5-min
 // cadence, scored against hmm_intraday_latest.pkl). A few daily-only fields
-// (Stress, RORO, VIX 5d Δ, SPX 20d RV, HY/IG spread, next-day transition
-// probs) are pulled from /api/regime — these have no intraday equivalent.
+// (Stress, RORO, VIX 5d Δ, SPX 20d RV, HY/IG spread) are pulled from
+// /api/regime — these have no intraday equivalent. Next-day transition
+// probabilities removed 2026-05-23: HMM is not predictive, the daily
+// transition matrix gave operators a false sense of forecasting.
 // loadRegime() fetches both endpoints in parallel and composes the panel;
 // re-polled every 60s so freshness drift below the 5-min cron is visible.
 const _STATE_COLOR  = {LOW_VOL:'var(--green)',TRANSITIONING:'var(--yellow)',HIGH_VOL:'var(--orange)',CRISIS:'var(--red)'};
@@ -5148,15 +5208,6 @@ function _renderRegimeStructure(intraday, daily) {
     ['HY/IG Spread', df.hy_ig_spread != null ? df.hy_ig_spread.toFixed(4)                         : '—'],
   ].map(([lbl,val])=>\`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${val}</div></div>\`).join('');
 
-  const tp = dly ? (dly.transition_probs_tomorrow || {}) : {};
-  const probHtml = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s => {
-    const pct = tp[s]!=null ? Math.round(tp[s]*100) : 0;
-    return \`<div class="regime-prob-row">
-      <div class="regime-prob-name">\${_STATE_SHORT[s]}</div>
-      <div class="regime-prob-track"><div class="regime-prob-bar" style="width:\${pct}%;background:\${_STATE_COLOR[s]}"></div></div>
-      <div class="regime-prob-pct">\${pct}%</div></div>\`;
-  }).join('');
-
   const modelTag = intraday.model && intraday.model.trained_at
     ? \`model retrained \${new Date(intraday.model.trained_at).toISOString().slice(0,10)}\`
     : '';
@@ -5182,25 +5233,8 @@ function _renderRegimeStructure(intraday, daily) {
     <!-- TWO-COLUMN BODY: what's driving (left) + what's happening (right) -->
     <div class="regime-body-grid">
 
-      <!-- LEFT: stress backdrop, model inputs, corroborating macro -->
+      <!-- LEFT: model inputs + corroborating macro -->
       <div>
-        <div class="regime-section">
-          <div class="regime-section-header">Market Stress</div>
-          <div style="display:flex;gap:18px;flex-wrap:wrap">
-            <div class="regime-bar-group" style="flex:1;min-width:200px">
-              <div class="regime-bar-label"><span>Stress</span><span>\${stress}/100</span></div>
-              <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
-            </div>
-            <div class="regime-bar-group" style="flex:1;min-width:200px">
-              <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
-              <div class="regime-roro-track">
-                <div class="regime-roro-center"></div>
-                <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div class="regime-section">
           <div class="regime-section-header">HMM Model Inputs <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(6 features driving the classification)</span></div>
           <div class="regime-feat-grid">\${featHtml}</div>
@@ -5212,7 +5246,7 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
       </div>
 
-      <!-- RIGHT: recent path + forward outlook -->
+      <!-- RIGHT: recent path + market stress -->
       <div>
         <div class="regime-section">
           <div class="regime-section-header">24h State Path</div>
@@ -5225,8 +5259,18 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
 
         <div class="regime-section">
-          <div class="regime-section-header">Next-Day Transition Probabilities <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(daily HMM)</span></div>
-          \${probHtml}
+          <div class="regime-section-header">Market Stress</div>
+          <div class="regime-bar-group" style="margin-bottom:12px">
+            <div class="regime-bar-label"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stress}/100</span></div>
+            <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
+          </div>
+          <div class="regime-bar-group">
+            <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
+            <div class="regime-roro-track">
+              <div class="regime-roro-center"></div>
+              <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -6810,7 +6854,10 @@ function _fmtDollar(v, withSign) {
 // Returns an rgba() so the tile keeps a dark base on zero, gradient-fades
 // to green for winners and red for losers.
 function _pnlColor(pct) {
-  if (pct == null || !isFinite(pct) || pct === 0) return 'rgba(48,54,61,0.55)';
+  // Snap to grey for any P&L that displays as "0.00%" — matches the
+  // 2-decimal formatting in _fmtPctSigned. Prevents the faint green/red
+  // tint on rounding-noise positions where the visible number reads zero.
+  if (pct == null || !isFinite(pct) || Math.abs(pct) < 0.005) return 'rgba(48,54,61,0.55)';
   const t = Math.max(-1, Math.min(1, pct / 5));
   if (t > 0) return 'rgba(63,185,80,'  + (0.18 + 0.72 * t).toFixed(2) + ')';
   return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
@@ -6934,6 +6981,173 @@ function _buildAlphaBarsHtml(group) {
 // ratios.
 const _heatmapSelected = {};   // { tableId: ticker | null }
 const _heatmapExpanded = {};   // { tableId: bool }
+
+// Open positions — two-column LONG/SHORT grid of uniform tiles.
+// Replaces the variable-area heatmap + custom packer for the live
+// positions view: CSS Grid auto-fill handles layout natively, tile
+// size is uniform (color still encodes P&L), columns are split by
+// broker.side. Closed-trade history (renderHistory) still uses
+// _buildHeatmapHtml below since the variable-area view conveys past
+// position size more usefully there.
+// Squarified-treemap algorithm (Bruls/Huijing/van Wijk 2000). Lays out
+// rectangles in a container so each has area proportional to its weight
+// AND aspect ratios are kept as close to 1 as possible. Pure function;
+// returns [{...item, x, y, w, h}]. The dashboard runs this per-column
+// after the column's actual width is known (ResizeObserver re-runs on
+// resize), then absolute-positions each tile from the result.
+function _squarifiedTreemap(items, width, height) {
+  if (!items.length || width <= 0 || height <= 0) return [];
+  const total = items.reduce((s, i) => s + Math.max(0, i.value || 0), 0);
+  if (total <= 0) return items.map(i => ({ ...i, x: 0, y: 0, w: 0, h: 0 }));
+  const scale = (width * height) / total;
+  const scaled = items
+    .map(i => ({ ...i, area: Math.max(0, i.value || 0) * scale }))
+    .filter(i => i.area > 0)
+    .sort((a, b) => b.area - a.area);
+  const output = [];
+  _squarifyStep(scaled, [], { x: 0, y: 0, w: width, h: height }, output);
+  return output;
+}
+function _worstAspect(row, sideLen) {
+  if (!row.length) return Infinity;
+  const sum = row.reduce((s, i) => s + i.area, 0);
+  const rmax = row.reduce((m, i) => Math.max(m, i.area), 0);
+  const rmin = row.reduce((m, i) => Math.min(m, i.area), Infinity);
+  const s2 = sum * sum, l2 = sideLen * sideLen;
+  return Math.max((l2 * rmax) / s2, s2 / (l2 * rmin));
+}
+function _layoutRow(row, rect, output) {
+  if (!row.length) return rect;
+  const sum = row.reduce((s, i) => s + i.area, 0);
+  if (rect.w >= rect.h) {
+    const colW = sum / rect.h;
+    let cy = rect.y;
+    for (const item of row) {
+      const itemH = item.area / colW;
+      output.push({ ...item, x: rect.x, y: cy, w: colW, h: itemH });
+      cy += itemH;
+    }
+    return { x: rect.x + colW, y: rect.y, w: Math.max(0, rect.w - colW), h: rect.h };
+  } else {
+    const rowH = sum / rect.w;
+    let cx = rect.x;
+    for (const item of row) {
+      const itemW = item.area / rowH;
+      output.push({ ...item, x: cx, y: rect.y, w: itemW, h: rowH });
+      cx += itemW;
+    }
+    return { x: rect.x, y: rect.y + rowH, w: rect.w, h: Math.max(0, rect.h - rowH) };
+  }
+}
+function _squarifyStep(items, row, rect, output) {
+  if (!items.length) { _layoutRow(row, rect, output); return; }
+  const next = items[0];
+  const sideLen = Math.min(rect.w, rect.h);
+  if (sideLen <= 0) { return; }
+  const candidate = [...row, next];
+  if (row.length === 0 || _worstAspect(candidate, sideLen) <= _worstAspect(row, sideLen)) {
+    _squarifyStep(items.slice(1), candidate, rect, output);
+  } else {
+    const remaining = _layoutRow(row, rect, output);
+    _squarifyStep(items, [], remaining, output);
+  }
+}
+
+function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
+  const longs  = groups.filter(g => g.broker && g.broker.side === 'long');
+  const shorts = groups.filter(g => g.broker && g.broker.side === 'short');
+  // No broker side (degraded mode) → bucket by DB direction as fallback so
+  // the panel never collapses to empty when Alpaca is unreachable.
+  for (const g of groups) {
+    if (!g.broker || !g.broker.side) {
+      const sigs = (g.signals || []);
+      const longCnt  = sigs.filter(s => (s.direction || '').toUpperCase() === 'LONG').length;
+      const shortCnt = sigs.filter(s => (s.direction || '').toUpperCase() === 'SHORT').length;
+      (longCnt >= shortCnt ? longs : shorts).push(g);
+    }
+  }
+  // Note: order doesn't matter for output rendering — the treemap algorithm
+  // sorts internally. We do sort here for the side counts only.
+
+  const buildCol = (label, rows) => {
+    const totalMv = rows.reduce((s, g) => s + Math.abs((g.broker && g.broker.market_value) || 0), 0);
+    const sideClass = label === 'LONG' ? 'pf-poscol-long' : 'pf-poscol-short';
+    const meta = \`\${rows.length} · \${totalMv > 0 ? _fmtDollar(totalMv, false) : '—'}\`;
+    const body = rows.length
+      ? \`<div class="pf-poscol-tm" data-side="\${label}"></div>\`
+      : '<div class="empty" style="padding:12px;font-size:11px">none</div>';
+    return \`<div class="pf-poscol \${sideClass}">
+      <div class="pf-poscol-header"><span>\${label}</span><span class="pf-poscol-meta">\${meta}</span></div>
+      \${body}
+    </div>\`;
+  };
+
+  // Stash per-side row data for the post-render treemap populator. Keyed
+  // by side label so _populateTreemap can pull the right rows + selection
+  // state. _navCache is the closure capture; selectedTicker passed through.
+  _pendingTreemap = {
+    LONG:  { rows: longs,  selectedTicker, nav },
+    SHORT: { rows: shorts, selectedTicker, nav },
+  };
+
+  return \`<div class="pf-pos-twocol">\${buildCol('LONG', longs)}\${buildCol('SHORT', shorts)}</div>\`;
+}
+
+// Module-scoped staging slot — _buildPositionsTwoColumnHtml fills this
+// during render so _populateTreemap can read the row data + selection
+// after the placeholder containers are in the DOM and their widths are
+// measurable. One render cycle at a time; no race because both writes
+// and reads happen synchronously in renderPositions().
+let _pendingTreemap = null;
+
+function _sizeClassForTile(w, h) {
+  const s = Math.min(w, h);
+  if (s >= 130) return 'huge';
+  if (s >= 80)  return 'large';
+  if (s >= 50)  return 'medium';
+  if (s >= 28)  return 'small';
+  return 'tiny';
+}
+
+function _populateTreemap(container, label) {
+  const stash = _pendingTreemap && _pendingTreemap[label];
+  if (!stash) return;
+  const { rows, selectedTicker, nav } = stash;
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  if (!w || !h || !rows.length) return;
+
+  // Weight = ABS broker market value (degraded → total_size_pct fallback).
+  // Filter out zero-weight items so the algorithm doesn't try to lay them out.
+  const items = rows.map(g => {
+    const mv = g.broker && Number.isFinite(g.broker.market_value)
+      ? Math.abs(g.broker.market_value)
+      : Math.abs(g.total_size_pct || 0);
+    return { ...g, value: mv };
+  });
+
+  const placed = _squarifiedTreemap(items, w, h);
+  container.innerHTML = placed.map(g => {
+    const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
+    const dollarPnl = (g.broker && Number.isFinite(g.broker.unrealized_pl))
+      ? g.broker.unrealized_pl
+      : ((nav && isFinite(nav) && g.contrib_pct != null) ? g.contrib_pct * nav : null);
+    const sharePct = (g.broker && g.broker.size_pct != null)
+      ? g.broker.size_pct * 100
+      : (g.total_size_pct || 0) * 100;
+    const isSel = g.ticker === selectedTicker;
+    const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
+    const sizeClass = _sizeClassForTile(g.w, g.h);
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+    return \`<div class="pf-postile\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" data-size="\${sizeClass}" style="left:\${g.x.toFixed(1)}px;top:\${g.y.toFixed(1)}px;width:\${g.w.toFixed(1)}px;height:\${g.h.toFixed(1)}px;background:\${_pnlColor(pnl)}" title="\${tip}">
+      <div class="pf-postile-sym">\${g.ticker}</div>
+      <div class="pf-postile-bottom">
+        <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+        <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
+      </div>
+    </div>\`;
+  }).join('');
+}
 
 function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const sorted = [...groups].sort((a, b) => (b.total_size_pct || 0) - (a.total_size_pct || 0));
@@ -7509,10 +7723,15 @@ function renderPositions(rows) {
     return _renderPositionsByStrategy(el, rows);
   }
   const groups = _groupByTicker(rows, 'open');
+  // Count = actual broker positions (consolidated per ticker), NOT the
+  // per-strategy intent rows. A 56-position book with ~6 strategies per
+  // ticker has ~343 intent rows behind it; showing "343 positions" is
+  // misleading — the operator wants the broker-truth count.
+  const longCnt  = groups.filter(g => g.broker && g.broker.side === 'long').length;
+  const shortCnt = groups.filter(g => g.broker && g.broker.side === 'short').length;
   document.getElementById('pf-pos-count').textContent =
-    rows.length ? \`\${groups.length} ticker\${groups.length === 1 ? '' : 's'} · \${rows.length} position\${rows.length === 1 ? '' : 's'}\` : '';
+    groups.length ? \`\${groups.length} open · \${longCnt} long · \${shortCnt} short\` : '';
   if (!groups.length) { el.innerHTML = '<div class="empty">No open positions</div>'; return; }
-  const expanded = !!_heatmapExpanded['pf-positions'];
   const selectedTicker = _heatmapSelected['pf-positions'] || null;
   // Re-validate selection — if the operator's previously-selected ticker
   // dropped out of the recent slice (closed, fell past the 90d window),
@@ -7520,39 +7739,37 @@ function renderPositions(rows) {
   const selectedGroup = selectedTicker ? groups.find(g => g.ticker === selectedTicker) : null;
   if (!selectedGroup) _heatmapSelected['pf-positions'] = null;
 
-  const controls = \`<div class="pf-heatmap-controls">
-    <span class="pf-hm-info">Tile size = portfolio size · color = unrealized P&amp;L · click to see strategy alpha</span>
-    <button class="pf-hm-btn" id="pf-hm-toggle">\${expanded ? 'Collapse' : 'Show all'}</button>
-  </div>\`;
-  const heatmap = _buildHeatmapHtml(groups, selectedGroup ? selectedGroup.ticker : null, expanded, _navCache);
-  const bars = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
+  const twocol = _buildPositionsTwoColumnHtml(groups, selectedGroup ? selectedGroup.ticker : null, _navCache);
+  const bars   = selectedGroup ? _buildAlphaBarsHtml(selectedGroup) : '';
+  el.innerHTML = twocol + bars;
 
-  el.innerHTML = controls + heatmap + bars;
-
-  // Pack tiles via FFDH after DOM insertion so the actual container
-  // width is known. Re-pack on container resize so the layout stays
-  // tight at any viewport. The off-screen left:-9999px in the tile
-  // template ensures users never see a brief unpacked flicker.
-  const heatmapEl = el.querySelector('.pf-heatmap');
-  if (heatmapEl) {
-    _packHeatmapShelves(heatmapEl);
-    if (!heatmapEl._resizeObserver) {
-      let lastWidth = heatmapEl.clientWidth;
-      heatmapEl._resizeObserver = new ResizeObserver(() => {
-        if (heatmapEl.clientWidth !== lastWidth) {
-          lastWidth = heatmapEl.clientWidth;
-          _packHeatmapShelves(heatmapEl);
+  // Populate each treemap container now that its width is measurable.
+  // Re-run on resize so the layout stays squarified at any column width.
+  el.querySelectorAll('.pf-poscol-tm').forEach(tm => {
+    const label = tm.dataset.side;
+    _populateTreemap(tm, label);
+    if (!tm._tmResizeObserver) {
+      let lastW = tm.clientWidth, lastH = tm.clientHeight;
+      tm._tmResizeObserver = new ResizeObserver(() => {
+        if (tm.clientWidth !== lastW || tm.clientHeight !== lastH) {
+          lastW = tm.clientWidth; lastH = tm.clientHeight;
+          _populateTreemap(tm, label);
+          _attachTileClickHandlers(el);
         }
       });
-      heatmapEl._resizeObserver.observe(heatmapEl);
+      tm._tmResizeObserver.observe(tm);
     }
-  }
+  });
+  _attachTileClickHandlers(el);
+}
 
-  // Click handlers — wire up tiles + expand toggle. Tile click toggles
-  // selection; clicking the already-selected tile collapses it. On open,
-  // kick off the per-ticker alpha fetch; re-render when the response
-  // lands so the bars panel hydrates without a full reload.
-  el.querySelectorAll('.pf-tile').forEach(tile => {
+// Tile click → toggle per-ticker selection → fetch alpha decomposition
+// → re-render to surface the bars panel below. Factored out so it can
+// be re-attached after a ResizeObserver-triggered treemap re-layout.
+function _attachTileClickHandlers(el) {
+  el.querySelectorAll('.pf-postile').forEach(tile => {
+    if (tile._tileClickBound) return;
+    tile._tileClickBound = true;
     tile.addEventListener('click', () => {
       const tk = tile.dataset.ticker;
       const cur = _heatmapSelected['pf-positions'];
@@ -7570,14 +7787,6 @@ function renderPositions(rows) {
       });
     });
   });
-  const hmToggle = el.querySelector('#pf-hm-toggle');
-  if (hmToggle) hmToggle.addEventListener('click', () => {
-    _heatmapExpanded['pf-positions'] = !expanded;
-    renderPositions(_rawDataCache['pf-positions']);
-  });
-  // Lambda slider relocated to the full-width Risk & Sizing panel above
-  // (renderRiskPanel()); kept the cache in _lambdaCache so other callers
-  // that still reference it see the operator's last-saved value.
 }
 
 function renderHistory(rows) {

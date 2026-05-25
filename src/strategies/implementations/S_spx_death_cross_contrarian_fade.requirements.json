@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_spx_death_cross_contrarian_fade",
+  "required": ["prices"],
+  "optional": []
+}

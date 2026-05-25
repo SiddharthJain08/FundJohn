@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_january_btm_size_seasonal",
+  "required": ["prices", "financials"],
+  "optional": []
+}

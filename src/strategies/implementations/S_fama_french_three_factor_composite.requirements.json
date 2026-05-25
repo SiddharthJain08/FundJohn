@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_fama_french_three_factor_composite",
+  "required": ["prices", "financials"],
+  "optional": []
+}
