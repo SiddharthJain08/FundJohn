@@ -225,9 +225,9 @@ async function _rate(opts, notify) {
 //      flow so next Saturday's run picks them up without operator action.
 const RETRY_FETCH_FAILED_AGE_HRS = parseInt(process.env.SATURDAY_RETRY_FETCH_FAILED_AGE_HRS || '336', 10);
 
-async function _hunt(maxFanout, opts, notify) {
+async function _hunt(maxFanout, opts, notify, queryFn = _query) {
   // Population 1: fresh candidates from today's rating + recurate.
-  const { rows: fresh } = await _query(
+  const { rows: fresh } = await queryFn(
     `SELECT candidate_id::text AS candidate_id, 'fresh' AS pop
        FROM research_candidates
       WHERE submitted_by IN ('curator','curator_spotcheck','ideator')
@@ -244,7 +244,7 @@ async function _hunt(maxFanout, opts, notify) {
   const stuckCap = Math.min(60, Math.max(0, maxFanout - fresh.length));
   let stuck = [];
   if (stuckCap > 0) {
-    const r = await _query(
+    const r = await queryFn(
       `SELECT candidate_id::text AS candidate_id, 'retry' AS pop
          FROM research_candidates
         WHERE hunter_result_json->>'rejection_reason_if_any' = 'fetch_failed'
@@ -256,22 +256,49 @@ async function _hunt(maxFanout, opts, notify) {
     stuck = r.rows;
   }
 
-  if (fresh.length === 0 && stuck.length === 0) {
+  // Population 1b: pre-specced internal drafts (ideator / MasterMindJohn).
+  // runHunterFanout bypasses PaperHunter for kind='internal' rows and passes
+  // the spec straight through (research-orchestrator.js:991 kind_internal bypass).
+  // Dedup: data_tier IS NULL — _tier stamps data_tier on every processed candidate
+  // (saturday_brain.js:307), so a coded/tiered draft is not re-selected next cycle.
+  // Bound so internal drafts never displace the fresh/retry paper budget.
+  const internalCap = Math.min(40, Math.max(0, maxFanout - fresh.length - stuck.length));
+  let internal = [];
+  if (internalCap > 0) {
+    const r = await queryFn(
+      `SELECT candidate_id::text AS candidate_id, 'internal' AS pop
+         FROM research_candidates
+        WHERE kind = 'internal'
+          AND hunter_result_json IS NOT NULL
+          AND hunter_result_json::text NOT IN ('null','{}')
+          AND hunter_result_json->>'strategy_id' IS NOT NULL
+          AND data_tier IS NULL
+          AND status IN ('pending','processing')
+        ORDER BY priority DESC, submitted_at DESC
+        LIMIT $1`,
+      [internalCap]
+    );
+    internal = r.rows;
+  }
+
+  if (fresh.length === 0 && stuck.length === 0 && internal.length === 0) {
     notify('hunt: nothing to extract (no pending candidates and no recoverable fetch_failed)');
     return { run: 0, results: [] };
   }
 
   // Clear stale hunter_result_json on the retry pool so paperhunter re-extracts.
+  // NOTE: do NOT clear hunter_result_json for internal rows — the pre-filled spec
+  // IS the payload and must be preserved for the kind_internal bypass to work.
   if (stuck.length > 0 && !opts.dryRun) {
-    await _query(
+    await queryFn(
       `UPDATE research_candidates SET hunter_result_json = NULL
         WHERE candidate_id::text = ANY($1::text[])`,
       [stuck.map(s => s.candidate_id)]
     );
   }
 
-  const all = [...fresh, ...stuck];
-  notify(`hunt: spawning paperhunter on ${all.length} candidates (${fresh.length} fresh + ${stuck.length} retry-failed) at concurrency ${DEFAULT_HUNTER_CONCURR}`);
+  const all = [...fresh, ...stuck, ...internal];
+  notify(`hunt: spawning paperhunter on ${all.length} candidates (${fresh.length} fresh + ${stuck.length} retry-failed + ${internal.length} internal-draft) at concurrency ${DEFAULT_HUNTER_CONCURR}`);
 
   if (opts.dryRun) {
     notify('hunt: DRY RUN — skipping spawn, returning empty results');
@@ -375,9 +402,9 @@ async function _ideate(opts, notify) {
       workspace: path.join(OPENCLAW_DIR, 'workspaces/default'),
       threadId:  uuidv4(),
       prompt:    'Generate 3–5 novel strategy ideas based on the current memory ' +
-                 'files and the data we have backfilled. Insert each into ' +
-                 "research_candidates with submitted_by='ideator'. Avoid duplicating " +
-                 'existing manifest strategies.',
+                 'files and the data we have backfilled. Insert each idea into ' +
+                 'research_candidates following your documented output format. ' +
+                 'Avoid duplicating existing manifest strategies.',
     });
     return { generated: 1 };  // ideator's own count goes via its own logging
   } catch (e) {
@@ -843,4 +870,4 @@ async function run(opts = {}) {
   }
 }
 
-module.exports = { run };
+module.exports = { run, _hunt };
