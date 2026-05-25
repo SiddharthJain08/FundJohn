@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Mastermind universe recs — Saturday 20:00 ET
+
+[Timer]
+OnCalendar=Sat *-*-* 20:00:00 America/New_York
+Persistent=true
+Unit=openclaw-universe-recs.service
+
+[Install]
+WantedBy=timers.target

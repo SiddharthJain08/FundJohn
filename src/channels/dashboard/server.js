@@ -351,6 +351,103 @@ app.get('/api/backfill-progress', async (_req, res) => {
   }
 });
 
+// ─────────────────────────── Universe Recommendations (SP-2 Phase C) ─────────
+// GET  /api/universe-recs        — recent recs (last 14 days)
+// POST /api/universe-recs/:id/:action — operator decision (approve / reject / defer)
+
+app.get('/api/universe-recs', async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT id, strategy_id, current_predicate, candidate_predicate,
+             backtest_summary->>'grid_sha256' AS grid_sha256,
+             rationale, approved, approved_by, adopted, recommended_at, mastermind_cost_usd
+        FROM strategy_universe_recommendations
+       WHERE recommended_at > NOW() - INTERVAL '14 days'
+       ORDER BY recommended_at DESC
+    `);
+    res.json({ recs: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/universe-recs/:id/:action', async (req, res) => {
+  const { id, action } = req.params;
+  if (!['approve', 'reject', 'defer'].includes(action)) {
+    return res.status(400).json({ error: "action must be one of: approve, reject, defer" });
+  }
+  if (!/^\d+$/.test(String(id))) {
+    return res.status(400).json({ error: 'id must be numeric' });
+  }
+  try {
+    if (action === 'approve') {
+      const repoRoot = path.resolve(__dirname, '../../..');
+      const { execFileSync } = require('node:child_process');
+      execFileSync(
+        'python3',
+        ['-m', 'src.strategies.lifecycle_universe_adoption', 'adopt', '--rec-id', String(id)],
+        { cwd: repoRoot, stdio: 'pipe', timeout: 30000 }
+      );
+    } else if (action === 'reject') {
+      // Only act on a not-yet-adopted rec (guard against rejecting live strategy).
+      const rejectResult = await query(
+        `UPDATE strategy_universe_recommendations
+            SET approved=false, adopted=false, approved_at=NOW(), approved_by='operator:dashboard'
+          WHERE id=$1 AND adopted=false`,
+        [id]
+      );
+      if (rejectResult.rowCount === 0) {
+        return res.status(409).json({ error: 'rec already adopted or not found' });
+      }
+      // Audit trail — failure does not 500 the main action.
+      try {
+        const { rows: recRows } = await query(
+          `SELECT strategy_id FROM strategy_universe_recommendations WHERE id=$1`, [id]
+        );
+        if (recRows.length > 0) {
+          await query(
+            `INSERT INTO lifecycle_audit_log (event, strategy_id, before_state, after_state, actor)
+             VALUES ('universe_filter_rejected', $1, NULL, NULL, 'operator:dashboard')`,
+            [recRows[0].strategy_id]
+          );
+        }
+      } catch (auditErr) {
+        console.error(`[dashboard] universe-recs reject audit insert failed (non-fatal):`, auditErr.message);
+      }
+    } else {
+      // defer — only defer a still-pending rec (approved IS NULL).
+      const deferResult = await query(
+        `UPDATE strategy_universe_recommendations
+            SET approved=NULL, approved_by='operator:dashboard:defer'
+          WHERE id=$1 AND approved IS NULL`,
+        [id]
+      );
+      if (deferResult.rowCount === 0) {
+        return res.status(409).json({ error: 'rec already adopted or not found' });
+      }
+      // Audit trail — failure does not 500 the main action.
+      try {
+        const { rows: recRows } = await query(
+          `SELECT strategy_id FROM strategy_universe_recommendations WHERE id=$1`, [id]
+        );
+        if (recRows.length > 0) {
+          await query(
+            `INSERT INTO lifecycle_audit_log (event, strategy_id, before_state, after_state, actor)
+             VALUES ('universe_filter_deferred', $1, NULL, NULL, 'operator:dashboard')`,
+            [recRows[0].strategy_id]
+          );
+        }
+      } catch (auditErr) {
+        console.error(`[dashboard] universe-recs defer audit insert failed (non-fatal):`, auditErr.message);
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(`[dashboard] universe-recs ${action} ${id} failed:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─────────────────────────── Universe Resolution ─────────────────────────────
 app.get('/api/universe-slice', async (_req, res) => {
   try {

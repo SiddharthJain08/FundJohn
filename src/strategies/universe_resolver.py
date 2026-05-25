@@ -98,6 +98,20 @@ class UniverseResolver:
         return union
 
 
+class MockResolver(UniverseResolver):
+    """SP-2 Phase C grid helper: force a candidate predicate, bypassing the
+    manifest-registered one. Reuses resolve()'s db-fetch / coverage-floor /
+    look-ahead-guard / sort / cache unchanged."""
+
+    def __init__(self, db: _DBProtocol, coverage: _CoverageProtocol,
+                 predicate: Callable[[object, _date], bool], **kw):
+        super().__init__(db=db, coverage=coverage, **kw)
+        self._forced_predicate = predicate
+
+    def _load_predicate(self, strategy_id: str) -> Callable[[object, _date], bool]:
+        return self._forced_predicate
+
+
 if __name__ == "__main__":
     import argparse, json, os, sys
     from datetime import date as _d

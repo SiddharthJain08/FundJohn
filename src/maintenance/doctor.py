@@ -1262,6 +1262,44 @@ def check_backfill_universe_coverage():
     return _warn(name, msg)
 
 
+# ── SP-2 Phase C: universe-recs freshness ─────────────────────────────────
+
+def _universe_recs_latest_recommended_at():
+    """Return MAX(recommended_at) from strategy_universe_recommendations, or None.
+    Indirection seam: tests monkeypatch this."""
+    import psycopg2
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        raise RuntimeError('POSTGRES_URI not set')
+    with psycopg2.connect(uri) as c, c.cursor() as cur:
+        cur.execute('SELECT MAX(recommended_at) FROM strategy_universe_recommendations')
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+@_check('universe_recs_freshness')
+def _check_universe_recs_freshness():
+    """Gated freshness of strategy_universe_recommendations. PASS when gate off.
+    WARN >8d since last run, FAIL >14d, WARN if table empty (never run).
+    Gated on OPENCLAW_UNIVERSE_RECS=1."""
+    if os.environ.get('OPENCLAW_UNIVERSE_RECS') != '1':
+        return _ok('universe_recs_freshness', 'gate off; skipped')
+    try:
+        last = _universe_recs_latest_recommended_at()
+    except Exception as exc:
+        return _warn('universe_recs_freshness', f'query failed: {type(exc).__name__}: {exc}')
+    if last is None:
+        return _warn('universe_recs_freshness', 'no recs yet — timer never run or gate just enabled')
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age_d = (datetime.now(timezone.utc) - last).days
+    if age_d > 14:
+        return _fail('universe_recs_freshness', f'last run {age_d}d ago (>{14}d threshold)')
+    if age_d > 8:
+        return _warn('universe_recs_freshness', f'last run {age_d}d ago (>{8}d threshold)')
+    return _ok('universe_recs_freshness', f'last run {age_d}d ago')
+
+
 def _drift_summary():
     """Indirection seam for the drift-alerts check."""
     sys.path.insert(0, str(ROOT / 'src'))

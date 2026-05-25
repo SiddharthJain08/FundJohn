@@ -12,7 +12,8 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../../.env') });
 
-const { Client, GatewayIntentBits, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, AttachmentBuilder, Partials } = require('discord.js');
+const { parseUniverseRecReaction } = require('./_universe_rec_reaction');
 const fs   = require('fs');
 const path = require('path');
 
@@ -70,8 +71,11 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.GuildMessageReactions,
   ],
-  partials: ['CHANNEL', 'MESSAGE'],
+  // Numeric Partials enum required by discord.js v14 — string forms are no-ops
+  // and would silently prevent messageReactionAdd from firing on uncached messages.
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction],
 });
 
 // ── Agent pipeline ────────────────────────────────────────────────────────────
@@ -1846,6 +1850,50 @@ client.on('interactionCreate', async (interaction) => {
     agentPersonas.post('tradedesk', 'trade-reports',
       `⚠️ **Rec execution failed** — rec_id \`${recId}\` | ${result.error || result.detail}`
     ).catch(() => null);
+  }
+});
+
+// ── Universe-rec reaction handler ─────────────────────────────────────────────
+// The curator posts a plain-text message ending with `_footer: universe-rec:<id>_`.
+// The operator reacts ✅ (approve) / ❌ (reject) / ⏸ (defer).
+// We forward the decision to the operator dashboard at :7870.
+client.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    if (user.bot) return;
+
+    // Fetch partials — webhook-posted messages are not in cache
+    if (reaction.partial) {
+      try { await reaction.fetch(); } catch (e) {
+        console.error('[bot] universe-rec: failed to fetch partial reaction:', e.message);
+        return;
+      }
+    }
+    if (reaction.message.partial) {
+      try { await reaction.message.fetch(); } catch (e) {
+        console.error('[bot] universe-rec: failed to fetch partial message:', e.message);
+        return;
+      }
+    }
+
+    const messageContent = reaction.message.content || '';
+    const emojiName = reaction.emoji.name;
+
+    const parsed = parseUniverseRecReaction(messageContent, emojiName);
+    if (!parsed) return;  // not a universe-rec message, or emoji not mapped
+
+    const { recId, action } = parsed;
+    const url = `http://127.0.0.1:7870/api/universe-recs/${recId}/${action}`;
+
+    const resp = await fetch(url, { method: 'POST' });
+    if (resp.ok) {
+      await reaction.message.react('✔').catch(() => null);
+      console.log(`[bot] universe-rec:${recId} → ${action} (by ${user.tag || user.id})`);
+    } else {
+      const body = await resp.text().catch(() => '');
+      console.error(`[bot] universe-rec:${recId} dashboard POST failed: ${resp.status} ${body}`);
+    }
+  } catch (err) {
+    console.error('[bot] universe-rec reaction handler error:', err.message);
   }
 });
 

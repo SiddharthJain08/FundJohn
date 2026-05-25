@@ -128,6 +128,14 @@
     <div class="body" id="bfp"></div>
     <div style="padding:4px 12px 6px;font-family:var(--mono);font-size:10px;color:var(--muted)" id="bfp-footer"></div>
   </section>
+
+  <section class="card span-12">
+    <header>
+      <h2>Universe Recommendations (last 14d · SP-2 Phase C)</h2>
+      <span class="count" id="uni-recs-count"></span>
+    </header>
+    <div class="body" id="uni-recs"></div>
+  </section>
 </main>
 
 <footer>
@@ -459,12 +467,84 @@ async function refreshBackfillProgress() {
   }
 }
 
+async function refreshUniverseRecs() {
+  const { recs = [], error } = await fetchJSON('/api/universe-recs');
+  const el = $('uni-recs');
+  const count = $('uni-recs-count');
+  if (error) {
+    el.innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(error)}</div>`;
+    return;
+  }
+  count.textContent = `${recs.length} recs`;
+  if (!recs.length) {
+    el.innerHTML = '<div class="muted">— no recommendations in last 14 days —</div>';
+    return;
+  }
+
+  function recState(r) {
+    if (r.adopted)            return ['adopted',  'ok'];
+    if (r.approved === true)  return ['approved', 'ok'];
+    if (r.approved === false) return ['rejected', 'err'];
+    if (r.approved === null) {
+      // Distinguish genuine initial state from operator-deferred:
+      // defer action writes approved_by='operator:dashboard:defer'; new recs have approved_by=null.
+      if (r.approved_by && r.approved_by.includes('defer')) return ['deferred', 'warn'];
+      return ['pending', 'muted'];
+    }
+    return ['pending', 'muted'];
+  }
+
+  el.innerHTML = table([
+    { key: 'id', label: 'id', get: r => r.id },
+    { key: 'strategy_id', label: 'strategy' },
+    { key: 'predicate', label: 'current → candidate', html: true,
+      get: r => `<span class="muted">${esc(r.current_predicate)}</span> → <b>${esc(r.candidate_predicate)}</b>` },
+    { key: 'state', label: 'state', html: true,
+      get: r => { const [s, c] = recState(r); return pill(s, c); } },
+    { key: 'rationale', label: 'rationale (snippet)',
+      get: r => (r.rationale || '').slice(0, 80) + ((r.rationale || '').length > 80 ? '…' : '') },
+    { key: 'recommended_at', label: 'rec at',
+      get: r => r.recommended_at ? new Date(r.recommended_at).toLocaleString() : '' },
+    { key: 'actions', label: 'actions', html: true,
+      get: r => {
+        const [s] = recState(r);
+        if (s === 'adopted' || s === 'approved') return '<span class="muted">done</span>';
+        return [
+          `<button class="refresh" data-rec-id="${esc(String(r.id))}" data-rec-action="approve" title="Approve">✅</button>`,
+          `<button class="refresh" data-rec-id="${esc(String(r.id))}" data-rec-action="reject"  title="Reject"  style="margin-left:4px">❌</button>`,
+          `<button class="refresh" data-rec-id="${esc(String(r.id))}" data-rec-action="defer"   title="Defer"   style="margin-left:4px">⏸</button>`,
+        ].join('');
+      }},
+  ], recs);
+
+  for (const btn of el.querySelectorAll('button[data-rec-id]')) {
+    btn.addEventListener('click', async () => {
+      const recId  = btn.dataset.recId;
+      const action = btn.dataset.recAction;
+      if (!confirm(action.toUpperCase() + ' universe rec #' + recId + '?')) return;
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const r = await fetch(
+          '/api/universe-recs/' + encodeURIComponent(recId) + '/' + encodeURIComponent(action),
+          { method: 'POST' }
+        );
+        const data = await r.json();
+        if (!r.ok) { alert('Error: ' + (data.error || r.statusText)); btn.disabled = false; return; }
+        await refreshUniverseRecs();
+      } catch (e) {
+        alert('Network error: ' + e.message);
+        btn.disabled = false;
+      }
+    });
+  }
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
     refreshGraphs(), refreshHealth(), refreshDataHealth(), refreshUniverseSlice(),
-    refreshBackfillProgress(),
+    refreshBackfillProgress(), refreshUniverseRecs(),
   ]);
 }
 
