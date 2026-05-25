@@ -458,7 +458,7 @@ app.get('/api/papermint-recent', async (_req, res) => {
       SELECT rc.candidate_id, rc.source_url, rc.submitted_at,
              rc.hunter_result_json->>'inferred_universe_filter' AS inferred,
              sr.id AS staged_strategy_id,
-             sr.created_at - rc.submitted_at AS adoption_lag
+             (sr.created_at - rc.submitted_at)::text AS adoption_lag
         FROM research_candidates rc
         LEFT JOIN strategy_registry sr ON sr.id = rc.hunter_result_json->>'strategy_id'
        WHERE rc.submitted_at > NOW() - INTERVAL '30 days'
