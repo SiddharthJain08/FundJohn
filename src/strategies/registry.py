@@ -141,6 +141,7 @@ _IMPL_MAP = {
     'S_january_btm_size_seasonal': ('strategies.implementations.S_january_btm_size_seasonal', 'JanuaryBTMSizeSeasonal'),
     'S_fama_french_three_factor_composite': ('strategies.implementations.S_fama_french_three_factor_composite', 'FamaFrenchThreeFactorComposite'),
     'S_spx_death_cross_contrarian_fade': ('strategies.implementations.S_spx_death_cross_contrarian_fade', 'SpxDeathCrossContrarianFade'),
+    'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
 }
 
 

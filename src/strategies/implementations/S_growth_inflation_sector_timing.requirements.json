@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_growth_inflation_sector_timing",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

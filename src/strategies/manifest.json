@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-24T15:33:26.907Z",
+  "updated_at": "2026-05-25T14:46:13.679Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -100,8 +100,8 @@
       ]
     },
     "S_transitioning_overbought_revert": {
-      "state": "live",
-      "state_since": "2026-05-14T14:00:17.853Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T13:15:58.225Z",
       "metadata": {
         "canonical_file": "S_transitioning_overbought_revert.py",
         "class": "TransitioningOverboughtRevert",
@@ -218,6 +218,14 @@
           "timestamp": "2026-05-14T14:00:17.853Z",
           "actor": "manual:repromote-after-bt-fallback-fix",
           "reason": "Re-promote after _load_backtest_sharpe fallback to strategy_registry. Auto-demote bounced this earlier because strategy_regime_backtests had no rows.",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T13:15:58.225Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
           "metadata": {}
         }
       ]
@@ -1110,8 +1118,8 @@
       ]
     },
     "S_HV9_rv_momentum_div": {
-      "state": "live",
-      "state_since": "2026-04-22T05:18:07.798201+00:00",
+      "state": "deprecated",
+      "state_since": "2026-05-25T08:01:16.214Z",
       "metadata": {
         "canonical_file": "shv9_rv_momentum_div.py",
         "class": "RVMomentumDivergence",
@@ -1131,6 +1139,14 @@
             "option": "A",
             "preserve_execution": true
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T08:01:16.214Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -1213,8 +1229,8 @@
       ]
     },
     "S_HV12_vrp_normalization": {
-      "state": "live",
-      "state_since": "2026-04-30T15:02:07.030Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:43:45.411Z",
       "metadata": {
         "canonical_file": "shv12_vrp_normalization.py",
         "class": "VRPNormalization",
@@ -1236,12 +1252,20 @@
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
           "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:43:45.411Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
     "S_HV13_call_put_iv_spread": {
-      "state": "live",
-      "state_since": "2026-04-22T17:21:29.639Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:43:59.707Z",
       "metadata": {
         "canonical_file": "shv13_call_put_iv_spread.py",
         "class": "CallPutIVSpread",
@@ -1258,12 +1282,20 @@
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
           "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:43:59.707Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
     "S_HV14_otm_skew_factor": {
-      "state": "live",
-      "state_since": "2026-04-22T17:22:00.478Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:50:03.335Z",
       "metadata": {
         "canonical_file": "shv14_otm_skew_factor.py",
         "class": "OTMSkewFactor",
@@ -1276,6 +1308,14 @@
           "timestamp": "2026-04-22T17:22:00.478Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:50:03.335Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
           "metadata": {}
         }
       ]
@@ -1750,8 +1790,8 @@
       ]
     },
     "S_robust_minimum_variance_hedge": {
-      "state": "live",
-      "state_since": "2026-04-22T05:18:07.798201+00:00",
+      "state": "deprecated",
+      "state_since": "2026-05-25T13:15:27.847Z",
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
@@ -1772,6 +1812,14 @@
             "option": "A",
             "preserve_execution": true
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T13:15:27.847Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -1846,8 +1894,8 @@
       ]
     },
     "S_alpha191_lasso_crossmarket": {
-      "state": "live",
-      "state_since": "2026-04-22T18:16:00.848Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:45:46.924Z",
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
@@ -1876,6 +1924,14 @@
           "timestamp": "2026-04-22T18:16:00.848Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:45:46.924Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
           "metadata": {}
         }
       ]
@@ -2179,8 +2235,8 @@
       ]
     },
     "S_HV14_otm_skew_factor_cohort2026": {
-      "state": "live",
-      "state_since": "2026-05-19T07:20:53.018Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:47:33.833Z",
       "metadata": {
         "canonical_file": "shv14_otm_skew_factor_cohort2026.py",
         "class": "OTMSkewFactor",
@@ -2269,12 +2325,20 @@
               "TRANSITIONING"
             ]
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:47:33.833Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
     "S_HV15_iv_term_structure_cohort2026": {
-      "state": "live",
-      "state_since": "2026-04-30T18:18:22.066Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T07:54:38.457Z",
       "metadata": {
         "canonical_file": "shv15_iv_term_structure_cohort2026.py",
         "class": "IVTermStructureSlope",
@@ -2353,6 +2417,14 @@
           "timestamp": "2026-04-30T18:18:22.066Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T07:54:38.457Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
           "metadata": {}
         }
       ]
@@ -3586,8 +3658,8 @@
       "history": []
     },
     "S_pairs_trading_min_distance": {
-      "state": "live",
-      "state_since": "2026-05-19T07:19:45.851Z",
+      "state": "deprecated",
+      "state_since": "2026-05-25T08:46:58.876Z",
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
         "class": "PairsTradingMinDistance",
@@ -3609,6 +3681,14 @@
               "CRISIS"
             ]
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "deprecated",
+          "timestamp": "2026-05-25T08:46:58.876Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual unstack via dashboard",
+          "metadata": {}
         }
       ]
     },
@@ -4274,7 +4354,11 @@
         "canonical_file": "S_spx_death_cross_contrarian_fade.py",
         "class": "SpxDeathCrossContrarianFade",
         "description": "Contrarian long SPY when 50-day SMA crosses below 200-day SMA; exit at Golden Cross or -20% hard stop. 73.5% win rate over 97 years.",
-        "eligible_regimes": ["TRANSITIONING", "HIGH_VOL", "CRISIS"],
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ],
         "eligible_regimes_source": "literature_override",
         "eligible_regimes_note": "97-year study (1928-2025) n=49 trades; modern 8y window yields ~4 events — too sparse for regime_partition auto-derivation. Regimes set from thesis: Death Crosses occur in elevated-stress environments."
       },
@@ -4306,6 +4390,402 @@
               ]
             },
             "candidate_id": "a2645236-9918-4681-b390-8dc8f78642cd"
+          }
+        }
+      ]
+    },
+    "S_growth_inflation_sector_timing": {
+      "state": "candidate",
+      "state_since": "2026-05-25T08:02:53.523038+00:00",
+      "metadata": {
+        "canonical_file": "S_growth_inflation_sector_timing.py",
+        "class": "GrowthInflationSectorTiming",
+        "description": "Rotate into one sector ETF based on growth×inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength."
+      },
+      "history": []
+    },
+    "S_tactical_yield_credit_term_premium": {
+      "state": "staging",
+      "state_since": "2026-05-25T08:06:56.453Z",
+      "metadata": {
+        "canonical_file": "s_tactical_yield_credit_term_premium.py",
+        "class": "S_tactical_yield_credit_term_premium",
+        "description": "Allocate to US Treasuries (IEF) and/or IG corporate bonds (LQD) only when the respective yield premium (term or credit spread over T-Bills) ranks in the top half of its full expanding historical distribution, otherwise hold cash; this systematically avoids bond exposure when carr"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T08:06:56.453Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "macro: reachable but not backfilled (providers yfinance)",
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2026-05-25"
+                }
+              ]
+            },
+            "candidate_id": "1eceaad4-6c5f-4bd7-8bf0-bfff61b06118"
+          }
+        }
+      ]
+    },
+    "S_book_to_market_value_premium": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_book_to_market_value_premium.py",
+        "class": "S_book_to_market_value_premium",
+        "description": "High book-to-market equity stocks earn a robust value premium over low B/M stocks across all US market eras because elevated B/M proxies for priced distress risk that factor covariance exposure — not mere characteristic compensation — explains."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "25c871cc-b8ad-4bff-b033-a81d1dab35db"
+          }
+        }
+      ]
+    },
+    "S_fama_french_three_factor_anomalies": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_fama_french_three_factor_anomalies.py",
+        "class": "S_fama_french_three_factor_anomalies",
+        "description": "Most cross-sectional return anomalies tied to size, book-to-market, earnings/price, cashflow/price, sales growth, and long-term reversal are captured by a three-factor model (market, SMB, HML), implying rational ICAPM/APT risk compensation — with excess returns in high-B/M small-"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "32bf5a47-8aca-4cd8-ab97-9731f79b293e"
+          }
+        }
+      ]
+    },
+    "S_fama_french_anomaly_dissection": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_fama_french_anomaly_dissection.py",
+        "class": "S_fama_french_anomaly_dissection",
+        "description": "Net stock issuance, accruals, and price momentum are pervasive cross-sectional return predictors across all cap tiers; combining these three signals into an equal-weighted composite score produces a robust long-short anomaly that survives size-controls and sorts."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "2b9dfba8-3882-46e2-a724-6f083e0210a2"
+          }
+        }
+      ]
+    },
+    "S_earnings_distraction_pead": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_earnings_distraction_pead.py",
+        "class": "S_earnings_distraction_pead",
+        "description": "When many firms announce earnings simultaneously, investors suffer attention overload and underreact to individual earnings surprises, creating stronger post-announcement drift that can be exploited by trading in the direction of the surprise on high-distraction days."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "earnings",
+                "earnings_calendar"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2025-01-06",
+                  "gap_to": "2025-03-31"
+                },
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2025-01-06",
+                  "gap_to": "2025-03-31"
+                }
+              ]
+            },
+            "candidate_id": "1abd9832-2508-4654-ad22-49f38c04f070"
+          }
+        }
+      ]
+    },
+    "S_daniel_titman_characteristics_cross_section": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_daniel_titman_characteristics_cross_section.py",
+        "class": "S_daniel_titman_characteristics_cross_section",
+        "description": "Small-cap and high book-to-market stocks earn persistent return premia because of their observable characteristics directly rather than their comovement with systematic risk factors, making a long-short portfolio ranked by size and B/M viable independent of factor-loading control"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "d8f5d99b-f7b8-4544-8695-f77d2c5e0556"
+          }
+        }
+      ]
+    },
+    "S_friday_earnings_inattention_drift": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_friday_earnings_inattention_drift.py",
+        "class": "S_friday_earnings_inattention_drift",
+        "description": "Earnings announced on Fridays receive 15% less immediate market attention and generate 70% more post-announcement drift, because investor inattention on Fridays causes systematic underreaction that can be harvested by going long positive-surprise and short negative-surprise Frida"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "earnings",
+                "earnings_calendar"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2025-01-06",
+                  "gap_to": "2025-03-31"
+                },
+                {
+                  "provider": "fmp",
+                  "column": "earnings",
+                  "data_type": "fundamentals",
+                  "gap_from": "2025-01-06",
+                  "gap_to": "2025-03-31"
+                }
+              ]
+            },
+            "candidate_id": "983e909d-ccf3-4cee-bba1-309cc0e6fcee"
+          }
+        }
+      ]
+    },
+    "S_value_momentum_everywhere": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_value_momentum_everywhere.py",
+        "class": "S_value_momentum_everywhere",
+        "description": "Value (book-to-market) and momentum (12-1 month return) premia are universal across eight asset classes and share a common global factor structure driven partly by funding-liquidity risk, making a combined long-short equity composite robust and persistent."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-12",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "026077b3-ac84-47d7-baa6-c527351add52"
+          }
+        }
+      ]
+    },
+    "S_idiosyncratic_vol_puzzle": {
+      "state": "staging",
+      "state_since": "2026-05-25T14:46:13.679Z",
+      "metadata": {
+        "canonical_file": "s_idiosyncratic_vol_puzzle.py",
+        "class": "S_idiosyncratic_vol_puzzle",
+        "description": "Stocks with high idiosyncratic volatility — measured as the std-dev of daily Fama-French three-factor residuals over the prior month — earn anomalously low subsequent returns that cannot be explained by size, book-to-market, momentum, or liquidity, enabling a long low-IVOL / shor"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-25T14:46:13.679Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
+                "macro: reachable but not backfilled (providers yfinance)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2025-01-06",
+                  "gap_to": "2026-05-25"
+                }
+              ]
+            },
+            "candidate_id": "288aa06d-7048-401f-9df2-fa4cc9210ade"
           }
         }
       ]
@@ -4407,6 +4887,16 @@
         "canonical_file": "S_january_btm_size_seasonal.py",
         "class": "JanuaryBTMSizeSeasonal",
         "description": "January seasonal B/M effect concentrated in small-cap stocks: LONG high-B/M small-cap, SHORT low-B/M small-cap each December; exit February."
+      },
+      "history": []
+    },
+    "S_growth_inflation_sector_timing": {
+      "state": "candidate",
+      "state_since": "2026-05-25T00:00:00.000000+00:00",
+      "metadata": {
+        "canonical_file": "S_growth_inflation_sector_timing.py",
+        "class": "GrowthInflationSectorTiming",
+        "description": "Rotate into one sector ETF based on growth×inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength."
       },
       "history": []
     }
