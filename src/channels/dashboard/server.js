@@ -460,7 +460,7 @@ app.get('/api/papermint-recent', async (_req, res) => {
              sr.id AS staged_strategy_id,
              sr.created_at - rc.submitted_at AS adoption_lag
         FROM research_candidates rc
-        LEFT JOIN strategy_registry sr ON sr.id = (rc.hunter_result_json->>'strategy_id')::integer
+        LEFT JOIN strategy_registry sr ON sr.id = rc.hunter_result_json->>'strategy_id'
        WHERE rc.submitted_at > NOW() - INTERVAL '30 days'
        ORDER BY rc.submitted_at DESC LIMIT 50
     `);
