@@ -98,7 +98,7 @@ _IMPL_MAP = {
     'S_pairs_cointegration_copula':  ('strategies.implementations.S_pairs_cointegration_copula',  'PairsCointegrationCopula'),
     'S_ma_tsmom_crossover':          ('strategies.implementations.S_ma_tsmom_crossover',          'MATSMOMCrossover'),
     'S_pca_etf_stat_arb_reversion':  ('strategies.implementations.S_pca_etf_stat_arb_reversion',  'PCAETFStatArbReversion'),
-    'S_price_earnings_momentum_drift': ('strategies.implementations.S_price_earnings_momentum_drift', 'PriceEarningsMomentumDrift'),
+    'S_price_earnings_momentum_drift': ('strategies.implementations.s_price_earnings_momentum_drift', 'PriceEarningsMomentumDrift'),
     'S_3d_pca_characteristic_factors': ('strategies.implementations.S_3d_pca_characteristic_factors', 'ThreeDPCACharacteristicFactors'),
     'S_bankruptcy_risk_anomaly': ('strategies.implementations.S_bankruptcy_risk_anomaly', 'BankruptcyRiskAnomaly'),
     'S_quality_adjusted_size': ('strategies.implementations.S_quality_adjusted_size', 'QualityAdjustedSize'),
