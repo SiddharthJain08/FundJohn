@@ -308,6 +308,22 @@ Phase C (shipped 2026-05-24, branch `feat/sp2-phase-c-mastermind-universe-recs`,
 
 **Migration 117** adds `lifecycle_audit_log` (migration 116 was taken by market_news). Doctor check `universe_recs_freshness` and system_check `universe_recs_health` are both gated on `OPENCLAW_UNIVERSE_RECS=1`. Spec: `docs/superpowers/specs/2026-05-22-sp2-phase-c-mastermind-universe-recs-design.md`. Plan: `docs/superpowers/plans/2026-05-22-sp2-phase-c-mastermind-universe-recs.md`.
 
+#### Predicate-at-mint (SP-2 Phase D)
+
+Phase D (shipped 2026-05-25, branch `feat/sp2-phase-d-research-hooks`, PR #11) closes the A→D loop by stamping a universe predicate onto each strategy at the moment it is minted from a research paper.
+
+**Flow**: PaperHunter (`src/agent/prompts/subagents/paperhunter.md`, §5 "Infer universe slice") picks ONE of the 12 `CANDIDATE_PREDICATES` whose scope best matches the paper's thesis and writes it as `inferred_universe_filter` into `research_candidates.hunter_result_json` (JSONB — no schema migration). The research orchestrator (`src/agent/research/research-orchestrator.js`, `_validateInferredFilter`) validates the name against the Python whitelist (falls back to `null` on unknown or when the gate is off) and threads it into the StrategyCoder context. StrategyCoder (`src/agent/prompts/subagents/strategycoder.md`, §"Universe predicate") emits a module-scope import when a filter is provided:
+
+```python
+from src.strategies.universe_default import <name> as universe_filter
+```
+
+At `lifecycle.register()` time, `_detect_module_predicate` AST-parses the strategy file for this top-level import and sets `metadata.universe_filter_ref = "src.strategies.universe_default:<name>"` in the manifest (the resolver-loadable `module:attr` form). Strategies without the import inherit the default `sp500`.
+
+**Gate**: `OPENCLAW_PHASE_D_PREDICATE_AT_MINT` — absent variable is treated as OFF; the live VPS `.env` must contain `=1` to activate. System_check `papermint_predicate_coverage` (agents + strategies tag) tracks 30-day coverage; day-1 reading will be 0% (all pre-Phase-D candidates have null) — see runbook for the expected burn-in period.
+
+Runbook: `docs/sp2-papermint-runbook.md`. Spec: `docs/superpowers/specs/2026-05-22-sp2-phase-d-research-hooks-design.md`. Plan: `docs/superpowers/plans/2026-05-22-sp2-phase-d-research-hooks.md`.
+
 ---
 
 ## 8. Database schema
