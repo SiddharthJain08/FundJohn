@@ -47,6 +47,36 @@ Signal(
 )
 ```
 
+### Universe predicate
+
+The orchestrator injects the inferred predicate into your context as:
+- `INFERRED_UNIVERSE_FILTER = <name>` (one of the 12 candidates) — OR
+- `INFERRED_UNIVERSE_FILTER = null`
+
+**If `INFERRED_UNIVERSE_FILTER` is a name:**
+Add this line directly after your standard imports (before the strategy class
+definition):
+
+```python
+from src.strategies.universe_default import <INFERRED_UNIVERSE_FILTER> as universe_filter
+```
+
+(substituting the actual predicate name for `<INFERRED_UNIVERSE_FILTER>`).
+The `universe_filter` symbol must be at **module scope** (a top-level import, not
+inside the class) so the lifecycle's predicate detection registers it on the
+strategy at staging time. The imported predicate already satisfies Phase A's
+`(meta, as_of)` predicate contract — do not redefine or wrap it.
+
+**If `INFERRED_UNIVERSE_FILTER` is null:**
+Do NOT define `universe_filter`. The strategy will inherit the default (`sp500`) —
+no code needed.
+
+**Never inline a custom predicate body.** Phase D restricts strategy files to
+importing one of the 12 pre-vetted predicates (or omitting the symbol entirely).
+Custom predicate emission is out of scope; if none of the 12 fit, leave
+`universe_filter` undefined and the operator will adopt a better one via the
+Saturday `universe-recs` cycle.
+
 ### Data dependency declaration
 
 Data dependencies go in **Artifact 4 — requirements.json** (defined below).

@@ -448,6 +448,26 @@ app.post('/api/universe-recs/:id/:action', async (req, res) => {
   }
 });
 
+// ──────────────────── Papermint Predicate Coverage (SP-2 Phase D) ────────────
+// GET /api/papermint-recent — recent research_candidates (last 30 days) with
+//   inferred predicate + adoption lag where a strategy was staged.
+
+app.get('/api/papermint-recent', async (_req, res) => {
+  try {
+    const { rows } = await query(`
+      SELECT rc.candidate_id, rc.source_url, rc.submitted_at,
+             rc.hunter_result_json->>'inferred_universe_filter' AS inferred,
+             sr.id AS staged_strategy_id,
+             (sr.created_at - rc.submitted_at)::text AS adoption_lag
+        FROM research_candidates rc
+        LEFT JOIN strategy_registry sr ON sr.id = rc.hunter_result_json->>'strategy_id'
+       WHERE rc.submitted_at > NOW() - INTERVAL '30 days'
+       ORDER BY rc.submitted_at DESC LIMIT 50
+    `);
+    res.json({ rows });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // ─────────────────────────── Universe Resolution ─────────────────────────────
 app.get('/api/universe-slice', async (_req, res) => {
   try {

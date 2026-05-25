@@ -17,7 +17,7 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, spawnSync } = require('child_process');
 const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
@@ -46,6 +46,27 @@ function _resolveImplPath(stratId) {
     if (cf) canonical = cf;
   } catch (_) { /* manifest read error → fall back to default */ }
   return path.join(IMPLEMENTATIONS_DIR, canonical);
+}
+
+const PYTHON = process.env.PYTHON_BIN || 'python3';
+
+/**
+ * Validate an inferred_universe_filter name against the real CANDIDATE_PREDICATES
+ * whitelist. Returns the name if valid (and gate is ON), null otherwise.
+ * Gate: OPENCLAW_PHASE_D_PREDICATE_AT_MINT=1
+ */
+function _validateInferredFilter(name) {
+  if (name == null) return null;
+  if (process.env.OPENCLAW_PHASE_D_PREDICATE_AT_MINT !== '1') return null;  // gate
+  const r = spawnSync(PYTHON, ['-c',
+    'from src.strategies.universe_default import CANDIDATE_PREDICATES; '
+    + 'import sys; sys.exit(0 if sys.argv[1] in CANDIDATE_PREDICATES else 1)',
+    name], { encoding: 'utf8', cwd: OPENCLAW_DIR });
+  if (r.status !== 0) {
+    console.warn(`[research-orch] PaperHunter emitted invalid predicate '${name}', falling back to default`);
+    return null;
+  }
+  return name;
 }
 
 // Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
@@ -408,10 +429,12 @@ class ResearchOrchestrator {
 
     // READY → implementation_queue + code immediately
     for (const item of (classification.ready || [])) {
+      const hr = hunterResults.find(h => h.candidate_id === item.candidate_id);
+      const specWithPred = { ...item.strategy_spec, inferred_universe_filter: hr?.inferred_universe_filter ?? null };
       await this._query(
         `INSERT INTO implementation_queue (candidate_id, strategy_spec, status)
          VALUES ($1, $2, 'pending')`,
-        [item.candidate_id, JSON.stringify(item.strategy_spec)]
+        [item.candidate_id, JSON.stringify(specWithPred)]
       );
       await this._query(
         `UPDATE research_candidates SET status = 'done' WHERE candidate_id = $1`,
@@ -426,7 +449,7 @@ class ResearchOrchestrator {
         outcome:     'pass',
         reasonCode:  'ready',
       });
-      await this._codeFromQueue(item, notify, channelNotify);
+      await this._codeFromQueue({ ...item, strategy_spec: specWithPred }, notify, channelNotify);
     }
 
     // BUILDABLE → data_ingestion_queue (one row per missing column)
@@ -1021,10 +1044,12 @@ class ResearchOrchestrator {
   }
 
   async _codeStrategy(strategySpec) {
+    const validInferred = _validateInferredFilter(strategySpec?.inferred_universe_filter ?? null);
     const ctx = {
       role:          'implement_strategy',
       STRATEGY_SPEC: JSON.stringify(strategySpec),
       instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
+      INFERRED_UNIVERSE_FILTER: validInferred,  // null or one of the 12 CANDIDATE_PREDICATES
     };
     const result = await this._runSubagent('strategycoder', strategySpec.strategy_id || 'strategy', ctx);
     await this._registerStrategy(strategySpec).catch((e) =>
@@ -1260,3 +1285,4 @@ class ResearchOrchestrator {
 }
 
 module.exports = ResearchOrchestrator;
+module.exports._validateInferredFilter = _validateInferredFilter;
