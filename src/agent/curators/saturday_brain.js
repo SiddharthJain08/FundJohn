@@ -261,6 +261,9 @@ async function _hunt(maxFanout, opts, notify, queryFn = _query) {
   // the spec straight through (research-orchestrator.js:991 kind_internal bypass).
   // Dedup: data_tier IS NULL — _tier stamps data_tier on every processed candidate
   // (saturday_brain.js:307), so a coded/tiered draft is not re-selected next cycle.
+  // Same as the paper path, this means a draft that errors in _code AFTER being
+  // tiered is dropped (no auto-retry). To retry, reset:
+  //   UPDATE research_candidates SET data_tier = NULL WHERE candidate_id = '...';
   // Bound so internal drafts never displace the fresh/retry paper budget.
   const internalCap = Math.min(40, Math.max(0, maxFanout - fresh.length - stuck.length));
   let internal = [];
@@ -282,7 +285,7 @@ async function _hunt(maxFanout, opts, notify, queryFn = _query) {
   }
 
   if (fresh.length === 0 && stuck.length === 0 && internal.length === 0) {
-    notify('hunt: nothing to extract (no pending candidates and no recoverable fetch_failed)');
+    notify('hunt: nothing to extract (no fresh, retry-failed, or internal-draft candidates)');
     return { run: 0, results: [] };
   }
 

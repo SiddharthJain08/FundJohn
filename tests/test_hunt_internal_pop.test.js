@@ -44,8 +44,9 @@ const { _hunt } = require('../src/agent/curators/saturday_brain');
  *  2. rejection_reason_if_any = 'fetch_failed' → stuck
  *  3. kind = 'internal' → internal
  */
-function makeMockQuery({ internalRows = [] } = {}) {
+function makeMockQuery({ internalRows = [], capturedSql = null } = {}) {
   return async function mockQuery(sql, _params) {
+    if (capturedSql) capturedSql.push(sql);
     if (sql.includes("submitted_by IN")) {
       // Population 1: fresh — return empty
       return { rows: [] };
@@ -91,50 +92,43 @@ test('_hunt Population-1b: kind=internal, data_tier NULL, status=pending IS sele
 });
 
 // ---------------------------------------------------------------------------
-// Test 2: same row once data_tier is set is NOT returned (SQL gate)
+// Test 2: the internal-population SQL enforces the data_tier dedup gate
 // ---------------------------------------------------------------------------
-test('_hunt Population-1b: row with data_tier set is NOT selected (SQL gate)', async () => {
-  // When data_tier IS NOT NULL, the SQL predicate `data_tier IS NULL` excludes
-  // the row. We simulate this by returning empty internalRows (the DB would not
-  // return the already-tiered row).
-  const mockQuery = makeMockQuery({
-    internalRows: [], // data_tier set → DB returns nothing
-  });
+// The data_tier IS NULL predicate is the ENTIRE dedup invariant — a tiered draft
+// must not be re-selected next cycle. The exclusion itself runs in Postgres, so
+// here we guard against accidental removal of the predicate from the query text.
+test('_hunt Population-1b: internal query enforces `data_tier IS NULL` dedup gate', async () => {
+  const capturedSql = [];
+  const mockQuery = makeMockQuery({ internalRows: [], capturedSql });
 
-  const result = await _hunt(
-    200,
-    { dryRun: true },
-    NOTIFY,
-    mockQuery,
+  await _hunt(200, { dryRun: true }, NOTIFY, mockQuery);
+
+  const internalSql = capturedSql.find(s => s.includes("kind = 'internal'"));
+  assert.ok(internalSql, 'internal-draft population query must be issued');
+  assert.ok(
+    internalSql.includes('data_tier IS NULL'),
+    'internal query must filter `data_tier IS NULL` (dedup invariant)'
   );
-
-  // With no fresh, stuck, or internal rows the function should early-return
-  // (nothing to extract).
-  assert.equal(result.run, 0);
-  // candidateIds is absent on the nothing-to-extract early return
-  const ids = result.candidateIds || [];
-  assert.ok(!ids.includes('cand-001'), 'Tiered row must NOT appear in candidateIds');
 });
 
 // ---------------------------------------------------------------------------
-// Test 3: kind='paper' ideator row is NOT selected by internal population
+// Test 3: the internal-population SQL only matches kind='internal'
 // ---------------------------------------------------------------------------
-test('_hunt Population-1b: kind=paper row is NOT selected (SQL only returns kind=internal)', async () => {
-  // The SQL WHERE clause `kind = 'internal'` means paper rows never appear
-  // in internalRows from the DB. Simulate by returning empty.
-  const mockQuery = makeMockQuery({
-    internalRows: [], // kind='paper' rows don't match SQL
-  });
+// kind='paper' ideator rows must never enter the bypass path (runHunterFanout
+// only bypasses PaperHunter for kind='internal'). Guard the `kind = 'internal'`
+// predicate against accidental removal.
+test('_hunt Population-1b: internal query is gated on `kind = \'internal\'`', async () => {
+  const capturedSql = [];
+  const mockQuery = makeMockQuery({ internalRows: [], capturedSql });
 
-  const result = await _hunt(
-    200,
-    { dryRun: true },
-    NOTIFY,
-    mockQuery,
+  await _hunt(200, { dryRun: true }, NOTIFY, mockQuery);
+
+  const internalSql = capturedSql.find(s => s.includes("kind = 'internal'"));
+  assert.ok(internalSql, 'internal-draft population query must be issued');
+  assert.ok(
+    internalSql.includes("kind = 'internal'"),
+    "internal query must filter `kind = 'internal'` so kind='paper' rows are excluded"
   );
-
-  const ids = result.candidateIds || [];
-  assert.ok(!ids.includes('paper-cand-001'), 'kind=paper row must NOT appear in candidateIds');
 });
 
 // ---------------------------------------------------------------------------
