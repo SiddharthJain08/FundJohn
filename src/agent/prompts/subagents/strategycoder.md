@@ -62,9 +62,10 @@ from src.strategies.universe_default import <INFERRED_UNIVERSE_FILTER> as univer
 ```
 
 (substituting the actual predicate name for `<INFERRED_UNIVERSE_FILTER>`).
-The `universe_filter` symbol must be at module scope so Phase A's universe-predicate
-lint (`src/strategies/universe_lint.py`) and the `(meta, as_of)` predicate contract
-find it.
+The `universe_filter` symbol must be at **module scope** (a top-level import, not
+inside the class) so the lifecycle's predicate detection registers it on the
+strategy at staging time. The imported predicate already satisfies Phase A's
+`(meta, as_of)` predicate contract — do not redefine or wrap it.
 
 **If `INFERRED_UNIVERSE_FILTER` is null:**
 Do NOT define `universe_filter`. The strategy will inherit the default (`sp500`) —
