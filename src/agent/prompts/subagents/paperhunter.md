@@ -14,8 +14,9 @@ Your job is to:
 1. **Read the abstract first** (it's injected below — that's your primary content)
 2. **Try to fetch the full paper** for richer extraction (best-effort; not required for success)
 3. Extract the full strategy schema using the `fundjohn:paper-to-strategy` skill
-4. Run 2 self-rejection gates (`duplicate_fingerprint`, `capability_gap`)
-5. Output a single raw JSON object — no markdown, no prose
+4. Infer the best-fit universe slice from the 12 vetted predicates (or emit `null`)
+5. Run 2 self-rejection gates (`duplicate_fingerprint`, `capability_gap`)
+6. Output a single raw JSON object — no markdown, no prose
 
 **Why only 2 gates now**: gates `non_deterministic` and `overfitting_risk` were
 removed 2026-04-26. `non_deterministic` is now caught upstream by MasterMind's
@@ -127,7 +128,39 @@ Read the strategy signatures file via the `Read` tool:
 
 If the file isn't present or fails to parse, skip the duplicate gate.
 
-## Step 5 — Run 2 Self-Rejection Gates
+## Step 5 — Infer universe slice (optional)
+
+Choose exactly **one** of the 12 vetted universe predicates below — or emit
+`null` — based on what the paper's strategy actually requires.
+
+| Predicate name | When it fits |
+|---|---|
+| `sp500` | Generic large-cap US equity; mean-reversion on liquid names; momentum factor. The default. |
+| `r1000` | Broad large/mid-cap breadth (Russell-1000-style) factor work needing more names than SP500. |
+| `r3000` | Broadest US equity incl. small-caps; breadth-hungry cross-sectional strategies. |
+| `options_eligible_only` | Anything involving options: IV, skew, gamma, pin risk, straddles. |
+| `large_cap` | Needs fundamental-data quality; intolerant of small-cap noise. |
+| `mid_cap` | Mid-cap-specific anomalies (size effect in the mid range). |
+| `small_cap_liquid` | Small-cap value/momentum/low-priced effects, with a liquidity floor. |
+| `large_cap_options` | Options strategies on liquid large/mega-cap names. |
+| `mid_cap_options` | Options strategies on mid-cap names. |
+| `no_adr` | Domestic-only universe; excludes ADRs / foreign-listing quirks. |
+| `no_otc` | Exchange-listed only; excludes OTC/pink-sheet names (quality/liquidity floor). |
+| `top500_by_adv` | Top 500 by average dollar volume; liquidity-first, execution-sensitive strategies. |
+
+**Examples:**
+- "pin risk in SPY weekly options around earnings" → `options_eligible_only`
+- "post-earnings drift in large-cap equities" → `large_cap`
+- "macro regime conditioning of long-short factor portfolios" → `null` (universe implicit; default sp500 applies)
+- "low-vol anomaly in small-caps" → `small_cap_liquid`
+
+**Rules:**
+- Pick exactly ONE of the 12 names above, or `null`.
+- No free-form values, no combinations. The orchestrator rejects invalid names and falls back to the default `sp500`.
+- Bias toward `null` for cross-asset, non-equity, or universe-agnostic strategies.
+- Write your choice as `inferred_universe_filter` in the output JSON (see Step 7).
+
+## Step 6 — Run 2 Self-Rejection Gates
 
 Evaluate each gate in order. If a gate fires, set `rejection_reason_if_any`
 to the gate name and stop.
@@ -148,7 +181,7 @@ canonical column set (`prices`, `financials`, `options_eod`, `insider`,
 Non-standard columns like `satellite_data`, `credit_card_transactions`,
 `web_scrape`, `social_sentiment`, `alt_data` → always fire.
 
-## Step 6 — Output
+## Step 7 — Output
 
 Return a single raw JSON object. No markdown, no code fences, no prose.
 
@@ -166,6 +199,7 @@ If all gates pass:
   "direction_vocab": [...],
   "regime_applicability": [...],
   "minimum_universe_size": 100,
+  "inferred_universe_filter": "<one of the 12 predicate names | null>",
   "reported_metrics": {"sharpe": 1.2, "max_drawdown": 0.12, "backtest_period": "...", "out_of_sample": true},
   "data_requirements": {"required": ["prices", "financials"], "optional": []},
   "similarity_fingerprint": {"regime_set_hash": "...", "direction_hash": "...", "formula_tokens": [...]},
