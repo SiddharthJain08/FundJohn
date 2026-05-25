@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-19T07:22:41.038Z",
+  "updated_at": "2026-05-24T15:33:26.907Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -705,8 +705,8 @@
       ]
     },
     "S_price_earnings_momentum_drift": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.722236+00:00",
+      "state": "live",
+      "state_since": "2026-05-24T15:31:41.946Z",
       "metadata": {
         "canonical_file": "s_price_earnings_momentum_drift.py",
         "class": "S_price_earnings_momentum_drift",
@@ -766,6 +766,21 @@
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_manual",
           "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-24T15:31:41.946Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
         }
       ]
     },
@@ -1266,8 +1281,8 @@
       ]
     },
     "S_HV15_iv_term_structure": {
-      "state": "live",
-      "state_since": "2026-04-22T17:22:24.876Z",
+      "state": "candidate",
+      "state_since": "2026-05-24T10:00:00.925631+00:00",
       "metadata": {
         "canonical_file": "shv15_iv_term_structure.py",
         "class": "IVTermStructure",
@@ -1280,6 +1295,14 @@
           "timestamp": "2026-04-22T17:22:24.876Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
+          "metadata": {}
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-24T10:00:00.925631+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
           "metadata": {}
         }
       ]
@@ -1490,8 +1513,8 @@
       ]
     },
     "S_regime_specialist_vol": {
-      "state": "live",
-      "state_since": "2026-04-22T05:18:07.798201+00:00",
+      "state": "candidate",
+      "state_since": "2026-05-24T10:00:00.946194+00:00",
       "metadata": {
         "canonical_file": "S_regime_specialist_vol.py",
         "class": "RegimeSpecialistVol",
@@ -1516,6 +1539,14 @@
             "option": "A",
             "preserve_execution": true
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-05-24T10:00:00.946194+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ]
     },
@@ -3846,6 +3877,438 @@
         "description": "Persistence-landscape Topological Risk (L1-norm of 1D sublevel-set PD) minimum-risk weighting over S&P 500; monthly rebalance, 252-day lookback."
       },
       "history": []
+    },
+    "S_price_filter_rule_trend": {
+      "state": "live",
+      "state_since": "2026-05-24T15:32:46.669Z",
+      "metadata": {
+        "canonical_file": "S_price_filter_rule_trend.py",
+        "class": "PriceFilterRuleTrend",
+        "description": "Filter-rule momentum: buy ½%-above trough, sell ½%-below peak — Sweeney (1988)",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-24T15:32:46.669Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ]
+    },
+    "S_ivol_cross_section_quintile": {
+      "state": "candidate",
+      "state_since": "2026-05-23T14:41:09.036437+00:00",
+      "metadata": {
+        "canonical_file": "S_ivol_cross_section_quintile.py",
+        "class": "IvolCrossSectionQuintile",
+        "description": "LONG bottom-quintile low-IVOL stocks, SHORT top-quintile high-IVOL stocks based on trailing-22-day FF3 residual volatility (Bali & Cakici 2008)."
+      },
+      "history": []
+    },
+    "S_financial_constraint_kz_factor": {
+      "state": "staging",
+      "state_since": "2026-05-23T14:47:24.934Z",
+      "metadata": {
+        "canonical_file": "S_financial_constraint_kz_factor.py",
+        "class": "FinancialConstraintKZFactor",
+        "description": "Financially constrained firms share a priced systematic risk factor that produces anomalously low returns, so long-unconstrained / short-constrained portfolios based on the KZ index capture a distinct constraint risk premium not explained by size, value, or momentum."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T14:47:24.934Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
+                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "46b71290-bac8-4f9b-94fe-0e2fb58fcdae"
+          }
+        }
+      ]
+    },
+    "S_fama_french_three_factor_composite": {
+      "state": "candidate",
+      "state_since": "2026-05-24T00:00:00.000000+00:00",
+      "metadata": {
+        "canonical_file": "S_fama_french_three_factor_composite.py",
+        "class": "FamaFrenchThreeFactorComposite",
+        "description": "Small-cap and high book-to-market stocks earn persistent excess returns; composite SMB+HML z-score rank: LONG top tercile, SHORT bottom tercile.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
+      },
+      "history": []
+    },
+    "S_january_btm_size_seasonal": {
+      "state": "staging",
+      "state_since": "2026-05-23T14:47:24.934Z",
+      "metadata": {
+        "canonical_file": "s_january_btm_size_seasonal.py",
+        "class": "S_january_btm_size_seasonal",
+        "description": "The book-to-market premium in U.S. equities is a January seasonal concentrated in small/young/growth stocks — not a pervasive cross-sectional factor — enabling a size-filtered value long-short timed around the turn of year."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T14:47:24.934Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "0be87f14-834c-4b00-b324-958d86536402"
+          }
+        }
+      ]
+    },
+    "S_bm_divy_market_timing": {
+      "state": "staging",
+      "state_since": "2026-05-23T14:47:24.934Z",
+      "metadata": {
+        "canonical_file": "s_bm_divy_market_timing.py",
+        "class": "S_bm_divy_market_timing",
+        "description": "Aggregate book-to-market ratio and dividend yield of the equal-weighted market index predict time-series variation in real expected market returns, with high B/M or high D/P signalling elevated risk premia that the market will subsequently compensate."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T14:47:24.934Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
+                "macro: reachable but not backfilled (providers yfinance)",
+                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials",
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2023-06-30"
+                },
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2026-05-23"
+                }
+              ]
+            },
+            "candidate_id": "4badd41f-af8e-4520-8833-de4c5fa2bdd7"
+          }
+        }
+      ]
+    },
+    "S_rd_intensity_intangible_factor": {
+      "state": "staging",
+      "state_since": "2026-05-23T14:47:24.934Z",
+      "metadata": {
+        "canonical_file": "s_rd_intensity_intangible_factor.py",
+        "class": "S_rd_intensity_intangible_factor",
+        "description": "Stocks with high R&D expenditure relative to market cap (beaten-down, poor-past-return firms) earn large excess returns because GAAP expensing of intangibles causes systematic market undervaluation of future economic benefits from innovation."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T14:47:24.934Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
+                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "e07db140-be94-456f-a86a-1acae5d63a6d"
+          }
+        }
+      ]
+    },
+    "S_growth_defensive_smooth_score_timing": {
+      "state": "staging",
+      "state_since": "2026-05-23T14:47:24.934Z",
+      "metadata": {
+        "canonical_file": "s_growth_defensive_smooth_score_timing.py",
+        "class": "S_growth_defensive_smooth_score_timing",
+        "description": "A continuous smooth-score function combining rate relief, SPY drawdown depth, VIX stress relief, and growth-crowding penalty — mapped via tanh to G/D weights with EWMA smoothing — improves risk-adjusted returns over static growth or balanced ETF allocations by dynamically timing "
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T14:47:24.934Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance)",
+                "vol_indices: reachable but not backfilled (providers yfinance)",
+                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "macro",
+                "vol_indices"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2024-04-27",
+                  "gap_to": "2026-05-23"
+                },
+                {
+                  "provider": "yfinance",
+                  "column": "vol_indices",
+                  "gap_from": "2024-04-27",
+                  "gap_to": "2026-05-23"
+                }
+              ]
+            },
+            "candidate_id": "b2932b31-f388-406c-b18f-c8aa1ec6dc00"
+          }
+        }
+      ]
+    },
+    "S_labor_day_week_momentum_reversal": {
+      "state": "live",
+      "state_since": "2026-05-24T15:33:26.907Z",
+      "metadata": {
+        "canonical_file": "S_labor_day_week_momentum_reversal.py",
+        "class": "LaborDayWeekMomentumReversal",
+        "description": "SPX momentum reversal during Labor Day week: short after positive prior-month return, long after negative prior-month return."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-24T15:33:26.907Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via literature: LOW_VOL,TRANSITIONING,HIGH_VOL]",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL"
+            ]
+          }
+        }
+      ]
+    },
+    "S_fomc_presell_spy_long": {
+      "state": "candidate",
+      "state_since": "2026-05-23T20:16:24.773745+00:00",
+      "metadata": {
+        "canonical_file": "S_fomc_presell_spy_long.py",
+        "class": "FomcPresellSpyLong",
+        "description": "Long SPY at close of session before FOMC when SPY is ≥1% down and closing in the bottom half of its daily range; forced pre-Fed selling reverses on resolution.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ],
+        "eligible_regimes_note": "Manual override: ~5 signals per 9 years (inherently low-frequency); auto-gate min_trade_count=20 not reachable. Literature support: Hanna 2025 Fed Day edge. Backtest 2017-2025: 4/5 wins, 100% win-rate in TRANSITIONING+HIGH_VOL.",
+        "backtest_results": {
+          "total_trades": 5,
+          "win_rate": 0.8,
+          "mean_pnl": 0.0126,
+          "regime_partition": {
+            "LOW_VOL": {
+              "count": 1,
+              "mean_pnl": -0.0224,
+              "win_rate": 0
+            },
+            "TRANSITIONING": {
+              "count": 3,
+              "mean_pnl": 0.0104,
+              "win_rate": 1
+            },
+            "HIGH_VOL": {
+              "count": 1,
+              "mean_pnl": 0.054,
+              "win_rate": 1
+            },
+            "CRISIS": {
+              "count": 0,
+              "mean_pnl": null,
+              "win_rate": null
+            }
+          }
+        }
+      },
+      "history": []
+    },
+    "S_bppp_bayesian_parametric_weights": {
+      "state": "staging",
+      "state_since": "2026-05-23T20:24:40.454Z",
+      "metadata": {
+        "canonical_file": "s_bppp_bayesian_parametric_weights.py",
+        "class": "S_bppp_bayesian_parametric_weights",
+        "description": "Placing a Bayesian prior on parametric portfolio policy coefficients corrects for estimation risk, shrinking overexposure to high-magnitude signals and delivering superior risk-adjusted returns and lower turnover vs standard PPP, with the largest edge during crisis episodes."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T20:24:40.454Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
+                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
+                "log_returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "financials"
+              ],
+              "provider_route": [
+                {
+                  "provider": "fmp",
+                  "column": "financials",
+                  "data_type": "fundamentals",
+                  "gap_from": "2022-12-10",
+                  "gap_to": "2023-06-30"
+                }
+              ]
+            },
+            "candidate_id": "55a2e361-f8e9-4b0b-af57-f72c845e7db7"
+          }
+        }
+      ]
+    },
+    "S_spx_death_cross_contrarian_fade": {
+      "state": "staging",
+      "state_since": "2026-05-23T20:24:40.454Z",
+      "metadata": {
+        "canonical_file": "S_spx_death_cross_contrarian_fade.py",
+        "class": "SpxDeathCrossContrarianFade",
+        "description": "Contrarian long SPY when 50-day SMA crosses below 200-day SMA; exit at Golden Cross or -20% hard stop. 73.5% win rate over 97 years.",
+        "eligible_regimes": ["TRANSITIONING", "HIGH_VOL", "CRISIS"],
+        "eligible_regimes_source": "literature_override",
+        "eligible_regimes_note": "97-year study (1928-2025) n=49 trades; modern 8y window yields ~4 events — too sparse for regime_partition auto-derivation. Regimes set from thesis: Death Crosses occur in elevated-stress environments."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-05-23T20:24:40.454Z",
+          "actor": "saturday_brain",
+          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2025-01-04",
+                  "gap_to": "2026-05-23"
+                }
+              ]
+            },
+            "candidate_id": "a2645236-9918-4681-b390-8dc8f78642cd"
+          }
+        }
+      ]
     }
   },
   "decommissioned": {
@@ -3883,6 +4346,69 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+    },
+    "S_ivol_cross_section_quintile": {
+      "state": "candidate",
+      "state_since": "2026-05-23T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_ivol_cross_section_quintile.py",
+        "class": "IvolCrossSectionQuintile",
+        "description": "LONG bottom-quintile low-IVOL stocks, SHORT top-quintile high-IVOL stocks based on trailing-22-day FF3 residual volatility (Bali & Cakici 2008)."
+      },
+      "history": []
+    },
+    "S_fomc_presell_spy_long": {
+      "state": "candidate",
+      "state_since": "2026-05-23T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_fomc_presell_spy_long.py",
+        "class": "FomcPresellSpyLong",
+        "description": "Long SPY at close of session before FOMC when SPY is ≥1% down and closing in the bottom half of its daily range; forced pre-Fed selling reverses on resolution.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ],
+        "eligible_regimes_note": "Manual override: ~5 signals per 9 years (inherently low-frequency); auto-gate min_trade_count=20 not reachable. Literature support: Hanna 2025 Fed Day edge. Backtest 2017-2025: 4/5 wins, 100% win-rate in TRANSITIONING+HIGH_VOL.",
+        "backtest_results": {
+          "total_trades": 5,
+          "win_rate": 0.8,
+          "mean_pnl": 0.0126,
+          "regime_partition": {
+            "LOW_VOL": {
+              "count": 1,
+              "mean_pnl": -0.0224,
+              "win_rate": 0
+            },
+            "TRANSITIONING": {
+              "count": 3,
+              "mean_pnl": 0.0104,
+              "win_rate": 1
+            },
+            "HIGH_VOL": {
+              "count": 1,
+              "mean_pnl": 0.054,
+              "win_rate": 1
+            },
+            "CRISIS": {
+              "count": 0,
+              "mean_pnl": null,
+              "win_rate": null
+            }
+          }
+        }
+      },
+      "history": []
+    },
+    "S_january_btm_size_seasonal": {
+      "state": "candidate",
+      "state_since": "2026-05-24T00:00:00.000000+00:00",
+      "metadata": {
+        "canonical_file": "S_january_btm_size_seasonal.py",
+        "class": "JanuaryBTMSizeSeasonal",
+        "description": "January seasonal B/M effect concentrated in small-cap stocks: LONG high-B/M small-cap, SHORT low-B/M small-cap each December; exit February."
+      },
+      "history": []
     }
   }
 }

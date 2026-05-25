@@ -7066,6 +7066,8 @@ function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
       (longCnt >= shortCnt ? longs : shorts).push(g);
     }
   }
+  // Note: order doesn't matter for output rendering — the treemap algorithm
+  // sorts internally. We do sort here for the side counts only.
 
   const buildCol = (label, rows) => {
     const totalMv = rows.reduce((s, g) => s + Math.abs((g.broker && g.broker.market_value) || 0), 0);
@@ -7082,7 +7084,7 @@ function _buildPositionsTwoColumnHtml(groups, selectedTicker, nav) {
 
   // Stash per-side row data for the post-render treemap populator. Keyed
   // by side label so _populateTreemap can pull the right rows + selection
-  // state after the placeholder containers are in the DOM.
+  // state. _navCache is the closure capture; selectedTicker passed through.
   _pendingTreemap = {
     LONG:  { rows: longs,  selectedTicker, nav },
     SHORT: { rows: shorts, selectedTicker, nav },

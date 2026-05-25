@@ -649,6 +649,19 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                         f'(entry={sig.entry_price}, stop={sig.stop_loss}, t1={sig.target_1})'
                     )
                     continue
+                # Guard: skip signals with degenerate geometry (stop == entry or inverted).
+                # Root cause: ATR=0 from stale/ffilled constant price series.
+                _ep, _sl, _t1 = float(sig.entry_price), float(sig.stop_loss), float(sig.target_1)
+                _dirn = (sig.direction or '').upper()
+                if _dirn in ('LONG', 'SHORT') and all(_math.isfinite(v) for v in [_ep, _sl, _t1]):
+                    _bad = ((_dirn == 'LONG' and not (_t1 > _ep > _sl)) or
+                            (_dirn == 'SHORT' and not (_t1 < _ep < _sl)))
+                    if _bad:
+                        logger.warning(
+                            f'[engine] Dropping degenerate-geometry signal: {strategy_id}/{sig.ticker} '
+                            f'(direction={_dirn} entry={_ep:.4f} stop={_sl:.4f} t1={_t1:.4f})'
+                        )
+                        continue
                 # Serialize signal_params — convert numpy scalars to native Python
                 # and sanitize NaN/Infinity so Postgres JSON accepts the row.
                 def _to_native(v):

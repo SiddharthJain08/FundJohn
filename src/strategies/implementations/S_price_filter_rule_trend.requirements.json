@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_price_filter_rule_trend",
+  "required": ["prices"],
+  "optional": []
+}

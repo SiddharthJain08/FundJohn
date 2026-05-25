@@ -359,6 +359,19 @@
       "TRANSITIONING"
     ]
   },
+  "S_fama_french_three_factor_composite": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_fear_index_return_prediction": {
     "regime_set_hash": "900af3274024f50d",
     "direction_hash": "a8f3862b96300e62",
@@ -371,6 +384,35 @@
     "regimes": [
       "HIGH_VOL",
       "LOW_VOL"
+    ]
+  },
+  "S_financial_constraint_kz_factor": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_fomc_presell_spy_long": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "delta",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
     ]
   },
   "S_industry_momentum_moskowitz": {
@@ -414,13 +456,39 @@
       "TRANSITIONING"
     ]
   },
-  "S_ivol_mispricing_asymmetry": {
-    "regime_set_hash": "c722b3f150c07554",
+  "S_ivol_cross_section_quintile": {
+    "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
       "momentum",
       "regime",
-      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_january_btm_size_seasonal": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "c65c9aa02b36a104",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_labor_day_week_momentum_reversal": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "delta",
+      "momentum",
+      "regime",
       "value"
     ],
     "regimes": [
@@ -665,15 +733,13 @@
       "TRANSITIONING"
     ]
   },
-  "S_price_earnings_momentum_drift": {
+  "S_price_filter_rule_trend": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
       "atr",
-      "earnings",
       "momentum",
-      "regime",
-      "value"
+      "regime"
     ],
     "regimes": [
       "LOW_VOL",
@@ -1170,10 +1236,65 @@
       "TRANSITIONING"
     ]
   },
+  "s_earnings_news_specific_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "earnings",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s_estimation_risk_three_fund": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s_ivol_mispricing_asymmetry": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "s_momentum_delayed_overreaction": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
     "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "s_price_earnings_momentum_drift": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "earnings",
       "momentum",
       "regime",
       "value"
@@ -1207,6 +1328,7 @@
       "iv_rank",
       "regime",
       "unusual_flow",
+      "value",
       "vrp"
     ],
     "regimes": [

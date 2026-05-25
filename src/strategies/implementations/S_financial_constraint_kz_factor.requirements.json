@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_financial_constraint_kz_factor",
+  "required": ["prices", "financials"],
+  "optional": []
+}
