@@ -39,6 +39,35 @@ Same Phase A/B/C substitutions apply (POSTGRES_URI, psycopg2, node migrate, syst
 
 ---
 
+## ⚠️ Pre-execution corrections (2026-05-25) — READ BEFORE ANY TASK
+
+Grounded against the actual codebase (Phase A/B/C all on `main`; this branch rebased onto `main` at setup). **Authoritative** where they conflict with Tasks 1–7.
+
+### D-C0 — Branch base: DONE
+Branch already rebased onto current `main` (has A/B/C). Task 0's "≥5 adopted strategies" precondition is informational only — Phase D depends on the predicate *machinery* (on main), not on live adoptions. Skip that gate.
+
+### D-C1 — CRITICAL: write the resolver-loadable `module:attr` ref, not the bare name
+`register_strategy_predicate` (Task 4) must write `metadata['universe_filter_ref'] = f"src.strategies.universe_default:{predicate_name}"`, NOT the bare `predicate_name`. The resolver `UniverseResolver._load_predicate` (`src/strategies/universe_resolver.py:42`) does `mod_path, attr = ref.rsplit(":", 1)` + `importlib.import_module(mod_path)` — a bare name (no colon) raises ValueError and breaks resolution for that strategy. (Identical contract to Phase C's adoption.) The AST-detected name stays bare for the `CANDIDATE_PREDICATES` whitelist check; only the WRITE is `module:attr`. Tests must assert the `module:attr` form AND that `_load_predicate` loads it without raising.
+
+### D-C2 — Real candidate names (NO `tech_sector` / `options_eligible`)
+The 12 real keys: `sp500, r1000, r3000, options_eligible_only, large_cap, mid_cap, small_cap_liquid, large_cap_options, mid_cap_options, no_adr, no_otc, top500_by_adv`. There are NO sector predicates. Task 1's §5 lists these (one-line "use when" each); its static test must check REAL names — replace `'options_eligible'`→`options_eligible_only`, DROP `'tech_sector'`. PaperHunter emits exactly one of the 12 or `null`.
+
+### D-C3 — There is NO `lifecycle.stage()`; wire detection into the real registration hook
+`lifecycle.py` has `class LifecycleStateMachine` with `register()`, `from_manifest()`, `save_manifest()`, `transition()`, `to_dict()` — **no `stage()` method, no module-level `MANIFEST`**. Net-new strategies enter the manifest via the orchestrator's Phase-3 auto-promote inline python snippet (`src/agent/research/research-orchestrator.js:731-753`): `LifecycleStateMachine.from_manifest('src/strategies/manifest.json')` → `lsm.register(sid, initial_state=CANDIDATE, metadata={'canonical_file': sid+'.py'})` (or `transition`) → `lsm.save_manifest(...)`.
+- Add `_detect_module_predicate(file_path)` (AST per plan) + `register_strategy_predicate(strategy_id, name)` to `lifecycle.py`.
+- **Preferred wiring:** detect inside `LifecycleStateMachine.register()` when `metadata.canonical_file` resolves to a readable file (gated `OPENCLAW_PHASE_D_PREDICATE_AT_MINT=='1'`), set `record.metadata['universe_filter_ref']` IN-MEMORY → the existing `save_manifest` persists it (no orchestrator edit, no double-write). If register() can't see the file path, fall back to extending the orchestrator snippet to call detect + register_strategy_predicate after register, before the final `save_manifest`.
+- `register_strategy_predicate` must persist via the in-memory record + `save_manifest`, OR a full-manifest json round-trip that PRESERVES all fields (StrategyRecord silent-strip lesson — `universe_filter_ref` lives INSIDE `metadata`, not top-level; verify `to_dict()` passes the full `metadata` dict through).
+- Add an overridable module-level `MANIFEST` (or path arg) so tests point at a temp copy (the plan's test monkeypatches `src.strategies.lifecycle.MANIFEST`).
+
+### D-C4 — Orchestrator: inject into the `_codeStrategy` ctx
+StrategyCoder dispatch builds `ctx` in `_codeStrategy(strategySpec)` (`research-orchestrator.js:~1024`): `const ctx = { role, STRATEGY_SPEC, instructions }` → `this._runSubagent('strategycoder', …, ctx)`. Add `_validateInferredFilter(...)` and set `ctx.INFERRED_UNIVERSE_FILTER = validInferred`. The inferred field rides `hunter_result_json` → `strategySpec`; verify it's threaded (else read from the candidate's `hunter_result_json.inferred_universe_filter`). Validator gated on `OPENCLAW_PHASE_D_PREDICATE_AT_MINT` (returns null when off), whitelists against `CANDIDATE_PREDICATES`.
+
+### D-C5 — system_check + dashboard corrections
+- `from ..types import Status` (NOT `src.system_checks.status` — no `status.py`; `Status` is in `src/system_checks/types.py`). Register in `src/system_checks/checks/__init__.py`. CLI: `python3 -m src.system_checks --check papermint_predicate_coverage --json`.
+- Dashboard endpoint (Task 5 Step 3) uses the existing `query()` helper (`const { query } = require('../../database/postgres')`, server.js:24), NOT `req.app.locals.pool` (doesn't exist). Localhost-bound; validate params.
+
+---
+
 ## Task 0: Branch + workspace setup
 
 **Files:** none
