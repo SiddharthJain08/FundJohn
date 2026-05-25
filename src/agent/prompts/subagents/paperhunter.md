@@ -135,29 +135,35 @@ Choose exactly **one** of the 12 vetted universe predicates below — or emit
 
 | Predicate name | When it fits |
 |---|---|
-| `sp500` | Generic large-cap US equity; mean-reversion on liquid names; momentum factor. The default. |
+| `sp500` | Generic large-cap US equity; mean-reversion on liquid names; momentum factor. The default for any strategy that works on large-cap names without an explicit cap-tier restriction. |
 | `r1000` | Broad large/mid-cap breadth (Russell-1000-style) factor work needing more names than SP500. |
 | `r3000` | Broadest US equity incl. small-caps; breadth-hungry cross-sectional strategies. |
-| `options_eligible_only` | Anything involving options: IV, skew, gamma, pin risk, straddles. |
-| `large_cap` | Needs fundamental-data quality; intolerant of small-cap noise. |
+| `options_eligible_only` | Broad options-eligibility filter: use when the strategy needs listed options but is NOT cap-specific (e.g. index/broad IV studies, skew across the full options universe, pin risk, straddles, gamma exposure). Do NOT pick this when the strategy is explicitly large-cap or mid-cap — see `large_cap_options` / `mid_cap_options` instead. |
+| `large_cap` | Needs fundamental-data quality or explicitly excludes mid/small-caps, or filters by an explicit market-cap threshold. Use only when the paper names a cap-size constraint (e.g. "top-decile market cap"); otherwise prefer `sp500` (the default for generic large-cap work). |
 | `mid_cap` | Mid-cap-specific anomalies (size effect in the mid range). |
 | `small_cap_liquid` | Small-cap value/momentum/low-priced effects, with a liquidity floor. |
-| `large_cap_options` | Options strategies on liquid large/mega-cap names. |
-| `mid_cap_options` | Options strategies on mid-cap names. |
+| `large_cap_options` | Options strategies specifically on large/mega-cap names (e.g. covered calls, collars, or single-name volatility trading on mega-caps where the cap-tier is part of the strategy design). |
+| `mid_cap_options` | Options strategies specifically on mid-cap names (e.g. mid-cap earnings volatility plays where mid-cap is an intentional universe choice). |
 | `no_adr` | Domestic-only universe; excludes ADRs / foreign-listing quirks. |
 | `no_otc` | Exchange-listed only; excludes OTC/pink-sheet names (quality/liquidity floor). |
 | `top500_by_adv` | Top 500 by average dollar volume; liquidity-first, execution-sensitive strategies. |
 
 **Examples:**
-- "pin risk in SPY weekly options around earnings" → `options_eligible_only`
-- "post-earnings drift in large-cap equities" → `large_cap`
+- "pin risk in SPY weekly options around earnings" → `options_eligible_only` (options-eligible universe, not cap-specific)
+- "broad IV term-structure skew across all optionable US equities" → `options_eligible_only` (cap-agnostic options study)
+- "covered-call income strategy on S&P 500 mega-cap names" → `large_cap_options` (options strategy explicitly on large/mega-cap names)
+- "mid-cap earnings implied-vol crush — buy straddles pre-announcement" → `mid_cap_options` (options strategy, mid-cap universe intentional)
+- "post-earnings drift in large-cap equities" → `large_cap` (paper explicitly restricts to large-cap by market-cap threshold)
 - "macro regime conditioning of long-short factor portfolios" → `null` (universe implicit; default sp500 applies)
 - "low-vol anomaly in small-caps" → `small_cap_liquid`
+- "momentum factor on Russell 3000" → `r3000`
 
 **Rules:**
 - Pick exactly ONE of the 12 names above, or `null`.
 - No free-form values, no combinations. The orchestrator rejects invalid names and falls back to the default `sp500`.
 - Bias toward `null` for cross-asset, non-equity, or universe-agnostic strategies.
+- For options strategies: choose `options_eligible_only` when there is no cap-tier constraint; choose `large_cap_options` or `mid_cap_options` when the cap tier is part of the strategy design.
+- For domestic-only / exchange-listed constraints: when the paper's only constraint is domestic-only or exchange-listed, pick `no_adr` or `no_otc`; when it ALSO has a cap-size constraint, prefer the cap-tier predicate (no combinations allowed).
 - Write your choice as `inferred_universe_filter` in the output JSON (see Step 7).
 
 ## Step 6 — Run 2 Self-Rejection Gates
