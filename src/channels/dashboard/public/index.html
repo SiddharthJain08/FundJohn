@@ -136,6 +136,14 @@
     </header>
     <div class="body" id="uni-recs"></div>
   </section>
+
+  <section class="card span-12">
+    <header>
+      <h2>Recent net-new strategies (predicate at mint · SP-2 Phase D)</h2>
+      <span class="count" id="papermint-count"></span>
+    </header>
+    <div class="body" id="papermint"></div>
+  </section>
 </main>
 
 <footer>
@@ -539,12 +547,44 @@ async function refreshUniverseRecs() {
   }
 }
 
+async function refreshPapermint() {
+  const { rows = [], error } = await fetchJSON('/api/papermint-recent');
+  const el = $('papermint');
+  const count = $('papermint-count');
+  if (error) {
+    el.innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(error)}</div>`;
+    return;
+  }
+  count.textContent = `${rows.length} candidates · 30d`;
+  if (!rows.length) {
+    el.innerHTML = '<div class="muted">— no candidates in last 30 days —</div>';
+    return;
+  }
+  el.innerHTML = table([
+    { key: 'candidate_id', label: 'candidate id',
+      get: r => String(r.candidate_id || '').slice(0, 8) },
+    { key: 'inferred', label: 'inferred predicate',
+      get: r => r.inferred || '(default)' },
+    { key: 'staged_strategy_id', label: 'staged strategy',
+      get: r => r.staged_strategy_id != null ? String(r.staged_strategy_id) : 'pending' },
+    { key: 'adoption_lag', label: 'adoption lag',
+      get: r => r.adoption_lag != null ? String(r.adoption_lag) : '—' },
+    { key: 'submitted_at', label: 'submitted at',
+      get: r => r.submitted_at ? new Date(r.submitted_at).toLocaleString() : '' },
+    { key: 'source_url', label: 'source',
+      html: true,
+      get: r => r.source_url
+        ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener" style="color:var(--muted);font-family:var(--mono);font-size:11px">${esc(String(r.source_url).slice(0, 60))}${r.source_url.length > 60 ? '…' : ''}</a>`
+        : '<span class="muted">—</span>' },
+  ], rows);
+}
+
 async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
     refreshGraphs(), refreshHealth(), refreshDataHealth(), refreshUniverseSlice(),
-    refreshBackfillProgress(), refreshUniverseRecs(),
+    refreshBackfillProgress(), refreshUniverseRecs(), refreshPapermint(),
   ]);
 }
 
