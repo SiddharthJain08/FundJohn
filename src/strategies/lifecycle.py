@@ -19,8 +19,10 @@ Usage
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -28,6 +30,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# SP-2 Phase D: canonical path to strategy implementation files.
+# Hoist here so `register()` + `_read_strategy_requirements` both reference
+# the same constant, and tests can monkeypatch it cleanly.
+_IMPLEMENTATIONS_DIR = Path(__file__).resolve().parents[2] / "src" / "strategies" / "implementations"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1.  States
@@ -205,6 +212,33 @@ def _sandbox_check_predicate(predicate_ref: "str | None") -> None:
             f"predicate behavior differs between real ({real}) and frozen ({frozen}) clock — "
             f"likely reads today()/now()/env. Predicate: {predicate_ref}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5b. SP-2 Phase D — AST-based predicate detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _detect_module_predicate(file_path) -> "str | None":
+    """Return the predicate name if the strategy file has a top-level
+    ``from src.strategies.universe_default import <name> as universe_filter``
+    (or the aliased ``strategies.universe_default`` form), else None.
+
+    Returns None on FileNotFoundError, SyntaxError, or any OSError — so
+    callers never need to guard against missing / unreadable files.
+    """
+    try:
+        tree = ast.parse(Path(file_path).read_text())
+    except (FileNotFoundError, SyntaxError, OSError):
+        return None
+    for node in tree.body:   # top-level only
+        if isinstance(node, ast.ImportFrom) and node.module in (
+            "src.strategies.universe_default",
+            "strategies.universe_default",
+        ):
+            for alias in node.names:
+                if alias.asname == "universe_filter":
+                    return alias.name
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -539,9 +573,7 @@ class LifecycleStateMachine:
         strategy has no requirements.json on disk.
         """
         import json as _json
-        from pathlib import Path
-        root = Path(__file__).resolve().parents[2]
-        req_dir = root / "src" / "strategies" / "implementations"
+        req_dir = _IMPLEMENTATIONS_DIR
         rec = self._records.get(sid)
         canonical = None
         if rec and rec.metadata:
@@ -574,8 +606,71 @@ class LifecycleStateMachine:
             state_since=now,
             metadata=metadata or {},
         )
+        # SP-2 Phase D: detect and persist the universe predicate from the
+        # strategy's implementation file, gated by OPENCLAW_PHASE_D_PREDICATE_AT_MINT=1.
+        # The caller's existing save_manifest() call then persists it into
+        # metadata.universe_filter_ref via to_dict (no second save needed here).
+        if os.environ.get("OPENCLAW_PHASE_D_PREDICATE_AT_MINT") == "1":
+            canonical = (metadata or {}).get("canonical_file")
+            if canonical:
+                try:
+                    from src.strategies.universe_default import CANDIDATE_PREDICATES as _CP
+                except ImportError:
+                    from strategies.universe_default import CANDIDATE_PREDICATES as _CP  # type: ignore
+                impl_path = _IMPLEMENTATIONS_DIR / canonical
+                detected = _detect_module_predicate(impl_path)
+                if detected and detected in _CP:
+                    rec.universe_filter_ref = f"src.strategies.universe_default:{detected}"
         self._records[strategy_id] = rec
         return rec
+
+    def register_strategy_predicate(
+        self,
+        strategy_id:    str,
+        predicate_name: "str | None",
+        path:           "str | Path",
+    ) -> None:
+        """Set (or clear) the universe predicate for an already-registered strategy.
+
+        Parameters
+        ----------
+        strategy_id:
+            Must already be in the manifest.
+        predicate_name:
+            A name from ``CANDIDATE_PREDICATES`` (e.g. ``"large_cap"``), or
+            ``None`` to clear the predicate.
+        path:
+            Manifest file path.  Saved via the blessed lock+merge path so
+            concurrent JS writers are not clobbered.
+
+        Raises
+        ------
+        ValueError
+            If *predicate_name* is not in ``CANDIDATE_PREDICATES`` (unless None).
+        ValueError
+            If *strategy_id* is not in the manifest.
+        """
+        try:
+            from src.strategies.universe_default import CANDIDATE_PREDICATES
+        except ImportError:
+            from strategies.universe_default import CANDIDATE_PREDICATES  # type: ignore
+
+        if predicate_name is not None and predicate_name not in CANDIDATE_PREDICATES:
+            raise ValueError(
+                f"predicate '{predicate_name}' not in candidate set; "
+                f"valid names: {sorted(CANDIDATE_PREDICATES)}"
+            )
+
+        record = self._records.get(strategy_id)
+        if record is None:
+            raise ValueError(f"strategy {strategy_id} not in manifest")
+
+        if predicate_name is not None:
+            record.universe_filter_ref = f"src.strategies.universe_default:{predicate_name}"
+        else:
+            record.universe_filter_ref = None
+
+        self.save_manifest(path)
 
     # ── persistence ──────────────────────────────────────────────────────────
 
