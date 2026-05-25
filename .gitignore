@@ -1,5 +1,7 @@
 # === Secrets & Credentials ===
 .env
+.env.*
+!.env.example
 .mcp.json
 
 # === Dependencies ===
