@@ -71,3 +71,18 @@ def test_hysteresis_streak_and_confirmed_transition():
     assert fired2 is False
     fired3, _ = cr.confirmed_transition(hist, 'CRISIS', streak, 0.50)
     assert fired3 is False
+
+
+def test_build_latest_json_shape():
+    j = cr.build_latest_json(
+        ts_utc='2026-05-26T07:00:00Z', state='HIGH_VOL', prior_state='LOW_VOL',
+        confidence=0.83, streak=2,
+        probs={'LOW_VOL': 0.05, 'TRANSITIONING': 0.10, 'HIGH_VOL': 0.83, 'CRISIS': 0.02},
+        features={'btc_rv_24h': 80.0}, transition_tag='CRYPTO_HMM_LOW_VOL_HIGH_VOL',
+        refit_performed=False)
+    assert j['state'] == 'HIGH_VOL'
+    assert j['confidence'] == 0.83
+    assert j['prior_state'] == 'LOW_VOL'
+    assert j['state_probabilities']['HIGH_VOL'] == 0.83
+    assert j['transition_tag'] == 'CRYPTO_HMM_LOW_VOL_HIGH_VOL'
+    assert j['fired_redeploy'] is False

@@ -137,3 +137,14 @@ def confirmed_transition(history: list[dict], current_state: str, streak: int,
     if streak < n_required or current_confidence < conf_required:
         return False, None
     return True, settled
+
+
+def build_latest_json(*, ts_utc, state, prior_state, confidence, streak, probs,
+                      features, transition_tag, refit_performed) -> dict:
+    return {
+        'ts_utc': ts_utc, 'state': state, 'prior_state': prior_state,
+        'confidence': round(float(confidence), 4), 'hysteresis_streak': int(streak),
+        'state_probabilities': probs, 'features': features,
+        'transition_tag': transition_tag, 'fired_redeploy': False,
+        'refit_performed': bool(refit_performed),
+    }
