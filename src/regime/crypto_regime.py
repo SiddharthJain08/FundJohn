@@ -150,3 +150,18 @@ def build_latest_json(*, ts_utc, state, prior_state, confidence, streak, probs,
         'transition_tag': transition_tag, 'fired_redeploy': False,
         'refit_performed': bool(refit_performed),
     }
+
+
+def load_crypto_regime_state(path=None) -> dict:
+    """Read the latest crypto regime from crypto_regime_latest.json.
+    Returns {'state': <STATE>, 'regime_data': {...}} or {'state': None} if absent
+    (caller fails-open). Mirrors engine.load_regime's file-primary shape."""
+    import json
+    from pathlib import Path as _P
+    p = _P(path) if path else (_P(__file__).resolve().parents[2]
+                               / '.agents' / 'crypto-market-state' / 'crypto_regime_latest.json')
+    try:
+        j = json.loads(p.read_text())
+        return {'state': j.get('state'), 'regime_data': j}
+    except (FileNotFoundError, ValueError):
+        return {'state': None, 'regime_data': {}}
