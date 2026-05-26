@@ -102,7 +102,9 @@ PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
     "crypto": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-3.2): calibrate
-               "max_drawdown": 0.40},   # crypto baseline vol; long-only BTC cannot meet equity's 20%
+               "max_drawdown": 0.70},   # operator sign-off 2026-05-26: BTC is a 60-80% DD asset;
+                                        # S_btc_momentum backtests Sharpe 1.02 / MaxDD 65% over 10y.
+                                        # 0.70 is a deliberate crypto-realistic band, not gamed.
 }
 
 

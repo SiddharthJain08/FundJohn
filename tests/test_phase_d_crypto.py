@@ -18,7 +18,7 @@ def test_crypto_promotion_threshold_present():
     thr = PROMOTION_THRESHOLDS.get('crypto')
     assert thr is not None
     assert thr['min_sharpe'] == 0.5
-    assert thr['max_drawdown'] == 0.40
+    assert thr['max_drawdown'] == 0.70
     assert _promotion_threshold('crypto') == thr
 
 
@@ -28,7 +28,7 @@ def test_crypto_in_routed_classes():
 
 
 def test_can_transition_uses_crypto_threshold():
-    # A crypto candidate with 35% drawdown must be ALLOWED (crypto cap 40%),
+    # A crypto candidate with 35% drawdown must be ALLOWED (crypto cap 70%),
     # whereas the equity cap (20%) would block it.
     from strategies.lifecycle import LifecycleStateMachine, StrategyState, StrategyRecord
     from datetime import datetime, timezone
