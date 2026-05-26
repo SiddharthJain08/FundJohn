@@ -34,6 +34,8 @@ from execution.regime_blended_sizer import size_positions
 from execution.handoff import read_handoff
 from execution.tradejohn_confirmer import confirm as real_confirmer
 from execution.sized_handoff import finalize_sized_payload
+from strategies.instrument_class import instrument_class_for
+from execution.instrument_class_sizer import apply_instrument_class_sizing
 
 
 def _build_sized_payload(orders: list[dict], handoff: dict,
@@ -119,6 +121,18 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
 
         entry      = float(entry_raw)
         notional   = abs(float(o['notional_usd']))
+        # SP-3: route by instrument_class. Default-OFF kill-switch forces the
+        # equity path (byte-identical) until soak. No walrus — read into a local
+        # so we don't shadow the `contributions` re-bound below.
+        if os.environ.get('OPENCLAW_INSTRUMENT_CLASS_ROUTING') == '1':
+            _contribs = o.get('contributions') or []
+            _sid_for_class = (_contribs[0].get('strategy_id')
+                              if _contribs else o.get('strategy_id'))
+            if _sid_for_class:
+                _ic = instrument_class_for(_sid_for_class)
+                if _ic not in ('equity', 'etp'):
+                    o = apply_instrument_class_sizing(o, _ic)
+                    notional = abs(float(o['notional_usd']))
         pct_nav    = round(notional / nav, 6)
         # Shares: legacy paths put a signed float in `qty`; sharpe_cadence
         # carries `shares=0` (compute from notional/entry here).

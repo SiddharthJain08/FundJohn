@@ -91,6 +91,32 @@ CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
+# SP-3: per-instrument-class candidate→live thresholds. equity/etp keep the
+# legacy values; option uses equity values as an explicit placeholder until
+# SP-4 calibration. crypto added in SP-3.1.
+PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
+    "equity": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "etp":    {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+}
+
+
+def _promotion_threshold(instrument_class: str) -> dict[str, float]:
+    return PROMOTION_THRESHOLDS.get(
+        instrument_class,
+        {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+         "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN})
+
+
+# SP-3 instrument-class taxonomy. VALID = accepted by validation;
+# ROUTED = has a live sizer/backtest handler in the MVP. crypto/futures
+# are reserved (valid) but unhandled until SP-3.1.
+VALID_INSTRUMENT_CLASSES  = frozenset({"equity", "option", "etp", "crypto", "futures"})
+ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp"})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  Data model
@@ -125,6 +151,7 @@ class StrategyRecord:
     # a follow-up commit.
     eligible_regimes: Optional[List[str]] = None
     universe_filter_ref: Optional[str] = None   # SP-2 Phase A — predicate import path "mod.path:attr"
+    instrument_class: str = "equity"   # SP-3 — equity|option|etp (crypto|futures reserved)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -282,6 +309,11 @@ class LifecycleStateMachine:
         data = json.loads(p.read_text())
         records: Dict[str, StrategyRecord] = {}
         for sid, rec in data.get("strategies", {}).items():
+            _ic = rec.get("instrument_class", "equity")
+            if _ic not in VALID_INSTRUMENT_CLASSES:
+                raise ValueError(
+                    f"strategy {sid!r}: unknown instrument_class {_ic!r}; "
+                    f"valid={sorted(VALID_INSTRUMENT_CLASSES)}")
             history = [TransitionEvent(**e) for e in rec.get("history", [])]
             records[sid] = StrategyRecord(
                 strategy_id=sid,
@@ -291,6 +323,7 @@ class LifecycleStateMachine:
                 metadata=rec.get("metadata", {}),
                 eligible_regimes=rec.get("eligible_regimes"),
                 universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
+                instrument_class=_ic,
             )
         decom_raw = data.get("decommissioned", {}) or {}
         decom_clean: Dict = {}
@@ -309,6 +342,7 @@ class LifecycleStateMachine:
                         metadata=rec.get("metadata", {}),
                         eligible_regimes=rec.get("eligible_regimes"),
                         universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
+                        instrument_class=rec.get("instrument_class", "equity"),
                     )
                     logger.warning(
                         "lifecycle: rescued misrouted active strategy %s "
@@ -429,16 +463,15 @@ class LifecycleStateMachine:
                 return False, (
                     "candidate→live requires metadata keys 'sharpe' and 'max_drawdown'"
                 )
-            if sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE:
+            thr = _promotion_threshold(rec.instrument_class)
+            if sharpe < thr["min_sharpe"]:
                 return False, (
                     f"candidate→live blocked: sharpe {sharpe:.2f} < "
-                    f"minimum {CANDIDATE_TO_LIVE_MIN_SHARPE}"
-                )
-            if drawdown > CANDIDATE_TO_LIVE_MAX_DRAWDOWN:
+                    f"minimum {thr['min_sharpe']} (instrument_class={rec.instrument_class})")
+            if drawdown > thr["max_drawdown"]:
                 return False, (
                     f"candidate→live blocked: max_drawdown {drawdown:.2%} > "
-                    f"limit {CANDIDATE_TO_LIVE_MAX_DRAWDOWN:.0%}"
-                )
+                    f"limit {thr['max_drawdown']:.0%} (instrument_class={rec.instrument_class})")
 
         # Guard: candidate → staging requires regime eligibility
         # Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
@@ -703,6 +736,9 @@ class LifecycleStateMachine:
             # strategies that never had the field.
             if rec.eligible_regimes is not None:
                 entry["eligible_regimes"] = rec.eligible_regimes
+            # SP-3: always-emit (default 'equity') so legacy records backfill
+            # on first write. Unlike eligible_regimes, this field is never omitted.
+            entry["instrument_class"] = rec.instrument_class
             strategies[sid] = entry
         return {
             "schema_version":  "1.0",

@@ -142,6 +142,8 @@ _IMPL_MAP = {
     'S_fama_french_three_factor_composite': ('strategies.implementations.S_fama_french_three_factor_composite', 'FamaFrenchThreeFactorComposite'),
     'S_spx_death_cross_contrarian_fade': ('strategies.implementations.S_spx_death_cross_contrarian_fade', 'SpxDeathCrossContrarianFade'),
     'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
+    # SP-3: commodity ETP momentum — reference strategy for instrument_class='etp' rails
+    'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
 }
 
 

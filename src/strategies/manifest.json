@@ -4789,6 +4789,17 @@
           }
         }
       ]
+    },
+    "S_commodity_etp_momentum": {
+      "state": "candidate",
+      "state_since": "2026-05-26T05:17:17.806232+00:00",
+      "instrument_class": "etp",
+      "metadata": {
+        "canonical_file": "S_commodity_etp_momentum.py",
+        "class": "CommodityEtpMomentum",
+        "description": "90-day total-return momentum rotator across commodity ETPs (GLD / SLV / USO); always long the single strongest name; reference implementation for SP-3 instrument_class=etp rails."
+      },
+      "history": []
     }
   },
   "decommissioned": {
