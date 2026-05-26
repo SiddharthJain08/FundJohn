@@ -136,3 +136,28 @@ def test_route_crypto_close_notional_null_fallback():
         res = ae._route_crypto_order(order, 100000.0, 'COID9')
     assert res['status'] == 'submitted'
     assert res['notional'] == 25000.0
+
+
+def test_execute_single_routes_crypto():
+    responses = {
+        'data crypto latest-trades': (True, {'trades': {'BTC/USD': {'p': 40000.0}}}, None),
+        'order submit': (True, {'id': 'es-1', 'qty': '0.025'}, None),
+    }
+    order = {'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.01,
+             'strategy_id': 'S_test_crypto'}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+        res = ae.execute_single(sess=None, equity=100000.0, order=order, run_date='2026-05-26')
+    assert res['status'] == 'submitted'
+    assert res['ticker'] == 'BTC/USD'
+    assert res['order_id'] == 'es-1'
+    assert res['client_order_id']  # coid populated
+
+
+def test_execute_single_equity_unaffected_missing_levels():
+    # Equity order with no entry/stop/target still hits the existing
+    # 'missing levels' SKIP — proves the crypto intercept did not alter it.
+    order = {'ticker': 'AAPL', 'direction': 'long', 'pct_nav': 0.01,
+             'strategy_id': 'S_test_equity'}
+    res = ae.execute_single(sess=None, equity=100000.0, order=order, run_date='2026-05-26')
+    assert res['status'] == 'SKIP'
+    assert res['reason'] == 'missing levels'

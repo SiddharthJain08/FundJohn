@@ -945,6 +945,15 @@ def execute_single(sess, equity, order, run_date):
     _budget  = max(1, 128 - len(_prefix) - len(_kind_tag))
     coid     = _prefix + _sid_clean[:_budget] + _kind_tag
 
+    # SP-3.1 Phase A: crypto (-USD) is 24/7, fractional-qty, no bracket — and
+    # _normalize_alpaca_symbol() returns None for it, which would otherwise
+    # SKIP it below. Intercept on the RAW ticker before that check. Covers
+    # both open and close_only (the helper branches internally), so neither
+    # path is missed. Non-crypto returns None and falls through unchanged.
+    _crypto_res = _route_crypto_order(order, equity, coid)
+    if _crypto_res is not None:
+        return _crypto_res
+
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',
                 'reason': f'unsupported on Alpaca paper ({raw_ticker})',
