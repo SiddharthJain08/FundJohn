@@ -67,3 +67,54 @@ def test_fractional_qty_survives_round_trip():
     finally:
         conn.rollback()   # never commit — leaves the canonical table untouched
         conn.close()
+
+
+import numpy as np
+import pandas as pd
+
+
+def _load_btc_strategy():
+    import importlib.util
+    path = ROOT / 'src' / 'strategies' / 'implementations' / 'S_btc_momentum.py'
+    spec = importlib.util.spec_from_file_location('S_btc_momentum', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.BtcMomentum
+
+
+def _btc_panel(values):
+    idx = pd.date_range('2025-01-01', periods=len(values), freq='D')
+    return pd.DataFrame({'BTC-USD': values}, index=idx)
+
+
+def test_btc_momentum_emits_long_on_uptrend():
+    Strat = _load_btc_strategy()
+    s = Strat()
+    prices = _btc_panel(list(np.linspace(30000, 60000, 120)))  # steady uptrend
+    sigs = s.generate_signals(prices, {'state': 'LOW_VOL'}, ['BTC-USD'])
+    assert len(sigs) == 1
+    sig = sigs[0]
+    assert sig.ticker == 'BTC-USD' and sig.direction == 'LONG'
+    assert sig.position_size_pct > 0
+    assert sig.stop_loss < sig.entry_price < sig.target_1
+
+
+def test_btc_momentum_goes_cash_on_downtrend():
+    Strat = _load_btc_strategy()
+    s = Strat()
+    prices = _btc_panel(list(np.linspace(60000, 30000, 120)))  # steady downtrend
+    sigs = s.generate_signals(prices, {'state': 'LOW_VOL'}, ['BTC-USD'])
+    assert sigs == []   # absolute-momentum gate → cash
+
+
+def test_btc_momentum_empty_on_short_history():
+    Strat = _load_btc_strategy()
+    s = Strat()
+    prices = _btc_panel(list(np.linspace(30000, 40000, 30)))  # < 90 lookback
+    assert s.generate_signals(prices, {'state': 'LOW_VOL'}, ['BTC-USD']) == []
+
+
+def test_btc_momentum_instrument_class_field():
+    Strat = _load_btc_strategy()
+    assert getattr(Strat, 'instrument_class', None) == 'crypto'
+    assert Strat.id == 'S_btc_momentum'
