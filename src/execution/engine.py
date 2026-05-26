@@ -34,6 +34,8 @@ sys.path.insert(0, str(ROOT))
 
 from strategies.registry import get_approved_strategies
 from strategies.regime_gate import is_eligible
+from strategies.instrument_class import instrument_class_for
+from regime.crypto_regime import load_crypto_regime_state
 
 logging.basicConfig(
     level=logging.INFO,
@@ -614,14 +616,27 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
     # regime is the full dict from load_regime(); the eligibility gate takes
     # the regime-state string. Strategies still get the full dict.
-    regime_state_str = regime['state'] if isinstance(regime, dict) else regime
+    equity_regime_str = regime['state'] if isinstance(regime, dict) else regime
+    _crypto_regime = None  # lazily loaded only if a crypto strategy is present
     results = {}
     for strat in strategies:
         try:
-            if not is_eligible(strat.id, regime_state_str):
-                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, regime_state_str)
+            # SP-3.1 Phase C: crypto strategies gate on the CRYPTO regime, not equity.
+            if instrument_class_for(strat.id) == 'crypto':
+                if _crypto_regime is None:
+                    _crypto_regime = load_crypto_regime_state()
+                strat_regime = _crypto_regime
+                strat_regime_str = _crypto_regime.get('state')
+                if not strat_regime_str:
+                    logger.info('[engine] %s skipped — no crypto regime available', strat.id)
+                    continue
+            else:
+                strat_regime = regime
+                strat_regime_str = equity_regime_str
+            if not is_eligible(strat.id, strat_regime_str):
+                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, strat_regime_str)
                 continue
-            signals = strat.generate_signals(prices, regime, universe, aux_data)
+            signals = strat.generate_signals(prices, strat_regime, universe, aux_data)
             results[strat.id] = signals or []
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
         except Exception as e:
