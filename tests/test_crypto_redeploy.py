@@ -106,3 +106,35 @@ def test_spawn_crypto_redeploy_builds_detached_cmd(monkeypatch):
     assert 'redeploy_crypto.py' in ' '.join(captured['cmd'])
     assert '--reason' in captured['cmd']
     assert captured['kw'].get('start_new_session') is True   # detached
+
+
+def test_emitted_open_order_submits_through_executor(monkeypatch):
+    # Integration: a sizer-emitted OPEN order must carry pct_nav so the executor's
+    # crypto path computes a positive notional and SUBMITS (not SKIP). Catches the
+    # notional_usd/pct_nav contract mismatch.
+    from unittest.mock import patch
+    weights = [{'strategy_id': 'S_btc', 'daily_weight': 1.0, 'effective_sharpe': 2.0, 'cadence_days': 5}]
+    signals = [{'strategy_id': 'S_btc', 'ticker': 'BTC-USD', 'direction': 'long'}]
+    orders = crs.size_crypto_positions(
+        {'equity': 100_000.0}, {'state': 'LOW_VOL'},
+        broker_loader=lambda: {},
+        weights_loader=lambda regime: weights,
+        signals_loader=lambda regime, wbs: signals,
+        crypto_strategy_ids={'S_btc'}, all_live_weight_sum=10.0)  # budget 20k
+    assert len(orders) == 1 and orders[0]['ticker'] == 'BTC-USD'
+    assert 'pct_nav' in orders[0] and orders[0]['pct_nav'] > 0
+
+    from execution import alpaca_executor as ae
+    responses = {
+        'data crypto latest-trades': (True, {'trades': {'BTC/USD': {'p': 40000.0}}}, None),
+        'order submit': (True, {'id': 'ord-x', 'qty': '0.5'}, None),
+    }
+    def _fake(args, timeout=30):
+        j = ' '.join(args)
+        for k, v in responses.items():
+            if k in j:
+                return v
+        raise AssertionError(f'unexpected CLI call: {j}')
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake):
+        res = ae._route_crypto_order(orders[0], 100_000.0, 'COID')
+    assert res['status'] == 'submitted'   # NOT 'SKIP' (non-positive notional)

@@ -101,9 +101,12 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
         delta = tgt - cur
         if abs(delta) < 1.0:
             continue
+        # Emit BOTH notional_usd AND pct_nav (matches the equity sizer contract,
+        # regime_blended_sizer.py): the executor's crypto OPEN path computes
+        # notional = equity × pct_nav, so a missing pct_nav would SKIP the order.
         orders.append({'ticker': tkr, 'direction': 'long' if delta > 0 else 'short',
-                       'notional_usd': abs(delta), 'strategy_id': 'crypto_redeploy',
-                       'close_only': False})
+                       'notional_usd': abs(delta), 'pct_nav': abs(delta) / nav,
+                       'strategy_id': 'crypto_redeploy', 'close_only': False})
     for tkr, cur in broker_crypto.items():
         if tkr in target_usd or cur == 0.0:
             continue
