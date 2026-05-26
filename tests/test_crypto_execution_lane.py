@@ -111,3 +111,28 @@ def test_route_crypto_close_rejected():
         res = ae._route_crypto_order(order, 100000.0, 'COID7')
     assert res['status'] == 'rejected'
     assert res['http'] == 404
+
+
+def test_route_crypto_full_close_sends_no_percentage():
+    captured = {}
+    def _cap(args, timeout=30):
+        captured['args'] = args
+        return (True, {'id': 'close-3', 'qty': '0.5', 'notional': '25000'}, None)
+    order = {'ticker': 'BTC-USD', 'close_only': True,
+             'notional_usd': 25000.0, 'current_usd': 25000.0}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_cap):
+        res = ae._route_crypto_order(order, 100000.0, 'COID8')
+    assert res['status'] == 'submitted'
+    assert '--percentage' not in captured['args']
+
+
+def test_route_crypto_close_notional_null_fallback():
+    # Alpaca returns notional=null on position-close; the result must fall
+    # back to the order's own notional_usd (load-bearing per Task 0 snapshot).
+    responses = {'position close': (True, {'id': 'close-4', 'qty': '0.3', 'notional': None}, None)}
+    order = {'ticker': 'BTC-USD', 'close_only': True,
+             'notional_usd': 25000.0, 'current_usd': 25000.0}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+        res = ae._route_crypto_order(order, 100000.0, 'COID9')
+    assert res['status'] == 'submitted'
+    assert res['notional'] == 25000.0

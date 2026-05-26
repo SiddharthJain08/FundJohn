@@ -511,13 +511,13 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
     if ok:
         _pay = pay if isinstance(pay, dict) else {}
         order_id = _pay.get('id') or _pay.get('order_id')
-        notclose = abs(float(_pay.get('notional') or notional_oc))
+        notional_close = abs(float(_pay.get('notional') or notional_oc))
         qty_close = float(_pay.get('qty') or 0.0)
-        entry_approx = round(notclose / qty_close, 6) if qty_close > 0 else 0.0
+        entry_approx = round(notional_close / qty_close, 6) if qty_close > 0 else 0.0
         kind = 'REDUCE' if is_partial else 'CLOSE'
-        log(f'↩ {raw_ticker} CRYPTO {kind}  notional≈${notclose:,.0f}  order={order_id or "?"}')
+        log(f'↩ {raw_ticker} CRYPTO {kind}  notional≈${notional_close:,.0f}  order={order_id or "?"}')
         return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty_close,
-                'notional': notclose, 'entry': entry_approx, 'order_id': order_id,
+                'notional': notional_close, 'entry': entry_approx, 'order_id': order_id,
                 'http': 200, 'tif': _CRYPTO_TIF, 'order_class': 'simple',
                 'client_order_id': coid}
     log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto close): {err.get("error","")}')
