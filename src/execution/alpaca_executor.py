@@ -411,6 +411,122 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
     return t
 
 
+def _is_crypto_ticker(raw: str | None) -> bool:
+    """True if `raw` is a crypto pair in the engine's BASE-USD convention
+    (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
+    Note: _normalize_alpaca_symbol() returns None for these (line 403), so a
+    crypto order must be intercepted on the RAW ticker before that check."""
+    return bool(raw) and raw.strip().upper().endswith('-USD')
+
+
+def _alpaca_crypto_symbol(raw: str) -> str:
+    """'BTC-USD' -> 'BTC/USD' (Alpaca crypto pair format). Python port of
+    collector.js _alpacaCryptoSymbol (replace '-' with '/')."""
+    return raw.strip().upper().replace('-', '/')
+
+
+# SP-3.1 Phase A: crypto order params. Confirmed by Task 0 spike
+# (docs/superpowers/specs/sp3.1-task0-crypto-cli-snapshot.md).
+_CRYPTO_TIF = 'gtc'        # crypto rejects 'day'/'opg'; a market order rests-then-fills
+_CRYPTO_QTY_DECIMALS = 9   # Alpaca BTC qty precision (Task 0 confirms min order size)
+
+
+def _crypto_latest_price(api_symbol: str) -> float | None:
+    """Latest trade price for an Alpaca crypto pair ('BTC/USD'), or None.
+    Response path confirmed in Task 0 snapshot: .trades[api_symbol].p."""
+    ok, payload, _err = _run_alpaca_cli(
+        ['data', 'crypto', 'latest-trades', '--symbols', api_symbol], timeout=10)
+    if not ok or not isinstance(payload, dict):
+        return None
+    trade = (payload.get('trades') or {}).get(api_symbol) or {}
+    try:
+        p = float(trade.get('p') or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return p if p > 0 else None
+
+
+def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
+    """SP-3.1 Phase A: handle a crypto order, or return None to fall through
+    to the equity path. Crypto is 24/7, fractional-qty, market+gtc, simple
+    order_class (no bracket, no broker-side stop — Phase D). Open orders are
+    sized + submitted here; close_only delegates to _route_crypto_close.
+    execute_single calls this once, above the equity session/qty logic, so
+    neither path is missed."""
+    raw_ticker = order.get('ticker') or ''
+    if not _is_crypto_ticker(raw_ticker):
+        return None
+    api_symbol = _alpaca_crypto_symbol(raw_ticker)
+    side = 'sell' if str(order.get('direction') or '').lower() == 'short' else 'buy'
+
+    if order.get('close_only'):
+        return _route_crypto_close(order, api_symbol, raw_ticker, coid)
+
+    pct_nav = float(order.get('pct_nav') or 0.0)
+    notional = equity * pct_nav
+    if notional <= 0:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': 'crypto: non-positive notional',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    price = _crypto_latest_price(api_symbol)
+    if price is None:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': 'crypto: no latest-trade price',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    qty = round(notional / price, _CRYPTO_QTY_DECIMALS)
+    if qty <= 0:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': f'crypto: qty rounds to 0 (notional={notional:.2f} price={price:.2f})',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    ok, pay, err = _submit_order_via_cli(
+        ticker=api_symbol, side=side, qty=qty, tif=_CRYPTO_TIF,
+        order_class='simple', target=None, stop=None, coid=coid,
+        order_type='market', extended_hours=False, limit_price=None)
+    if ok:
+        _pay = pay if isinstance(pay, dict) else {}
+        oid = _pay.get('id') or _pay.get('order_id')
+        log(f'✔ {raw_ticker} CRYPTO {side.upper()} x{qty}  ~${notional:,.0f} @ {price:,.2f}'
+            f'  order={oid or "?"}')
+        return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty,
+                'notional': notional, 'entry': price, 'order_id': oid, 'http': 200,
+                'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+    log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto open): {err.get("error","")}')
+    return {'ticker': api_symbol, 'status': 'rejected',
+            'reason': err.get('error') or 'crypto order submit failed',
+            'http': err.get('status'), 'body': str(err),
+            'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+
+
+def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str) -> dict:
+    """Flatten or partially reduce a crypto position. No session gate (24/7).
+    Mirrors the equity close_only partial-reduce math (execute_single:863-870)."""
+    notional_oc = abs(float(order.get('notional_usd') or 0))
+    current_oc = abs(float(order.get('current_usd') or 0))
+    cli_args = ['position', 'close', '--symbol-or-asset-id', api_symbol]
+    is_partial = (current_oc > 0 and notional_oc < current_oc * 0.999)
+    if is_partial:
+        pct = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))
+        cli_args += ['--percentage', str(pct)]
+    ok, pay, err = _run_alpaca_cli(cli_args, timeout=15)
+    if ok:
+        _pay = pay if isinstance(pay, dict) else {}
+        order_id = _pay.get('id') or _pay.get('order_id')
+        notional_close = abs(float(_pay.get('notional') or notional_oc))
+        qty_close = float(_pay.get('qty') or 0.0)
+        entry_approx = round(notional_close / qty_close, 6) if qty_close > 0 else 0.0
+        kind = 'REDUCE' if is_partial else 'CLOSE'
+        log(f'↩ {raw_ticker} CRYPTO {kind}  notional≈${notional_close:,.0f}  order={order_id or "?"}')
+        return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty_close,
+                'notional': notional_close, 'entry': entry_approx, 'order_id': order_id,
+                'http': 200, 'tif': _CRYPTO_TIF, 'order_class': 'simple',
+                'client_order_id': coid}
+    log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto close): {err.get("error","")}')
+    return {'ticker': api_symbol, 'status': 'rejected',
+            'reason': err.get('error') or 'crypto position close failed',
+            'http': err.get('status'), 'body': str(err),
+            'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+
+
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:
     """Best-effort classifier for Alpaca 4xx errors that indicate the asset
     itself isn't tradable on this account/feed (delisted, halted, asset
@@ -828,6 +944,20 @@ def execute_single(sess, equity, order, run_date):
     _prefix  = f'AX{run_date.replace("-","")}_{_coid_ticker}_'
     _budget  = max(1, 128 - len(_prefix) - len(_kind_tag))
     coid     = _prefix + _sid_clean[:_budget] + _kind_tag
+
+    # SP-3.1 Phase A: crypto (-USD) is 24/7, fractional-qty, no bracket — and
+    # _normalize_alpaca_symbol() returns None for it, which would otherwise
+    # SKIP it below. Intercept on the RAW ticker before that check. Covers
+    # both open and close_only (the helper branches internally), so neither
+    # path is missed. Non-crypto returns None and falls through unchanged.
+    # Gated to match the sizer dispatch (regime_blended_sizer_live): when
+    # OPENCLAW_INSTRUMENT_CLASS_ROUTING is OFF, crypto is NOT handled and the
+    # order falls through to the equity path (which SKIPs -USD as unsupported),
+    # preserving the SP-3 gate-OFF equity-byte-identical invariant.
+    if os.environ.get('OPENCLAW_INSTRUMENT_CLASS_ROUTING') == '1':
+        _crypto_res = _route_crypto_order(order, equity, coid)
+        if _crypto_res is not None:
+            return _crypto_res
 
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',

@@ -26,6 +26,12 @@ def test_option_without_delta_passes_through_failopen():
     assert apply_instrument_class_sizing(order, 'option')['notional_usd'] == 1000.0
 
 
-def test_crypto_raises_no_handler():
-    with pytest.raises(NotImplementedError, match='crypto'):
-        apply_instrument_class_sizing({'ticker': 'BTC-USD', 'notional_usd': 1.0}, 'crypto')
+def test_crypto_is_identity():
+    order = {'ticker': 'BTC-USD', 'notional_usd': 1000.0}
+    assert apply_instrument_class_sizing(order, 'crypto')['notional_usd'] == 1000.0
+
+
+def test_futures_raises_no_handler():
+    import pytest
+    with pytest.raises(NotImplementedError, match='futures'):
+        apply_instrument_class_sizing({'ticker': 'CL=F', 'notional_usd': 1.0}, 'futures')

@@ -2,7 +2,7 @@
 equity/etp are literal pass-throughs (the live equity path must be byte-identical).
 option scales notional by |delta| when a delta is carried on the order (fail-open
 to raw notional otherwise — full greeks-driven delta sizing is an SP-3.x fast-follow).
-crypto/futures raise (reserved, no handler until SP-3.1).
+crypto is a notional pass-through (SP-3.1 Phase A). futures raises (reserved).
 
 Executor note (SP-3 Task 8): ETPs are `us_equity` to Alpaca (verified at
 alpaca_executor.py `_skip_extended_hours`: it reads the asset `class` field
@@ -14,8 +14,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_PASS_THROUGH = {"equity", "etp"}
-_RESERVED = {"crypto", "futures"}
+_PASS_THROUGH = {"equity", "etp", "crypto"}  # crypto: notional sizing, no greeks (SP-3.1 Phase A)
+_RESERVED = {"futures"}
 
 
 def apply_instrument_class_sizing(order: dict, instrument_class: str) -> dict:

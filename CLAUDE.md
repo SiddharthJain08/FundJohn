@@ -8,8 +8,8 @@ Columns may be ADDED at any time. Tickers may be ADDED at any time. Date
 ranges may only grow. **No code path is allowed to drop columns, drop
 tickers, truncate the date axis, deprecate columns, or delete rows from
 prices.parquet, options_eod.parquet, financials.parquet, macro.parquet,
-insider.parquet, earnings.parquet, prices_30m.parquet, or
-historical_regimes.parquet.** Same rule applies to the canonical
+insider.parquet, earnings.parquet, prices_30m.parquet,
+historical_regimes.parquet, or crypto_bars_1h.parquet.** Same rule applies to the canonical
 Postgres tables (`execution_signals`, `signal_pnl`, `alpaca_submissions`,
 `data_coverage`, `data_columns`). The system's job is to grow the data
 forever and let strategies opt into whichever subset they need; it is
