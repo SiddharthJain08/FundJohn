@@ -8,7 +8,7 @@ flows end-to-end (data -> signal -> sizer -> crypto executor -> resting stop).
 NOT a tuned production alpha.
 
 State: candidate at mint; promoted to live only after a backtest clears the
-crypto PROMOTION_THRESHOLDS (min_sharpe 0.5 / max_drawdown 0.40).
+crypto PROMOTION_THRESHOLDS (min_sharpe 0.5 / max_drawdown 0.70).
 """
 from __future__ import annotations
 

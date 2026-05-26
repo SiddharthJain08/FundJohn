@@ -489,11 +489,18 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
             f'  order={oid or "?"}')
         stop_px = float(order.get('stop') or 0.0)
         if stop_px > 0 and oid:
-            filled_qty = _poll_crypto_fill(oid)
-            if filled_qty > 0:
-                _submit_crypto_stop(api_symbol, stop_px, filled_qty, coid)
-            else:
-                log(f'  ↳ crypto stop skipped — entry {oid} not filled in time (entry stands)')
+            # Best-effort resting stop. This runs AFTER a successful entry and
+            # ABOVE execute_single's try-block, so it must never raise — a CLI
+            # subprocess hang (TimeoutExpired) would otherwise abort the whole
+            # batch and orphan this just-opened position with no audit row.
+            try:
+                filled_qty = _poll_crypto_fill(oid)
+                if filled_qty > 0:
+                    _submit_crypto_stop(api_symbol, stop_px, filled_qty, coid)
+                else:
+                    log(f'  ↳ crypto stop skipped — entry {oid} not filled in time (entry stands)')
+            except Exception as _stop_err:   # noqa: BLE001 — entry must stand
+                log(f'  ↳ crypto stop best-effort failed (entry stands): {_stop_err}')
         return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty,
                 'notional': notional, 'entry': price, 'order_id': oid, 'http': 200,
                 'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
@@ -515,7 +522,11 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
         pct = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))
         cli_args += ['--percentage', str(pct)]
     # Phase D: a resting sell stop reserves the position → close would 403.
-    _cancel_open_crypto_stops(api_symbol)
+    # Best-effort + guarded: a CLI hang here must never abort the close.
+    try:
+        _cancel_open_crypto_stops(api_symbol)
+    except Exception as _cx:   # noqa: BLE001 — close must proceed
+        log(f'  ↳ crypto stop-cancel best-effort failed (continuing to close): {_cx}')
     ok, pay, err = _run_alpaca_cli(cli_args, timeout=15)
     if ok:
         _pay = pay if isinstance(pay, dict) else {}
@@ -542,8 +553,9 @@ def _poll_crypto_fill(order_id: str, timeout: float = 10.0,
     actual filled qty (crypto market orders fill async + slightly short of the
     requested qty due to fees). Returns the filled qty (float) on a filled /
     partially_filled order, or 0.0 on terminal-non-fill (rejected/canceled/
-    expired) / timeout / CLI error. Never raises — the caller treats the stop
-    as best-effort."""
+    expired) / timeout / CLI error. Returns 0.0 on any CLI-error response; a CLI
+    subprocess hang can still raise TimeoutExpired, so the caller wraps this in a
+    best-effort guard (the entry must stand regardless)."""
     import time as _time
     deadline = _time.monotonic() + timeout
     while _time.monotonic() < deadline:
@@ -608,7 +620,8 @@ def _cancel_open_crypto_stops(api_symbol: str) -> int:
     """SP-3.1 Phase D: cancel any OPEN crypto orders for api_symbol (e.g.
     'BTC/USD'). A resting sell stop reserves the position, so a close/flatten
     would 403 unless the stop is cancelled first. Returns count cancelled.
-    Fail-safe — never raises."""
+    Returns 0 on any CLI-error response; a CLI subprocess hang can still raise
+    TimeoutExpired, so the caller wraps this in a best-effort guard."""
     ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
     if not ok or not isinstance(payload, list):
         return 0

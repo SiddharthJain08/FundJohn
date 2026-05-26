@@ -225,3 +225,24 @@ def test_crypto_entry_emits_paired_stop(monkeypatch):
     assert len(stop_submits) == 1, f'expected 1 paired stop, got {len(stop_submits)}'
     a = stop_submits[0]
     assert a[a.index('--qty') + 1] == '0.000196'   # sized to FILLED qty, not requested 0.0002
+
+
+def test_crypto_entry_stands_when_stop_poll_raises(monkeypatch):
+    """Final-review regression: a CLI subprocess hang (TimeoutExpired) during
+    the post-entry stop must NOT abort the entry — the submitted result stands."""
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    import subprocess
+    def fake_cli(args, timeout=30):
+        if 'latest-trades' in args:
+            return True, {'trades': {'BTC/USD': {'p': 76000.0}}}, None
+        if args[:2] == ['order', 'submit']:
+            return True, {'id': 'entry-1', 'status': 'pending_new', 'qty': '0.0002'}, None
+        if args[:2] == ['order', 'get']:
+            raise subprocess.TimeoutExpired(cmd='alpaca order get', timeout=5)
+        return True, {}, None
+    monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    monkeypatch.setenv('OPENCLAW_INSTRUMENT_CLASS_ROUTING', '1')
+    order = {'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.01, 'stop': 70000.0}
+    res = ax._route_crypto_order(order, equity=100_000.0, coid='c1')
+    assert res is not None and res['status'] == 'submitted' and res['order_id'] == 'entry-1'
