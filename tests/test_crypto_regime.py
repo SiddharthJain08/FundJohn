@@ -55,3 +55,19 @@ def test_fit_and_score_orders_states_by_vol_and_returns_label():
     assert names[int(order[0])] == 'LOW_VOL'
     assert names[int(order[-1])] == 'CRISIS'
     assert set(names.values()) == set(cr.STATE_NAMES_ORDERED)
+
+
+def test_hysteresis_streak_and_confirmed_transition():
+    # newest-first history, settled LOW_VOL (streak>=3), new CRISIS at conf 0.95
+    hist = [
+        {'state': 'CRISIS', 'fired_redeploy': False, 'hysteresis_streak': 1},
+        {'state': 'LOW_VOL', 'fired_redeploy': False, 'hysteresis_streak': 5},
+        {'state': 'LOW_VOL', 'fired_redeploy': False, 'hysteresis_streak': 4},
+    ]
+    streak = cr.hysteresis_streak(hist, 'CRISIS')
+    fired, prior = cr.confirmed_transition(hist, 'CRISIS', streak, 0.95)
+    assert fired is True and prior == 'LOW_VOL'
+    fired2, _ = cr.confirmed_transition(hist, 'LOW_VOL', cr.hysteresis_streak(hist, 'LOW_VOL'), 0.99)
+    assert fired2 is False
+    fired3, _ = cr.confirmed_transition(hist, 'CRISIS', streak, 0.50)
+    assert fired3 is False

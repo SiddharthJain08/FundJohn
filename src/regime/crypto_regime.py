@@ -76,3 +76,64 @@ def save_model(model, path) -> None:
 def load_model(path):
     with open(path, 'rb') as f:
         return pickle.load(f)
+
+
+HYSTERESIS_TIERS = {
+    'CRISIS': (1, 0.90), 'HIGH_VOL': (2, 0.80),
+    'TRANSITIONING': (3, 0.70), 'LOW_VOL': (3, 0.70),
+}
+_DOWNWARD_TIER = (3, 0.70)
+_STATE_RANK = {'LOW_VOL': 0, 'TRANSITIONING': 1, 'HIGH_VOL': 2, 'CRISIS': 3}
+
+
+def hysteresis_streak(history: list[dict], current_state: str) -> int:
+    """Consecutive most-recent rows matching current_state, +1 for this tick.
+    history is newest-first. Mirrors run_intraday_market_state.py:365-374."""
+    n = 0
+    for row in history:
+        if row.get('state') == current_state:
+            n += 1
+        else:
+            break
+    return n + 1
+
+
+def _is_upward(prior_state, new_state) -> bool:
+    if prior_state is None:
+        return False
+    return _STATE_RANK.get(new_state, -1) > _STATE_RANK.get(prior_state, -1)
+
+
+def _tier_for_transition(prior_state, new_state) -> tuple[int, float]:
+    if _is_upward(prior_state, new_state):
+        return HYSTERESIS_TIERS.get(new_state, _DOWNWARD_TIER)
+    return _DOWNWARD_TIER
+
+
+def _find_settled_regime(history: list[dict]) -> str | None:
+    """Most recent fired_redeploy row, else first row with streak>=3.
+    Mirrors run_intraday_market_state.py:392-423 (fired_liquidation->fired_redeploy)."""
+    for row in history:
+        state = row.get('state')
+        if not state:
+            continue
+        if row.get('fired_redeploy'):
+            return state
+        try:
+            if int(row.get('hysteresis_streak') or 0) >= 3:
+                return state
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def confirmed_transition(history: list[dict], current_state: str, streak: int,
+                         current_confidence: float) -> tuple[bool, str | None]:
+    """Mirrors run_intraday_market_state.py:426-453. Returns (fired, prior_state)."""
+    settled = _find_settled_regime(history)
+    if settled is None or settled == current_state:
+        return False, None
+    n_required, conf_required = _tier_for_transition(settled, current_state)
+    if streak < n_required or current_confidence < conf_required:
+        return False, None
+    return True, settled
