@@ -411,6 +411,20 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
     return t
 
 
+def _is_crypto_ticker(raw: str | None) -> bool:
+    """True if `raw` is a crypto pair in the engine's BASE-USD convention
+    (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
+    Note: _normalize_alpaca_symbol() returns None for these (line 403), so a
+    crypto order must be intercepted on the RAW ticker before that check."""
+    return bool(raw) and raw.strip().upper().endswith('-USD')
+
+
+def _alpaca_crypto_symbol(raw: str) -> str:
+    """'BTC-USD' -> 'BTC/USD' (Alpaca crypto pair format). Python port of
+    collector.js _alpacaCryptoSymbol (replace '-' with '/')."""
+    return raw.strip().upper().replace('-', '/')
+
+
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:
     """Best-effort classifier for Alpaca 4xx errors that indicate the asset
     itself isn't tradable on this account/feed (delisted, halted, asset
