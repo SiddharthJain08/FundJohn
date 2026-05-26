@@ -73,3 +73,41 @@ def test_route_crypto_open_skips_on_zero_notional():
     res = ae._route_crypto_order(order, 100000.0, 'COID4')
     assert res['status'] == 'SKIP'
     assert 'notional' in res['reason']
+
+
+def test_route_crypto_full_close():
+    responses = {'position close': (True, {'id': 'close-1', 'qty': '0.5', 'notional': '25000'}, None)}
+    order = {'ticker': 'BTC-USD', 'close_only': True,
+             'notional_usd': 25000.0, 'current_usd': 25000.0}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+        res = ae._route_crypto_order(order, 100000.0, 'COID5')
+    assert res['status'] == 'submitted'
+    assert res['order_id'] == 'close-1'
+    assert res['ticker'] == 'BTC/USD'
+
+
+def test_route_crypto_partial_reduce_sends_percentage():
+    captured = {}
+    def _cap(args, timeout=30):
+        captured['args'] = args
+        return (True, {'id': 'close-2', 'qty': '0.25', 'notional': '12500'}, None)
+    # reduce to half: notional_usd 12500 of current_usd 25000 -> ~50%
+    order = {'ticker': 'BTC-USD', 'close_only': True,
+             'notional_usd': 12500.0, 'current_usd': 25000.0}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_cap):
+        res = ae._route_crypto_order(order, 100000.0, 'COID6')
+    assert res['status'] == 'submitted'
+    assert '--percentage' in captured['args']
+    pct = captured['args'][captured['args'].index('--percentage') + 1]
+    assert abs(float(pct) - 50.0) < 0.5
+
+
+def test_route_crypto_close_rejected():
+    responses = {'position close': (False, None, {'exit_code': 1, 'status': 404,
+                                                  'error': 'position does not exist'})}
+    order = {'ticker': 'ETH-USD', 'close_only': True,
+             'notional_usd': 1000.0, 'current_usd': 1000.0}
+    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+        res = ae._route_crypto_order(order, 100000.0, 'COID7')
+    assert res['status'] == 'rejected'
+    assert res['http'] == 404

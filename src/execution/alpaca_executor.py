@@ -497,8 +497,34 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
             'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
 
 
-def _route_crypto_close(order, api_symbol, raw_ticker, coid):  # body lands in Task 4
-    raise NotImplementedError('crypto close path — implemented in Task 4')
+def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str) -> dict:
+    """Flatten or partially reduce a crypto position. No session gate (24/7).
+    Mirrors the equity close_only partial-reduce math (execute_single:863-870)."""
+    notional_oc = abs(float(order.get('notional_usd') or 0))
+    current_oc = abs(float(order.get('current_usd') or 0))
+    cli_args = ['position', 'close', '--symbol-or-asset-id', api_symbol]
+    is_partial = (current_oc > 0 and notional_oc < current_oc * 0.999)
+    if is_partial:
+        pct = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))
+        cli_args += ['--percentage', str(pct)]
+    ok, pay, err = _run_alpaca_cli(cli_args, timeout=15)
+    if ok:
+        _pay = pay if isinstance(pay, dict) else {}
+        order_id = _pay.get('id') or _pay.get('order_id')
+        notclose = abs(float(_pay.get('notional') or notional_oc))
+        qty_close = float(_pay.get('qty') or 0.0)
+        entry_approx = round(notclose / qty_close, 6) if qty_close > 0 else 0.0
+        kind = 'REDUCE' if is_partial else 'CLOSE'
+        log(f'↩ {raw_ticker} CRYPTO {kind}  notional≈${notclose:,.0f}  order={order_id or "?"}')
+        return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty_close,
+                'notional': notclose, 'entry': entry_approx, 'order_id': order_id,
+                'http': 200, 'tif': _CRYPTO_TIF, 'order_class': 'simple',
+                'client_order_id': coid}
+    log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto close): {err.get("error","")}')
+    return {'ticker': api_symbol, 'status': 'rejected',
+            'reason': err.get('error') or 'crypto position close failed',
+            'http': err.get('status'), 'body': str(err),
+            'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
 
 
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:
