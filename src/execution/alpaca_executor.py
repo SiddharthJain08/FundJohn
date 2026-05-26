@@ -487,6 +487,20 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
         oid = _pay.get('id') or _pay.get('order_id')
         log(f'✔ {raw_ticker} CRYPTO {side.upper()} x{qty}  ~${notional:,.0f} @ {price:,.2f}'
             f'  order={oid or "?"}')
+        stop_px = float(order.get('stop') or 0.0)
+        if stop_px > 0 and oid:
+            # Best-effort resting stop. This runs AFTER a successful entry and
+            # ABOVE execute_single's try-block, so it must never raise — a CLI
+            # subprocess hang (TimeoutExpired) would otherwise abort the whole
+            # batch and orphan this just-opened position with no audit row.
+            try:
+                filled_qty = _poll_crypto_fill(oid)
+                if filled_qty > 0:
+                    _submit_crypto_stop(api_symbol, stop_px, filled_qty, coid)
+                else:
+                    log(f'  ↳ crypto stop skipped — entry {oid} not filled in time (entry stands)')
+            except Exception as _stop_err:   # noqa: BLE001 — entry must stand
+                log(f'  ↳ crypto stop best-effort failed (entry stands): {_stop_err}')
         return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty,
                 'notional': notional, 'entry': price, 'order_id': oid, 'http': 200,
                 'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
@@ -507,6 +521,12 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
     if is_partial:
         pct = max(0.01, min(99.99, round((notional_oc / current_oc) * 100.0, 2)))
         cli_args += ['--percentage', str(pct)]
+    # Phase D: a resting sell stop reserves the position → close would 403.
+    # Best-effort + guarded: a CLI hang here must never abort the close.
+    try:
+        _cancel_open_crypto_stops(api_symbol)
+    except Exception as _cx:   # noqa: BLE001 — close must proceed
+        log(f'  ↳ crypto stop-cancel best-effort failed (continuing to close): {_cx}')
     ok, pay, err = _run_alpaca_cli(cli_args, timeout=15)
     if ok:
         _pay = pay if isinstance(pay, dict) else {}
@@ -525,6 +545,99 @@ def _route_crypto_close(order: dict, api_symbol: str, raw_ticker: str, coid: str
             'reason': err.get('error') or 'crypto position close failed',
             'http': err.get('status'), 'body': str(err),
             'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+
+
+def _poll_crypto_fill(order_id: str, timeout: float = 10.0,
+                      poll_interval: float = 0.5) -> float:
+    """SP-3.1 Phase D: poll a crypto entry order until it fills, return the
+    actual filled qty (crypto market orders fill async + slightly short of the
+    requested qty due to fees). Returns the filled qty (float) on a filled /
+    partially_filled order, or 0.0 on terminal-non-fill (rejected/canceled/
+    expired) / timeout / CLI error. Returns 0.0 on any CLI-error response; a CLI
+    subprocess hang can still raise TimeoutExpired, so the caller wraps this in a
+    best-effort guard (the entry must stand regardless)."""
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        ok, payload, _err = _run_alpaca_cli(['order', 'get', order_id], timeout=5)
+        if ok and isinstance(payload, dict):
+            status = str(payload.get('status') or '').lower()
+            try:
+                fq = float(payload.get('filled_qty') or 0.0)
+            except (TypeError, ValueError):
+                fq = 0.0
+            if status == 'filled':
+                return fq
+            if status in ('canceled', 'cancelled', 'rejected', 'expired'):
+                return fq if fq > 0 else 0.0   # partial-then-canceled still protectable
+        _time.sleep(poll_interval)
+    # Timed out — return whatever last filled qty we saw (0.0 if none).
+    ok, payload, _err = _run_alpaca_cli(['order', 'get', order_id], timeout=5)
+    if ok and isinstance(payload, dict):
+        try:
+            return float(payload.get('filled_qty') or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _submit_crypto_stop(api_symbol: str, stop_price: float, qty: float,
+                        coid: str) -> dict | None:
+    """SP-3.1 Phase D: place a resting SELL stop_limit on a crypto long position.
+    Crypto has no bracket/OCO, so the stop is a separate resting order placed
+    after the entry fills (sized to the ACTUAL filled qty). stop_limit is the
+    only crypto stop type Alpaca accepts (plain 'stop' → 422). The limit price
+    sits BELOW the stop so the order is marketable on a downward break.
+    Returns a small result dict on success, or None on failure / invalid input
+    (the caller keeps the entry result — fail-safe, never unwinds the entry).
+    Shape per docs/superpowers/specs/sp3.1-phase-d-crypto-stop-snapshot.md."""
+    if not (stop_price and stop_price > 0 and qty and qty > 0):
+        return None
+    limit_price = round(stop_price * 0.995, 2)   # 0.5% below stop → marketable
+    args = [
+        'order', 'submit',
+        '--symbol',           api_symbol,
+        '--side',             'sell',
+        '--qty',              str(qty),
+        '--type',             'stop_limit',
+        '--stop-price',       _price_str(stop_price),
+        '--limit-price',      _price_str(limit_price),
+        '--time-in-force',    _CRYPTO_TIF,
+        '--client-order-id',  f'{coid}-stop',
+    ]
+    ok, pay, err = _run_alpaca_cli(args, timeout=15)
+    if ok:
+        _pay = pay if isinstance(pay, dict) else {}
+        oid = _pay.get('id') or _pay.get('order_id')
+        log(f'  ↳ crypto STOP rest @ {stop_price:,.2f} (limit {limit_price:,.2f}) order={oid or "?"}')
+        return {'order_id': oid, 'status': _pay.get('status'), 'stop_price': stop_price}
+    _e = err.get('error', '') if isinstance(err, dict) else str(err)
+    log(f'  ↳ crypto STOP submit failed (entry stands): {_e}')
+    return None
+
+
+def _cancel_open_crypto_stops(api_symbol: str) -> int:
+    """SP-3.1 Phase D: cancel any OPEN crypto orders for api_symbol (e.g.
+    'BTC/USD'). A resting sell stop reserves the position, so a close/flatten
+    would 403 unless the stop is cancelled first. Returns count cancelled.
+    Returns 0 on any CLI-error response; a CLI subprocess hang can still raise
+    TimeoutExpired, so the caller wraps this in a best-effort guard."""
+    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
+    if not ok or not isinstance(payload, list):
+        return 0
+    n = 0
+    for o in payload:
+        if not isinstance(o, dict):
+            continue
+        if o.get('symbol') == api_symbol:
+            oid = o.get('id') or o.get('order_id')
+            if oid:
+                c_ok, _p, _e = _run_alpaca_cli(['order', 'cancel', '--order-id', oid], timeout=10)
+                if c_ok:
+                    n += 1
+    if n:
+        log(f'  ↳ cancelled {n} open crypto order(s) for {api_symbol} before close')
+    return n
 
 
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:

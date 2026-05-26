@@ -101,6 +101,10 @@ PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
     "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "crypto": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-3.2): calibrate
+               "max_drawdown": 0.70},   # operator sign-off 2026-05-26: BTC is a 60-80% DD asset;
+                                        # S_btc_momentum backtests Sharpe 1.02 / MaxDD 65% over 10y.
+                                        # 0.70 is a deliberate crypto-realistic band, not gamed.
 }
 
 
@@ -112,10 +116,10 @@ def _promotion_threshold(instrument_class: str) -> dict[str, float]:
 
 
 # SP-3 instrument-class taxonomy. VALID = accepted by validation;
-# ROUTED = has a live sizer/backtest handler in the MVP. crypto/futures
-# are reserved (valid) but unhandled until SP-3.1.
+# ROUTED = has a live sizer/backtest handler. crypto was routed in SP-3.1
+# Phase D; futures is reserved (valid) but unhandled.
 VALID_INSTRUMENT_CLASSES  = frozenset({"equity", "option", "etp", "crypto", "futures"})
-ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp"})
+ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp", "crypto"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
