@@ -49,4 +49,9 @@ def test_fit_and_score_orders_states_by_vol_and_returns_label():
     assert 0.0 <= conf <= 1.0
     assert set(probs.keys()) == set(cr.STATE_NAMES_ORDERED)
     names = cr.state_names(model)
-    assert names[0] == 'LOW_VOL' and names[3] == 'CRISIS'
+    # Ordering is by ascending means_[:,0]; raw HMM indices are arbitrary, so
+    # assert on the SORTED order: lowest-vol raw state -> LOW_VOL, highest -> CRISIS.
+    order = np.argsort(model.means_[:, 0])
+    assert names[int(order[0])] == 'LOW_VOL'
+    assert names[int(order[-1])] == 'CRISIS'
+    assert set(names.values()) == set(cr.STATE_NAMES_ORDERED)
