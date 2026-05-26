@@ -57,3 +57,18 @@ def test_unrelated_promotion_does_not_strip_instrument_class(tmp_path):
     reloaded = json.loads(p.read_text(encoding='utf-8'))
     assert reloaded['strategies']['s1']['instrument_class'] == 'etp', \
         'promotion of s2 must not strip s1.instrument_class'
+
+
+import pytest  # noqa: E402
+
+def test_unknown_instrument_class_rejected(tmp_path):
+    p = _write(tmp_path, {'strategies': {'s1': _entry(instrument_class='banana')}})
+    with pytest.raises(ValueError, match='instrument_class'):
+        LifecycleStateMachine.from_manifest(p)
+
+
+def test_reserved_classes_accepted(tmp_path):
+    for cls in ('crypto', 'futures'):
+        p = _write(tmp_path, {'strategies': {'s1': _entry(instrument_class=cls)}})
+        out = LifecycleStateMachine.from_manifest(p).to_dict()
+        assert out['strategies']['s1']['instrument_class'] == cls

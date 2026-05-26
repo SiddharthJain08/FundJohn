@@ -91,6 +91,12 @@ CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
+# SP-3 instrument-class taxonomy. VALID = accepted by validation;
+# ROUTED = has a live sizer/backtest handler in the MVP. crypto/futures
+# are reserved (valid) but unhandled until SP-3.1.
+VALID_INSTRUMENT_CLASSES  = frozenset({"equity", "option", "etp", "crypto", "futures"})
+ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp"})
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3.  Data model
@@ -283,6 +289,11 @@ class LifecycleStateMachine:
         data = json.loads(p.read_text())
         records: Dict[str, StrategyRecord] = {}
         for sid, rec in data.get("strategies", {}).items():
+            _ic = rec.get("instrument_class", "equity")
+            if _ic not in VALID_INSTRUMENT_CLASSES:
+                raise ValueError(
+                    f"strategy {sid!r}: unknown instrument_class {_ic!r}; "
+                    f"valid={sorted(VALID_INSTRUMENT_CLASSES)}")
             history = [TransitionEvent(**e) for e in rec.get("history", [])]
             records[sid] = StrategyRecord(
                 strategy_id=sid,
@@ -292,7 +303,7 @@ class LifecycleStateMachine:
                 metadata=rec.get("metadata", {}),
                 eligible_regimes=rec.get("eligible_regimes"),
                 universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
-                instrument_class=rec.get("instrument_class", "equity"),
+                instrument_class=_ic,
             )
         decom_raw = data.get("decommissioned", {}) or {}
         decom_clean: Dict = {}
