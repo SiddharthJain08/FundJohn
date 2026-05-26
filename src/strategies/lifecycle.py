@@ -125,6 +125,7 @@ class StrategyRecord:
     # a follow-up commit.
     eligible_regimes: Optional[List[str]] = None
     universe_filter_ref: Optional[str] = None   # SP-2 Phase A — predicate import path "mod.path:attr"
+    instrument_class: str = "equity"   # SP-3 — equity|option|etp (crypto|futures reserved)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -291,6 +292,7 @@ class LifecycleStateMachine:
                 metadata=rec.get("metadata", {}),
                 eligible_regimes=rec.get("eligible_regimes"),
                 universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
+                instrument_class=rec.get("instrument_class", "equity"),
             )
         decom_raw = data.get("decommissioned", {}) or {}
         decom_clean: Dict = {}
@@ -309,6 +311,7 @@ class LifecycleStateMachine:
                         metadata=rec.get("metadata", {}),
                         eligible_regimes=rec.get("eligible_regimes"),
                         universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
+                        instrument_class=rec.get("instrument_class", "equity"),
                     )
                     logger.warning(
                         "lifecycle: rescued misrouted active strategy %s "
@@ -703,6 +706,9 @@ class LifecycleStateMachine:
             # strategies that never had the field.
             if rec.eligible_regimes is not None:
                 entry["eligible_regimes"] = rec.eligible_regimes
+            # SP-3: always-emit (default 'equity') so legacy records backfill
+            # on first write. Unlike eligible_regimes, this field is never omitted.
+            entry["instrument_class"] = rec.instrument_class
             strategies[sid] = entry
         return {
             "schema_version":  "1.0",
