@@ -145,12 +145,25 @@ def test_execute_single_routes_crypto():
     }
     order = {'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.01,
              'strategy_id': 'S_test_crypto'}
-    with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
+    with patch.dict('os.environ', {'OPENCLAW_INSTRUMENT_CLASS_ROUTING': '1'}), \
+         patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
         res = ae.execute_single(sess=None, equity=100000.0, order=order, run_date='2026-05-26')
     assert res['status'] == 'submitted'
     assert res['ticker'] == 'BTC/USD'
     assert res['order_id'] == 'es-1'
     assert res['client_order_id']  # coid populated
+
+
+def test_execute_single_crypto_falls_through_when_gate_off():
+    # Gate OFF: the crypto intercept must NOT fire — a -USD order falls through
+    # to the equity path, which SKIPs it as unsupported. Proves the SP-3
+    # gate-OFF equity-byte-identical invariant holds at the executor too.
+    order = {'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.01,
+             'strategy_id': 'S_test_crypto'}
+    with patch.dict('os.environ', {'OPENCLAW_INSTRUMENT_CLASS_ROUTING': '0'}):
+        res = ae.execute_single(sess=None, equity=100000.0, order=order, run_date='2026-05-26')
+    assert res['status'] == 'SKIP'
+    assert 'unsupported on Alpaca paper' in res['reason']
 
 
 def test_execute_single_equity_unaffected_missing_levels():

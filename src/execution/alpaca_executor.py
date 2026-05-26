@@ -950,9 +950,14 @@ def execute_single(sess, equity, order, run_date):
     # SKIP it below. Intercept on the RAW ticker before that check. Covers
     # both open and close_only (the helper branches internally), so neither
     # path is missed. Non-crypto returns None and falls through unchanged.
-    _crypto_res = _route_crypto_order(order, equity, coid)
-    if _crypto_res is not None:
-        return _crypto_res
+    # Gated to match the sizer dispatch (regime_blended_sizer_live): when
+    # OPENCLAW_INSTRUMENT_CLASS_ROUTING is OFF, crypto is NOT handled and the
+    # order falls through to the equity path (which SKIPs -USD as unsupported),
+    # preserving the SP-3 gate-OFF equity-byte-identical invariant.
+    if os.environ.get('OPENCLAW_INSTRUMENT_CLASS_ROUTING') == '1':
+        _crypto_res = _route_crypto_order(order, equity, coid)
+        if _crypto_res is not None:
+            return _crypto_res
 
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',
