@@ -425,6 +425,80 @@ def _alpaca_crypto_symbol(raw: str) -> str:
     return raw.strip().upper().replace('-', '/')
 
 
+# SP-3.1 Phase A: crypto order params. Confirmed by Task 0 spike
+# (docs/superpowers/specs/sp3.1-task0-crypto-cli-snapshot.md).
+_CRYPTO_TIF = 'gtc'        # crypto rejects 'day'/'opg'; a market order rests-then-fills
+_CRYPTO_QTY_DECIMALS = 9   # Alpaca BTC qty precision (Task 0 confirms min order size)
+
+
+def _crypto_latest_price(api_symbol: str) -> float | None:
+    """Latest trade price for an Alpaca crypto pair ('BTC/USD'), or None.
+    Response path confirmed in Task 0 snapshot: .trades[api_symbol].p."""
+    ok, payload, _err = _run_alpaca_cli(
+        ['data', 'crypto', 'latest-trades', '--symbols', api_symbol], timeout=10)
+    if not ok or not isinstance(payload, dict):
+        return None
+    trade = (payload.get('trades') or {}).get(api_symbol) or {}
+    try:
+        p = float(trade.get('p') or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return p if p > 0 else None
+
+
+def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
+    """SP-3.1 Phase A: handle a crypto order, or return None to fall through
+    to the equity path. Crypto is 24/7, fractional-qty, market+gtc, simple
+    order_class (no bracket, no broker-side stop — Phase D). Covers BOTH open
+    and close_only by branching on order['close_only']; execute_single calls
+    this once, above the equity session/qty logic, so neither path is missed."""
+    raw_ticker = order.get('ticker') or ''
+    if not _is_crypto_ticker(raw_ticker):
+        return None
+    api_symbol = _alpaca_crypto_symbol(raw_ticker)
+    side = 'sell' if str(order.get('direction') or '').lower() == 'short' else 'buy'
+
+    if order.get('close_only'):
+        return _route_crypto_close(order, api_symbol, raw_ticker, coid)
+
+    pct_nav = float(order.get('pct_nav') or 0.0)
+    notional = equity * pct_nav
+    if notional <= 0:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': 'crypto: non-positive notional',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    price = _crypto_latest_price(api_symbol)
+    if price is None:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': 'crypto: no latest-trade price',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    qty = round(notional / price, _CRYPTO_QTY_DECIMALS)
+    if qty <= 0:
+        return {'ticker': api_symbol, 'status': 'SKIP',
+                'reason': f'crypto: qty rounds to 0 (notional={notional:.2f} price={price:.2f})',
+                'client_order_id': coid, 'tif': _CRYPTO_TIF, 'order_class': 'simple'}
+    ok, pay, err = _submit_order_via_cli(
+        ticker=api_symbol, side=side, qty=qty, tif=_CRYPTO_TIF,
+        order_class='simple', target=None, stop=None, coid=coid,
+        order_type='market', extended_hours=False, limit_price=None)
+    if ok:
+        oid = (pay or {}).get('id') or (pay or {}).get('order_id')
+        log(f'✔ {raw_ticker} CRYPTO {side.upper()} x{qty}  ~${notional:,.0f} @ {price:,.2f}'
+            f'  order={oid or "?"}')
+        return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty,
+                'notional': notional, 'entry': price, 'order_id': oid, 'http': 200,
+                'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+    log(f'CLI rc={err.get("exit_code",1)} {raw_ticker} (crypto open): {err.get("error","")}')
+    return {'ticker': api_symbol, 'status': 'rejected',
+            'reason': err.get('error') or 'crypto order submit failed',
+            'http': err.get('status'), 'body': str(err),
+            'tif': _CRYPTO_TIF, 'order_class': 'simple', 'client_order_id': coid}
+
+
+def _route_crypto_close(order, api_symbol, raw_ticker, coid):  # body lands in Task 4
+    raise NotImplementedError('crypto close path — implemented in Task 4')
+
+
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:
     """Best-effort classifier for Alpaca 4xx errors that indicate the asset
     itself isn't tradable on this account/feed (delisted, halted, asset
