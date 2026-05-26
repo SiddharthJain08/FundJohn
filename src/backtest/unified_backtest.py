@@ -71,7 +71,7 @@ REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
 
 # SP-3: per-instrument-class execution cost (one-way, basis points). equity/etp
 # share the equity model in MVP; options/crypto get their own when those engines land.
-INSTRUMENT_COST_BPS: dict[str, float] = {"equity": 1.0, "etp": 1.0, "option": 5.0}
+INSTRUMENT_COST_BPS: dict[str, float] = {"equity": 1.0, "etp": 1.0, "option": 5.0, "crypto": 25.0}
 
 
 def resolve_cost_model_bps(instrument_class: str) -> float:

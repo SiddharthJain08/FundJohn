@@ -101,6 +101,8 @@ PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
     "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "crypto": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-3.2): calibrate
+               "max_drawdown": 0.40},   # crypto baseline vol; long-only BTC cannot meet equity's 20%
 }
 
 
@@ -115,7 +117,7 @@ def _promotion_threshold(instrument_class: str) -> dict[str, float]:
 # ROUTED = has a live sizer/backtest handler in the MVP. crypto/futures
 # are reserved (valid) but unhandled until SP-3.1.
 VALID_INSTRUMENT_CLASSES  = frozenset({"equity", "option", "etp", "crypto", "futures"})
-ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp"})
+ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp", "crypto"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
