@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-26T13:35:04.354148+00:00",
+  "updated_at": "2026-05-26T14:49:05.702813+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -4931,8 +4931,8 @@
       "instrument_class": "etp"
     },
     "S_btc_momentum": {
-      "state": "candidate",
-      "state_since": "2026-05-26T13:35:04.353122+00:00",
+      "state": "live",
+      "state_since": "2026-05-26T14:49:05.685915+00:00",
       "metadata": {
         "canonical_file": "S_btc_momentum.py",
         "class": "BtcMomentum",
@@ -4944,7 +4944,19 @@
           "CRISIS"
         ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-26T14:49:05.685915+00:00",
+          "actor": "operator",
+          "reason": "SP-3.1 Phase D activation (operator-approved 0.70 crypto MaxDD cap)",
+          "metadata": {
+            "sharpe": 1.0156,
+            "max_drawdown": 0.651661
+          }
+        }
+      ],
       "instrument_class": "crypto"
     }
   },
