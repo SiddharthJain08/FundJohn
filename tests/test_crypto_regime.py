@@ -33,6 +33,15 @@ def test_first_feature_is_a_vol_so_state_ordering_works():
     assert cr.CRYPTO_FEATURE_COLS[0] == 'btc_rv_24h'
 
 
+def test_compute_features_no_btc_returns_empty_frame():
+    # Defensive guard: parquet without BTC-USD must not KeyError — returns an
+    # empty, correctly-columned frame so the driver's len<200 guard catches it.
+    eth_only = _synth_bars(ticker='ETH-USD', seed=9)
+    feats = cr.compute_features(eth_only)
+    assert list(feats.columns) == cr.CRYPTO_FEATURE_COLS
+    assert len(feats) == 0
+
+
 def test_fit_and_score_orders_states_by_vol_and_returns_label():
     # Two volatility regimes concatenated -> the high-vol tail must score
     # a more severe label than a low-vol prefix.

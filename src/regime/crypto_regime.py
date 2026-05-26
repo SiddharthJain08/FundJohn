@@ -29,6 +29,8 @@ def compute_features(bars: pd.DataFrame) -> pd.DataFrame:
     columns == CRYPTO_FEATURE_COLS, NaN rows dropped."""
     wide = bars.pivot_table(index='ts_utc', columns='ticker', values='close', aggfunc='last')
     wide = wide.sort_index()
+    if 'BTC-USD' not in wide.columns:
+        return pd.DataFrame(columns=CRYPTO_FEATURE_COLS)
     btc = wide['BTC-USD']
     eth = wide['ETH-USD'] if 'ETH-USD' in wide.columns else btc  # degrade: dispersion -> 0
     feats = pd.DataFrame(index=wide.index)

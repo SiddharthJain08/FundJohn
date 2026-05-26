@@ -52,6 +52,9 @@ def main() -> int:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     cb.update_recent(hours_back=48)
+    if not cb.DEFAULT_PARQUET.exists():
+        print('[crypto-regime] no crypto_bars_1h.parquet — run backfill first')
+        return 1
     bars = pd.read_parquet(cb.DEFAULT_PARQUET)
     feats = cr.compute_features(bars)
     if len(feats) < 200:
