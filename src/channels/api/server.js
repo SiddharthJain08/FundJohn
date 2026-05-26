@@ -2722,6 +2722,31 @@ app.get('/api/regime/intraday', async (req, res) => {
   }
 });
 
+app.get('/api/regime/crypto', async (req, res) => {
+  try {
+    const latestRes = await dbQuery(
+      `SELECT ts_utc, state, prior_state, confidence, hysteresis_streak,
+              fired_redeploy, transition_tag, features_json
+         FROM crypto_regime_states
+         ORDER BY ts_utc DESC
+         LIMIT 1`
+    );
+    if (!latestRes.rows.length) {
+      return res.json({ available: false, reason: 'no_ticks_yet' });
+    }
+    const histRes = await dbQuery(
+      `SELECT ts_utc, state, confidence
+         FROM crypto_regime_states
+         WHERE ts_utc >= NOW() - INTERVAL '24 hours'
+         ORDER BY ts_utc ASC`
+    );
+    res.json({ available: true, latest: latestRes.rows[0], history: histRes.rows });
+  } catch (err) {
+    // Table may not exist if migration 118 isn't applied — degrade gracefully.
+    res.json({ available: false, reason: 'error', error: err.message });
+  }
+});
+
 // SSE stream
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -5054,9 +5079,14 @@ function showOverview() {
     <div class="regime-panel-header">Volatility Regime Structure</div>
     <div class="empty" style="padding:10px 0;font-size:11px">Loading regime...</div>
   </div>\`;
-  ov.innerHTML = regimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
+  const cryptoRegimePlaceholder = \`<div id="crypto-regime-panel" class="regime-panel">
+    <div class="regime-panel-header">Crypto Regime Structure</div>
+    <div class="empty" style="padding:10px 0;font-size:11px">Loading crypto regime...</div>
+  </div>\`;
+  ov.innerHTML = regimePlaceholder + cryptoRegimePlaceholder + (html || '<div class="empty">No market data yet — pipeline runs at 9:00 AM ET</div>') + newsHtml;
   loadNewsSection('overview-news', null);
   loadRegime();
+  loadCryptoRegime();
 }
 
 // ── Regime Panel ─────────────────────────────────────────────────────────────
@@ -5277,6 +5307,118 @@ function _renderRegimeStructure(intraday, daily) {
     </div>\`;
 }
 
+function _renderCryptoRegimeStructure(data) {
+  if (!data || !data.available) {
+    return \`<div class="regime-panel-header" style="margin-bottom:8px">
+      Crypto Regime Structure <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">24/7 HMM</span>
+    </div>
+    <div class="empty" style="padding:8px 0;font-size:11px">Crypto regime detector inactive — enable OPENCLAW_CRYPTO_REGIME + run backfill.</div>\`;
+  }
+  const L = data.latest || {};
+
+  const stateClass = _STATE_CLASS[L.state] || 'regime-state-NO_DATA';
+  const conf       = L.confidence != null ? Math.round(L.confidence * 100) + '%' : '—';
+  const streak     = L.hysteresis_streak != null ? L.hysteresis_streak + ' ticks' : '—';
+  const age        = _ageStr(L.ts_utc);
+
+  // Stale: last tick > 2h old (24/7 detector, hourly cadence).
+  const stale = L.ts_utc ? (Date.now() - new Date(L.ts_utc).getTime()) > 2 * 3600 * 1000 : true;
+  const staleBadge = stale
+    ? \`<span class="regime-alert-badge" title="last tick &gt;2 hours ago — crypto detector may be paused or backfill not yet applied">STALE · \${age}</span>\`
+    : '';
+  const priorBadge = (L.prior_state && L.prior_state !== L.state)
+    ? \`<span class="regime-alert-badge">⚠ \${L.prior_state} → \${L.state}</span>\` : '';
+
+  // Feature tiles — features_json may arrive as a JSON string (JSONB → depends on driver).
+  const rawF = L.features_json;
+  const f = rawF ? (typeof rawF === 'string' ? JSON.parse(rawF) : rawF) : {};
+  const fmt = (v, dp) => v == null || (typeof v === 'number' && isNaN(v)) ? '—' : (typeof v === 'number' ? v.toFixed(dp) : String(v));
+  const _CRYPTO_FEATURE_TILES = [
+    ['BTC RV 24h',    'btc_rv_24h',          2],
+    ['BTC RV 7d',     'btc_rv_168h',         2],
+    ['Vol Term Slope','btc_vol_term_slope',   3],
+    ['BTC Ret 24h',   'btc_ret_24h',         2],
+    ['ETH–BTC Disp',  'eth_btc_dispersion',  2],
+  ];
+  const featHtml = _CRYPTO_FEATURE_TILES
+    .map(([lbl, key, dp]) => \`<div class="regime-feat"><div class="regime-feat-label">\${lbl}</div><div class="regime-feat-val">\${fmt(f[key], dp)}</div></div>\`)
+    .join('');
+
+  // 24h state-path sparkline — hourly cadence → 24 buckets of 60 min each.
+  const _C_BUCKETS  = 24;
+  const _C_BUCKET_MS = 60 * 60 * 1000;
+  const _c_now = Date.now();
+  const _c_bucketStart = _c_now - _C_BUCKETS * _C_BUCKET_MS;
+  const _c_buckets = Array.from({ length: _C_BUCKETS }, (_, i) => ({
+    start: _c_bucketStart + i * _C_BUCKET_MS,
+    end:   _c_bucketStart + (i + 1) * _C_BUCKET_MS,
+    rows: [],
+  }));
+  for (const r of (data.history || [])) {
+    const t = new Date(r.ts_utc).getTime();
+    const idx = Math.floor((t - _c_bucketStart) / _C_BUCKET_MS);
+    if (idx >= 0 && idx < _C_BUCKETS) _c_buckets[idx].rows.push(r);
+  }
+  const sparkHtml = _c_buckets.map(b => {
+    const useful = b.rows.filter(r => r.state && r.state !== 'UNKNOWN');
+    const winLbl = \`\${new Date(b.start).toISOString().slice(11,16)}–\${new Date(b.end).toISOString().slice(11,16)} UTC\`;
+    if (useful.length === 0) {
+      return \`<span class="regime-spark-tick" style="background:var(--dim);opacity:0.5" title="\${winLbl} · no data"></span>\`;
+    }
+    const states = useful.map(r => r.state);
+    const allSame = states.every(s => s === states[0]);
+    const color = allSame ? (_STATE_COLOR[states[0]] || 'var(--dim)') : 'var(--muted)';
+    const avgConf = useful.reduce((a, r) => a + (Number(r.confidence) || 0), 0) / useful.length;
+    const op = Math.max(0.3, Math.min(1, avgConf));
+    const stateLbl = allSame ? states[0] : 'mixed (' + states.join('/') + ')';
+    const tt = \`\${winLbl} · \${stateLbl} · avg conf \${Math.round(avgConf * 100)}%\`;
+    return \`<span class="regime-spark-tick" style="background:\${color};opacity:\${op}" title="\${tt}"></span>\`;
+  }).join('');
+
+  return \`
+    <div class="regime-panel-header" style="margin-bottom:10px">
+      Crypto Regime Structure
+      <span style="font-size:9px;color:var(--dim);text-transform:none;letter-spacing:0">
+        24/7 crypto HMM · 5 features (BTC RV/term-slope/return + ETH–BTC disp) · gated (OPENCLAW_CRYPTO_REGIME) · last tick \${age}
+      </span>
+    </div>
+
+    <!-- HERO: current state + key metrics + alert badges -->
+    <div class="regime-hero">
+      <span class="regime-state-badge \${stateClass}">\${L.state || 'UNKNOWN'}</span>
+      <div class="regime-meta-item"><div class="regime-meta-label">Confidence</div><div class="regime-meta-val">\${conf}</div></div>
+      <div class="regime-meta-item"><div class="regime-meta-label">Duration</div><div class="regime-meta-val">\${streak}</div></div>
+      <div style="flex:1"></div>
+      \${priorBadge}\${staleBadge}
+    </div>
+
+    <!-- TWO-COLUMN BODY: model inputs (left) + 24h path (right) -->
+    <div class="regime-body-grid">
+
+      <!-- LEFT: model inputs -->
+      <div>
+        <div class="regime-section">
+          <div class="regime-section-header">HMM Model Inputs <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal">(5 features driving the classification)</span></div>
+          <div class="regime-feat-grid">\${featHtml}</div>
+        </div>
+      </div>
+
+      <!-- RIGHT: 24h state path -->
+      <div>
+        <div class="regime-section">
+          <div class="regime-section-header">24h State Path</div>
+          <div style="display:flex;gap:1px;align-items:center;height:18px;padding:2px 0">\${sparkHtml}</div>
+          <div style="display:flex;gap:10px;font-size:9px;color:var(--muted);margin-top:6px;flex-wrap:wrap">
+            \${['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'].map(s =>
+              \`<span><span style="display:inline-block;width:8px;height:8px;background:\${_STATE_COLOR[s]};border-radius:1px;margin-right:3px;vertical-align:middle"></span>\${_STATE_SHORT[s]}</span>\`
+            ).join('')}
+          </div>
+        </div>
+      </div>
+
+    </div>\`;
+}
+
 async function loadRegime() {
   const el = document.getElementById('regime-panel');
   if (!el) return;
@@ -5285,6 +5427,13 @@ async function loadRegime() {
     _safeFetch('/api/regime',          { available: false, state: 'NO_DATA' }, { critical: true, label: 'regime-daily' }),
   ]);
   el.innerHTML = _renderRegimeStructure(intraday, daily);
+}
+
+async function loadCryptoRegime() {
+  const el = document.getElementById('crypto-regime-panel');
+  if (!el) return;
+  const data = await _safeFetch('/api/regime/crypto', { available: false }, { label: 'regime-crypto' });
+  el.innerHTML = _renderCryptoRegimeStructure(data);
 }
 
 // ── Ticker Detail ─────────────────────────────────────────────────────────────
