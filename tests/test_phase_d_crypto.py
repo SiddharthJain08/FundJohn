@@ -118,3 +118,81 @@ def test_btc_momentum_instrument_class_field():
     Strat = _load_btc_strategy()
     assert getattr(Strat, 'instrument_class', None) == 'crypto'
     assert Strat.id == 'S_btc_momentum'
+
+
+def test_submit_crypto_stop_constructs_args(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    captured = {}
+    def fake_cli(args, timeout=30):
+        captured['args'] = args
+        return True, {'id': 'stop-123', 'status': 'new'}, None
+    monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    res = ax._submit_crypto_stop('BTC/USD', stop_price=70000.0, qty=0.0002, coid='c1')
+    assert res is not None and res.get('order_id') == 'stop-123'
+    a = captured['args']
+    assert a[:2] == ['order', 'submit']
+    assert '--symbol' in a and 'BTC/USD' in a
+    assert '--side' in a and 'sell' in a
+    assert '--type' in a and 'stop_limit' in a
+    assert '--stop-price' in a
+    assert '--limit-price' in a
+    assert '--time-in-force' in a and 'gtc' in a
+    # limit must be BELOW stop for a protective sell stop
+    li = a.index('--limit-price'); si = a.index('--stop-price')
+    assert float(a[li+1]) < float(a[si+1])
+
+
+def test_submit_crypto_stop_failsafe(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    monkeypatch.setattr(ax, '_run_alpaca_cli',
+                        lambda args, timeout=30: (False, None, {'status': 422, 'error': 'stop rejected'}))
+    assert ax._submit_crypto_stop('BTC/USD', 70000.0, 0.0002, 'c1') is None
+
+
+def test_poll_crypto_fill_returns_filled_qty(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    seq = [
+        (True, {'status': 'pending_new', 'filled_qty': '0'}, None),
+        (True, {'status': 'filled', 'filled_qty': '0.000199499'}, None),
+    ]
+    calls = {'i': 0}
+    def fake_cli(args, timeout=30):
+        r = seq[min(calls['i'], len(seq)-1)]; calls['i'] += 1
+        return r
+    monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    fq = ax._poll_crypto_fill('entry-1', timeout=2.0, poll_interval=0.01)
+    assert abs(fq - 0.000199499) < 1e-9
+
+
+def test_poll_crypto_fill_zero_on_reject(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    monkeypatch.setattr(ax, '_run_alpaca_cli',
+                        lambda args, timeout=30: (True, {'status': 'rejected', 'filled_qty': '0'}, None))
+    assert ax._poll_crypto_fill('x', timeout=2.0, poll_interval=0.01) == 0.0
+
+
+def test_crypto_close_cancels_open_stop_first(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    events = []
+    def fake_cli(args, timeout=30):
+        events.append(list(args))
+        if args[:2] == ['order', 'list']:
+            return True, [{'id': 'stop-9', 'symbol': 'BTC/USD', 'type': 'stop_limit'}], None
+        if args[:2] == ['order', 'cancel']:
+            return True, {}, None
+        if args[:2] == ['position', 'close']:
+            return True, {'id': 'close-1', 'qty': '0.0002', 'notional': '15.0'}, None
+        return True, {}, None
+    monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    order = {'close_only': True, 'ticker': 'BTC-USD', 'notional_usd': 15.0, 'current_usd': 15.0}
+    res = ax._route_crypto_close(order, 'BTC/USD', 'BTC-USD', 'c1')
+    assert res['status'] == 'submitted'
+    # a cancel happened BEFORE the close
+    kinds = [e[:2] for e in events]
+    assert ['order', 'cancel'] in kinds, 'no cancel issued'
+    assert kinds.index(['order', 'cancel']) < kinds.index(['position', 'close']), 'cancel must precede close'
