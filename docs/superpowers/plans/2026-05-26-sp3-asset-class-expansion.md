@@ -198,17 +198,29 @@ VALID_INSTRUMENT_CLASSES  = frozenset({"equity", "option", "etp", "crypto", "fut
 ROUTED_INSTRUMENT_CLASSES = frozenset({"equity", "option", "etp"})
 ```
 
-- [ ] **Step 4: Validate in `from_manifest`** — immediately after `data = json.loads(...)` (:282), before the loop, add a helper-free inline check inside the loop body (after computing each record), OR validate the raw value at read. Add this right after `for sid, rec in data.get("strategies", {}).items():` (:284):
+- [ ] **Step 4: Validate in `from_manifest`** — in the main loop (:284-294), validate then use the validated local in the construction. The loop body becomes:
 
 ```python
+        for sid, rec in data.get("strategies", {}).items():
             _ic = rec.get("instrument_class", "equity")
             if _ic not in VALID_INSTRUMENT_CLASSES:
                 raise ValueError(
                     f"strategy {sid!r}: unknown instrument_class {_ic!r}; "
                     f"valid={sorted(VALID_INSTRUMENT_CLASSES)}")
+            history = [TransitionEvent(**e) for e in rec.get("history", [])]
+            records[sid] = StrategyRecord(
+                strategy_id=sid,
+                state=StrategyState(rec["state"]),
+                state_since=rec["state_since"],
+                history=history,
+                metadata=rec.get("metadata", {}),
+                eligible_regimes=rec.get("eligible_regimes"),
+                universe_filter_ref=rec.get("metadata", {}).get("universe_filter_ref"),
+                instrument_class=_ic,
+            )
 ```
 
-(Use `_ic` for the `instrument_class=` kwarg in the construction below it instead of re-reading.)
+(The rescue construction at :303 from Task 1 Step 4 keeps `instrument_class=rec.get("instrument_class", "equity")` — rescued misrouted entries are tolerated without hard validation.)
 
 - [ ] **Step 5: Run to verify it passes**
 
@@ -523,11 +535,12 @@ Inside the per-order loop, in the normal-bracket branch (after `notional = abs(f
 
 ```python
         # SP-3: route by instrument_class. Default-OFF kill-switch forces the
-        # equity path (byte-identical) until soak.
+        # equity path (byte-identical) until soak. No walrus — read into a local
+        # so we don't shadow the `contributions` re-bound below at :135.
         if os.environ.get('OPENCLAW_INSTRUMENT_CLASS_ROUTING') == '1':
-            _sid_for_class = (contributions[0].get('strategy_id')
-                              if (contributions := o.get('contributions') or [])
-                              else o.get('strategy_id'))
+            _contribs = o.get('contributions') or []
+            _sid_for_class = (_contribs[0].get('strategy_id')
+                              if _contribs else o.get('strategy_id'))
             if _sid_for_class:
                 _ic = instrument_class_for(_sid_for_class)
                 if _ic not in ('equity', 'etp'):
@@ -535,7 +548,7 @@ Inside the per-order loop, in the normal-bracket branch (after `notional = abs(f
                     notional = abs(float(o['notional_usd']))
 ```
 
-(Note: equity/etp short-circuit means zero behavior change for all current strategies even when the gate is ON. Place this so `notional` used downstream reflects any option scaling.)
+(Note: equity/etp short-circuit means zero behavior change for all current strategies even when the gate is ON. Place this so `notional` used downstream reflects any option scaling. `apply_instrument_class_sizing` returns a new dict, so rebinding `o` updates the `notional_usd` read at :152.)
 
 - [ ] **Step 6: Run the sizer's existing tests for no regression**
 
@@ -594,7 +607,23 @@ def resolve_cost_model_bps(instrument_class: str) -> float:
 
 (If `simulate_trade`/`_per_bar_simulate` already applies a commission/cost, wire `resolve_cost_model_bps` in as the bps source for the selected class; if it currently uses a hardcoded value, replace that read with `resolve_cost_model_bps(instrument_class)`. Confirm by reading `simulate_trade` :208.)
 
-- [ ] **Step 5: Add `instrument_class` kwarg to `run_backtest`** (:572) — default `'equity'`, thread to cost-model selection, and add to the returned result dict (e.g. `result['instrument_class'] = instrument_class`). For MVP all classes use `load_prices_panels()`; the seam is the cost model + the recorded class.
+- [ ] **Step 5: Add `instrument_class` kwarg to `run_backtest`** (:572). To guarantee equity backtests stay byte-identical, MVP does **not** alter `simulate_trade`/`_per_bar_simulate` math and does **not** add a DB column (no migration). The cost model is *resolved and logged* now; wiring it into actual fills is a fast-follow.
+
+  Change the signature (after `resolver=None` at :579):
+
+```python
+                 resolver=None,
+                 instrument_class: str = 'equity') -> str:
+```
+
+  After `strategy_cls = load_strategy_class(filepath)` (~:597), add a log line that surfaces the resolved cost model (no behavioral effect):
+
+```python
+    _cost_bps = resolve_cost_model_bps(instrument_class)
+    _log(f'instrument_class={instrument_class} cost_model_bps={_cost_bps}')
+```
+
+  Leave `load_prices_panels()` and the simulation untouched — all MVP classes (equity/etp) load the same panel and run identical math. This satisfies §3.3 "records which class it backtested" via the log without a schema change.
 
 - [ ] **Step 6: Run to verify it passes + no regression**
 
@@ -651,7 +680,7 @@ def test_crypto_class_raises_through_dispatcher():
         apply_instrument_class_sizing({'ticker': 'BTC-USD', 'notional_usd': 1.0}, 'crypto')
 ```
 
-- [ ] **Step 2: Create the fixture strategy** (`tests/fixtures/synthetic_etp_strategy.py`) — a minimal `StrategyTemplate` subclass mirroring the interface in `src/strategies/strategy_template_base.py` (read it first: `init()`/`next()`/`buy()`/`sell()`), trading a single synthetic series. This exists ONLY to exercise the backtest path in tests; it is never added to `manifest.json` or `_IMPL_MAP`. Keep it ~20 lines.
+- [ ] **Step 2: Create the fixture strategy** (`tests/fixtures/synthetic_etp_strategy.py`) — a minimal **`BaseStrategy`** subclass following the PRODUCTION strategy contract (read `src/strategies/implementations/s_earnings_news_specific_momentum.py:18-24` first for the real interface: subclass `BaseStrategy`, set `active_in_regimes` + `MAX_SIGNALS` class attrs, implement `generate_signals(self, prices, regime, universe, aux_data=None) -> List[Signal]`). NOT `StrategyTemplate` (that ABC is the backtest-oracle clone, not the engine contract). The fixture returns one deterministic long `Signal` on a synthetic ticker. It exists ONLY for tests; never added to `manifest.json` or `_IMPL_MAP`. Add a smoke step in the test that instantiates it and asserts `generate_signals(...)` returns a non-empty list — proving the production contract without needing `prices.parquet`.
 
 - [ ] **Step 3: Run to verify it passes**
 
@@ -704,9 +733,9 @@ Expected: each basket ticker is `class: us_equity, tradable: true`. Substitute a
 
 - [ ] **Step 2: Ensure price coverage (append-only).** Add the 4 basket tickers to `universe_config` as `active=true` so the daily collector keeps them fresh (read `src/database/migrations/008_market_universe.sql` + `027_universe_sync.sql` for the table shape; use an `INSERT ... ON CONFLICT DO UPDATE SET active=true` — never DELETE). Then backfill history with the existing driver (read `scripts/backfill_universe_5y.py --help`-equivalent via `main` :886; it must NOT overwrite existing rows — `_promote_chunk` enforces the zero-existing precondition). Verify post-backfill: the basket tickers have ≥2y of rows in `prices.parquet`.
 
-- [ ] **Step 3: Read the strategy interface.** Read `src/strategies/strategy_template_base.py` AND one existing momentum implementation (find via `grep -l momentum src/strategies/implementations/*.py | head -1`) to learn the exact production strategy contract the engine + `unified_backtest.load_strategy_class` expect. Implement `s_commodity_etp_momentum.py` to that contract.
+- [ ] **Step 3: Read the strategy interface.** Read 2 existing momentum implementations (`grep -ln "momentum" src/strategies/implementations/*.py | head -2`) and the `BaseStrategy` base they subclass. Learn the exact production contract: `BaseStrategy` subclass, `active_in_regimes` + `MAX_SIGNALS` class attrs, `generate_signals(self, prices, regime, universe, aux_data=None) -> List[Signal]`, and how `Signal` brackets (entry/stop/target) are constructed. Match a template's structure exactly — do NOT use `StrategyTemplate`.
 
-- [ ] **Step 4: Implement the strategy.** Signal rule (fully specified, no placeholder): each rebalance, rank the basket by trailing 90-trading-day total return; go LONG the single top-ranked ETP; flat otherwise; standard bracket (stop = entry − 2·ATR(14), target_1 = entry + 3·ATR(14)); monthly rebalance cadence. Follow the interface from Step 3 exactly.
+- [ ] **Step 4: Implement the strategy.** Signal rule (fully specified): on each `generate_signals` call, restrict to the basket tickers present in `universe`/`prices`, rank them by trailing 90-trading-day total return, emit ONE long `Signal` for the top-ranked ETP (flat if <90 days history), with a bracket constructed the SAME way the template strategy from Step 3 builds its bracket (reuse its ATR/stop/target idiom rather than inventing one). **Cadence:** do NOT hand-roll a calendar gate — production cadence is governed by the sharpe-cadence / `strategy_state` machinery for live strategies; for the backtest+candidate proof, match the template's cadence handling (likely none inside `generate_signals`). Keep the logic minimal and well-commented: the goal is to exercise the rails, not discover alpha.
 
 - [ ] **Step 5: Register.** Add the `_IMPL_MAP` entry in `registry.py` (`'S_commodity_etp_momentum': ('strategies.implementations.s_commodity_etp_momentum', '<ClassName>')`) and a `manifest.json` entry with `state: 'candidate'`, `instrument_class: 'etp'`, `metadata.canonical_file`, `metadata.class`, and a basket-appropriate `metadata.universe_filter_ref` (or document that it carries its own basket). Match the entry shape of an existing candidate strategy.
 
@@ -740,26 +769,41 @@ git commit -m "feat(sp3): reference commodity-ETP momentum strategy (instrument_
 - Modify: `.env.example`
 - Test: `tests/test_kill_switch_instrument_class.py`
 
-- [ ] **Step 1: Write the parity test** — with the gate OFF, a non-equity order is NOT re-sized by the sizer wiring (forced equity path); with the gate ON, the dispatcher engages. Test the gate semantics directly:
+- [ ] **Step 1: Write the load-bearing gate-parity test** — proves the spec's most important claim: with the gate OFF, an *option* order flows through `_build_sized_payload` with notional **unchanged** (equity path); with the gate ON, the dispatcher scales it. Monkeypatch the resolver so no production manifest entry is needed.
 
 ```python
-import os, sys
+import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
+from execution import regime_blended_sizer_live as rbsl  # noqa
 
 
-def test_gate_off_means_equity_path(monkeypatch):
+def _orders_handoff():
+    order = {'ticker': 'SPY', 'notional_usd': 1000.0, 'direction': 1, 'delta': 0.5,
+             'bracket': {'entry_price': 100.0, 'stop_loss': 95.0, 'take_profit_1': 110.0},
+             'contributions': [{'strategy_id': 'opt_strat', 'attribution_weight': 1.0}]}
+    handoff = {'cycle_date': '2026-05-26', 'regime': {'state': 'LOW_VOL'}}
+    return [order], handoff
+
+
+def test_gate_off_leaves_option_notional_unchanged(monkeypatch):
     monkeypatch.delenv('OPENCLAW_INSTRUMENT_CLASS_ROUTING', raising=False)
-    assert os.environ.get('OPENCLAW_INSTRUMENT_CLASS_ROUTING') != '1'
+    monkeypatch.setattr(rbsl, 'instrument_class_for', lambda *a, **k: 'option')
+    orders, handoff = _orders_handoff()
+    out = rbsl._build_sized_payload(orders, handoff, equity=100_000.0)
+    assert out['orders'][0]['notional_usd'] == 1000.0  # equity path, unscaled
 
 
-def test_gate_on_value(monkeypatch):
+def test_gate_on_scales_option_notional(monkeypatch):
     monkeypatch.setenv('OPENCLAW_INSTRUMENT_CLASS_ROUTING', '1')
-    assert os.environ['OPENCLAW_INSTRUMENT_CLASS_ROUTING'] == '1'
+    monkeypatch.setattr(rbsl, 'instrument_class_for', lambda *a, **k: 'option')
+    orders, handoff = _orders_handoff()
+    out = rbsl._build_sized_payload(orders, handoff, equity=100_000.0)
+    assert out['orders'][0]['notional_usd'] == 500.0  # scaled by |delta|=0.5
 ```
 
-(The substantive gate behavior is covered by Task 5's wiring + Task 7's smoke; this task documents the switch and locks its name.)
+(This also confirms `apply_instrument_class_sizing` is only invoked under the gate. Task 5's unit tests + Task 7's smoke cover the dispatcher in isolation.)
 
 - [ ] **Step 2: Document in `.env.example`** — verify the file exists, then add:
 
@@ -791,7 +835,7 @@ Expected: all green. Capture the count.
 
 - [ ] **Step 2: Equity-parity spot check** — pick one live equity strategy, run its backtest before/after this branch (or with gate ON vs OFF) and confirm metrics are numerically identical.
 
-- [ ] **Step 3: Update docs/memory (do NOT deploy).** Add a `## Recent Changes` entry to `/root/openclaw/CLAUDE.md`; write a `project_sp3_asset_class_expansion.md` auto-memory + index line. Note the open fast-follows (greeks-aware option sizing/backtest, leveraged-ETP decay, crypto/SP-3.1) and that the gate is default-OFF + reference strategy is `candidate`-only.
+- [ ] **Step 3: Update docs/memory (do NOT deploy).** Add a `## Recent Changes` entry to `/root/openclaw/CLAUDE.md`; write a `project_sp3_asset_class_expansion.md` auto-memory + index line. Note the open fast-follows (greeks-aware option sizing/backtest, leveraged-ETP decay, crypto/SP-3.1) and that the gate is default-OFF + reference strategy is `candidate`-only. **Stage by explicit name** (`git add /root/openclaw/CLAUDE.md` — the memory file is outside the repo) — never `git add -A`.
 
 - [ ] **Step 4: Surface to operator before any merge/deploy.** Summarize: tasks done, test counts, reference-strategy backtest metrics, the basket used, and the gate state. **Do not merge to main, push, or flip the gate without operator approval** (live VPS).
 
