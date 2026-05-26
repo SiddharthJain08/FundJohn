@@ -358,6 +358,31 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
+    // SP-3.1 Phase B: 24/7 crypto regime detector — hourly, gated.
+    // Inert unless OPENCLAW_CRYPTO_REGIME=1. Spawns the driver detached,
+    // mirroring the intraday-HMM spawn above. Produces a regime signal only
+    // (crypto_regime_latest.json + crypto_regime_states); no redeploy (Phase C).
+    cron.schedule('0 * * * *', () => {
+        if (process.env.OPENCLAW_CRYPTO_REGIME !== '1') return;
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logFd = fs.openSync(path.join(logDir, `crypto_hmm_${today}.log`), 'a');
+            const child = spawn(PYTHON, ['scripts/run_crypto_market_state.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+        } catch (e) {
+            log(`Crypto regime tick spawn error: ${e.message}`);
+        }
+    }, { timezone: 'UTC' });
+
     // Daily 18:00 ET — intraday HMM refit attempt. Trains a fresh HMM on
     // the accumulated intraday_features.parquet; the detector reads
     // hmm_intraday_latest.pkl on its next tick. Bootstrap-safe (no-op if
