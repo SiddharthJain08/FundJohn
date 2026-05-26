@@ -69,6 +69,14 @@ DEFAULT_START_DATE    = '2016-04-11'   # earliest historical_regimes row
 PRICES_PARQUET = ROOT / 'data' / 'master' / 'prices.parquet'
 REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
 
+# SP-3: per-instrument-class execution cost (one-way, basis points). equity/etp
+# share the equity model in MVP; options/crypto get their own when those engines land.
+INSTRUMENT_COST_BPS: dict[str, float] = {"equity": 1.0, "etp": 1.0, "option": 5.0}
+
+
+def resolve_cost_model_bps(instrument_class: str) -> float:
+    return INSTRUMENT_COST_BPS.get(instrument_class, INSTRUMENT_COST_BPS["equity"])
+
 
 def _log(msg: str) -> None:
     print(f'[unified_backtest] {msg}', flush=True)
@@ -576,7 +584,8 @@ def run_backtest(strategy_id: str, *,
                  max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
                  conn: Optional[psycopg2.extensions.connection] = None,
                  commit: bool = True,
-                 resolver=None) -> str:
+                 resolver=None,
+                 instrument_class: str = 'equity') -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
@@ -596,6 +605,8 @@ def run_backtest(strategy_id: str, *,
         raise FileNotFoundError(f'no implementation file for {strategy_id}')
     strategy_cls = load_strategy_class(filepath)
     _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
+    _cost_bps = resolve_cost_model_bps(instrument_class)
+    _log(f'instrument_class={instrument_class} cost_model_bps={_cost_bps}')
 
     # Discovery mode: bypass should_run() by widening active_in_regimes on
     # the instance. Strategies that branch on regime['state'] *inside*
