@@ -48,3 +48,32 @@ def test_crypto_orphan_close_only_crypto():
     assert 'BTC-USD' in tickers
     assert 'ETH-USD' in tickers
     assert 'SPY' not in tickers
+
+
+def test_production_format_broker_symbol_nets_to_zero():
+    # Alpaca returns crypto positions as 'BTC/USD' (slash); the sizer must
+    # normalize to 'BTC-USD' and NET against the 'BTC-USD' target — not double up.
+    broker = {'SPY': 150_000.0, 'BTC/USD': 20_000.0}  # slash form (real Alpaca)
+    weights = [{'strategy_id': 'S_btc', 'daily_weight': 1.0, 'effective_sharpe': 2.0, 'cadence_days': 5}]
+    signals = [{'strategy_id': 'S_btc', 'ticker': 'BTC-USD', 'direction': 'long'}]
+    orders = crs.size_crypto_positions(
+        {'equity': 100_000.0}, {'state': 'LOW_VOL'},
+        broker_loader=lambda: broker,
+        weights_loader=lambda regime: weights,
+        signals_loader=lambda regime, wbs: signals,
+        crypto_strategy_ids={'S_btc'}, all_live_weight_sum=10.0)  # share 0.1 → budget 20k == held
+    assert orders == []  # matched position nets to ~0 → no double-up order
+
+
+def test_short_signal_emits_short():
+    weights = [{'strategy_id': 'S_btc', 'daily_weight': 1.0, 'effective_sharpe': 2.0, 'cadence_days': 5}]
+    signals = [{'strategy_id': 'S_btc', 'ticker': 'BTC-USD', 'direction': 'short'}]
+    orders = crs.size_crypto_positions(
+        {'equity': 100_000.0}, {'state': 'LOW_VOL'},
+        broker_loader=lambda: {},
+        weights_loader=lambda regime: weights,
+        signals_loader=lambda regime, wbs: signals,
+        crypto_strategy_ids={'S_btc'}, all_live_weight_sum=10.0)
+    assert len(orders) == 1
+    assert orders[0]['ticker'] == 'BTC-USD'
+    assert orders[0]['direction'] == 'short'

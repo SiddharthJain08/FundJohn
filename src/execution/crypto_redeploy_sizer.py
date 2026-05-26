@@ -19,6 +19,16 @@ def _is_crypto_ticker(t: str) -> bool:
     return bool(t) and t.strip().upper().endswith('-USD')
 
 
+def _normalize_broker_symbol(t: str) -> str:
+    """Map a broker crypto symbol to the engine BASE-USD (dash) convention.
+    Alpaca position list returns crypto as 'BTC/USD' (slash; confirmed Task 0 +
+    Phase B smoke); signals/engine use 'BTC-USD' (dash). '/' never appears in an
+    equity ticker, so this can never mis-map an equity position into crypto — the
+    equity-untouched invariant is preserved. (A no-separator 'BTCUSD' form, if
+    Alpaca ever returns one, stays excluded = fail-closed; confirm at Phase D.)"""
+    return (t or '').strip().upper().replace('/', '-')
+
+
 def _dir_to_int(d) -> int:
     s = str(d or '').lower()
     return 1 if s in ('long', 'buy', '1') else (-1 if s in ('short', 'sell', '-1') else 0)
@@ -40,12 +50,12 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
     if weights_loader is None:
         from execution import strategy_weights as _sw
         weights_loader = _sw.load_current
-    rows = weights_loader(regime) or []
+    rows = [r for r in (weights_loader(regime) or []) if r.get('strategy_id')]
     if crypto_strategy_ids is None:
         from strategies.instrument_class import instrument_class_for
         crypto_strategy_ids = {r['strategy_id'] for r in rows
                                if instrument_class_for(r['strategy_id']) == 'crypto'}
-    weight_by_strat = {r['strategy_id']: float(r['daily_weight']) for r in rows
+    weight_by_strat = {r['strategy_id']: float(r.get('daily_weight') or 0.0) for r in rows
                        if r['strategy_id'] in crypto_strategy_ids}
     if not weight_by_strat:
         return []
@@ -64,9 +74,11 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
     ticker_w = {t: w for t, w in ticker_w.items() if w != 0.0}
 
     if all_live_weight_sum is None:
-        all_live_weight_sum = sum(float(r['daily_weight']) for r in rows) or 1.0
+        all_live_weight_sum = sum(float(r.get('daily_weight') or 0.0) for r in rows) or 1.0
     crypto_weight_sum = sum(weight_by_strat.values())
-    crypto_share = (crypto_weight_sum / all_live_weight_sum) if all_live_weight_sum else 0.0
+    # crypto_share is a fraction of the leverage budget — clamp to [0,1] so a
+    # misconfigured/over-allocated weight set can never exceed LAMBDA_GLOBAL×NAV.
+    crypto_share = min(1.0, max(0.0, (crypto_weight_sum / all_live_weight_sum) if all_live_weight_sum else 0.0))
     crypto_budget = LAMBDA_GLOBAL * nav * crypto_share
     abs_w = sum(abs(w) for w in ticker_w.values())
     target_usd = {t: (w * crypto_budget / abs_w) for t, w in ticker_w.items()} if abs_w else {}
@@ -74,7 +86,14 @@ def size_crypto_positions(account_state: dict, crypto_regime_state: dict, *,
     if broker_loader is None:
         from execution.regime_blended_sizer import _load_broker_positions_usd
         broker_loader = _load_broker_positions_usd
-    broker_crypto = {t: v for t, v in (broker_loader() or {}).items() if _is_crypto_ticker(t)}
+    # Normalize broker symbols to the dash convention BEFORE filtering, so a real
+    # Alpaca 'BTC/USD' position nets against a 'BTC-USD' target. Equity symbols
+    # have no '/', stay unchanged, and remain excluded by the -USD filter.
+    broker_crypto = {}
+    for _t, _v in (broker_loader() or {}).items():
+        _norm = _normalize_broker_symbol(_t)
+        if _is_crypto_ticker(_norm):
+            broker_crypto[_norm] = _v
 
     orders: list[dict] = []
     for tkr, tgt in target_usd.items():
