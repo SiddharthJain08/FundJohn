@@ -494,7 +494,9 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
             # subprocess hang (TimeoutExpired) would otherwise abort the whole
             # batch and orphan this just-opened position with no audit row.
             try:
-                filled_qty = _poll_crypto_fill(oid)
+                # 45s window: crypto paper fills can lag >10s; too short a poll
+                # skips the protective stop (observed in the Phase D live smoke).
+                filled_qty = _poll_crypto_fill(oid, timeout=45.0)
                 if filled_qty > 0:
                     _submit_crypto_stop(api_symbol, stop_px, filled_qty, coid)
                 else:
