@@ -77,3 +77,18 @@ def test_short_signal_emits_short():
     assert len(orders) == 1
     assert orders[0]['ticker'] == 'BTC-USD'
     assert orders[0]['direction'] == 'short'
+
+
+def test_driver_gate_off_is_noop(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_CRYPTO_REDEPLOY', raising=False)
+    import importlib
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    rc = importlib.import_module('redeploy_crypto')
+    assert rc.main(['--reason', 'TEST']) == 0  # no-op, returns 0 without DB/broker
+
+
+def test_cooldown_key_is_crypto_namespaced():
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import redeploy_crypto as rc
+    assert rc._cooldown_key('2026-05-26') == 'redeploy:crypto:cooldown:2026-05-26'
+    assert rc._sentinel_key('2026-05-26', 'X') == 'redeploy:crypto:fired:2026-05-26:X'
