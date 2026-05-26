@@ -144,6 +144,8 @@ _IMPL_MAP = {
     'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
     # SP-3: commodity ETP momentum — reference strategy for instrument_class='etp' rails
     'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
+    # SP-3.1: BTC momentum — reference strategy for instrument_class='crypto' rails
+    'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
 }
 
 
