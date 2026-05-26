@@ -2,7 +2,6 @@ import sys, json
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
-import pytest
 from strategies.lifecycle import LifecycleStateMachine, StrategyState
 from strategies.instrument_class import instrument_class_for
 from execution.instrument_class_sizer import apply_instrument_class_sizing
@@ -28,9 +27,10 @@ def test_etp_full_path(tmp_path):
     assert ok is True
 
 
-def test_crypto_class_raises_through_dispatcher():
-    with pytest.raises(NotImplementedError):
-        apply_instrument_class_sizing({'ticker': 'BTC-USD', 'notional_usd': 1.0}, 'crypto')
+def test_crypto_class_is_identity_through_dispatcher():
+    # SP-3.1 Phase A: crypto is now a notional pass-through (was reserved/raises in SP-3).
+    out = apply_instrument_class_sizing({'ticker': 'BTC-USD', 'notional_usd': 1.0}, 'crypto')
+    assert out['notional_usd'] == 1.0
 
 
 def test_synthetic_fixture_emits_signal():
