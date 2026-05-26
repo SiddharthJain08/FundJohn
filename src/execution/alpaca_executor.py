@@ -449,9 +449,10 @@ def _crypto_latest_price(api_symbol: str) -> float | None:
 def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
     """SP-3.1 Phase A: handle a crypto order, or return None to fall through
     to the equity path. Crypto is 24/7, fractional-qty, market+gtc, simple
-    order_class (no bracket, no broker-side stop — Phase D). Covers BOTH open
-    and close_only by branching on order['close_only']; execute_single calls
-    this once, above the equity session/qty logic, so neither path is missed."""
+    order_class (no bracket, no broker-side stop — Phase D). Open orders are
+    sized + submitted here; close_only delegates to _route_crypto_close.
+    execute_single calls this once, above the equity session/qty logic, so
+    neither path is missed."""
     raw_ticker = order.get('ticker') or ''
     if not _is_crypto_ticker(raw_ticker):
         return None
@@ -482,7 +483,8 @@ def _route_crypto_order(order: dict, equity: float, coid: str) -> dict | None:
         order_class='simple', target=None, stop=None, coid=coid,
         order_type='market', extended_hours=False, limit_price=None)
     if ok:
-        oid = (pay or {}).get('id') or (pay or {}).get('order_id')
+        _pay = pay if isinstance(pay, dict) else {}
+        oid = _pay.get('id') or _pay.get('order_id')
         log(f'✔ {raw_ticker} CRYPTO {side.upper()} x{qty}  ~${notional:,.0f} @ {price:,.2f}'
             f'  order={oid or "?"}')
         return {'ticker': api_symbol, 'status': 'submitted', 'qty': qty,
