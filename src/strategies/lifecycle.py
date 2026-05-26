@@ -91,6 +91,26 @@ CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
+# SP-3: per-instrument-class candidate→live thresholds. equity/etp keep the
+# legacy values; option uses equity values as an explicit placeholder until
+# SP-4 calibration. crypto added in SP-3.1.
+PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
+    "equity": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "etp":    {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+    "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+}
+
+
+def _promotion_threshold(instrument_class: str) -> dict[str, float]:
+    return PROMOTION_THRESHOLDS.get(
+        instrument_class,
+        {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
+         "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN})
+
+
 # SP-3 instrument-class taxonomy. VALID = accepted by validation;
 # ROUTED = has a live sizer/backtest handler in the MVP. crypto/futures
 # are reserved (valid) but unhandled until SP-3.1.
@@ -443,16 +463,15 @@ class LifecycleStateMachine:
                 return False, (
                     "candidate→live requires metadata keys 'sharpe' and 'max_drawdown'"
                 )
-            if sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE:
+            thr = _promotion_threshold(rec.instrument_class)
+            if sharpe < thr["min_sharpe"]:
                 return False, (
                     f"candidate→live blocked: sharpe {sharpe:.2f} < "
-                    f"minimum {CANDIDATE_TO_LIVE_MIN_SHARPE}"
-                )
-            if drawdown > CANDIDATE_TO_LIVE_MAX_DRAWDOWN:
+                    f"minimum {thr['min_sharpe']} (instrument_class={rec.instrument_class})")
+            if drawdown > thr["max_drawdown"]:
                 return False, (
                     f"candidate→live blocked: max_drawdown {drawdown:.2%} > "
-                    f"limit {CANDIDATE_TO_LIVE_MAX_DRAWDOWN:.0%}"
-                )
+                    f"limit {thr['max_drawdown']:.0%} (instrument_class={rec.instrument_class})")
 
         # Guard: candidate → staging requires regime eligibility
         # Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
