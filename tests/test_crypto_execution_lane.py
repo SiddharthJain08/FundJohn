@@ -76,7 +76,8 @@ def test_route_crypto_open_skips_on_zero_notional():
 
 
 def test_route_crypto_full_close():
-    responses = {'position close': (True, {'id': 'close-1', 'qty': '0.5', 'notional': '25000'}, None)}
+    responses = {'order list': (True, [], None),
+                 'position close': (True, {'id': 'close-1', 'qty': '0.5', 'notional': '25000'}, None)}
     order = {'ticker': 'BTC-USD', 'close_only': True,
              'notional_usd': 25000.0, 'current_usd': 25000.0}
     with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
@@ -103,7 +104,8 @@ def test_route_crypto_partial_reduce_sends_percentage():
 
 
 def test_route_crypto_close_rejected():
-    responses = {'position close': (False, None, {'exit_code': 1, 'status': 404,
+    responses = {'order list': (True, [], None),
+                 'position close': (False, None, {'exit_code': 1, 'status': 404,
                                                   'error': 'position does not exist'})}
     order = {'ticker': 'ETH-USD', 'close_only': True,
              'notional_usd': 1000.0, 'current_usd': 1000.0}
@@ -129,7 +131,8 @@ def test_route_crypto_full_close_sends_no_percentage():
 def test_route_crypto_close_notional_null_fallback():
     # Alpaca returns notional=null on position-close; the result must fall
     # back to the order's own notional_usd (load-bearing per Task 0 snapshot).
-    responses = {'position close': (True, {'id': 'close-4', 'qty': '0.3', 'notional': None}, None)}
+    responses = {'order list': (True, [], None),
+                 'position close': (True, {'id': 'close-4', 'qty': '0.3', 'notional': None}, None)}
     order = {'ticker': 'BTC-USD', 'close_only': True,
              'notional_usd': 25000.0, 'current_usd': 25000.0}
     with patch.object(ae, '_run_alpaca_cli', side_effect=_fake_cli(responses)):
