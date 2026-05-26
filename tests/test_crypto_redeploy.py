@@ -92,3 +92,17 @@ def test_cooldown_key_is_crypto_namespaced():
     import redeploy_crypto as rc
     assert rc._cooldown_key('2026-05-26') == 'redeploy:crypto:cooldown:2026-05-26'
     assert rc._sentinel_key('2026-05-26', 'X') == 'redeploy:crypto:fired:2026-05-26:X'
+
+
+def test_spawn_crypto_redeploy_builds_detached_cmd(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'scripts'))
+    import run_crypto_market_state as rcms
+    captured = {}
+    class _FakePopen:
+        def __init__(self, cmd, **kw): captured['cmd'] = cmd; captured['kw'] = kw
+    monkeypatch.setattr('subprocess.Popen', _FakePopen)
+    monkeypatch.setenv('OPENCLAW_CRYPTO_REDEPLOY', '1')
+    rcms._spawn_crypto_redeploy('LOW_VOL', 'CRISIS', '2026-05-26')
+    assert 'redeploy_crypto.py' in ' '.join(captured['cmd'])
+    assert '--reason' in captured['cmd']
+    assert captured['kw'].get('start_new_session') is True   # detached

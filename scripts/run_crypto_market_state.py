@@ -6,6 +6,7 @@ spawns a redeploy — fired_redeploy stays FALSE (Phase C owns that)."""
 from __future__ import annotations
 import json
 import os
+import subprocess as _subprocess
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -45,6 +46,36 @@ def _insert_state(conn, ts_utc, state, prior_state, confidence, streak, tag, fea
     conn.commit()
 
 
+def _spawn_crypto_redeploy(prior_state: str, new_state: str, date_str: str) -> str:
+    """Spawn scripts/redeploy_crypto.py DETACHED (mirrors the equity intraday spawn
+    in scripts/run_intraday_market_state.py). Gated: only spawns when
+    OPENCLAW_CRYPTO_REDEPLOY=1."""
+    if os.environ.get('OPENCLAW_CRYPTO_REDEPLOY') != '1':
+        return 'gate_off'
+    reason = f'CRYPTO_HMM_{prior_state}_{new_state}'
+    log_dir = ROOT / 'logs'
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_fd = os.open(str(log_dir / f'redeploy_crypto_{date_str}.log'),
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    except Exception:
+        log_fd = _subprocess.DEVNULL
+    try:
+        _subprocess.Popen(
+            [sys.executable, str(ROOT / 'scripts' / 'redeploy_crypto.py'),
+             '--reason', reason, '--date', date_str],
+            cwd=str(ROOT), stdin=_subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
+            start_new_session=True, close_fds=True)
+    except Exception as e:
+        print(f'[crypto-regime] redeploy spawn failed: {e}')
+        return 'spawn_error'
+    finally:
+        if isinstance(log_fd, int) and log_fd != _subprocess.DEVNULL:
+            try: os.close(log_fd)
+            except Exception: pass
+    return 'spawned'
+
+
 def main() -> int:
     if os.environ.get('OPENCLAW_CRYPTO_REGIME') != '1':
         print('[crypto-regime] gate OFF (OPENCLAW_CRYPTO_REGIME != 1) — no-op')
@@ -82,6 +113,14 @@ def main() -> int:
         tag = f'CRYPTO_HMM_{prior}_{state}' if fired else None
         prior_state = prior if fired else (history[0]['state'] if history else None)
         _insert_state(conn, ts_utc, state, prior_state, confidence, streak, tag, latest_features)
+        if fired and prior:
+            spawn_result = _spawn_crypto_redeploy(prior, state, ts_utc[:10])
+            if spawn_result == 'spawned':
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE crypto_regime_states SET fired_redeploy = TRUE "
+                                "WHERE ts_utc = %s", (ts_utc,))
+                conn.commit()
+            print(f'[crypto-regime] transition {prior}->{state}: redeploy {spawn_result}')
     finally:
         conn.close()
 
