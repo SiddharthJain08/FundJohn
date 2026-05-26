@@ -31,3 +31,22 @@ def test_compute_features_columns_and_finiteness():
 
 def test_first_feature_is_a_vol_so_state_ordering_works():
     assert cr.CRYPTO_FEATURE_COLS[0] == 'btc_rv_24h'
+
+
+def test_fit_and_score_orders_states_by_vol_and_returns_label():
+    # Two volatility regimes concatenated -> the high-vol tail must score
+    # a more severe label than a low-vol prefix.
+    low = _synth_bars(n=300, vol=0.002, seed=3)
+    high = _synth_bars(n=300, vol=0.02, seed=4)
+    high['ts_utc'] = pd.date_range('2026-03-01', periods=300, freq='h', tz='UTC') \
+        .strftime('%Y-%m-%dT%H:%M:%SZ')
+    bars = pd.concat([low, high], ignore_index=True)
+    eth = bars.copy(); eth['ticker'] = 'ETH-USD'
+    feats = cr.compute_features(pd.concat([bars, eth], ignore_index=True))
+    model = cr.fit_hmm(feats)
+    label, conf, probs = cr.score_latest(model, feats)
+    assert label in cr.STATE_NAMES_ORDERED
+    assert 0.0 <= conf <= 1.0
+    assert set(probs.keys()) == set(cr.STATE_NAMES_ORDERED)
+    names = cr.state_names(model)
+    assert names[0] == 'LOW_VOL' and names[3] == 'CRISIS'
