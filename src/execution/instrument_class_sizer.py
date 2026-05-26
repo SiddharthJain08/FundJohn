@@ -2,7 +2,13 @@
 equity/etp are literal pass-throughs (the live equity path must be byte-identical).
 option scales notional by |delta| when a delta is carried on the order (fail-open
 to raw notional otherwise — full greeks-driven delta sizing is an SP-3.x fast-follow).
-crypto/futures raise (reserved, no handler until SP-3.1)."""
+crypto/futures raise (reserved, no handler until SP-3.1).
+
+Executor note (SP-3 Task 8): ETPs are `us_equity` to Alpaca (verified at
+alpaca_executor.py `_skip_extended_hours`: it reads the asset `class` field
+and only `us_equity` passes), so ETP orders ride the existing equity execution
++ session rails with NO executor branch in the MVP. crypto (24/7) needs
+asset-class-aware session logic — deferred to SP-3.1."""
 from __future__ import annotations
 import logging
 
