@@ -196,3 +196,32 @@ def test_crypto_close_cancels_open_stop_first(monkeypatch):
     kinds = [e[:2] for e in events]
     assert ['order', 'cancel'] in kinds, 'no cancel issued'
     assert kinds.index(['order', 'cancel']) < kinds.index(['position', 'close']), 'cancel must precede close'
+
+
+def test_crypto_entry_emits_paired_stop(monkeypatch):
+    sys.path.insert(0, str(ROOT / 'src'))
+    from execution import alpaca_executor as ax
+    calls = []
+    def fake_cli(args, timeout=30):
+        calls.append(list(args))
+        if args[:2] == ['data', 'crypto'] or 'latest-trades' in args:
+            return True, {'trades': {'BTC/USD': {'p': 76000.0}}}, None
+        if args[:2] == ['order', 'get']:
+            # poll returns a filled entry (slightly short of requested — fees)
+            return True, {'status': 'filled', 'filled_qty': '0.000196'}, None
+        if args[:2] == ['order', 'submit'] and '--type' in args and 'stop_limit' in args:
+            return True, {'id': 'stop-1', 'status': 'new'}, None
+        if args[:2] == ['order', 'submit']:
+            return True, {'id': 'entry-1', 'status': 'pending_new', 'qty': '0.0002'}, None
+        return True, {}, None
+    monkeypatch.setattr(ax, '_run_alpaca_cli', fake_cli)
+    monkeypatch.setenv('OPENCLAW_INSTRUMENT_CLASS_ROUTING', '1')
+    order = {'ticker': 'BTC-USD', 'direction': 'long', 'pct_nav': 0.01, 'stop': 70000.0}
+    res = ax._route_crypto_order(order, equity=100_000.0, coid='c1')
+    assert res is not None and res['status'] == 'submitted'
+    assert res['order_id'] == 'entry-1'
+    # a stop_limit order was also submitted, sized to the polled filled qty:
+    stop_submits = [c for c in calls if c[:2] == ['order', 'submit'] and 'stop_limit' in c]
+    assert len(stop_submits) == 1, f'expected 1 paired stop, got {len(stop_submits)}'
+    a = stop_submits[0]
+    assert a[a.index('--qty') + 1] == '0.000196'   # sized to FILLED qty, not requested 0.0002
