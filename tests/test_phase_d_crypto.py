@@ -41,3 +41,29 @@ def test_can_transition_uses_crypto_threshold():
     ok, msg = lsm.can_transition('S_x', StrategyState.LIVE,
                                  {'sharpe': 0.8, 'max_drawdown': 0.35})
     assert ok, msg
+
+
+import os
+import pytest
+
+
+@pytest.mark.skipif(not os.environ.get('POSTGRES_URI'), reason='no POSTGRES_URI')
+def test_fractional_qty_survives_round_trip():
+    import psycopg2
+    conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO alpaca_submissions
+              (run_date, ticker, strategy_id, direction, qty,
+               entry_price, stop_price, target_price, pct_nav, notional_usd,
+               time_in_force, order_class, client_order_id, submitted_at)
+            VALUES (DATE '2099-01-01', 'BTC-USD', '__pytest__', 'long', 0.00018,
+                    76000, 70000, 80000, 0.01, 15.0, 'gtc', 'simple', '__pytest_coid__', NOW())
+            RETURNING qty
+        """)
+        stored = float(cur.fetchone()[0])
+        assert stored == pytest.approx(0.00018), f'qty truncated to {stored}'
+    finally:
+        conn.rollback()   # never commit — leaves the canonical table untouched
+        conn.close()
