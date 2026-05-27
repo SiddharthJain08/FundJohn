@@ -31,7 +31,15 @@ def realized_vol(prices: pd.Series, window: int = DEFAULT_WINDOW) -> float:
 
 
 def synthetic_iv(prices: pd.Series, vrp_factor: float = DEFAULT_VRP_FACTOR,
-                 window: int = DEFAULT_WINDOW) -> float:
-    """Modeled IV for an underlying as of the last bar in `prices`."""
+                 window: int = DEFAULT_WINDOW, underlying: str | None = None,
+                 as_of=None) -> float:
+    """Modeled IV for an underlying as of the last bar in `prices`.
+    VIX-anchored when (underlying, as_of) are supplied and the underlying has a
+    vol-index beta (SP-4 Phase 0.5); else realized-vol × vrp_factor."""
+    if underlying is not None and as_of is not None:
+        from backtest.vol_index import vix_anchored_iv
+        anchored = vix_anchored_iv(underlying, as_of)
+        if anchored is not None:
+            return max(IV_FLOOR, float(anchored))
     rv = realized_vol(prices, window=window)
     return max(IV_FLOOR, float(rv) * float(vrp_factor))

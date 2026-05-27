@@ -59,7 +59,8 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
     if len(fut) == 0:
         return None
     S0 = float(close.loc[entry_dt])
-    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window)
+    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window,
+                          underlying=spec.underlying, as_of=_as_date(entry_dt))
     expiry = nearest_monthly_expiry(_as_date(entry_dt), spec.dte_target)
     t0 = max((expiry - _as_date(entry_dt)).days / 365.0, 1e-6)
     legs = _legs_for(spec, S0, t0, sigma0)
@@ -88,7 +89,8 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
         if dte <= 0:
             exit_prem = sum(max(0.0, (S - K) if f == 'c' else (K - S)) for f, K in legs)
             exit_dt, reason = dt, 'expiry'; break
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window)
+        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
+                             underlying=spec.underlying, as_of=_as_date(dt))
         if (not spec.hold_to_expiry) and dte <= spec.roll_dte:
             exit_prem = sum(bs_price(f, S, K, dte / 365.0, sig_t) for f, K in legs)
             exit_dt, reason = dt, 'roll'; break
@@ -99,7 +101,8 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
     if exit_dt is None:
         dt = fut[:max_hold_days][-1]; S = float(close.loc[dt]); cur = _as_date(dt)
         dte = max((expiry - cur).days, 0)
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window)
+        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
+                             underlying=spec.underlying, as_of=_as_date(dt))
         exit_prem = (sum(bs_price(f, S, K, max(dte / 365.0, 1e-6), sig_t) for f, K in legs)
                      if dte > 0 else sum(max(0.0, (S - K) if f == 'c' else (K - S)) for f, K in legs))
         exit_dt, reason = dt, 'max_hold'
@@ -131,7 +134,8 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
     if len(fut) == 0:
         return None
     S0 = float(close.loc[entry_dt])
-    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window)
+    sigma0 = synthetic_iv(close.loc[:entry_dt], vrp_factor=vrp_factor, window=window,
+                          underlying=spec.underlying, as_of=_as_date(entry_dt))
     flag = _flag_for(spec.right)
     expiry = nearest_monthly_expiry(_as_date(entry_dt), spec.dte_target)
     t0 = max((expiry - _as_date(entry_dt)).days / 365.0, 1e-6)
@@ -152,7 +156,8 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
             exit_dt, reason = dt, 'expiry'
             break
         if (not spec.hold_to_expiry) and dte <= spec.roll_dte:
-            sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window)
+            sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
+                                 underlying=spec.underlying, as_of=_as_date(dt))
             exit_premium = bs_price(flag, S, K, max(dte / 365.0, 1e-6), sig_t)
             exit_dt, reason = dt, 'roll'
             break
@@ -160,7 +165,8 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
         dt = fut[:max_hold_days][-1]
         S = float(close.loc[dt]); cur_date = _as_date(dt)
         dte = max((expiry - cur_date).days, 0)
-        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window)
+        sig_t = synthetic_iv(close.loc[:dt], vrp_factor=vrp_factor, window=window,
+                             underlying=spec.underlying, as_of=_as_date(dt))
         exit_premium = (bs_price(flag, S, K, max(dte / 365.0, 1e-6), sig_t)
                         if dte > 0 else max(0.0, (S - K) if flag == 'c' else (K - S)))
         exit_dt, reason = dt, 'max_hold'
