@@ -59,6 +59,7 @@ def _fetch_account_state(sess):
         'initial_margin':        0.0,
         'maintenance_margin':    0.0,
         'multiplier':            1.0,
+        'daytrade_count':        0,
         'fetched':               False,
     }
     try:
@@ -67,7 +68,8 @@ def _fetch_account_state(sess):
         j = r.json()
         for key in ('equity', 'cash', 'long_market_value', 'short_market_value',
                     'buying_power', 'regt_buying_power', 'daytrading_buying_power',
-                    'initial_margin', 'maintenance_margin', 'multiplier'):
+                    'initial_margin', 'maintenance_margin', 'multiplier',
+                    'daytrade_count'):
             v = j.get(key)
             if v is not None:
                 try:

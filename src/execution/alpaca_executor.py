@@ -820,6 +820,31 @@ def _dtbp_summary_line(skipped: list) -> str:
     return f'⛔ {len(bp)} opens skipped for buying-power (lowest-conviction): {tickers}'
 
 
+def _bp_snapshot(account: dict, run_date, path: str | None = None) -> None:
+    """Append one buying-power snapshot row to logs/bp_snapshots.csv
+    (append-only; header written once). Best-effort — never raises into
+    the executor."""
+    import csv as _csv, datetime as _dt
+    try:
+        p = Path(path) if path else (ROOT / 'logs' / 'bp_snapshots.csv')
+        p.parent.mkdir(parents=True, exist_ok=True)
+        new = not p.exists()
+        with open(p, 'a', newline='') as f:
+            w = _csv.writer(f)
+            if new:
+                w.writerow(['timestamp', 'run_date', 'equity',
+                            'daytrading_buying_power', 'regt_buying_power',
+                            'daytrade_count', 'multiplier'])
+            w.writerow([
+                _dt.datetime.utcnow().isoformat(), str(run_date),
+                account.get('equity'), account.get('daytrading_buying_power'),
+                account.get('regt_buying_power'), account.get('daytrade_count'),
+                account.get('multiplier'),
+            ])
+    except Exception as e:
+        log(f'[dtbp-guard] bp_snapshot write failed: {e}')
+
+
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
     """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
 
@@ -1556,6 +1581,7 @@ def main():
     equity  = account['equity']
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
+    _bp_snapshot(account, run_date)
 
     # Reset per-run unsupported-asset + asset-meta caches.
     _unsupported_assets.clear()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import sys, unittest
+import tempfile, csv
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +107,21 @@ class TestDtbpGate(unittest.TestCase):
     def test_on_when_one(self):
         with patch.dict(os.environ, {'OPENCLAW_DTBP_GUARD': '1'}):
             self.assertTrue(ae._dtbp_guard_enabled())
+
+
+class TestBpSnapshot(unittest.TestCase):
+    def test_appends_csv_row_with_header(self):
+        import tempfile, csv
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'bp_snapshots.csv'
+            acct = {'equity': 110000.0, 'daytrading_buying_power': 0.0,
+                    'regt_buying_power': 58000.0, 'daytrade_count': 64, 'multiplier': 4}
+            ae._bp_snapshot(acct, '2026-05-27', path=str(path))
+            ae._bp_snapshot(acct, '2026-05-27', path=str(path))  # append, no dup header
+            rows = list(csv.reader(open(path)))
+            self.assertEqual(rows[0][0], 'timestamp')   # header once
+            self.assertEqual(len(rows), 3)              # header + 2 data rows
+            self.assertIn('64', rows[1])                # daytrade_count present
 
 
 if __name__ == '__main__':
