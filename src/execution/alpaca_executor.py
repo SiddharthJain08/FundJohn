@@ -1642,7 +1642,12 @@ def main():
         ticker = order.get('ticker') or '???'
 
         if guard_on and (ticker, sid) in dtbp_skip_keys:
-            _record_dtbp_skip(conn, run_date, order, equity)
+            # Dry-run must stay side-effect-free: log the would-skip, don't
+            # write the skipped_dtbp audit row.
+            if args.dry_run:
+                log(f'DRY {ticker} {sid}  would skip (DTBP budget exhausted)')
+            else:
+                _record_dtbp_skip(conn, run_date, order, equity)
             skipped.append({'ticker': ticker, 'reason': 'dtbp_budget_exhausted'})
             continue
 
