@@ -146,6 +146,8 @@ _IMPL_MAP = {
     'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
     # SP-3.1: BTC momentum — reference strategy for instrument_class='crypto' rails
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
+    # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
+    'S_short_straddle_vrp':              ('strategies.implementations.S_short_straddle_vrp',              'ShortStraddleVRP'),
 }
 
 

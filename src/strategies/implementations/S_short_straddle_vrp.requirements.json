@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_short_straddle_vrp",
+  "required": ["prices"],
+  "optional": []
+}
