@@ -1,8 +1,0 @@
-# Python dependencies for openclaw.
-# NOTE: this project does not yet centrally track all Python deps; this file
-# is a minimal manifest started for SP-4 Phase 0. The VPS environment has
-# additional packages installed that are not listed here yet.
-
-# SP-4 Phase 0 synthetic options engine
-py_vollib
-scipy
