@@ -468,7 +468,11 @@ class ResearchOrchestrator {
     // READY → implementation_queue + code immediately
     for (const item of (classification.ready || [])) {
       const hr = hunterResults.find(h => h.candidate_id === item.candidate_id);
-      const specWithPred = { ...item.strategy_spec, inferred_universe_filter: hr?.inferred_universe_filter ?? null };
+      const specWithPred = {
+        ...item.strategy_spec,
+        inferred_universe_filter:  hr?.inferred_universe_filter ?? null,
+        inferred_instrument_class: hr?.inferred_instrument_class ?? null,
+      };
       await this._query(
         `INSERT INTO implementation_queue (candidate_id, strategy_spec, status)
          VALUES ($1, $2, 'pending')`,
