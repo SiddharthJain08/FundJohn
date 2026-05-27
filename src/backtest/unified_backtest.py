@@ -826,7 +826,8 @@ def main() -> int:
             try:
                 run_backtest(sid,
                              start_date=args.start_date, end_date=args.end_date,
-                             max_hold_days=args.max_hold_days)
+                             max_hold_days=args.max_hold_days,
+                             instrument_class=_resolve_instrument_class(sid))
                 ok += 1
             except Exception as e:
                 _log(f'FAIL {sid}: {type(e).__name__}: {e}')
@@ -838,7 +839,8 @@ def main() -> int:
         try:
             run_backtest(args.strategy_id,
                          start_date=args.start_date, end_date=args.end_date,
-                         max_hold_days=args.max_hold_days)
+                         max_hold_days=args.max_hold_days,
+                         instrument_class=_resolve_instrument_class(args.strategy_id))
             return 0
         except FileNotFoundError as e:
             _log(f'FAIL: {e}'); return 1
@@ -851,7 +853,8 @@ def main() -> int:
         try:
             run_backtest(sid, filepath=args.strategy_file,
                          start_date=args.start_date, end_date=args.end_date,
-                         max_hold_days=args.max_hold_days)
+                         max_hold_days=args.max_hold_days,
+                         instrument_class=_resolve_instrument_class(sid, filepath=args.strategy_file))
             return 0
         except Exception as e:
             _log(f'FAIL: {type(e).__name__}: {e}')

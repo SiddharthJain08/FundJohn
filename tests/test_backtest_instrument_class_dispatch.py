@@ -50,3 +50,40 @@ def test_default_equity_when_nothing(tmp_path, monkeypatch):
 def test_live_manifest_reference_option_strategy():
     # No monkeypatch: against the real worktree manifest.
     assert ub._resolve_instrument_class('S_short_straddle_vrp') == 'option'
+
+
+def test_main_strategy_id_threads_instrument_class(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(ub, 'run_backtest',
+                        lambda sid, **kw: captured.update({'sid': sid, **kw}) or 'run-id')
+    monkeypatch.setattr(sys, 'argv', ['prog', '--strategy-id', 'S_short_straddle_vrp'])
+    assert ub.main() == 0
+    assert captured['sid'] == 'S_short_straddle_vrp'
+    assert captured['instrument_class'] == 'option'   # from the live manifest
+
+
+def test_main_strategy_file_uses_module_const(tmp_path, monkeypatch):
+    # A file whose stem is NOT in the manifest -> resolver falls back to the const.
+    impl = tmp_path / 'S_probe_opt.py'
+    impl.write_text("INSTRUMENT_CLASS = 'option'\n\nclass X: pass\n")
+    captured = {}
+    monkeypatch.setattr(ub, 'run_backtest',
+                        lambda sid, **kw: captured.update({'sid': sid, **kw}) or 'run-id')
+    monkeypatch.setattr(sys, 'argv', ['prog', '--strategy-file', str(impl)])
+    assert ub.main() == 0
+    assert captured['instrument_class'] == 'option'
+
+
+def test_main_all_live_threads_per_strategy(monkeypatch):
+    monkeypatch.setattr(ub, '_all_live_strategies', lambda: ['S_short_straddle_vrp'])
+    seen = []
+    monkeypatch.setattr(ub, 'run_backtest',
+                        lambda sid, **kw: seen.append((sid, kw.get('instrument_class'))) or 'run-id')
+    monkeypatch.setattr(sys, 'argv', ['prog', '--all-live'])
+    assert ub.main() == 0
+    assert ('S_short_straddle_vrp', 'option') in seen
+
+
+def test_resolution_composes_with_dispatch():
+    # End-to-end link without running a backtest: resolved class -> correct sim fn.
+    assert ub._simulate_for(ub._resolve_instrument_class('S_short_straddle_vrp')) is options_backtest.simulate
