@@ -8,6 +8,14 @@
 
 **Tech Stack:** Python, `py_vollib` (BS price/greeks/IV — verified installed), `numpy`/`pandas`, `pyarrow` (parquet), `psycopg2` (existing DB write path), pytest.
 
+## Operator gates (human-in-loop — the subagent driver MUST PAUSE, not auto-clear)
+
+These steps are NOT subagent-executable. The driver must stop and surface to the operator:
+- **Task 10 Step 4** — if parity FAILS, surface before any calibration (do not proceed to Task 11).
+- **Task 11 Step 3** — proposed `PROMOTION_THRESHOLDS` numbers need operator sign-off before the `lifecycle.py` commit (they gate real promotions).
+- **Task 12 Step 2** — `./scripts/regen-integrity-manifest.sh` runs on the **VPS** (manifest is gitignored/local-per-VPS), not in the worktree.
+- **Task 12 Step 5** — merge / push / VPS-pull / promote-reference are operator decisions. Do NOT merge or deploy.
+
 ---
 
 ## Grounding facts (verified against live source 2026-05-27)
@@ -53,6 +61,38 @@ pnl_pct = cycle_pnl_dollars / (entry_underlying_price * 100.0)
 | `scripts/options_parity_check.py` (new) | Synthetic vs real-chain PnL parity + VRP calibration |
 | `scripts/calibrate_option_thresholds.py` (new) | Threshold calibration after parity passes |
 | `tests/test_options_pricing.py`, `tests/test_synthetic_iv.py`, `tests/test_options_backtest.py`, `tests/test_options_sizer.py` (new) | Unit/regression tests |
+
+---
+
+## Task 0: Worktree setup (precondition)
+
+Execution happens in an isolated worktree off `feat/sp4-phase-0-greeks-engine` (created via the using-git-worktrees skill / `EnterWorktree`). The worktree does NOT contain the gitignored master data or `.env`, so:
+
+- [ ] **Step 1: Symlink the master data (gitignored parquets the backtest/parity tasks read)**
+
+```bash
+# from the worktree root
+mkdir -p data
+[ -e data/master ] || ln -s /root/openclaw/data/master data/master
+ls -l data/master/options_eod.parquet data/master/prices.parquet  # both must resolve
+```
+
+- [ ] **Step 2: Confirm DB + broker creds are reachable (read .env, never `source` it — unquoted parens break bash)**
+
+```bash
+grep -E '^(POSTGRES_URI|ALPACA_API_KEY|ALPACA_SECRET)' /root/openclaw/.env >/dev/null && echo "creds present"
+# Tasks 9/11 need POSTGRES_URI exported in the shell that runs them:
+export POSTGRES_URI="$(grep -E '^POSTGRES_URI=' /root/openclaw/.env | cut -d= -f2-)"
+python3 -c "import os,psycopg2; psycopg2.connect(os.environ['POSTGRES_URI']).close(); print('db ok')"
+```
+
+- [ ] **Step 3: Confirm the test runner works from the worktree root**
+
+```bash
+python3 -m pytest tests/test_instrument_class_sizer.py -q   # baseline green before any change
+```
+
+No commit (environment setup only).
 
 ---
 
@@ -916,19 +956,14 @@ git commit -m "feat(sp4-p0): roll-then-reopen continuous holding across rolls"
 Append:
 
 ```python
-def test_run_backtest_dispatches_option_class(monkeypatch):
-    # When instrument_class='option', run_backtest must call options_backtest.simulate.
+def test_simulate_dispatch_selects_correct_path():
+    # The dispatch is a module-level selector so it's verifiable without a DB.
     from backtest import unified_backtest as ub
-    called = {'opt': False}
-    real = options_backtest.simulate
-
-    def spy(*a, **k):
-        called['opt'] = True
-        return real(*a, **k)
-
-    monkeypatch.setattr(ub, '_options_simulate', spy, raising=False)
-    # We don't run the full DB write here; assert the dispatch symbol exists.
-    assert hasattr(ub, 'run_backtest')
+    from backtest import options_backtest as ob
+    assert ub._simulate_for('option') is ob.simulate
+    assert ub._simulate_for('equity') is ub._per_bar_simulate
+    assert ub._simulate_for('crypto') is ub._per_bar_simulate
+    assert ub._simulate_for('etp') is ub._per_bar_simulate
 ```
 
 (Full end-to-end DB run is exercised by Task 9's reference-strategy run, which needs `prices.parquet` + Postgres.)
@@ -940,21 +975,30 @@ Expected: PASS (these must stay green — the dispatch edit must not perturb equ
 
 - [ ] **Step 3: Implement the dispatch**
 
-In `unified_backtest.py`, replace the single `sim = _per_bar_simulate(...)` call with:
+In `unified_backtest.py`, add a top-level import (near the other `from backtest...`/local imports; `options_backtest` does NOT import `unified_backtest`, so no circular import) and a module-level selector:
 
 ```python
+from backtest import options_backtest  # SP-4 Phase 0
+
+
+def _simulate_for(instrument_class: str):
+    """SP-4 Phase 0 dispatch: pick the simulate fn for an instrument_class.
+    Only 'option' diverges; everything else uses the existing equity path."""
     if instrument_class == 'option':
-        from backtest.options_backtest import simulate as _options_simulate
-        sim = _options_simulate(
-            instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
-            strategy_id=strategy_id, resolver=resolver, max_hold_days=max_hold_days,
-        )
-    else:
-        sim = _per_bar_simulate(
-            instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
-            strategy_id=strategy_id, resolver=resolver, max_hold_days=max_hold_days,
-        )
+        return options_backtest.simulate
+    return _per_bar_simulate
 ```
+
+Then replace the single `sim = _per_bar_simulate(...)` call in `run_backtest` with:
+
+```python
+    sim = _simulate_for(instrument_class)(
+        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+        strategy_id=strategy_id, resolver=resolver, max_hold_days=max_hold_days,
+    )
+```
+
+(`_per_bar_simulate` must be defined above `_simulate_for`, or reference it lazily — it already is, at line ~427.)
 
 - [ ] **Step 4: Run tests to verify**
 
@@ -1017,27 +1061,35 @@ Expected: FAIL — `contracts` key not produced.
 
 - [ ] **Step 3: Implement delta-dollar sizing in the option branch**
 
-Replace the `option` branch body in `apply_instrument_class_sizing`:
+Replace the `option` branch body in `apply_instrument_class_sizing`. The new delta-dollar path activates only when `underlying_price` is present; otherwise it FALLS BACK to the legacy `|delta|`-notional scaling (so the existing `test_instrument_class_sizer.py::test_option_scales_by_delta_when_present`, which passes a delta-only order and expects `notional_usd==500`, stays green):
 
 ```python
     if instrument_class == "option":
         delta = order.get("delta")
-        S = order.get("underlying_price")
         try:
             d = abs(float(delta)) if delta is not None else None
         except (TypeError, ValueError):
             d = None
-        if d is None or d <= 0 or not S:
-            logger.warning("[instrument_class_sizer] option order %s lacks delta/"
-                           "underlying_price; raw notional (fail-open)", order.get("ticker"))
+        if d is None or d <= 0:
+            logger.warning("[instrument_class_sizer] option order %s has no usable "
+                           "delta; using raw notional (fail-open)", order.get("ticker"))
             return order
+        # Preferred (SP-4 Phase 0): greeks-aware delta-dollar sizing when the
+        # underlying price is known — size contracts so delta-dollar == notional.
+        S = order.get("underlying_price")
+        try:
+            S = float(S) if S is not None else None
+        except (TypeError, ValueError):
+            S = None
+        if S and S > 0:
+            scaled = dict(order)
+            delta_dollar_per_contract = d * S * 100.0
+            scaled["contracts"] = round(float(order["notional_usd"]) / delta_dollar_per_contract, 6)
+            scaled["delta_dollar"] = round(float(order["notional_usd"]), 2)
+            return scaled
+        # Fallback (no underlying price): legacy |delta|-notional scaling (SP-3 behavior).
         scaled = dict(order)
-        delta_dollar_per_contract = d * float(S) * 100.0
-        if delta_dollar_per_contract <= 0:
-            return order
-        # size contracts so the position's delta-dollar exposure == notional_usd
-        scaled["contracts"] = round(float(order["notional_usd"]) / delta_dollar_per_contract, 6)
-        scaled["delta_dollar"] = round(float(order["notional_usd"]), 2)
+        scaled["notional_usd"] = round(float(order["notional_usd"]) * d, 2)
         return scaled
 ```
 
@@ -1164,7 +1216,12 @@ PY
 
 Run:
 ```bash
-python3 -c "import pyarrow.parquet as pq; df=pq.read_table('data/master/prices.parquet',columns=['ticker']).to_pandas(); print('SPY' in set(df['ticker']))"
+# SPY must exist AND extend back near DEFAULT_START_DATE (2016-04-11) for a stable calibration.
+python3 -c "
+import pyarrow.parquet as pq
+df=pq.read_table('data/master/prices.parquet',columns=['ticker','date']).to_pandas()
+spy=df[df['ticker']=='SPY']
+print('SPY present:', not spy.empty, '| min date:', spy['date'].min() if not spy.empty else None)"
 python3 -c "
 import sys; sys.path.insert(0,'.'); sys.path.insert(0,'src')
 from backtest.unified_backtest import run_backtest
@@ -1398,6 +1455,8 @@ Then edit `src/strategies/lifecycle.py` `PROMOTION_THRESHOLDS`:
 ```
 
 Replace `<CALIBRATED>`/`<recorded>` with the measured numbers. **Surface the proposed numbers to the operator for sign-off before committing** (these gate real promotions).
+
+> **Do NOT pattern-match the option threshold to equity's 0.5.** Option-strategy cycles span ~30 days vs equity's ~10, so the equal-weighted daily-return scale that `aggregate_metrics` builds differs between classes. Sharpe is scale-invariant *within* a strategy, but the calibrated option `min_sharpe` may legitimately land above or below 0.5 — let the empirical distribution decide, don't anchor to the equity value.
 
 - [ ] **Step 4: Run the lifecycle tests + threshold sanity**
 
