@@ -99,6 +99,20 @@ const BLUEPRINT_SIGNAL_RX = new RegExp(
 const IMPL_BUCKET_THRESH = 0.40;   // implementability_score floor
 const ALL_BUCKETS = ['high', 'med', 'low', 'reject', 'implementable_candidate'];
 
+// SP-4: per-class confidence floor for high-tier corpus buckets. Caps
+// option(<0.80)/crypto(<0.70) at 'med' so we don't spend PaperHunter/backtest
+// budget on candidates that will fail the higher per-class promotion gate.
+const CLASS_CONFIDENCE_FLOOR = { option: 0.80, crypto: 0.70 };
+const HIGH_BUCKETS = new Set(['high', 'implementable_candidate']);
+
+function applyClassBucketFloor(bucket, instrumentClass, confidence) {
+  const floor = CLASS_CONFIDENCE_FLOOR[instrumentClass];
+  if (floor != null && HIGH_BUCKETS.has(bucket) && (Number(confidence) || 0) < floor) {
+    return 'med';
+  }
+  return bucket;
+}
+
 class MastermindCurator {
   constructor() {
     this._pool = null;
@@ -913,10 +927,16 @@ class MastermindCurator {
         if (rawImpl >= IMPL_BUCKET_THRESH) {
           bucket = 'implementable_candidate';
         }
+        // SP-4: instrument class + per-class confidence floor.
+        const instrumentClass = (typeof r.inferred_instrument_class === 'string'
+          && ['equity', 'option', 'etp', 'crypto', 'futures'].includes(r.inferred_instrument_class))
+          ? r.inferred_instrument_class : 'equity';
+        bucket = applyClassBucketFloor(bucket, instrumentClass, rawConf);
         return {
           paper_id:                 p.paper_id,
           confidence:               rawConf,
           implementability_score:   rawImpl,
+          inferred_instrument_class: instrumentClass,
           data_requirements_hint:   (r.data_requirements_hint && typeof r.data_requirements_hint === 'object')
                                         ? r.data_requirements_hint : null,
           predicted_bucket:         bucket,
@@ -1042,3 +1062,4 @@ class MastermindCurator {
 }
 
 module.exports = MastermindCurator;
+module.exports.applyClassBucketFloor = applyClassBucketFloor;
