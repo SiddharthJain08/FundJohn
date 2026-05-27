@@ -4958,6 +4958,21 @@
         }
       ],
       "instrument_class": "crypto"
+    },
+    "S_short_straddle_vrp": {
+      "state": "candidate",
+      "state_since": "2026-05-27T05:03:48.950915Z",
+      "metadata": {
+        "canonical_file": "S_short_straddle_vrp.py",
+        "class": "ShortStraddleVRP",
+        "description": "Delta-hedged short ATM straddle on SPY harvesting the volatility risk premium; reference option strategy.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
+      },
+      "history": [],
+      "instrument_class": "option"
     }
   },
   "decommissioned": {

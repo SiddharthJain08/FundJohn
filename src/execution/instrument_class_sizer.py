@@ -31,6 +31,20 @@ def apply_instrument_class_sizing(order: dict, instrument_class: str) -> dict:
             logger.warning("[instrument_class_sizer] option order %s has no usable "
                            "delta; using raw notional (fail-open)", order.get("ticker"))
             return order
+        # Preferred (SP-4 Phase 0): greeks-aware delta-dollar sizing when the
+        # underlying price is known — size contracts so delta-dollar == notional.
+        S = order.get("underlying_price")
+        try:
+            S = float(S) if S is not None else None
+        except (TypeError, ValueError):
+            S = None
+        if S and S > 0:
+            scaled = dict(order)
+            delta_dollar_per_contract = d * S * 100.0
+            scaled["contracts"] = round(float(order["notional_usd"]) / delta_dollar_per_contract, 6)
+            scaled["delta_dollar"] = round(float(order["notional_usd"]), 2)
+            return scaled
+        # Fallback (no underlying price): legacy |delta|-notional scaling (SP-3 behavior).
         scaled = dict(order)
         scaled["notional_usd"] = round(float(order["notional_usd"]) * d, 2)
         return scaled

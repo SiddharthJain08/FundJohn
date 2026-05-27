@@ -91,20 +91,27 @@ CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
-# SP-3: per-instrument-class candidate→live thresholds. equity/etp keep the
-# legacy values; option uses equity values as an explicit placeholder until
-# SP-4 calibration. crypto added in SP-3.1.
+# SP-3/SP-4: per-instrument-class candidate→live thresholds. equity/etp keep the
+# legacy values. option + crypto calibrated in SP-4 (2026-05-27), operator-signed-off.
 PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     "equity": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
     "etp":    {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
-    "option": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-4): calibrate
-               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
-    "crypto": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,   # TODO(SP-3.2): calibrate
-               "max_drawdown": 0.70},   # operator sign-off 2026-05-26: BTC is a 60-80% DD asset;
-                                        # S_btc_momentum backtests Sharpe 1.02 / MaxDD 65% over 10y.
-                                        # 0.70 is a deliberate crypto-realistic band, not gamed.
+    # option: conservative bar — HIGHER than equity's 0.5 — because the options
+    # backtest is a VIX-anchored SYNTHETIC engine (in-regime IV-MAE ~0.082 on the
+    # supported index/ETF-ATM envelope; cross-regime trusted via VIX being real
+    # 30d implied vol). Operator sign-off SP-4 2026-05-27; refine as Phase C
+    # accrues real option candidates. Trusted underlyings live in
+    # backtest.vol_index.VALID_OPTION_UNDERLYINGS (index/ETF only for now).
+    "option": {"min_sharpe": 0.80,
+               "max_drawdown": 0.30},
+    # crypto: 0.50 min_sharpe FLOOR — only one live strategy so far
+    # (S_btc_momentum, backtest Sharpe 1.02 / MaxDD 65% over 10y), so no
+    # population to calibrate against yet; revisit when one exists.
+    # max_drawdown 0.70 operator sign-off 2026-05-26 (BTC is a 60-80% DD asset).
+    "crypto": {"min_sharpe": 0.50,
+               "max_drawdown": 0.70},
 }
 
 

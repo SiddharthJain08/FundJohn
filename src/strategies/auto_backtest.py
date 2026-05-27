@@ -527,6 +527,13 @@ def run_backtest(filepath: str) -> dict:
                 'regime_breakdown': {}, 'method': 'v2_regime_stratified'}
     strategy_cls = classes[0]
 
+    _ic = getattr(strategy_cls, 'instrument_class', 'equity')
+    if _ic == 'option':
+        raise ValueError(
+            f"auto_backtest does not support instrument_class='option' "
+            f"({strategy_cls.__name__}): options need the VIX-anchored synthetic engine. "
+            f"Use backtest.unified_backtest.run_backtest(strategy_id, instrument_class='option').")
+
     # Step 3: load prices once
     try:
         prices = _load_prices()
