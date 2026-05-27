@@ -59,6 +59,7 @@ sys.path.insert(0, str(ROOT))
 
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 from strategies.validate_strategy import validate                     # noqa: E402
+from backtest import options_backtest  # SP-4 Phase 0
 
 # ── Configuration ────────────────────────────────────────────────────────────
 TRADING_DAYS_PER_YEAR = 252
@@ -575,6 +576,14 @@ def _per_bar_simulate(
     }
 
 
+def _simulate_for(instrument_class: str):
+    """SP-4 Phase 0 dispatch: pick the simulate fn for an instrument_class.
+    Only 'option' diverges; everything else uses the existing equity path."""
+    if instrument_class == 'option':
+        return options_backtest.simulate
+    return _per_bar_simulate
+
+
 # ── Main run ─────────────────────────────────────────────────────────────────
 
 def run_backtest(strategy_id: str, *,
@@ -623,7 +632,7 @@ def run_backtest(strategy_id: str, *,
     start_dt = pd.Timestamp(start_date)
     end_dt   = pd.Timestamp(end_date) if end_date else close_wide.index.max()
 
-    sim = _per_bar_simulate(
+    sim = _simulate_for(instrument_class)(
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         strategy_id=strategy_id,
         resolver=resolver,

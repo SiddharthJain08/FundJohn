@@ -130,3 +130,13 @@ def test_delta_hedge_reduces_directional_loss_and_has_signal_keys():
     assert abs(ch['pnl_pct']) < abs(cn['pnl_pct'])
     assert ch['hedge_pnl_pct'] > 0           # long-share hedge gains in the up-move
     assert ch['signal_stop'] is None and ch['signal_target'] is None
+
+
+def test_simulate_dispatch_selects_correct_path():
+    # The dispatch is a module-level selector so it's verifiable without a DB.
+    from backtest import unified_backtest as ub
+    from backtest import options_backtest as ob
+    assert ub._simulate_for('option') is ob.simulate
+    assert ub._simulate_for('equity') is ub._per_bar_simulate
+    assert ub._simulate_for('crypto') is ub._per_bar_simulate
+    assert ub._simulate_for('etp') is ub._per_bar_simulate
