@@ -69,6 +69,27 @@ function _validateInferredFilter(name) {
   return name;
 }
 
+
+/**
+ * SP-4: Validate an inferred_instrument_class against VALID_INSTRUMENT_CLASSES.
+ * Returns the class if valid AND the gate is ON; otherwise 'equity' (the
+ * byte-identical default — gate OFF, null, or unknown all resolve to equity).
+ * Gate: OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT=1
+ */
+function _validateInferredClass(name) {
+  if (name == null) return 'equity';
+  if (process.env.OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT !== '1') return 'equity';  // gate
+  const r = spawnSync(PYTHON, ['-c',
+    'from src.strategies.lifecycle import VALID_INSTRUMENT_CLASSES; '
+    + 'import sys; sys.exit(0 if sys.argv[1] in VALID_INSTRUMENT_CLASSES else 1)',
+    name], { encoding: 'utf8', cwd: OPENCLAW_DIR });
+  if (r.status !== 0) {
+    console.warn(`[research-orch] PaperHunter emitted invalid instrument_class '${name}', falling back to equity`);
+    return 'equity';
+  }
+  return name;
+}
+
 // Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
 // Node event loop keeps serving HTTP traffic while this runs, so the Cancel
 // button / other dashboard actions remain responsive during long backtests.
@@ -1286,3 +1307,4 @@ class ResearchOrchestrator {
 
 module.exports = ResearchOrchestrator;
 module.exports._validateInferredFilter = _validateInferredFilter;
+module.exports._validateInferredClass = _validateInferredClass;
