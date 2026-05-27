@@ -96,6 +96,26 @@ def _dir_to_int(d) -> int:
     return 0
 
 
+def _derive_action(kind: str, out_current: float, out_target: float, dir_sign: int) -> str:
+    """Human-readable trade action, derived from the order's emission kind and
+    the current/target position USD. The wire field `direction` (long/short)
+    stays the order SIDE (buy/sell) the executor reads; `action` is for humans
+    (so a long-*reduction* reads `reduce_long`, not `short`)."""
+    cur = out_current or 0.0
+    tgt = out_target or 0.0
+    if kind in ('orphan_close', 'flip_close'):
+        return 'close_long' if cur > 0 else 'close_short'
+    if kind == 'flip_open':
+        return 'flip_to_long' if tgt > 0 else 'flip_to_short'
+    # delta
+    if cur == 0.0:
+        return 'open_long' if tgt > 0 else 'open_short'
+    if (cur > 0) == (tgt > 0):                      # same side
+        side = 'long' if cur > 0 else 'short'
+        return f'add_{side}' if abs(tgt) > abs(cur) else f'reduce_{side}'
+    return 'flip_to_long' if tgt > 0 else 'flip_to_short'   # opposite-sign delta (defensive)
+
+
 def _load_lambda(default: float = 2.0) -> float:
     """Read position_sizing_lambda from pipeline_config; fall back to default
     on any error. Bounded clamp guards against operator-pasted garbage.
@@ -562,6 +582,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'current_usd':             out_current,
             'contributing_strategies': ticker_meta[tkr]['strategies'],
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
+            'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         })
     return orders
 
