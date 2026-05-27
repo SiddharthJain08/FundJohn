@@ -18,6 +18,27 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class OptionSpec:
+    """Declarative option contract spec carried on a Signal (SP-4 Phase 0).
+
+    The backtest engine (options_backtest.py) and a future live executor read
+    the SAME spec to select a contract — parity by construction. Equity/crypto/
+    etp signals leave Signal.option_spec=None and behave byte-identically.
+    """
+    underlying:    str                       # e.g. 'SPY'
+    right:         str = 'call'              # 'call' | 'put' (per-leg; ignored for straddle/strangle)
+    strike_rule:   str = 'target_delta'      # 'target_delta' | 'atm' | 'fixed_moneyness'
+    target_delta:  float = 0.30              # used when strike_rule='target_delta'
+    moneyness:     Optional[float] = None    # K/S, used when strike_rule='fixed_moneyness'
+    dte_target:    int = 30                  # nearest monthly expiry >= this many calendar days
+    structure:     str = 'single'            # 'single' | 'straddle' | 'strangle'
+    hedge:         str = 'none'              # 'none' | 'delta'
+    hedge_cadence: str = 'daily'             # rehedge frequency when hedge='delta'
+    roll_dte:      int = 7                   # roll when remaining DTE <= this
+    hold_to_expiry: bool = False             # income legs may hold to expiry instead of rolling
+
+
+@dataclass
 class Signal:
     ticker:            str
     direction:         str          # LONG | SHORT | SELL_VOL | BUY_VOL | FLAT
@@ -36,6 +57,9 @@ class Signal:
     # to the handoff; trade_handoff_builder.py otherwise fills it with the
     # standard feature set. Default empty keeps old strategies compatible.
     features:          dict = field(default_factory=dict)
+    # SP-4 Phase 0: option contract spec for instrument_class='option' strategies.
+    # None for equity/crypto/etp — keeps every existing strategy byte-identical.
+    option_spec: Optional['OptionSpec'] = None
 
 
 REGIME_POSITION_SCALE = {
