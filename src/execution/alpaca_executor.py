@@ -1534,6 +1534,26 @@ def execute_single(sess, equity, order, run_date):
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
+def _handoff_fresh(run_date, _dir=None, _now=None):
+    """True if the sized handoff for run_date exists AND was written today (ET).
+
+    Execute-phase gate for the close-execution split: the ~3:55pm execute must
+    refuse to trade on a stale/leftover handoff when the ~3:10pm compute didn't
+    refresh it today. (The legacy single-run path writes the handoff seconds
+    before, so it always reads as fresh.)"""
+    from zoneinfo import ZoneInfo
+    base = _dir or HANDOFF_DIR
+    fpath = base / f'{run_date}_sized.json'
+    if not fpath.exists():
+        return False, 'sized handoff file missing'
+    et = ZoneInfo('America/New_York')
+    now = _now or datetime.now(et)
+    mtime = datetime.fromtimestamp(fpath.stat().st_mtime, et)
+    if mtime.date() != now.date():
+        return False, f'sized handoff stale (written {mtime.date()}, today {now.date()})'
+    return True, 'fresh'
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=str(date.today()))
@@ -1551,6 +1571,10 @@ def main():
     handoff = read_handoff(run_date, 'sized')
     if not handoff:
         log('No sized handoff — nothing to execute')
+        sys.exit(0)
+    fresh, why = _handoff_fresh(run_date)
+    if not fresh:
+        log(f'Handoff freshness gate: {why} — refusing to execute (compute phase did not produce a fresh handoff)')
         sys.exit(0)
     orders = handoff.get('orders') or []
     if not orders:
