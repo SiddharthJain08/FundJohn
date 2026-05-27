@@ -214,17 +214,28 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
             ul = spec.underlying
             if ul not in close_wide.columns:
                 continue
-            if spec.structure == 'single':
-                cyc = _price_single_cycle(spec, close_wide[ul].dropna(), current_date,
-                                          sign, vrp_factor, window, max_hold_days)
-            else:
-                cyc = _price_multileg_cycle(spec, close_wide[ul].dropna(), current_date,
-                                            sign, vrp_factor, window, max_hold_days)
-            if cyc is None:
-                continue
-            cyc.update({'ticker': ul, 'direction': 'long' if sign > 0 else 'short',
-                        'entry_regime': str(regime_state)})
-            trades.append(cyc)
+            # roll-then-reopen: keep re-entering while the prior cycle ended on a roll
+            cursor = current_date
+            remaining = max_hold_days
+            while remaining > 0 and cursor is not None:
+                series = close_wide[ul].dropna()
+                if spec.structure == 'single':
+                    cyc = _price_single_cycle(spec, series, cursor, sign,
+                                              vrp_factor, window, remaining)
+                else:
+                    cyc = _price_multileg_cycle(spec, series, cursor, sign,
+                                                vrp_factor, window, remaining)
+                if cyc is None:
+                    break
+                cyc.update({'ticker': ul, 'direction': 'long' if sign > 0 else 'short',
+                            'entry_regime': str(regime_state)})
+                trades.append(cyc)
+                remaining -= cyc['holding_days']
+                if cyc['exit_reason'] != 'roll':
+                    break
+                # next cycle starts at the bar AFTER this cycle's exit
+                later = series.index[series.index > pd.Timestamp(cyc['exit_date'])]
+                cursor = later[0] if len(later) else None
 
     return {'trades': trades, 'universe_sizes': [], 'days_processed': days_processed,
             'days_with_signals': days_with_signals, 'static_universe': static_universe,

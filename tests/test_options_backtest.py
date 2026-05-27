@@ -102,3 +102,15 @@ def test_short_straddle_with_delta_hedge_produces_trade():
     t = out['trades'][0]
     assert t['direction'] == 'short'
     assert 'hedge_pnl_pct' in t
+
+
+def test_roll_produces_multiple_cycles_over_long_hold():
+    close_wide, bars = _trending_panels(n=400, drift=0.0, seed=3)
+    regimes = pd.Series('LOW_VOL', index=close_wide.index)
+    inst = _ShortStraddleStrat()
+    out = options_backtest.simulate(inst, close_wide, bars, regimes,
+                                    close_wide.index[0], close_wide.index[-1],
+                                    strategy_id='T_short_straddle', vrp_factor=1.3,
+                                    max_hold_days=120)
+    # 120 trading days / ~30-DTE rolls → expect >1 cycle from the single signal
+    assert len(out['trades']) >= 2
