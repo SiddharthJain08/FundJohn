@@ -60,6 +60,7 @@ sys.path.insert(0, str(ROOT))
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 from strategies.validate_strategy import validate                     # noqa: E402
 from backtest import options_backtest  # SP-4 Phase 0
+from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
 
 # ── Configuration ────────────────────────────────────────────────────────────
 TRADING_DAYS_PER_YEAR = 252
@@ -582,6 +583,31 @@ def _simulate_for(instrument_class: str):
     if instrument_class == 'option':
         return options_backtest.simulate
     return _per_bar_simulate
+
+
+def _resolve_instrument_class(strategy_id: str, filepath: Optional[str] = None) -> str:
+    """Resolve a strategy's instrument_class for backtest dispatch.
+
+    Precedence: (1) manifest ``strategies[strategy_id].instrument_class`` — the
+    authoritative source the lifecycle promotion gate reads — accepted only if
+    in VALID_INSTRUMENT_CLASSES; (2) a module-level ``INSTRUMENT_CLASS`` const in
+    *filepath* (covers a freshly-coded --strategy-file not yet in the manifest),
+    via lifecycle._detect_module_instrument_class; (3) 'equity'. Never raises.
+    """
+    try:
+        manifest_path = ROOT / 'src' / 'strategies' / 'manifest.json'
+        entry = (json.loads(manifest_path.read_text()).get('strategies', {})
+                 .get(strategy_id) or {})
+        ic = entry.get('instrument_class')
+        if ic in VALID_INSTRUMENT_CLASSES:
+            return ic
+    except Exception:
+        pass
+    if filepath:
+        detected = _detect_module_instrument_class(filepath)
+        if detected:
+            return detected
+    return 'equity'
 
 
 # ── Main run ─────────────────────────────────────────────────────────────────
