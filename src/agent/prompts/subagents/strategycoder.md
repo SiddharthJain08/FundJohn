@@ -47,6 +47,25 @@ Signal(
 )
 ```
 
+### Instrument class (SP-4)
+
+The orchestrator injects the validated class into your context as:
+- `INFERRED_INSTRUMENT_CLASS = "equity" | "option" | "etp" | "crypto"`
+
+You MUST do BOTH of the following with that value:
+
+1. **Manifest field** — set `"instrument_class": "<INFERRED_INSTRUMENT_CLASS>"`
+   as a TOP-LEVEL key on the manifest entry (Artifact 3 below shows where).
+2. **Module constant** — add `INSTRUMENT_CLASS = "<INFERRED_INSTRUMENT_CLASS>"`
+   at module scope in the `.py` (right after imports), so lifecycle can
+   auto-detect it on the register()-creates path.
+
+Per-class implementation guidance:
+- **`option`** — emit `Signal.direction` ∈ {`SELL_VOL`, `BUY_VOL`} (never LONG/SHORT for the option legs). Populate `Signal.option_spec` with an `OptionSpec` (imported from `strategies.base`): set `underlying`, `right`, `strike_rule`/`target_delta`, `dte_target`, `structure` (`single|straddle|strangle`), `hedge` (`none|delta`). The underlying MUST be one of SPY/SPX/^GSPC/QQQ/IWM. Universe filter is typically `options_eligible_only` or null.
+- **`crypto`** — emit `Signal.direction` ∈ {`LONG`, `FLAT`} on `BTC-USD`/`ETH-USD`. Do NOT define a `universe_filter` (the 12 predicates are equity universes; leave it out → default applies but is irrelevant for a fixed crypto ticker set).
+- **`etp`** — standard `LONG`/`FLAT` momentum/rotation on the ETP tickers (e.g. GLD/SLV/USO) using generic `prices`. No universe_filter unless an equity predicate genuinely applies.
+- **`equity`** (default) — unchanged from today.
+
 ### Universe predicate
 
 The orchestrator injects the inferred predicate into your context as:
@@ -127,7 +146,8 @@ Add to the `"strategies"` object (inside it, before the closing `}`):
     "class": "YourStrategyClass",
     "description": "Brief description from strategy_spec"
   },
-  "history": []
+  "history": [],
+  "instrument_class": "<INFERRED_INSTRUMENT_CLASS, default equity>"
 }
 ```
 New strategies always start as `state: candidate`. A Postgres `strategy_registry` row with

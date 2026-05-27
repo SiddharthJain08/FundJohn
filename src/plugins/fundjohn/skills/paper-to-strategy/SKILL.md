@@ -35,6 +35,9 @@ Produce exactly this JSON block (all fields required unless marked optional):
   "direction_vocab": ["LONG", "SHORT"],
   "regime_applicability": ["LOW_VOL", "NEUTRAL"],
 
+  "inferred_instrument_class": "equity",
+  "inferred_option_underlying": null,
+
   "minimum_universe_size": 100,
   "reported_metrics": {
     "sharpe": 1.2,
@@ -96,6 +99,17 @@ Only values from: `LONG`, `SHORT`, `BUY_VOL`, `SELL_VOL`, `FLAT`, `HOLD`.
 Only values from: `LOW_VOL`, `NEUTRAL`, `HIGH_VOL`, `TRANSITIONING`, `RISK_OFF`, `TREND`.
 Empty array = all regimes.
 
+### inferred_instrument_class  (REQUIRED — SP-4; always emit this field)
+One of `equity` (default) | `option` | `etp` | `crypto`. Classify the strategy's instrument:
+- `option` — trades listed options / volatility (data needs `options_eod`, or `direction_vocab` includes `SELL_VOL`/`BUY_VOL`; straddles, strangles, variance/vol-premium, put-writing, delta-hedged vol). The underlying MUST be an index/ETF in `{SPY, SPX, ^GSPC, QQQ, IWM}` and ATM / near-term — otherwise set `rejection_reason_if_any: "option_envelope_unsupported"`.
+- `etp` — commodity/sector ETP rotation on price data (e.g. GLD, SLV, USO, sector ETFs).
+- `crypto` — BTC-USD or ETH-USD price-only signals (momentum/carry). Funding-rate / perpetual / order-book needs → `capability_gap`.
+- `equity` — everything else, or when unsure.
+
+### inferred_option_underlying  (REQUIRED — SP-4)
+When `inferred_instrument_class` is `option`, the single primary underlying ticker
+(one of `SPY`, `SPX`, `^GSPC`, `QQQ`, `IWM`). Otherwise `null`.
+
 ### data_requirements.required[].column
 Only columns from OpenClaw schema:
 - `prices` — OHLCV + vwap, daily
@@ -128,6 +142,7 @@ Set to null if passing. Set to one of:
 - `"overfitting_risk"` — OOS Sharpe > 2.5 on monthly US equity
 - `"duplicate_fingerprint"` — Jaccard(formula_tokens, existing) > 0.6 AND regime_set matches
 - `"capability_gap"` — required column not in ledger AND no provider in servers.json covered_columns
+- `"option_envelope_unsupported"` — option strategy whose underlying is not in `{SPY, SPX, ^GSPC, QQQ, IWM}` (single-name / OTM-wing / other), or not ATM/near-term
 
 ## What NOT to Include
 - Do not include implementation code

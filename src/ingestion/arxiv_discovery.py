@@ -43,6 +43,7 @@ ARXIV_API  = 'http://export.arxiv.org/api/query'
 # and applied-stats papers that q-fin authors increasingly cross-list under, not q-fin.
 CATEGORIES          = [
     'q-fin.ST', 'q-fin.PM', 'q-fin.TR', 'q-fin.CP', 'q-fin.GN', 'q-fin.RM',
+    'q-fin.PR', 'q-fin.MF',   # SP-4: derivatives/securities pricing + mathematical finance
     'cs.LG', 'cs.AI', 'cs.CL', 'stat.ML',
 ]
 MAX_RESULTS_DEFAULT = 200  # per category

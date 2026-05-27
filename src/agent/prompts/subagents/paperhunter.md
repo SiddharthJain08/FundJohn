@@ -166,6 +166,26 @@ Choose exactly **one** of the 12 vetted universe predicates below — or emit
 - For domestic-only / exchange-listed constraints: when the paper's only constraint is domestic-only or exchange-listed, pick `no_adr` or `no_otc`; when it ALSO has a cap-size constraint, prefer the cap-tier predicate (no combinations allowed).
 - Write your choice as `inferred_universe_filter` in the output JSON (see Step 7).
 
+## Step 5b — Infer instrument class (SP-4)
+
+Independently of the universe predicate, classify the strategy's instrument
+class. Write it as `inferred_instrument_class` in the output JSON.
+
+| Class | Choose when | Envelope (must hold or REJECT) |
+|---|---|---|
+| `option` | Strategy trades listed options / volatility (data_requirements include `options_eod`, or direction is `SELL_VOL`/`BUY_VOL`, e.g. straddles, strangles, variance/vol-premium, delta-hedged vol). | Underlying MUST be an index/ETF in our synthetic-greeks envelope: **SPY, SPX, ^GSPC, QQQ, IWM**, and ATM / near-term. Single-name options, OTM-wing/skew, or any other underlying → REJECT with `option_envelope_unsupported`. |
+| `etp` | Strategy rotates/holds exchange-traded products / commodity ETPs (e.g. GLD, SLV, USO, sector ETFs) on price data. | No leverage-decay strategies (we don't model intraday decay). |
+| `crypto` | Strategy trades crypto spot, **BTC-USD or ETH-USD only**, using price-derived signals (momentum, carry, trend). | Anything needing funding-rate, perpetual/OI, or order-book data → REJECT via Gate 2 (capability_gap). |
+| `equity` (default) | Everything else (the existing equity-momentum/factor/mean-reversion world), OR when unsure. | — |
+
+Also emit `inferred_option_underlying`: when `inferred_instrument_class` is
+`option`, the single primary underlying ticker (e.g. `"SPY"`); otherwise `null`.
+
+**Rules:**
+- Emit exactly one of: `equity` | `option` | `etp` | `crypto`. Default to `equity` when unsure (the downstream gate treats null/unknown as equity).
+- If the strategy is `option` but the underlying is NOT in {SPY, SPX, ^GSPC, QQQ, IWM} (or is OTM-wing/skew/single-name), emit the rejection stub with `rejection_reason_if_any: "option_envelope_unsupported"` and stop.
+- `etp` and `crypto` strategies use `inferred_universe_filter: null` (the 12 predicates are equity universes — they do not apply).
+
 ## Step 6 — Run 2 Self-Rejection Gates
 
 Evaluate each gate in order. If a gate fires, set `rejection_reason_if_any`
@@ -187,6 +207,12 @@ canonical column set (`prices`, `financials`, `options_eod`, `insider`,
 Non-standard columns like `satellite_data`, `credit_card_transactions`,
 `web_scrape`, `social_sentiment`, `alt_data` → always fire.
 
+**Crypto data axis (SP-4):** BTC-USD / ETH-USD daily price bars ARE available
+(via the canonical `prices` column — list `prices`, not a crypto-specific
+column). But crypto microstructure columns — `funding_rate`, `perp_oi`,
+`open_interest`, `order_book`, `spot_vol` — are NOT available; a crypto
+strategy requiring any of them → always fire (`capability_gap`).
+
 ## Step 7 — Output
 
 Return a single raw JSON object. No markdown, no code fences, no prose.
@@ -206,6 +232,8 @@ If all gates pass:
   "regime_applicability": [...],
   "minimum_universe_size": 100,
   "inferred_universe_filter": "<one of the 12 predicate names | null>",
+  "inferred_instrument_class": "equity | option | etp | crypto",
+  "inferred_option_underlying": "<index/ETF ticker when option, else null>",
   "reported_metrics": {"sharpe": 1.2, "max_drawdown": 0.12, "backtest_period": "...", "out_of_sample": true},
   "data_requirements": {"required": ["prices", "financials"], "optional": []},
   "similarity_fingerprint": {"regime_set_hash": "...", "direction_hash": "...", "formula_tokens": [...]},
@@ -250,6 +278,11 @@ PaperHunter sees abstracts harvested from these arXiv categories nightly:
 - **q-fin.ST / PM / TR / CP / GN / RM** — quantitative finance proper
 - **cs.LG / cs.AI / cs.CL** — ML, AI, NLP papers that may apply to alpha discovery
 - **stat.ML** — statistical-ML papers (factor methods, regularization, causal inference)
+- **q-fin.PR / q-fin.MF** — derivatives/securities pricing + mathematical finance (SP-4: feeds options & vol papers)
+
+PaperHunter now classifies each paper's `inferred_instrument_class` — options
+strategies are accepted only inside the index/ETF-ATM envelope (see Step 5b);
+crypto only for BTC/ETH price-only signals.
 
 Volume implication: roughly 3-5x the prior arXiv-only flow. Triage aggressively; an
 ML paper without an explicit financial application or backtest should be downscored.

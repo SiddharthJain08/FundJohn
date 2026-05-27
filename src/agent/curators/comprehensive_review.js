@@ -259,12 +259,25 @@ No hedge language. Every claim must cite a number from the data.
 // mastermind_prompt_addenda table stays as a historical record but is
 // neither read nor written by this codebase.
 
+// SP-4: mirror of lifecycle.py PROMOTION_THRESHOLDS (keep in sync). Used to
+// tell the reviewer the correct per-class promotion floor for this strategy.
+const PROMOTION_THRESHOLDS = {
+  equity: { min_sharpe: 0.5,  max_drawdown: 0.20 },
+  etp:    { min_sharpe: 0.5,  max_drawdown: 0.20 },
+  option: { min_sharpe: 0.80, max_drawdown: 0.30 },
+  crypto: { min_sharpe: 0.50, max_drawdown: 0.70 },
+};
+
 function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
+  const ic = strategy.instrument_class || 'equity';
+  const thr = PROMOTION_THRESHOLDS[ic] || PROMOTION_THRESHOLDS.equity;
+  const classLine = `Instrument class: ${ic} (promotion floor: Sharpe ≥ ${thr.min_sharpe.toFixed(2)}, MaxDD ≤ ${(thr.max_drawdown * 100).toFixed(0)}%)`;
   return `${MEMO_SYSTEM_PREAMBLE}
 
 Strategy: ${strategy.id} (${strategy.name})
 Status: ${strategy.status}
 Tier: ${strategy.tier}
+${classLine}
 Backtest: sharpe=${strategy.backtest_sharpe} ret=${strategy.backtest_return_pct}% dd=${strategy.backtest_max_dd_pct}%
 Universe: ${(strategy.universe || []).join(', ')}
 Signal frequency: ${strategy.signal_frequency}
@@ -319,6 +332,14 @@ async function _postToDiscord(channelName, text) {
 async function _reviewOne(strategy, { dryRun, notify }) {
   const log = (m) => { notify?.(`${strategy.id}: ${m}`); };
   const tradePack = await _buildTradePack(strategy.id);
+
+  // SP-4: enrich with instrument_class from the manifest (top-level field).
+  try {
+    const manifestPath = path.join(OPENCLAW_DIR, 'src/strategies/manifest.json');
+    const mf = JSON.parse(require('fs').readFileSync(manifestPath, 'utf-8'));
+    strategy.instrument_class = (mf.strategies || {})[strategy.id]?.instrument_class || 'equity';
+  } catch (_) { strategy.instrument_class = strategy.instrument_class || 'equity'; }
+
   if (!tradePack.signals.length && !tradePack.pnl.length) {
     log('no trades yet — skipping');
     return { strategy_id: strategy.id, skipped: true, reason: 'no_trades' };
@@ -541,4 +562,4 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
   };
 }
 
-module.exports = { run };
+module.exports = { run, buildStrategyPrompt };

@@ -69,6 +69,44 @@ function _validateInferredFilter(name) {
   return name;
 }
 
+
+/**
+ * SP-4: Validate an inferred_instrument_class against VALID_INSTRUMENT_CLASSES.
+ * Returns the class if valid AND the gate is ON; otherwise 'equity' (the
+ * byte-identical default — gate OFF, null, or unknown all resolve to equity).
+ * Gate: OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT=1
+ */
+function _validateInferredClass(name) {
+  if (name == null) return 'equity';
+  if (process.env.OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT !== '1') return 'equity';  // gate
+  const r = spawnSync(PYTHON, ['-c',
+    'from src.strategies.lifecycle import VALID_INSTRUMENT_CLASSES; '
+    + 'import sys; sys.exit(0 if sys.argv[1] in VALID_INSTRUMENT_CLASSES else 1)',
+    name], { encoding: 'utf8', cwd: OPENCLAW_DIR });
+  if (r.status !== 0) {
+    console.warn(`[research-orch] PaperHunter emitted invalid instrument_class '${name}', falling back to equity`);
+    return 'equity';
+  }
+  return name;
+}
+
+/**
+ * SP-4: True iff `underlying` is in the Phase-0 synthetic-greeks envelope
+ * (backtest.vol_index.VALID_OPTION_UNDERLYINGS — index/ETF ATM only). Used to
+ * hard-reject out-of-envelope option strategies (single-name / OTM-wing) before
+ * coding, since the synthetic engine can't price them with promotion-grade
+ * fidelity. Not gated: the orchestrator only calls it when class=='option',
+ * which itself requires the gate ON.
+ */
+function _optionUnderlyingSupported(underlying) {
+  if (!underlying) return false;
+  const r = spawnSync(PYTHON, ['-c',
+    'from src.backtest.vol_index import is_supported_option_underlying; '
+    + 'import sys; sys.exit(0 if is_supported_option_underlying(sys.argv[1]) else 1)',
+    String(underlying)], { encoding: 'utf8', cwd: OPENCLAW_DIR });
+  return r.status === 0;
+}
+
 // Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
 // Node event loop keeps serving HTTP traffic while this runs, so the Cancel
 // button / other dashboard actions remain responsive during long backtests.
@@ -430,7 +468,11 @@ class ResearchOrchestrator {
     // READY → implementation_queue + code immediately
     for (const item of (classification.ready || [])) {
       const hr = hunterResults.find(h => h.candidate_id === item.candidate_id);
-      const specWithPred = { ...item.strategy_spec, inferred_universe_filter: hr?.inferred_universe_filter ?? null };
+      const specWithPred = {
+        ...item.strategy_spec,
+        inferred_universe_filter:  hr?.inferred_universe_filter ?? null,
+        inferred_instrument_class: hr?.inferred_instrument_class ?? null,
+      };
       await this._query(
         `INSERT INTO implementation_queue (candidate_id, strategy_spec, status)
          VALUES ($1, $2, 'pending')`,
@@ -1045,11 +1087,25 @@ class ResearchOrchestrator {
 
   async _codeStrategy(strategySpec) {
     const validInferred = _validateInferredFilter(strategySpec?.inferred_universe_filter ?? null);
+    const validClass    = _validateInferredClass(strategySpec?.inferred_instrument_class ?? null);
+    // SP-4 envelope guard: an option strategy must be on a Phase-0-supported
+    // index/ETF underlying, else the synthetic greeks engine can't price it
+    // with promotion-grade fidelity. Hard-reject here (propagates to
+    // _codeFromQueue's catch → status 'coding'→'failed') rather than emit a
+    // bogus backtest. Only fires when the gate is ON (validClass=='option').
+    if (validClass === 'option'
+        && !_optionUnderlyingSupported(strategySpec?.inferred_option_underlying ?? null)) {
+      throw new Error(
+        `option_envelope_unsupported: underlying `
+        + `'${strategySpec?.inferred_option_underlying ?? null}' not in `
+        + `VALID_OPTION_UNDERLYINGS (Phase-0 index/ETF-ATM envelope)`);
+    }
     const ctx = {
       role:          'implement_strategy',
       STRATEGY_SPEC: JSON.stringify(strategySpec),
       instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
-      INFERRED_UNIVERSE_FILTER: validInferred,  // null or one of the 12 CANDIDATE_PREDICATES
+      INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 12 CANDIDATE_PREDICATES
+      INFERRED_INSTRUMENT_CLASS: validClass,     // equity (default/gate-off) | option | etp | crypto | futures
     };
     const result = await this._runSubagent('strategycoder', strategySpec.strategy_id || 'strategy', ctx);
     await this._registerStrategy(strategySpec).catch((e) =>
@@ -1286,3 +1342,5 @@ class ResearchOrchestrator {
 
 module.exports = ResearchOrchestrator;
 module.exports._validateInferredFilter = _validateInferredFilter;
+module.exports._validateInferredClass = _validateInferredClass;
+module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;

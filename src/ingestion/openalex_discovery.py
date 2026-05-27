@@ -71,6 +71,8 @@ FINANCE_CONCEPTS = [
     'C64943373',   # Alpha (finance)
     'C91602232',   # Volatility (finance)
     'C93373587',   # Mathematical finance
+    'C24189920',   # Implied volatility (SP-4 — options/vol papers)
+    'C180706569',  # Cryptocurrency (SP-4 — crypto papers)
 ]
 
 # Phase 4b: alpha-author watchlist. Any paper by one of these authors in the
@@ -89,6 +91,9 @@ AUTHOR_WATCHLIST = {
     'lettau':     'A5033095024',   # Martin Lettau — Berkeley
     'hirshleifer':'A5067662277',   # David Hirshleifer — USC
     'hou':        'A5066035235',   # Kewei Hou — OSU
+    'carr':       'A5064063645',   # Peter Carr — options/volatility (NYU) [SP-4]
+    'gatheral':   'A5028270155',   # Jim Gatheral — volatility surface (Baruch) [SP-4]
+    'sinclair':   'A5082953374',   # Euan Sinclair — option vol-premium [SP-4]
 }
 
 

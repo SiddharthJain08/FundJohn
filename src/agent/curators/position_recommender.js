@@ -25,6 +25,7 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const { spawn } = require('child_process');
 
 const elig        = require('./_critique_eligibility.js');
@@ -91,6 +92,15 @@ function _deriveDeltas(recommendations, currentSize) {
                           recommendations?.action ||
                           'no reasoning provided by review',
   };
+}
+
+// SP-4: resolve a strategy's instrument_class from the manifest (top-level
+// field, default equity). Pure (path injected) so it's unit-testable.
+function _classForStrategyFromManifest(manifestPath, strategyId) {
+  try {
+    const mf = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    return (mf.strategies || {})[strategyId]?.instrument_class || 'equity';
+  } catch (_) { return 'equity'; }
 }
 
 function _sourceRecommendedSize(synthesisRow, memoRecommendation) {
@@ -231,6 +241,8 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
   for (const memo of memos) {
     const currentSize = await _currentSize(memo.strategy_id);
     const deltas = _deriveDeltas(memo.recommendations || {}, currentSize);
+    const instrumentClass = _classForStrategyFromManifest(
+      path.join(OPENCLAW_DIR, 'src/strategies/manifest.json'), memo.strategy_id);
 
     // F3 synthesis pass: if OPENCLAW_MEMO_CRITIQUE=1 and the strategy is
     // eligible, invoke the Mastermind synthesizer over critiques +
@@ -278,7 +290,7 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
        deltas.target_delta_pct, deltas.hold_days_delta,
        deltas.reasoning],
     );
-    persisted.push({ strategy_id: memo.strategy_id, rec_id: rows[0].id, ...deltas });
+    persisted.push({ strategy_id: memo.strategy_id, rec_id: rows[0].id, instrument_class: instrumentClass, ...deltas });
   }
 
   const digest = _formatDigest(persisted);
@@ -415,4 +427,4 @@ async function _applyStopReplacements(persisted, notify, { reportOnly = false } 
   return all;
 }
 
-module.exports = { run, _applyStopReplacements, _sourceRecommendedSize };
+module.exports = { run, _applyStopReplacements, _sourceRecommendedSize, _classForStrategyFromManifest };
