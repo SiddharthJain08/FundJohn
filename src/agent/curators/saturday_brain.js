@@ -462,7 +462,12 @@ async function _stage(tierB, opts, notify) {
             class:          sid,
             description:    (hunterResult.hypothesis_one_liner || sid).slice(0, 280),
           },
-          instrument_class: hunterResult.inferred_instrument_class || 'equity',
+          // SP-4: gate-OFF byte-identity — only carry a non-equity class into
+          // the staged manifest when instrument-class-at-mint is enabled; else
+          // 'equity' (matches pre-SP-4 behavior, where _stage wrote no class).
+          instrument_class: (process.env.OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT === '1'
+            ? (hunterResult.inferred_instrument_class || 'equity')
+            : 'equity'),
           history: [{
             from_state: null,
             to_state:   'staging',
