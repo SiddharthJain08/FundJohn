@@ -742,6 +742,39 @@ def _dtbp_opening_budget(account: dict) -> float:
     return max(0.0, min(dtbp, regt))
 
 
+def _open_conviction(o: dict) -> float:
+    """Conviction rank for an opening order: kelly_final, else pct_nav."""
+    k = o.get('kelly_final')
+    if k is not None:
+        try:
+            return abs(float(k))
+        except (TypeError, ValueError):
+            pass
+    return abs(float(o.get('pct_nav') or 0.0))
+
+
+def _compute_dtbp_skips(open_orders: list, account: dict, equity: float) -> set:
+    """Return the set of (ticker, strategy_id) opening orders to skip because
+    they exceed the day-trade/Reg-T budget. Highest-conviction opens are
+    funded first; at the first open that does not fit the remaining budget,
+    it and ALL lower-conviction opens are skipped. Notional basis =
+    equity * pct_nav."""
+    budget = _dtbp_opening_budget(account)
+    ranked = sorted(open_orders, key=_open_conviction, reverse=True)
+    skips: set = set()
+    remaining = budget
+    cutoff = False
+    for o in ranked:
+        key = (o.get('ticker'), o.get('strategy_id') or 'unknown')
+        notional = float(equity) * float(o.get('pct_nav') or 0.0)
+        if cutoff or notional > remaining:
+            cutoff = True
+            skips.add(key)
+        else:
+            remaining -= notional
+    return skips
+
+
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
     """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
 
