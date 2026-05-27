@@ -156,3 +156,13 @@ def test_iv_mae_helper_perfect_match_is_zero():
     assert iv_mae([0.2, 0.3, 0.25], [0.2, 0.3, 0.25]) == 0.0
     # 10% high across the board -> 0.10 MAE
     assert abs(iv_mae([0.22, 0.33], [0.20, 0.30]) - 0.10) < 1e-9
+
+
+def test_auto_backtest_refuses_option_strategy(tmp_path):
+    import importlib
+    auto = importlib.import_module('strategies.auto_backtest')
+    # S_short_straddle_vrp is instrument_class='option' → must raise
+    import pytest
+    fp = str(ROOT / 'src' / 'strategies' / 'implementations' / 'S_short_straddle_vrp.py')
+    with pytest.raises(ValueError, match='option'):
+        auto.run_backtest(fp)

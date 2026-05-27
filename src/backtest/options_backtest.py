@@ -15,6 +15,7 @@ import pandas as pd
 from datetime import date
 
 logger = logging.getLogger(__name__)
+_UNSUPPORTED_WARNED: set = set()
 
 from backtest.options_pricing import (bs_price, bs_greeks, strike_for_target_delta,
                                        nearest_monthly_expiry, RISK_FREE)
@@ -229,6 +230,12 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
             ul = spec.underlying
             if ul not in close_wide.columns:
                 continue
+            from backtest.vol_index import is_supported_option_underlying
+            if not is_supported_option_underlying(ul) and ul not in _UNSUPPORTED_WARNED:
+                _UNSUPPORTED_WARNED.add(ul)
+                logger.warning('[options_backtest] underlying %s is NOT in VALID_OPTION_UNDERLYINGS '
+                               '— IV uses the low-fidelity realized-vol fallback (~25%% off real IV); '
+                               'backtest metrics are NOT trustworthy for promotion.', ul)
             # roll-then-reopen: keep re-entering while the prior cycle ended on a roll
             cursor = current_date
             remaining = max_hold_days
