@@ -140,3 +140,11 @@ def test_simulate_dispatch_selects_correct_path():
     assert ub._simulate_for('equity') is ub._per_bar_simulate
     assert ub._simulate_for('crypto') is ub._per_bar_simulate
     assert ub._simulate_for('etp') is ub._per_bar_simulate
+
+
+def test_parity_mae_helper():
+    from scripts.options_parity_check import mae_fraction
+    synth = [1.0, 2.0, 3.0]; real = [1.1, 1.8, 3.3]
+    m = mae_fraction(synth, real)
+    # mean(|.1|/1.1, |.2|/1.8, |.3|/3.3) ≈ mean(0.0909,0.111,0.0909)=0.0976
+    assert abs(m - 0.0976) < 0.01
