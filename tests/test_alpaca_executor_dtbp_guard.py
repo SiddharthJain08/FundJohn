@@ -54,6 +54,19 @@ class TestComputeDtbpSkips(unittest.TestCase):
         self.assertEqual(ae._compute_dtbp_skips(opens, acct, equity=100000.0), set())
 
 
+class TestRecordDtbpSkip(unittest.TestCase):
+    def test_writes_skipped_dtbp_row(self):
+        conn = MagicMock(); cur = MagicMock(); conn.cursor.return_value = cur
+        order = {'ticker': 'AMAT', 'strategy_id': 'S_x', 'direction': 'long',
+                 'pct_nav': 0.0644, 'order_class': 'bracket'}
+        ae._record_dtbp_skip(conn, '2026-05-27', order, equity=110000.0)
+        cur.execute.assert_called_once()
+        params = cur.execute.call_args[0][1]
+        self.assertIn('skipped_dtbp', params)
+        self.assertIn('dtbp_budget_exhausted', params)
+        conn.commit.assert_called_once()
+
+
 class TestDtbpGate(unittest.TestCase):
     def test_default_on_when_unset(self):
         with patch.dict(os.environ, {}, clear=False):

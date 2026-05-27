@@ -387,6 +387,27 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
     cur.close()
 
 
+def _record_dtbp_skip(conn, run_date, order, equity: float) -> None:
+    """Persist a skipped-for-buying-power order as an audit row
+    (alpaca_status='skipped_dtbp', no order id) via record_submission."""
+    notional = round(float(equity) * float(order.get('pct_nav') or 0.0), 2)
+    resp = {
+        'status':   'skipped_dtbp',
+        'qty':      0,
+        'notional': notional,
+        'order_id': None,
+        'http':     None,
+        'reason':   'dtbp_budget_exhausted',
+        'entry':    order.get('entry'),
+    }
+    record_submission(
+        conn, run_date, order, resp,
+        order.get('tif') or 'day',
+        order.get('order_class') or 'simple',
+        '',
+    )
+
+
 def _normalize_alpaca_symbol(raw: str) -> str | None:
     """Map engine/handoff ticker → Alpaca-accepted symbol.
     Returns None for symbols Alpaca paper doesn't support (futures, indices,
