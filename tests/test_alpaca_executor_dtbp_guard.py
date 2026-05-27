@@ -19,6 +19,21 @@ class TestDtbpBudget(unittest.TestCase):
             {'daytrading_buying_power': -5.0, 'regt_buying_power': 100.0}), 0.0)
         self.assertEqual(ae._dtbp_opening_budget({}), 0.0)
 
+    def test_failed_fetch_is_conservative_zero(self):
+        # _fetch_account_state sets fetched=False on failure (BP fields fall
+        # back to PAPER_PORTFOLIO). A failed re-fetch must NOT be permissive.
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'fetched': False, 'daytrading_buying_power': 100000.0,
+             'regt_buying_power': 100000.0}), 0.0)
+
+    def test_fetched_true_or_absent_uses_values(self):
+        # fetched=True → normal; missing 'fetched' key (e.g. unit-test dicts) → normal
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'fetched': True, 'daytrading_buying_power': 40000.0,
+             'regt_buying_power': 60000.0}), 40000.0)
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'daytrading_buying_power': 40000.0, 'regt_buying_power': 60000.0}), 40000.0)
+
 
 class TestComputeDtbpSkips(unittest.TestCase):
     def _open(self, tkr, pct, kelly, sid=None):

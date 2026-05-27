@@ -757,7 +757,16 @@ def _dtbp_opening_budget(account: dict) -> float:
     DTBP is the intraday day-trade limit Alpaca rejects opens against on a
     PDT account; regt is the Reg-T overnight cap. Missing/negative -> 0.0
     (fail safe: skip opens rather than over-submit). No headroom by design.
+
+    A failed account re-fetch (fetched is explicitly False) returns 0.0 so
+    the guard skips opens rather than over-submitting on stale fallback values.
+    (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
     """
+    # A failed account re-fetch (fetched is explicitly False) must not be
+    # permissive: return 0 so the guard skips opens rather than over-submit.
+    # (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
+    if account.get('fetched') is False:
+        return 0.0
     dtbp = float(account.get('daytrading_buying_power') or 0.0)
     regt = float(account.get('regt_buying_power') or 0.0)
     return max(0.0, min(dtbp, regt))
@@ -786,7 +795,7 @@ def _compute_dtbp_skips(open_orders: list, account: dict, equity: float) -> set:
     remaining = budget
     cutoff = False
     for o in ranked:
-        key = (o.get('ticker'), o.get('strategy_id') or 'unknown')
+        key = (o.get('ticker') or '???', o.get('strategy_id') or 'unknown')
         notional = float(equity) * float(o.get('pct_nav') or 0.0)
         if cutoff or notional > remaining:
             cutoff = True
