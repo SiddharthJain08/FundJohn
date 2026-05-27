@@ -246,11 +246,15 @@ function start(swarm, generateId, notifyDiscord) {
     // 23:59 ET daily — reset token budget
     cron.schedule('59 23 * * *', resetTokenBudgets, { timezone: 'America/New_York' });
 
-    // 10:00 AM ET Mon–Fri — the new daily cycle (Phase 2 of the pipeline
-    // restructure). Spawns pipeline_orchestrator.py which runs queue_drain →
-    // collect → signals → handoff → trade → alpaca → report.
-    // Orchestrator is idempotent; duplicate triggers return immediately.
-    cron.schedule('0 10 * * 1-5', () => {
+    // Close-execution rollout gate (default OFF). When ON, the daily cycle
+    // computes at ~3:10pm ET (close[t]-proxy signals) and executes market orders
+    // into the ~3:55pm close to mirror the backtests' close[t] fill, plus a
+    // 9:35am dashboard-only SOD refresh. When OFF, the legacy 10:00am cycle runs
+    // unchanged. Spec: docs/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
+    const closeExecLive = process.env.OPENCLAW_CLOSE_EXEC_LIVE === '1';
+
+    // 10:00 AM ET Mon–Fri — legacy daily cycle (registered only when close-exec is OFF).
+    if (!closeExecLive) cron.schedule('0 10 * * 1-5', () => {
         const useLangGraph = process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1';
         const today = new Date().toISOString().slice(0, 10);
 
@@ -290,6 +294,37 @@ function start(swarm, generateId, notifyDiscord) {
             log(`10am cycle spawn error: ${e.message}`);
         }
     }, { timezone: 'America/New_York' });
+
+    // Close-execution crons (registered only when close-exec is ON): compute → execute → SOD.
+    if (closeExecLive) {
+        const dispatchCycle = (reason, steps) => {
+            const today = new Date().toISOString().slice(0, 10);
+            try {
+                const { runDailyCycleGraph } = require('../agent/graphs/daily-cycle');
+                runDailyCycleGraph({ runDate: today, reason, requestedSteps: steps })
+                    .then((out) => log(`${reason} finished: status=${out.status} aborted=${out.abortedAt || 'none'}`))
+                    .catch((err) => log(`${reason} FAILED: ${err.message}`));
+            } catch (e) {
+                log(`${reason} dispatch error: ${e.message}`);
+            }
+        };
+        // 3:10 PM ET — compute phase (close[t]-proxy signals; produces sized handoff; no execution).
+        cron.schedule('10 15 * * 1-5', () => {
+            log('close-exec compute (3:10pm ET)');
+            dispatchCycle('scheduled-compute', ['collect', 'sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
+        }, { timezone: 'America/New_York' });
+        // 3:55 PM ET — execute phase (market orders into the close).
+        cron.schedule('55 15 * * 1-5', () => {
+            log('close-exec execute (3:55pm ET)');
+            dispatchCycle('scheduled-execute', ['alpaca', 'reconcile', 'report', 'pyportfolioopt_shadow', 'health']);
+        }, { timezone: 'America/New_York' });
+        // 9:35 AM ET — start-of-day price refresh (dashboard only; not a signal input).
+        cron.schedule('35 9 * * 1-5', () => {
+            log('SOD dashboard refresh (9:35am ET)');
+            try { runPython('src/pipeline/run_sod_refresh.py'); }
+            catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
+        }, { timezone: 'America/New_York' });
+    }
 
     // 9:00 AM ET Mon–Fri: fresh regime at market open (run_market_state.py only — no signals/Alpaca)
     cron.schedule('0 9 * * 1-5', async () => {

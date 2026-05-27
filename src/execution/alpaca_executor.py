@@ -1534,6 +1534,67 @@ def execute_single(sess, equity, order, run_date):
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
+def _close_inflight_key(run_date) -> str:
+    return f'execute:close:inflight:{run_date}'
+
+
+def _executor_redis():
+    """Lazy Redis client (decode_responses). None on any failure — the in-flight
+    lock is best-effort (its TTL is the backstop); a missing lock never blocks
+    submission."""
+    try:
+        import redis
+        return redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                              socket_connect_timeout=3, decode_responses=True)
+    except Exception as e:
+        log(f'[executor] redis unavailable: {e}')
+        return None
+
+
+def _set_close_inflight(run_date, ttl=300, _r=None) -> bool:
+    """Mark the close-execute phase in-flight so a concurrent intraday-regime
+    redeploy defers instead of racing the market-into-close submission."""
+    r = _r if _r is not None else _executor_redis()
+    if r is None:
+        return False
+    try:
+        r.setex(_close_inflight_key(run_date), ttl, '1')
+        return True
+    except Exception as e:
+        log(f'[executor] close-inflight set failed: {e}')
+        return False
+
+
+def _clear_close_inflight(run_date, _r=None) -> None:
+    r = _r if _r is not None else _executor_redis()
+    if r is None:
+        return
+    try:
+        r.delete(_close_inflight_key(run_date))
+    except Exception as e:
+        log(f'[executor] close-inflight clear failed: {e}')
+
+
+def _handoff_fresh(run_date, _dir=None, _now=None):
+    """True if the sized handoff for run_date exists AND was written today (ET).
+
+    Execute-phase gate for the close-execution split: the ~3:55pm execute must
+    refuse to trade on a stale/leftover handoff when the ~3:10pm compute didn't
+    refresh it today. (The legacy single-run path writes the handoff seconds
+    before, so it always reads as fresh.)"""
+    from zoneinfo import ZoneInfo
+    base = _dir or HANDOFF_DIR
+    fpath = base / f'{run_date}_sized.json'
+    if not fpath.exists():
+        return False, 'sized handoff file missing'
+    et = ZoneInfo('America/New_York')
+    now = _now or datetime.now(et)
+    mtime = datetime.fromtimestamp(fpath.stat().st_mtime, et)
+    if mtime.date() != now.date():
+        return False, f'sized handoff stale (written {mtime.date()}, today {now.date()})'
+    return True, 'fresh'
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=str(date.today()))
@@ -1551,6 +1612,10 @@ def main():
     handoff = read_handoff(run_date, 'sized')
     if not handoff:
         log('No sized handoff — nothing to execute')
+        sys.exit(0)
+    fresh, why = _handoff_fresh(run_date)
+    if not fresh:
+        log(f'Handoff freshness gate: {why} — refusing to execute (compute phase did not produce a fresh handoff)')
         sys.exit(0)
     orders = handoff.get('orders') or []
     if not orders:
@@ -1575,6 +1640,12 @@ def main():
         'closed':     'CLOSED (overnight 20:00–04:00 ET / weekend / holiday) — refusing all submits',
     }
     log(f'Market session: {_session_descriptions.get(session, session)}')
+
+    # Mark the close-execute phase in-flight so a concurrent intraday-regime
+    # redeploy defers (300s TTL is the crash backstop). RTH-only — the legacy
+    # 10am RTH run also benefits from not racing a redeploy.
+    if rth:
+        _set_close_inflight(run_date)
 
     sess    = _alpaca_session()
     account = _fetch_account_state(sess)
@@ -1701,13 +1772,18 @@ def main():
                 failed_flip_closes.add(ticker)
                 log(f'  WARN {ticker} flip_close not submitted (status={result.get("status")}); matched open will be skipped')
 
+        if isinstance(result, dict):
+            result.setdefault('action', order.get('action'))   # human-readable label for #trade-reports
         if result.get('status') in ('submitted', 'recovered'):
             submitted.append(result)
             new_notional_total += result.get('notional') or 0.0
         else:
-            skipped.append({'ticker': ticker, 'reason': result.get('reason') or result.get('body') or result.get('status')})
+            skipped.append({'ticker': ticker, 'reason': result.get('reason') or result.get('body') or result.get('status'),
+                            'action': order.get('action')})
 
     conn.close()
+    if rth:
+        _clear_close_inflight(run_date)
 
     log(f'Done — submitted={len(submitted)}  skipped={len(skipped)}  new_notional=${new_notional_total:,.0f}')
     if skipped:
@@ -1720,6 +1796,15 @@ def main():
     # case the old _alert_partial covered.
     if submitted or skipped:
         _post_executor_summary(run_date, submitted, skipped, new_notional_total)
+
+
+def _format_submitted_sample(submitted, limit: int = 8) -> str:
+    """#trade-reports sample line — shows the human-readable `action`
+    (reduce_long/flip_to_short/…) so a long-reduction never reads as a 'short'."""
+    return ', '.join(
+        f'{s.get("ticker","?")}:{(s.get("action") or s.get("direction") or "?")} x{s.get("qty","?")}'
+        for s in submitted[:limit]
+    )
 
 
 def _post_executor_summary(run_date, submitted, skipped, notional):
@@ -1743,10 +1828,7 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
         f'orders in · new notional ${notional:,.0f}',
     ]
     if submitted:
-        sample = ', '.join(
-            f'{s.get("ticker","?")}x{s.get("qty","?")}'
-            for s in submitted[:8]
-        )
+        sample = _format_submitted_sample(submitted)
         suffix = ' …' if len(submitted) > 8 else ''
         lines.append(f'• submitted: {sample}{suffix}')
     if skipped:

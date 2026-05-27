@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
 import psycopg2, psycopg2.extras
-from execution.regime_blended_sizer import size_positions
+from execution.regime_blended_sizer import size_positions, _derive_action
 from execution.handoff import read_handoff
 from execution.tradejohn_confirmer import confirm as real_confirmer
 from execution.sized_handoff import finalize_sized_payload
@@ -115,6 +115,10 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                     {'strategy_id': sid_oc, 'attribution_weight': 1.0}],
                 'current_usd':             o.get('current_usd', 0.0),
                 'target_usd':              o.get('target_usd', 0.0),
+                'action':                  o.get('action') or _derive_action(
+                    'orphan_close' if not o.get('target_usd') else 'delta',
+                    o.get('current_usd', 0.0), o.get('target_usd', 0.0),
+                    -1 if str(dir_str).lower() == 'short' else 1),
             }
             payload['orders'].append(order_oc)
             continue

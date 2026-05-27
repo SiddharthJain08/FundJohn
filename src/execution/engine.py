@@ -193,7 +193,14 @@ def load_approved_strategies(cur):
 # ──────────────────────────────────────────────────────────
 
 def load_prices(universe: list) -> pd.DataFrame:
-    """Load master price parquet; pivot to wide format (date index × ticker columns, close prices)."""
+    """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
+
+    When OPENCLAW_CLOSE_PROXY_SNAPSHOT=1, append a today-dated (ET) row from a
+    live close[t]-proxy snapshot so live signal generation mirrors the backtests'
+    close[t] decision. The proxy fetch is deliberately OUTSIDE the parquet
+    try/except: a CloseProxyError MUST propagate (abort the signals step), never
+    be swallowed into an empty frame that would orphan-close the whole book.
+    """
     master_path = ROOT / 'data' / 'master' / 'prices.parquet'
     if not master_path.exists():
         logger.warning(f"Master prices not found at {master_path}")
@@ -206,11 +213,21 @@ def load_prices(universe: list) -> pd.DataFrame:
         cols = [c for c in universe if c in wide.columns]
         if cols:
             wide = wide[cols]
-        logger.info(f"Prices loaded: {wide.shape[1]} tickers × {wide.shape[0]} dates")
-        return wide
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
+
+    # close[t]-proxy injection — OUTSIDE the try so CloseProxyError propagates.
+    if os.environ.get('OPENCLAW_CLOSE_PROXY_SNAPSHOT') == '1':
+        from ingestion.close_proxy_snapshot import fetch_close_proxy
+        today = pd.Timestamp.now(tz='America/New_York').normalize().tz_localize(None)
+        proxy = fetch_close_proxy(list(wide.columns), today)
+        if today not in wide.index:
+            wide.loc[today] = pd.Series(proxy).reindex(wide.columns)
+            wide.sort_index(inplace=True)
+
+    logger.info(f"Prices loaded: {wide.shape[1]} tickers × {wide.shape[0]} dates")
+    return wide
 
 
 def load_aux_data(universe: list) -> dict:
@@ -1049,6 +1066,19 @@ def log_run(cur, run_date, regime_state, metrics: dict):
 # MAIN
 # ──────────────────────────────────────────────────────────
 
+def _fatal_exit_code(exc) -> int:
+    """Exit code for a fatal engine error.
+
+    CloseProxyError (the close[t]-proxy snapshot fetch failed entirely) is a
+    data-availability FATAL: return 2 so the LangGraph step node aborts the
+    whole cycle regardless of strict mode. rc=1 is treated as a soft 'warn'
+    that lets the chain continue to handoff/trade — on an empty signal set that
+    would orphan-close the book (the 2026-05-22 failure mode). All other errors
+    keep the legacy rc=1.
+    """
+    return 2 if type(exc).__name__ == 'CloseProxyError' else 1
+
+
 def main():
     import time
     t0       = time.time()
@@ -1178,7 +1208,7 @@ def main():
         except Exception:
             pass
         print(json.dumps({'status': 'error', 'error': str(e)}))
-        sys.exit(1)
+        sys.exit(_fatal_exit_code(e))
     finally:
         cur.close()
         conn.close()
