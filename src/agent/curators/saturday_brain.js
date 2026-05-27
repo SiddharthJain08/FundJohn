@@ -462,6 +462,7 @@ async function _stage(tierB, opts, notify) {
             class:          sid,
             description:    (hunterResult.hypothesis_one_liner || sid).slice(0, 280),
           },
+          instrument_class: hunterResult.inferred_instrument_class || 'equity',
           history: [{
             from_state: null,
             to_state:   'staging',

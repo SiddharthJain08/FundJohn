@@ -279,6 +279,26 @@ def _detect_module_predicate(file_path) -> "str | None":
     return None
 
 
+def _detect_module_instrument_class(file_path) -> "str | None":
+    """Return the instrument_class if the strategy file has a top-level
+    ``INSTRUMENT_CLASS = "<class>"`` assignment whose value is in
+    VALID_INSTRUMENT_CLASSES, else None. Mirrors _detect_module_predicate;
+    returns None on FileNotFoundError / SyntaxError / OSError.
+    """
+    try:
+        tree = ast.parse(Path(file_path).read_text())
+    except (FileNotFoundError, SyntaxError, OSError):
+        return None
+    for node in tree.body:   # top-level only
+        if isinstance(node, ast.Assign):
+            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if "INSTRUMENT_CLASS" in targets and isinstance(node.value, ast.Constant):
+                val = node.value.value
+                if isinstance(val, str) and val in VALID_INSTRUMENT_CLASSES:
+                    return val
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6.  State machine
 # ─────────────────────────────────────────────────────────────────────────────
@@ -665,6 +685,16 @@ class LifecycleStateMachine:
                 detected = _detect_module_predicate(impl_path)
                 if detected and detected in _CP:
                     rec.universe_filter_ref = f"src.strategies.universe_default:{detected}"
+        # SP-4: detect and persist instrument_class from the impl file, gated
+        # by OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT=1. Covers the rare
+        # register()-creates-the-record path (StrategyCoder normally writes the
+        # manifest entry directly, which from_manifest already reads).
+        if os.environ.get("OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT") == "1":
+            canonical = (metadata or {}).get("canonical_file")
+            if canonical:
+                detected_ic = _detect_module_instrument_class(_IMPLEMENTATIONS_DIR / canonical)
+                if detected_ic:
+                    rec.instrument_class = detected_ic
         self._records[strategy_id] = rec
         return rec
 
