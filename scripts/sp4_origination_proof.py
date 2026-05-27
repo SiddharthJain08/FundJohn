@@ -53,6 +53,11 @@ def main():
     if os.environ.get('OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT') != '1':
         sys.exit('Refusing: set OPENCLAW_SP4_INSTRUMENT_CLASS_AT_MINT=1 to run the proof.')
 
+    # Force OPENCLAW_DIR to THIS tree: prod .env sets OPENCLAW_DIR=/root/openclaw,
+    # which would make the orchestrator + run-subagent-cli read prompts/skills
+    # from main instead of this worktree — silently testing the wrong code.
+    os.environ['OPENCLAW_DIR'] = ROOT
+
     proc = subprocess.run(['node', '-e', _NODE, args.candidate_id], cwd=ROOT, check=False)
 
     # Print the manifest entries for any non-equity strategy (operator inspection).
