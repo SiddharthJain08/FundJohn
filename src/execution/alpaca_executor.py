@@ -775,6 +775,12 @@ def _compute_dtbp_skips(open_orders: list, account: dict, equity: float) -> set:
     return skips
 
 
+def _dtbp_guard_enabled() -> bool:
+    """Kill-switch, default ON. Set OPENCLAW_DTBP_GUARD=0 to disable (then
+    the executor behaves byte-identically to the pre-guard path)."""
+    return os.environ.get('OPENCLAW_DTBP_GUARD', '1') != '0'
+
+
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
     """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
 

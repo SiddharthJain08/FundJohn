@@ -1,8 +1,9 @@
 """tests/test_alpaca_executor_dtbp_guard.py — DTBP guard unit tests (mock-only)."""
 from __future__ import annotations
+import os
 import sys, unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
 from execution import alpaca_executor as ae  # noqa: E402
@@ -51,6 +52,19 @@ class TestComputeDtbpSkips(unittest.TestCase):
         opens = [self._open('A', 0.30, 0.30), self._open('B', 0.30, 0.20)]
         acct = {'daytrading_buying_power': 999999.0, 'regt_buying_power': 999999.0}
         self.assertEqual(ae._compute_dtbp_skips(opens, acct, equity=100000.0), set())
+
+
+class TestDtbpGate(unittest.TestCase):
+    def test_default_on_when_unset(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('OPENCLAW_DTBP_GUARD', None)
+            self.assertTrue(ae._dtbp_guard_enabled())
+    def test_off_when_zero(self):
+        with patch.dict(os.environ, {'OPENCLAW_DTBP_GUARD': '0'}):
+            self.assertFalse(ae._dtbp_guard_enabled())
+    def test_on_when_one(self):
+        with patch.dict(os.environ, {'OPENCLAW_DTBP_GUARD': '1'}):
+            self.assertTrue(ae._dtbp_guard_enabled())
 
 
 if __name__ == '__main__':
