@@ -1066,6 +1066,19 @@ def log_run(cur, run_date, regime_state, metrics: dict):
 # MAIN
 # ──────────────────────────────────────────────────────────
 
+def _fatal_exit_code(exc) -> int:
+    """Exit code for a fatal engine error.
+
+    CloseProxyError (the close[t]-proxy snapshot fetch failed entirely) is a
+    data-availability FATAL: return 2 so the LangGraph step node aborts the
+    whole cycle regardless of strict mode. rc=1 is treated as a soft 'warn'
+    that lets the chain continue to handoff/trade — on an empty signal set that
+    would orphan-close the book (the 2026-05-22 failure mode). All other errors
+    keep the legacy rc=1.
+    """
+    return 2 if type(exc).__name__ == 'CloseProxyError' else 1
+
+
 def main():
     import time
     t0       = time.time()
@@ -1195,7 +1208,7 @@ def main():
         except Exception:
             pass
         print(json.dumps({'status': 'error', 'error': str(e)}))
-        sys.exit(1)
+        sys.exit(_fatal_exit_code(e))
     finally:
         cur.close()
         conn.close()
