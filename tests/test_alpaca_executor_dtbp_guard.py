@@ -67,6 +67,19 @@ class TestRecordDtbpSkip(unittest.TestCase):
         conn.commit.assert_called_once()
 
 
+class TestSummaryBpLine(unittest.TestCase):
+    def test_bp_skip_line_counts_dtbp_skips(self):
+        skipped = [{'ticker': 'AMAT', 'reason': 'dtbp_budget_exhausted'},
+                   {'ticker': 'AMD', 'reason': 'dtbp_budget_exhausted'},
+                   {'ticker': 'XYZ', 'reason': 'already executed'}]
+        line = ae._dtbp_summary_line(skipped)
+        self.assertIn('2', line)
+        self.assertIn('buying-power', line.lower())
+    def test_no_line_when_no_bp_skips(self):
+        self.assertEqual(ae._dtbp_summary_line(
+            [{'ticker': 'X', 'reason': 'already executed'}]), '')
+
+
 class TestDtbpGate(unittest.TestCase):
     def test_default_on_when_unset(self):
         with patch.dict(os.environ, {}, clear=False):

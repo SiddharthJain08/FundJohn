@@ -802,6 +802,15 @@ def _dtbp_guard_enabled() -> bool:
     return os.environ.get('OPENCLAW_DTBP_GUARD', '1') != '0'
 
 
+def _dtbp_summary_line(skipped: list) -> str:
+    """One-line buying-power-skip summary, or '' if none were skipped for BP."""
+    bp = [s for s in skipped if s.get('reason') == 'dtbp_budget_exhausted']
+    if not bp:
+        return ''
+    tickers = ', '.join(s['ticker'] for s in bp[:10])
+    return f'⛔ {len(bp)} opens skipped for buying-power (lowest-conviction): {tickers}'
+
+
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
     """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
 
@@ -1683,6 +1692,9 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
         )
         suffix = ' …' if len(skipped) > 8 else ''
         lines.append(f'• rejected:  {reasons}{suffix}')
+    _bp_line = _dtbp_summary_line(skipped)
+    if _bp_line:
+        lines.append(_bp_line)
     msg = '\n'.join(lines)[:1900]
     headers = {'Authorization': f'Bot {token}'}
     try:
