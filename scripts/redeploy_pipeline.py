@@ -76,6 +76,18 @@ def _redis():
         return None
 
 
+def _close_execute_inflight(r, run_date) -> bool:
+    """True if the daily close-execute phase holds the in-flight lock for
+    run_date. The 3:55pm execute sets `execute:close:inflight:{date}` (TTL ~5m);
+    a redeploy must defer rather than race the market-into-close submission."""
+    if r is None:
+        return False
+    try:
+        return bool(r.get(f'execute:close:inflight:{run_date}'))
+    except Exception:
+        return False
+
+
 def _alpaca_clock_is_rth() -> tuple[bool, bool]:
     """Returns (call_succeeded, is_open). Fails safe: any CLI/parse error
     returns (False, False) so the caller blocks the spawn. The Phase 3
@@ -272,6 +284,12 @@ def main(argv=None) -> int:
                 _print_action({
                     'action': 'blocked',
                     'reason': 'same_transition_already_fired',
+                })
+                return 0
+            if _close_execute_inflight(r, run_date):
+                _print_action({
+                    'action': 'blocked',
+                    'reason': 'close_execute_inflight',
                 })
                 return 0
         except Exception as e:
