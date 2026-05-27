@@ -729,6 +729,19 @@ def _exec_priority_for_test(o: dict) -> tuple[int, float]:
     return (tier, -notional)
 
 
+def _dtbp_opening_budget(account: dict) -> float:
+    """Max notional of NEW opening orders the account can fund this cycle.
+
+    = max(0, min(daytrading_buying_power, regt_buying_power)).
+    DTBP is the intraday day-trade limit Alpaca rejects opens against on a
+    PDT account; regt is the Reg-T overnight cap. Missing/negative -> 0.0
+    (fail safe: skip opens rather than over-submit). No headroom by design.
+    """
+    dtbp = float(account.get('daytrading_buying_power') or 0.0)
+    regt = float(account.get('regt_buying_power') or 0.0)
+    return max(0.0, min(dtbp, regt))
+
+
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
     """Poll `alpaca order get <id>` until status='filled' or timeout/terminal.
 
