@@ -351,7 +351,7 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           submitted_at
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
-          alpaca_order_id = EXCLUDED.alpaca_order_id,
+          alpaca_order_id = COALESCE(EXCLUDED.alpaca_order_id, alpaca_submissions.alpaca_order_id),
           alpaca_status   = EXCLUDED.alpaca_status,
           alpaca_http     = EXCLUDED.alpaca_http,
           alpaca_error    = EXCLUDED.alpaca_error,
@@ -385,6 +385,27 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
     ))
     conn.commit()
     cur.close()
+
+
+def _record_dtbp_skip(conn, run_date, order, equity: float) -> None:
+    """Persist a skipped-for-buying-power order as an audit row
+    (alpaca_status='skipped_dtbp', no order id) via record_submission."""
+    notional = round(float(equity) * float(order.get('pct_nav') or 0.0), 2)
+    resp = {
+        'status':   'skipped_dtbp',
+        'qty':      0,
+        'notional': notional,
+        'order_id': None,
+        'http':     None,
+        'reason':   'dtbp_budget_exhausted',
+        'entry':    order.get('entry'),
+    }
+    record_submission(
+        conn, run_date, order, resp,
+        order.get('tif') or 'day',
+        order.get('order_class') or 'simple',
+        '',
+    )
 
 
 def _normalize_alpaca_symbol(raw: str) -> str | None:
@@ -727,6 +748,101 @@ def _exec_priority_for_test(o: dict) -> tuple[int, float]:
     else:
         tier = 3
     return (tier, -notional)
+
+
+def _dtbp_opening_budget(account: dict) -> float:
+    """Max notional of NEW opening orders the account can fund this cycle.
+
+    = max(0, min(daytrading_buying_power, regt_buying_power)).
+    DTBP is the intraday day-trade limit Alpaca rejects opens against on a
+    PDT account; regt is the Reg-T overnight cap. Missing/negative -> 0.0
+    (fail safe: skip opens rather than over-submit). No headroom by design.
+
+    A failed account re-fetch (fetched is explicitly False) returns 0.0 so
+    the guard skips opens rather than over-submitting on stale fallback values.
+    (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
+    """
+    # A failed account re-fetch (fetched is explicitly False) must not be
+    # permissive: return 0 so the guard skips opens rather than over-submit.
+    # (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
+    if account.get('fetched') is False:
+        return 0.0
+    dtbp = float(account.get('daytrading_buying_power') or 0.0)
+    regt = float(account.get('regt_buying_power') or 0.0)
+    return max(0.0, min(dtbp, regt))
+
+
+def _open_conviction(o: dict) -> float:
+    """Conviction rank for an opening order: kelly_final, else pct_nav."""
+    k = o.get('kelly_final')
+    if k is not None:
+        try:
+            return abs(float(k))
+        except (TypeError, ValueError):
+            pass
+    return abs(float(o.get('pct_nav') or 0.0))
+
+
+def _compute_dtbp_skips(open_orders: list, account: dict, equity: float) -> set:
+    """Return the set of (ticker, strategy_id) opening orders to skip because
+    they exceed the day-trade/Reg-T budget. Highest-conviction opens are
+    funded first; at the first open that does not fit the remaining budget,
+    it and ALL lower-conviction opens are skipped. Notional basis =
+    equity * pct_nav."""
+    budget = _dtbp_opening_budget(account)
+    ranked = sorted(open_orders, key=_open_conviction, reverse=True)
+    skips: set = set()
+    remaining = budget
+    cutoff = False
+    for o in ranked:
+        key = (o.get('ticker') or '???', o.get('strategy_id') or 'unknown')
+        notional = float(equity) * float(o.get('pct_nav') or 0.0)
+        if cutoff or notional > remaining:
+            cutoff = True
+            skips.add(key)
+        else:
+            remaining -= notional
+    return skips
+
+
+def _dtbp_guard_enabled() -> bool:
+    """Kill-switch, default ON. Set OPENCLAW_DTBP_GUARD=0 to disable (then
+    the executor behaves byte-identically to the pre-guard path)."""
+    return os.environ.get('OPENCLAW_DTBP_GUARD', '1') != '0'
+
+
+def _dtbp_summary_line(skipped: list) -> str:
+    """One-line buying-power-skip summary, or '' if none were skipped for BP."""
+    bp = [s for s in skipped if s.get('reason') == 'dtbp_budget_exhausted']
+    if not bp:
+        return ''
+    tickers = ', '.join(s['ticker'] for s in bp[:10])
+    return f'⛔ {len(bp)} opens skipped for buying-power (lowest-conviction): {tickers}'
+
+
+def _bp_snapshot(account: dict, run_date, path: str | None = None) -> None:
+    """Append one buying-power snapshot row to logs/bp_snapshots.csv
+    (append-only; header written once). Best-effort — never raises into
+    the executor."""
+    import csv as _csv, datetime as _dt
+    try:
+        p = Path(path) if path else (ROOT / 'logs' / 'bp_snapshots.csv')
+        p.parent.mkdir(parents=True, exist_ok=True)
+        new = not p.exists()
+        with open(p, 'a', newline='') as f:
+            w = _csv.writer(f)
+            if new:
+                w.writerow(['timestamp', 'run_date', 'equity',
+                            'daytrading_buying_power', 'regt_buying_power',
+                            'daytrade_count', 'multiplier'])
+            w.writerow([
+                _dt.datetime.utcnow().isoformat(), str(run_date),
+                account.get('equity'), account.get('daytrading_buying_power'),
+                account.get('regt_buying_power'), account.get('daytrade_count'),
+                account.get('multiplier'),
+            ])
+    except Exception as e:
+        log(f'[dtbp-guard] bp_snapshot write failed: {e}')
 
 
 def _wait_for_fill(order_id: str, timeout: float = 15.0, poll_interval: float = 0.5) -> bool:
@@ -1465,6 +1581,7 @@ def main():
     equity  = account['equity']
     long_mv = account['long_market_value']
     regt_bp = account['regt_buying_power']
+    _bp_snapshot(account, run_date)
 
     # Reset per-run unsupported-asset + asset-meta caches.
     _unsupported_assets.clear()
@@ -1474,7 +1591,8 @@ def main():
     _load_broker_positions()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
-    log(f'[executor] session={session}, submitting {len(orders)} orders (pure sizer output — no executor-side cap)')
+    log(f'[executor] session={session}, {len(orders)} orders queued '
+        f'(DTBP guard {"ON" if _dtbp_guard_enabled() else "OFF"})')
 
     submitted = []
     skipped   = []
@@ -1502,9 +1620,37 @@ def main():
     if flip_tickers:
         log(f'[executor] direction-flip pairs detected for {len(flip_tickers)} tickers: {sorted(flip_tickers)}')
 
+    # DTBP guard: computed lazily at the first opening-tier order so the
+    # re-fetched account reflects buying power freed by the closes above.
+    guard_on = _dtbp_guard_enabled()
+    dtbp_skip_keys: set = set()
+    dtbp_ready = False
+
     for order in orders:
+        if guard_on and not dtbp_ready and _exec_priority_for_test(order)[0] >= 2:
+            acct2 = _fetch_account_state(sess)
+            open_orders = [o for o in orders if _exec_priority_for_test(o)[0] >= 2]
+            dtbp_skip_keys = _compute_dtbp_skips(open_orders, acct2, equity)
+            dtbp_ready = True
+            if dtbp_skip_keys:
+                log(f'[dtbp-guard] budget=${_dtbp_opening_budget(acct2):,.0f} '
+                    f'(DTBP=${acct2.get("daytrading_buying_power",0):,.0f} '
+                    f'regt=${acct2.get("regt_buying_power",0):,.0f}); '
+                    f'skipping {len(dtbp_skip_keys)} low-conviction opens')
+
         sid    = order.get('strategy_id') or 'unknown'
         ticker = order.get('ticker') or '???'
+
+        if guard_on and (ticker, sid) in dtbp_skip_keys \
+                and not already_executed(conn, run_date, sid, ticker):
+            # Dry-run must stay side-effect-free: log the would-skip, don't
+            # write the skipped_dtbp audit row.
+            if args.dry_run:
+                log(f'DRY {ticker} {sid}  would skip (DTBP budget exhausted)')
+            else:
+                _record_dtbp_skip(conn, run_date, order, equity)
+            skipped.append({'ticker': ticker, 'reason': 'dtbp_budget_exhausted'})
+            continue
 
         # Pair-skip: flip_open for a ticker whose flip_close didn't complete
         # must not be submitted — it would oversell into the still-held
@@ -1610,6 +1756,9 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
         )
         suffix = ' …' if len(skipped) > 8 else ''
         lines.append(f'• rejected:  {reasons}{suffix}')
+    _bp_line = _dtbp_summary_line(skipped)
+    if _bp_line:
+        lines.append(_bp_line)
     msg = '\n'.join(lines)[:1900]
     headers = {'Authorization': f'Bot {token}'}
     try:
