@@ -63,5 +63,10 @@
         "news", "sentiment", "press_releases", "earnings_transcripts"
       ]
     }
-  ]
+  ],
+  "crypto_data_taxonomy": {
+    "_comment": "SP-4 advisory — documents which crypto data is backtestable. The capability gate (paperhunter.md Gate 2) rejects any column NOT in a covered_columns list or the canonical set; these 'unavailable' names are intentionally absent from covered_columns so they keep failing.",
+    "available": ["prices (BTC-USD / ETH-USD daily bars, via the canonical prices column)"],
+    "unavailable": ["funding_rate", "perp_oi", "open_interest", "order_book", "spot_vol"]
+  }
 }
