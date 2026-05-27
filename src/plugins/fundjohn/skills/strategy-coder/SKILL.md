@@ -98,11 +98,22 @@ One line to add to `_IMPL_MAP` in `src/strategies/registry.py`:
     "class": "{ClassName}",
     "description": "{signal_logic one-liner from strategy_spec}"
   },
-  "history": []
+  "history": [],
+  "instrument_class": "{instrument_class}"
 }
 ```
 
 Add this under the strategy_id key in the `"strategies"` section of `manifest.json`.
+
+### instrument_class  (REQUIRED — SP-4; top-level, NOT inside metadata)
+Set `"instrument_class"` to the `INFERRED_INSTRUMENT_CLASS` value the orchestrator
+injects into your context — one of `equity` (default) | `option` | `etp` | `crypto`.
+ALSO emit a module-scope constant `INSTRUMENT_CLASS = "{instrument_class}"` in the
+`.py` (right after imports) so the lifecycle can auto-detect it. Per-class signal
+guidance: `option` → `SELL_VOL`/`BUY_VOL` + populate `Signal.option_spec` with an
+`OptionSpec` (underlying ∈ {SPY,SPX,^GSPC,QQQ,IWM}); `crypto` → `LONG`/`FLAT` on
+BTC-USD/ETH-USD; `etp` → `LONG`/`FLAT` on the ETP tickers. If `INFERRED_INSTRUMENT_CLASS`
+is absent, use `equity`.
 
 ## Hard Rules
 - Never edit `src/strategies/base.py` or `src/strategies/lifecycle.py`
