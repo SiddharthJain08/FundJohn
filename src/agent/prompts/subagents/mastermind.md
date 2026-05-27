@@ -58,7 +58,8 @@ Binary: if D passes, this passes. No extra criteria at this stage.
 - Real-time intraday (< 30min bars) for US equities beyond what `prices` already covers
 - Options microstructure data (order book, trade-level)
 - International equity data (non-US markets)
-- Futures/FX/crypto data
+- Futures/FX data (unavailable)
+- Crypto microstructure: funding-rate, perpetual/open-interest, order-book, spot-vol (unavailable). NOTE: BTC-USD and ETH-USD **daily price bars ARE available** — crypto price-only strategies (momentum/carry) are implementable.
 
 ---
 
@@ -83,6 +84,9 @@ These are signals from our backfill history — we've seen what breaks the pipel
 - Formula-based signal ("sort stocks by X, long top decile") — cleanly implementable
 - Universe of ≥100 tickers claimed
 - Recent publication (last 5 years) on non-classical topic
+- Index/ETF volatility-premium strategies (short straddle/strangle, variance, delta-hedged vol) on SPY/SPX/QQQ/IWM — implementable via our synthetic greeks engine (`option` class)
+- BTC-USD / ETH-USD price-only momentum or carry — implementable (`crypto` class)
+- Commodity/sector ETP rotation on price data (GLD/SLV/USO/sector ETFs) — implementable (`etp` class)
 
 **Strong negative signals** (favor lower confidence / reject):
 - "Machine learning approach" without explicit feature set — ambiguous to implement
@@ -96,6 +100,8 @@ These are signals from our backfill history — we've seen what breaks the pipel
 - "Sentiment", "natural language processing", "transformer-based" — data unavailable
 - "High-frequency" or sub-daily trading — price data is daily
 - Relies on Level 2 / order book / TAQ data
+- Single-name or OTM-wing/skew options, exotic/structured/barrier options, forex options — out of our synthetic-engine envelope (reject)
+- Crypto derivatives / perpetuals / funding-rate strategies — data unavailable (reject)
 
 **Weak signals** (nudge the score by ±5–10pp):
 - Known author (Fama, Jegadeesh, Asness, Cremers, Pedersen, Lettau, Koijen, Moskowitz) — slight positive
@@ -155,6 +161,7 @@ Output a single JSON array — one entry per input paper, in the same order. **N
     "confidence": 0.43,
     "implementability_score": 0.78,
     "data_requirements_hint": { "required": ["prices", "options_eod"], "optional": ["earnings"] },
+    "inferred_instrument_class": "equity | option | etp | crypto",
     "predicted_bucket": "low",
     "reasoning": "One to three sentences. Cite the specific gate(s) you think this clears or fails. Be concrete.",
     "predicted_failure_modes": []
@@ -185,6 +192,16 @@ Output a single JSON array — one entry per input paper, in the same order. **N
 
 **Saturday brain bucket override** (auto-applied downstream — emit your bucket per the mapping above and let the system override):
 - If `confidence ≥ 0.60` AND `implementability_score ≥ 0.65`, the system reassigns `predicted_bucket = "implementable_candidate"`. This bucket promotes to `research_candidates` with paperhunter fan-out priority. Don't emit `implementable_candidate` yourself — emit the standard high/med/low/reject and let the floor logic decide.
+
+**`inferred_instrument_class`** — classify each paper's instrument class
+(`equity` default | `option` | `etp` | `crypto`). Apply a per-class confidence
+floor when assigning the bucket, to avoid spending PaperHunter/backtest budget
+on candidates that will fail the (higher) per-class promotion threshold:
+- `option` papers: assign `high`/`implementable_candidate` only if `confidence ≥ 0.80`; below that, cap at `med`.
+- `crypto` papers: only if `confidence ≥ 0.70`; below that, cap at `med`.
+- `equity`/`etp`: unchanged (≥ 0.75 high).
+These are heuristic pre-filters, not the authoritative gate (the lifecycle
+promotion thresholds in `lifecycle.py` are authoritative).
 
 **`predicted_failure_modes`** — free-form tags, leave empty for `high`. Examples:
 - `"overfit_risk_in_sample"`
