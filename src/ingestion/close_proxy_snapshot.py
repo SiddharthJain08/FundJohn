@@ -122,3 +122,27 @@ def fetch_close_proxy(universe, asof_date) -> dict:
     if (equities or cryptos) and not out:
         raise CloseProxyError("close[t]-proxy snapshot fetch produced no prices")
     return out
+
+
+def fetch_open_prices(universe) -> dict:
+    """Return {engine_ticker: today's OPEN price} (dailyBar.o) for equities/ETPs.
+
+    Used by the dashboard-only SOD refresh — NOT a signal input. Best-effort:
+    missing tickers omitted, never raises (dashboard cosmetics must not break
+    anything)."""
+    equities: dict[str, str] = {}
+    for tk in universe or []:
+        a = _to_alpaca_equity(tk)
+        if a:
+            equities[a] = tk
+    out: dict[str, float] = {}
+    syms = list(equities.keys())
+    for i in range(0, len(syms), _CHUNK):
+        res = _run_cli(["data", "multi-snapshots", "--symbols", ",".join(syms[i:i + _CHUNK])])
+        if not isinstance(res, dict):
+            continue
+        for asym, snap in res.items():
+            o = ((snap or {}).get("dailyBar") or {}).get("o")
+            if o:
+                out[equities.get(asym, _from_alpaca_equity(asym))] = float(o)
+    return out
