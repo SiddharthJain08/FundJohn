@@ -1772,11 +1772,14 @@ def main():
                 failed_flip_closes.add(ticker)
                 log(f'  WARN {ticker} flip_close not submitted (status={result.get("status")}); matched open will be skipped')
 
+        if isinstance(result, dict):
+            result.setdefault('action', order.get('action'))   # human-readable label for #trade-reports
         if result.get('status') in ('submitted', 'recovered'):
             submitted.append(result)
             new_notional_total += result.get('notional') or 0.0
         else:
-            skipped.append({'ticker': ticker, 'reason': result.get('reason') or result.get('body') or result.get('status')})
+            skipped.append({'ticker': ticker, 'reason': result.get('reason') or result.get('body') or result.get('status'),
+                            'action': order.get('action')})
 
     conn.close()
     if rth:
@@ -1793,6 +1796,15 @@ def main():
     # case the old _alert_partial covered.
     if submitted or skipped:
         _post_executor_summary(run_date, submitted, skipped, new_notional_total)
+
+
+def _format_submitted_sample(submitted, limit: int = 8) -> str:
+    """#trade-reports sample line — shows the human-readable `action`
+    (reduce_long/flip_to_short/…) so a long-reduction never reads as a 'short'."""
+    return ', '.join(
+        f'{s.get("ticker","?")}:{(s.get("action") or s.get("direction") or "?")} x{s.get("qty","?")}'
+        for s in submitted[:limit]
+    )
 
 
 def _post_executor_summary(run_date, submitted, skipped, notional):
@@ -1816,10 +1828,7 @@ def _post_executor_summary(run_date, submitted, skipped, notional):
         f'orders in · new notional ${notional:,.0f}',
     ]
     if submitted:
-        sample = ', '.join(
-            f'{s.get("ticker","?")}x{s.get("qty","?")}'
-            for s in submitted[:8]
-        )
+        sample = _format_submitted_sample(submitted)
         suffix = ' …' if len(submitted) > 8 else ''
         lines.append(f'• submitted: {sample}{suffix}')
     if skipped:
