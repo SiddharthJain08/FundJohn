@@ -72,3 +72,33 @@ def test_single_leg_long_call_produces_trades():
         assert k in t
     assert isinstance(t['pnl_pct'], float)
     assert t['pnl_pct'] > -1.0
+
+
+class _ShortStraddleStrat(BaseStrategy):
+    id = 'T_short_straddle'; name = 'test straddle'; min_lookback = 30
+    instrument_class = 'option'; MAX_SIGNALS = 1
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']
+
+    def generate_signals(self, prices, regime, universe, aux_data=None):
+        if 'SPY' not in prices.columns or len(prices) != self.min_lookback + 5:
+            return []
+        S = float(prices['SPY'].iloc[-1])
+        return [Signal(ticker='SPY', direction='SELL_VOL', entry_price=S,
+                       stop_loss=S * 0.9, target_1=S * 1.1, target_2=0.0, target_3=0.0,
+                       position_size_pct=0.05, confidence='MED',
+                       option_spec=OptionSpec(underlying='SPY', structure='straddle',
+                                              hedge='delta', dte_target=30, roll_dte=7))]
+
+
+def test_short_straddle_with_delta_hedge_produces_trade():
+    # Calm tape (low realized vol) but priced with a VRP markup → short vol earns the premium.
+    close_wide, bars = _trending_panels(drift=0.0, seed=7)
+    regimes = pd.Series('LOW_VOL', index=close_wide.index)
+    inst = _ShortStraddleStrat()
+    out = options_backtest.simulate(inst, close_wide, bars, regimes,
+                                    close_wide.index[0], close_wide.index[-1],
+                                    strategy_id='T_short_straddle', vrp_factor=1.3)
+    assert len(out['trades']) >= 1
+    t = out['trades'][0]
+    assert t['direction'] == 'short'
+    assert 'hedge_pnl_pct' in t
