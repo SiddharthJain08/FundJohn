@@ -1556,7 +1556,8 @@ def main():
     _load_broker_positions()
 
     log(f'Account equity ${equity:,.2f}  long_mv ${long_mv:,.2f}  regt_bp ${regt_bp:,.2f}')
-    log(f'[executor] session={session}, submitting {len(orders)} orders (pure sizer output — no executor-side cap)')
+    log(f'[executor] session={session}, {len(orders)} orders queued '
+        f'(DTBP guard {"ON" if _dtbp_guard_enabled() else "OFF"})')
 
     submitted = []
     skipped   = []
@@ -1584,9 +1585,31 @@ def main():
     if flip_tickers:
         log(f'[executor] direction-flip pairs detected for {len(flip_tickers)} tickers: {sorted(flip_tickers)}')
 
+    # DTBP guard: computed lazily at the first opening-tier order so the
+    # re-fetched account reflects buying power freed by the closes above.
+    guard_on = _dtbp_guard_enabled()
+    dtbp_skip_keys: set = set()
+    dtbp_ready = False
+
     for order in orders:
+        if guard_on and not dtbp_ready and _exec_priority_for_test(order)[0] >= 2:
+            acct2 = _fetch_account_state(sess)
+            open_orders = [o for o in orders if _exec_priority_for_test(o)[0] >= 2]
+            dtbp_skip_keys = _compute_dtbp_skips(open_orders, acct2, equity)
+            dtbp_ready = True
+            if dtbp_skip_keys:
+                log(f'[dtbp-guard] budget=${_dtbp_opening_budget(acct2):,.0f} '
+                    f'(DTBP=${acct2.get("daytrading_buying_power",0):,.0f} '
+                    f'regt=${acct2.get("regt_buying_power",0):,.0f}); '
+                    f'skipping {len(dtbp_skip_keys)} low-conviction opens')
+
         sid    = order.get('strategy_id') or 'unknown'
         ticker = order.get('ticker') or '???'
+
+        if guard_on and (ticker, sid) in dtbp_skip_keys:
+            _record_dtbp_skip(conn, run_date, order, equity)
+            skipped.append({'ticker': ticker, 'reason': 'dtbp_budget_exhausted'})
+            continue
 
         # Pair-skip: flip_open for a ticker whose flip_close didn't complete
         # must not be submitted — it would oversell into the still-held
