@@ -148,3 +148,11 @@ def test_parity_mae_helper():
     m = mae_fraction(synth, real)
     # mean(|.1|/1.1, |.2|/1.8, |.3|/3.3) ≈ mean(0.0909,0.111,0.0909)=0.0976
     assert abs(m - 0.0976) < 0.01
+
+
+def test_iv_mae_helper_perfect_match_is_zero():
+    from scripts.options_parity_check import iv_mae
+    # identical synthetic vs real IV -> 0 MAE
+    assert iv_mae([0.2, 0.3, 0.25], [0.2, 0.3, 0.25]) == 0.0
+    # 10% high across the board -> 0.10 MAE
+    assert abs(iv_mae([0.22, 0.33], [0.20, 0.30]) - 0.10) < 1e-9
