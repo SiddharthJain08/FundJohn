@@ -351,7 +351,7 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           submitted_at
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
-          alpaca_order_id = EXCLUDED.alpaca_order_id,
+          alpaca_order_id = COALESCE(EXCLUDED.alpaca_order_id, alpaca_submissions.alpaca_order_id),
           alpaca_status   = EXCLUDED.alpaca_status,
           alpaca_http     = EXCLUDED.alpaca_http,
           alpaca_error    = EXCLUDED.alpaca_error,
@@ -1641,7 +1641,8 @@ def main():
         sid    = order.get('strategy_id') or 'unknown'
         ticker = order.get('ticker') or '???'
 
-        if guard_on and (ticker, sid) in dtbp_skip_keys:
+        if guard_on and (ticker, sid) in dtbp_skip_keys \
+                and not already_executed(conn, run_date, sid, ticker):
             # Dry-run must stay side-effect-free: log the would-skip, don't
             # write the skipped_dtbp audit row.
             if args.dry_run:

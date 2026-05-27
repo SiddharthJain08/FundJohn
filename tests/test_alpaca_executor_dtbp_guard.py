@@ -109,6 +109,17 @@ class TestDtbpGate(unittest.TestCase):
             self.assertTrue(ae._dtbp_guard_enabled())
 
 
+class TestRecordSubmissionCoalesce(unittest.TestCase):
+    def test_conflict_clause_coalesces_order_id(self):
+        # A skip-record (order_id=None) must NOT be able to null an existing
+        # real alpaca_order_id via the ON CONFLICT update.
+        conn = MagicMock(); cur = MagicMock(); conn.cursor.return_value = cur
+        order = {'ticker': 'AMAT', 'strategy_id': 'S_x', 'direction': 'long', 'pct_nav': 0.05}
+        ae._record_dtbp_skip(conn, '2026-05-27', order, equity=110000.0)
+        sql = cur.execute.call_args[0][0]
+        self.assertIn('COALESCE(EXCLUDED.alpaca_order_id', sql)
+
+
 class TestBpSnapshot(unittest.TestCase):
     def test_appends_csv_row_with_header(self):
         import tempfile, csv
