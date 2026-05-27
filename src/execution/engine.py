@@ -193,7 +193,14 @@ def load_approved_strategies(cur):
 # ──────────────────────────────────────────────────────────
 
 def load_prices(universe: list) -> pd.DataFrame:
-    """Load master price parquet; pivot to wide format (date index × ticker columns, close prices)."""
+    """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
+
+    When OPENCLAW_CLOSE_PROXY_SNAPSHOT=1, append a today-dated (ET) row from a
+    live close[t]-proxy snapshot so live signal generation mirrors the backtests'
+    close[t] decision. The proxy fetch is deliberately OUTSIDE the parquet
+    try/except: a CloseProxyError MUST propagate (abort the signals step), never
+    be swallowed into an empty frame that would orphan-close the whole book.
+    """
     master_path = ROOT / 'data' / 'master' / 'prices.parquet'
     if not master_path.exists():
         logger.warning(f"Master prices not found at {master_path}")
@@ -206,11 +213,21 @@ def load_prices(universe: list) -> pd.DataFrame:
         cols = [c for c in universe if c in wide.columns]
         if cols:
             wide = wide[cols]
-        logger.info(f"Prices loaded: {wide.shape[1]} tickers × {wide.shape[0]} dates")
-        return wide
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
+
+    # close[t]-proxy injection — OUTSIDE the try so CloseProxyError propagates.
+    if os.environ.get('OPENCLAW_CLOSE_PROXY_SNAPSHOT') == '1':
+        from ingestion.close_proxy_snapshot import fetch_close_proxy
+        today = pd.Timestamp.now(tz='America/New_York').normalize().tz_localize(None)
+        proxy = fetch_close_proxy(list(wide.columns), today)
+        if today not in wide.index:
+            wide.loc[today] = pd.Series(proxy).reindex(wide.columns)
+            wide.sort_index(inplace=True)
+
+    logger.info(f"Prices loaded: {wide.shape[1]} tickers × {wide.shape[0]} dates")
+    return wide
 
 
 def load_aux_data(universe: list) -> dict:
