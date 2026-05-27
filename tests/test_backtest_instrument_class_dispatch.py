@@ -87,3 +87,13 @@ def test_main_all_live_threads_per_strategy(monkeypatch):
 def test_resolution_composes_with_dispatch():
     # End-to-end link without running a backtest: resolved class -> correct sim fn.
     assert ub._simulate_for(ub._resolve_instrument_class('S_short_straddle_vrp')) is options_backtest.simulate
+
+
+def test_equity_strategy_resolves_equity_and_dispatches_per_bar():
+    # Byte-identity guard: a normal equity strategy still resolves to 'equity'
+    # and dispatches to _per_bar_simulate (the change is confined to 'option').
+    strategies = json.load(open(ROOT / 'src' / 'strategies' / 'manifest.json'))['strategies']
+    equity_sid = next(sid for sid, e in strategies.items()
+                      if e.get('instrument_class', 'equity') == 'equity')
+    assert ub._resolve_instrument_class(equity_sid) == 'equity'
+    assert ub._simulate_for(ub._resolve_instrument_class(equity_sid)).__name__ == '_per_bar_simulate'
