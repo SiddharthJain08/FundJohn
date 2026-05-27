@@ -114,3 +114,19 @@ def test_roll_produces_multiple_cycles_over_long_hold():
                                     max_hold_days=120)
     # 120 trading days / ~30-DTE rolls → expect >1 cycle from the single signal
     assert len(out['trades']) >= 2
+
+
+def test_delta_hedge_reduces_directional_loss_and_has_signal_keys():
+    import numpy as np, pandas as pd
+    from backtest import options_backtest as ob
+    from strategies.base import OptionSpec
+    idx = pd.date_range('2022-01-03', periods=90, freq='B')
+    trend = pd.Series(100 * np.cumprod(1 + np.full(90, 0.005)), index=idx)  # +0.5%/day
+    hedged = OptionSpec(underlying='X', structure='straddle', hedge='delta', dte_target=30, roll_dte=7)
+    naked  = OptionSpec(underlying='X', structure='straddle', hedge='none',  dte_target=30, roll_dte=7)
+    ch = ob._price_multileg_cycle(hedged, trend, idx[0], -1, 1.2, 21, 30)
+    cn = ob._price_multileg_cycle(naked,  trend, idx[0], -1, 1.2, 21, 30)
+    # short straddle in an up-trend: delta-hedge must shrink the directional loss
+    assert abs(ch['pnl_pct']) < abs(cn['pnl_pct'])
+    assert ch['hedge_pnl_pct'] > 0           # long-share hedge gains in the up-move
+    assert ch['signal_stop'] is None and ch['signal_target'] is None

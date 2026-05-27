@@ -10,8 +10,11 @@ contract per signal on a 100x multiplier; pnl_pct = cycle_pnl / (entry_S*100)
 + roll/expiry land in later tasks.
 """
 from __future__ import annotations
+import logging
 import pandas as pd
 from datetime import date
+
+logger = logging.getLogger(__name__)
 
 from backtest.options_pricing import (bs_price, bs_greeks, strike_for_target_delta,
                                        nearest_monthly_expiry, RISK_FREE)
@@ -19,6 +22,7 @@ from backtest.synthetic_iv import synthetic_iv
 
 MULTIPLIER = 100.0
 COST_PER_CONTRACT_BPS = 5.0  # mirrors INSTRUMENT_COST_BPS['option']; on premium notional
+HEDGE_COST_PER_SHARE_BPS = 1.0  # bps charged on hedge notional traded each rebalance + closeout
 
 
 def _as_date(ts) -> date:
@@ -67,12 +71,11 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
         return sum(bs_greeks(f, S, K, max(t, 1e-6), sig)['delta'] for f, K in legs)
 
     hedge_units = 0.0
-    hedge_cost_bps = 1.0
     hedge_pnl = 0.0
     prev_S = S0
     if spec.hedge == 'delta':
         target_units = -sign * net_delta(S0, t0, sigma0) * MULTIPLIER
-        hedge_pnl -= abs(target_units - hedge_units) * S0 * (hedge_cost_bps / 1e4)
+        hedge_pnl -= abs(target_units - hedge_units) * S0 * (HEDGE_COST_PER_SHARE_BPS / 1e4)
         hedge_units = target_units
 
     exit_dt = exit_prem = reason = None
@@ -91,7 +94,7 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
             exit_dt, reason = dt, 'roll'; break
         if spec.hedge == 'delta':
             target_units = -sign * net_delta(S, dte / 365.0, sig_t) * MULTIPLIER
-            hedge_pnl -= abs(target_units - hedge_units) * S * (hedge_cost_bps / 1e4)
+            hedge_pnl -= abs(target_units - hedge_units) * S * (HEDGE_COST_PER_SHARE_BPS / 1e4)
             hedge_units = target_units
     if exit_dt is None:
         dt = fut[:max_hold_days][-1]; S = float(close.loc[dt]); cur = _as_date(dt)
@@ -101,6 +104,8 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
                      if dte > 0 else sum(max(0.0, (S - K) if f == 'c' else (K - S)) for f, K in legs))
         exit_dt, reason = dt, 'max_hold'
 
+    # Liquidate the residual hedge at the exit bar (closeout friction).
+    hedge_pnl -= abs(hedge_units) * S * (HEDGE_COST_PER_SHARE_BPS / 1e4)
     cost = (entry_prem + exit_prem) * (COST_PER_CONTRACT_BPS / 1e4)
     option_pnl = sign * (exit_prem - entry_prem) * MULTIPLIER - cost * MULTIPLIER
     cycle_pnl = option_pnl + hedge_pnl
@@ -113,6 +118,7 @@ def _price_multileg_cycle(spec, close, entry_dt, sign, vrp_factor, window, max_h
         'option_pnl_pct': float(option_pnl / base),
         'hedge_pnl_pct': float(hedge_pnl / base),
         'expiry': expiry.isoformat(), 'iv_entry': round(sigma0, 4),
+        'signal_stop': None, 'signal_target': None,
     }
 
 
@@ -167,6 +173,7 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
         'entry_price': round(entry_premium, 4), 'exit_price': round(exit_premium, 4),
         'exit_reason': reason, 'holding_days': held, 'pnl_pct': float(pnl_pct),
         'strike': round(K, 2), 'expiry': expiry.isoformat(), 'iv_entry': round(sigma0, 4),
+        'signal_stop': None, 'signal_target': None,
     }
 
 
@@ -198,6 +205,8 @@ def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
         except TypeError:
             signals = instance.generate_signals(prices_to_date, regime_payload, static_universe)
         except Exception:
+            logger.warning('[options_backtest] %s generate_signals failed on %s',
+                           getattr(instance, 'id', '?'), _as_date(current_date), exc_info=True)
             continue
         days_processed += 1
         if not signals:
