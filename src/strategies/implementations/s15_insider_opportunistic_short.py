@@ -17,6 +17,7 @@ from ..base import BaseStrategy, Signal
 # ── Transaction-type filter ─────────────────────────────────────────────────
 
 _QUALIFYING_SALE_TYPES = {'S-SALE', 'S'}
+_QUALIFYING_BUY_TYPES = {'P-PURCHASE', 'P'}
 
 
 def qualifying_sales(txns: Iterable[dict]) -> list[dict]:
@@ -307,7 +308,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             sales = qualifying_sales(window_txns)
             buys = [
                 t for t in window_txns
-                if (t.get('transactionType') or '').upper() in ('P-PURCHASE', 'P')
+                if (t.get('transactionType') or '').upper() in _QUALIFYING_BUY_TYPES
             ]
 
             # Stage 1

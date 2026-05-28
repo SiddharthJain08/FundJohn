@@ -318,10 +318,17 @@ def test_generate_signals_empty_in_crisis_regime(monkeypatch):
 
 
 def _build_aux_for_cluster(ticker, sales, history_per_seller):
-    """Build aux_data with both short and long insider slices."""
+    """Build aux_data with both short and long insider slices.
+
+    The production aux loader serves a 450-day trailing window in
+    `insider_history_long` that does NOT contain the same-day cluster sales
+    (those live only in `insider_txns`, the 45-day current-window slice).
+    Mirror that semantics in the fixture: long-history slice carries only
+    the per-seller historical txns, not the current cluster.
+    """
     return {
         'insider_txns':         {ticker: sales},
-        'insider_history_long': {ticker: sum(history_per_seller.values(), []) + sales},
+        'insider_history_long': {ticker: sum(history_per_seller.values(), [])},
     }
 
 
