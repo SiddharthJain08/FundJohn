@@ -261,3 +261,56 @@ def test_conviction_filter_missing_shares_owned_after():
     ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10)
     assert ok is True
     assert meta['c_suite_present'] is True
+
+
+import os
+import numpy as np
+from src.strategies.implementations.s15_insider_opportunistic_short import (
+    OpportunisticInsiderShort,
+)
+
+
+def _make_prices(tickers=('AAA',), days=30):
+    idx = pd.date_range('2026-04-01', periods=days, freq='D')
+    return pd.DataFrame({t: np.linspace(100, 110, days) for t in tickers}, index=idx)
+
+
+def test_strategy_metadata():
+    s = OpportunisticInsiderShort()
+    assert s.id == 'S15_insider_opportunistic_short'
+    assert s.tier == 2
+    assert s.active_in_regimes == ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
+    assert s.signal_frequency == 'daily'
+
+
+def test_strategy_default_parameters():
+    s = OpportunisticInsiderShort()
+    p = s.default_parameters()
+    assert p['min_insiders'] == 3
+    assert p['min_net_sell_value'] == 5_000_000
+    assert p['min_opportunistic_count'] == 2
+    assert p['min_personal_stake_pct'] == 0.10
+    assert p['base_size_pct'] == 0.015
+    assert p['max_concurrent_positions'] == 20
+    assert p['wide_stop_pct'] == 0.15
+    assert p['cooldown_after_stop_days'] == 30
+
+
+def test_generate_signals_empty_when_gate_off(monkeypatch):
+    """No env var → empty signals."""
+    monkeypatch.delenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', raising=False)
+    s = OpportunisticInsiderShort()
+    prices = _make_prices(['AAA', 'BBB'])
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['AAA', 'BBB'], aux_data={})
+    assert signals == []
+
+
+def test_generate_signals_empty_in_crisis_regime(monkeypatch):
+    """CRISIS regime excluded from active_in_regimes — emit nothing."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    prices = _make_prices(['AAA'])
+    regime = {'state': 'CRISIS'}
+    signals = s.generate_signals(prices, regime, ['AAA'], aux_data={})
+    assert signals == []

@@ -9,7 +9,9 @@ Spec: docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.m
 
 from __future__ import annotations
 from typing import Iterable
+import os
 import pandas as pd
+from ..base import BaseStrategy, Signal
 
 
 # ── Transaction-type filter ─────────────────────────────────────────────────
@@ -190,3 +192,52 @@ def conviction_filter(
     if c_suite_present:
         return True, meta
     return False, meta
+
+
+# ── Strategy class ──────────────────────────────────────────────────────────
+
+class OpportunisticInsiderShort(BaseStrategy):
+    id                = 'S15_insider_opportunistic_short'
+    name              = 'Opportunistic Insider Cluster Short'
+    description       = ("SHORT clusters of insider sales where opportunistic "
+                         "sellers dominate and conviction filter passes "
+                         "(>=10% personal stake or C-suite present).")
+    tier              = 2
+    signal_frequency  = 'daily'
+    min_lookback      = 20
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
+
+    def default_parameters(self) -> dict:
+        return {
+            # Stage 1 (cluster gate)
+            'min_insiders':              3,
+            'min_net_sell_value':        5_000_000,
+            # Stage 2 (opportunistic classifier)
+            'min_opportunistic_count':   2,
+            # Stage 3 (conviction filter)
+            'min_personal_stake_pct':    0.10,
+            # Position management
+            'base_size_pct':             0.015,
+            'max_concurrent_positions':  20,
+            'wide_stop_pct':             0.15,
+            'cooldown_after_stop_days':  30,
+            # Window for Stage 1 (calendar days)
+            'short_lookback_days':       30,
+        }
+
+    def generate_signals(self, prices, regime, universe, aux_data=None) -> list:
+        # Gate check (default OFF)
+        if os.environ.get('OPENCLAW_S15_INSIDER_OPPORTUNISTIC') != '1':
+            return []
+
+        # Regime check
+        regime_state = regime.get('state', 'LOW_VOL')
+        if not self.should_run(regime_state):
+            return []
+
+        # No data → no signals
+        if prices is None or prices.empty:
+            return []
+
+        # Stub: full Stage 1/2/3 wiring comes in Task 7
+        return []
