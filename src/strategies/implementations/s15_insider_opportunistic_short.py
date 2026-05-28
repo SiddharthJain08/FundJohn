@@ -239,9 +239,151 @@ class OpportunisticInsiderShort(BaseStrategy):
         if not self.should_run(regime_state):
             return []
 
-        # No data → no signals
         if prices is None or prices.empty:
             return []
 
-        # Stub: full Stage 1/2/3 wiring comes in Task 7
-        return []
+        p = self.parameters
+        scale = self.position_scale(regime_state)
+
+        # Reference date: last bar in prices
+        ref_date = prices.index[-1]
+        if isinstance(ref_date, str):
+            ref_date = pd.to_datetime(ref_date)
+
+        # Stage 1 cluster window
+        short_lookback = int(p['short_lookback_days'])
+        stage1_cutoff = ref_date - pd.Timedelta(days=short_lookback)
+
+        # Aux data slices
+        short_txns_all = (aux_data or {}).get('insider_txns', {}) or {}
+        long_history_all = (aux_data or {}).get('insider_history_long', {}) or {}
+
+        # Cooldown
+        recent_stops = (aux_data or {}).get('recent_stop_outs') or {}
+        cooldown_days = int(p['cooldown_after_stop_days'])
+
+        # Disable Stage 2 only via ablation env var (Task 9 introduces this).
+        # Read here so Task 9 doesn't need to re-touch this function.
+        ablate_classifier = (
+            os.environ.get('OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER') == '1'
+        )
+
+        candidates: list = []
+
+        for ticker in universe:
+            if ticker not in prices.columns:
+                continue
+
+            # Cooldown gate
+            last_stop = recent_stops.get(ticker)
+            if last_stop is not None:
+                try:
+                    last_stop_ts = pd.to_datetime(last_stop)
+                    if (ref_date - last_stop_ts).days < cooldown_days:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            # Fast-fail: no insider data
+            ticker_txns = short_txns_all.get(ticker, [])
+            if not ticker_txns:
+                continue
+
+            # Filter Stage 1 window
+            window_txns = []
+            for t in ticker_txns:
+                td_raw = t.get('transactionDate') or t.get('transaction_date')
+                if td_raw is None:
+                    continue
+                try:
+                    td = pd.to_datetime(td_raw)
+                except (TypeError, ValueError):
+                    continue
+                if td < stage1_cutoff or td > ref_date:
+                    continue
+                window_txns.append(t)
+
+            # Split into sales / buys (qualifying types)
+            sales = qualifying_sales(window_txns)
+            buys = [
+                t for t in window_txns
+                if (t.get('transactionType') or '').upper() in ('P-PURCHASE', 'P')
+            ]
+
+            # Stage 1
+            ok1, meta1 = cluster_gate(
+                sales, buys,
+                min_insiders=p['min_insiders'],
+                min_net_value=p['min_net_sell_value'],
+            )
+            if not ok1:
+                continue
+
+            # Stage 2: opportunistic classifier
+            seller_names = {(s.get('reportingName') or '').strip()
+                            for s in sales
+                            if (s.get('reportingName') or '').strip()}
+            seller_history = long_history_all.get(ticker, [])
+
+            opp_count = 0
+            routine_count = 0
+            for name in seller_names:
+                this_seller_history = [
+                    h for h in seller_history
+                    if (h.get('reportingName') or '').strip() == name
+                ]
+                kind = classify_insider(this_seller_history, ref_date)
+                if kind == 'opportunistic':
+                    opp_count += 1
+                else:
+                    routine_count += 1
+
+            if not ablate_classifier:
+                if opp_count < int(p['min_opportunistic_count']):
+                    continue
+
+            # Stage 3
+            ok3, meta3 = conviction_filter(
+                sales,
+                min_personal_stake_pct=p['min_personal_stake_pct'],
+            )
+            if not ok3:
+                continue
+
+            # Build the signal
+            ts = prices[ticker].dropna()
+            if len(ts) < self.min_lookback:
+                continue
+            current_price = float(ts.iloc[-1])
+            if current_price <= 0:
+                continue
+
+            stops = self.compute_stops_and_targets(
+                ts, 'SHORT', current_price, regime_state=regime_state
+            )
+            wide_stop_floor = current_price * (1.0 + float(p['wide_stop_pct']))
+            stop_value = max(stops.get('stop', wide_stop_floor), wide_stop_floor)
+
+            candidates.append(Signal(
+                ticker            = ticker,
+                direction         = 'SHORT',
+                entry_price       = current_price,
+                stop_loss         = stop_value,
+                target_1          = None,
+                target_2          = None,
+                target_3          = None,
+                position_size_pct = round(float(p['base_size_pct']) * scale, 4),
+                confidence        = 'HIGH',
+                signal_params     = {
+                    'distinct_insiders':           meta1['distinct_insiders'],
+                    'opportunistic_count':         opp_count,
+                    'routine_count':               routine_count,
+                    'net_sell_value':              round(meta1['net_sell_value'], 0),
+                    'top_seller_pct_of_holdings':  round(meta3['top_seller_pct_of_holdings'], 4),
+                    'c_suite_present':             bool(meta3['c_suite_present']),
+                    'lookback_days':               short_lookback,
+                    'cluster_kind':                'SELL_OPPORTUNISTIC',
+                },
+            ))
+
+        return candidates[:int(p['max_concurrent_positions'])]

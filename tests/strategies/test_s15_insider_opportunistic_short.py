@@ -315,3 +315,164 @@ def test_generate_signals_empty_in_crisis_regime(monkeypatch):
     regime = {'state': 'CRISIS'}
     signals = s.generate_signals(prices, regime, ['AAA'], aux_data={})
     assert signals == []
+
+
+def _build_aux_for_cluster(ticker, sales, history_per_seller):
+    """Build aux_data with both short and long insider slices."""
+    return {
+        'insider_txns':         {ticker: sales},
+        'insider_history_long': {ticker: sum(history_per_seller.values(), []) + sales},
+    }
+
+
+def _seller_history(name, role, n_quarters_with_sales, value_each=1_000_000):
+    """Build a synthetic seller history with N distinct quarters in the t-15..t-3 window."""
+    txns = []
+    quarter_dates = [
+        '2025-04-20',
+        '2025-07-20',
+        '2025-10-20',
+        '2026-01-20',
+    ]
+    for d in quarter_dates[:n_quarters_with_sales]:
+        txns.append({
+            'transactionDate':  d,
+            'transactionType':  'S-Sale',
+            'reportingName':    name,
+            'role':             role,
+            'value':            value_each,
+            'shares':           5_000,
+            'sharesOwnedAfter': 100_000,
+        })
+    return txns
+
+
+def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatch):
+    """Cluster: 3 insiders, $6M, 0 buys, 2 opportunistic, CEO present → SHORT signal."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'CEO Person', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Alice', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Bob', 'role': 'officer: SVP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'CEO Person': _seller_history('CEO Person', 'officer: CEO', n_quarters_with_sales=1),
+        'VP Alice':   _seller_history('VP Alice',   'officer: VP',  n_quarters_with_sales=1),
+        'VP Bob':     _seller_history('VP Bob',     'officer: SVP', n_quarters_with_sales=1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert len(signals) == 1
+    sig = signals[0]
+    assert sig.ticker == 'TGT'
+    assert sig.direction == 'SHORT'
+    assert sig.confidence == 'HIGH'
+    entry = sig.entry_price
+    assert sig.stop_loss >= entry * 1.15 - 0.01
+    assert sig.target_1 is None
+    assert sig.target_2 is None
+    assert sig.target_3 is None
+    assert sig.signal_params['cluster_kind'] == 'SELL_OPPORTUNISTIC'
+    assert sig.signal_params['opportunistic_count'] >= 2
+
+
+def test_generate_signals_does_not_fire_on_routine_cluster(monkeypatch):
+    """Same cluster sizes but all 3 sellers classify as routine → no signal."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine A', 'role': 'officer: CEO',
+         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine B', 'role': 'officer: CFO',
+         'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine C', 'role': 'officer: VP',
+         'value': 5_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'Routine A': _seller_history('Routine A', 'officer: CEO', 4),
+        'Routine B': _seller_history('Routine B', 'officer: CFO', 4),
+        'Routine C': _seller_history('Routine C', 'officer: VP',  4),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert signals == []
+
+
+def test_generate_signals_fails_cluster_with_offsetting_buy(monkeypatch):
+    """3 sellers with $6M but 1 buy in the same window → fail Stage 1."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'A', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'B', 'role': 'officer: VP',
+         'value': 2_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'C', 'role': 'officer: VP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-09', 'transactionType': 'P-Purchase',
+         'reportingName': 'D', 'role': 'officer: VP', 'value': 500_000,
+         'shares': 1_000, 'sharesOwnedAfter': 5_000},
+    ]
+    history_per_seller = {
+        'A': _seller_history('A', 'officer: CEO', 1),
+        'B': _seller_history('B', 'officer: VP', 1),
+        'C': _seller_history('C', 'officer: VP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert signals == []
+
+
+def test_generate_signals_respects_cooldown(monkeypatch):
+    """If ticker has a recent stop-out within cooldown window, skip."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'A', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'B', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'C', 'role': 'officer: VP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'A': _seller_history('A', 'officer: CEO', 1),
+        'B': _seller_history('B', 'officer: VP', 1),
+        'C': _seller_history('C', 'officer: VP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    # Recent stop-out 10 days ago — within 30-day cooldown
+    aux['recent_stop_outs'] = {'TGT': pd.Timestamp('2026-05-05')}
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert signals == []
