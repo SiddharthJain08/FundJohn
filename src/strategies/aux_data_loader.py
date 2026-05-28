@@ -177,8 +177,16 @@ def _build_insider_index() -> None:
         # Use to_dict('records') for vectorized loading — 50x faster than iterrows().
         ins['_dp_str'] = pd.to_datetime(ins['date'], errors='coerce').dt.strftime('%Y-%m-%d')
         ins = ins.dropna(subset=['_dp_str'])
-        records = ins[['ticker', '_dp_str', 'date', 'transaction_type',
-                       'insider_name', 'net_value', 'shares']].to_dict('records')
+        # Project the parquet columns we surface to strategies. role +
+        # shares_owned_after are required by S15's Stage 3 conviction filter
+        # (C-suite role check + personal-stake calculation); their absence
+        # silently blocks every S15 signal on real data.
+        projected_cols = ['ticker', '_dp_str', 'date', 'transaction_type',
+                          'insider_name', 'net_value', 'shares']
+        for opt_col in ('role', 'shares_owned_after'):
+            if opt_col in ins.columns:
+                projected_cols.append(opt_col)
+        records = ins[projected_cols].to_dict('records')
         # Group by calendar date of transaction for binary-search index.
         by_date: dict = defaultdict(lambda: defaultdict(list))
         for r in records:
@@ -192,13 +200,18 @@ def _build_insider_index() -> None:
                 txn_ts = pd.Timestamp(ds)
             except Exception:
                 txn_ts = ds  # fallback to string if parsing fails
-            by_date[ds][str(r.get('ticker', ''))].append({
+            role_raw = r.get('role')
+            after_raw = r.get('shares_owned_after')
+            txn = {
                 'transactionDate': txn_ts,
                 'transactionType': str(r.get('transaction_type', '') or ''),
                 'reportingName':   str(r.get('insider_name', '') or ''),
                 'value':           float(r.get('net_value', 0) or 0),
                 'shares':          float(r.get('shares', 0) or 0),
-            })
+                'role':            str(role_raw) if role_raw is not None and not pd.isna(role_raw) else None,
+                'sharesOwnedAfter': float(after_raw) if after_raw is not None and not pd.isna(after_raw) else None,
+            }
+            by_date[ds][str(r.get('ticker', ''))].append(txn)
         _INSIDER_DATE_INDEX = sorted(by_date.keys())
         _INSIDER_BY_DATE = {d: dict(tickers) for d, tickers in by_date.items()}
         log.info('aux_data_loader: insider index built date_count=%d tickers=%d rows=%d',
