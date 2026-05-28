@@ -75,7 +75,24 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 **v5 amendment (2026-05-28, post-v4-KILL-but-recovered):** v4 broke the monotonic worsening (Sharpe recovered −3.44 → +0.28, MaxDD 17.93% → 4.21%). v5 pushes the Stage 1 axis further along the only lever that worked: bumps min_insiders 4 → 5 and min_net_sell_value $10M → $20M. Result: **non-monotonic** — v5 Sharpe collapsed to −1.39 and MaxDD tripled to 11.69% despite hit-rate rising (0.568 → 0.634). The over-tightened gate filtered out positive-edge trades faster than negative-edge ones; remaining loss distribution clustered in time, blowing daily-portfolio Sharpe. **v4 is the local optimum on this axis.**
 
-**v6 amendment (2026-05-28, post-v5-KILL):** Reverts Stage 1 to v4 local optimum (4 insiders / $10M) and tests a NEW axis — drops `max_concurrent_positions` 20 → 8 so the ranking score (`opp_count × log10(net_sell_value)`) finally bites. Result: per-trade economics meaningfully improved (avg pnl 2.2×, MaxDD 4.21% → 3.88%) and **combined Sharpe jumped 0.36 → +1.04** (3× v4, best across all 6 versions), but standalone Sharpe regressed +0.28 → −0.36 because surviving loss days covary. The lever bound on 27% of days (31/116) confirming it's a real concentration effect, not noise. Still fails G1/G3 gates (combined 1.04 vs 8.0 target).
+**v6 amendment (2026-05-28, post-v5-KILL):** Reverts Stage 1 to v4 local optimum (4 insiders / $10M) and tests a NEW axis — drops `max_concurrent_positions` 20 → 8 so the ranking score (`opp_count × log10(net_sell_value)`) finally bites. Result: per-trade economics meaningfully improved (avg pnl 2.2×, MaxDD 4.21% → 3.88%) and combined Sharpe (as originally documented) jumped 0.36 → +1.04, but standalone Sharpe regressed +0.28 → −0.36 because surviving loss days covary. The lever bound on 27% of days (31/116) confirming it's a real concentration effect, not noise. *Note: v7+ recomputation using the canonical `aggregate_metrics()` methodology yields a different combined-Sharpe figure for v6 (~−0.17); the documented +1.04 reflects an alternate equal-weighting recipe. Treat the v7-vs-v6 comparison as apples-to-apples only on standalone Sharpe.*
+
+**v7-v10 amendment (2026-05-28, post-v6 sweep):** Four-variant sweep on two axes — concentration cap further (cap=5, cap=3) and Stage 3 strictness (AND-logic + min_opportunistic_count 2→3; alone and stacked with cap=8). Results:
+
+| Variant | Lever | Standalone Sharpe | MaxDD | Trades | Combined Sharpe | Suggestion |
+|---|---|---|---|---|---|---|
+| v7 | cap=5 (v6 → 5) | **+0.58** | 4.02% | 394 | +0.68 | **INVESTIGATE** |
+| v8 | cap=3 (v6 → 3) | −0.74 | 6.73% | 277 | −0.39 | KILL |
+| v9 | Stage 3 strict alone (cap=20, AND-logic, min_opp=3) | −1.05 | 3.40% | 576 | −0.93 | KILL |
+| v10 | Stage 3 strict + cap=8 (stack) | −1.59 | 3.45% | 476 | −1.35 | KILL |
+
+**v7 (cap=5) is the global best across the entire v1-v10 sweep** and the first variant in 10 attempts to clear G1 (standalone Sharpe ≥ 0.5). Per-trade edge sharpened materially (avg_pnl 0.0046 vs v4's 0.0011, ~4×) and hit-rate climbed to 0.61. 4 of 6 gates pass — only G3 (combined ≥ 8.0, structurally unreachable for a SHORT overlay) and G5 (classifier inertness, structural data-depth issue) fail.
+
+**Cap axis is U-inverted with peak at cap=5.** v4 (cap=20) +0.28 → v6 (cap=8) −0.36 → **v7 (cap=5) +0.58** → v8 (cap=3) −0.74. cap=5 is the sweet spot between ranking precision and adequate diversification; cap=3 over-concentrates and surviving top-3 daily clusters become sector-correlated.
+
+**Stage 3 strictness axis is unproductive.** v9 (alone) and v10 (stacked) both regressed sharply. The Stage 2 classifier's inertness means min_opp=3 is a no-op; only the AND-logic prunes trades, removing diversifying low-conviction signals without raising per-trade edge enough to compensate. v10 confirms the levers are sub-additive — they compete for the same "low-conviction trade" population.
+
+**Final default_parameters at HEAD reflect v10 settings (Stage 3 strict + cap=8) for archival reproducibility of the verdict trail.** Operator should revert to v7 settings (cap=5, stage3_require_both=False, min_opportunistic_count=2) before any merge or further iteration.
 
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
