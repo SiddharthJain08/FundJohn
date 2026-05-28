@@ -286,8 +286,8 @@ def test_strategy_metadata():
 def test_strategy_default_parameters():
     s = OpportunisticInsiderShort()
     p = s.default_parameters()
-    assert p['min_insiders'] == 3
-    assert p['min_net_sell_value'] == 5_000_000
+    assert p['min_insiders'] == 4
+    assert p['min_net_sell_value'] == 10_000_000
     assert p['min_opportunistic_count'] == 2
     assert p['min_personal_stake_pct'] == 0.10
     assert p['base_size_pct'] == 0.015
@@ -355,7 +355,7 @@ def _seller_history(name, role, n_quarters_with_sales, value_each=1_000_000):
 
 
 def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatch):
-    """Cluster: 3 insiders, $6M, 0 buys, 2 opportunistic, CEO present → SHORT signal."""
+    """Cluster: 4 insiders, $12M, 0 buys, opportunistic, CEO present → SHORT signal."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
 
@@ -365,18 +365,22 @@ def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatc
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'CEO Person', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 3_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'VP Alice', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+         'value': 3_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
         {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
          'reportingName': 'VP Bob', 'role': 'officer: SVP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+         'value': 3_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-12', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Carol', 'role': 'officer: VP',
+         'value': 3_000_000, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
     ]
     history_per_seller = {
         'CEO Person': _seller_history('CEO Person', 'officer: CEO', n_quarters_with_sales=1),
         'VP Alice':   _seller_history('VP Alice',   'officer: VP',  n_quarters_with_sales=1),
         'VP Bob':     _seller_history('VP Bob',     'officer: SVP', n_quarters_with_sales=1),
+        'VP Carol':   _seller_history('VP Carol',   'officer: VP',  n_quarters_with_sales=1),
     }
     aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
     regime = {'state': 'LOW_VOL'}
@@ -397,7 +401,7 @@ def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatc
 
 
 def test_generate_signals_does_not_fire_on_routine_cluster(monkeypatch):
-    """Same cluster sizes but all 3 sellers classify as routine → no signal."""
+    """Same cluster sizes but all 4 sellers classify as routine → no signal."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     idx = pd.date_range('2026-04-16', periods=30, freq='D')
@@ -412,11 +416,15 @@ def test_generate_signals_does_not_fire_on_routine_cluster(monkeypatch):
         {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
          'reportingName': 'Routine C', 'role': 'officer: VP',
          'value': 5_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-12', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine D', 'role': 'officer: VP',
+         'value': 5_000_000, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
     ]
     history_per_seller = {
         'Routine A': _seller_history('Routine A', 'officer: CEO', 4),
         'Routine B': _seller_history('Routine B', 'officer: CFO', 4),
         'Routine C': _seller_history('Routine C', 'officer: VP',  4),
+        'Routine D': _seller_history('Routine D', 'officer: VP',  4),
     }
     aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
     regime = {'state': 'LOW_VOL'}
@@ -425,7 +433,7 @@ def test_generate_signals_does_not_fire_on_routine_cluster(monkeypatch):
 
 
 def test_generate_signals_fails_cluster_with_offsetting_buy(monkeypatch):
-    """3 sellers with $6M but 1 buy in the same window → fail Stage 1."""
+    """4 sellers with $12M but 1 buy in the same window → fail Stage 1."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     idx = pd.date_range('2026-04-16', periods=30, freq='D')
@@ -433,21 +441,26 @@ def test_generate_signals_fails_cluster_with_offsetting_buy(monkeypatch):
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'A', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 3_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'B', 'role': 'officer: VP',
-         'value': 2_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+         'value': 3_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
         {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
          'reportingName': 'C', 'role': 'officer: VP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+         'value': 3_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-10', 'transactionType': 'S-Sale',
+         'reportingName': 'D', 'role': 'officer: VP',
+         'value': 3_000_000, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
+        # offsetting buy
         {'transactionDate': '2026-05-09', 'transactionType': 'P-Purchase',
-         'reportingName': 'D', 'role': 'officer: VP', 'value': 500_000,
+         'reportingName': 'E', 'role': 'officer: VP', 'value': 500_000,
          'shares': 1_000, 'sharesOwnedAfter': 5_000},
     ]
     history_per_seller = {
         'A': _seller_history('A', 'officer: CEO', 1),
         'B': _seller_history('B', 'officer: VP', 1),
         'C': _seller_history('C', 'officer: VP', 1),
+        'D': _seller_history('D', 'officer: VP', 1),
     }
     aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
     regime = {'state': 'LOW_VOL'}
@@ -464,18 +477,22 @@ def test_generate_signals_respects_cooldown(monkeypatch):
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'A', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 3_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'B', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+         'value': 3_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
         {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
          'reportingName': 'C', 'role': 'officer: VP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+         'value': 3_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-12', 'transactionType': 'S-Sale',
+         'reportingName': 'D', 'role': 'officer: VP',
+         'value': 3_000_000, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
     ]
     history_per_seller = {
         'A': _seller_history('A', 'officer: CEO', 1),
         'B': _seller_history('B', 'officer: VP', 1),
         'C': _seller_history('C', 'officer: VP', 1),
+        'D': _seller_history('D', 'officer: VP', 1),
     }
     aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
     # Recent stop-out 10 days ago — within 30-day cooldown
@@ -497,7 +514,7 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     sales_per_ticker = {}
     history_per_ticker = {}
     for i, t in enumerate(tickers):
-        v = (i + 1) * 1_000_000
+        v = (i + 1) * 4_000_000
         sales_per_ticker[t] = [
             {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
              'reportingName': f'A{i}', 'role': 'officer: CEO',
@@ -508,11 +525,15 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
             {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
              'reportingName': f'C{i}', 'role': 'officer: VP',
              'value': v, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+            {'transactionDate': '2026-05-12', 'transactionType': 'S-Sale',
+             'reportingName': f'D{i}', 'role': 'officer: VP',
+             'value': v, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
         ]
         history_per_ticker[t] = [
             *_seller_history(f'A{i}', 'officer: CEO', 1, value_each=v),
             *_seller_history(f'B{i}', 'officer: VP',  1, value_each=v),
             *_seller_history(f'C{i}', 'officer: VP',  1, value_each=v),
+            *_seller_history(f'D{i}', 'officer: VP',  1, value_each=v),
         ]
     aux = {
         'insider_txns':         sales_per_ticker,
@@ -536,18 +557,22 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'Routine A', 'role': 'officer: CEO',
-         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 4_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'Routine B', 'role': 'officer: CFO',
-         'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+         'value': 4_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
         {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
          'reportingName': 'Routine C', 'role': 'officer: VP',
-         'value': 5_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+         'value': 4_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        {'transactionDate': '2026-05-12', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine D', 'role': 'officer: VP',
+         'value': 4_000_000, 'shares': 5_000, 'sharesOwnedAfter': 50_000},
     ]
     history_per_seller = {
         'Routine A': _seller_history('Routine A', 'officer: CEO', 4),
         'Routine B': _seller_history('Routine B', 'officer: CFO', 4),
         'Routine C': _seller_history('Routine C', 'officer: VP',  4),
+        'Routine D': _seller_history('Routine D', 'officer: VP',  4),
     }
     aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
     regime = {'state': 'LOW_VOL'}
@@ -555,4 +580,4 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     # With classifier disabled, this routine cluster passes Stages 1, 2 (ablated), 3
     assert len(signals) == 1
     assert signals[0].signal_params['opportunistic_count'] == 0
-    assert signals[0].signal_params['routine_count'] == 3
+    assert signals[0].signal_params['routine_count'] == 4
