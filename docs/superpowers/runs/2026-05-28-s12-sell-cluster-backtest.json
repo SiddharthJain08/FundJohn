@@ -88,6 +88,181 @@
     "computed_suggestion_v2": "HOLD",
     "computed_suggestion_v2_rationale": "Acceptance criteria evaluation: (a) modified_v2_sharpe >= 0.5 → FALSE (-0.0026). (b) modified_v2_max_drawdown <= 0.20 → TRUE (0.122). (c) modified_v2_sharpe >= baseline_v2_sharpe → FALSE (the SELL branch degrades a now-very-strong baseline of 4.25 down to 0). FLIP is not justified. The bug-fix wins are concentrated in the BUY-only baseline (Sharpe 4.25) — that's where the operator should focus. The SELL branch (still gated default-OFF) currently subtracts net edge; needs threshold tightening (≥7 sellers, ≥$5M) or per-regime gating before a separate FLIP review. The big v1→v2 improvement validates the three bug fixes; the SELL branch as currently calibrated does NOT improve over the fixed baseline."
   },
+  "post_threshold_sweep": {
+    "date": "2026-05-28",
+    "branch": "feat/premarket-panic-scan",
+    "commit_at_sweep": "8701855",
+    "goal": "Find SELL-cluster thresholds that preserve or beat the v2 BUY-only baseline Sharpe of +4.25.",
+    "method": "For each candidate config (min_sell_insiders / min_net_sell_value), temporarily patched default_parameters() in src/strategies/implementations/s12_insider.py, ran OPENCLAW_S12_SELL_CLUSTER=1 python3 -m src.backtest.unified_backtest --strategy-id S12_insider, captured metrics from strategy_backtest_runs + strategy_backtest_trades, then reverted via git checkout. File NOT committed.",
+    "configs": [
+      {
+        "label": "current (gate ON, as-shipped)",
+        "min_sell_insiders": 5,
+        "min_net_sell_value": 2000000,
+        "run_id": "4c28d72f-ee26-4073-ad50-d4cfd4b05e8a (modified_v2 above)",
+        "sharpe": -0.0026,
+        "max_drawdown_pct": 12.1617,
+        "trade_count": 266,
+        "return_pct": 3.3751,
+        "short_count": 261,
+        "short_stop_count": 159,
+        "short_stop_rate_pct": 60.92,
+        "short_target_count": 74
+      },
+      {
+        "label": "A",
+        "min_sell_insiders": 7,
+        "min_net_sell_value": 5000000,
+        "run_id": "a57a0c9d-c9d9-48b0-a937-3101776d553a",
+        "sharpe": 0.9018,
+        "max_drawdown_pct": 8.927,
+        "trade_count": 63,
+        "return_pct": 5.954,
+        "long_count": 5,
+        "short_count": 58,
+        "short_stop_count": 34,
+        "short_target_count": 19,
+        "short_max_hold_count": 5,
+        "short_stop_rate_pct": 58.62
+      },
+      {
+        "label": "B",
+        "min_sell_insiders": 7,
+        "min_net_sell_value": 10000000,
+        "run_id": "c46ba4d3-7557-411e-8ea8-b15e4c9b979c",
+        "sharpe": 0.3027,
+        "max_drawdown_pct": 8.927,
+        "trade_count": 42,
+        "return_pct": 2.8349,
+        "long_count": 5,
+        "short_count": 37,
+        "short_stop_count": 20,
+        "short_target_count": 12,
+        "short_max_hold_count": 5,
+        "short_stop_rate_pct": 54.05
+      },
+      {
+        "label": "C",
+        "min_sell_insiders": 10,
+        "min_net_sell_value": 5000000,
+        "run_id": "68a0d82e-1c83-457a-a12f-36440f636388",
+        "sharpe": 4.0991,
+        "max_drawdown_pct": 4.206,
+        "trade_count": 12,
+        "return_pct": 8.3139,
+        "long_count": 5,
+        "short_count": 7,
+        "short_stop_count": 3,
+        "short_target_count": 4,
+        "short_stop_rate_pct": 42.86
+      },
+      {
+        "label": "D",
+        "min_sell_insiders": 10,
+        "min_net_sell_value": 10000000,
+        "run_id": "1723f0ea-84a1-4fda-86ff-c0ac528fde51",
+        "sharpe": 4.0991,
+        "max_drawdown_pct": 4.206,
+        "trade_count": 12,
+        "return_pct": 8.3139,
+        "long_count": 5,
+        "short_count": 7,
+        "short_stop_count": 3,
+        "short_target_count": 4,
+        "short_stop_rate_pct": 42.86,
+        "note": "Structurally identical to C: at min_sell_insiders=10, all 7 qualifying clusters already had net_sell_value >= $10M, so the $10M floor is redundant. D adds no information."
+      }
+    ],
+    "spec_decision_tree": {
+      "any_config_sharpe_ge_4.25": false,
+      "any_config_sharpe_ge_2.0": true,
+      "all_configs_sharpe_lt_2.0": false,
+      "branch_triggered": "promising-but-not-breakeven (configs C/D at 4.0991 fall in the 2.0 <= s < 4.25 band)",
+      "phase_2_required": false,
+      "phase_2_reason_skipped": "Spec gates Phase 2 on ALL configs Sharpe < 2.0; configs C and D are at 4.0991, far above 2.0."
+    },
+    "conclusion": "NO WINNER under the strict >= 4.25 bar. Best config = C (10 sellers / $5M) at Sharpe 4.0991, MaxDD 4.21%, 12 trades, return +8.31%. Configs C and D add 7 SHORTs with a 43% stop-rate (vs 61% at the as-shipped 5/$2M), 4 targets / 3 stops — the SHORT branch at the 10-seller bar has positive edge in-sample but the 7-trade sample is thin, and total Sharpe still dips 0.15 points below baseline (4.25 -> 4.10) due to the volatility cost of the 7 extra trades. Whether doubling return (4.16% -> 8.31%) at the cost of 0.15 Sharpe is preferable is an operator preference call, not a backtest call. Recommended default: HOLD (gate stays OFF). If operator weights return / MaxDD-headroom over Sharpe-purity, Config C is the deploy candidate. No file commit per spec's 'no winner = no commit' rule.",
+    "path_forward": "HOLD (default). Operator-overridable to FLIP-AT-CONFIG-C if return-over-Sharpe preference is stated. Do NOT pursue >= 12-seller thresholds (sample shrinks below 7 SHORTs) and do NOT run Phase 2 price-filter (spec gate not tripped)."
+  },
+  "post_cooldown_fix": {
+    "date": "2026-05-28",
+    "branch": "feat/premarket-panic-scan",
+    "bug_fixed": "src/strategies/aux_data_loader.py:_recent_stop_outs queried strategy_backtest_trades unscoped — PRIOR backtest runs' stop-outs suppressed the same ticker in the CURRENT run (cross-run contamination, breaks reproducibility). The DB path was also structurally wrong: within-run trades are not persisted until run_backtest commits at the end, so the function could NEVER have observed the current run's own stops.",
+    "fix": "Replaced the DB query with an in-memory within-run state. _per_bar_simulate now owns run_stop_history: dict[str, pd.Timestamp], updated each bar from simulate_trade exit_info when exit_reason='stop', passed into load_aux_data(..., run_stop_history=...). _recent_stop_outs is now a pure filter: drops entries outside the 21-day envelope, drops entries >= the current bar (no look-ahead). When run_stop_history is not provided (live trading via engine.py's separate load_aux_data, or any non-backtest caller), the function returns {} → cooldown becomes a no-op, matching pre-bug behavior.",
+    "tests": "tests/strategies/test_s12_insider_sell_cluster.py 8/8 PASS post-fix (none of them inject recent_stop_outs so they're insensitive). tests/test_unified_backtest.py + test_backtest_as_of.py + test_backtest_instrument_class_dispatch.py 32/32 PASS.",
+    "v3_baseline_buy_only": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=0",
+      "run_id": "d2e35994-d1b4-486c-97ac-0191e436801a",
+      "sharpe_ratio": 14.1305,
+      "max_drawdown_pct": 1.1629,
+      "trade_count": 9,
+      "return_pct": 7.0893,
+      "per_direction_breakdown": [
+        {"direction": "long", "count": 9}
+      ],
+      "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2}
+    },
+    "v3_modified_5_2M": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=1",
+      "run_id": "2b7e314b-7c11-40bc-af08-58b60fb59bf9",
+      "sharpe_ratio": 2.3825,
+      "max_drawdown_pct": 9.5013,
+      "trade_count": 407,
+      "return_pct": 25.9175,
+      "per_direction_breakdown": [
+        {"direction": "long", "count": 7},
+        {"direction": "short", "count": 400}
+      ],
+      "short_stop_rate_pct": 69.5,
+      "by_exit_reason_short": {"stop": 278, "target": 90, "end_of_data": 19, "max_hold": 13},
+      "glw_trade_count": 5,
+      "glw_summary": "GLW now appears: 1 stop (2026-05-08 entry), 2 targets (2026-05-11, 2026-05-26 entries), 2 EOD (2026-05-22, 2026-05-27 entries) — 2 wins / 1 stop / 2 flat"
+    },
+    "v3_config_c_10_5M": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=1",
+      "params": {"min_sell_insiders": 10, "min_net_sell_value": 5000000},
+      "run_id": "89b8752f-fab7-46fc-8fd3-ea80e564569d",
+      "sharpe_ratio": -1.5819,
+      "max_drawdown_pct": 17.0042,
+      "trade_count": 46,
+      "return_pct": -4.8964,
+      "per_direction_breakdown": [
+        {"direction": "long", "count": 9},
+        {"direction": "short", "count": 37}
+      ],
+      "short_stop_rate_pct": 64.86,
+      "by_exit_reason_short": {"stop": 24, "target": 8, "end_of_data": 3, "max_hold": 2},
+      "glw_trade_count": 2,
+      "glw_summary": "GLW appears: 1 target (2026-05-26 entry, +5.0%), 1 EOD (2026-05-27 entry, 0%)"
+    },
+    "v3_phase_b_filter_5_2M": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=1",
+      "params": {"min_sell_insiders": 5, "min_net_sell_value": 2000000, "structural_filter": "T-1 close < T-2 close AND T-1 close < 10d SMA"},
+      "run_id": "ebb1f9b0-dfd3-4c31-8240-5277ff4059ea",
+      "sharpe_ratio": -4.9025,
+      "max_drawdown_pct": 26.0244,
+      "trade_count": 109,
+      "return_pct": -23.6024,
+      "per_direction_breakdown": [
+        {"direction": "long", "count": 9},
+        {"direction": "short", "count": 100}
+      ],
+      "short_stop_rate_pct": 77.0,
+      "interpretation": "Structural filter HURTS performance — shorting INTO already-falling stocks worsens stop-rate (69.5% → 77%) because of mean-reversion bounce. Filter reverted; tests restored."
+    },
+    "v2_vs_v3_comparison_table": [
+      "                       v2 (buggy loader)         v3 (cooldown fix)",
+      "BUY-only baseline:     Sharpe 4.25  / 13 trades   Sharpe 14.13 / 9 trades",
+      "5/$2M modified:        Sharpe -0.003/ 266 trades  Sharpe 2.38  / 407 trades",
+      "Config C (10/$5M):     Sharpe 4.10  / 12 trades   Sharpe -1.58 / 46 trades",
+      "",
+      "The v2 numbers were CONTAMINATED by cross-run DB reads.",
+      "v3 is the first reproducible measurement of the actual strategy."
+    ],
+    "interpretation": "The cooldown bug was a Sharpe ratio funhouse mirror. Config C v2's Sharpe 4.10 was a phantom: prior runs' stops suppressed real trades and inflated the metric. v3 numbers (which are byte-stable across re-runs) reveal: (a) the BUY-only baseline is genuinely excellent (Sharpe 14.13 / MaxDD 1.16% / 9 trades). (b) The SELL branch at 5/$2M is a Sharpe-2.38 / MaxDD-9.5% addition that boosts return 7.1% → 25.9% but dilutes the BUY-only purity. (c) Tightening to 10/$5M backfires (Sharpe -1.58); the filter removed the wrong tail of clusters. (d) The structural price-confirmation filter (Phase B) is actively net-negative.",
+    "computed_suggestion_v3": "HOLD with high confidence the SELL branch should NOT FLIP at current calibration. The BUY-only baseline (gate OFF) at Sharpe 14.13 / MaxDD 1.16% over 9 trades is the deploy candidate. The bug fix lands as a correctness fix independent of the SELL-branch decision.",
+    "computed_suggestion_v3_rationale": "Acceptance criteria (Sharpe >= 4.25 of BUY-only baseline OR Sharpe >= 2.0 with clear downside protection): the 5/$2M config hits Sharpe 2.38 with 9.5% MaxDD — meets the 'Sharpe >= 2.0' floor but FAILS the 'protects downside' clause (it adds 9.5pp of drawdown to a baseline that draws 1.16%). Net: the SELL branch adds return at the cost of much higher drawdown and worse Sharpe vs the BUY-only baseline. No threshold sweep wins. The structural filter loses. Cooldown fix ships independently because it's a correctness fix."
+  },
   "operator_decision": "PENDING",
   "operator_rationale": "operator to fill in after reviewing"
 }

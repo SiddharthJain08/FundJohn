@@ -475,6 +475,11 @@ def _per_bar_simulate(
     days_with_signals = 0
     # Track per-bar universe sizes when resolver is active.
     universe_sizes: list[int] = []
+    # Within-run stop-out history: {ticker: last_stop_exit_date}. Built up
+    # bar-by-bar from simulate_trade results and fed back into aux_data so
+    # per-ticker cooldowns are scoped strictly to the CURRENT backtest run
+    # (no cross-run DB contamination — see aux_data_loader._recent_stop_outs).
+    run_stop_history: dict = {}
 
     for current_date in oos_dates:
         # Need at least min_lookback days of history before strategy can run
@@ -504,10 +509,16 @@ def _per_bar_simulate(
         }
 
         # Aux data is point-in-time-safe — loader keys by date.
+        # ``run_stop_history`` carries within-run stop exits so per-ticker
+        # cooldowns are scoped to THIS run only (prevents cross-run leakage).
         aux = {'options': {}}
         if load_aux_data is not None:
             try:
-                aux = load_aux_data(current_date, strategy_id=strategy_id)
+                aux = load_aux_data(
+                    current_date,
+                    strategy_id=strategy_id,
+                    run_stop_history=run_stop_history,
+                )
             except Exception:
                 aux = {'options': {}}
 
@@ -552,6 +563,17 @@ def _per_bar_simulate(
                 continue
             exit_info = simulate_trade(ticker_bars, current_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days)
+            # Record stop exits in within-run history so future bars'
+            # per-ticker cooldown can suppress same-ticker re-fires. Keep
+            # the LATEST stop date per ticker.
+            if exit_info.get('exit_reason') == 'stop':
+                try:
+                    _stop_dt = pd.Timestamp(exit_info['exit_date'])
+                    _prev = run_stop_history.get(ticker)
+                    if _prev is None or _stop_dt > _prev:
+                        run_stop_history[ticker] = _stop_dt
+                except Exception:
+                    pass
             trades.append({
                 'ticker':         ticker,
                 'direction':      'long' if direction > 0 else 'short',
