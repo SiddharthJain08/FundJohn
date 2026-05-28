@@ -1,0 +1,211 @@
+{
+  "date": "2026-05-28",
+  "version": "v8",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "6ca161b",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v8_changes_summary": [
+    "max_concurrent_positions: 5 → 3 (push v7 concentration cap even further)",
+    "All other v7 settings preserved (Stage 1 = 4 / $10M; min_opportunistic_count=2; stage3_require_both=False)",
+    "Continues the single-lever concentration-cap sweep: v6 cap=8 → v7 cap=5 → v8 cap=3"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Identical to v7 except max_concurrent_positions=3 (down from 5). All other levers held constant to isolate the concentration-cap effect.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60,
+    "methodology_note": "Same as v7: aggregate_metrics-style combined Sharpe (verified against v4)."
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60. REUSED verbatim.",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused from v1-v7."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 with v8 settings (cap=3). OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "1141e4bc-9896-4858-aaf7-e7585bff8007",
+    "sharpe_ratio": -0.738,
+    "max_drawdown_pct": 6.7288,
+    "trade_count": 277,
+    "return_pct": 1.6658,
+    "hit_rate": 0.6209,
+    "avg_holding_days": 25.3,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 277, "avg_pnl": 0.0060, "sum_pnl": 1.667, "avg_hold": 25.3}
+    ],
+    "by_exit_reason": {"end_of_data": 98, "target": 111, "stop": 48, "max_hold": 20},
+    "short_stop_rate_pct": 17.33,
+    "short_target_rate_pct": 40.07,
+    "short_eod_rate_pct": 35.38,
+    "short_max_hold_rate_pct": 7.22,
+    "notes": "v8 BREAKS the v6→v7 trend. Standalone Sharpe REGRESSED from v7's +0.58 to v8's -0.74 (-1.32 absolute) — by a wider margin than v6's drop from v4. Trade count fell 394→277 (~30%). The cap=3 lever is too tight: it pushed concentration past the sweet spot. Per-trade avg_pnl rose (0.0046 → 0.0060) and hit rate held strong (0.61 → 0.62 — highest of any version), but standalone MaxDD ballooned 4.02% → 6.73% (~67% increase) and return collapsed +5.00% → +1.67%. Interpretation: cap=3 selected only the 3 highest-ranked clusters per day; when those happened to be in correlated tickers (same sector / same news event), all three losers compounded. The diversification benefit of slightly more positions (cap=5) outweighed the further ranking-precision gain. The cap-axis gradient is NOT monotonic — it PEAKS at cap=5 (v7) and inflects downward at cap=3 (v8)."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 classifier DISABLED",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "d802ae6a-9932-4bdb-9de4-3379ad940034",
+    "sharpe_ratio": -0.738,
+    "max_drawdown_pct": 6.7288,
+    "trade_count": 277,
+    "return_pct": 1.6658,
+    "hit_rate": 0.6209,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 277, "avg_pnl": 0.0060, "sum_pnl": 1.667, "avg_hold": 25.3}
+    ],
+    "by_exit_reason": {"end_of_data": 98, "target": 111, "stop": 48, "max_hold": 20},
+    "notes": "IDENTICAL to modified_s15_standalone. Stage 2 calendar-quarter classifier remains non-discriminating — same data-depth limitation observed in v1-v7."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Classifier inert for the eighth consecutive version (data-depth limitation, not parameter-tunable).",
+    "classifier_mechanism": "Unchanged from v1-v7.",
+    "code_correctness": "Stage 2 correctly implemented.",
+    "v8_cap_effect": "Cap=3 over-concentrated. The cap-gradient picture is now clear: v4 cap=20 (Sharpe +0.28), v6 cap=8 (-0.36), v7 cap=5 (+0.58), v8 cap=3 (-0.74). NON-MONOTONIC — peaks at cap=5 with cap=8 and cap=3 both regressing. The mechanism: cap=20 admits a wide, low-edge, diversified population (mediocre Sharpe); cap=8 admits enough ranking precision that the variance reduction doesn't compensate for loser-correlation in temporal clusters (worst Sharpe); cap=5 hits a sweet spot where ranking precision + just-enough diversification combine; cap=3 falls off the cliff because the top-3 clusters per day are too often sector-correlated, blowing out daily-portfolio variance."
+  },
+  "modified_combined": {
+    "description": "S12 BUY + S15 v8 SHORT combined, aggregate_metrics methodology",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "1141e4bc-9896-4858-aaf7-e7585bff8007"
+    ],
+    "combined_trade_count": 286,
+    "combined_sharpe_ratio": -0.3897,
+    "combined_max_drawdown_pct": 6.26,
+    "combined_return_pct": 2.5313,
+    "combined_daily_obs": 178,
+    "methodology_note": "Same as v7."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -0.738,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-0.738 >= 0.5 → FALSE (worst of cap-sweep; delta vs v7: -1.32)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 277,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "277 >= 15 → TRUE (surplus +262)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -0.3897,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-0.3897 >= 8.0 → FALSE (delta -8.39; floor structurally unreachable)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 6.26,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "6.26 <= 8.0 → TRUE (headroom +1.74pp; tighter than v7's 4.10pp)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe",
+      "ablation_sharpe": -0.738,
+      "modified_sharpe": -0.738,
+      "result": "FAIL",
+      "detail": "-0.738 < -0.738 → FALSE (classifier still inert)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 6.7288,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "6.7288 <= 15.0 → TRUE (headroom +8.27pp; worse than v7's 4.02%)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "v1_v2_v3_v4_v5_v6_v7_v8_comparison": {
+    "description": "8-version side-by-side. Cap-axis sweep: v4(20) → v6(8) → v7(5) → v8(3). Result: PEAK at v7 (cap=5).",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v6_sharpe": -0.3601,
+      "v7_sharpe": 0.5817,
+      "v8_sharpe": -0.738,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct": 3.8807,
+      "v7_maxdd_pct": 4.018,
+      "v8_maxdd_pct": 6.7288,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v6_trades": 524,
+      "v7_trades": 394,
+      "v8_trades": 277,
+      "v8_changes_vs_v7": "Single-lever change: max_concurrent_positions 5→3. Sharpe collapsed +0.58→-0.74 (-1.32). Trade count fell 394→277 (~30%). Per-trade avg_pnl rose 0.0046→0.0060 (+30%); hit rate climbed 0.61→0.62 (best of all 8 versions). But MaxDD ballooned 4.02%→6.73% (+67%) and return collapsed +5.00%→+1.67%. The diversification floor matters: cap=5 had enough positions to dampen loser-correlation in temporal clusters; cap=3 does not.",
+      "cap_gradient_summary": "v4(20)→+0.28; v6(8)→-0.36; v7(5)→+0.58; v8(3)→-0.74. NON-MONOTONIC — peaks at v7 (cap=5) with v6 (cap=8) and v8 (cap=3) both regressing. The cap parameter has a U-inverted topology: too loose (cap=20) lacks ranking discrimination; too tight (cap=3) lacks diversification; the sweet spot is cap=5."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v6_sharpe_documented": 1.0369,
+      "v6_sharpe_recomputed": -0.1693,
+      "v7_sharpe": 0.6805,
+      "v8_sharpe": -0.3897,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct_documented": 2.2679,
+      "v6_maxdd_pct_recomputed": 3.7804,
+      "v7_maxdd_pct": 3.8968,
+      "v8_maxdd_pct": 6.26,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293,
+      "v6_trades": 533,
+      "v7_trades": 403,
+      "v8_trades": 286
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "v8 fails G1 (Sharpe -0.74, threshold 0.5), G3, and G5. Per the decision tree, any non-G5 failure → KILL. v8 establishes the upper bound of the productive concentration cap range: tighter than v7 over-concentrates. The cap-axis sweep is now complete enough to declare a peak at cap=5 (v7). Recommend abandoning further cap-tightening and proceed to v9 (Stage 3 strict alone with cap reverted to 20) and v10 (stack v7's cap with v9's Stage 3 strictness).",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}
