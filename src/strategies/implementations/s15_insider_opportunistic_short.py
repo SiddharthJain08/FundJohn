@@ -224,15 +224,15 @@ class OpportunisticInsiderShort(BaseStrategy):
             'min_insiders':              4,
             'min_net_sell_value':        10_000_000,
             # Stage 2 (opportunistic classifier)
-            'min_opportunistic_count':   2,
+            'min_opportunistic_count':   3,  # v9: 2→3 (tighten Stage 2)
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
-            'stage3_require_both':       False,  # v9/v10: True → AND logic
+            'stage3_require_both':       True,  # v9: False→True (AND logic)
             # Position management — v6 cuts concurrent cap 20 → 8 so the
             # ranking score (opp_count × log10(net_sell_value)) actually bites
             # on high-fire days. v4 avg 5.8 fires/day, cap=20 rarely bound.
             'base_size_pct':             0.015,
-            'max_concurrent_positions':  3,  # v8: cap 5→3 (push concentration even more)
+            'max_concurrent_positions':  20,  # v9: revert cap to baseline (isolate Stage 3)
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
             # Window for Stage 1 (calendar days)
