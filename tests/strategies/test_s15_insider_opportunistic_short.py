@@ -294,6 +294,7 @@ def test_strategy_default_parameters():
     assert p['max_concurrent_positions'] == 20
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
+    assert p['short_lookback_days'] == 30
 
 
 def test_generate_signals_empty_when_gate_off(monkeypatch):

@@ -205,6 +205,10 @@ class OpportunisticInsiderShort(BaseStrategy):
     tier              = 2
     signal_frequency  = 'daily'
     min_lookback      = 20
+    # Active in HIGH_VOL (unlike S12 BUY) because the SHORT thesis on
+    # opportunistic insider sales is regime-agnostic per Cohen-Malloy-Pomorski
+    # 2012 — the signal's informational content does not decay in higher-vol
+    # regimes. CRISIS is excluded to avoid squeeze risk during panics.
     active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
     def default_parameters(self) -> dict:
