@@ -524,3 +524,35 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     top_tickers = {sig.ticker for sig in signals[:5]}
     assert 'T24' in top_tickers
     assert 'T23' in top_tickers
+
+
+def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch):
+    """When OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1, routine clusters fire."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    monkeypatch.setenv('OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine A', 'role': 'officer: CEO',
+         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine B', 'role': 'officer: CFO',
+         'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'Routine C', 'role': 'officer: VP',
+         'value': 5_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'Routine A': _seller_history('Routine A', 'officer: CEO', 4),
+        'Routine B': _seller_history('Routine B', 'officer: CFO', 4),
+        'Routine C': _seller_history('Routine C', 'officer: VP',  4),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    # With classifier disabled, this routine cluster passes Stages 1, 2 (ablated), 3
+    assert len(signals) == 1
+    assert signals[0].signal_params['opportunistic_count'] == 0
+    assert signals[0].signal_params['routine_count'] == 3
