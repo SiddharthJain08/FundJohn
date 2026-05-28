@@ -331,11 +331,11 @@ def test_strategy_default_parameters():
     p = s.default_parameters()
     assert p['min_insiders'] == 4
     assert p['min_net_sell_value'] == 10_000_000
-    assert p['min_opportunistic_count'] == 2
+    assert p['min_opportunistic_count'] == 3
     assert p['min_personal_stake_pct'] == 0.10
-    assert p['stage3_require_both'] is False
+    assert p['stage3_require_both'] is True
     assert p['base_size_pct'] == 0.015
-    assert p['max_concurrent_positions'] == 3
+    assert p['max_concurrent_positions'] == 20
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
     assert p['short_lookback_days'] == 30
@@ -406,10 +406,12 @@ def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatc
     idx = pd.date_range('2026-04-16', periods=30, freq='D')
     prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
 
+    # v9/v10: CEO shares bumped 10K→20K so personal_stake_pct = 16.7% > 10% threshold,
+    # satisfying both legs of stage3_require_both=True AND-logic.
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'CEO Person', 'role': 'officer: CEO',
-         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 5_000_000, 'shares': 20_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'VP Alice', 'role': 'officer: VP',
          'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
@@ -530,10 +532,11 @@ def test_generate_signals_respects_cooldown(monkeypatch):
     s = OpportunisticInsiderShort()
     idx = pd.date_range('2026-04-16', periods=30, freq='D')
     prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    # v9/v10: CEO shares bumped 10K→20K for AND-logic conviction filter compatibility.
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'A', 'role': 'officer: CEO',
-         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 5_000_000, 'shares': 20_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'B', 'role': 'officer: VP',
          'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
@@ -563,7 +566,7 @@ def test_generate_signals_respects_cooldown(monkeypatch):
 
 
 def test_generate_signals_caps_at_max_concurrent(monkeypatch):
-    """25 qualifying tickers → only top 3 by score are emitted (v8: cap 5→3)."""
+    """25 qualifying tickers → only top 20 by score are emitted (v9: cap reverted to 20)."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     tickers = [f'T{i:02d}' for i in range(25)]
@@ -575,10 +578,13 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     history_per_ticker = {}
     for i, t in enumerate(tickers):
         v = (i + 1) * 4_000_000
+        # v9/v10: CEO shares bumped 10K→20K so personal_stake_pct = 20K/(100K+20K) = 16.7%,
+        # comfortably above the 10% threshold. Required because stage3_require_both=True
+        # demands BOTH stake_pass AND c_suite_present.
         sales_per_ticker[t] = [
             {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
              'reportingName': f'A{i}', 'role': 'officer: CEO',
-             'value': v, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+             'value': v, 'shares': 20_000, 'sharesOwnedAfter': 100_000},
             {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
              'reportingName': f'B{i}', 'role': 'officer: VP',
              'value': v, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
@@ -605,8 +611,8 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     }
     regime = {'state': 'LOW_VOL'}
     signals = s.generate_signals(prices, regime, tickers, aux_data=aux)
-    assert len(signals) == 3
-    top_tickers = {sig.ticker for sig in signals}
+    assert len(signals) == 20
+    top_tickers = {sig.ticker for sig in signals[:5]}
     assert 'T24' in top_tickers
     assert 'T23' in top_tickers
 
@@ -618,10 +624,11 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     s = OpportunisticInsiderShort()
     idx = pd.date_range('2026-04-16', periods=30, freq='D')
     prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    # v9/v10: Routine A shares bumped 10K→20K for AND-logic conviction filter compatibility.
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'Routine A', 'role': 'officer: CEO',
-         'value': 5_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+         'value': 5_000_000, 'shares': 20_000, 'sharesOwnedAfter': 100_000},
         {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
          'reportingName': 'Routine B', 'role': 'officer: CFO',
          'value': 5_000_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
