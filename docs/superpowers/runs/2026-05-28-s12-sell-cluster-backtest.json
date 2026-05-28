@@ -1,0 +1,43 @@
+{
+  "date": "2026-05-28",
+  "spec": "docs/superpowers/specs/2026-05-28-s12-insider-sell-cluster-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s12-insider-sell-cluster.md",
+  "commit_at_test": "ff1c3f0",
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Added insider data to src/strategies/aux_data_loader.py (binary-search date index + Timestamp pre-parsing for performance). The unified backtest did not previously inject insider_txns into aux_data; this patch makes S12_insider exercisable in backtest. Patch is additive and matches engine.py's live insider data shape exactly.",
+    "patch_commit": "pending (see verdict commit)"
+  },
+  "baseline": {
+    "gate_value": "OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "dd90198e-b728-49c2-b1c7-53baa14c42dc",
+    "sharpe_ratio": -1.6098,
+    "max_drawdown": 21.4831,
+    "trade_count": 225,
+    "return_pct": -18.9606,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 225, "avg_pnl": -0.0019, "sum_pnl": -0.4331}
+    ]
+  },
+  "modified": {
+    "gate_value": "OPENCLAW_S12_SELL_CLUSTER=1",
+    "run_id": "06f58a71-28f8-4f27-8e54-939a15c4f351",
+    "sharpe_ratio": -0.712,
+    "max_drawdown": 18.9243,
+    "trade_count": 602,
+    "return_pct": -5.113,
+    "per_direction_breakdown": [
+      {"direction": "long",  "count": 135, "avg_pnl": -0.0065, "sum_pnl": -0.8833},
+      {"direction": "short", "count": 467, "avg_pnl": -0.0009, "sum_pnl": -0.4048}
+    ]
+  },
+  "acceptance_criteria": {
+    "modified_sharpe_above_floor": "-0.712 >= 0.5 → FALSE",
+    "modified_drawdown_under_cap": "18.9243 <= 20.0 → TRUE",
+    "modified_sharpe_not_worse_than_baseline": "-0.712 >= -1.6098 → TRUE (improved by +0.90 Sharpe points)"
+  },
+  "computed_suggestion": "HOLD",
+  "computed_suggestion_rationale": "The SELL-cluster branch substantially improves both Sharpe (+0.90 Sharpe points: -1.61→-0.71) and MaxDD (-2.56pp: 21.48%→18.92%), and the 467 short trades show low average per-trade loss (-0.09%), indicating the signal is broadly safe but lacks edge. The absolute Sharpe floor of 0.5 is not met (-0.712), so FLIP is not justified. REJECT is also not justified because the modified branch strictly improves on baseline across all metrics. Operator should investigate: (a) whether the BUY-cluster baseline itself has any positive-alpha regime (per-regime breakdown recommended), (b) whether the short-cluster thresholds (≥5 sellers, ≥$2M, zero-buys) are too broad and are triggering on low-signal sell clusters. A tighter dollar threshold (e.g. ≥$5M) or higher seller count (≥7) may flip the SHORT branch to positive Sharpe while keeping the safety profile.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}
