@@ -38,6 +38,56 @@
   },
   "computed_suggestion": "HOLD",
   "computed_suggestion_rationale": "The SELL-cluster branch substantially improves both Sharpe (+0.90 Sharpe points: -1.61→-0.71) and MaxDD (-2.56pp: 21.48%→18.92%), and the 467 short trades show low average per-trade loss (-0.09%), indicating the signal is broadly safe but lacks edge. The absolute Sharpe floor of 0.5 is not met (-0.712), so FLIP is not justified. REJECT is also not justified because the modified branch strictly improves on baseline across all metrics. Operator should investigate: (a) whether the BUY-cluster baseline itself has any positive-alpha regime (per-regime breakdown recommended), (b) whether the short-cluster thresholds (≥5 sellers, ≥$2M, zero-buys) are too broad and are triggering on low-signal sell clusters. A tighter dollar threshold (e.g. ≥$5M) or higher seller count (≥7) may flip the SHORT branch to positive Sharpe while keeping the safety profile.",
+  "post_fix_results": {
+    "fix_commits": [
+      {"sha": "5452409", "summary": "pass regime_state to stops/targets on both BUY and SELL paths (Bug 1)"},
+      {"sha": "7d9af6f", "summary": "gate BUY emission on HIGH confidence (Bug 2)"},
+      {"sha": "ff209d1", "summary": "per-ticker cooldown after stop-out, default 10 trading days (Bug 3)"}
+    ],
+    "baseline_v2": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=0",
+      "run_id": "e735aabb-1e5e-42f8-afce-c0ad1ecee126",
+      "sharpe_ratio": 4.2508,
+      "max_drawdown": 2.77,
+      "trade_count": 13,
+      "return_pct": 4.1603,
+      "per_direction_breakdown": [
+        {"direction": "long", "count": 13, "avg_pnl": 0.02298, "sum_pnl": 0.2988}
+      ],
+      "by_exit_reason": {"target": 7, "end_of_data": 4, "stop": 2}
+    },
+    "modified_v2": {
+      "gate_value": "OPENCLAW_S12_SELL_CLUSTER=1",
+      "run_id": "4c28d72f-ee26-4073-ad50-d4cfd4b05e8a",
+      "sharpe_ratio": -0.0026,
+      "max_drawdown": 12.1617,
+      "trade_count": 266,
+      "return_pct": 3.3751,
+      "per_direction_breakdown": [
+        {"direction": "long",  "count":   5, "avg_pnl": 0.01817, "sum_pnl": 0.0908},
+        {"direction": "short", "count": 261, "avg_pnl": 0.00160, "sum_pnl": 0.4165}
+      ],
+      "by_exit_reason": {"stop": 159, "target": 74, "end_of_data": 22, "max_hold": 11}
+    },
+    "acceptance_criteria_v2": {
+      "modified_v2_sharpe_above_floor": "-0.0026 >= 0.5 → FALSE",
+      "modified_v2_drawdown_under_cap": "12.1617 <= 20.0 → TRUE",
+      "modified_v2_sharpe_not_worse_than_baseline_v2": "-0.0026 >= 4.2508 → FALSE (the SELL branch DEGRADES the now-strong BUY-only baseline)"
+    },
+    "v1_vs_v2_comparison": {
+      "baseline_sharpe": "v1 -1.61 → v2 +4.25 (+5.86 Sharpe points)",
+      "baseline_max_drawdown": "v1 21.48% → v2 2.77% (-18.71pp)",
+      "baseline_trade_count": "v1 225 → v2 13 (HIGH-conf gate + cooldown filter out 94% of trades)",
+      "baseline_return_pct": "v1 -18.96% → v2 +4.16% (sign flip)",
+      "modified_sharpe": "v1 -0.712 → v2 -0.0026 (still flat but no longer negative)",
+      "modified_max_drawdown": "v1 18.92% → v2 12.16% (-6.76pp)",
+      "modified_trade_count": "v1 602 → v2 266 (-56%, mainly fewer SHORTs due to BUY cooldown contagion + tighter HIGH gate; long count 135→5)",
+      "modified_return_pct": "v1 -5.11% → v2 +3.38% (sign flip)",
+      "interpretation": "The three bug fixes turned the BUY-only baseline from a money-loser into a clear winner (Sharpe 4.25 over 13 trades). Sample size is small but the trade quality (7 targets / 2 stops / 4 EOD) is consistent. The SELL branch on v2 still adds ~261 short trades that net positive (sum_pnl +0.4165, but stops outweigh targets 159 vs 74). The SELL branch's contribution drops the combined Sharpe from 4.25 to ~0, so it remains net-negative on top of a now-strong BUY baseline."
+    },
+    "computed_suggestion_v2": "HOLD",
+    "computed_suggestion_v2_rationale": "Acceptance criteria evaluation: (a) modified_v2_sharpe >= 0.5 → FALSE (-0.0026). (b) modified_v2_max_drawdown <= 0.20 → TRUE (0.122). (c) modified_v2_sharpe >= baseline_v2_sharpe → FALSE (the SELL branch degrades a now-very-strong baseline of 4.25 down to 0). FLIP is not justified. The bug-fix wins are concentrated in the BUY-only baseline (Sharpe 4.25) — that's where the operator should focus. The SELL branch (still gated default-OFF) currently subtracts net edge; needs threshold tightening (≥7 sellers, ≥$5M) or per-regime gating before a separate FLIP review. The big v1→v2 improvement validates the three bug fixes; the SELL branch as currently calibrated does NOT improve over the fixed baseline."
+  },
   "operator_decision": "PENDING",
   "operator_rationale": "operator to fill in after reviewing"
 }
