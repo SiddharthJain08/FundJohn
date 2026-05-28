@@ -6,8 +6,12 @@ signed mean polarity score.
 """
 from __future__ import annotations
 import logging
+import os
 from collections import defaultdict
+from datetime import datetime
 from typing import Dict, List, Optional
+
+import psycopg2
 
 from src.services.finbert.client import FinbertClient
 
@@ -86,3 +90,49 @@ def score_news_rows(news_rows: List[Dict]) -> List[Dict]:
             'news_top_headlines':  [h for _, h in top],
         })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Sibling helper: fetch + score by ticker list + time window
+# ---------------------------------------------------------------------------
+
+_NEWS_FETCH_SQL = """
+    SELECT primary_ticker, title, summary, uuid
+      FROM market_news
+     WHERE (primary_ticker = ANY(%s) OR related_tickers && %s::text[])
+       AND published_at >= %s
+"""
+
+
+def score_news_for_tickers(tickers: List[str], since_ts: datetime) -> List[Dict]:
+    """Fetch market_news for `tickers` since `since_ts`, score with FinBERT,
+    return one aggregated dict per ticker (same shape as score_news_rows)
+    plus an `evidence_uuids` list for downstream confirmer citation.
+
+    Returns [] if no news rows are found or tickers is empty. No DB writes.
+    """
+    if not tickers:
+        return []
+
+    dsn = os.environ['POSTGRES_URI']
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(_NEWS_FETCH_SQL, (tickers, tickers, since_ts))
+        rows = cur.fetchall()
+
+    if not rows:
+        return []
+
+    news_rows: List[Dict] = []
+    uuids_by_ticker: Dict[str, List[str]] = {}
+    for ticker, title, summary, uuid in rows:
+        news_rows.append({
+            'ticker':   ticker,
+            'headline': title or '',
+            'summary':  summary or '',
+        })
+        uuids_by_ticker.setdefault(ticker, []).append(str(uuid))
+
+    aggregated = score_news_rows(news_rows)
+    for entry in aggregated:
+        entry['evidence_uuids'] = uuids_by_ticker.get(entry['ticker'], [])
+    return aggregated
