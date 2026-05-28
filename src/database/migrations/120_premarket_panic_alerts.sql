@@ -2,7 +2,7 @@
 -- Pre-market sentiment panic scanner: audit log of every scan output.
 -- One row per (scan_ts, ticker). Realized PnL columns are filled by EOD job.
 
-CREATE TABLE premarket_panic_alerts (
+CREATE TABLE IF NOT EXISTS premarket_panic_alerts (
     id                          BIGSERIAL PRIMARY KEY,
     scan_ts                     TIMESTAMPTZ NOT NULL,
     scan_label                  TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE premarket_panic_alerts (
     created_at                  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX premarket_panic_alerts_day_ticker
+CREATE INDEX IF NOT EXISTS premarket_panic_alerts_day_ticker
     ON premarket_panic_alerts(trading_day, ticker);
-CREATE INDEX premarket_panic_alerts_scan_ts
+CREATE INDEX IF NOT EXISTS premarket_panic_alerts_scan_ts
     ON premarket_panic_alerts(scan_ts);
