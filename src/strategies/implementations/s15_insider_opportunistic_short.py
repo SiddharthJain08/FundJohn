@@ -242,6 +242,9 @@ class OpportunisticInsiderShort(BaseStrategy):
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
             'cluster_cooldown_days':     14,
+            # v3 momentum filter (Khan-Liu 2015)
+            'min_pct_above_50d_sma':     0.02,
+            'sma_window':                50,
             # Window for Stage 1 (calendar days)
             'short_lookback_days':       30,
         }
@@ -389,6 +392,22 @@ class OpportunisticInsiderShort(BaseStrategy):
                 continue
             current_price = float(ts.iloc[-1])
             if current_price <= 0:
+                continue
+
+            # v3 momentum filter: require current_price >= 50d SMA * (1 + buffer).
+            # Academic basis: Khan-Liu 2015 — insider sales are more
+            # informative when the stock is at a relative high (selling into
+            # strength = "selling at top"). Filtering out below-trend tickers
+            # avoids catching mean-reversion bounces off oversold lows.
+            sma_window = int(p['sma_window'])
+            if len(ts) >= sma_window:
+                sma_50 = float(ts.iloc[-sma_window:].mean())
+                if sma_50 > 0:
+                    above_pct = (current_price / sma_50) - 1.0
+                    if above_pct < float(p['min_pct_above_50d_sma']):
+                        continue
+            else:
+                # Not enough history for the SMA gate — skip the ticker conservatively.
                 continue
 
             stops = self.compute_stops_and_targets(

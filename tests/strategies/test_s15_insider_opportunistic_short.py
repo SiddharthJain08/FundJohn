@@ -313,6 +313,8 @@ def test_strategy_default_parameters():
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
     assert p['cluster_cooldown_days'] == 14
+    assert p['min_pct_above_50d_sma'] == 0.02
+    assert p['sma_window'] == 50
     assert p['short_lookback_days'] == 30
 
 
@@ -378,8 +380,8 @@ def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatc
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
 
-    idx = pd.date_range('2026-04-16', periods=30, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
 
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
@@ -509,9 +511,9 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     tickers = [f'T{i:02d}' for i in range(25)]
-    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
     prices = pd.DataFrame(
-        {t: np.linspace(100, 105, 30) for t in tickers}, index=idx,
+        {t: np.linspace(95, 110, 60) for t in tickers}, index=idx,
     )
     sales_per_ticker = {}
     history_per_ticker = {}
@@ -550,8 +552,8 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     monkeypatch.setenv('OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER', '1')
     s = OpportunisticInsiderShort()
-    idx = pd.date_range('2026-04-16', periods=30, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'Routine A', 'role': 'officer: CEO',
@@ -611,8 +613,8 @@ def test_generate_signals_emits_after_cluster_cooldown_expires(monkeypatch):
     """Same setup but emission was 20 days ago — fires."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
-    idx = pd.date_range('2026-04-16', periods=30, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'A', 'role': 'officer: CEO',
@@ -635,3 +637,61 @@ def test_generate_signals_emits_after_cluster_cooldown_expires(monkeypatch):
     regime = {'state': 'LOW_VOL'}
     signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
     assert len(signals) == 1
+
+
+def test_generate_signals_fires_when_price_above_50d_sma(monkeypatch):
+    """Stock at 110 with 50d SMA at 100 → above 10%, filter passes."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    # 50 days of prices ramping from 95 to 110 — SMA ≈ 102.5, current = 110
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'CEO Person', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Alice', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Bob', 'role': 'officer: SVP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'CEO Person': _seller_history('CEO Person', 'officer: CEO', 1),
+        'VP Alice':   _seller_history('VP Alice',   'officer: VP',  1),
+        'VP Bob':     _seller_history('VP Bob',     'officer: SVP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert len(signals) == 1
+
+
+def test_generate_signals_blocked_when_price_below_50d_sma(monkeypatch):
+    """Stock at 90 with 50d SMA at 100 → 10% below, filter blocks."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    # 60 days of prices declining from 110 to 90 — SMA ≈ 100, current = 90
+    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(110, 90, 60)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'CEO Person', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Alice', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'VP Bob', 'role': 'officer: SVP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'CEO Person': _seller_history('CEO Person', 'officer: CEO', 1),
+        'VP Alice':   _seller_history('VP Alice',   'officer: VP',  1),
+        'VP Bob':     _seller_history('VP Bob',     'officer: SVP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert signals == []
