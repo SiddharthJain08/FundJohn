@@ -128,9 +128,17 @@ class InsiderClusterBuy(BaseStrategy):
                 insider_data=insider_data,
                 prices=prices,
                 universe=universe,
+                regime_state=regime_state,  # NEW
             ))
 
-        signals.sort(key=lambda s: s.signal_params.get('net_buy_value', 0) or s.signal_params.get('net_sell_value', 0), reverse=True)
+        signals.sort(
+            key=lambda s: (
+                s.signal_params.get('net_buy_value', 0) or 0
+            ) + (
+                s.signal_params.get('net_sell_value', 0) or 0
+            ),
+            reverse=True,
+        )
         return signals[:8]
 
     def _generate_sell_signals(
@@ -139,6 +147,7 @@ class InsiderClusterBuy(BaseStrategy):
         insider_data: dict,
         prices,
         universe,
+        regime_state: str = 'LOW_VOL',  # NEW
     ) -> list:
         """Emit SHORT signals on insider sell-clusters.
 
@@ -149,6 +158,8 @@ class InsiderClusterBuy(BaseStrategy):
         """
         if not insider_data:
             return []
+
+        scale = self.position_scale(regime_state)
 
         try:
             ref_date = prices.index[-1]
@@ -224,7 +235,7 @@ class InsiderClusterBuy(BaseStrategy):
                 target_1          = stops['t1'],
                 target_2          = stops['t2'],
                 target_3          = stops['t3'],
-                position_size_pct = round(float(params['base_size_pct']), 4),
+                position_size_pct = round(float(params['base_size_pct']) * scale, 4),
                 confidence        = 'HIGH',
                 signal_params     = {
                     'distinct_insiders': int(distinct_sellers),
