@@ -741,3 +741,202 @@ def _main():
 
 if __name__ == '__main__':
     _main()
+
+
+# ── close_subset: additive extended-hours partial flatten ────────────────────
+# These helpers exist alongside the existing _close_symbol / liquidate_on_regime_change
+# path and do NOT touch it. The existing _load_broker_positions (dict) is
+# intentionally left unchanged — this new helper returns a list[dict] and uses
+# a distinct name to avoid any collision.
+
+
+def _load_broker_positions_list() -> list[dict]:
+    """Shell out to `alpaca position list` and return the raw list-of-dicts.
+    Returns [] on any CLI error. Distinct from the existing _load_broker_positions
+    (which returns a dict) to avoid collision with liquidate_on_regime_change."""
+    ok, payload, _err = _run_cli(['position', 'list'], timeout=15)
+    if not ok or not isinstance(payload, list):
+        return []
+    return payload
+
+
+def _submit_extended_hours_close(order: dict) -> dict:
+    """Fetch a marketable limit price and submit a single pre-market limit close
+    via `alpaca order submit --type limit --extended-hours`.
+
+    The `order` dict must contain: symbol, side ('buy'|'sell'), qty.
+
+    Raises RuntimeError if:
+      - _pick_limit_price returns None (no usable quote — halted/quoteless ticker)
+      - the alpaca CLI call returns non-zero
+
+    `_pick_limit_price` is called here (not in the caller) so that mocking
+    `_submit_extended_hours_close` in tests bypasses the quote-fetch entirely."""
+    from src.execution.alpaca_executor import _pick_limit_price
+    symbol = order['symbol']
+    side = order['side']
+    limit_px = _pick_limit_price(symbol, side)
+    if limit_px is None:
+        raise RuntimeError(
+            f'_pick_limit_price returned None for {symbol} — '
+            'no usable quote or trade available (halted/quoteless?)'
+        )
+    cmd = [
+        'order', 'submit',
+        '--symbol', symbol,
+        '--side', side,
+        '--type', 'limit',
+        '--time-in-force', 'day',
+        '--extended-hours',
+        '--qty', str(order['qty']),
+        '--limit-price', f'{limit_px:.2f}',
+    ]
+    ok, payload, err = _run_cli(cmd, timeout=15)
+    if not ok:
+        raise RuntimeError(f'alpaca CLI: {err}')
+    return {
+        'status': (payload.get('status', 'pending') if isinstance(payload, dict) else 'pending'),
+        'filled_qty': float((payload.get('filled_qty', 0) or 0) if isinstance(payload, dict) else 0),
+        'avg_fill_price': float((payload.get('filled_avg_price', 0) or 0) if isinstance(payload, dict) else 0),
+        'order_id': (payload.get('id') if isinstance(payload, dict) else None),
+    }
+
+
+def _write_liquidation_audit(row: dict) -> str | None:
+    """INSERT into alpaca_liquidations using the actual table schema and
+    return the auto-generated UUID (as string) or None on failure.
+    id is UUID with DEFAULT gen_random_uuid() — NOT specified in the INSERT.
+
+    The row dict must contain keys: run_date, regime_from, regime_to,
+    ticker, direction, qty, result_status.
+    Optional: market_value_usd, filled_qty, avg_fill_price.
+    These are persisted in close_result JSONB so no schema migration is needed.
+
+    Note: alpaca_liquidations uses 'symbol' (not 'ticker') and 'side_closed'
+    (not 'direction') — the close_subset-specific field names in the row dict
+    are mapped to the actual schema here."""
+    try:
+        import psycopg2
+    except ImportError:
+        logger.warning('[close_subset] psycopg2 not available — audit skipped')
+        return None
+    dsn = os.environ.get('POSTGRES_URI')
+    if not dsn:
+        logger.warning('[close_subset] POSTGRES_URI not set — audit skipped')
+        return None
+    # Pack fill details into close_result JSONB (existing column) to avoid
+    # schema migration — alpaca_liquidations has no ticker/direction/market_value_usd
+    # columns; those are close_subset-internal labels stored here for traceability.
+    close_result_payload = json.dumps({
+        'source': 'close_subset',
+        'ticker': row.get('ticker'),
+        'direction': row.get('direction'),
+        'market_value_usd': row.get('market_value_usd'),
+        'filled_qty': row.get('filled_qty'),
+        'avg_fill_price': row.get('avg_fill_price'),
+    })
+    side_closed = ('long_close' if row.get('direction') == 'long' else 'short_close')
+    try:
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO alpaca_liquidations
+                    (run_date, regime_from, regime_to, symbol, qty,
+                     side_closed, close_result, result_status)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    row['run_date'], row['regime_from'], row['regime_to'],
+                    row.get('ticker'), row.get('qty'),
+                    side_closed,
+                    close_result_payload,
+                    row['result_status'],
+                ),
+            )
+            new_id = cur.fetchone()[0]
+            conn.commit()
+        return str(new_id) if new_id else None
+    except Exception as e:
+        logger.warning('[close_subset] audit INSERT failed: %s', e)
+        return None
+
+
+def close_subset(tickers: list[str], reason: str) -> list[dict]:
+    """Flatten a SUBSET of broker equity positions using extended-hours limit orders.
+
+    Does NOT touch the existing liquidate_on_regime_change / _close_symbol path.
+    Filters broker positions to us_equity asset_class only (crypto/options skipped).
+
+    Returns a list of per-ticker result dicts with keys:
+      ticker, status — always present
+      qty, filled_qty, avg_fill_price, liquidation_id — on success
+      error — on submit_error
+
+    status values: 'filled' | 'pending' | <broker status> | 'submit_error' | 'no_position'
+    """
+    if not tickers:
+        return []
+    from datetime import date as _date
+    positions = _load_broker_positions_list()
+    by_sym = {
+        p['symbol']: p
+        for p in positions
+        if isinstance(p, dict) and p.get('asset_class') == 'us_equity'
+    }
+
+    results: list[dict] = []
+    run_date = _date.today()
+    for ticker in tickers:
+        pos = by_sym.get(ticker)
+        if pos is None:
+            results.append({'ticker': ticker, 'status': 'no_position'})
+            continue
+
+        try:
+            signed_qty = float(pos['qty'])
+        except (TypeError, ValueError):
+            results.append({'ticker': ticker, 'status': 'no_position'})
+            continue
+
+        abs_qty = abs(signed_qty)
+        side = 'sell' if signed_qty > 0 else 'buy'
+
+        try:
+            outcome = _submit_extended_hours_close({
+                'symbol': ticker, 'side': side, 'qty': abs_qty,
+            })
+            audit_id = _write_liquidation_audit({
+                'run_date': run_date,
+                'regime_from': reason,
+                'regime_to': 'FLAT',
+                'ticker': ticker,
+                'direction': 'long' if signed_qty > 0 else 'short',
+                'qty': abs_qty,
+                'market_value_usd': float(pos.get('market_value') or 0),
+                'result_status': outcome['status'],
+                'filled_qty': outcome['filled_qty'],
+                'avg_fill_price': outcome['avg_fill_price'],
+            })
+            results.append({
+                'ticker': ticker,
+                'status': outcome['status'],
+                'qty': abs_qty,
+                'filled_qty': outcome['filled_qty'],
+                'avg_fill_price': outcome['avg_fill_price'],
+                'liquidation_id': audit_id,
+            })
+        except Exception as e:
+            logger.warning('[close_subset] %s: %s', ticker, e)
+            _write_liquidation_audit({
+                'run_date': run_date,
+                'regime_from': reason,
+                'regime_to': 'FLAT',
+                'ticker': ticker,
+                'direction': 'long' if signed_qty > 0 else 'short',
+                'qty': abs_qty,
+                'market_value_usd': float(pos.get('market_value') or 0),
+                'result_status': 'submit_error',
+            })
+            results.append({'ticker': ticker, 'status': 'submit_error', 'error': str(e)})
+    return results

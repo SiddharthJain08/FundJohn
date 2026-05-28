@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw EDGAR 8-K ingester (lookback=%i hours)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/python3 -m scripts.ingest_edgar_8k --lookback-hours %i
+StandardOutput=journal
+StandardError=journal

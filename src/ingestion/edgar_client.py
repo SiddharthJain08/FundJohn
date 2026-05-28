@@ -107,6 +107,34 @@ class EDGARClient:
                f"/{cik}/{accession}/{acc_clean}-index.json")
         return await self.get(url)
 
+    async def fetch_document(self, url: str) -> Optional[bytes]:
+        """Fetch an arbitrary URL and return raw bytes (not JSON-decoded).
+
+        Used for HTML/text primary documents like 8-K filings, which the
+        JSON-decoding `get()` cannot handle. Applies the same User-Agent,
+        rate-limiting, and exponential backoff as `get()`. Returns None
+        on non-200 (other than 429/5xx, which retry) or after exhausting
+        retries.
+        """
+        await self._throttle()
+        for delay in [0.0] + RETRY_DELAYS:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                async with self._session.get(url) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+                    if resp.status == 429 or 500 <= resp.status < 600:
+                        logger.warning("EDGAR %d on %s, will retry", resp.status, url)
+                        continue
+                    logger.error("EDGAR HTTP %d for %s", resp.status, url)
+                    return None  # 4xx other than 429 — don't retry
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                logger.warning("EDGAR network error fetching %s, will retry", url)
+                continue
+        logger.error("EDGAR: exhausted retries for %s", url)
+        return None
+
 
 async def fetch_filings(cik: str, form_types: Optional[List[str]] = None) -> List[Dict]:
     """
