@@ -85,18 +85,15 @@ If Stage 1 fails: ticker skipped.
 
 ### Stage 2 — Opportunistic classifier (per insider in the cluster)
 
-**v2 amendment (2026-05-28, post-v1 verdict):** The original calendar-quarter classifier was structurally dormant — the insider parquet has only ~3 years of S-Sale history, and only ~8 `(ticker, insider_name)` pairs accumulated ≥3 distinct sale quarters in the rolling window. The cluster gate's `≥3 distinct insiders` requirement combined with the all-but-empty routine bucket meant `opp_count = distinct_insiders − routine_count ≥ 2` trivially held for every qualifying cluster. v2 replaces the calendar-quarter logic with a **sale-frequency** classifier that activates immediately under sparse data.
-
 For each insider in the Stage-1-qualifying cluster, classify them as "opportunistic" or "routine":
 
 1. Look up their qualifying sales (same transaction-type whitelist as Stage 1) in months **t − 15 to t − 3** (a 12-month window with a 3-month gap to avoid look-ahead leakage from the cluster itself).
-2. Count the number of qualifying sales in the window: `n = len(qualifying_sales_in_window)`.
-3. Classify:
-   - `n >= min_qualifying_sales_for_routine` (default **4**) → **routine** (frequent seller; mechanical pattern likely)
-   - `n < min_qualifying_sales_for_routine` → **opportunistic** (rare seller; informational signal)
-   - `n == 0` → **opportunistic** (new insider, default to high signal)
-
-The threshold of 4 sales in 12 months ≈ "more frequent than once per quarter," which is the empirical cut-point for routine selling. It is a per-insider statistic, not a per-window-quarter statistic, so it works with any history length.
+2. Bucket sales by calendar quarter (Q1: Jan-Mar, etc.).
+3. Count distinct quarters with ≥1 sale.
+4. Classify:
+   - `quarters_with_sales >= 3` → **routine** (regular pattern; non-informational)
+   - `quarters_with_sales <= 2` → **opportunistic**
+   - `total_qualifying_sales_in_window == 0` → **opportunistic** (new insider, default to high signal)
 
 Cluster passes Stage 2 iff **at least 2 insiders are classified opportunistic.**
 
@@ -153,7 +150,6 @@ Take top 20 by `score` descending.
 | Price targets | None | Time-decay trade |
 | Time exit | Close at trading day 60 from entry | Aligns with informational decay window (literature) |
 | Re-entry cooldown | 30 trading days after a stop-out | Prevents re-entering a squeeze ticker daily |
-| **Cluster self-cooldown (v2)** | **14 trading days after any emission** | **Prevents the same insider cluster from re-firing daily while sitting in the 30-day Stage-1 window. v1 surfaced 1,137 trades over 124 days (~9/day) because the cluster persisted in the lookback; v2 caps each cluster at ~1 emission per fortnight.** |
 | Active regimes | LOW_VOL, TRANSITIONING, HIGH_VOL | CRISIS excluded — squeeze risk worse in panics |
 
 ### Regime scaling

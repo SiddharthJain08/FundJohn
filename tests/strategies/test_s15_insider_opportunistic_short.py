@@ -22,15 +22,15 @@ def _make_txn(date, value=1_000_000, ttype='S-Sale'):
     }
 
 
-def test_classify_insider_routine_frequent_seller():
-    """Insider with >=4 qualifying sales in t-15..t-3 window → routine."""
+def test_classify_insider_routine_regular_quarterly():
+    """Insider selling every quarter for 12mo → routine."""
     history = [
+        _make_txn('2025-03-15'),
         _make_txn('2025-04-15'),
         _make_txn('2025-07-15'),
         _make_txn('2025-10-15'),
         _make_txn('2026-01-15'),
     ]
-    # All 4 in window (2025-02-15..2026-02-15) → routine
     assert classify_insider(history, AS_OF) == 'routine'
 
 
@@ -49,60 +49,43 @@ def test_classify_insider_opportunistic_new_insider():
 
 
 def test_classify_insider_ignores_outside_window():
-    """Txns outside t-15 to t-3 must not count toward the frequency count."""
+    """Txns outside t-15 to t-3 must not count toward quarter buckets."""
     history = [
         _make_txn('2026-03-15'),
         _make_txn('2026-04-15'),
         _make_txn('2026-05-10'),
     ]
-    # Zero txns in t-15..t-3 window → opportunistic
     assert classify_insider(history, AS_OF) == 'opportunistic'
 
 
 def test_classify_insider_routine_at_threshold():
-    """Exactly 4 qualifying sales in window → routine (boundary)."""
-    history = [
-        _make_txn('2025-04-15'),
-        _make_txn('2025-07-15'),
-        _make_txn('2025-10-15'),
-        _make_txn('2026-01-15'),
-    ]
-    # 4 in window → routine (boundary)
-    assert classify_insider(history, AS_OF) == 'routine'
-
-
-def test_classify_insider_opportunistic_at_threshold():
-    """Exactly 3 qualifying sales in window → opportunistic (boundary)."""
+    """Exactly 3 distinct quarters in window → routine (boundary)."""
     history = [
         _make_txn('2025-05-15'),
         _make_txn('2025-09-15'),
         _make_txn('2025-12-15'),
     ]
-    # 3 in window → opportunistic (one below routine threshold)
+    assert classify_insider(history, AS_OF) == 'routine'
+
+
+def test_classify_insider_opportunistic_at_threshold():
+    """Exactly 2 distinct quarters in window → opportunistic (boundary)."""
+    history = [
+        _make_txn('2025-05-15'),
+        _make_txn('2025-09-15'),
+    ]
     assert classify_insider(history, AS_OF) == 'opportunistic'
 
 
 def test_classify_insider_counts_bare_s_type():
     """Bare 'S' transactionType (alternate SEC form) is counted same as S-Sale."""
+    # 3 distinct quarters using bare 'S' → routine
     history = [
-        _make_txn('2025-04-15', ttype='S'),
-        _make_txn('2025-07-15', ttype='S'),
-        _make_txn('2025-10-15', ttype='S'),
-        _make_txn('2026-01-15', ttype='S'),
+        _make_txn('2025-05-15', ttype='S'),
+        _make_txn('2025-09-15', ttype='S'),
+        _make_txn('2025-12-15', ttype='S'),
     ]
-    # 4 bare-S sales in window → routine
     assert classify_insider(history, AS_OF) == 'routine'
-
-
-def test_classify_insider_param_overridable():
-    """min_qualifying_sales_for_routine parameter overrides the default."""
-    history = [
-        _make_txn('2025-05-15'),
-        _make_txn('2025-09-15'),
-    ]
-    # 2 sales in window: routine at threshold=2, opportunistic at default (4)
-    assert classify_insider(history, AS_OF, min_qualifying_sales_for_routine=2) == 'routine'
-    assert classify_insider(history, AS_OF, min_qualifying_sales_for_routine=4) == 'opportunistic'
 
 
 def test_qualifying_sales_only_keeps_s_sale_and_s():
@@ -306,15 +289,11 @@ def test_strategy_default_parameters():
     assert p['min_insiders'] == 3
     assert p['min_net_sell_value'] == 5_000_000
     assert p['min_opportunistic_count'] == 2
-    assert p['min_qualifying_sales_for_routine'] == 4
     assert p['min_personal_stake_pct'] == 0.10
     assert p['base_size_pct'] == 0.015
     assert p['max_concurrent_positions'] == 20
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
-    assert p['cluster_cooldown_days'] == 14
-    assert p['min_pct_above_50d_sma'] == 0.02
-    assert p['sma_window'] == 50
     assert p['short_lookback_days'] == 30
 
 
@@ -380,8 +359,8 @@ def test_generate_signals_fires_on_opportunistic_cluster_with_c_suite(monkeypatc
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
 
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
 
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
@@ -511,9 +490,9 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     tickers = [f'T{i:02d}' for i in range(25)]
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
     prices = pd.DataFrame(
-        {t: np.linspace(95, 110, 60) for t in tickers}, index=idx,
+        {t: np.linspace(100, 105, 30) for t in tickers}, index=idx,
     )
     sales_per_ticker = {}
     history_per_ticker = {}
@@ -552,8 +531,8 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     monkeypatch.setenv('OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER', '1')
     s = OpportunisticInsiderShort()
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
     sales = [
         {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
          'reportingName': 'Routine A', 'role': 'officer: CEO',
@@ -577,121 +556,3 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     assert len(signals) == 1
     assert signals[0].signal_params['opportunistic_count'] == 0
     assert signals[0].signal_params['routine_count'] == 3
-
-
-def test_generate_signals_respects_cluster_self_cooldown(monkeypatch):
-    """If ticker had S15 emission within 14 trading days, skip."""
-    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
-    s = OpportunisticInsiderShort()
-    idx = pd.date_range('2026-04-16', periods=30, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
-    sales = [
-        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
-         'reportingName': 'A', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
-        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
-         'reportingName': 'B', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
-        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
-         'reportingName': 'C', 'role': 'officer: VP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
-    ]
-    history_per_seller = {
-        'A': _seller_history('A', 'officer: CEO', 1),
-        'B': _seller_history('B', 'officer: VP', 1),
-        'C': _seller_history('C', 'officer: VP', 1),
-    }
-    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
-    # Recent emission 7 days ago — within 14-day cluster cooldown
-    aux['recent_emissions'] = {'TGT': pd.Timestamp('2026-05-08')}
-    regime = {'state': 'LOW_VOL'}
-    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
-    assert signals == []
-
-
-def test_generate_signals_emits_after_cluster_cooldown_expires(monkeypatch):
-    """Same setup but emission was 20 days ago — fires."""
-    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
-    s = OpportunisticInsiderShort()
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
-    sales = [
-        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
-         'reportingName': 'A', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
-        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
-         'reportingName': 'B', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
-        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
-         'reportingName': 'C', 'role': 'officer: VP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
-    ]
-    history_per_seller = {
-        'A': _seller_history('A', 'officer: CEO', 1),
-        'B': _seller_history('B', 'officer: VP', 1),
-        'C': _seller_history('C', 'officer: VP', 1),
-    }
-    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
-    # Emission 20 days ago — past the 14-day window
-    aux['recent_emissions'] = {'TGT': pd.Timestamp('2026-04-25')}
-    regime = {'state': 'LOW_VOL'}
-    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
-    assert len(signals) == 1
-
-
-def test_generate_signals_fires_when_price_above_50d_sma(monkeypatch):
-    """Stock at 110 with 50d SMA at 100 → above 10%, filter passes."""
-    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
-    s = OpportunisticInsiderShort()
-    # 50 days of prices ramping from 95 to 110 — SMA ≈ 102.5, current = 110
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(95, 110, 60)}, index=idx)
-    sales = [
-        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
-         'reportingName': 'CEO Person', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
-        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
-         'reportingName': 'VP Alice', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
-        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
-         'reportingName': 'VP Bob', 'role': 'officer: SVP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
-    ]
-    history_per_seller = {
-        'CEO Person': _seller_history('CEO Person', 'officer: CEO', 1),
-        'VP Alice':   _seller_history('VP Alice',   'officer: VP',  1),
-        'VP Bob':     _seller_history('VP Bob',     'officer: SVP', 1),
-    }
-    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
-    regime = {'state': 'LOW_VOL'}
-    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
-    assert len(signals) == 1
-
-
-def test_generate_signals_blocked_when_price_below_50d_sma(monkeypatch):
-    """Stock at 90 with 50d SMA at 100 → 10% below, filter blocks."""
-    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
-    s = OpportunisticInsiderShort()
-    # 60 days of prices declining from 110 to 90 — SMA ≈ 100, current = 90
-    idx = pd.date_range('2026-03-15', periods=60, freq='D')
-    prices = pd.DataFrame({'TGT': np.linspace(110, 90, 60)}, index=idx)
-    sales = [
-        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
-         'reportingName': 'CEO Person', 'role': 'officer: CEO',
-         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
-        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
-         'reportingName': 'VP Alice', 'role': 'officer: VP',
-         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
-        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
-         'reportingName': 'VP Bob', 'role': 'officer: SVP',
-         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
-    ]
-    history_per_seller = {
-        'CEO Person': _seller_history('CEO Person', 'officer: CEO', 1),
-        'VP Alice':   _seller_history('VP Alice',   'officer: VP',  1),
-        'VP Bob':     _seller_history('VP Bob',     'officer: SVP', 1),
-    }
-    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
-    regime = {'state': 'LOW_VOL'}
-    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
-    assert signals == []

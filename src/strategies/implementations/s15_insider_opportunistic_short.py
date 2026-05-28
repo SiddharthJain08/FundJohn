@@ -40,28 +40,15 @@ def qualifying_sales(txns: Iterable[dict]) -> list[dict]:
 
 # ── Stage 2: opportunistic-vs-routine classifier ────────────────────────────
 
-def classify_insider(
-    history: list[dict],
-    as_of: pd.Timestamp,
-    min_qualifying_sales_for_routine: int = 4,
-) -> str:
-    """Classify an insider as 'opportunistic' or 'routine' by sale frequency.
+def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
+    """Classify an insider as 'opportunistic' or 'routine'.
 
     Window: t-15 to t-3 months from as_of (12-month window with 3-month
-    look-ahead gap). Counts qualifying sales in the window.
+    look-ahead gap). Buckets qualifying sales by calendar quarter.
 
-    - n >= min_qualifying_sales_for_routine → 'routine' (frequent seller)
-    - n < min_qualifying_sales_for_routine  → 'opportunistic' (rare seller)
-    - n == 0                                → 'opportunistic' (new insider default)
-
-    v2 — replaces the v1 calendar-quarter classifier, which was structurally
-    dormant on real data (insider parquet has only ~3 years of history; few
-    (ticker, insider) pairs accumulate >=3 distinct sale quarters in the
-    rolling window). Sale frequency activates the filter immediately
-    regardless of history depth.
-
-    4 sales per 12 months ≈ "more frequent than once per quarter" — the
-    empirical cut-point for routine selling.
+    - >=3 distinct quarters with sales → 'routine'
+    - <=2 distinct quarters in window → 'opportunistic'
+    - 0 qualifying sales in window → 'opportunistic' (new insider default)
     """
     sales = qualifying_sales(history or [])
     if not sales:
@@ -70,7 +57,7 @@ def classify_insider(
     window_start = as_of - pd.DateOffset(months=15)
     window_end = as_of - pd.DateOffset(months=3)
 
-    n_in_window = 0
+    quarters = set()
     for t in sales:
         try:
             txn_date = pd.to_datetime(t.get('transactionDate'))
@@ -78,9 +65,9 @@ def classify_insider(
             continue
         if txn_date < window_start or txn_date > window_end:
             continue
-        n_in_window += 1
+        quarters.add((txn_date.year, (txn_date.month - 1) // 3 + 1))
 
-    if n_in_window >= int(min_qualifying_sales_for_routine):
+    if len(quarters) >= 3:
         return 'routine'
     return 'opportunistic'
 
@@ -233,7 +220,6 @@ class OpportunisticInsiderShort(BaseStrategy):
             'min_net_sell_value':        5_000_000,
             # Stage 2 (opportunistic classifier)
             'min_opportunistic_count':   2,
-            'min_qualifying_sales_for_routine': 4,
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
             # Position management
@@ -241,10 +227,6 @@ class OpportunisticInsiderShort(BaseStrategy):
             'max_concurrent_positions':  20,
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
-            'cluster_cooldown_days':     14,
-            # v3 momentum filter (Khan-Liu 2015)
-            'min_pct_above_50d_sma':     0.02,
-            'sma_window':                50,
             # Window for Stage 1 (calendar days)
             'short_lookback_days':       30,
         }
@@ -281,8 +263,6 @@ class OpportunisticInsiderShort(BaseStrategy):
         # Cooldown
         recent_stops = (aux_data or {}).get('recent_stop_outs') or {}
         cooldown_days = int(p['cooldown_after_stop_days'])
-        recent_emissions = (aux_data or {}).get('recent_emissions') or {}
-        cluster_cooldown_days = int(p['cluster_cooldown_days'])
 
         # Disable Stage 2 only via ablation env var (Task 9 introduces this).
         # Read here so Task 9 doesn't need to re-touch this function.
@@ -302,17 +282,6 @@ class OpportunisticInsiderShort(BaseStrategy):
                 try:
                     last_stop_ts = pd.to_datetime(last_stop)
                     if (ref_date - last_stop_ts).days < cooldown_days:
-                        continue
-                except (TypeError, ValueError):
-                    pass
-
-            # Cluster self-cooldown (v2): suppress re-emissions on a ticker
-            # within cluster_cooldown_days trading days of the last emission.
-            last_emit = recent_emissions.get(ticker)
-            if last_emit is not None:
-                try:
-                    last_emit_ts = pd.to_datetime(last_emit)
-                    if (ref_date - last_emit_ts).days < cluster_cooldown_days:
                         continue
                 except (TypeError, ValueError):
                     pass
@@ -365,10 +334,7 @@ class OpportunisticInsiderShort(BaseStrategy):
                     h for h in seller_history
                     if (h.get('reportingName') or '').strip() == name
                 ]
-                kind = classify_insider(
-                    this_seller_history, ref_date,
-                    min_qualifying_sales_for_routine=int(p['min_qualifying_sales_for_routine']),
-                )
+                kind = classify_insider(this_seller_history, ref_date)
                 if kind == 'opportunistic':
                     opp_count += 1
                 else:
@@ -392,22 +358,6 @@ class OpportunisticInsiderShort(BaseStrategy):
                 continue
             current_price = float(ts.iloc[-1])
             if current_price <= 0:
-                continue
-
-            # v3 momentum filter: require current_price >= 50d SMA * (1 + buffer).
-            # Academic basis: Khan-Liu 2015 — insider sales are more
-            # informative when the stock is at a relative high (selling into
-            # strength = "selling at top"). Filtering out below-trend tickers
-            # avoids catching mean-reversion bounces off oversold lows.
-            sma_window = int(p['sma_window'])
-            if len(ts) >= sma_window:
-                sma_50 = float(ts.iloc[-sma_window:].mean())
-                if sma_50 > 0:
-                    above_pct = (current_price / sma_50) - 1.0
-                    if above_pct < float(p['min_pct_above_50d_sma']):
-                        continue
-            else:
-                # Not enough history for the SMA gate — skip the ticker conservatively.
                 continue
 
             stops = self.compute_stops_and_targets(
