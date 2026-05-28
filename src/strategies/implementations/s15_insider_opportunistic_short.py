@@ -215,9 +215,9 @@ class OpportunisticInsiderShort(BaseStrategy):
 
     def default_parameters(self) -> dict:
         return {
-            # Stage 1 (cluster gate)
-            'min_insiders':              3,
-            'min_net_sell_value':        5_000_000,
+            # Stage 1 (cluster gate) — v4 tighten: 4 insiders / $10M (was 3 / $5M)
+            'min_insiders':              4,
+            'min_net_sell_value':        10_000_000,
             # Stage 2 (opportunistic classifier)
             'min_opportunistic_count':   2,
             # Stage 3 (conviction filter)

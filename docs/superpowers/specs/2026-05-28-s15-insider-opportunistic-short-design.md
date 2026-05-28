@@ -71,10 +71,12 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 ### Stage 1 — Cluster gate (per ticker, daily)
 
+**v4 amendment (2026-05-28, post-v3-KILL):** v1/v2/v3 verdict trajectory: Sharpe +0.14 → −1.60 → −3.44. Cooldown (v2) and momentum filter (v3) both pushed the signal further negative. v4 reverts v2/v3 changes and instead tightens Stage 1 conviction: bumps min_insiders 3 → 4 and min_net_sell_value $5M → $10M. Pushes toward higher-conviction clusters at the cluster gate itself. Final hypothesis test — if the v1 signal had any latent edge that the v1 looseness was diluting, tightening the gate isolates it.
+
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
-- `distinct_insiders >= 3`
-- `net_sell_value >= $5_000_000` (sum of `value` over qualifying transactions)
+- `distinct_insiders >= 4` *(v4: was 3)*
+- `net_sell_value >= $10_000_000` (sum of `value` over qualifying transactions) *(v4: was $5M)*
 - Zero offsetting buys in the same 30-day window (`require_zero_buys = True`)
 - Only count transactions where `transaction_type` is one of:
   - `S-Sale`
