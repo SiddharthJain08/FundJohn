@@ -73,10 +73,12 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 **v4 amendment (2026-05-28, post-v3-KILL):** v1/v2/v3 verdict trajectory: Sharpe +0.14 → −1.60 → −3.44. Cooldown (v2) and momentum filter (v3) both pushed the signal further negative. v4 reverts v2/v3 changes and instead tightens Stage 1 conviction: bumps min_insiders 3 → 4 and min_net_sell_value $5M → $10M. Pushes toward higher-conviction clusters at the cluster gate itself. Final hypothesis test — if the v1 signal had any latent edge that the v1 looseness was diluting, tightening the gate isolates it.
 
+**v5 amendment (2026-05-28, post-v4-KILL-but-recovered):** v4 broke the monotonic worsening (Sharpe recovered −3.44 → +0.28, MaxDD 17.93% → 4.21%). v5 pushes the Stage 1 axis further along the only lever that worked: bumps min_insiders 4 → 5 and min_net_sell_value $10M → $20M. Result: **non-monotonic** — v5 Sharpe collapsed to −1.39 and MaxDD tripled to 11.69% despite hit-rate rising (0.568 → 0.634). The over-tightened gate filtered out positive-edge trades faster than negative-edge ones; remaining loss distribution clustered in time, blowing daily-portfolio Sharpe. **v4 is the local optimum on this axis.** Default parameters in code remain at v5 levels for archival reproducibility of this verdict; operator may revert to v4 levels before any future merge.
+
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
-- `distinct_insiders >= 4` *(v4: was 3)*
-- `net_sell_value >= $10_000_000` (sum of `value` over qualifying transactions) *(v4: was $5M)*
+- `distinct_insiders >= 5` *(v5: was 4 in v4; was 3 in v1-v3)*
+- `net_sell_value >= $20_000_000` (sum of `value` over qualifying transactions) *(v5: was $10M in v4; was $5M in v1-v3)*
 - Zero offsetting buys in the same 30-day window (`require_zero_buys = True`)
 - Only count transactions where `transaction_type` is one of:
   - `S-Sale`
