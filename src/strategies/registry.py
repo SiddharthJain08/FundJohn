@@ -34,6 +34,7 @@ _IMPL_MAP = {
     'S9_dual_momentum':  ('strategies.implementations.s09_dual_momentum',     'DualMomentum'),
     'S10_quality_value': ('strategies.implementations.s10_quality_value',     'QualityValue'),
     'S12_insider':       ('strategies.implementations.s12_insider', 'InsiderClusterBuy'),
+    'S15_insider_opportunistic_short': ('strategies.implementations.s15_insider_opportunistic_short', 'OpportunisticInsiderShort'),
     'S15_iv_rv_arb':     ('strategies.implementations.s15_iv_rv_arb',         'IVRVArb'),
     'S_custom_jt_momentum_12mo': ('strategies.implementations.S_custom_jt_momentum_12mo', 'JTMomentum12Mo'),
     'S23_regime_momentum':      ('strategies.implementations.S23_regime_momentum',      'RegimeMomentumStrategy'),

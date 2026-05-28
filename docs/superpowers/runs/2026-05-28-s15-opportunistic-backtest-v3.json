@@ -1,0 +1,176 @@
+{
+  "date": "2026-05-28",
+  "version": "v3",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "90b3b65",
+  "v3_changes_summary": [
+    "momentum filter: min_pct_above_50d_sma=0.02, sma_window=50 — tickers below their 50d SMA + 2% buffer are skipped. Hypothesis: filter to 'insider sells into strength' subset (Khan-Liu 2015), opposite direction from failed S12_SELL Phase B 'short into weakness' filter.",
+    "carries v2 cluster cooldown (14 trading days) and frequency classifier (>=4 sales/year = routine) forward unchanged"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "aux_loader role+sharesOwnedAfter projection from v1; v2 cluster cooldown + frequency classifier; v3 adds above-50d-SMA momentum filter in s15_insider_opportunistic_short.py.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "b45016bb-00d7-4c77-8375-5477696bba73",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Matches v1 and v2 baselines byte-for-byte: Sharpe 14.1305 / 9 trades / MaxDD 1.16%. Confirms v3 branch does not perturb S12."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 alone (OpportunisticInsiderShort) with v3 momentum filter (above 50d SMA + 2% buffer) + v2 frequency classifier + v2 14d cooldown, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "6bb24add-a940-4db2-aef0-a53814c89582",
+    "sharpe_ratio": -3.4355,
+    "max_drawdown_pct": 17.9272,
+    "trade_count": 138,
+    "return_pct": -10.1469,
+    "hit_rate": 0.5217,
+    "avg_holding_days": 14.96,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 138, "avg_pnl": -0.0087, "sum_pnl": -1.1982}
+    ],
+    "by_exit_reason": {"end_of_data": 51, "target": 56, "stop": 29, "max_hold": 2},
+    "short_stop_rate_pct": 21.01,
+    "short_target_rate_pct": 40.58,
+    "short_eod_rate_pct": 36.96,
+    "short_max_hold_rate_pct": 1.45,
+    "notes": "v3 momentum filter reduced trades from v2's 182 to 138 (24% further reduction). Sharpe deteriorated from v2's -1.597 to -3.4355 — the filter did not isolate a positive-edge subset. The 'sells into strength' sub-population has WORSE performance: stop rate rose from 18.1% (v2) to 21.0% (v3), and avg_pnl worsened from -0.383% (v2) to -0.87% (v3) per trade. The Khan-Liu 2015 momentum premise is falsified on this dataset: insider selling above the 50d SMA does not predict near-term price decline in the backtest window."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 frequency classifier DISABLED (OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1) — every above-SMA cluster seller treated as opportunistic",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "90dce22b-bb70-4916-bbbe-1495d4367c7d",
+    "sharpe_ratio": -3.4355,
+    "max_drawdown_pct": 17.9272,
+    "trade_count": 138,
+    "return_pct": -10.1469,
+    "hit_rate": 0.5217,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 138, "avg_pnl": -0.0087, "sum_pnl": -1.1982}
+    ],
+    "by_exit_reason": {"end_of_data": 51, "target": 56, "stop": 29, "max_hold": 2},
+    "notes": "IDENTICAL to modified_s15_standalone — same trade count (138), same Sharpe (-3.4355), same MaxDD (17.93%), byte-for-byte identical exit breakdown. The frequency-based Stage 2 classifier is STILL non-discriminating after adding the v3 momentum filter. The data density problem identified in v2 persists: insufficient per-insider rolling sales history to reach the 4/year routine threshold. G5 fails: ablation_sharpe is not strictly less than modified_sharpe."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Both the v3 momentum filter and the v2 frequency classifier fail to discriminate. The strategy has no demonstrated positive edge at any version tested (v1→v3).",
+    "momentum_filter_mechanism": "The above-50d-SMA filter was designed to select 'sells into strength' where insider conviction would be highest (company looks good, insider sells anyway). In practice this sub-population has worse PnL than the full v2 pool. The filtered tickers are near or above 52-week highs in a bull-regime period (late 2025 to mid 2026) — a momentum environment where stocks above their SMA continue rising, making short positions more costly.",
+    "classifier_mechanism": "classify_insider() with rolling-12-month frequency model still lacks per-insider sale history depth. Most insider (ticker, insider_name) pairs have ≤2 sales in any 12-month slice of the parquet. DATA depth problem, not a code defect — same root cause as v2.",
+    "code_correctness": "Both filters are correctly implemented and env vars are correctly read. The failures are empirical, not bugs.",
+    "new_vs_v2": "v2 root cause: 14d cooldown removed the clusters that had positive PnL (those re-signals that fired within the cooldown window were apparently the alpha source). v3 root cause: the above-SMA momentum filter further concentrates on the worst-performing subset (strong-momentum stocks that reverse less on insider selling)."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from the union of S12 BUY trades (run_id b45016bb) + S15 SHORT trades (run_id 6bb24add), equal-weighted daily portfolio methodology matching aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "b45016bb-00d7-4c77-8375-5477696bba73",
+      "6bb24add-a940-4db2-aef0-a53814c89582"
+    ],
+    "combined_trade_count": 147,
+    "combined_sharpe_ratio": -3.1938,
+    "combined_max_drawdown_pct": 16.4854,
+    "combined_return_pct": -8.5685,
+    "combined_daily_obs": 179,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days, equal-weighted on each day. Sharpe annualized by sqrt(252), risk-free = 5%/252. Identical to aggregate_metrics() implementation."
+  },
+  "v1_v2_v3_comparison": {
+    "description": "3-version side-by-side comparison across all run types",
+    "baseline_a": {
+      "v1_sharpe": 14.1305, "v2_sharpe": 14.1305, "v3_sharpe": 14.1305,
+      "v1_maxdd_pct": 1.1629, "v2_maxdd_pct": 1.1629, "v3_maxdd_pct": 1.1629,
+      "v1_trades": 9, "v2_trades": 9, "v3_trades": 9,
+      "result": "IDENTICAL across all 3 versions — no perturbation of S12 baseline"
+    },
+    "standalone": {
+      "v1_sharpe": 0.1359, "v2_sharpe": -1.597, "v3_sharpe": -3.4355,
+      "v1_maxdd_pct": 7.1368, "v2_maxdd_pct": 9.37, "v3_maxdd_pct": 17.9272,
+      "v1_trades": 1137, "v2_trades": 182, "v3_trades": 138,
+      "v1_to_v2_delta_sharpe": -1.7329,
+      "v2_to_v3_delta_sharpe": -1.8385,
+      "v1_to_v3_delta_sharpe": -3.5714,
+      "result": "Every version WORSE than the previous. v3 momentum filter pushed Sharpe from -1.60 to -3.44 — the opposite direction from the hypothesis. Trades fell from 182 to 138 (24% reduction), but the filtered subset has materially worse avg_pnl (-0.87% vs -0.38%). The 'sells into strength' sub-population is the worst-performing subset."
+    },
+    "ablation": {
+      "v1_sharpe": 0.1359, "v2_sharpe": -1.597, "v3_sharpe": -3.4355,
+      "v1_maxdd_pct": 7.1368, "v2_maxdd_pct": 9.37, "v3_maxdd_pct": 17.9272,
+      "v1_trades": 1137, "v2_trades": 182, "v3_trades": 138,
+      "result": "Identical to standalone in all 3 versions — frequency classifier has never discriminated (G5 fails v1, v2, v3)"
+    },
+    "combined": {
+      "v1_sharpe": 0.1759, "v2_sharpe": -1.2078, "v3_sharpe": -3.1938,
+      "v1_maxdd_pct": 7.0434, "v2_maxdd_pct": 8.5299, "v3_maxdd_pct": 16.4854,
+      "v1_trades": 1146, "v2_trades": 191, "v3_trades": 147,
+      "result": "Combined Sharpe has gone from marginally positive (v1: +0.18) to deeply negative (v3: -3.19). Each version is decisively worse than the previous."
+    }
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -3.4355,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-3.4355 >= 0.5 → FALSE (delta: -3.9355)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 138,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "138 >= 15 → TRUE"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -3.1938,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-3.1938 >= 8.0 → FALSE (delta: -11.1938)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 16.4854,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "16.4854 <= 8.0 → FALSE (excess: +8.4854pp)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe (classifier discriminates)",
+      "ablation_sharpe": -3.4355,
+      "modified_sharpe": -3.4355,
+      "result": "FAIL",
+      "detail": "-3.4355 < -3.4355 → FALSE (identical — classifier still inert; same data-depth failure as v1 and v2)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 17.9272,
+      "threshold": 15.0,
+      "result": "FAIL",
+      "detail": "17.9272 <= 15.0 → FALSE (excess: +2.9272pp; v3 momentum filter WORSENED MaxDD from v2's 9.37%)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": ["G2_s15_trade_count_ge_15"],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G4_combined_maxdd_le_8pct",
+      "G5_ablation_sharpe_lt_modified",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_passed_count": 1,
+    "gates_failed_count": 5
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "Five of six acceptance gates fail. The decision tree is unambiguous: any failure other than G5-only → KILL. Here G1, G3, G4, G5, and G6 all fail simultaneously. The Khan-Liu 2015 'sell into strength' hypothesis is definitively falsified: the v3 momentum filter (above 50d SMA + 2% buffer) selected the worst-performing subset of the already-negative v2 signals. Sharpe went from -1.597 (v2) to -3.4355 (v3); MaxDD from 9.37% to 17.93%; avg trade PnL from -0.383% to -0.87%. Every hypothesis tested across 3 versions has produced a monotonically worsening result. The combined portfolio (S12+S15) has deteriorated from marginally positive Sharpe in v1 (+0.18) to deeply negative in v3 (-3.19), with MaxDD growing from 7.0% to 16.5%. This strategy concept — shorting insider sell clusters — has no demonstrated positive edge in any formulation tested. The classifier is structurally inert due to data depth (v1, v2, v3 all identical on ablation). G5 cannot pass until the insider parquet accumulates 1-2 more years of per-insider sale history. Given that the un-filtered signal (v1) barely had positive Sharpe at 0.14, well below the 0.5 gate, and every subsequent filter has worsened it, there is no reasonable basis to continue iteration. KILL: close the S15 branch; do not promote to paper trading.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

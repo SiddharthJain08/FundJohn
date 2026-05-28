@@ -19,7 +19,11 @@ class InsiderClusterBuy(BaseStrategy):
     tier             = 2
     signal_frequency = 'daily'
     min_lookback     = 20
-    active_in_regimes = ['LOW_VOL', 'TRANSITIONING']
+    # Insider movements are regime-agnostic per operator (2026-05-28): the
+    # informational content of insider cluster buys does not decay across
+    # LOW_VOL/TRANSITIONING/HIGH_VOL. CRISIS remains excluded (extreme
+    # tail-risk regime; no insider edge documented during panics).
+    active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 
     def default_parameters(self) -> dict:
         return {

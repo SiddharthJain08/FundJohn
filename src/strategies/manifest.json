@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-26T14:49:05.702813+00:00",
+  "updated_at": "2026-05-28T15:30:06.193621+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -968,7 +968,8 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation",
+        "regime_agnostic_sharpe": true
       },
       "history": [],
       "instrument_class": "equity"
@@ -4973,6 +4974,43 @@
       },
       "history": [],
       "instrument_class": "option"
+    },
+    "S15_insider_opportunistic_short": {
+      "state": "live",
+      "state_since": "2026-05-28T15:30:06.192016+00:00",
+      "metadata": {
+        "canonical_file": "s15_insider_opportunistic_short.py",
+        "class": "OpportunisticInsiderShort",
+        "description": "Opportunistic insider cluster SHORT \u2014 Cohen-Malloy-Pomorski 2012 classifier",
+        "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+        "added": "2026-05-28",
+        "regime_agnostic_sharpe": true
+      },
+      "history": [
+        {
+          "from_state": "paper",
+          "to_state": "candidate",
+          "timestamp": "2026-05-28T15:29:20+00:00",
+          "actor": "operator:s15-v13-promotion",
+          "reason": "paper-state migration (analog of scripts/migrate_paper_to_candidate.py); S15 was misregistered as paper at v0 mint",
+          "metadata": {}
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-28T15:30:06.192016+00:00",
+          "actor": "operator:s15-v13-promotion",
+          "reason": "v13 verdict cleared G1/G2/G4/G6 (Sharpe +1.6894, MaxDD 4.81%, 477 trades)",
+          "metadata": {
+            "sharpe": 1.6894,
+            "max_drawdown": 0.04814,
+            "backtest_run_id": "4ac57e6b-2141-4bba-a107-f0ab63b08536",
+            "window": "2025-11-28 to 2026-05-28",
+            "instrument_class": "equity"
+          }
+        }
+      ],
+      "instrument_class": "equity"
     }
   },
   "decommissioned": {

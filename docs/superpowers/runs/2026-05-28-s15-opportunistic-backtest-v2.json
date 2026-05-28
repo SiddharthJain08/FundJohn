@@ -1,0 +1,136 @@
+{
+  "date": "2026-05-28",
+  "version": "v2",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "23d551b",
+  "v2_changes_summary": [
+    "cluster_self_cooldown: 14 trading days post-emission; each (ticker, cluster_date) key suppresses re-entry for 14 trading days; reduces trade count from v1 ~1137 to v2 182",
+    "frequency_based_stage2_classifier: replaces dormant calendar-quarter bucketing with rolling-12-month sale count per insider; routine threshold = 4 sales/year within window; designed to make Stage 2 discriminate where the quarterly approach could not"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "aux_data_loader projects role + shares_owned_after (carried over from v1 fix at commit 096aaf7). Both v2 changes (cooldown + frequency classifier) added on this branch at commits 53d33f2 + 23d551b.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "385a763f-4ba2-4d8a-b3b4-7d2fd31ba100",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Matches v1 baseline byte-for-byte: Sharpe 14.1305 / 9 trades / MaxDD 1.16%. Confirms v2 branch does not perturb S12."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 alone (OpportunisticInsiderShort) with frequency classifier ON and 14d cooldown, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "52bd6dd6-99ab-42fb-a911-fa5b3c7d355b",
+    "sharpe_ratio": -1.597,
+    "max_drawdown_pct": 9.37,
+    "trade_count": 182,
+    "return_pct": -0.5816,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 182, "avg_pnl": -0.003829, "sum_pnl": -0.6969}
+    ],
+    "by_exit_reason": {"end_of_data": 77, "target": 69, "stop": 33, "max_hold": 3},
+    "short_stop_rate_pct": 18.13,
+    "short_target_rate_pct": 37.91,
+    "short_eod_rate_pct": 42.31,
+    "short_max_hold_rate_pct": 1.65,
+    "notes": "Cooldown reduced trade count from 1137→182 (84% reduction). However Sharpe went from +0.14 (v1) to -1.60 (v2) — negative and worsened. The 14d cooldown appears to have selected a worse-performing subset: the clusters that are NOT on cooldown (i.e., first occurrence or post-cooldown) have a more negative avg_pnl (-0.383%) than the full v1 pool (-0.245%). Return also flipped from +3.88% to -0.58%. The short signal itself appears to have negative edge when the cooldown logic selects for fresh clusters."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 frequency classifier DISABLED (OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1) — every cluster seller treated as opportunistic",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "a2224273-c582-481f-ba93-3cdcd83fb416",
+    "sharpe_ratio": -1.597,
+    "max_drawdown_pct": 9.37,
+    "trade_count": 182,
+    "return_pct": -0.5816,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 182, "avg_pnl": -0.003829, "sum_pnl": -0.6969}
+    ],
+    "by_exit_reason": {"end_of_data": 77, "target": 69, "stop": 33, "max_hold": 3},
+    "notes": "IDENTICAL to modified_s15_standalone — same trade count (182), same Sharpe (-1.597), same MaxDD (9.37%), byte-for-byte identical exit breakdown. The frequency-based Stage 2 classifier is still non-discriminating on the current insider parquet, for the same structural reason as v1: insufficient density of per-insider rolling sales history to hit the 4/year threshold for 'routine' classification. See ablation_root_cause_analysis."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Frequency classifier is non-discriminating. Identical to v1 ablation outcome.",
+    "mechanism": "classify_insider() with the new frequency model windows the rolling 12 months prior to each bar date. For bars in the 2025-11-28 → 2026-05-28 window, this means the classifier inspects roughly Dec 2024 → May 2026. The insider parquet has insufficient S-Sale event density per individual insider (most appear once or twice in any 12-month window) to reach the 4-sale/year 'routine' threshold. Empirically: the vast majority of (ticker, insider_name) pairs have ≤2 sales in any 12-month slice of the parquet. The frequency model is a better-designed gate than the calendar-quarter approach, but still needs ≥3-4 years of per-insider sale history to discriminate reliably.",
+    "code_correctness": "The frequency classifier logic is correctly implemented and the ablation env var is correctly read. This is a DATA depth property, not a code defect — the same conclusion as v1.",
+    "new_vs_v1": "v1 root cause: ≥3 distinct calendar quarters per insider (quarterly bucketing); v2 root cause: ≥4 S-Sale events in rolling 12 months (frequency model). Both gates require historical depth the current parquet cannot yet provide.",
+    "remediation": "Data accumulation path: the insider parquet grows organically as each weekly pipeline run adds new rows. The frequency classifier will begin discriminating when per-insider sale counts within rolling 12-month windows reach the threshold — approximately 1-2 years of continued operation. No code change needed; the design is correct."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from the union of S12 BUY trades (run_id 385a763f) + S15 SHORT trades (run_id 52bd6dd6), using equal-weighted daily portfolio methodology matching aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "385a763f-4ba2-4d8a-b3b4-7d2fd31ba100",
+      "52bd6dd6-99ab-42fb-a911-fa5b3c7d355b"
+    ],
+    "combined_trade_count": 191,
+    "combined_sharpe_ratio": -1.2078,
+    "combined_max_drawdown_pct": 8.5299,
+    "combined_return_pct": 0.7396,
+    "combined_daily_obs": 179,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days, equal-weighted on each day. Sharpe annualized by sqrt(252), risk-free = 5%/252. Identical to aggregate_metrics() implementation."
+  },
+  "v1_comparison": {
+    "description": "Side-by-side v1 vs v2 metrics for each run",
+    "baseline_a": {
+      "v1_sharpe": 14.1305, "v2_sharpe": 14.1305, "delta_sharpe": 0.0,
+      "v1_maxdd_pct": 1.1629, "v2_maxdd_pct": 1.1629, "delta_maxdd": 0.0,
+      "v1_trades": 9, "v2_trades": 9, "delta_trades": 0,
+      "result": "IDENTICAL — v2 branch does not perturb S12 baseline"
+    },
+    "standalone": {
+      "v1_sharpe": 0.1359, "v2_sharpe": -1.597, "delta_sharpe": -1.7329,
+      "v1_maxdd_pct": 7.1368, "v2_maxdd_pct": 9.37, "delta_maxdd": 2.2332,
+      "v1_trades": 1137, "v2_trades": 182, "delta_trades": -955,
+      "result": "Cooldown reduced trades 84% but Sharpe flipped negative; v2 is WORSE than v1 standalone"
+    },
+    "ablation": {
+      "v1_sharpe": 0.1359, "v2_sharpe": -1.597, "delta_sharpe": -1.7329,
+      "v1_maxdd_pct": 7.1368, "v2_maxdd_pct": 9.37, "delta_maxdd": 2.2332,
+      "v1_trades": 1137, "v2_trades": 182, "delta_trades": -955,
+      "result": "Identical to v2 standalone — classifier still non-discriminating"
+    },
+    "combined": {
+      "v1_sharpe": 0.1759, "v2_sharpe": -1.2078, "delta_sharpe": -1.3837,
+      "v1_maxdd_pct": 7.0434, "v2_maxdd_pct": 8.5299, "delta_maxdd": 1.4865,
+      "v1_trades": 1146, "v2_trades": 191, "delta_trades": -955,
+      "result": "Combined Sharpe went from marginally positive (0.18) to deeply negative (-1.21); v2 combined is decisively worse"
+    }
+  },
+  "acceptance": {
+    "s15_standalone_sharpe_ge_0.5": "-1.597 >= 0.5 → FALSE (delta: -2.097)",
+    "s15_standalone_maxdd_le_15pct": "9.37 <= 15.0 → TRUE",
+    "s15_trade_count_ge_15": "182 >= 15 → TRUE",
+    "combined_sharpe_ge_8.0": "-1.2078 >= 8.0 → FALSE (delta: -9.2078)",
+    "combined_maxdd_le_8pct": "8.5299 <= 8.0 → FALSE (delta: +0.5299)",
+    "ablation_sharpe_lt_modified_sharpe": "-1.597 < -1.597 → FALSE (identical — frequency classifier still inert)"
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "s15_standalone_maxdd_le_15pct",
+      "s15_trade_count_ge_15"
+    ],
+    "gates_failed": [
+      "s15_standalone_sharpe_ge_0.5",
+      "combined_sharpe_ge_8.0",
+      "combined_maxdd_le_8pct",
+      "ablation_sharpe_lt_modified_sharpe"
+    ],
+    "gates_passed_count": 2,
+    "gates_failed_count": 4
+  },
+  "computed_suggestion": "HOLD",
+  "computed_suggestion_rationale": "Four of six acceptance gates fail; v2 is decisively worse than v1 on every performance metric. The cluster self-cooldown (v2's primary change) reduced trade count from 1,137 to 182 as expected, but produced a negative outcome: Sharpe went from +0.14 (v1) to -1.60 (v2), and return flipped from +3.88% to -0.58%. This indicates that the clusters firing on first occurrence (before the 14d cooldown suppresses them) have negative edge — the v1 trades that occurred on re-signals within 14 days of the original cluster were the ones carrying positive PnL. By eliminating them, the cooldown has removed the signal entirely. The combined portfolio Sharpe of -1.21 collapses the S12 baseline (14.13 → -1.21) and MaxDD exceeds the 8% cap (8.53%). The frequency-based Stage 2 classifier, while better-designed than the v1 quarterly approach, remains inert on the current insider parquet for the same structural reason: insufficient per-insider sale history depth to hit the 4/year threshold. Ablation remains byte-identical to standalone. HOLD rationale: The v2 design changes have negative empirical impact; the strategy should not be deployed in its current v2 form. The cooldown hypothesis (that first-occurrence clusters are better quality) is falsified by this backtest — the opposite appears true. Next investigation: (a) Consider removing or relaxing the cooldown entirely; (b) examine whether the re-signal pattern within 14d of emission is the actual alpha source; (c) probe per-cluster PnL to identify whether any signal sub-class has positive edge; (d) the frequency classifier design is sound — defer judgment on it until data depth increases.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

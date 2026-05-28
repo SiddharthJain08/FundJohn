@@ -1,0 +1,216 @@
+{
+  "date": "2026-05-28",
+  "version": "v9",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "5271748",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v9_changes_summary": [
+    "Stage 2: min_opportunistic_count 2 → 3 (require 3+ opportunistic sellers)",
+    "Stage 3: stage3_require_both False → True (require BOTH stake_pass AND c_suite_present)",
+    "Concentration cap reverted: max_concurrent_positions 3 → 20 (to ISOLATE Stage 3 effect)",
+    "Compares against v4 baseline (cap=20, OR-logic, min_opp=2)"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Isolates the Stage 3 strictness lever from the concentration cap. v4 was the cap=20 reference with OR-logic and min_opp=2 — v9 adds AND-logic + min_opp=3 at the same cap. If v9 outperforms v4, the Stage 3 lever has independent value; if not, the conviction filter strictness is the wrong axis to push.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only. REUSED verbatim.",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 v9: cap=20 + min_opp=3 + stage3_require_both=True. OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "4c1d7239-4ded-4ef0-ba24-e07ccb8c15c1",
+    "sharpe_ratio": -1.0507,
+    "max_drawdown_pct": 3.3954,
+    "trade_count": 576,
+    "return_pct": 1.6167,
+    "hit_rate": 0.5816,
+    "avg_holding_days": 20.01,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 576, "avg_pnl": 0.0028, "sum_pnl": 1.616, "avg_hold": 20.0}
+    ],
+    "by_exit_reason": {"end_of_data": 272, "target": 192, "stop": 88, "max_hold": 24},
+    "short_stop_rate_pct": 15.28,
+    "short_target_rate_pct": 33.33,
+    "short_eod_rate_pct": 47.22,
+    "short_max_hold_rate_pct": 4.17,
+    "notes": "Stage 3 strictness ALONE (cap=20, AND-logic, min_opp=3) REGRESSED vs v4 baseline (cap=20, OR-logic, min_opp=2). Standalone Sharpe collapsed v4 +0.28 → v9 -1.05 (-1.33 absolute). Surprising trade count: v4 had 699, v9 has 576 — only ~18% reduction despite AND-logic on Stage 3 + tighter Stage 2. Interpretation: the AND-logic conviction filter does NOT discriminate enough on the in-sample population. The classifier remains structurally inert (every seller defaults to opportunistic) so min_opp=3 is satisfied trivially on most clusters. And the AND-logic requires both stake_pass (≥10% personal stake) AND c_suite — in the real data, when 4+ insiders fire in 30 days, at least one CEO/CFO/COO/Chair is almost always present, and many high-conviction clusters have a CEO with stake > 10%. So the population reduction is mild but the survivors are NOT obviously higher-quality — Sharpe collapsed because the strict-filter survivors happen to cluster temporally even more than v4. Standalone MaxDD held tight at 3.40% (best of any version that uses cap=20). Hit rate fell 0.61 (v7) → 0.58 (v9), aligning with v6 and v4."
+  },
+  "ablation": {
+    "description": "S15 v9 with Stage 2 classifier DISABLED",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "ed1d0228-b6b6-41be-a056-2a003adc91cb",
+    "sharpe_ratio": -1.0507,
+    "max_drawdown_pct": 3.3954,
+    "trade_count": 576,
+    "return_pct": 1.6167,
+    "hit_rate": 0.5816,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 576, "avg_pnl": 0.0028, "sum_pnl": 1.616, "avg_hold": 20.0}
+    ],
+    "by_exit_reason": {"end_of_data": 272, "target": 192, "stop": 88, "max_hold": 24},
+    "notes": "IDENTICAL to modified_s15_standalone. Classifier still inert. NOTE: even with min_opporutunistic_count raised to 3, the classifier produces no discriminating gate — confirming the issue is upstream data depth, not a gate-threshold tuning problem."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Classifier remains inert; raising min_opportunistic_count from 2 to 3 had NO discriminating effect (the classifier returns 'opportunistic' for nearly every (ticker, insider) by default, so the count gate is satisfied by any sufficiently-large cluster regardless of threshold).",
+    "classifier_mechanism": "Unchanged.",
+    "code_correctness": "Stage 2 implementation correct. Stage 3 implementation correct (verified by unit tests for require_both=True).",
+    "v9_stage3_strictness_effect": "AND-logic on Stage 3 (require_both=True) cut trade count from v4's 699 to v9's 576 (~18%). The surviving population has WORSE Sharpe than v4's superset population. This rules out 'Stage 3 strictness alone is the missing edge' — strictness does not improve the risk-adjusted outcome at the cap=20 wide-diversification setting. Combined with the v6→v7→v8 cap-axis result, this suggests the productive lever for this strategy is concentration via the cap, NOT additional conviction-filter strictness."
+  },
+  "modified_combined": {
+    "description": "S12 BUY + S15 v9 SHORT combined",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "4c1d7239-4ded-4ef0-ba24-e07ccb8c15c1"
+    ],
+    "combined_trade_count": 585,
+    "combined_sharpe_ratio": -0.9265,
+    "combined_max_drawdown_pct": 3.3137,
+    "combined_return_pct": 1.8253,
+    "combined_daily_obs": 178,
+    "methodology_note": "Same as v7/v8."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -1.0507,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-1.0507 >= 0.5 → FALSE (delta -1.55; WORST of 9 versions at standalone Sharpe besides v3/v5)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 576,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "576 >= 15 → TRUE (surplus +561)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -0.9265,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-0.9265 >= 8.0 → FALSE (structurally unreachable)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 3.3137,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "3.3137 <= 8.0 → TRUE (headroom +4.69pp; LOWEST combined MaxDD of any S15 variant)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe",
+      "ablation_sharpe": -1.0507,
+      "modified_sharpe": -1.0507,
+      "result": "FAIL",
+      "detail": "-1.0507 < -1.0507 → FALSE (classifier still inert even at min_opp=3)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 3.3954,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "3.3954 <= 15.0 → TRUE (headroom +11.60pp; LOWEST standalone MaxDD of any S15 variant)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "v1_v2_v3_v4_v5_v6_v7_v8_v9_comparison": {
+    "description": "9-version side-by-side. v9 = Stage 3 strict alone at cap=20 (v4-baseline cap).",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v6_sharpe": -0.3601,
+      "v7_sharpe": 0.5817,
+      "v8_sharpe": -0.738,
+      "v9_sharpe": -1.0507,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct": 3.8807,
+      "v7_maxdd_pct": 4.018,
+      "v8_maxdd_pct": 6.7288,
+      "v9_maxdd_pct": 3.3954,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v6_trades": 524,
+      "v7_trades": 394,
+      "v8_trades": 277,
+      "v9_trades": 576,
+      "v9_changes_vs_v4_baseline": "Stage 2 min_opp 2→3; Stage 3 OR→AND (stage3_require_both=True); cap held at 20. Result: Sharpe regressed v4 +0.28 → v9 -1.05 (-1.33). Trade count: v4 699 → v9 576 (~18% reduction). Stage 3 strictness IS NOT a productive lever — adding AND-logic to the conviction filter at the wide-cap setting REDUCES Sharpe. The conviction filter strictness axis does not have independent value once the classifier is structurally inert."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v6_sharpe_documented": 1.0369,
+      "v6_sharpe_recomputed": -0.1693,
+      "v7_sharpe": 0.6805,
+      "v8_sharpe": -0.3897,
+      "v9_sharpe": -0.9265,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct_documented": 2.2679,
+      "v6_maxdd_pct_recomputed": 3.7804,
+      "v7_maxdd_pct": 3.8968,
+      "v8_maxdd_pct": 6.26,
+      "v9_maxdd_pct": 3.3137,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293,
+      "v6_trades": 533,
+      "v7_trades": 403,
+      "v8_trades": 286,
+      "v9_trades": 585
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "Three of six gates pass (G2, G4, G6) and three fail (G1, G3, G5). v9 standalone Sharpe (-1.05) is the third-worst of 9 versions, beaten only by v3 (-3.44) and v5 (-1.39). Stage 3 strictness ALONE at v4's wide cap (20) does not improve risk-adjusted return — it actively REGRESSES vs v4 baseline. Combined Sharpe is also negative (-0.93). The only standalone metrics improvement is MaxDD (3.40%, lowest of any S15 variant), but that comes from variance dampening via population pruning, not from selecting higher-edge clusters. The AND-logic conviction filter is not the missing lever. KILL.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

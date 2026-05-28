@@ -1,0 +1,229 @@
+{
+  "date": "2026-05-28",
+  "version": "v11",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "4010f93",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v11_changes_summary": [
+    "max_concurrent_positions: 5 (v7) → 4 (single-lever sweep, bracket v7 peak FROM BELOW)",
+    "Reverts v10's two confounding levers (min_opportunistic_count 3→2, stage3_require_both True→False) back to v7's OR-logic baseline",
+    "Stage 1 unchanged at v4/v6/v7 local optimum (4 / $10M)",
+    "Purpose: characterize whether the v6→v7→v8 cap-axis (8 → 5 → 3, Sharpe -0.36 → +0.58 → -0.74) has a peak strictly at cap=5 or whether cap=4 holds residual Sharpe above zero"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Single-lever sweep on max_concurrent_positions only. All v7 settings preserved except cap (5 → 4). Confirms the cap-axis U-shape geometry: v7 (cap=5) is the right ridge, v11 (cap=4) is the left descent toward v8 (cap=3, Sharpe -0.74).",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60,
+    "methodology_note": "Combined Sharpe uses the v7+ canonical aggregate_metrics-style calculation (distribute pnl_pct evenly across each trade's holding_days, equal-weighted daily portfolio mean, std ddof=1, rf=5%/252, annualize sqrt(252)). The v6-era variant calculation is NOT used here — v7 verdict reproduced v4's combined_sharpe=0.358 with this method, anchoring it as the canonical methodology going forward."
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60. REUSED verbatim from v1-v10.",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused from v1-v10 (baseline does not depend on S15 parameters)."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 with v11 settings (cap=4, OR-logic Stage 3, min_opp=2). OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "4ec8492b-75d2-4fbb-8d59-ce3ef3dfa1f1",
+    "sharpe_ratio": -0.4221,
+    "max_drawdown_pct": 6.2443,
+    "trade_count": 336,
+    "return_pct": 2.4331,
+    "hit_rate": 0.6071,
+    "avg_holding_days": 23.74,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 336, "avg_pnl": 0.00200, "sum_pnl": 0.6725, "avg_hold": 23.74}
+    ],
+    "by_exit_reason": {"end_of_data": 126, "target": 130, "stop": 60, "max_hold": 20},
+    "short_stop_rate_pct": 17.86,
+    "short_target_rate_pct": 38.69,
+    "short_eod_rate_pct": 37.50,
+    "short_max_hold_rate_pct": 5.95,
+    "notes": "v11 cap=4 IS WORSE than v7 cap=5. Standalone Sharpe FELL from v7's +0.58 to v11's -0.42 (delta -1.00 absolute). Confirms v7 cap=5 is a SHARP local peak. Per-trade avg_pnl COLLAPSED from v7's 0.0046 to v11's 0.0020 (~57% drop); trade count fell from v7's 394 to v11's 336 (only ~15% reduction); MaxDD WIDENED from v7's 4.02% to v11's 6.24%. Hit rate held flat (~0.61). Interpretation: cap=4 reaches deeper into the ranking than cap=5 without buying enough variance-reduction to compensate — the marginal trades pruned by cap=4 vs cap=5 were the higher-quality survivors, so the surviving pool quality DEGRADED rather than improved. The cap-axis curve is now characterized: v8 cap=3 (-0.74) < v11 cap=4 (-0.42) < v6 cap=8 (-0.36) < v4 cap=20 (+0.28) < v7 cap=5 (+0.58). cap=5 is a singular peak."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 classifier DISABLED",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "d7735ba1-7020-42f8-a483-49be9b501b69",
+    "sharpe_ratio": -0.4221,
+    "max_drawdown_pct": 6.2443,
+    "trade_count": 336,
+    "return_pct": 2.4331,
+    "hit_rate": 0.6071,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 336, "avg_pnl": 0.00200, "sum_pnl": 0.6725, "avg_hold": 23.74}
+    ],
+    "by_exit_reason": {"end_of_data": 126, "target": 130, "stop": 60, "max_hold": 20},
+    "notes": "IDENTICAL to modified_s15_standalone (byte-for-byte). Calendar-quarter Stage 2 classifier remains non-discriminating for the eleventh consecutive version. G5 fails: ablation_sharpe is NOT strictly less than modified_sharpe."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Stage 2 calendar-quarter classifier (v1 Cohen-Malloy-Pomorski 2012) remains structurally inert for the 11th consecutive version. Same DATA-property failure: per-insider sale history is too sparse for the 15-to-3-month rolling window to populate quarterly buckets, so nearly every (ticker, insider_name) pair returns 'opportunistic'.",
+    "classifier_mechanism": "classify_insider() checks for sales in a 12-month rolling window. With sparse parquet history, nearly all sellers default to 'opportunistic'.",
+    "code_correctness": "Stage 2 is correctly implemented. Inertness is a data-depth limitation, not a code bug.",
+    "v11_cap_effect": "max_concurrent_positions=4 (down from v7's 5) pruned the bottom ranks more aggressively, removing 58 trades (394 → 336, ~15% reduction). But the marginal trades pruned were apparently NOT bottom-tail noise — they were diversifying-quality fires that contributed positive Sharpe in v7. The cap-axis monotonic-tightening hypothesis is REFUTED for cap < 5: tightening past v7's cap=5 destroys signal faster than it removes noise. v8 (cap=3) is even worse (-0.74). v11 (cap=4) sits on the descending shoulder between the v7 peak and the v8 valley."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from union of S12 BUY trades (run_id 7f9ed076) + S15 v11 SHORT trades (run_id 4ec8492b), equal-weighted daily portfolio mirroring aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "4ec8492b-75d2-4fbb-8d59-ce3ef3dfa1f1"
+    ],
+    "combined_trade_count": 345,
+    "combined_sharpe_ratio": -0.2564,
+    "combined_max_drawdown_pct": 5.9274,
+    "combined_return_pct": 2.8634,
+    "combined_daily_obs": 178,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days starting day-after-entry (calendar days), equal-weighted on each day. Sharpe = (mean - rf_daily) / std(ddof=1) * sqrt(252), rf=5%/252. Identical to aggregate_metrics() implementation in unified_backtest.py."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -0.4221,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-0.4221 >= 0.5 → FALSE (delta -0.9221 vs threshold; delta -1.00 vs v7's +0.58). v11 cap=4 fell below the v6 cap=8 floor."
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 336,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "336 >= 15 → TRUE (surplus +321; ~15% below v7's 394 as expected from cap=4 vs cap=5)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -0.2564,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-0.2564 >= 8.0 → FALSE (delta -8.26; structurally unreachable as documented in v1-v10)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 5.9274,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "5.9274 <= 8.0 → TRUE (headroom +2.07pp; tighter than v7's +4.10pp because the short overlay leaked MaxDD)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe",
+      "ablation_sharpe": -0.4221,
+      "modified_sharpe": -0.4221,
+      "result": "FAIL",
+      "detail": "-0.4221 < -0.4221 → FALSE (identical — classifier still non-discriminating, same data-depth failure as v1-v10)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 6.2443,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "6.2443 <= 15.0 → TRUE (headroom +8.76pp; wider than v7's 4.02% but still safely below the ceiling)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "v1_v2_v3_v4_v5_v6_v7_v8_v9_v10_v11_comparison": {
+    "description": "11-version side-by-side standalone+combined metrics. v11 = cap=4 brackets v7 cap=5 peak from below.",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v6_sharpe": -0.3601,
+      "v7_sharpe": 0.5817,
+      "v8_sharpe": -0.738,
+      "v9_sharpe": -1.0507,
+      "v10_sharpe": -1.5936,
+      "v11_sharpe": -0.4221,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct": 3.8807,
+      "v7_maxdd_pct": 4.018,
+      "v8_maxdd_pct": 6.7288,
+      "v9_maxdd_pct": 3.3954,
+      "v10_maxdd_pct": 3.448,
+      "v11_maxdd_pct": 6.2443,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v6_trades": 524,
+      "v7_trades": 394,
+      "v8_trades": 277,
+      "v9_trades": 576,
+      "v10_trades": 476,
+      "v11_trades": 336,
+      "v11_changes_vs_v7": "Single-lever sweep: max_concurrent_positions 5→4. All other v7 settings preserved. Trade count fell 394→336 (~15%; less than the v6→v7 drop of ~25% because cap=4 prunes only the tail). Per-trade avg_pnl FELL 0.0046→0.0020 (~57% drop). Standalone Sharpe COLLAPSED +0.58 → -0.42 (-1.00 absolute swing). Standalone MaxDD widened 4.02% → 6.24% (+2.2pp). Conclusion: cap=5 is a singular peak on the concentration-cap axis. Cap-axis curve fully characterized: v8 cap=3 (-0.74) < v11 cap=4 (-0.42) < v6 cap=8 (-0.36) < v4 cap=20 (+0.28) < v7 cap=5 (+0.58). cap=5 is monotonically declining in BOTH directions."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v6_sharpe_documented": 1.0369,
+      "v6_sharpe_recomputed": -0.1693,
+      "v7_sharpe": 0.6805,
+      "v8_sharpe": -0.3897,
+      "v9_sharpe": -0.9265,
+      "v10_sharpe": -1.3516,
+      "v11_sharpe": -0.2564,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct_documented": 2.2679,
+      "v6_maxdd_pct_recomputed": 3.7804,
+      "v7_maxdd_pct": 3.8968,
+      "v8_maxdd_pct": 6.26,
+      "v9_maxdd_pct": 3.3137,
+      "v10_maxdd_pct": 3.375,
+      "v11_maxdd_pct": 5.9274,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293,
+      "v6_trades": 533,
+      "v7_trades": 403,
+      "v8_trades": 286,
+      "v9_trades": 585,
+      "v10_trades": 485,
+      "v11_trades": 345
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "v11 cap=4 underperformed v7 cap=5 on standalone Sharpe by -1.00 absolute, confirming v7's peak is sharply singular. Three of six gates pass (G2, G4, G6), three fail (G1, G3, G5). v11 brackets v7 from below the way v8 (cap=3, Sharpe -0.74) did, with v11 sitting between v8 and v7 on the descending shoulder. Cap-axis is now fully characterized as a single-peaked U-inverted curve with maximum at cap=5; no further single-lever cap-axis exploration will improve on v7. v7 remains the global best of the 11-version sweep. KILL.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

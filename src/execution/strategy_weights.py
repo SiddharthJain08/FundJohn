@@ -377,6 +377,58 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     return out
 
 
+def _apply_regime_agnostic_override(
+    conn,
+    bt: dict,
+    active: list[dict],
+) -> None:
+    """Override per-regime bt_sharpe with overall bt_sharpe for strategies
+    flagged `metadata.regime_agnostic_sharpe = True` in manifest.
+
+    Some strategies (insider movements per operator directive 2026-05-28)
+    have alpha that does not split usefully across regimes — the per-regime
+    Sharpe from unified_backtest reflects trade-distribution noise more than
+    real regime sensitivity. For those, use the OVERALL bt_sharpe across all
+    eligible regimes so weights are uniform.
+
+    Mutates `bt` in place. Idempotent. Safe to call after every backtest
+    refresh because it reads the latest primary_window run each time.
+    """
+    manifest = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json').read_text())
+    agnostic_sids = {
+        sid for sid, e in manifest.get('strategies', {}).items()
+        if (e.get('metadata') or {}).get('regime_agnostic_sharpe') is True
+    }
+    if not agnostic_sids:
+        return
+    active_sids = {s['strategy_id'] for s in active}
+    target_sids = list(agnostic_sids & active_sids)
+    if not target_sids:
+        return
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute('''
+        SELECT DISTINCT ON (strategy_id) strategy_id, total_sharpe, total_trades
+          FROM strategy_backtest_runs
+         WHERE strategy_id = ANY(%s) AND primary_window = TRUE
+           AND total_sharpe IS NOT NULL
+         ORDER BY strategy_id, run_at DESC
+    ''', (target_sids,))
+    overall = {r['strategy_id']: {
+        'bt_sharpe': float(r['total_sharpe']),
+        'bt_n':      int(r['total_trades']) if r['total_trades'] is not None else None,
+    } for r in cur}
+
+    for s in active:
+        sid = s['strategy_id']
+        if sid not in overall:
+            continue
+        for R in s['eligible_regimes']:
+            bt[(sid, R)] = dict(overall[sid])  # copy so callers can't mutate the source
+        logger.info('strategy_weights: %s regime-agnostic override → bt_sharpe=%.4f across %s',
+                    sid, overall[sid]['bt_sharpe'], s['eligible_regimes'])
+
+
 def _load_regime_by_date() -> dict:
     """Read historical_regimes.parquet → { 'YYYY-MM-DD': regime_state }.
 
@@ -478,6 +530,11 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
         active = _load_active_strategies(conn)
         sids = [s['strategy_id'] for s in active]
         bt   = _load_backtest_sharpe(conn, sids)
+        # Insider strategies (S12 BUY + S15 SHORT, 2026-05-28) flag
+        # metadata.regime_agnostic_sharpe — override per-regime bt_sharpe
+        # with the overall so weekly unified_backtest re-runs don't
+        # restore regime-split values.
+        _apply_regime_agnostic_override(conn, bt, active)
         regime_by_date = _load_regime_by_date()
         live = _load_live_sharpe(conn, sids, regime_by_date)
         oue  = _load_oue_by_strategy_regime(conn, sids)

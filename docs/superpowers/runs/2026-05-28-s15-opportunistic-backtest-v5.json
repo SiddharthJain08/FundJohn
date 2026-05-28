@@ -1,0 +1,190 @@
+{
+  "date": "2026-05-28",
+  "version": "v5",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "5217400",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v5_changes_summary": [
+    "Stage 1 push: min_insiders 4→5, min_net_sell_value $10M→$20M",
+    "All other v4 settings preserved (v1 calendar-quarter classifier, v1 position management, 15% wide stop, 60d hold)",
+    "Lever: continue along the v4 axis (Stage 1 tightening) that broke the v1→v2→v3 monotonic worsening"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "aux_loader role+sharesOwnedAfter projection still in place (096aaf7). v1 calendar-quarter classifier preserved. v1 position management preserved (15% wide stop, 60d hold). Stage 1 thresholds pushed further on the v4 axis: min_insiders=5, min_net_sell_value=$20M.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60. REUSED verbatim from v1/v2/v3/v4 (S15 changes do not perturb S12 codepath).",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused from v4. Matches v1/v2/v3/v4 baselines byte-for-byte: Sharpe 14.1305 / 9 trades / MaxDD 1.16%. Confirms v5 branch does not perturb S12."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 alone (OpportunisticInsiderShort) with v5 pushed Stage 1 (min_insiders=5, min_net_sell_value=$20M) + v1 calendar-quarter classifier + v1 position management. OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "9243ea41-08e2-4c93-8542-98da041ae0e2",
+    "sharpe_ratio": -1.3882,
+    "max_drawdown_pct": 11.6862,
+    "trade_count": 284,
+    "return_pct": -1.38,
+    "hit_rate": 0.6338,
+    "avg_holding_days": 18.01,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 284, "avg_pnl": 0.0011, "sum_pnl": 0.314, "avg_hold": 18.0}
+    ],
+    "by_exit_reason": {"end_of_data": 132, "target": 90, "stop": 46, "max_hold": 16},
+    "short_stop_rate_pct": 16.20,
+    "short_target_rate_pct": 31.69,
+    "short_eod_rate_pct": 46.48,
+    "short_max_hold_rate_pct": 5.63,
+    "notes": "Pushing Stage 1 further along the v4 axis (min_insiders 4→5, min_net_sell_value $10M→$20M) REVERSED the v3→v4 recovery: Sharpe collapsed from v4 +0.28 to v5 -1.39, return turned negative (-1.38%), and MaxDD nearly tripled from 4.21% to 11.69%. Trade count fell from 699 (v4) to 284 (v5) — the tighter threshold filtered out roughly 60% of the cluster population. The lever (tightening Stage 1) does NOT exhibit monotonic improvement: v3 (very loose 3/$5M) was worst, v4 (moderate 4/$10M) was best (positive but sub-gate), v5 (tight 5/$20M) is materially worse than v4. v4 appears to be a local optimum on this axis under the 6-month window; further tightening removes higher-conviction clusters faster than it improves edge per trade. Hit rate did rise (0.568→0.634) but average pnl per trade did not improve proportionally (0.0011→0.0011 — flat), and the daily-portfolio Sharpe (which captures clustering of losers in time) collapsed. End-of-data rate fell slightly (50.5%→46.5%) so the mark-to-market exposure is comparable to v4."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 calendar-quarter classifier DISABLED (OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1) — every cluster seller treated as opportunistic",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "a2ed8165-e292-41e1-92d9-d515e2ddfeba",
+    "sharpe_ratio": -1.3882,
+    "max_drawdown_pct": 11.6862,
+    "trade_count": 284,
+    "return_pct": -1.38,
+    "hit_rate": 0.6338,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 284, "avg_pnl": 0.0011, "sum_pnl": 0.314, "avg_hold": 18.0}
+    ],
+    "by_exit_reason": {"end_of_data": 132, "target": 90, "stop": 46, "max_hold": 16},
+    "notes": "IDENTICAL to modified_s15_standalone — same trade count (284), same Sharpe (-1.3882), same MaxDD (11.69%), byte-for-byte identical exit breakdown. The calendar-quarter Stage 2 classifier remains non-discriminating in v5 (same structural data-depth limitation observed in v1, v2, v3, v4). Root cause unchanged: classify_insider() returns 'opportunistic' by default when a seller has no qualifying sales history in the 15-to-3-month lookback window, so the min_opportunistic_count gate passes universally. G5 fails: ablation_sharpe is not strictly less than modified_sharpe."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Stage 2 calendar-quarter classifier (v1 Cohen-Malloy-Pomorski 2012) is structurally inert for the fifth consecutive version. Same DATA-property failure: per-insider sale history is too sparse for the 15-to-3-month rolling window to populate quarterly buckets, so nearly every (ticker, insider_name) pair returns 'opportunistic' (the safe default) and the min_opportunistic_count gate passes universally.",
+    "classifier_mechanism": "classify_insider() checks for sales in a 12-month rolling window (months t-15 to t-3). Requires >=3 distinct quarters → 'routine'; else → 'opportunistic'. With sparse parquet history, nearly all sellers return 'opportunistic'.",
+    "code_correctness": "Stage 2 is correctly implemented and the env var is correctly read. The gate is functionally correct but the data simply lacks the historical depth to discriminate (confirmed across v1, v2, v3, v4, v5).",
+    "stage1_pushing_effect": "v5 pushed Stage 1 further along the v4 axis (min_insiders 4→5, min_net_sell_value $10M→$20M). This filtered the cluster universe from 699 (v4) to 284 (v5) trades but REVERSED the Sharpe gain: -1.39 v5 vs +0.28 v4. The lever does not extrapolate — v4 sits near the local optimum on this axis for the 6-month window, with further tightening doing more harm than good by removing trades whose individual edge averages near-zero but whose population-level diversification was reducing the daily-portfolio variance."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from the union of S12 BUY trades (run_id 7f9ed076) + S15 SHORT trades (run_id 9243ea41), equal-weighted daily portfolio methodology matching aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "9243ea41-08e2-4c93-8542-98da041ae0e2"
+    ],
+    "combined_trade_count": 293,
+    "combined_sharpe_ratio": -1.3097,
+    "combined_max_drawdown_pct": 11.6862,
+    "combined_return_pct": -1.1195,
+    "combined_daily_obs": 178,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days, equal-weighted on each day. Sharpe annualized by sqrt(252), risk-free = 5%/252. Identical to aggregate_metrics() implementation in unified_backtest.py."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -1.3882,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-1.3882 >= 0.5 → FALSE (delta: -1.8882; v5 collapsed deep negative from v4 +0.28)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 284,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "284 >= 15 → TRUE (surplus: +269; lower than v4's 699 as expected from tighter Stage 1)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -1.3097,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-1.3097 >= 8.0 → FALSE (delta: -9.3097; S15 SHORT now drags the combined book net-negative even with S12's 14.13 Sharpe BUY contribution)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 11.6862,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "11.6862 <= 8.0 → FALSE (overshoot: -3.6862pp; v5 MaxDD blew past the 8% cap, regression from v4's 4.13%)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe (classifier discriminates)",
+      "ablation_sharpe": -1.3882,
+      "modified_sharpe": -1.3882,
+      "result": "FAIL",
+      "detail": "-1.3882 < -1.3882 → FALSE (identical — calendar-quarter classifier still non-discriminating; same data-depth failure as v1, v2, v3, v4)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 11.6862,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "11.6862 <= 15.0 → TRUE (headroom: +3.3138pp; nearly 3x worse than v4's 4.21% but still inside the 15% gate)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G4_combined_maxdd_le_8pct",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 2,
+    "gates_failed_count": 4
+  },
+  "v1_v2_v3_v4_v5_comparison": {
+    "description": "5-version side-by-side comparison of standalone S15 run metrics",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v5_changes_vs_v4": "Pushing Stage 1 further along the same axis (min_insiders 4→5, min_net_sell_value $10M→$20M) REVERSED v4's recovery. Sharpe collapsed from +0.28 to -1.39; MaxDD nearly tripled from 4.21% to 11.69%; return turned negative (4.16% → -1.38%). Trade count fell from 699 to 284 (≈60% reduction). The Stage 1 tightening lever is non-monotonic: v3 (loose, 3/$5M) was worst at -3.44, v4 (moderate, 4/$10M) was best at +0.28, and v5 (tight, 5/$20M) regressed to -1.39. v4 is a local optimum.",
+      "trajectory_note": "v1→v2→v3 was monotonically worsening. v4 broke that trajectory with a meaningful recovery (negative→positive Sharpe). v5 attempted to extend the recovery along the same axis but instead RE-ENTERED the negative-Sharpe regime. Combined with the persistent G5 failure (Stage 2 classifier still non-discriminating across five versions) and the new G4 failure (combined MaxDD breached the 8% cap for the first time since v3), v5 confirms that further single-axis tightening will not reach the gates. The alpha hypothesis (insider sell clusters predict near-term decline) is now empirically rejected at five distinct parameterizations on this 6-month window."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "Four of six acceptance gates fail (G1, G3, G4, G5) — one more failure than v4. Per the decision tree, any non-G5 failure triggers KILL, and v5 fails G1, G3, AND G4 independent of G5. The v5 result is doubly informative: (1) it rejects the hypothesis that Stage 1 tightening is the right lever — pushing min_insiders 4→5 and $10M→$20M REVERSED v4's recovery, collapsing standalone Sharpe from +0.28 to -1.39 and tripling MaxDD from 4.21% to 11.69%; v4 is a local optimum on this axis, not a step toward higher edge. (2) It re-confirms the Stage 2 classifier has been structurally inert across all five versions — the calendar-quarter implementation cannot discriminate against the available data depth, so opportunistic vs routine is functionally a no-op gate. Combined with v1-v3's negative trajectory and v4's sub-gate positive, the five-version sweep covers a wide parameter envelope (cluster size 3→5, threshold $5M→$20M, with and without cooldown/frequency/momentum filters) without ever clearing G1's 0.5 Sharpe floor. The empirical conclusion is that the S15 opportunistic-short alpha claim is not supported on this 6-month window with this data depth, and no remaining parameter lever has demonstrated monotonic improvement potential. KILL: do not promote, do not iterate to v6. Recommend retiring the candidate (or deferring until the historical data depth grows enough for Stage 2 to discriminate, which is an SP-2 Phase B / years-out concern, not a v6 question).",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

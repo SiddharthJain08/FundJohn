@@ -148,6 +148,7 @@ def _day_slice(date_str: str) -> dict[str, dict]:
 # S12_insider uses lookback_days=20 trading days * 1.5 calendar buffer = 30 days.
 # We supply a 45-day window so strategies with larger lookbacks are still covered.
 INSIDER_SLICE_DAYS = 45
+INSIDER_LONG_DAYS = 450   # 15 months — Stage 2 classifier window for S15
 
 # Module-level caches for insider index structures.
 # _INSIDER_DATE_INDEX: sorted list of date strings that have transactions.
@@ -176,8 +177,16 @@ def _build_insider_index() -> None:
         # Use to_dict('records') for vectorized loading — 50x faster than iterrows().
         ins['_dp_str'] = pd.to_datetime(ins['date'], errors='coerce').dt.strftime('%Y-%m-%d')
         ins = ins.dropna(subset=['_dp_str'])
-        records = ins[['ticker', '_dp_str', 'date', 'transaction_type',
-                       'insider_name', 'net_value', 'shares']].to_dict('records')
+        # Project the parquet columns we surface to strategies. role +
+        # shares_owned_after are required by S15's Stage 3 conviction filter
+        # (C-suite role check + personal-stake calculation); their absence
+        # silently blocks every S15 signal on real data.
+        projected_cols = ['ticker', '_dp_str', 'date', 'transaction_type',
+                          'insider_name', 'net_value', 'shares']
+        for opt_col in ('role', 'shares_owned_after'):
+            if opt_col in ins.columns:
+                projected_cols.append(opt_col)
+        records = ins[projected_cols].to_dict('records')
         # Group by calendar date of transaction for binary-search index.
         by_date: dict = defaultdict(lambda: defaultdict(list))
         for r in records:
@@ -191,13 +200,18 @@ def _build_insider_index() -> None:
                 txn_ts = pd.Timestamp(ds)
             except Exception:
                 txn_ts = ds  # fallback to string if parsing fails
-            by_date[ds][str(r.get('ticker', ''))].append({
+            role_raw = r.get('role')
+            after_raw = r.get('shares_owned_after')
+            txn = {
                 'transactionDate': txn_ts,
                 'transactionType': str(r.get('transaction_type', '') or ''),
                 'reportingName':   str(r.get('insider_name', '') or ''),
                 'value':           float(r.get('net_value', 0) or 0),
                 'shares':          float(r.get('shares', 0) or 0),
-            })
+                'role':            str(role_raw) if role_raw is not None and not pd.isna(role_raw) else None,
+                'sharesOwnedAfter': float(after_raw) if after_raw is not None and not pd.isna(after_raw) else None,
+            }
+            by_date[ds][str(r.get('ticker', ''))].append(txn)
         _INSIDER_DATE_INDEX = sorted(by_date.keys())
         _INSIDER_BY_DATE = {d: dict(tickers) for d, tickers in by_date.items()}
         log.info('aux_data_loader: insider index built date_count=%d tickers=%d rows=%d',
@@ -236,6 +250,35 @@ def _insider_slice(date_str: str) -> dict:
     for i in range(lo, hi):
         d = _INSIDER_DATE_INDEX[i]
         for ticker, txns in _INSIDER_BY_DATE[d].items():
+            merged[ticker].extend(txns)
+    return dict(merged)
+
+
+@lru_cache(maxsize=None)
+def _insider_long_slice(date_str: str) -> dict:
+    """Return insider history for the INSIDER_LONG_DAYS window ending on date_str.
+
+    Mirrors _insider_slice's structure but with a 15-month window for S15's
+    opportunistic-vs-routine classifier. Returns the same per-txn dict shape:
+    {ticker: [{transactionDate, transactionType, reportingName, value,
+              shares, sharesOwnedAfter, pricePerShare}]}.
+
+    Cached indefinitely (lru_cache maxsize=None) — same pattern as
+    _insider_slice. Caller is expected to slice further by sub-window
+    (e.g. t-15 to t-3 months) inside the strategy.
+    """
+    _build_insider_index()
+    if not _INSIDER_DATE_INDEX:
+        return {}
+    ts = pd.to_datetime(date_str)
+    cutoff_str = str((ts - pd.Timedelta(days=INSIDER_LONG_DAYS)).date())
+    lo = bisect.bisect_left(_INSIDER_DATE_INDEX, cutoff_str)
+    hi = bisect.bisect_right(_INSIDER_DATE_INDEX, date_str)
+    if lo >= hi:
+        return {}
+    merged: dict = defaultdict(list)
+    for d in _INSIDER_DATE_INDEX[lo:hi]:
+        for ticker, txns in _INSIDER_BY_DATE.get(d, {}).items():
             merged[ticker].extend(txns)
     return dict(merged)
 
@@ -345,23 +388,32 @@ def load_aux_data(
         aux_data['recent_stop_outs'].
 
     Returns: {
-        'options':      {ticker: {...fields...}},
-        'vol_indices':  {vix_close, vvix_close, vix9d_close},
-        'insider_txns': {ticker: [{transactionDate, transactionType,
-                                   reportingName, value, shares}]},
+        'options':              {ticker: {...fields...}},
+        'vol_indices':          {vix_close, vvix_close, vix9d_close},
+        'insider_txns':         {ticker: [{transactionDate, transactionType,
+                                           reportingName, value, shares}]},
+        'insider_history_long': {ticker: [{transactionDate, transactionType,
+                                           reportingName, value, shares}]},
+                                # 15-month (INSIDER_LONG_DAYS=450d) rolling window
+                                # for S15_insider_opportunistic_short Stage 2
+                                # classifier (t-15 to t-3 month pattern check).
+                                # Caller slices further by sub-window as needed.
         'recent_stop_outs': {ticker: pd.Timestamp},  # when strategy_id given
     }
     insider_txns is filtered to a INSIDER_SLICE_DAYS-day rolling window ending on
     `date` so per-bar calls in backtest simulation don't carry the full history.
-    This matches the effective content engine.py serves in live trading (same-day
-    data fetch naturally contains only recent filings). Strategies still apply
-    their own lookback window filter as they do in production.
+    insider_history_long uses a INSIDER_LONG_DAYS-day (15-month) window for S15's
+    opportunistic-vs-routine classifier; it is purely additive and does not alter
+    insider_txns. Both match the effective content engine.py serves in live trading
+    (same-day data fetch naturally contains only recent filings). Strategies still
+    apply their own lookback window filter as they do in production.
     """
     date_str = str(date)[:10]
     out = {
-        'options':      _day_slice(date_str),
-        'vol_indices':  _vol_indices_slice(date_str),
-        'insider_txns': _insider_slice(date_str),
+        'options':              _day_slice(date_str),
+        'vol_indices':          _vol_indices_slice(date_str),
+        'insider_txns':         _insider_slice(date_str),
+        'insider_history_long': _insider_long_slice(date_str),
     }
     if strategy_id:
         out['recent_stop_outs'] = _recent_stop_outs(

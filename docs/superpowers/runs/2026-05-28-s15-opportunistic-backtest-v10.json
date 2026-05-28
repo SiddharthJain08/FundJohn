@@ -1,0 +1,223 @@
+{
+  "date": "2026-05-28",
+  "version": "v10",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "ccbddb2",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v10_changes_summary": [
+    "STACK: v6's concentration cap (max_concurrent_positions=8) WITH v9's Stage 3 strictness",
+    "min_opportunistic_count = 3 (from v9)",
+    "stage3_require_both = True (from v9, AND-logic conviction filter)",
+    "max_concurrent_positions = 8 (from v6)",
+    "Tests whether the two levers compound (additive/super-additive) or are sub-additive"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "v10 stacks v6's cap=8 (which gave standalone Sharpe -0.36) with v9's Stage 3 strict (which gave -1.05). If the levers are independent and additive, expect mid-pack Sharpe; if super-additive (the gains compound), expect Sharpe better than either; if sub-additive (the levers fight each other), expect worse than either.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only. REUSED verbatim.",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 v10: cap=8 + min_opp=3 + stage3_require_both=True. OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "c169f850-3d06-4418-8131-26bd4d944d11",
+    "sharpe_ratio": -1.5936,
+    "max_drawdown_pct": 3.448,
+    "trade_count": 476,
+    "return_pct": 0.6948,
+    "hit_rate": 0.5882,
+    "avg_holding_days": 20.99,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 476, "avg_pnl": 0.00146, "sum_pnl": 0.695, "avg_hold": 21.0}
+    ],
+    "by_exit_reason": {"end_of_data": 210, "target": 170, "stop": 76, "max_hold": 20},
+    "short_stop_rate_pct": 15.97,
+    "short_target_rate_pct": 35.71,
+    "short_eod_rate_pct": 44.12,
+    "short_max_hold_rate_pct": 4.20,
+    "notes": "v10 = SUB-ADDITIVE stack. Standalone Sharpe -1.59 is WORSE than either lever individually: v6 cap=8 alone gave -0.36, v9 Stage 3 strict alone gave -1.05. The combined effect is roughly v6+v9 (sub-additively) — the levers do NOT compound, they fight each other. Trade count 476 is between v6 (524) and v9 (576). Per-trade avg_pnl dropped to 0.0015 — the lowest of any version using cap≤8 — strong evidence that AND-logic Stage 3 + cap-based concentration are pruning DIFFERENT but OVERLAPPING populations: applying both simultaneously removes diversifying low-conviction trades that the cap alone would have kept (via ranking) and that Stage 3 strict alone would have kept (because more positions are allowed to clear the cap=20 cap). MaxDD held tight at 3.45% (~v9's 3.40%). Return collapsed to +0.69% (worst of the post-v3 stretch)."
+  },
+  "ablation": {
+    "description": "S15 v10 with Stage 2 classifier DISABLED",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "f5e4b36d-f30c-42c9-bfe6-f03c4eec64d9",
+    "sharpe_ratio": -1.5936,
+    "max_drawdown_pct": 3.448,
+    "trade_count": 476,
+    "return_pct": 0.6948,
+    "hit_rate": 0.5882,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 476, "avg_pnl": 0.00146, "sum_pnl": 0.695, "avg_hold": 21.0}
+    ],
+    "by_exit_reason": {"end_of_data": 210, "target": 170, "stop": 76, "max_hold": 20},
+    "notes": "IDENTICAL to modified_s15_standalone. Classifier inert for the tenth consecutive version."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Classifier inert. Same data-depth limitation.",
+    "classifier_mechanism": "Unchanged.",
+    "code_correctness": "Stage 2 + Stage 3 implementations correct (38/38 unit tests green).",
+    "v10_stack_effect": "Stacking v6's cap=8 with v9's Stage 3 strict produced WORSE risk-adjusted return than either lever individually. The two filters are NOT independent — they prune overlapping populations of low-conviction trades. Applying both simultaneously over-prunes the diversifying tail and concentrates surviving trades into a narrower, more temporally-correlated set. This is the same loser-correlation failure mode that hurt v6 alone and v8 alone, amplified by the additional Stage 3 prune. Confirms: the productive lever is concentration via cap, NOT conviction-filter strictness, and the cap sweet-spot is cap=5 (v7) — NOT a cap that gets compounded with strictness."
+  },
+  "modified_combined": {
+    "description": "S12 BUY + S15 v10 SHORT combined",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "c169f850-3d06-4418-8131-26bd4d944d11"
+    ],
+    "combined_trade_count": 485,
+    "combined_sharpe_ratio": -1.3516,
+    "combined_max_drawdown_pct": 3.375,
+    "combined_return_pct": 1.0661,
+    "combined_daily_obs": 178,
+    "methodology_note": "Same as v7-v9."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": -1.5936,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "-1.5936 >= 0.5 → FALSE (worst Sharpe since v5; delta -2.09)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 476,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "476 >= 15 → TRUE (surplus +461)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": -1.3516,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "-1.3516 >= 8.0 → FALSE (structurally unreachable)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 3.375,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "3.375 <= 8.0 → TRUE (headroom +4.62pp; ~ties v9 for lowest)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe",
+      "ablation_sharpe": -1.5936,
+      "modified_sharpe": -1.5936,
+      "result": "FAIL",
+      "detail": "-1.5936 < -1.5936 → FALSE (classifier inert)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 3.448,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "3.448 <= 15.0 → TRUE (headroom +11.55pp)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "v1_v2_v3_v4_v5_v6_v7_v8_v9_v10_comparison": {
+    "description": "Final 10-version side-by-side. v10 = stack v6 cap with v9 Stage 3 strictness.",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v6_sharpe": -0.3601,
+      "v7_sharpe": 0.5817,
+      "v8_sharpe": -0.738,
+      "v9_sharpe": -1.0507,
+      "v10_sharpe": -1.5936,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct": 3.8807,
+      "v7_maxdd_pct": 4.018,
+      "v8_maxdd_pct": 6.7288,
+      "v9_maxdd_pct": 3.3954,
+      "v10_maxdd_pct": 3.448,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v6_trades": 524,
+      "v7_trades": 394,
+      "v8_trades": 277,
+      "v9_trades": 576,
+      "v10_trades": 476,
+      "v10_changes_vs_v6_and_v9": "Stack of v6 cap=8 + v9 Stage 3 strictness. Result: SUB-ADDITIVE. Standalone Sharpe -1.59 is WORSE than v6 alone (-0.36) AND worse than v9 alone (-1.05). The levers fight each other: cap prunes by ranking, Stage 3 strict prunes by conviction; together they remove overlapping diversifying trades and over-concentrate the surviving population. avg_pnl per trade dropped to 0.0015 (lowest of any post-v3 version). The compound failure rules out 'combine multiple modest levers' as a productive direction. Final ranking on the standalone-Sharpe axis: v7 (+0.58) > v4 (+0.28) > v1 (+0.14) > v6 (-0.36) > v8 (-0.74) > v9 (-1.05) > v5 (-1.39) > v10 (-1.59) > v2 (-1.60) > v3 (-3.44)."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v6_sharpe_documented": 1.0369,
+      "v6_sharpe_recomputed": -0.1693,
+      "v7_sharpe": 0.6805,
+      "v8_sharpe": -0.3897,
+      "v9_sharpe": -0.9265,
+      "v10_sharpe": -1.3516,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct_documented": 2.2679,
+      "v6_maxdd_pct_recomputed": 3.7804,
+      "v7_maxdd_pct": 3.8968,
+      "v8_maxdd_pct": 6.26,
+      "v9_maxdd_pct": 3.3137,
+      "v10_maxdd_pct": 3.375,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293,
+      "v6_trades": 533,
+      "v7_trades": 403,
+      "v8_trades": 286,
+      "v9_trades": 585,
+      "v10_trades": 485
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "Three of six gates pass (G2, G4, G6) and three fail (G1, G3, G5). v10 standalone Sharpe (-1.59) is the second-worst of 10 versions, beaten only by v3 (-3.44). The lever stack is sub-additive — combining v6's cap=8 with v9's AND-logic Stage 3 strictness produced WORSE risk-adjusted return than either lever alone. Combined Sharpe is also negative (-1.35). Confirms: the productive direction for this strategy is the concentration cap axis ALONE, with sweet spot at cap=5 (v7). No further lever combinations are likely to push past v7's standalone Sharpe of +0.58 within the 6-month window on the available data depth. KILL.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}

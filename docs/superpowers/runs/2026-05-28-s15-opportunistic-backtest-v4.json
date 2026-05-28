@@ -1,0 +1,185 @@
+{
+  "date": "2026-05-28",
+  "version": "v4",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "7e5449d",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v4_changes_summary": [
+    "Stage 1 tighten: min_insiders 3→4, min_net_sell_value $5M→$10M",
+    "v2 cluster cooldown REVERTED",
+    "v2 frequency classifier REVERTED",
+    "v3 momentum filter REVERTED"
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "aux_loader role+sharesOwnedAfter projection still in place (096aaf7). v1 calendar-quarter classifier restored. v1 position management restored (15% wide stop, 60d hold). Stage 1 thresholds tightened: min_insiders=4, min_net_sell_value=$10M.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Matches v1/v2/v3 baselines byte-for-byte: Sharpe 14.1305 / 9 trades / MaxDD 1.16%. Confirms v4 branch does not perturb S12."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 alone (OpportunisticInsiderShort) with v4 tightened Stage 1 (min_insiders=4, min_net_sell_value=$10M) + v1 calendar-quarter classifier + v1 position management. OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "9ad91639-a83d-47b7-bba3-aec71e946780",
+    "sharpe_ratio": 0.2772,
+    "max_drawdown_pct": 4.2127,
+    "trade_count": 699,
+    "return_pct": 4.1596,
+    "hit_rate": 0.568,
+    "avg_holding_days": 19.45,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 699, "avg_pnl": 0.0011, "sum_pnl": 0.7962, "avg_hold": 19.5}
+    ],
+    "by_exit_reason": {"end_of_data": 353, "target": 228, "stop": 94, "max_hold": 24},
+    "short_stop_rate_pct": 13.45,
+    "short_target_rate_pct": 32.62,
+    "short_eod_rate_pct": 50.50,
+    "short_max_hold_rate_pct": 3.43,
+    "notes": "Tightening Stage 1 (min_insiders 3→4, min_net_sell_value $5M→$10M) while reverting all v2/v3 additive filters produced a dramatic shift from v3 (-3.44 Sharpe, 138 trades) to v4 (+0.28 Sharpe, 699 trades). Sharpe is positive but remains below the G1 gate of 0.5. Trade count is very high (699 over 6 months = ~116/month) because v1 position management uses 60d hold and no cooldown. End-of-data exits (50.5%) are the dominant exit path — large fraction of positions are still open at window close, suggesting actual realized PnL is unclear."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 calendar-quarter classifier DISABLED (OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1) — every cluster seller treated as opportunistic",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "64c242db-0bae-49a9-a4cb-b409df03f85d",
+    "sharpe_ratio": 0.2772,
+    "max_drawdown_pct": 4.2127,
+    "trade_count": 699,
+    "return_pct": 4.1596,
+    "hit_rate": 0.568,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 699, "avg_pnl": 0.0011, "sum_pnl": 0.7962, "avg_hold": 19.5}
+    ],
+    "by_exit_reason": {"end_of_data": 353, "target": 228, "stop": 94, "max_hold": 24},
+    "notes": "IDENTICAL to modified_s15_standalone — same trade count (699), same Sharpe (0.2772), same MaxDD (4.21%), byte-for-byte identical exit breakdown. The calendar-quarter Stage 2 classifier remains non-discriminating in v4. Root cause confirmed: classify_insider() returns 'opportunistic' by default when a seller has no qualifying sales history in the 15-to-3-month lookback window (the most common case given data density). ALL sellers default to 'opportunistic', so enabling vs disabling the Stage 2 gate is equivalent. G5 fails: ablation_sharpe is not strictly less than modified_sharpe."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "The Stage 2 calendar-quarter classifier (v1 Cohen-Malloy-Pomorski 2012) is structurally inert for the same reason as the v1/v2 frequency classifier: per-insider sale history is too sparse. classify_insider() returns 'opportunistic' when a seller has no sales in the 15-to-3-month window. Most (ticker, insider_name) pairs lack sufficient rolling history for any classification other than the optimistic default.",
+    "classifier_mechanism": "classify_insider() checks for sales in a 12-month rolling window (months t-15 to t-3). Requires >=3 distinct quarters → 'routine'; else → 'opportunistic'. With sparse parquet history, nearly all sellers return 'opportunistic' (the safe default). The min_opportunistic_count gate (requires >= 2 opportunistic sellers) then passes universally.",
+    "code_correctness": "Stage 2 is correctly implemented and the env var is correctly read. The gate is functionally correct but the data simply lacks the historical depth to discriminate (same DATA property identified in v1/v2/v3).",
+    "stage1_tightening_effect": "The Stage 1 tightening (min_insiders 3→4, min_net_sell_value $5M→$10M) is the key change in v4. It restored the v1 universe structure (699 trades vs v3's 138) by eliminating the v2/v3 additive filters while raising the conviction bar. The tighter threshold filters out smaller, noisier clusters but still leaves a very large population."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from the union of S12 BUY trades (run_id 7f9ed076) + S15 SHORT trades (run_id 9ad91639), equal-weighted daily portfolio methodology matching aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "9ad91639-a83d-47b7-bba3-aec71e946780"
+    ],
+    "combined_trade_count": 708,
+    "combined_sharpe_ratio": 0.358,
+    "combined_max_drawdown_pct": 4.1273,
+    "combined_return_pct": 4.3375,
+    "combined_daily_obs": 178,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days, equal-weighted on each day. Sharpe annualized by sqrt(252), risk-free = 5%/252. Identical to aggregate_metrics() implementation in unified_backtest.py."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": 0.2772,
+      "threshold": 0.5,
+      "result": "FAIL",
+      "detail": "0.2772 >= 0.5 → FALSE (delta: -0.2228; positive but below gate)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 699,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "699 >= 15 → TRUE (surplus: +684)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": 0.358,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "0.358 >= 8.0 → FALSE (delta: -7.642)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 4.1273,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "4.1273 <= 8.0 → TRUE (headroom: +3.8727pp)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe (classifier discriminates)",
+      "ablation_sharpe": 0.2772,
+      "modified_sharpe": 0.2772,
+      "result": "FAIL",
+      "detail": "0.2772 < 0.2772 → FALSE (identical — calendar-quarter classifier still non-discriminating; same data-depth failure as v1, v2, v3)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 4.2127,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "4.2127 <= 15.0 → TRUE (headroom: +10.7873pp; v4 MaxDD dramatically improved from v3's 17.93%)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "v1_v2_v3_v4_comparison": {
+    "description": "4-version side-by-side comparison of standalone S15 run metrics",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v4_changes_vs_v3": "Reverting v2/v3 additive filters (cooldown, frequency classifier, momentum filter) + tightening Stage 1 (min_insiders 3→4, min_net_sell_value $5M→$10M) dramatically improved Sharpe from -3.44 to +0.28 and MaxDD from 17.93% to 4.21%. However Sharpe remains below the 0.5 gate. Trade count recovered from v3's 138 to 699, revealing that the v2/v3 filters were removing ALL positive-edge trades.",
+      "trajectory_note": "v1→v2→v3 was monotonically worsening. v4 breaks that trajectory with a material recovery, but still does not clear G1 (0.5 Sharpe threshold) or G3 (combined 8.0 threshold). The 50.5% end-of-data exit rate casts uncertainty on realized Sharpe — many positions were open at window close."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708
+    }
+  },
+  "computed_suggestion": "KILL",
+  "computed_suggestion_rationale": "Three of six acceptance gates fail (G1, G3, G5). The decision tree is clear: any failure other than G5-alone → KILL. G1 fails: standalone Sharpe is 0.28 vs the 0.5 gate. G3 fails: combined Sharpe is 0.36 vs the 8.0 gate. G5 fails: ablation and standalone are byte-for-byte identical (the Stage 2 classifier has never discriminated across any of the 4 versions tested — this is a structural data-depth limitation, not a code defect). The v4 results do show a meaningful improvement over v3: reverting all v2/v3 filters (cooldown, frequency classifier, momentum) while tightening Stage 1 thresholds recovered Sharpe from -3.44 to +0.28 and MaxDD from 17.93% to 4.21%. However, 50.5% of trades exit at end-of-data (positions still open at window close), which means the realized Sharpe is partially attributed to mark-to-market unrealized gains rather than closed PnL. The v4 tightening improved Signal quality but the core alpha claim — insider sell clusters predict near-term price decline — is supported only marginally at Sharpe 0.28. Given that v1 (the most permissive filter set, 1137 trades) had Sharpe 0.14, v4 (tighter Stage 1, 699 trades) at 0.28 represents modest improvement, but neither clears the gate. The Stage 2 classifier has failed to discriminate in every version; the market data window (6 months, bull-to-volatile regime) is unfavorable for a SHORT strategy. KILL: do not promote to paper trading. The v4 reversion result is informative — it isolates Stage 1 tightening as the only lever that improved performance — but the edge is insufficient to justify live deployment.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}
