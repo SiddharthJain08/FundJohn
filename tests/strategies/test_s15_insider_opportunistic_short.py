@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 from src.strategies.implementations.s15_insider_opportunistic_short import (
     classify_insider,
+    qualifying_sales,
 )
 
 
@@ -85,3 +86,44 @@ def test_classify_insider_counts_bare_s_type():
         _make_txn('2025-12-15', ttype='S'),
     ]
     assert classify_insider(history, AS_OF) == 'routine'
+
+
+def test_qualifying_sales_only_keeps_s_sale_and_s():
+    """Filter must keep S-Sale and S, drop everything else."""
+    mixed = [
+        {'transactionType': 'S-Sale',   'value': 1_000_000},
+        {'transactionType': 'S',        'value': 2_000_000},
+        {'transactionType': 'M-Exempt', 'value': 3_000_000},
+        {'transactionType': 'F-InKind', 'value': 4_000_000},
+        {'transactionType': 'G-Gift',   'value': 5_000_000},
+        {'transactionType': 'D',        'value': 6_000_000},
+        {'transactionType': 'A-Award',  'value': 7_000_000},
+        {'transactionType': 'J-Other',  'value': 8_000_000},
+        {'transactionType': 'P-Purchase', 'value': 9_000_000},
+    ]
+    out = qualifying_sales(mixed)
+    assert len(out) == 2
+    assert {t['value'] for t in out} == {1_000_000, 2_000_000}
+
+
+def test_qualifying_sales_case_insensitive():
+    """Match on uppercase form so casing variants are handled."""
+    txns = [
+        {'transactionType': 's-sale', 'value': 100},
+        {'transactionType': 'S-sale', 'value': 200},
+        {'transactionType': 's',      'value': 300},
+    ]
+    out = qualifying_sales(txns)
+    assert len(out) == 3
+
+
+def test_qualifying_sales_handles_missing_type():
+    """Txns with missing/None transactionType are dropped silently."""
+    txns = [
+        {'transactionType': 'S-Sale', 'value': 1},
+        {'transactionType': None,     'value': 2},
+        {'value': 3},
+    ]
+    out = qualifying_sales(txns)
+    assert len(out) == 1
+    assert out[0]['value'] == 1

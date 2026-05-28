@@ -8,7 +8,30 @@ Spec: docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.m
 """
 
 from __future__ import annotations
+from typing import Iterable
 import pandas as pd
+
+
+# ── Transaction-type filter ─────────────────────────────────────────────────
+
+_QUALIFYING_SALE_TYPES = {'S-SALE', 'S'}
+
+
+def qualifying_sales(txns: Iterable[dict]) -> list[dict]:
+    """Keep only S-Sale and S transaction types (open-market sales).
+
+    Drops M-Exempt (option exercise), F-InKind (tax withholding), G-Gift,
+    D (return to issuer), A-Award (RSU grant), J-Other, P-Purchase (buy).
+    These are mechanical or non-informational and would dilute the signal.
+    """
+    out = []
+    for t in txns:
+        ttype = t.get('transactionType')
+        if ttype is None:
+            continue
+        if str(ttype).upper() in _QUALIFYING_SALE_TYPES:
+            out.append(t)
+    return out
 
 
 # ── Stage 2: opportunistic-vs-routine classifier ────────────────────────────
@@ -22,28 +45,22 @@ def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
     - >=3 distinct quarters with sales → 'routine'
     - <=2 distinct quarters in window → 'opportunistic'
     - 0 qualifying sales in window → 'opportunistic' (new insider default)
-
-    Only counts S-Sale / S transaction types (see _qualifying_sales rules).
-    Other txn types (M-Exempt, F-InKind, etc.) are mechanical, not informational.
     """
-    if not history:
+    sales = qualifying_sales(history or [])
+    if not sales:
         return 'opportunistic'
 
     window_start = as_of - pd.DateOffset(months=15)
     window_end = as_of - pd.DateOffset(months=3)
 
     quarters = set()
-    for t in history:
-        ttype = (t.get('transactionType') or '').upper()
-        if ttype not in ('S-SALE', 'S'):
-            continue
+    for t in sales:
         try:
             txn_date = pd.to_datetime(t.get('transactionDate'))
         except (TypeError, ValueError):
             continue
         if txn_date < window_start or txn_date > window_end:
             continue
-        # Calendar quarter bucket: (year, quarter_num 1-4)
         quarters.add((txn_date.year, (txn_date.month - 1) // 3 + 1))
 
     if len(quarters) >= 3:
