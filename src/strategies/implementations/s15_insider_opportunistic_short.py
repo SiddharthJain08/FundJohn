@@ -9,7 +9,6 @@ Spec: docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.m
 
 from __future__ import annotations
 import pandas as pd
-from typing import Iterable
 
 
 # ── Stage 2: opportunistic-vs-routine classifier ────────────────────────────

@@ -74,3 +74,14 @@ def test_classify_insider_opportunistic_at_threshold():
         _make_txn('2025-09-15'),
     ]
     assert classify_insider(history, AS_OF) == 'opportunistic'
+
+
+def test_classify_insider_counts_bare_s_type():
+    """Bare 'S' transactionType (alternate SEC form) is counted same as S-Sale."""
+    # 3 distinct quarters using bare 'S' → routine
+    history = [
+        _make_txn('2025-05-15', ttype='S'),
+        _make_txn('2025-09-15', ttype='S'),
+        _make_txn('2025-12-15', ttype='S'),
+    ]
+    assert classify_insider(history, AS_OF) == 'routine'
