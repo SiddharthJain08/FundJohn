@@ -59,6 +59,22 @@ def _main(argv: list[str] | None = None) -> int:
     results = asyncio.run(ingest_8k_filings(tickers, args.lookback_hours))
     total_new = sum(results.values())
     log.info('ingested 8-Ks: total new=%d, per-ticker=%s', total_new, results)
+
+    # Discord post — only when something new was ingested (skip silent days).
+    if total_new > 0:
+        try:
+            from src.execution.pipeline_orchestrator import post_channel
+            ch = os.environ.get('OPENCLAW_EDGAR_DISCORD_WEBHOOK_NAME', 'pre-market-alerts')
+            hits = sorted([(t, n) for t, n in results.items() if n > 0],
+                          key=lambda x: -x[1])
+            lines = [f'**EDGAR 8-K ingest** — {total_new} new filing(s) across {len(hits)} ticker(s)']
+            lines += [f'  · {t}: {n}' for t, n in hits[:20]]
+            if len(hits) > 20:
+                lines.append(f'  · …and {len(hits) - 20} more')
+            post_channel(ch, '\n'.join(lines))
+        except Exception as e:
+            log.warning('discord post failed (non-fatal): %s', e)
+
     return 0
 
 

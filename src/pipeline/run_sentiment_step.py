@@ -233,6 +233,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     upsert_postgres(merged, run_date, pg_uri)
     append_parquet(merged, run_date)
+
+    # Discord post — daily summary to #pre-market-alerts (or configured channel).
+    # Counts only; ticker-level detail stays in the DB to avoid wall-of-text.
+    try:
+        from src.execution.pipeline_orchestrator import post_channel
+        ch = os.environ.get('OPENCLAW_SENTIMENT_DISCORD_WEBHOOK_NAME', 'pre-market-alerts')
+        bear_n = sum(1 for r in merged if float(r.get('social_bear_ratio') or 0) >= 0.6)
+        bull_n = sum(1 for r in merged if float(r.get('social_bull_ratio') or 0) >= 0.6)
+        neg_news_n = sum(1 for r in merged if float(r.get('news_finbert_neg') or 0) >= 0.5)
+        lines = [
+            f'**D1 sentiment** — {run_date} · {len(merged)} ticker-rows',
+            f'  · social: {bull_n} bullish (≥60%), {bear_n} bearish (≥60%)',
+            f'  · news: {neg_news_n} tickers FinBERT-neg ≥0.5',
+        ]
+        post_channel(ch, '\n'.join(lines))
+    except Exception as e:
+        logger.warning('sentiment discord post failed (non-fatal): %s', e)
+
     return 0
 
 
