@@ -99,7 +99,7 @@ class InsiderClusterBuy(BaseStrategy):
                 continue
 
             current_price = float(ts.iloc[-1])
-            stops = self.compute_stops_and_targets(ts, 'LONG', current_price)
+            stops = self.compute_stops_and_targets(ts, 'LONG', current_price, regime_state=regime_state)
 
             conf = 'HIGH' if distinct_insiders >= 5 and net_buy_value >= 2_000_000 else 'MED'
 
@@ -225,7 +225,7 @@ class InsiderClusterBuy(BaseStrategy):
             if current_price <= 0:
                 continue
 
-            stops = self.compute_stops_and_targets(ts, 'SHORT', current_price)
+            stops = self.compute_stops_and_targets(ts, 'SHORT', current_price, regime_state=regime_state)
 
             out.append(Signal(
                 ticker            = ticker,
