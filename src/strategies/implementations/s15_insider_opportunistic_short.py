@@ -219,20 +219,21 @@ class OpportunisticInsiderShort(BaseStrategy):
 
     def default_parameters(self) -> dict:
         return {
-            # Stage 1 (cluster gate) — v12 LOOSENS to v1's threshold (3 / $5M)
-            # to test whether the ranking score (v7 cap=5) selects better from
-            # a larger candidate pool. Hypothesis: bigger pool + tight cap may
-            # find higher-quality survivors than v7's already-restricted pool.
-            'min_insiders':              3,  # v12: 4→3 (v1-style)
-            'min_net_sell_value':        5_000_000,  # v12: 10M→5M (v1-style)
+            # Stage 1 (cluster gate) — v13 pushes the loose-Stage-1 axis FURTHER
+            # (min_insiders 3→2, min_net_sell_value $5M→$3M) while keeping v7/v12's
+            # cap=5. Tests whether the cross-axis gradient (bigger pool × tight cap)
+            # continues monotonically OR whether v12 (3 / $5M / cap=5) is the sweet
+            # spot beyond which ranking precision degrades on noisier candidates.
+            'min_insiders':              2,  # v13: 3→2 (ultra-loose)
+            'min_net_sell_value':        3_000_000,  # v13: 5M→3M (ultra-loose)
             # Stage 2 (opportunistic classifier)
             'min_opportunistic_count':   2,
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
             'stage3_require_both':       False,  # OR-logic preserved (v7 baseline)
-            # Position management — v12 keeps v7's cap=5 peak.
+            # Position management — v13 keeps v7/v12's cap=5 peak.
             'base_size_pct':             0.015,
-            'max_concurrent_positions':  5,  # v12: keep v7 cap (global best so far)
+            'max_concurrent_positions':  5,  # v13: keep v7/v12 cap (peak so far)
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
             # Window for Stage 1 (calendar days)
