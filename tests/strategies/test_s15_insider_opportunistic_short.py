@@ -335,7 +335,7 @@ def test_strategy_default_parameters():
     assert p['min_personal_stake_pct'] == 0.10
     assert p['stage3_require_both'] is False
     assert p['base_size_pct'] == 0.015
-    assert p['max_concurrent_positions'] == 5
+    assert p['max_concurrent_positions'] == 3
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
     assert p['short_lookback_days'] == 30
@@ -563,7 +563,7 @@ def test_generate_signals_respects_cooldown(monkeypatch):
 
 
 def test_generate_signals_caps_at_max_concurrent(monkeypatch):
-    """25 qualifying tickers → only top 5 by score are emitted (v7: cap 8→5)."""
+    """25 qualifying tickers → only top 3 by score are emitted (v8: cap 5→3)."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     tickers = [f'T{i:02d}' for i in range(25)]
@@ -605,8 +605,8 @@ def test_generate_signals_caps_at_max_concurrent(monkeypatch):
     }
     regime = {'state': 'LOW_VOL'}
     signals = s.generate_signals(prices, regime, tickers, aux_data=aux)
-    assert len(signals) == 5
-    top_tickers = {sig.ticker for sig in signals[:5]}
+    assert len(signals) == 3
+    top_tickers = {sig.ticker for sig in signals}
     assert 'T24' in top_tickers
     assert 'T23' in top_tickers
 
