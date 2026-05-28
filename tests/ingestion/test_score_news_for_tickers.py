@@ -13,15 +13,13 @@ def test_score_news_for_tickers_filters_by_ticker_and_window(
     mock_score, mock_connect
 ):
     since = datetime(2026, 5, 27, 22, 0, tzinfo=timezone.utc)
-    fake_rows = [
-        {'ticker': 'GLW', 'headline': 'CFO departs', 'summary': '', 'uuid': 'u1'},
-        {'ticker': 'GLW', 'headline': 'Guidance cut', 'summary': '', 'uuid': 'u2'},
-    ]
     cursor = MagicMock()
+    # 5-tuples: (primary_ticker, related_tickers, title, summary, uuid)
     cursor.fetchall.return_value = [
-        (r['ticker'], r['headline'], r['summary'], r['uuid']) for r in fake_rows
+        ('GLW', [], 'CFO departs', '', 'u1'),
+        ('GLW', [], 'Guidance cut', '', 'u2'),
     ]
-    cursor.description = [('ticker',), ('headline',), ('summary',), ('uuid',)]
+    cursor.description = [('primary_ticker',), ('related_tickers',), ('title',), ('summary',), ('uuid',)]
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cursor
     mock_connect.return_value.__enter__.return_value = conn
@@ -57,7 +55,7 @@ def test_score_news_for_tickers_filters_by_ticker_and_window(
 def test_score_news_for_tickers_empty_returns_empty_list(mock_score, mock_connect):
     cursor = MagicMock()
     cursor.fetchall.return_value = []
-    cursor.description = [('ticker',), ('headline',), ('summary',), ('uuid',)]
+    cursor.description = [('primary_ticker',), ('related_tickers',), ('title',), ('summary',), ('uuid',)]
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cursor
     mock_connect.return_value.__enter__.return_value = conn
@@ -65,3 +63,38 @@ def test_score_news_for_tickers_empty_returns_empty_list(mock_score, mock_connec
     out = score_news_for_tickers(['NONESUCH'], datetime.now(timezone.utc))
     assert out == []
     mock_score.assert_not_called()
+
+
+@patch('src.ingestion.news_finbert_scorer.psycopg2.connect')
+@patch('src.ingestion.news_finbert_scorer.score_news_rows')
+def test_related_tickers_match_is_attributed_to_queried_ticker(
+    mock_score, mock_connect, monkeypatch,
+):
+    """A row whose primary_ticker is SPY but related_tickers includes GLW
+    should count as GLW news when GLW was queried."""
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://fake')
+    from datetime import datetime, timezone
+    since = datetime(2026, 5, 27, 22, 0, tzinfo=timezone.utc)
+    cursor = MagicMock()
+    cursor.fetchall.return_value = [
+        ('SPY', ['GLW', 'IWM'], 'Industrial slowdown: GLW guidance cut', '', 'u-related'),
+        ('GLW', ['SPY'],        'GLW CFO departs',                       '', 'u-primary'),
+    ]
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cursor
+    mock_connect.return_value.__enter__.return_value = conn
+    mock_score.return_value = [{
+        'ticker': 'GLW', 'news_count_24h': 2,
+        'news_finbert_neg': 1.0, 'news_finbert_pos': 0.0,
+        'news_finbert_neu': 0.0, 'news_mean_score': -0.9,
+        'news_top_headlines': ['Industrial slowdown: GLW guidance cut', 'GLW CFO departs'],
+    }]
+    out = score_news_for_tickers(['GLW'], since)
+
+    # Both rows should be passed to score_news_rows as GLW
+    passed_rows = mock_score.call_args[0][0]
+    tickers_passed = [r['ticker'] for r in passed_rows]
+    assert tickers_passed == ['GLW', 'GLW']
+
+    # Both uuids should be attached to GLW's evidence
+    assert sorted(out[0]['evidence_uuids']) == ['u-primary', 'u-related']

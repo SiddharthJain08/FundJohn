@@ -97,7 +97,7 @@ def score_news_rows(news_rows: List[Dict]) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 _NEWS_FETCH_SQL = """
-    SELECT primary_ticker, title, summary, uuid
+    SELECT primary_ticker, related_tickers, title, summary, uuid
       FROM market_news
      WHERE (primary_ticker = ANY(%s) OR related_tickers && %s::text[])
        AND published_at >= %s
@@ -109,11 +109,16 @@ def score_news_for_tickers(tickers: List[str], since_ts: datetime) -> List[Dict]
     return one aggregated dict per ticker (same shape as score_news_rows)
     plus an `evidence_uuids` list for downstream confirmer citation.
 
+    A single headline can match multiple queried tickers (via primary_ticker
+    or related_tickers); it is attributed once per matched ticker so each
+    ticker's count reflects all news mentioning it, not just primary coverage.
+
     Returns [] if no news rows are found or tickers is empty. No DB writes.
     """
     if not tickers:
         return []
 
+    queried = set(tickers)
     dsn = os.environ['POSTGRES_URI']
     with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(_NEWS_FETCH_SQL, (tickers, tickers, since_ts))
@@ -124,13 +129,20 @@ def score_news_for_tickers(tickers: List[str], since_ts: datetime) -> List[Dict]
 
     news_rows: List[Dict] = []
     uuids_by_ticker: Dict[str, List[str]] = {}
-    for ticker, title, summary, uuid in rows:
-        news_rows.append({
-            'ticker':   ticker,
-            'headline': title or '',
-            'summary':  summary or '',
-        })
-        uuids_by_ticker.setdefault(ticker, []).append(str(uuid))
+    for primary_ticker, related_tickers, title, summary, uuid in rows:
+        # Determine which queried tickers this row should be attributed to.
+        article_tickers = {primary_ticker} | set(related_tickers or [])
+        matched = queried & article_tickers
+        for ticker in matched:
+            news_rows.append({
+                'ticker':   ticker,
+                'headline': title or '',
+                'summary':  summary or '',
+            })
+            uuids_by_ticker.setdefault(ticker, []).append(str(uuid))
+
+    if not news_rows:
+        return []
 
     aggregated = score_news_rows(news_rows)
     for entry in aggregated:
