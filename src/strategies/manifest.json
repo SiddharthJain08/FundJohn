@@ -4973,6 +4973,19 @@
       },
       "history": [],
       "instrument_class": "option"
+    },
+    "S15_insider_opportunistic_short": {
+      "history": [],
+      "instrument_class": "equity",
+      "metadata": {
+        "canonical_file": "s15_insider_opportunistic_short.py",
+        "class": "OpportunisticInsiderShort",
+        "description": "Opportunistic insider cluster SHORT \u2014 Cohen-Malloy-Pomorski 2012 classifier",
+        "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+        "added": "2026-05-28"
+      },
+      "state": "paper",
+      "state_since": "2026-05-28T00:00:00+00:00"
     }
   },
   "decommissioned": {
