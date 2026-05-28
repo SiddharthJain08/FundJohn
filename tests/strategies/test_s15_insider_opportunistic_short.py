@@ -483,3 +483,44 @@ def test_generate_signals_respects_cooldown(monkeypatch):
     regime = {'state': 'LOW_VOL'}
     signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
     assert signals == []
+
+
+def test_generate_signals_caps_at_max_concurrent(monkeypatch):
+    """25 qualifying tickers → only top 20 by score are emitted."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    tickers = [f'T{i:02d}' for i in range(25)]
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame(
+        {t: np.linspace(100, 105, 30) for t in tickers}, index=idx,
+    )
+    sales_per_ticker = {}
+    history_per_ticker = {}
+    for i, t in enumerate(tickers):
+        v = (i + 1) * 1_000_000
+        sales_per_ticker[t] = [
+            {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+             'reportingName': f'A{i}', 'role': 'officer: CEO',
+             'value': v, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+            {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+             'reportingName': f'B{i}', 'role': 'officer: VP',
+             'value': v, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+            {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+             'reportingName': f'C{i}', 'role': 'officer: VP',
+             'value': v, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+        ]
+        history_per_ticker[t] = [
+            *_seller_history(f'A{i}', 'officer: CEO', 1, value_each=v),
+            *_seller_history(f'B{i}', 'officer: VP',  1, value_each=v),
+            *_seller_history(f'C{i}', 'officer: VP',  1, value_each=v),
+        ]
+    aux = {
+        'insider_txns':         sales_per_ticker,
+        'insider_history_long': history_per_ticker,
+    }
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, tickers, aux_data=aux)
+    assert len(signals) == 20
+    top_tickers = {sig.ticker for sig in signals[:5]}
+    assert 'T24' in top_tickers
+    assert 'T23' in top_tickers

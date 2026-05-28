@@ -9,6 +9,7 @@ Spec: docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.m
 
 from __future__ import annotations
 from typing import Iterable
+import math
 import os
 import pandas as pd
 from ..base import BaseStrategy, Signal
@@ -387,4 +388,11 @@ class OpportunisticInsiderShort(BaseStrategy):
                 },
             ))
 
+        # Rank by (opportunistic_count * log10(max(net_sell_value, 1))), desc
+        def _score(sig):
+            v = max(float(sig.signal_params.get('net_sell_value') or 1.0), 1.0)
+            opp = int(sig.signal_params.get('opportunistic_count') or 0)
+            return opp * math.log10(v)
+
+        candidates.sort(key=_score, reverse=True)
         return candidates[:int(p['max_concurrent_positions'])]
