@@ -1,0 +1,11 @@
+[Unit]
+Description=Fire pre-market realized-PnL backfill at 16:05 ET
+Requires=openclaw-premarket-realized-backfill.service
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:05:00 America/New_York
+Persistent=false
+Unit=openclaw-premarket-realized-backfill.service
+
+[Install]
+WantedBy=timers.target
