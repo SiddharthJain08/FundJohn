@@ -315,3 +315,60 @@ Each phase emits Discord summaries so the operator can monitor.
   to drop crypto and options from the scanned set — most likely
   `instrument_class = 'equity'` against the strategies/positions join, but the
   precise table and column reference is to be confirmed at implementation time.
+
+---
+
+## 11. GLW post-mortem result (2026-05-28)
+
+Replay run on 2026-05-28 against the production `market_news` table.
+
+**Sanity counts (pre-market window 2026-05-27 18:00 ET -> 2026-05-28 09:00 ET):**
+- GLW news rows in `market_news`: 0
+- Earliest: N/A (no rows)
+- Latest: N/A (no rows)
+
+Note: The production `market_news` table contains 563 total rows spanning
+2026-04-27 to 2026-05-27 UTC. The one GLW row that exists in the table is
+dated 2026-05-19 10:09 UTC (title: "Corning Leans Into AI Infrastructure
+Growth As Valuation And Risks Stand Out") -- a week-old article, well outside
+the pre-market window. No GLW news was ingested during the 2026-05-27
+18:00 ET -> 2026-05-28 09:00 ET window.
+
+**07:30 ET replay** (mode: with-sonnet):
+- news_count: 0
+- finbert_neg_ratio: 0.0
+- panic_score: 0.0
+- advisory_would_fire: false
+- Sonnet verdict: not run (no news to pass to confirmer)
+- Sonnet severity: not run
+- Sonnet rationale: not run
+- Headlines surfaced: (none)
+
+**09:00 ET replay** (mode: with-sonnet):
+- news_count: 0
+- finbert_neg_ratio: 0.0
+- panic_score: 0.0
+- advisory_would_fire: false
+- Sonnet verdict: not run (no news to pass to confirmer)
+- Sonnet severity: not run
+- Sonnet rationale: not run
+- Headlines surfaced: (none)
+
+**Conclusion:**
+
+The scanner would NOT have caught GLW on 2026-05-28. The production
+`market_news` table contained zero GLW articles in the 15-hour pre-market
+window (2026-05-27 18:00 ET to 2026-05-28 09:00 ET), so both the 07:30 ET
+and 09:00 ET replays returned a panic_score of 0.0 and advisory_would_fire
+= false. This is a news-ingestion coverage gap, not a scoring or threshold
+failure: the scanner's logic is sound, but the input data was absent entirely.
+
+This outcome strongly warrants the follow-up specs suggested in the design
+document. Specifically, an EDGAR 8-K tap (or pre-market tape / earnings
+transcript wire) is the most likely source of the adverse news that caused
+the ~4% open-day drop -- such disclosures arrive hours before open via the
+SEC EDGAR RSS feed and would appear in `market_news` only if an 8-K ingestor
+is running. Recommend prioritising: (1) an EDGAR 8-K ingestor that polls the
+SEC EDGAR RSS for current-report filings by held tickers, and (2) a diagnostic
+rule that flags when a held ticker has zero news ingested in the prior 24 h,
+as a coverage-gap alert rather than a silence-is-safe assumption.
