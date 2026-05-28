@@ -1,0 +1,13 @@
+{
+  "ticker": "GLW",
+  "as_of": "2026-05-28T07:30:00-04:00",
+  "window_start": "2026-05-27T22:00:00+00:00",
+  "news_count": 0,
+  "finbert_neg_ratio": 0.0,
+  "panic_score": 0.0,
+  "advisory_would_fire": false,
+  "headlines": [],
+  "sonnet_verdict": null,
+  "sonnet_severity": null,
+  "sonnet_rationale": null
+}

@@ -372,3 +372,57 @@ is running. Recommend prioritising: (1) an EDGAR 8-K ingestor that polls the
 SEC EDGAR RSS for current-report filings by held tickers, and (2) a diagnostic
 rule that flags when a held ticker has zero news ingested in the prior 24 h,
 as a coverage-gap alert rather than a silence-is-safe assumption.
+
+---
+
+### 11.1. Post-EDGAR-integration replay (2026-05-28)
+
+After shipping the EDGAR 8-K ingester (`2026-05-28-edgar-8k-ingester-design.md`),
+re-ran the GLW replay against the now-populated market_news. EDGAR backfill
+window: 7 days.
+
+**EDGAR backfill found for GLW (filing_date >= 2026-05-21):**
+- no 8-Ks in window (backfill returned total new=0; edgar_8k_filings table
+  contains 0 rows for GLW across all dates)
+
+**market_news rows for GLW since 2026-05-27 (publisher='SEC EDGAR'):**
+- no rows
+
+**07:30 ET replay (post-EDGAR):**
+- news_count: 0
+- finbert_neg_ratio: 0.0
+- panic_score: 0.0
+- advisory_would_fire: false
+- Sonnet verdict: not run (no news to pass to confirmer)
+- Sonnet severity: not run
+- Sonnet rationale: not run
+
+**09:00 ET replay (post-EDGAR):**
+- news_count: 0
+- finbert_neg_ratio: 0.0
+- panic_score: 0.0
+- advisory_would_fire: false
+- Sonnet verdict: not run (no news to pass to confirmer)
+- Sonnet severity: not run
+- Sonnet rationale: not run
+
+**Conclusion:**
+
+GLW filed NO 8-K with the SEC in the 7-day window ending 2026-05-28. The
+`edgar_8k_filings` table (populated by the new ingester) returned zero rows for
+GLW for dates >= 2026-05-21, and the `market_news` table likewise has no SEC
+EDGAR rows for the ticker. With both Alpaca news and EDGAR 8-Ks absent from the
+pre-market window, the post-EDGAR replay produces identical results to the
+pre-EDGAR baseline: news_count=0, panic_score=0.0, advisory_would_fire=false at
+both 07:30 and 09:00 ET.
+
+The EDGAR integration is working correctly — it ingested from SEC's EDGAR API
+and confirmed no material 8-K filing (Items 5.02 leadership change, 4.02
+auditor concerns, 2.05 workforce reduction, etc.) was made by GLW in the look-
+back window. The ~4% open-day drop therefore originated from a non-EDGAR source:
+the most likely candidates are an analyst downgrade issued pre-market via
+a research terminal wire (not public RSS), options market positioning / large
+block print, or sector rotation in Corning's optical-networking segment on
+tariff/AI-spend news. The next follow-up spec is pre-market tape data (Alpaca
+bars 04:00-09:30 ET) so the scanner can detect price-action panic and surface
+unusual volume/gap signals regardless of news availability.
