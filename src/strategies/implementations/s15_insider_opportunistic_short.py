@@ -215,18 +215,19 @@ class OpportunisticInsiderShort(BaseStrategy):
 
     def default_parameters(self) -> dict:
         return {
-            # Stage 1 (cluster gate) — v5 tighten: 5 insiders / $20M
-            # (v4 was 4 / $10M; v1 was 3 / $5M). Pushed further along the
-            # only axis that improved Sharpe in 4 prior iterations.
-            'min_insiders':              5,
-            'min_net_sell_value':        20_000_000,
+            # Stage 1 (cluster gate) — v6 revert to v4 local optimum (4 / $10M).
+            # v5 push to 5 / $20M overshot: Sharpe collapsed +0.28 → -1.39.
+            'min_insiders':              4,
+            'min_net_sell_value':        10_000_000,
             # Stage 2 (opportunistic classifier)
             'min_opportunistic_count':   2,
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
-            # Position management
+            # Position management — v6 cuts concurrent cap 20 → 8 so the
+            # ranking score (opp_count × log10(net_sell_value)) actually bites
+            # on high-fire days. v4 avg 5.8 fires/day, cap=20 rarely bound.
             'base_size_pct':             0.015,
-            'max_concurrent_positions':  20,
+            'max_concurrent_positions':  8,
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
             # Window for Stage 1 (calendar days)

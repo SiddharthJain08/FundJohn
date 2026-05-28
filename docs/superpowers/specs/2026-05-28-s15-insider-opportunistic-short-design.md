@@ -73,12 +73,14 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 **v4 amendment (2026-05-28, post-v3-KILL):** v1/v2/v3 verdict trajectory: Sharpe +0.14 → −1.60 → −3.44. Cooldown (v2) and momentum filter (v3) both pushed the signal further negative. v4 reverts v2/v3 changes and instead tightens Stage 1 conviction: bumps min_insiders 3 → 4 and min_net_sell_value $5M → $10M. Pushes toward higher-conviction clusters at the cluster gate itself. Final hypothesis test — if the v1 signal had any latent edge that the v1 looseness was diluting, tightening the gate isolates it.
 
-**v5 amendment (2026-05-28, post-v4-KILL-but-recovered):** v4 broke the monotonic worsening (Sharpe recovered −3.44 → +0.28, MaxDD 17.93% → 4.21%). v5 pushes the Stage 1 axis further along the only lever that worked: bumps min_insiders 4 → 5 and min_net_sell_value $10M → $20M. Result: **non-monotonic** — v5 Sharpe collapsed to −1.39 and MaxDD tripled to 11.69% despite hit-rate rising (0.568 → 0.634). The over-tightened gate filtered out positive-edge trades faster than negative-edge ones; remaining loss distribution clustered in time, blowing daily-portfolio Sharpe. **v4 is the local optimum on this axis.** Default parameters in code remain at v5 levels for archival reproducibility of this verdict; operator may revert to v4 levels before any future merge.
+**v5 amendment (2026-05-28, post-v4-KILL-but-recovered):** v4 broke the monotonic worsening (Sharpe recovered −3.44 → +0.28, MaxDD 17.93% → 4.21%). v5 pushes the Stage 1 axis further along the only lever that worked: bumps min_insiders 4 → 5 and min_net_sell_value $10M → $20M. Result: **non-monotonic** — v5 Sharpe collapsed to −1.39 and MaxDD tripled to 11.69% despite hit-rate rising (0.568 → 0.634). The over-tightened gate filtered out positive-edge trades faster than negative-edge ones; remaining loss distribution clustered in time, blowing daily-portfolio Sharpe. **v4 is the local optimum on this axis.**
+
+**v6 amendment (2026-05-28, post-v5-KILL):** Reverts Stage 1 to v4 local optimum (4 insiders / $10M) and tests a NEW axis — drops `max_concurrent_positions` 20 → 8 so the ranking score (`opp_count × log10(net_sell_value)`) finally bites. Result: per-trade economics meaningfully improved (avg pnl 2.2×, MaxDD 4.21% → 3.88%) and **combined Sharpe jumped 0.36 → +1.04** (3× v4, best across all 6 versions), but standalone Sharpe regressed +0.28 → −0.36 because surviving loss days covary. The lever bound on 27% of days (31/116) confirming it's a real concentration effect, not noise. Still fails G1/G3 gates (combined 1.04 vs 8.0 target).
 
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
-- `distinct_insiders >= 5` *(v5: was 4 in v4; was 3 in v1-v3)*
-- `net_sell_value >= $20_000_000` (sum of `value` over qualifying transactions) *(v5: was $10M in v4; was $5M in v1-v3)*
+- `distinct_insiders >= 4` *(v6: reverted from v5's 5 to v4 local optimum)*
+- `net_sell_value >= $10_000_000` (sum of `value` over qualifying transactions) *(v6: reverted from v5's $20M to v4 local optimum)*
 - Zero offsetting buys in the same 30-day window (`require_zero_buys = True`)
 - Only count transactions where `transaction_type` is one of:
   - `S-Sale`
