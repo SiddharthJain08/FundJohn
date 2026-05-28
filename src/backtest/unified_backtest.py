@@ -480,6 +480,11 @@ def _per_bar_simulate(
     # per-ticker cooldowns are scoped strictly to the CURRENT backtest run
     # (no cross-run DB contamination — see aux_data_loader._recent_stop_outs).
     run_stop_history: dict = {}
+    # Within-run emission history: {ticker: last_emission_date}. Built up
+    # bar-by-bar from generate_signals results and fed back into aux_data so
+    # cluster self-cooldowns (e.g. S15 cluster_cooldown_days) are scoped to
+    # the CURRENT backtest run only (see aux_data_loader._recent_emissions).
+    run_emissions_history: dict = {}
 
     for current_date in oos_dates:
         # Need at least min_lookback days of history before strategy can run
@@ -518,6 +523,7 @@ def _per_bar_simulate(
                     current_date,
                     strategy_id=strategy_id,
                     run_stop_history=run_stop_history,
+                    run_emissions_history=run_emissions_history,
                 )
             except Exception:
                 aux = {'options': {}}
@@ -531,6 +537,19 @@ def _per_bar_simulate(
                 continue
         except Exception:
             continue
+
+        # Track S15-style cluster-self-cooldown: record each emitted
+        # signal's ticker so the next bar's load_aux_data filter sees them
+        # in aux_data['recent_emissions'].
+        for s in signals or []:
+            try:
+                sig_ticker = getattr(s, 'ticker', None)
+                if sig_ticker:
+                    prev = run_emissions_history.get(sig_ticker)
+                    if prev is None or current_date > prev:
+                        run_emissions_history[sig_ticker] = current_date
+            except Exception:
+                pass
 
         days_processed += 1
         if not signals:

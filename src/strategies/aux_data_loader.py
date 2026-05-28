@@ -371,21 +371,64 @@ def _recent_stop_outs(
     return out
 
 
+def _recent_emissions(
+    date_str: str,
+    strategy_id: str,
+    run_emissions_history: dict | None = None,
+) -> dict:
+    """Per-strategy {ticker: last_emission_date} filtered to a cooldown envelope.
+
+    Parallel to ``_recent_stop_outs`` but tracks the strategy's own emission
+    history. ``run_emissions_history`` is supplied by the backtest simulation
+    loop and updated bar-by-bar from each ``generate_signals`` call. Filtered
+    to drop entries outside the cooldown envelope (45 calendar days — the
+    longest cooldown we'd ever want) and entries on/after ``date_str`` (no
+    look-ahead). When ``run_emissions_history`` is not provided, returns ``{}``
+    so the cooldown is a no-op in live/non-backtest callers (matching the
+    legacy behavior).
+    """
+    if not run_emissions_history:
+        return {}
+    out = {}
+    try:
+        cur = pd.Timestamp(date_str)
+    except (TypeError, ValueError):
+        return {}
+    envelope = pd.Timedelta(days=45)  # generous; strategies apply their own
+    for ticker, dt in run_emissions_history.items():
+        try:
+            dt_ts = pd.Timestamp(dt)
+        except (TypeError, ValueError):
+            continue
+        if dt_ts >= cur:
+            continue  # no look-ahead
+        if cur - dt_ts > envelope:
+            continue  # outside cooldown envelope
+        out[ticker] = dt_ts
+    return out
+
+
 def load_aux_data(
     date: str | pd.Timestamp,
     strategy_id: str | None = None,
     run_stop_history: dict | None = None,
+    run_emissions_history: dict | None = None,
 ) -> dict:
     """Return aux_data dict for a given trading date.
 
     date: 'YYYY-MM-DD' or pandas Timestamp.
-    strategy_id: optional — used to gate inclusion of recent_stop_outs. When
-        present, recent_stop_outs is computed from ``run_stop_history`` (if
-        provided by the caller — typically the backtest simulation loop).
+    strategy_id: optional — used to gate inclusion of recent_stop_outs and
+        recent_emissions. When present, both are computed from the supplied
+        history dicts (if provided by the caller — typically the backtest
+        simulation loop).
     run_stop_history: optional dict {ticker: pd.Timestamp} representing
         within-run stop-out exits. Filtered to the lookback envelope and
         strictly-past dates relative to ``date`` before being injected into
         aux_data['recent_stop_outs'].
+    run_emissions_history: optional dict {ticker: pd.Timestamp} representing
+        the strategy's own SHORT/LONG emissions within the current backtest run.
+        When given alongside ``strategy_id``, aux_data['recent_emissions'] is
+        populated with the cooldown-envelope filtered subset.
 
     Returns: {
         'options':              {ticker: {...fields...}},
@@ -398,7 +441,8 @@ def load_aux_data(
                                 # for S15_insider_opportunistic_short Stage 2
                                 # classifier (t-15 to t-3 month pattern check).
                                 # Caller slices further by sub-window as needed.
-        'recent_stop_outs': {ticker: pd.Timestamp},  # when strategy_id given
+        'recent_stop_outs':  {ticker: pd.Timestamp},  # when strategy_id given
+        'recent_emissions':  {ticker: pd.Timestamp},  # when strategy_id given
     }
     insider_txns is filtered to a INSIDER_SLICE_DAYS-day rolling window ending on
     `date` so per-bar calls in backtest simulation don't carry the full history.
@@ -418,6 +462,9 @@ def load_aux_data(
     if strategy_id:
         out['recent_stop_outs'] = _recent_stop_outs(
             date_str, strategy_id, run_stop_history=run_stop_history
+        )
+        out['recent_emissions'] = _recent_emissions(
+            date_str, strategy_id, run_emissions_history=run_emissions_history
         )
     return out
 

@@ -294,6 +294,7 @@ def test_strategy_default_parameters():
     assert p['max_concurrent_positions'] == 20
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
+    assert p['cluster_cooldown_days'] == 14
     assert p['short_lookback_days'] == 30
 
 
@@ -556,3 +557,63 @@ def test_ablation_classifier_disabled_lets_routine_clusters_through(monkeypatch)
     assert len(signals) == 1
     assert signals[0].signal_params['opportunistic_count'] == 0
     assert signals[0].signal_params['routine_count'] == 3
+
+
+def test_generate_signals_respects_cluster_self_cooldown(monkeypatch):
+    """If ticker had S15 emission within 14 trading days, skip."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'A', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'B', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'C', 'role': 'officer: VP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'A': _seller_history('A', 'officer: CEO', 1),
+        'B': _seller_history('B', 'officer: VP', 1),
+        'C': _seller_history('C', 'officer: VP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    # Recent emission 7 days ago — within 14-day cluster cooldown
+    aux['recent_emissions'] = {'TGT': pd.Timestamp('2026-05-08')}
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert signals == []
+
+
+def test_generate_signals_emits_after_cluster_cooldown_expires(monkeypatch):
+    """Same setup but emission was 20 days ago — fires."""
+    monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
+    s = OpportunisticInsiderShort()
+    idx = pd.date_range('2026-04-16', periods=30, freq='D')
+    prices = pd.DataFrame({'TGT': np.linspace(100, 105, 30)}, index=idx)
+    sales = [
+        {'transactionDate': '2026-05-01', 'transactionType': 'S-Sale',
+         'reportingName': 'A', 'role': 'officer: CEO',
+         'value': 2_000_000, 'shares': 10_000, 'sharesOwnedAfter': 100_000},
+        {'transactionDate': '2026-05-05', 'transactionType': 'S-Sale',
+         'reportingName': 'B', 'role': 'officer: VP',
+         'value': 2_500_000, 'shares': 8_000, 'sharesOwnedAfter': 80_000},
+        {'transactionDate': '2026-05-08', 'transactionType': 'S-Sale',
+         'reportingName': 'C', 'role': 'officer: VP',
+         'value': 2_000_000, 'shares': 6_000, 'sharesOwnedAfter': 70_000},
+    ]
+    history_per_seller = {
+        'A': _seller_history('A', 'officer: CEO', 1),
+        'B': _seller_history('B', 'officer: VP', 1),
+        'C': _seller_history('C', 'officer: VP', 1),
+    }
+    aux = _build_aux_for_cluster('TGT', sales, history_per_seller)
+    # Emission 20 days ago — past the 14-day window
+    aux['recent_emissions'] = {'TGT': pd.Timestamp('2026-04-25')}
+    regime = {'state': 'LOW_VOL'}
+    signals = s.generate_signals(prices, regime, ['TGT'], aux_data=aux)
+    assert len(signals) == 1

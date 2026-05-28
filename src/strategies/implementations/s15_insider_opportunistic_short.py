@@ -227,6 +227,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             'max_concurrent_positions':  20,
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
+            'cluster_cooldown_days':     14,
             # Window for Stage 1 (calendar days)
             'short_lookback_days':       30,
         }
@@ -263,6 +264,8 @@ class OpportunisticInsiderShort(BaseStrategy):
         # Cooldown
         recent_stops = (aux_data or {}).get('recent_stop_outs') or {}
         cooldown_days = int(p['cooldown_after_stop_days'])
+        recent_emissions = (aux_data or {}).get('recent_emissions') or {}
+        cluster_cooldown_days = int(p['cluster_cooldown_days'])
 
         # Disable Stage 2 only via ablation env var (Task 9 introduces this).
         # Read here so Task 9 doesn't need to re-touch this function.
@@ -282,6 +285,17 @@ class OpportunisticInsiderShort(BaseStrategy):
                 try:
                     last_stop_ts = pd.to_datetime(last_stop)
                     if (ref_date - last_stop_ts).days < cooldown_days:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            # Cluster self-cooldown (v2): suppress re-emissions on a ticker
+            # within cluster_cooldown_days trading days of the last emission.
+            last_emit = recent_emissions.get(ticker)
+            if last_emit is not None:
+                try:
+                    last_emit_ts = pd.to_datetime(last_emit)
+                    if (ref_date - last_emit_ts).days < cluster_cooldown_days:
                         continue
                 except (TypeError, ValueError):
                     pass
