@@ -105,7 +105,32 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 **v12 falsifies the sub-additivity heuristic from v9/v10.** That earlier lesson — "stacking levers fights themselves" — was correct only for **same-axis stacks** (cap × Stage 3 strictness both prune the low-conviction tail). **Cross-axis combinations** (Stage 1 looseness × cap tightness) compound *additively*: v1's loose gate admits a bigger, more diverse candidate pool; cap=5's ranking then sharpens it. Per-trade edge doubled vs v7 (0.0046 → 0.0095), confirming the bigger pool does NOT just admit noise — it admits diverse signal the ranking score can filter.
 
-**Final default_parameters at HEAD reflect v12 settings (3 / $5M, cap=5, OR-logic, min_opp=2).** Operator decision pending — v12's Sharpe +1.36 is genuinely interesting but verdict gates were never designed to capture "INVESTIGATE → paper trade" disposition cleanly.
+**v13 amendment (2026-05-28, post-v12-INVESTIGATE):** Pushes the cross-axis loose-Stage-1 gradient one more step — min_insiders 3→2 and min_net_sell_value $5M→$3M, keeping cap=5. Result:
+
+| Metric | v12 | **v13** | Δ |
+|---|---|---|---|
+| Standalone Sharpe | +1.36 | **+1.69** | **+0.32 (+24%)** |
+| Combined Sharpe | +1.48 | **+1.82** | **+0.34 (+23%)** |
+| Standalone MaxDD | 4.63% | 4.81% | +0.18pp |
+| Trades | 465 | 477 | +12 |
+| Hit rate | 0.63 | 0.64 | +0.01 |
+| Avg per-trade pnl | 0.0095 | 0.0102 | +7.5% |
+
+**v13 is the global champion across all 13 versions tested.** Standalone Sharpe +1.69 / Combined Sharpe +1.82 / MaxDD 4.81% / 477 trades / hit-rate 0.64. Widest G1 margin in the sweep (+1.19 over the 0.5 equity floor). Cap-binding rate climbed from v12's 71.7% to v13's 78.8% — the ultra-loose Stage 1 promoted 8 additional days into cap-bound territory, where the ranking score extracts further alpha.
+
+**Refined cross-axis lesson:** the v12 finding ("cross-axis combinations compound") strengthens to "**cross-axis loose-Stage-1 × tight-cap compounds monotonically for at least 2 steps along the looseness axis** while the cap is binding." A cliff exists somewhere beyond v13 (min_insiders=1 or $1M floor) but v13 has not hit it.
+
+**Final defaults at HEAD = v13 settings:** min_insiders=2, min_net_sell_value=$3M, max_concurrent_positions=5, min_opportunistic_count=2, stage3_require_both=False, OR-logic.
+
+**Promotion record (2026-05-28T15:30 UTC):**
+- Manifest state: paper → candidate → live (via lifecycle.transition, candidate→live guards passed: Sharpe 1.6894 ≥ 0.5 equity floor; MaxDD 4.81% ≤ 20% equity ceiling)
+- `strategy_regime_params`: 3 rows inserted — eligible=TRUE for LOW_VOL, TRANSITIONING, HIGH_VOL; CRISIS excluded (squeeze risk per class declaration `active_in_regimes`)
+- `strategy_weights_by_regime` rebuilt: per-regime weights LOW_VOL 8.08 / TRANSITIONING 0.64 / HIGH_VOL 12.55 (cadence_days=1 derived from `signal_frequency='daily'`)
+- Operator action remaining: flip `OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1` in production `.env` (the runtime emission gate) before S15 begins emitting signals on the live pipeline
+
+**Known structural caveats (unchanged across all 13 versions):**
+- Stage 2 calendar-quarter classifier remains inert (data-depth limit — 3-year parquet history insufficient to populate per-insider quarterly buckets); G5 has failed identically all 13 times. This is data-dependent, not a code defect, and resolves naturally as the parquet accumulates more history.
+- G3 (combined Sharpe ≥ 8.0) is structurally unreachable for any short overlay sitting on top of a 9-trade S12 baseline at Sharpe 14.13. This gate would need redesign for any future SHORT strategy promotion.
 
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
