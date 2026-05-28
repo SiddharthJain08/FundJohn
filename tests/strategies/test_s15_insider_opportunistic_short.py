@@ -252,6 +252,49 @@ def test_conviction_filter_fails_when_all_low_stake_and_no_c_suite():
     assert meta['c_suite_present'] is False
 
 
+def test_conviction_filter_require_both_passes_when_both_present():
+    """v9/v10: require_both=True → BOTH c_suite AND stake_pass must hold."""
+    sales = [{
+        'reportingName': 'CEO Person',
+        'role': 'officer: CEO',
+        'shares': 50_000,
+        'sharesOwnedAfter': 400_000,
+        'value': 5_000_000,
+    }]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10, require_both=True)
+    assert ok is True
+    assert meta['c_suite_present'] is True
+    assert meta['top_seller_pct_of_holdings'] > 0.10
+
+
+def test_conviction_filter_require_both_fails_when_only_c_suite():
+    """require_both=True + only c_suite (no stake_pass) → fail."""
+    sales = [{
+        'reportingName': 'CEO Person',
+        'role': 'officer: CEO',
+        'shares': 100,           # tiny stake
+        'sharesOwnedAfter': 100_000,
+        'value': 20_000,
+    }]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10, require_both=True)
+    assert ok is False
+    assert meta['c_suite_present'] is True
+
+
+def test_conviction_filter_require_both_fails_when_only_stake():
+    """require_both=True + only stake_pass (no c_suite) → fail."""
+    sales = [{
+        'reportingName': 'VP Person',
+        'role': 'officer: VP Engineering',  # not c-suite
+        'shares': 50_000,
+        'sharesOwnedAfter': 400_000,
+        'value': 5_000_000,
+    }]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10, require_both=True)
+    assert ok is False
+    assert meta['c_suite_present'] is False
+
+
 def test_conviction_filter_missing_shares_owned_after():
     """Missing sharesOwnedAfter → that seller skipped for stake test but role still checked."""
     sales = [
@@ -290,6 +333,7 @@ def test_strategy_default_parameters():
     assert p['min_net_sell_value'] == 10_000_000
     assert p['min_opportunistic_count'] == 2
     assert p['min_personal_stake_pct'] == 0.10
+    assert p['stage3_require_both'] is False
     assert p['base_size_pct'] == 0.015
     assert p['max_concurrent_positions'] == 8
     assert p['wide_stop_pct'] == 0.15

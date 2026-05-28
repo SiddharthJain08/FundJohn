@@ -155,13 +155,16 @@ def _personal_stake_pct(sales_by_name: dict, name: str) -> float | None:
 def conviction_filter(
     sales: list[dict],
     min_personal_stake_pct: float = 0.10,
+    require_both: bool = False,
 ) -> tuple[bool, dict]:
     """Stage 3: does this cluster carry conviction signal?
 
-    Passes if ANY of:
+    Default (require_both=False) passes if ANY of:
       (1) Personal stake: any single seller sold >= min_personal_stake_pct of
           their prior personal holdings.
       (2) C-suite: any seller's role contains CEO/CFO/COO/Chair/Chairman.
+
+    When require_both=True (v9/v10), BOTH (1) AND (2) must hold.
 
     Note: Company-stake sub-test from the spec (>=1.5% of shares outstanding)
     is skipped — we don't have a reliable shares_outstanding feed in the
@@ -183,15 +186,16 @@ def conviction_filter(
             top_pct = pct
 
     c_suite_present = any(_is_c_suite(s.get('role')) for s in sales)
+    stake_pass = top_pct >= float(min_personal_stake_pct)
 
     meta = {
         'top_seller_pct_of_holdings': top_pct,
         'c_suite_present':            c_suite_present,
     }
 
-    if top_pct >= float(min_personal_stake_pct):
-        return True, meta
-    if c_suite_present:
+    if require_both:
+        return (stake_pass and c_suite_present), meta
+    if stake_pass or c_suite_present:
         return True, meta
     return False, meta
 
@@ -223,6 +227,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             'min_opportunistic_count':   2,
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
+            'stage3_require_both':       False,  # v9/v10: True → AND logic
             # Position management — v6 cuts concurrent cap 20 → 8 so the
             # ranking score (opp_count × log10(net_sell_value)) actually bites
             # on high-fire days. v4 avg 5.8 fires/day, cap=20 rarely bound.
@@ -351,6 +356,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             ok3, meta3 = conviction_filter(
                 sales,
                 min_personal_stake_pct=p['min_personal_stake_pct'],
+                require_both=bool(p.get('stage3_require_both', False)),
             )
             if not ok3:
                 continue
