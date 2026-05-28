@@ -66,3 +66,44 @@ def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
     if len(quarters) >= 3:
         return 'routine'
     return 'opportunistic'
+
+
+# ── Stage 1: cluster gate ───────────────────────────────────────────────────
+
+def cluster_gate(
+    sales: list[dict],
+    buys: list[dict],
+    min_insiders: int = 3,
+    min_net_value: float = 5_000_000,
+) -> tuple[bool, dict]:
+    """Stage 1: does this cluster of sales meet the threshold gate?
+
+    Conditions (all required):
+      - distinct insiders in `sales` >= min_insiders
+      - sum(value) over `sales` >= min_net_value
+      - `buys` is empty (require_zero_buys hard-coded True; aligns with spec)
+
+    Returns (passes, metadata) where metadata always includes the computed
+    stats so caller can log/rank even when ok=False.
+    """
+    distinct_insiders = len({
+        (s.get('reportingName') or '').strip() for s in sales
+        if (s.get('reportingName') or '').strip()
+    })
+    net_sell_value = sum(float(s.get('value') or 0.0) for s in sales)
+    buy_count = len(buys)
+
+    meta = {
+        'distinct_insiders': distinct_insiders,
+        'net_sell_value':    net_sell_value,
+        'sell_count':        len(sales),
+        'buy_count':         buy_count,
+    }
+
+    if buy_count > 0:
+        return False, meta
+    if distinct_insiders < int(min_insiders):
+        return False, meta
+    if net_sell_value < float(min_net_value):
+        return False, meta
+    return True, meta

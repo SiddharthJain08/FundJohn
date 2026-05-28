@@ -127,3 +127,64 @@ def test_qualifying_sales_handles_missing_type():
     out = qualifying_sales(txns)
     assert len(out) == 1
     assert out[0]['value'] == 1
+
+
+from src.strategies.implementations.s15_insider_opportunistic_short import (
+    cluster_gate,
+)
+
+
+def _txn(name, value=1_000_000, ttype='S-Sale', date='2026-05-10'):
+    return {
+        'transactionDate': date,
+        'transactionType': ttype,
+        'reportingName':   name,
+        'value':           value,
+        'shares':          5000,
+        'sharesOwnedAfter': 50_000,
+        'role':            'officer: VP',
+    }
+
+
+def test_cluster_gate_passes_3_insiders_5m_zero_buys():
+    sales = [
+        _txn('A', 2_000_000), _txn('B', 2_000_000), _txn('C', 2_000_000),
+    ]
+    buys = []
+    ok, meta = cluster_gate(sales, buys, min_insiders=3, min_net_value=5_000_000)
+    assert ok is True
+    assert meta['distinct_insiders'] == 3
+    assert meta['net_sell_value'] == 6_000_000
+
+
+def test_cluster_gate_fails_2_insiders():
+    sales = [_txn('A', 5_000_000), _txn('B', 5_000_000)]
+    ok, meta = cluster_gate(sales, [], min_insiders=3, min_net_value=5_000_000)
+    assert ok is False
+    assert meta['distinct_insiders'] == 2
+
+
+def test_cluster_gate_fails_under_value_threshold():
+    sales = [_txn('A', 1_000_000), _txn('B', 1_000_000), _txn('C', 1_000_000)]
+    ok, meta = cluster_gate(sales, [], min_insiders=3, min_net_value=5_000_000)
+    assert ok is False
+    assert meta['net_sell_value'] == 3_000_000
+
+
+def test_cluster_gate_fails_with_any_buy():
+    sales = [_txn('A', 2_000_000), _txn('B', 2_000_000), _txn('C', 2_000_000)]
+    buys = [{'transactionType': 'P-Purchase', 'value': 100_000, 'reportingName': 'Z'}]
+    ok, meta = cluster_gate(sales, buys, min_insiders=3, min_net_value=5_000_000)
+    assert ok is False
+    assert meta['buy_count'] == 1
+
+
+def test_cluster_gate_distinct_insider_counting():
+    """Same insider name counted once even with multiple txns."""
+    sales = [
+        _txn('A', 2_000_000), _txn('A', 2_000_000), _txn('A', 2_000_000),
+        _txn('B', 2_000_000), _txn('C', 2_000_000),
+    ]
+    ok, meta = cluster_gate(sales, [], min_insiders=3, min_net_value=5_000_000)
+    assert meta['distinct_insiders'] == 3
+    assert meta['net_sell_value'] == 10_000_000
