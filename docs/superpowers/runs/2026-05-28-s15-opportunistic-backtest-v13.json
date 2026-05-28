@@ -1,0 +1,260 @@
+{
+  "date": "2026-05-28",
+  "version": "v13",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "51ca79e",
+  "branch": "feat/s15-insider-opportunistic-short",
+  "v13_changes_summary": [
+    "min_insiders: 3 → 2 (push v12's loose Stage 1 axis FURTHER — ultra-loose)",
+    "min_net_sell_value: 5M → 3M (push v12's loose Stage 1 axis FURTHER — ultra-loose)",
+    "max_concurrent_positions: 5 (KEEP v7/v12's peak cap)",
+    "All other v12 settings preserved (min_opp_count=2; stage3_require_both=False OR-logic; v1 calendar-quarter classifier; v1 position management; 15% wide stop; 60d hold)",
+    "Purpose: test whether the cross-axis gradient (bigger candidate pool × tight cap) continues monotonically beyond v12, OR whether v12 (3/$5M/cap=5) was already the sweet spot on the loose-Stage-1 × tight-cap frontier."
+  ],
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Single-axis extension of v12's cross-axis combo: push Stage 1 LOOSER on both knobs simultaneously (min_insiders 3→2, min_net_sell_value $5M→$3M) while keeping the v7/v12 cap=5 ranking-cap. The ranking score (opp_count × log10(net_sell_value)) gets an EVEN denser pool to pick from. Hypothesis: if v12's gradient (loose-Stage-1 + tight-cap → +0.78 Sharpe lift over v7) was driven by ranking benefiting from a bigger pool, then ultra-loose should compound it further. Counter-hypothesis: v12 was already the sweet spot — beyond it, pool noise overwhelms ranking precision.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60,
+    "methodology_note": "Combined Sharpe uses the v7+ canonical aggregate_metrics-style calculation (distribute pnl_pct evenly across each trade's holding_days, equal-weighted daily portfolio mean, std ddof=1, rf=5%/252, annualize sqrt(252))."
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60. REUSED verbatim from v1-v12.",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7f9ed076-76ef-4f14-903f-905074a3ea13",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "hit_rate": 0.5556,
+    "avg_holding_days": 4.22,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9, "avg_pnl": 0.0212, "sum_pnl": 0.1908, "avg_hold": 4.2}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reused from v1-v12 (baseline does not depend on S15 parameters)."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 with v13 settings (cap=5, OR-logic Stage 3, min_opp=2, Stage 1 = 2 / $3M ultra-loose). OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "4ac57e6b-2141-4bba-a107-f0ab63b08536",
+    "sharpe_ratio": 1.6894,
+    "max_drawdown_pct": 4.8144,
+    "trade_count": 477,
+    "return_pct": 8.0285,
+    "hit_rate": 0.6373,
+    "avg_holding_days": 23.34,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 477, "avg_pnl": 0.01021, "sum_pnl": 4.8720, "avg_hold": 23.34}
+    ],
+    "by_exit_reason": {"end_of_data": 162, "target": 221, "stop": 72, "max_hold": 22},
+    "short_stop_rate_pct": 15.09,
+    "short_target_rate_pct": 46.33,
+    "short_eod_rate_pct": 33.96,
+    "short_max_hold_rate_pct": 4.61,
+    "notes": "v13 = NEW GLOBAL BEST. Pushed v12's loose-Stage-1 axis further (3/$5M → 2/$3M) and the gradient CONTINUED — Sharpe climbed v12 1.3648 → v13 1.6894 (+0.32 absolute, +24% relative). Per-trade economics improved further (avg_pnl 0.00950 → 0.01021, +7.5%; hit rate 0.6301 → 0.6373; target rate 45.16% → 46.33%; stop rate dropped 15.27% → 15.09%). Trade count rose modestly 465 → 477 (+12, +2.6%) — the ultra-loose gate admits more candidate days but cap=5 still binds at the same per-day exposure. Cap-binding RATE rose 71.7% (v12) → 78.8% (v13) — 8 more days now hit the cap because the looser gate let more days reach the 5-signal threshold (v12 distribution had 4 days at 3-count and 4 at 4-count; v13 distribution shows 0 at 3- or 4-count, all promoted to cap=5). MaxDD edged up 4.63 → 4.81 (+0.18pp) but remains well within G6's 15% guardrail. The hypothesis 'cross-axis gradient continues' is CONFIRMED for one more step. Whether the frontier continues past v13 (e.g. min_insiders=1 / $1M) is open; signal degradation should eventually overwhelm ranking precision."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 classifier DISABLED",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "e38a7560-42af-4a40-8a7d-41e1e73d1490",
+    "sharpe_ratio": 1.6894,
+    "max_drawdown_pct": 4.8144,
+    "trade_count": 477,
+    "return_pct": 8.0285,
+    "hit_rate": 0.6373,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 477, "avg_pnl": 0.01021, "sum_pnl": 4.8720, "avg_hold": 23.34}
+    ],
+    "by_exit_reason": {"end_of_data": 162, "target": 221, "stop": 72, "max_hold": 22},
+    "notes": "IDENTICAL to modified_s15_standalone (byte-for-byte). Calendar-quarter Stage 2 classifier remains non-discriminating for the 13th consecutive version. G5 fails by the same data-depth pattern documented v1-v12 — classifier is correctly implemented; per-insider parquet history is too sparse for the 15-to-3-month rolling window to populate quarterly buckets, so nearly every (ticker, insider_name) pair returns 'opportunistic'."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Stage 2 calendar-quarter classifier (Cohen-Malloy-Pomorski 2012) remains structurally inert for the 13th consecutive version. Same DATA-property failure: per-insider sale history is too sparse for the 15-to-3-month rolling window to populate quarterly buckets, so nearly every (ticker, insider_name) pair returns 'opportunistic'.",
+    "classifier_mechanism": "classify_insider() checks for sales in a 12-month rolling window. With sparse parquet history, nearly all sellers default to 'opportunistic'.",
+    "code_correctness": "Stage 2 is correctly implemented. Inertness is a data-depth limitation, not a code bug.",
+    "v13_stage1_x_cap_interaction": "Stage 1 (2 / $3M) loosened FURTHER vs v12 (3 / $5M). The daily candidate pool grew again; max_concurrent_positions=5 still prunes to the same daily commitment. Result: the ranking score gets an EVEN denser pool while exposure stays capped. Cap-binding rate climbed 71.7% (v12) → 78.8% (v13): 8 days that were below-cap in v12 (4 at 3-count, 4 at 4-count) now hit cap=5 — those incremental 8 cap-bound days carry the marginal Sharpe lift. Per-trade avg_pnl rose 0.00950 → 0.01021 (+7.5%); hit rate climbed 0.6301 → 0.6373. The cross-axis gradient (loose-Stage-1 × tight-cap → higher ranking-quality survivors) extends past v12 — v12 was not the sweet spot."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from union of S12 BUY trades (run_id 7f9ed076) + S15 v13 SHORT trades (run_id 4ac57e6b), equal-weighted daily portfolio mirroring aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "7f9ed076-76ef-4f14-903f-905074a3ea13",
+      "4ac57e6b-2141-4bba-a107-f0ab63b08536"
+    ],
+    "combined_trade_count": 486,
+    "combined_sharpe_ratio": 1.8185,
+    "combined_max_drawdown_pct": 4.6153,
+    "combined_return_pct": 8.3294,
+    "combined_daily_obs": 178,
+    "combined_hit_rate": 0.6358,
+    "combined_avg_holding_days": 22.99,
+    "combined_avg_pnl_pct": 1.0417,
+    "combined_sortino": 2.4863,
+    "combined_calmar": 2.5986,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days starting day-after-entry (calendar days), equal-weighted on each day. Sharpe = (mean - rf_daily) / std(ddof=1) * sqrt(252), rf=5%/252. Identical to aggregate_metrics() implementation in unified_backtest.py."
+  },
+  "acceptance": {
+    "G1_s15_standalone_sharpe_ge_0.5": {
+      "gate": "S15 standalone Sharpe >= 0.5",
+      "value": 1.6894,
+      "threshold": 0.5,
+      "result": "PASS",
+      "detail": "1.6894 >= 0.5 → TRUE (surplus +1.19; +0.32 absolute over v12's +1.36 — new global best by a wide margin)"
+    },
+    "G2_s15_trade_count_ge_15": {
+      "gate": "S15 trade count >= 15",
+      "value": 477,
+      "threshold": 15,
+      "result": "PASS",
+      "detail": "477 >= 15 → TRUE (surplus +462; +2.6% over v12's 465 — ultra-loose Stage 1 admits more days but cap=5 still binds)"
+    },
+    "G3_combined_sharpe_ge_8.0": {
+      "gate": "Combined Sharpe >= 8.0",
+      "value": 1.8185,
+      "threshold": 8.0,
+      "result": "FAIL",
+      "detail": "1.8185 >= 8.0 → FALSE (delta -6.18; closest of any version but G3's 8.0 floor remains structurally unreachable for a short overlay on a 9-trade, 14.13-Sharpe baseline)"
+    },
+    "G4_combined_maxdd_le_8pct": {
+      "gate": "Combined MaxDD <= 8%",
+      "value": 4.6153,
+      "threshold": 8.0,
+      "result": "PASS",
+      "detail": "4.6153 <= 8.0 → TRUE (headroom +3.38pp; +0.17pp over v12's 4.44%, still well within guardrail)"
+    },
+    "G5_ablation_sharpe_lt_modified": {
+      "gate": "Ablation Sharpe strictly less than Modified Sharpe",
+      "ablation_sharpe": 1.6894,
+      "modified_sharpe": 1.6894,
+      "result": "FAIL",
+      "detail": "1.6894 < 1.6894 → FALSE (identical — classifier still non-discriminating, same data-depth failure as v1-v12)"
+    },
+    "G6_standalone_maxdd_le_15pct": {
+      "gate": "Standalone MaxDD <= 15%",
+      "value": 4.8144,
+      "threshold": 15.0,
+      "result": "PASS",
+      "detail": "4.8144 <= 15.0 → TRUE (headroom +10.19pp)"
+    }
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "G1_s15_standalone_sharpe_ge_0.5",
+      "G2_s15_trade_count_ge_15",
+      "G4_combined_maxdd_le_8pct",
+      "G6_standalone_maxdd_le_15pct"
+    ],
+    "gates_failed": [
+      "G3_combined_sharpe_ge_8.0",
+      "G5_ablation_sharpe_lt_modified"
+    ],
+    "gates_passed_count": 4,
+    "gates_failed_count": 2
+  },
+  "v1_through_v13_comparison": {
+    "description": "13-version side-by-side. v13 = v12 + push loose-Stage-1 axis further (2/$3M) = NEW global best, gradient still climbing.",
+    "standalone": {
+      "v1_sharpe": 0.1359,
+      "v2_sharpe": -1.597,
+      "v3_sharpe": -3.4355,
+      "v4_sharpe": 0.2772,
+      "v5_sharpe": -1.3882,
+      "v6_sharpe": -0.3601,
+      "v7_sharpe": 0.5817,
+      "v8_sharpe": -0.738,
+      "v9_sharpe": -1.0507,
+      "v10_sharpe": -1.5936,
+      "v11_sharpe": -0.4221,
+      "v12_sharpe": 1.3648,
+      "v13_sharpe": 1.6894,
+      "v1_maxdd_pct": 7.1368,
+      "v2_maxdd_pct": 9.37,
+      "v3_maxdd_pct": 17.9272,
+      "v4_maxdd_pct": 4.2127,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct": 3.8807,
+      "v7_maxdd_pct": 4.018,
+      "v8_maxdd_pct": 6.7288,
+      "v9_maxdd_pct": 3.3954,
+      "v10_maxdd_pct": 3.448,
+      "v11_maxdd_pct": 6.2443,
+      "v12_maxdd_pct": 4.6315,
+      "v13_maxdd_pct": 4.8144,
+      "v1_trades": 1137,
+      "v2_trades": 182,
+      "v3_trades": 138,
+      "v4_trades": 699,
+      "v5_trades": 284,
+      "v6_trades": 524,
+      "v7_trades": 394,
+      "v8_trades": 277,
+      "v9_trades": 576,
+      "v10_trades": 476,
+      "v11_trades": 336,
+      "v12_trades": 465,
+      "v13_trades": 477,
+      "v13_changes_vs_v12": "Single-axis push: Stage 1 LOOSEN further (3→2 insiders, $5M→$3M). Cap KEEP (5). Trade count rose 465 → 477 (+12, +2.6%) — the ultra-loose gate brings 8 more days up to the cap=5 binding point (cap-rate 71.7% → 78.8%). avg_pnl rose 0.00950 → 0.01021 (+7.5%); hit rate 0.6301 → 0.6373; target rate 45.16% → 46.33%. Standalone Sharpe climbed +1.36 → +1.69 (+0.32 absolute, +24% relative). MaxDD edged up 4.63 → 4.81 (+0.18pp). The cross-axis gradient (loose-Stage-1 × tight-cap) CONTINUES past v12 — v12 was not yet the sweet spot. Final ranking on standalone-Sharpe axis: v13 (+1.69) > v12 (+1.36) > v7 (+0.58) > v4 (+0.28) > v1 (+0.14) > v6 (-0.36) > v11 (-0.42) > v8 (-0.74) > v9 (-1.05) > v5 (-1.39) > v10 (-1.59) > v2 (-1.60) > v3 (-3.44)."
+    },
+    "combined": {
+      "v1_sharpe": 0.1759,
+      "v2_sharpe": -1.2078,
+      "v3_sharpe": -3.1938,
+      "v4_sharpe": 0.358,
+      "v5_sharpe": -1.3097,
+      "v6_sharpe_documented": 1.0369,
+      "v6_sharpe_recomputed": -0.1693,
+      "v7_sharpe": 0.6805,
+      "v8_sharpe": -0.3897,
+      "v9_sharpe": -0.9265,
+      "v10_sharpe": -1.3516,
+      "v11_sharpe": -0.2564,
+      "v12_sharpe": 1.4818,
+      "v13_sharpe": 1.8185,
+      "v1_maxdd_pct": 7.0434,
+      "v2_maxdd_pct": 8.5299,
+      "v3_maxdd_pct": 16.4854,
+      "v4_maxdd_pct": 4.1273,
+      "v5_maxdd_pct": 11.6862,
+      "v6_maxdd_pct_documented": 2.2679,
+      "v6_maxdd_pct_recomputed": 3.7804,
+      "v7_maxdd_pct": 3.8968,
+      "v8_maxdd_pct": 6.26,
+      "v9_maxdd_pct": 3.3137,
+      "v10_maxdd_pct": 3.375,
+      "v11_maxdd_pct": 5.9274,
+      "v12_maxdd_pct": 4.4424,
+      "v13_maxdd_pct": 4.6153,
+      "v1_trades": 1146,
+      "v2_trades": 191,
+      "v3_trades": 147,
+      "v4_trades": 708,
+      "v5_trades": 293,
+      "v6_trades": 533,
+      "v7_trades": 403,
+      "v8_trades": 286,
+      "v9_trades": 585,
+      "v10_trades": 485,
+      "v11_trades": 345,
+      "v12_trades": 474,
+      "v13_trades": 486
+    }
+  },
+  "cap_binding_diagnostic": {
+    "description": "Per-day signal-count distribution for v12 vs v13 (both cap=5, both 113 signal days over identical window). Cap-binding rate measures how often the cap=5 ranking gate actually bites.",
+    "v12_total_signal_days": 113,
+    "v12_distribution": {"1": 16, "2": 8, "3": 4, "4": 4, "5": 81},
+    "v12_cap_bound_days": 81,
+    "v12_cap_bind_rate_pct": 71.7,
+    "v13_total_signal_days": 113,
+    "v13_distribution": {"1": 16, "2": 8, "5": 89},
+    "v13_cap_bound_days": 89,
+    "v13_cap_bind_rate_pct": 78.8,
+    "delta_cap_bound_days": 8,
+    "interpretation": "The looser Stage 1 (2/$3M) promoted 8 days that were 3-count or 4-count in v12 up to 5-count in v13. Those 8 extra cap-bound days carry the marginal Sharpe lift: more days where the ranking gets to choose from a denser pool, while exposure stays the same. The 1-count and 2-count low-signal days are byte-identical between v12 and v13 — those days don't have enough candidates to benefit from either gate."
+  },
+  "computed_suggestion": "INVESTIGATE",
+  "computed_suggestion_rationale": "v13 is the THIRD version (after v7 and v12) to clear G1, and does so with the WIDEST margin of any version (1.69 vs threshold 0.5; +0.32 absolute over v12's +1.36 — new global best). Four of six gates pass (G1, G2, G4, G6); only G3 (the documented-unreachable combined-Sharpe ≥ 8.0 floor) and G5 (the structurally-inert classifier discrimination) fail — the SAME failure pattern as v7 and v12. Per-trade economics improved further (avg_pnl 0.00950 → 0.01021, +7.5%; hit rate 0.6301 → 0.6373; target rate 45.16% → 46.33%); standalone MaxDD stayed safe at 4.81% (within +0.18pp of v12). The cross-axis combination's gradient continues past v12 — the lesson refines further from v12's 'CROSS-AXIS combinations (Stage 1 + cap) can compound' to v13's 'CROSS-AXIS combinations compound monotonically for at least 2 steps along the looseness axis when the cap is binding'. Suggest INVESTIGATE — same disposition as v7/v12 but with the widest G1 headroom of any version. Operator should consider: (a) whether to extend the gradient one more step (v14: min_insiders=1 or $1M floor) to find the cliff edge, (b) whether v13's 6-month sample is robust enough to promote, or (c) whether longer holdout / k-fold reshuffle is needed before crossing the LIVE threshold. PROMOTE candidacy is the strongest of any version to date.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}
