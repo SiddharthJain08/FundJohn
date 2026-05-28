@@ -92,7 +92,20 @@ All three stages must pass for a SHORT signal to fire on a ticker.
 
 **Stage 3 strictness axis is unproductive.** v9 (alone) and v10 (stacked) both regressed sharply. The Stage 2 classifier's inertness means min_opp=3 is a no-op; only the AND-logic prunes trades, removing diversifying low-conviction signals without raising per-trade edge enough to compensate. v10 confirms the levers are sub-additive — they compete for the same "low-conviction trade" population.
 
-**Final default_parameters at HEAD reflect v10 settings (Stage 3 strict + cap=8) for archival reproducibility of the verdict trail.** Operator should revert to v7 settings (cap=5, stage3_require_both=False, min_opportunistic_count=2) before any merge or further iteration.
+**v11-v12 amendment (2026-05-28, post-v7-INVESTIGATE):** Two-variant follow-up sweep: v11 brackets the cap=5 peak from below (cap=4); v12 combines v1's looser Stage 1 (3 / $5M) with v7's tighter cap=5.
+
+| Variant | Lever | Standalone Sharpe | MaxDD | Trades | Combined Sharpe | Suggestion |
+|---|---|---|---|---|---|---|
+| v11 | cap=4 | −0.42 | 6.24% | 336 | −0.26 | KILL |
+| **v12** | **3/$5M + cap=5** | **+1.36** | **4.63%** | **465** | **+1.48** | **INVESTIGATE** |
+
+**v12 is the new global best across all 12 versions** — Standalone Sharpe +1.36 (2.3× v7), Combined Sharpe +1.48 (2.2× v7), hit-rate 0.63 (best non-baseline), avg pnl 0.0095 (2.1× v7's 0.0046), 465 trades, MaxDD 4.63%. 4 of 6 gates pass; only G3 (combined ≥ 8.0, structurally unreachable) and G5 (classifier inertness, structural data-depth issue) fail.
+
+**v11 confirms cap=5 as a sharp, singular peak.** The fully-characterized cap axis is now: cap=3 (−0.74) < cap=4 (−0.42) < cap=8 (−0.36) < cap=20 (+0.28) < **cap=5 (+0.58 to +1.36, peak)**. Single-mode U-inverted with maximum at cap=5; any other cap value tested degraded Sharpe materially.
+
+**v12 falsifies the sub-additivity heuristic from v9/v10.** That earlier lesson — "stacking levers fights themselves" — was correct only for **same-axis stacks** (cap × Stage 3 strictness both prune the low-conviction tail). **Cross-axis combinations** (Stage 1 looseness × cap tightness) compound *additively*: v1's loose gate admits a bigger, more diverse candidate pool; cap=5's ranking then sharpens it. Per-trade edge doubled vs v7 (0.0046 → 0.0095), confirming the bigger pool does NOT just admit noise — it admits diverse signal the ranking score can filter.
+
+**Final default_parameters at HEAD reflect v12 settings (3 / $5M, cap=5, OR-logic, min_opp=2).** Operator decision pending — v12's Sharpe +1.36 is genuinely interesting but verdict gates were never designed to capture "INVESTIGATE → paper trade" disposition cleanly.
 
 For each ticker in the universe, examine sales in the trailing 30 calendar days:
 
