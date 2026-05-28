@@ -102,6 +102,8 @@ class InsiderClusterBuy(BaseStrategy):
             stops = self.compute_stops_and_targets(ts, 'LONG', current_price, regime_state=regime_state)
 
             conf = 'HIGH' if distinct_insiders >= 5 and net_buy_value >= 2_000_000 else 'MED'
+            if conf == 'MED':
+                continue   # gate: only HIGH-conf BUY clusters fire
 
             signals.append(Signal(
                 ticker            = ticker,
