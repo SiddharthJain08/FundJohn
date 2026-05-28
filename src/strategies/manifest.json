@@ -968,7 +968,8 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation"
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation",
+        "regime_agnostic_sharpe": true
       },
       "history": [],
       "instrument_class": "equity"
@@ -4982,7 +4983,8 @@
         "class": "OpportunisticInsiderShort",
         "description": "Opportunistic insider cluster SHORT \u2014 Cohen-Malloy-Pomorski 2012 classifier",
         "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
-        "added": "2026-05-28"
+        "added": "2026-05-28",
+        "regime_agnostic_sharpe": true
       },
       "history": [
         {
