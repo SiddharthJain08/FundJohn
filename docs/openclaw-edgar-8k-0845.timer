@@ -1,0 +1,11 @@
+[Unit]
+Description=Fire EDGAR 8-K ingester at 08:45 ET
+Requires=openclaw-edgar-8k@24.service
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:45:00 America/New_York
+Persistent=false
+Unit=openclaw-edgar-8k@24.service
+
+[Install]
+WantedBy=timers.target
