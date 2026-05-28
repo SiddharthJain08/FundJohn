@@ -1,0 +1,103 @@
+{
+  "date": "2026-05-28",
+  "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
+  "plan": "docs/superpowers/plans/2026-05-28-s15-insider-opportunistic-short.md",
+  "commit_at_test": "096aaf7d33e5bafa3d98d6056ef797114392be2c",
+  "implementation_notes": {
+    "aux_data_loader_patched": true,
+    "patch_description": "Added insider_history_long (15-month rolling slice) and role/sharesOwnedAfter projection to src/strategies/aux_data_loader.py. Both patches were built on this branch (commits 455c142 + 096aaf7) and match the field shape S15's Stage 2 classifier and Stage 3 conviction filter expect.",
+    "backtest_window": "2025-11-28 → 2026-05-28 (6 months)",
+    "max_hold_days": 60
+  },
+  "baseline_a": {
+    "description": "S12_insider BUY-only, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0, OPENCLAW_S12_SELL_CLUSTER=0, max-hold-days=60",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=0 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "7b353369-2a3d-4232-9ba2-e569d277376a",
+    "sharpe_ratio": 14.1305,
+    "max_drawdown_pct": 1.1629,
+    "trade_count": 9,
+    "return_pct": 7.0893,
+    "per_direction_breakdown": [
+      {"direction": "long", "count": 9}
+    ],
+    "by_exit_reason": {"target": 5, "end_of_data": 2, "stop": 2},
+    "notes": "Reproduces v3 cooldown-fixed baseline (d2e35994) byte-for-byte: Sharpe 14.1305 / 9 trades / MaxDD 1.16%. Confirms the cooldown fix is stable on this branch."
+  },
+  "modified_s15_standalone": {
+    "description": "S15 alone (OpportunisticInsiderShort) with classifier ON, OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1, OPENCLAW_S12_SELL_CLUSTER=0",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "ede95b46-cae9-4a59-bb54-b1a2d33b9e3f",
+    "sharpe_ratio": 0.1359,
+    "max_drawdown_pct": 7.1368,
+    "trade_count": 1137,
+    "return_pct": 3.8776,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 1137, "avg_pnl": -0.00245, "sum_pnl": -2.7905}
+    ],
+    "by_exit_reason": {"end_of_data": 491, "target": 413, "stop": 202, "max_hold": 31},
+    "short_stop_rate_pct": 17.77,
+    "short_target_rate_pct": 36.32,
+    "short_eod_rate_pct": 43.18,
+    "notes": "1137 SHORT trades; trade volume is very high (avg ~9.2 signals/day across 124 active days). The low stop rate (17.8%) and high end-of-data rate (43.2%) suggest the 60d max-hold cap is binding heavily and the 15% wide stop is rarely hit. Avg per-trade loss = -0.245% with a positive Sharpe of 0.14 — marginal positive edge but well below the 0.5 floor."
+  },
+  "ablation": {
+    "description": "S15 with Stage 2 opportunistic classifier DISABLED (OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1) — every seller treated as opportunistic",
+    "gate_value": "OPENCLAW_S15_INSIDER_OPPORTUNISTIC=1 OPENCLAW_S15_DISABLE_OPPORTUNISTIC_CLASSIFIER=1 OPENCLAW_S12_SELL_CLUSTER=0",
+    "run_id": "8c3737c4-6c1e-44ad-82c1-a85474a98ecf",
+    "sharpe_ratio": 0.1359,
+    "max_drawdown_pct": 7.1368,
+    "trade_count": 1137,
+    "return_pct": 3.8776,
+    "per_direction_breakdown": [
+      {"direction": "short", "count": 1137, "avg_pnl": -0.00245, "sum_pnl": -2.7905}
+    ],
+    "by_exit_reason": {"end_of_data": 491, "target": 413, "stop": 202, "max_hold": 31},
+    "notes": "IDENTICAL to modified_s15_standalone — same trade count, same Sharpe, same MaxDD, byte-for-byte identical exit-reason breakdown. The ablation env var IS being read correctly (confirmed by code inspection), but the Stage 2 classifier is non-discriminating on the current insider parquet. See root_cause_analysis for explanation."
+  },
+  "ablation_root_cause_analysis": {
+    "finding": "Stage 2 classifier is non-discriminating due to data sparsity, NOT a code bug.",
+    "mechanism": "classify_insider() windows over t-15 to t-3 months from each bar date. For bars in the 2025-11-28 → 2026-05-28 backtest window, the classifier window spans roughly Aug 2024 → Feb 2026. The insider parquet has only 65 S-Sale rows in all of 2024 and 948 in 2025 for 231 unique tickers — insufficient density for any individual seller to accumulate ≥3 distinct calendar quarters of qualifying sales within the rolling window. Empirically verified: only 8 (ticker, insider_name) pairs in the classifier window have ≥3 distinct quarters of S-Sale activity, and none of them are in clusters that pass Stage 1 (3+ distinct insiders, $5M+, zero buys).",
+    "consequence": "Every seller is classified 'opportunistic' (the 0-quarter default). With all sellers opportunistic, opp_count equals the full distinct_insiders count (always ≥3, the Stage 1 minimum), so opp_count >= min_opportunistic_count=2 always holds. The Stage 2 filter never fires regardless of the ablation flag.",
+    "code_correctness": "The classifier logic (classify_insider, the ablate_classifier branch) is correctly implemented and unit-tested. The ablation env var is correctly read and the guard is in the right place. This is a DATA property, not a code defect.",
+    "remediation": "Requires either (a) backfilling ≥3 years of S-Sale history per insider so the rolling window captures routine patterns, OR (b) narrowing the classifier window definition so it works within the available ~2-year data depth (e.g., use a 6-month window for quarterly bucketing instead of 12). Neither is in scope for v1. The Stage 2 filter is currently inert until insider data depth grows."
+  },
+  "modified_combined": {
+    "description": "Portfolio-level Sharpe computed from the union of S12 BUY trades (run_id 7b353369) + S15 SHORT trades (run_id ede95b46), using the same equal-weighted daily portfolio methodology as aggregate_metrics() in unified_backtest.py",
+    "combined_run_ids": [
+      "7b353369-2a3d-4232-9ba2-e569d277376a",
+      "ede95b46-cae9-4a59-bb54-b1a2d33b9e3f"
+    ],
+    "combined_trade_count": 1146,
+    "combined_sharpe_ratio": 0.1759,
+    "combined_max_drawdown_pct": 7.0434,
+    "combined_return_pct": 3.9936,
+    "combined_daily_obs": 179,
+    "methodology_note": "Built daily_pnls dict from both run_ids' strategy_backtest_trades, distributed pnl_pct evenly across holding_days, equal-weighted on each day. Sharpe annualized by sqrt(252), risk-free = 5%/252. This is identical to the aggregate_metrics() implementation in src/backtest/unified_backtest.py."
+  },
+  "acceptance": {
+    "s15_standalone_sharpe_ge_0.5": "0.1359 >= 0.5 → FALSE (delta: -0.3641)",
+    "s15_standalone_maxdd_le_15pct": "7.1368 <= 15.0 → TRUE",
+    "s15_trade_count_ge_15": "1137 >= 15 → TRUE (far exceeds minimum)",
+    "combined_sharpe_ge_8.0": "0.1759 >= 8.0 → FALSE (delta: -7.8241; the S15 SHORT book collapses the combined Sharpe from 14.13 → 0.18)",
+    "combined_maxdd_le_8pct": "7.0434 <= 8.0 → TRUE (within cap, but combined Sharpe fails decisively)",
+    "ablation_sharpe_lt_modified_sharpe": "0.1359 < 0.1359 → FALSE (identical — Stage 2 classifier carries zero discriminating weight on current data)"
+  },
+  "acceptance_summary": {
+    "gates_passed": [
+      "s15_standalone_maxdd_le_15pct",
+      "s15_trade_count_ge_15",
+      "combined_maxdd_le_8pct"
+    ],
+    "gates_failed": [
+      "s15_standalone_sharpe_ge_0.5",
+      "combined_sharpe_ge_8.0",
+      "ablation_sharpe_lt_modified_sharpe"
+    ],
+    "gates_passed_count": 3,
+    "gates_failed_count": 3
+  },
+  "computed_suggestion": "INVESTIGATE",
+  "computed_suggestion_rationale": "Three of six acceptance gates fail: (1) S15 standalone Sharpe is 0.14 — well below the 0.5 floor, indicating the opportunistic short signal has marginal positive edge but cannot carry the strategy independently at current calibration. (2) The combined Sharpe (0.18) catastrophically dilutes the S12 BUY-only baseline (14.13 → 0.18) because the 1137 SHORT trades dwarf the 9 LONG trades in the portfolio daily PnL series — the signal volume mismatch is extreme. (3) The ablation gate fails: classifier disabled produces byte-identical results (Sharpe 0.1359 in both cases). However, gate 3 fails for a documented DATA reason, not a code defect — the Stage 2 classifier is correctly implemented but cannot discriminate on the current insider parquet (too few sellers with ≥3 distinct quarters of historical sales). This is NOT the 'classifier is broken' scenario described in the spec; it is the 'classifier is dormant pending data depth' scenario. The spec's verdict table maps this to INVESTIGATE rather than HOLD or REJECT. Key investigations needed before re-running the backtest: (a) Whether the Stage 1 cluster thresholds are far too loose — 1137 SHORTs over 6 months on a 374-ticker universe is implausibly high (>9 signals/day on average); inspect whether the 30-day lookback window is accumulating stale clusters that never clear; (b) Whether the 60d max-hold is driving the 43% end-of-data rate (suggesting most trades never close on signal, only on time cap); (c) Whether the Stage 2 fix (extend historical data depth, or re-calibrate window) would materially reduce trade count and improve signal quality. FLIP is not justified. The positive MaxDD profile (7.1% standalone, 7.0% combined) is encouraging and suggests the short book has a good loss-containment structure, but Sharpe is too low to deploy. Prioritize investigating the cluster-accumulation/lookback mechanism as the most likely calibration flaw.",
+  "operator_decision": "PENDING",
+  "operator_rationale": "operator to fill in after reviewing"
+}
