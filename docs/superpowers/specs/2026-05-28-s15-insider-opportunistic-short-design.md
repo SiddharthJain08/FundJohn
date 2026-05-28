@@ -202,29 +202,15 @@ Schema (per ticker, dict-of-lists, same shape as `insider_txns`):
 
 **Backtest plumbing:** `_per_bar_simulate` must pass the 15-month-as-of-bar slice into `load_aux_data`, same way it already does for `insider_txns`. The slice is computed from `as_of - 15mo` to `as_of - 3mo` for Stage 2 and `as_of - 30d` to `as_of` for Stage 1. We provide the full 15-month window in `insider_history_long`; the strategy slices internally.
 
-### Universe predicate
+### Universe handling
 
-S15 declares:
+S15 follows S12_insider's established pattern: **no `universe_filter` declared at module level.** The default `sp500` predicate applies via `DEFAULT_UNIVERSE_FILTER`.
 
-```python
-universe_filter = universe_filters.has_insider_history
-```
+Rationale: universe predicates in `src/strategies/universe_default.py` have signature `(meta: TickerMetadata, as_of) -> bool` and are restricted to metadata-only deterministic checks (universe_lint gate forbids `os`/`datetime`/`time` imports). They cannot read `insider.parquet`. Adding a `has_insider_history` flag to `TickerMetadata` is a cross-cutting backfill change out of scope for this strategy.
 
-New predicate in `src/data/universe_filters.py`:
+Instead, S15 filters inside `generate_signals` by iterating the resolved universe and fast-failing tickers without insider data: `if not insider_history_long.get(ticker): continue`. The 387 tickers in `insider.parquet` overlap heavily with SP500, so most cycles touch the strategy's logic for ~300-400 names. Per-bar overhead is negligible (same pattern as S12_insider).
 
-```python
-def has_insider_history(meta, as_of):
-    """Tickers with >=10 qualifying insider transactions in the trailing 12 months."""
-    # signature must match the (meta, as_of) contract (SP-2 Phase A)
-```
-
-Without this predicate, S15 wastes cycles scanning ~5,000 SP-2 universe tickers for which we have no insider data. With it, the universe is bounded to the 387 tickers in our parquet, intersected with the SP-2 union universe.
-
-Predicate constraints (per SP-2 Phase A): no `datetime`/`time`/`os` imports (lifecycle sandbox check will reject), pure function of `(meta, as_of)`, deterministic.
-
-### Predicate-at-mint compatibility
-
-Because the predicate is declared at module top-level as `universe_filter = ...`, SP-2 Phase D's lifecycle AST detector picks it up and writes `universe_filter_ref` into the manifest at strategy register time. No additional integration work.
+Performance note: the dict lookup is O(1); the strategy will not slow the backtest meaningfully even across the full SP-2 union universe.
 
 ## 7. Testing
 
