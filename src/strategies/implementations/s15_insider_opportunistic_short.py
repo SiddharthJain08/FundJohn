@@ -232,7 +232,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             # ranking score (opp_count × log10(net_sell_value)) actually bites
             # on high-fire days. v4 avg 5.8 fires/day, cap=20 rarely bound.
             'base_size_pct':             0.015,
-            'max_concurrent_positions':  20,  # v9: revert cap to baseline (isolate Stage 3)
+            'max_concurrent_positions':  8,  # v10: stack v6 cap with v9 Stage 3 strictness
             'wide_stop_pct':             0.15,
             'cooldown_after_stop_days':  30,
             # Window for Stage 1 (calendar days)
