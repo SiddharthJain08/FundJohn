@@ -329,13 +329,13 @@ def test_strategy_metadata():
 def test_strategy_default_parameters():
     s = OpportunisticInsiderShort()
     p = s.default_parameters()
-    assert p['min_insiders'] == 3
-    assert p['min_net_sell_value'] == 5_000_000
+    assert p['min_insiders'] == 2  # v13: 3→2 (ultra-loose)
+    assert p['min_net_sell_value'] == 3_000_000  # v13: 5M→3M (ultra-loose)
     assert p['min_opportunistic_count'] == 2
     assert p['min_personal_stake_pct'] == 0.10
     assert p['stage3_require_both'] is False
     assert p['base_size_pct'] == 0.015
-    assert p['max_concurrent_positions'] == 5
+    assert p['max_concurrent_positions'] == 5  # v13: keep v7/v12 cap
     assert p['wide_stop_pct'] == 0.15
     assert p['cooldown_after_stop_days'] == 30
     assert p['short_lookback_days'] == 30
@@ -566,7 +566,7 @@ def test_generate_signals_respects_cooldown(monkeypatch):
 
 
 def test_generate_signals_caps_at_max_concurrent(monkeypatch):
-    """25 qualifying tickers → only top 5 by score are emitted (v12: cap=5 with looser Stage 1, 3/$5M)."""
+    """25 qualifying tickers → only top 5 by score are emitted (v13: cap=5 with ultra-loose Stage 1, 2/$3M)."""
     monkeypatch.setenv('OPENCLAW_S15_INSIDER_OPPORTUNISTIC', '1')
     s = OpportunisticInsiderShort()
     tickers = [f'T{i:02d}' for i in range(25)]
