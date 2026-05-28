@@ -40,15 +40,28 @@ def qualifying_sales(txns: Iterable[dict]) -> list[dict]:
 
 # ── Stage 2: opportunistic-vs-routine classifier ────────────────────────────
 
-def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
-    """Classify an insider as 'opportunistic' or 'routine'.
+def classify_insider(
+    history: list[dict],
+    as_of: pd.Timestamp,
+    min_qualifying_sales_for_routine: int = 4,
+) -> str:
+    """Classify an insider as 'opportunistic' or 'routine' by sale frequency.
 
     Window: t-15 to t-3 months from as_of (12-month window with 3-month
-    look-ahead gap). Buckets qualifying sales by calendar quarter.
+    look-ahead gap). Counts qualifying sales in the window.
 
-    - >=3 distinct quarters with sales → 'routine'
-    - <=2 distinct quarters in window → 'opportunistic'
-    - 0 qualifying sales in window → 'opportunistic' (new insider default)
+    - n >= min_qualifying_sales_for_routine → 'routine' (frequent seller)
+    - n < min_qualifying_sales_for_routine  → 'opportunistic' (rare seller)
+    - n == 0                                → 'opportunistic' (new insider default)
+
+    v2 — replaces the v1 calendar-quarter classifier, which was structurally
+    dormant on real data (insider parquet has only ~3 years of history; few
+    (ticker, insider) pairs accumulate >=3 distinct sale quarters in the
+    rolling window). Sale frequency activates the filter immediately
+    regardless of history depth.
+
+    4 sales per 12 months ≈ "more frequent than once per quarter" — the
+    empirical cut-point for routine selling.
     """
     sales = qualifying_sales(history or [])
     if not sales:
@@ -57,7 +70,7 @@ def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
     window_start = as_of - pd.DateOffset(months=15)
     window_end = as_of - pd.DateOffset(months=3)
 
-    quarters = set()
+    n_in_window = 0
     for t in sales:
         try:
             txn_date = pd.to_datetime(t.get('transactionDate'))
@@ -65,9 +78,9 @@ def classify_insider(history: list[dict], as_of: pd.Timestamp) -> str:
             continue
         if txn_date < window_start or txn_date > window_end:
             continue
-        quarters.add((txn_date.year, (txn_date.month - 1) // 3 + 1))
+        n_in_window += 1
 
-    if len(quarters) >= 3:
+    if n_in_window >= int(min_qualifying_sales_for_routine):
         return 'routine'
     return 'opportunistic'
 
@@ -220,6 +233,7 @@ class OpportunisticInsiderShort(BaseStrategy):
             'min_net_sell_value':        5_000_000,
             # Stage 2 (opportunistic classifier)
             'min_opportunistic_count':   2,
+            'min_qualifying_sales_for_routine': 4,
             # Stage 3 (conviction filter)
             'min_personal_stake_pct':    0.10,
             # Position management
@@ -348,7 +362,10 @@ class OpportunisticInsiderShort(BaseStrategy):
                     h for h in seller_history
                     if (h.get('reportingName') or '').strip() == name
                 ]
-                kind = classify_insider(this_seller_history, ref_date)
+                kind = classify_insider(
+                    this_seller_history, ref_date,
+                    min_qualifying_sales_for_routine=int(p['min_qualifying_sales_for_routine']),
+                )
                 if kind == 'opportunistic':
                     opp_count += 1
                 else:

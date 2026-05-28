@@ -22,15 +22,15 @@ def _make_txn(date, value=1_000_000, ttype='S-Sale'):
     }
 
 
-def test_classify_insider_routine_regular_quarterly():
-    """Insider selling every quarter for 12mo → routine."""
+def test_classify_insider_routine_frequent_seller():
+    """Insider with >=4 qualifying sales in t-15..t-3 window → routine."""
     history = [
-        _make_txn('2025-03-15'),
         _make_txn('2025-04-15'),
         _make_txn('2025-07-15'),
         _make_txn('2025-10-15'),
         _make_txn('2026-01-15'),
     ]
+    # All 4 in window (2025-02-15..2026-02-15) → routine
     assert classify_insider(history, AS_OF) == 'routine'
 
 
@@ -49,43 +49,60 @@ def test_classify_insider_opportunistic_new_insider():
 
 
 def test_classify_insider_ignores_outside_window():
-    """Txns outside t-15 to t-3 must not count toward quarter buckets."""
+    """Txns outside t-15 to t-3 must not count toward the frequency count."""
     history = [
         _make_txn('2026-03-15'),
         _make_txn('2026-04-15'),
         _make_txn('2026-05-10'),
     ]
+    # Zero txns in t-15..t-3 window → opportunistic
     assert classify_insider(history, AS_OF) == 'opportunistic'
 
 
 def test_classify_insider_routine_at_threshold():
-    """Exactly 3 distinct quarters in window → routine (boundary)."""
+    """Exactly 4 qualifying sales in window → routine (boundary)."""
+    history = [
+        _make_txn('2025-04-15'),
+        _make_txn('2025-07-15'),
+        _make_txn('2025-10-15'),
+        _make_txn('2026-01-15'),
+    ]
+    # 4 in window → routine (boundary)
+    assert classify_insider(history, AS_OF) == 'routine'
+
+
+def test_classify_insider_opportunistic_at_threshold():
+    """Exactly 3 qualifying sales in window → opportunistic (boundary)."""
     history = [
         _make_txn('2025-05-15'),
         _make_txn('2025-09-15'),
         _make_txn('2025-12-15'),
     ]
-    assert classify_insider(history, AS_OF) == 'routine'
-
-
-def test_classify_insider_opportunistic_at_threshold():
-    """Exactly 2 distinct quarters in window → opportunistic (boundary)."""
-    history = [
-        _make_txn('2025-05-15'),
-        _make_txn('2025-09-15'),
-    ]
+    # 3 in window → opportunistic (one below routine threshold)
     assert classify_insider(history, AS_OF) == 'opportunistic'
 
 
 def test_classify_insider_counts_bare_s_type():
     """Bare 'S' transactionType (alternate SEC form) is counted same as S-Sale."""
-    # 3 distinct quarters using bare 'S' → routine
     history = [
-        _make_txn('2025-05-15', ttype='S'),
-        _make_txn('2025-09-15', ttype='S'),
-        _make_txn('2025-12-15', ttype='S'),
+        _make_txn('2025-04-15', ttype='S'),
+        _make_txn('2025-07-15', ttype='S'),
+        _make_txn('2025-10-15', ttype='S'),
+        _make_txn('2026-01-15', ttype='S'),
     ]
+    # 4 bare-S sales in window → routine
     assert classify_insider(history, AS_OF) == 'routine'
+
+
+def test_classify_insider_param_overridable():
+    """min_qualifying_sales_for_routine parameter overrides the default."""
+    history = [
+        _make_txn('2025-05-15'),
+        _make_txn('2025-09-15'),
+    ]
+    # 2 sales in window: routine at threshold=2, opportunistic at default (4)
+    assert classify_insider(history, AS_OF, min_qualifying_sales_for_routine=2) == 'routine'
+    assert classify_insider(history, AS_OF, min_qualifying_sales_for_routine=4) == 'opportunistic'
 
 
 def test_qualifying_sales_only_keeps_s_sale_and_s():
@@ -289,6 +306,7 @@ def test_strategy_default_parameters():
     assert p['min_insiders'] == 3
     assert p['min_net_sell_value'] == 5_000_000
     assert p['min_opportunistic_count'] == 2
+    assert p['min_qualifying_sales_for_routine'] == 4
     assert p['min_personal_stake_pct'] == 0.10
     assert p['base_size_pct'] == 0.015
     assert p['max_concurrent_positions'] == 20
