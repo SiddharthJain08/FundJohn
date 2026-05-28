@@ -107,3 +107,86 @@ def cluster_gate(
     if net_sell_value < float(min_net_value):
         return False, meta
     return True, meta
+
+
+# ── Stage 3: conviction filter ──────────────────────────────────────────────
+
+_C_SUITE_KEYWORDS = ('CEO', 'CFO', 'COO', 'CHAIR', 'CHAIRMAN',
+                     'CHIEF EXECUTIVE', 'CHIEF FINANCIAL', 'CHIEF OPERATING')
+
+
+def _is_c_suite(role: str | None) -> bool:
+    if not role:
+        return False
+    upper = role.upper()
+    return any(kw in upper for kw in _C_SUITE_KEYWORDS)
+
+
+def _personal_stake_pct(sales_by_name: dict, name: str) -> float | None:
+    """Compute (shares_sold / prior_holdings) for one insider's sales.
+
+    prior_holdings = max(sharesOwnedAfter across this insider's txns) +
+                     sum(shares sold across this insider's txns)
+    Returns None if no usable sharesOwnedAfter.
+    """
+    seller_txns = sales_by_name.get(name, [])
+    shares_sold_total = 0.0
+    max_after = None
+    for t in seller_txns:
+        shares = float(t.get('shares') or 0.0)
+        shares_sold_total += shares
+        after = t.get('sharesOwnedAfter')
+        if after is not None:
+            after_f = float(after)
+            if max_after is None or after_f > max_after:
+                max_after = after_f
+    if max_after is None:
+        return None
+    prior_holdings = max_after + shares_sold_total
+    if prior_holdings <= 0:
+        return None
+    return shares_sold_total / prior_holdings
+
+
+def conviction_filter(
+    sales: list[dict],
+    min_personal_stake_pct: float = 0.10,
+) -> tuple[bool, dict]:
+    """Stage 3: does this cluster carry conviction signal?
+
+    Passes if ANY of:
+      (1) Personal stake: any single seller sold >= min_personal_stake_pct of
+          their prior personal holdings.
+      (2) C-suite: any seller's role contains CEO/CFO/COO/Chair/Chairman.
+
+    Note: Company-stake sub-test from the spec (>=1.5% of shares outstanding)
+    is skipped — we don't have a reliable shares_outstanding feed in the
+    aux loader. Spec authorized graceful skip of this sub-test.
+
+    Returns (passes, metadata).
+    """
+    sales_by_name: dict = {}
+    for s in sales:
+        name = (s.get('reportingName') or '').strip()
+        if not name:
+            continue
+        sales_by_name.setdefault(name, []).append(s)
+
+    top_pct = 0.0
+    for name in sales_by_name:
+        pct = _personal_stake_pct(sales_by_name, name)
+        if pct is not None and pct > top_pct:
+            top_pct = pct
+
+    c_suite_present = any(_is_c_suite(s.get('role')) for s in sales)
+
+    meta = {
+        'top_seller_pct_of_holdings': top_pct,
+        'c_suite_present':            c_suite_present,
+    }
+
+    if top_pct >= float(min_personal_stake_pct):
+        return True, meta
+    if c_suite_present:
+        return True, meta
+    return False, meta

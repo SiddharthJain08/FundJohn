@@ -188,3 +188,76 @@ def test_cluster_gate_distinct_insider_counting():
     ok, meta = cluster_gate(sales, [], min_insiders=3, min_net_value=5_000_000)
     assert meta['distinct_insiders'] == 3
     assert meta['net_sell_value'] == 10_000_000
+
+
+from src.strategies.implementations.s15_insider_opportunistic_short import (
+    conviction_filter,
+)
+
+
+def test_conviction_filter_passes_on_personal_stake():
+    """Single seller sold 10%+ of prior holdings."""
+    sales = [{
+        'reportingName': 'A',
+        'role': 'officer: VP',
+        'shares': 50_000,
+        'sharesOwnedAfter': 400_000,
+        'value': 5_000_000,
+    }]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is True
+    assert meta['top_seller_pct_of_holdings'] > 0.10
+    assert meta['c_suite_present'] is False
+
+
+def test_conviction_filter_passes_on_c_suite():
+    """No personal-stake pass but CEO present → passes via role test."""
+    sales = [
+        {'reportingName': 'A', 'role': 'officer: CEO and Director',
+         'shares': 1_000, 'sharesOwnedAfter': 100_000, 'value': 200_000},
+    ]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is True
+    assert meta['c_suite_present'] is True
+
+
+def test_conviction_filter_passes_on_cfo():
+    sales = [
+        {'reportingName': 'B', 'role': 'officer: Chief Financial Officer',
+         'shares': 100, 'sharesOwnedAfter': 10_000, 'value': 20_000},
+    ]
+    ok, _ = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is True
+
+
+def test_conviction_filter_passes_on_chair():
+    sales = [
+        {'reportingName': 'C', 'role': 'director: Chairman of the Board',
+         'shares': 100, 'sharesOwnedAfter': 10_000, 'value': 20_000},
+    ]
+    ok, _ = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is True
+
+
+def test_conviction_filter_fails_when_all_low_stake_and_no_c_suite():
+    """No seller >=10% AND no C-suite → fail."""
+    sales = [
+        {'reportingName': 'A', 'role': 'officer: VP Engineering',
+         'shares': 1_000, 'sharesOwnedAfter': 100_000, 'value': 200_000},
+        {'reportingName': 'B', 'role': 'officer: SVP Sales',
+         'shares': 2_000, 'sharesOwnedAfter': 200_000, 'value': 400_000},
+    ]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is False
+    assert meta['c_suite_present'] is False
+
+
+def test_conviction_filter_missing_shares_owned_after():
+    """Missing sharesOwnedAfter → that seller skipped for stake test but role still checked."""
+    sales = [
+        {'reportingName': 'CEO Person', 'role': 'officer: CEO',
+         'shares': 1_000, 'sharesOwnedAfter': None, 'value': 50_000},
+    ]
+    ok, meta = conviction_filter(sales, min_personal_stake_pct=0.10)
+    assert ok is True
+    assert meta['c_suite_present'] is True
