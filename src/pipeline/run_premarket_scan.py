@@ -305,8 +305,6 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser()
     parser.add_argument('--scan-label', required=True, choices=['07:30', '09:00'])
-    parser.add_argument('--dry-run', action='store_true',
-                        help='compute and print rows; skip DB writes, Discord, autoclose')
     parser.add_argument('--tickers', nargs='*',
                         help='override broker-position lookup for debugging')
     args = parser.parse_args(argv)
@@ -316,11 +314,6 @@ def main(argv: list[str] | None = None) -> int:
     except GateConfigError as e:
         log.error('gate config: %s', e)
         return 2
-
-    if args.dry_run:
-        os.environ.setdefault('PREMARKET_DRY_RUN', '1')
-        # Dry-run currently mirrors the persist/post path through the same code;
-        # production callers do not pass --dry-run, so just gate at run_scan if desired.
 
     return run_scan(args.scan_label, ticker_override=args.tickers)
 

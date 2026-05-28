@@ -70,6 +70,8 @@ def test_rules_only_path_persists_and_posts_when_score_above_threshold(
     _post.assert_called_once()
 
 
+@patch('src.pipeline.run_premarket_scan.resolve_premarket_webhook',
+       return_value='https://discord.com/api/webhooks/test')
 @patch('src.pipeline.run_premarket_scan._post_discord')
 @patch('src.pipeline.run_premarket_scan._persist_alert_rows')
 @patch('src.pipeline.run_premarket_scan.confirm_panic')
@@ -77,7 +79,7 @@ def test_rules_only_path_persists_and_posts_when_score_above_threshold(
 @patch('src.pipeline.run_premarket_scan.load_open_equity_positions')
 @patch('src.pipeline.run_premarket_scan.is_trading_day_in_et', return_value=True)
 def test_confirmer_path_calls_sonnet_only_for_above_threshold(
-    _cal, _load, mock_news, mock_sonnet, _persist, _post, monkeypatch,
+    _cal, _load, mock_news, mock_sonnet, _persist, _post, _webhook, monkeypatch,
 ):
     monkeypatch.setenv('OPENCLAW_PREMARKET_SCAN', '1')
     monkeypatch.setenv('OPENCLAW_PREMARKET_CONFIRMER', '1')
