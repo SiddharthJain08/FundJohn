@@ -507,7 +507,7 @@ def _per_bar_simulate(
         aux = {'options': {}}
         if load_aux_data is not None:
             try:
-                aux = load_aux_data(current_date)
+                aux = load_aux_data(current_date, strategy_id=strategy_id)
             except Exception:
                 aux = {'options': {}}
 

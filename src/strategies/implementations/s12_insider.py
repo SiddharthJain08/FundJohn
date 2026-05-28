@@ -32,6 +32,12 @@ class InsiderClusterBuy(BaseStrategy):
             'min_sell_insiders':   5,
             'min_net_sell_value':  2_000_000,
             'require_zero_buys':   True,
+            # Per-ticker re-fire cooldown after a stop-out (trading days). The
+            # insider cluster persists for days; without this, the strategy
+            # re-enters daily as a losing ticker bleeds (CHTR fired 19x in May
+            # 2026, stop-out 11x, cum -30.7pp). aux_data['recent_stop_outs'] is
+            # populated by aux_data_loader from strategy_backtest_trades.
+            'cooldown_after_stop_days': 10,
         }
 
     def generate_signals(self, prices, regime, universe, aux_data=None) -> List[Signal]:
@@ -57,9 +63,25 @@ class InsiderClusterBuy(BaseStrategy):
 
         cutoff = ref_date - pd.Timedelta(days=p['lookback_days'] * 1.5)  # calendar buffer
 
+        # Per-ticker post-stop-out cooldown (Bug 3). recent_stop_outs is a dict
+        # {ticker: last_stop_out_date} populated by aux_data_loader. Missing /
+        # malformed entries fail OPEN (no skip).
+        recent_stops = (aux_data or {}).get('recent_stop_outs') or {}
+        cooldown_days = int(p.get('cooldown_after_stop_days', 10))
+
         for ticker in universe:
             if ticker not in prices.columns:
                 continue
+
+            # Cooldown: skip tickers that stopped out within the last N trading days.
+            last_stop = recent_stops.get(ticker)
+            if last_stop is not None:
+                try:
+                    last_stop_ts = pd.to_datetime(last_stop)
+                    if (ref_date - last_stop_ts).days < cooldown_days:
+                        continue   # cooldown active — skip this ticker
+                except (TypeError, ValueError):
+                    pass   # malformed date — fail open
 
             txns = insider_data.get(ticker, [])
             if not txns:
@@ -131,6 +153,7 @@ class InsiderClusterBuy(BaseStrategy):
                 prices=prices,
                 universe=universe,
                 regime_state=regime_state,  # NEW
+                aux_data=aux_data,          # NEW: cooldown
             ))
 
         signals.sort(
@@ -150,6 +173,7 @@ class InsiderClusterBuy(BaseStrategy):
         prices,
         universe,
         regime_state: str = 'LOW_VOL',  # NEW
+        aux_data: dict = None,          # NEW: cooldown
     ) -> list:
         """Emit SHORT signals on insider sell-clusters.
 
@@ -172,10 +196,24 @@ class InsiderClusterBuy(BaseStrategy):
 
         cutoff = ref_date - pd.Timedelta(days=int(params.get('lookback_days', 20)) * 1.5)
 
+        # Per-ticker post-stop-out cooldown (Bug 3). Mirrors the BUY branch.
+        recent_stops = (aux_data or {}).get('recent_stop_outs') or {}
+        cooldown_days = int(params.get('cooldown_after_stop_days', 10))
+
         out = []
         for ticker in universe:
             if ticker not in prices.columns:
                 continue
+
+            # Cooldown: skip tickers that stopped out within the last N trading days.
+            last_stop = recent_stops.get(ticker)
+            if last_stop is not None:
+                try:
+                    last_stop_ts = pd.to_datetime(last_stop)
+                    if (ref_date - last_stop_ts).days < cooldown_days:
+                        continue
+                except (TypeError, ValueError):
+                    pass
 
             txns = insider_data.get(ticker, [])
             if not txns:

@@ -26,6 +26,7 @@ Usage from auto_backtest.py:
 from __future__ import annotations
 import bisect
 import logging
+import os
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
@@ -274,15 +275,67 @@ def _vol_indices_slice(date_str: str) -> dict:
     return out
 
 
-def load_aux_data(date: str | pd.Timestamp) -> dict:
+# Cooldown lookback for recent stop-outs (calendar days). The strategy's
+# `cooldown_after_stop_days` is in trading days (~10), so use a generous
+# calendar buffer to cover weekends/holidays.
+RECENT_STOP_OUTS_LOOKBACK_DAYS = 21
+
+
+@lru_cache(maxsize=None)
+def _recent_stop_outs(date_str: str, strategy_id: str) -> dict:
+    """Return the most-recent stop-out exit date per ticker within the past
+    RECENT_STOP_OUTS_LOOKBACK_DAYS calendar days (relative to `date_str`),
+    scoped to one strategy_id. Used by S12_insider's per-ticker cooldown.
+
+    Reads strategy_backtest_trades with exit_reason='stop'. Fails OPEN on any
+    DB error or missing POSTGRES_URI — the cooldown becomes a no-op so the
+    strategy continues to fire normally. Cached indefinitely (per (date, sid)).
+    """
+    dsn = os.environ.get('POSTGRES_URI')
+    if not dsn:
+        return {}
+    try:
+        import psycopg2
+    except ImportError:
+        return {}
+    try:
+        as_of = pd.to_datetime(date_str).date()
+        cutoff = (pd.Timestamp(as_of) - pd.Timedelta(days=RECENT_STOP_OUTS_LOOKBACK_DAYS)).date()
+        out: dict = {}
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT ticker, MAX(exit_date)
+                  FROM strategy_backtest_trades
+                 WHERE strategy_id = %s
+                   AND exit_reason = 'stop'
+                   AND exit_date >= %s
+                   AND exit_date <= %s
+                 GROUP BY ticker
+                """,
+                (strategy_id, cutoff, as_of),
+            )
+            for ticker, dt in cur.fetchall():
+                if ticker and dt is not None:
+                    out[str(ticker)] = pd.to_datetime(dt)
+        return out
+    except Exception as exc:
+        log.warning('aux_data_loader: _recent_stop_outs failed (%s) — cooldown is no-op', exc)
+        return {}
+
+
+def load_aux_data(date: str | pd.Timestamp, strategy_id: str | None = None) -> dict:
     """Return aux_data dict for a given trading date.
 
     date: 'YYYY-MM-DD' or pandas Timestamp.
+    strategy_id: optional — when provided, includes `recent_stop_outs` scoped
+        to that strategy (used by S12_insider's per-ticker post-stop cooldown).
     Returns: {
         'options':      {ticker: {...fields...}},
         'vol_indices':  {vix_close, vvix_close, vix9d_close},
         'insider_txns': {ticker: [{transactionDate, transactionType,
                                    reportingName, value, shares}]},
+        'recent_stop_outs': {ticker: pd.Timestamp},  # when strategy_id given
     }
     insider_txns is filtered to a INSIDER_SLICE_DAYS-day rolling window ending on
     `date` so per-bar calls in backtest simulation don't carry the full history.
@@ -291,11 +344,14 @@ def load_aux_data(date: str | pd.Timestamp) -> dict:
     their own lookback window filter as they do in production.
     """
     date_str = str(date)[:10]
-    return {
+    out = {
         'options':      _day_slice(date_str),
         'vol_indices':  _vol_indices_slice(date_str),
         'insider_txns': _insider_slice(date_str),
     }
+    if strategy_id:
+        out['recent_stop_outs'] = _recent_stop_outs(date_str, strategy_id)
+    return out
 
 
 def available_dates() -> list[str]:
