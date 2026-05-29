@@ -35,3 +35,29 @@ def test_overlap_similarity_matrix_diagonal_and_symmetry():
     assert m['S1']['S1'] == 1.0 and m['S2']['S2'] == 1.0
     assert m['S1']['S2'] == m['S2']['S1']
     assert abs(m['S1']['S2'] - 0.5) < 1e-9  # |intersect|=1, |union|=2
+
+
+def test_adaptive_alpha_zero_at_no_obs():
+    assert ss.adaptive_alpha(0) == 0.0
+
+
+def test_adaptive_alpha_reaches_ceiling():
+    assert abs(ss.adaptive_alpha(ss.ALPHA_FULL_OBS) - ss.RETURN_CORR_ALPHA_CEIL) < 1e-9
+    assert abs(ss.adaptive_alpha(10 * ss.ALPHA_FULL_OBS) - ss.RETURN_CORR_ALPHA_CEIL) < 1e-9  # capped
+
+
+def test_blend_pure_overlap_when_no_return_history():
+    overlap = {'A': {'A': 1.0, 'B': 0.5}, 'B': {'A': 0.5, 'B': 1.0}}
+    retcorr = {'A': {'A': 1.0, 'B': 0.9}, 'B': {'A': 0.9, 'B': 1.0}}
+    n_obs = {('A', 'B'): 0}  # no joint return history -> alpha 0 -> pure overlap
+    blended = ss.blend_similarity(overlap, retcorr, n_obs)
+    assert abs(blended['A']['B'] - 0.5) < 1e-9
+
+
+def test_blend_weights_return_corr_when_history_ample():
+    overlap = {'A': {'A': 1.0, 'B': 0.2}, 'B': {'A': 0.2, 'B': 1.0}}
+    retcorr = {'A': {'A': 1.0, 'B': 0.9}, 'B': {'A': 0.9, 'B': 1.0}}
+    n_obs = {('A', 'B'): ss.ALPHA_FULL_OBS}  # alpha = ceiling 0.6
+    blended = ss.blend_similarity(overlap, retcorr, n_obs)
+    # 0.4*0.2 + 0.6*0.9 = 0.62
+    assert abs(blended['A']['B'] - 0.62) < 1e-9

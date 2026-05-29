@@ -41,3 +41,66 @@ def overlap_similarity(sets_by_strat: dict[str, set]) -> dict[str, dict[str, flo
             out[a][b] = j
             out[b][a] = j
     return out
+
+
+def _pearson(xs: list[float], ys: list[float]) -> Optional[float]:
+    import math
+    n = len(xs)
+    if n != len(ys) or n < 2:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    num = sum((xs[i] - mx) * (ys[i] - my) for i in range(n))
+    dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+    dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+    if dx == 0 or dy == 0:
+        return None
+    return num / (dx * dy)
+
+
+def return_correlation(returns_by_strat: dict[str, dict[str, float]]
+                       ) -> tuple[dict[str, dict[str, float]], dict[tuple, int]]:
+    """Pearson on per-strategy {date: daily_return}. Returns (matrix, n_obs_per_pair).
+    Sparse / zero-variance pairs default to SPARSE_DEFAULT; off-diagonals clipped +/-0.95."""
+    strats = sorted(returns_by_strat.keys())
+    out: dict[str, dict[str, float]] = {s: {} for s in strats}
+    n_obs: dict[tuple, int] = {}
+    for i, a in enumerate(strats):
+        out[a][a] = 1.0
+        for b in strats[i + 1:]:
+            da, db = returns_by_strat[a], returns_by_strat[b]
+            paired = sorted(set(da) & set(db))
+            n_obs[(a, b)] = n_obs[(b, a)] = len(paired)
+            if len(paired) < 2:
+                rho = SPARSE_DEFAULT
+            else:
+                r = _pearson([da[d] for d in paired], [db[d] for d in paired])
+                rho = SPARSE_DEFAULT if r is None else max(-MAX_OFF_DIAGONAL, min(MAX_OFF_DIAGONAL, r))
+            out[a][b] = out[b][a] = rho
+    return out, n_obs
+
+
+def adaptive_alpha(n_obs: int) -> float:
+    """Weight on return-correlation: 0 at no joint history, rising linearly to the
+    ceiling at ALPHA_FULL_OBS overlapping observations, then capped."""
+    if n_obs <= 0:
+        return 0.0
+    return min(RETURN_CORR_ALPHA_CEIL, RETURN_CORR_ALPHA_CEIL * n_obs / ALPHA_FULL_OBS)
+
+
+def blend_similarity(overlap: dict[str, dict[str, float]],
+                     return_corr: dict[str, dict[str, float]],
+                     n_obs_per_pair: dict[tuple, int]) -> dict[str, dict[str, float]]:
+    """Per-pair convex blend: (1-alpha)*overlap + alpha*return_corr, alpha=adaptive_alpha(n_obs).
+    Overlap LEADS; return-corr enters only as joint history accrues. Diagonal 1.0."""
+    strats = sorted(overlap.keys())
+    out: dict[str, dict[str, float]] = {s: {} for s in strats}
+    for a in strats:
+        for b in strats:
+            if a == b:
+                out[a][b] = 1.0
+                continue
+            o = overlap.get(a, {}).get(b, 0.0)
+            r = return_corr.get(a, {}).get(b, SPARSE_DEFAULT)
+            al = adaptive_alpha(n_obs_per_pair.get((a, b), 0))
+            out[a][b] = (1.0 - al) * o + al * r
+    return out
