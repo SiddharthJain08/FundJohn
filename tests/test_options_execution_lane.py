@@ -164,3 +164,89 @@ def test_options_session_gate_afterhours_skips():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='afterhours'):
         ok, reason = _options_session_gate()
     assert not ok and 'RTH-only' in reason
+
+
+import os as _os
+from unittest.mock import patch, MagicMock
+from execution.alpaca_executor import _route_option_order
+
+def _spec(structure='single', right='call', strike_rule='atm', moneyness=None,
+          target_delta=0.30, dte_target=30, underlying='SPY'):
+    s = MagicMock()
+    s.structure = structure; s.right = right; s.strike_rule = strike_rule
+    s.moneyness = moneyness; s.target_delta = target_delta
+    s.dte_target = dte_target; s.underlying = underlying
+    return s
+
+def _option_order(direction='long', right='call', contracts=1, notional=20000,
+                  strike_rule='atm', underlying='SPY'):
+    return {
+        'ticker': underlying, 'strategy_id': 'S_test',
+        'direction': direction, 'instrument_class': 'option',
+        'contracts': contracts, 'notional_usd': notional,
+        'option_spec': _spec(right=right, strike_rule=strike_rule, underlying=underlying),
+    }
+
+def test_route_returns_none_when_gate_off(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
+    assert _route_option_order(_option_order(), equity=100000, coid='c1') is None
+
+def test_route_returns_none_when_not_option():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    order = {'ticker':'AAPL','instrument_class':'equity','notional_usd':1000}
+    try: assert _route_option_order(order, equity=100000, coid='c1') is None
+    finally: _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+
+def test_route_returns_none_when_missing_option_spec():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    order = {'ticker':'SPY','instrument_class':'option','notional_usd':1000}  # no option_spec
+    try: assert _route_option_order(order, equity=100000, coid='c1') is None
+    finally: _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+
+def test_route_skips_outside_rth():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='closed'):
+        res = _route_option_order(_option_order(), equity=100000, coid='c1')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'skipped' and 'market closed' in res.get('reason','')
+
+def test_route_skips_when_strike_unresolved():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=None), \
+         patch('execution.alpaca_executor._list_expiries',
+               return_value=[__import__('datetime').date(2026,7,16)]):
+        res = _route_option_order(_option_order(), equity=100000, coid='c1')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'skipped' and 'strike' in res.get('reason','')
+
+def test_route_refuses_short_call():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
+         patch('execution.alpaca_executor._list_expiries',
+               return_value=[_dt.date(2026,7,16)]):
+        res = _route_option_order(_option_order(direction='short', right='call'),
+                                   equity=100000, coid='c1')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'skipped' and 'short call' in res.get('reason','')
+
+def test_route_short_put_with_insufficient_cash_skips():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
+         patch('execution.alpaca_executor._list_expiries',
+               return_value=[_dt.date(2026,7,16)]), \
+         patch('execution.alpaca_executor._account_cash', return_value=1000.0), \
+         patch('execution.alpaca_executor._option_quote',
+               return_value={'bid':5.0, 'ask':5.10}), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0):
+        res = _route_option_order(_option_order(direction='short', right='put',
+                                                strike_rule='atm'),
+                                   equity=100000, coid='c1')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'skipped' and 'insufficient cash' in res.get('reason','')

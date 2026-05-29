@@ -604,6 +604,158 @@ def _options_session_gate() -> tuple[bool, str | None]:
     return False, f'option: RTH-only (current session={kind})'
 
 
+def _option_quote(occ_symbol: str) -> dict | None:
+    """Best bid/ask for an OCC symbol from `alpaca data option chain` snapshot."""
+    underlying = ''
+    # OCC root parse: alpha prefix
+    for c in occ_symbol:
+        if c.isalpha(): underlying += c
+        else: break
+    ok, payload, _ = _run_alpaca_cli([
+        'data','option','chain','--underlying-symbol', underlying])
+    if not ok or not payload: return None
+    snapshots = payload.get('snapshots') or {}
+    snap = snapshots.get(occ_symbol)
+    if not snap: return None
+    q = snap.get('latestQuote') or {}
+    try:
+        bid = float(q.get('bp') or q.get('bid') or 0)
+        ask = float(q.get('ap') or q.get('ask') or 0)
+        if bid > 0 and ask > 0:
+            return {'bid': bid, 'ask': ask}
+    except (TypeError, ValueError): pass
+    return None
+
+
+def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
+    """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
+    if str(side).lower() == 'buy':
+        return round(float(quote['ask']) + slip, 2)
+    return round(max(0.01, float(quote['bid']) - slip), 2)
+
+
+def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
+    """SP-5.1a — single-leg options exec lane.
+    Returns a result dict for option orders (branches close_only internally) or
+    None to fall through. Equity-byte-identical when None is returned."""
+    import os as _os, datetime as _dt
+    if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
+        return None
+    if order.get('instrument_class') != 'option':
+        return None
+    spec = order.get('option_spec')
+    if spec is None:
+        return None
+    # 5.1a is SINGLE-LEG ONLY. mleg = SP-5.1b.
+    if getattr(spec, 'structure', 'single') != 'single':
+        return _option_skip(order, coid, equity,
+            f"option: structure={spec.structure!r} not in SP-5.1a (single-leg only)")
+    # RTH gate
+    ok_session, sess_reason = _options_session_gate()
+    if not ok_session:
+        return _option_skip(order, coid, equity, sess_reason)
+
+    direction = str(order.get('direction','long')).lower()
+    right = str(spec.right).lower()
+    side = 'buy' if direction == 'long' else 'sell'
+
+    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
+    if right == 'call' and side == 'sell':
+        return _option_skip(order, coid, equity,
+            'option: short call requires covered-call lookup (not in SP-5.1a)')
+
+    today = _dt.date.today()
+    expiry = _resolve_expiry(spec, today)
+    if expiry is None:
+        return _option_skip(order, coid, equity, 'option: expiry unresolved')
+    strike = _resolve_strike(spec, today, expiry)
+    if strike is None:
+        return _option_skip(order, coid, equity, 'option: strike unresolved')
+    occ = _build_occ_symbol(spec, strike, expiry)
+
+    # close_only branch
+    if order.get('close_only'):
+        return _route_option_close(order, occ, coid)
+
+    # Quote-driven marketable limit
+    quote = _option_quote(occ)
+    if quote is None:
+        return _option_skip(order, coid, equity, 'option: no quote for limit price')
+    # Sub-contract guard uses the limit price
+    side_intent_qty_lookup = _options_current_qty(occ)
+    final_side, intent = _options_position_intent(direction, side_intent_qty_lookup)
+    limit = _option_marketable_limit(final_side, quote)
+
+    raw_qty, qty_reason = _resolve_option_qty(order, limit)
+    if qty_reason and raw_qty == 0:
+        return _option_skip(order, coid, equity, qty_reason)
+    if qty_reason: log(qty_reason)
+
+    # Cash-collateral guard (short put only; zero otherwise)
+    cash = _account_cash()
+    if cash is None:
+        return _option_skip(order, coid, equity, 'option: account.cash fetch failed')
+    final_qty, cash_reason = _apply_cash_collateral_guard(
+        right=right, side=final_side, strike=strike, qty=raw_qty, account_cash=cash)
+    if final_qty == 0:
+        return _option_skip(order, coid, equity, cash_reason)
+    if cash_reason: log(cash_reason)
+
+    # Submit
+    args = ['order','submit',
+            '--symbol', occ, '--qty', str(int(final_qty)),
+            '--side', final_side, '--type','limit',
+            '--limit-price', f"{limit:.2f}",
+            '--time-in-force','day',
+            '--position-intent', intent,
+            '--client-order-id', coid]
+    ok, payload, err = _run_alpaca_cli(args)
+    if not ok or not payload:
+        return _option_skip(order, coid, equity, f'option: submit failed ({err or "no payload"})')
+
+    notional = float(final_qty) * 100.0 * float(limit)
+    return {
+        'ticker': occ, 'status': 'submitted',
+        'order_id': payload.get('id'),
+        'qty': final_qty, 'notional': notional, 'entry': limit,
+        'tif': 'day', 'order_class': 'simple',
+        'client_order_id': coid,
+        'instrument_class': 'option',
+    }
+
+
+def _route_option_close(order: dict, occ: str, coid: str) -> dict:
+    """Single-leg option close via `position close`."""
+    pct = order.get('close_percentage')
+    args = ['position','close','--symbol-or-asset-id', occ]
+    if pct is not None and 0 < float(pct) < 100:
+        args += ['--percentage', f"{float(pct):.2f}"]
+    ok, payload, err = _run_alpaca_cli(args)
+    if not ok or not payload:
+        return _option_skip(order, coid, equity=0.0,
+            reason=f'option-close: failed ({err or "no payload"})')
+    return {
+        'ticker': occ, 'status': 'submitted',
+        'order_id': payload.get('id') or payload.get('order_id'),
+        'qty': payload.get('qty'),
+        'notional': 0.0, 'entry': 0.0, 'tif': 'day',
+        'order_class': 'simple', 'client_order_id': coid,
+        'instrument_class': 'option',
+    }
+
+
+def _option_skip(order: dict, coid: str, equity: float, reason: str) -> dict:
+    """Standard SKIP result dict for options. Writes a SKIP audit row downstream."""
+    log(f'[option] SKIP {order.get("ticker","?")}: {reason}')
+    return {
+        'ticker': order.get('ticker', '?'),
+        'status': 'skipped', 'reason': reason,
+        'order_id': None, 'qty': 0, 'notional': 0.0, 'entry': 0.0,
+        'tif': 'day', 'order_class': 'simple',
+        'client_order_id': coid, 'instrument_class': 'option',
+    }
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
