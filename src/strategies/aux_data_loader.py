@@ -49,6 +49,8 @@ _VOL_INDICES_DF: Optional[pd.DataFrame] = None
 _SENT_DF = None
 SENTIMENT_FIELDS = ['news_count_24h', 'news_mean_score', 'news_finbert_pos',
                     'news_finbert_neu', 'news_finbert_neg']
+# News sentiment decays fast; do not serve a score older than this (avoids stale-data signals).
+SENTIMENT_MAX_AGE_DAYS = 7
 
 
 def _load_panel() -> pd.DataFrame:
@@ -343,6 +345,12 @@ def _sentiment_day_slice(date_str):
     if day.empty:
         return {}
     latest = day.sort_values('date').drop_duplicates('ticker', keep='last')
+    # Staleness cap: news sentiment decays fast — a score older than SENTIMENT_MAX_AGE_DAYS
+    # is noise, not signal. Without this, a ticker that stops making news would drive a
+    # live LONG/SHORT off a months-old score indefinitely (silent-stale-data failure mode).
+    latest = latest[(ts - latest['date']).dt.days <= SENTIMENT_MAX_AGE_DAYS]
+    if latest.empty:
+        return {}
     out = {}
     for row in latest.itertuples(index=False):
         d = {f: getattr(row, f) for f in SENTIMENT_FIELDS

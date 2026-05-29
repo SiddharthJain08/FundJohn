@@ -130,7 +130,11 @@ def _flush(new_rows: list[dict]) -> tuple[int, int]:
         return before, before
     new_df = pd.DataFrame(new_rows, columns=NEWS_COLS).drop_duplicates(['ticker', 'date'])
     merged = merge_append_only(existing, new_df)
-    merged.to_parquet(SENT_PATH, index=False)
+    # Atomic write: a daily-pipeline reader (aux_data_loader._load_sentiment_panel) may read
+    # SENT_PATH mid-backfill — write to a temp file then rename so it never sees a partial parquet.
+    tmp = SENT_PATH.with_suffix('.parquet.tmp')
+    merged.to_parquet(tmp, index=False)
+    os.replace(tmp, SENT_PATH)
     return before, len(merged)
 
 
