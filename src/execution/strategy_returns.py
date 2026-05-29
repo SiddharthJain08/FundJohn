@@ -39,10 +39,15 @@ def aggregate_strategy_daily(per_signal: dict[str, dict[str, float]]) -> dict[st
     return {d: sum(vs) / len(vs) for d, vs in by_date.items() if vs}
 
 
+_DOTENV_LOADED = False
+
 def _db():
+    global _DOTENV_LOADED
     import psycopg2
-    from dotenv import load_dotenv
-    load_dotenv()
+    if not _DOTENV_LOADED:
+        from dotenv import load_dotenv
+        load_dotenv()
+        _DOTENV_LOADED = True
     return psycopg2.connect(os.environ.get('DATABASE_URL')
                             or os.environ.get('POSTGRES_URI')
                             or 'postgresql://openclaw:password@localhost:5432/openclaw')
@@ -62,18 +67,22 @@ def _live_marks_by_strategy(window_days: int):
     """
     raw: dict[str, dict[str, list]] = {}
     regime_of: dict[str, dict[str, str]] = {}
-    with _db() as conn, conn.cursor() as cur:
-        cur.execute(sql, (window_days,))
-        for sid, sig, d, unreal, real, regime in cur.fetchall():
-            raw.setdefault(sid, {}).setdefault(sig, []).append((d, unreal, real))
-            regime_of.setdefault(sid, {})[d] = regime
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (window_days,))
+            for sid, sig, d, unreal, real, regime in cur.fetchall():
+                raw.setdefault(sid, {}).setdefault(sig, []).append((d, unreal, real))
+                regime_of.setdefault(sid, {})[d] = regime
+    finally:
+        conn.close()
     out: dict[str, dict[str, dict[str, float]]] = {}
     for sid, sigs in raw.items():
         out[sid] = {sig: difference_signal_marks(marks) for sig, marks in sigs.items()}
     return out, regime_of
 
 
-def rebuild_daily_returns(window_days: int = 180, trigger: str = 'manual') -> int:
+def rebuild_daily_returns(window_days: int = 180) -> int:
     """Reconstruct live (differenced) per-strategy daily returns and upsert. Returns row count."""
     live, regime_of = _live_marks_by_strategy(window_days)
     rows = []
@@ -83,15 +92,19 @@ def rebuild_daily_returns(window_days: int = 180, trigger: str = 'manual') -> in
             rows.append((sid, d, ret, regime_of.get(sid, {}).get(d), 'live'))
     if not rows:
         return 0
-    with _db() as conn, conn.cursor() as cur:
-        cur.executemany(
-            """INSERT INTO strategy_daily_returns
-                 (strategy_id, ret_date, daily_return_pct, regime_state, source)
-               VALUES (%s,%s,%s,%s,%s)
-               ON CONFLICT (strategy_id, ret_date, source) DO UPDATE
-                 SET daily_return_pct = EXCLUDED.daily_return_pct,
-                     regime_state = EXCLUDED.regime_state,
-                     computed_at = NOW()""",
-            rows)
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO strategy_daily_returns
+                     (strategy_id, ret_date, daily_return_pct, regime_state, source)
+                   VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (strategy_id, ret_date, source) DO UPDATE
+                     SET daily_return_pct = EXCLUDED.daily_return_pct,
+                         regime_state = EXCLUDED.regime_state,
+                         computed_at = NOW()""",
+                rows)
         conn.commit()
+    finally:
+        conn.close()
     return len(rows)
