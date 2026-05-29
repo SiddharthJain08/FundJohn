@@ -94,7 +94,7 @@ def test_ungrouped_strategies_are_singleton_blocks():
     out = bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={'A': 1.0, 'B': 1.0})
     assert out['n_blocks'] == 2
     assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
-    assert math.isclose(out['stop'], 97.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)  # tightest of 98(2%)/97(3%)
 
 
 def test_wrong_direction_and_nonfinite_rejected():
@@ -640,6 +640,10 @@ def main():
     ap.add_argument('--regime', default='LOW_VOL')
     ap.add_argument('--max-hold', type=int, default=10)
     args = ap.parse_args()
+
+    # Load .env BEFORE load_prices_panels (its quarantine filter needs POSTGRES_URI).
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
     from backtest.unified_backtest import load_prices_panels
     _, panels = load_prices_panels()
