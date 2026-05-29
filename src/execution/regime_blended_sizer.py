@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 
 def _ortho_enabled(gate: str) -> bool:
-    import os
     return os.environ.get(gate) == '1'
 
 
@@ -425,13 +424,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
         return []
 
+    # Tier-2: deflate the conviction gate by effective-independent-bets (gate only; sizing untouched).
+    gate_net_sharpe = ticker_net_sharpe
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
+        from execution import orthogonalization as _og
+        contribs_by_ticker = {
+            tkr: list(zip(meta['strategies'], meta['directions']))
+            for tkr, meta in ticker_meta.items()
+        }
+        gate_net_sharpe = _og.deflated_net_sharpe(
+            contribs_by_ticker, _ortho_groups['block_map'],
+            _ortho_groups['matrix'], sharpe_by_strat)
+        logger.info('orthogonalization.corr_weight: deflated gate for %d tickers', len(gate_net_sharpe))
+
     # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
     # below the configured floor (default 3.0, from pipeline_config). This
     # is the operator's primary conviction filter — kills single-strategy
     # bets AND near-cancellation tickers in one rule.
     if min_cum_sharpe > 0:
         gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if abs(ticker_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
+                     if abs(gate_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
         for tkr in gated_out:
             ticker_w.pop(tkr, None)
             ticker_meta.pop(tkr, None)
