@@ -170,6 +170,59 @@ def _manifest_canonical_file_consistency():
     return Status.PASS, f'all {checked} canonical_file entries resolve cleanly'
 
 
+@check(name='live_strategies_have_weights', tags=['strategies'], requires=['db', 'fs'])
+def _live_strategies_have_weights():
+    """Every manifest live/monitoring EQUITY-CLASS strategy must have at least
+    one strategy_weights_by_regime row. The dashboard's candidate→live
+    transition fire-and-forgets a `strategy_weights --rebuild`; if the spawn
+    fails, the rebuild errors out, or per-regime backtest data never landed,
+    the strategy joins the active stack but the sizer's `load_current(regime)`
+    returns no row → strategy gets zero weight → no orders fire and nobody
+    notices until they audit P&L.
+
+    Crypto strategies (instrument_class='crypto') are sized by
+    `execution.crypto_redeploy_sizer` against `crypto_regime_states`, NOT by
+    `strategy_weights_by_regime`. Excluded here so this check stays a
+    real-failure signal."""
+    if not MANIFEST.exists():
+        return Status.SKIP, 'no manifest'
+    m = json.loads(MANIFEST.read_text())
+    active_equity_class = {
+        sid for sid, e in (m.get('strategies') or {}).items()
+        if e.get('state') in ('live', 'monitoring')
+        and e.get('instrument_class', 'equity') != 'crypto'
+    }
+    if not active_equity_class:
+        return Status.SKIP, 'no live/monitoring equity-class strategies'
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute('SELECT DISTINCT strategy_id FROM strategy_weights_by_regime WHERE strategy_id = ANY(%s) AND is_current = TRUE',
+                    (list(active_equity_class),))
+        have = {r[0] for r in cur.fetchall()}
+    missing = sorted(active_equity_class - have)
+    if missing:
+        return Status.FAIL, f'{len(missing)}/{len(active_equity_class)} live equity strategies missing from weights table — likely missing per-regime backtest data; rerun_backtest fixes it. Affected: {missing[:5]}'
+    return Status.PASS, f'all {len(active_equity_class)} live/monitoring equity strategies have ≥1 weights row (crypto excluded)'
+
+
+@check(name='live_strategies_have_cadence', tags=['strategies'], requires=['db', 'fs'])
+def _live_strategies_have_cadence():
+    """Every live strategy_weights_by_regime row must carry cadence_days > 0.
+    A cadence of 0 means the sizer's `daily_weight = w / sqrt(cadence)` blows
+    up and the strategy effectively sizes to zero (or NaN). Backstop for the
+    cadence-bootstrap fix added 2026-05-29: if neither live_avg nor backtest
+    avg_holding_days resolves, static_cad must still be ≥1."""
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute('''SELECT strategy_id, regime_state, cadence_days
+                         FROM strategy_weights_by_regime
+                        WHERE is_current = TRUE
+                          AND (cadence_days IS NULL OR cadence_days < 1)''')
+        bad = cur.fetchall()
+    if bad:
+        sample = [f'{sid}/{rgm}={cad}' for sid, rgm, cad in bad[:5]]
+        return Status.FAIL, f'{len(bad)} rows with cadence_days < 1 or NULL: ' + '; '.join(sample)
+    return Status.PASS, 'all weights rows have cadence_days ≥ 1'
+
+
 @check(name='manifest_no_active_under_decommissioned', tags=['strategies'], requires=['fs'])
 def _manifest_no_active_under_decommissioned():
     """An entry under m['decommissioned'] must NOT carry state='live',

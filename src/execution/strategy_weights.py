@@ -249,6 +249,33 @@ def _load_active_strategies(conn) -> list[dict]:
             except (TypeError, ValueError):
                 pass
 
+    # Backtest avg_holding_days as the BOOTSTRAP fallback for freshly-promoted
+    # strategies that haven't accumulated live fills yet. Without this, every
+    # candidate→live transition sized at static_cad (the signal_frequency
+    # label's coarse trading-day count, e.g. 'daily'→1) regardless of the
+    # backtest's measured holding period. A momentum strategy whose backtest
+    # holds ~4 trading days was being treated as daily for its entire
+    # first-week-of-live window. Pull from `strategy_backtest_runs` where
+    # primary_window=true (the canonical unified_backtest result). Used as
+    # a fallback when live_avg is null/0, NOT a floor — once live fills
+    # materialize, live_avg_by_strat takes over.
+    cur.execute('''
+        SELECT DISTINCT ON (strategy_id) strategy_id, avg_holding_days
+          FROM strategy_backtest_runs
+         WHERE strategy_id = ANY(%s)
+           AND primary_window = TRUE
+           AND avg_holding_days IS NOT NULL
+         ORDER BY strategy_id, run_at DESC
+    ''', (active_ids,))
+    backtest_avg_by_strat: dict[str, float] = {}
+    for r in cur:
+        v = r['avg_holding_days']
+        if v is not None:
+            try:
+                backtest_avg_by_strat[r['strategy_id']] = float(v)
+            except (TypeError, ValueError):
+                pass
+
     out: list[dict] = []
     for sid in active_ids:
         eligible = eligible_by_strat.get(sid, [])
@@ -271,11 +298,18 @@ def _load_active_strategies(conn) -> list[dict]:
                 logger.warning('strategy_weights: could not read %s: %s', impl_path, e)
         static_cad = cadence_days(sig_freq)
         live_avg = live_avg_by_strat.get(sid)
-        live_cad = max(1, math.ceil(live_avg)) if live_avg and live_avg > 0 else 0
-        effective_cad = max(static_cad, live_cad)
-        if live_cad > static_cad:
-            logger.info('strategy_weights: %s cadence_days %d → %d (live avg=%.2f overrides static "%s")',
-                        sid, static_cad, effective_cad, live_avg, sig_freq or 'unknown')
+        backtest_avg = backtest_avg_by_strat.get(sid)
+        if live_avg and live_avg > 0:
+            chosen_avg, chosen_src = live_avg, 'live'
+        elif backtest_avg and backtest_avg > 0:
+            chosen_avg, chosen_src = backtest_avg, 'backtest'
+        else:
+            chosen_avg, chosen_src = 0.0, 'static'
+        chosen_cad = max(1, math.ceil(chosen_avg)) if chosen_avg > 0 else 0
+        effective_cad = max(static_cad, chosen_cad)
+        if chosen_cad > static_cad:
+            logger.info('strategy_weights: %s cadence_days %d → %d (%s avg=%.2f overrides static "%s")',
+                        sid, static_cad, effective_cad, chosen_src, chosen_avg, sig_freq or 'unknown')
         out.append({
             'strategy_id': sid,
             'eligible_regimes': eligible,
