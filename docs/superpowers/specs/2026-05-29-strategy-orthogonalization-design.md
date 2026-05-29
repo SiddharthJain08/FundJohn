@@ -80,11 +80,13 @@ The foundational artifact that does not exist today. Reconstructed two ways and 
 - **Live:** `signal_pnl` daily marks joined to `execution_signals.strategy_id`. **`unrealized_pnl_pct` is a cumulative-since-entry *level*, not a daily return** — it must be **differenced**: per `signal_id`, the day's contribution = `unrealized_pnl_pct[pnl_date] − unrealized_pnl_pct[prior pnl_date]` (first mark = entry-day Δ from 0; close day = `realized_pnl_pct − last unrealized_pnl_pct`). Correlating the raw levels would manufacture spurious trend-correlation between any two strategies with rising cumulative PnL. The per-signal daily Δ's are then aggregated equal-weight across the strategy's open signals to a per-`(strategy_id, date)` daily return. `signal_pnl` has `UNIQUE(signal_id, pnl_date)` so the mark series is well-defined.
 - **Historical:** `strategy_backtest_trades` (`entry_date`, `exit_date`, `pnl_pct`, `entry_regime`) run through the existing `unified_backtest._portfolio_daily_returns(trades)` equal-weight marking (`src/backtest/unified_backtest.py:273`).
 
+> **AS-BUILT (2026-05-29):** v1 reconstructs the **live** source only (`source='live'`). The backtest-source half is **deferred** — backtest dates fall outside the 90/180-day similarity windows anyway, so it would not change current similarity; its value is table-completeness for the §10 information-ratio follow-on. The `UNIQUE(strategy_id, ret_date, source)` constraint already supports adding it later with no migration.
+
 Stored per `(strategy_id, date)` with a `source ∈ {live, backtest}` tag and the `regime_state` live on that date (for per-regime slicing). Append-only-friendly; recomputable.
 
 ### 4.2 Similarity substrate — `src/execution/strategy_similarity.py` (new module)
 
-The **transpose** of `correlation_matrix.py`: a per-regime **strategy×strategy** similarity matrix, reusing that file's scaffolding (`SPARSE_DEFAULT`, ±0.95 clip, per-regime coverage classification `real`/`fallback_global`/`stress_prior`, and `current_state_probabilities()` for the state-probability blend).
+The **transpose** of `correlation_matrix.py`: a per-regime **strategy×strategy** similarity matrix, reusing that file's scaffolding (`SPARSE_DEFAULT`, ±0.95 clip).
 
 Two component signals, blended:
 
@@ -92,7 +94,7 @@ Two component signals, blended:
 
 2. **Return correlation — shrinkage component.** Pearson on the §4.1 series over the regime slice, entered with a **data-adaptive blend weight** `α(n)` that rises from ≈0 (pure overlap when little joint history exists) toward a target ceiling as the count of overlapping observations grows. Implements "lead with overlap; add return-corr where data allows" rather than a fixed α. Diagonal 1.0; off-diagonals clipped ±0.95; sparse pairs → `SPARSE_DEFAULT`.
 
-Per-regime matrices are blended by current HMM `state_probabilities` exactly as `blended_correlation_by_state` does, yielding one effective similarity matrix for the live regime mix.
+> **AS-BUILT (2026-05-29):** v1 builds one **independent** similarity matrix per regime and the live sizer reads the **single resolved `regime_state`** for the cycle via `load_groups(regime_state)` — consistent with how the rest of the sizer resolves exactly one regime (`strategy_weights.load_current(regime_state)`, etc.). The cross-regime **state-probability blend** (mixing matrices by HMM `state_probabilities`, the Phase-2H pattern) is **deferred** as a future smoothing enhancement for regime transitions; it is NOT implemented in v1, and the `current_state_probabilities()` helper was removed as dead code.
 
 ### 4.3 Clustering → two cuts
 
@@ -181,6 +183,7 @@ A weekly `#strategy-memos` post lists strategy pairs/groups that have shared a f
 2. Flip `OPENCLAW_STRATEGY_FOLD=1`, then later `OPENCLAW_STRATEGY_CORR_WEIGHT=1`, each after its own soak.
 3. **Byte-identical invariant:** all gates OFF ⇒ the sizer path produces identical orders to today (load-bearing regression test, per prior expansions).
 4. Per-regime, reversible (regroup next week), no master-data writes, fail-safe to OFF on any missing/empty groups table.
+5. **Negative-`effective_sharpe` runbook note:** a live strategy can drift to a slightly negative `effective_sharpe`. On the `CORR_WEIGHT`-ON path this makes `block_conviction`'s floor (`max(member sharpes)`) negative, so the deflated gate becomes *harder* to clear for a negatively-valued contributor — i.e. **conservative** (the ticker is more likely dropped), which is the desired direction. No action needed; documented so the behavior isn't mistaken for a bug during soak.
 
 ---
 
@@ -191,7 +194,7 @@ A weekly `#strategy-memos` post lists strategy pairs/groups that have shared a f
 - Tier-2: k_eff math (k=2/ρ̄=0.9 → k_eff≈1.05; k=5/ρ̄=0.9 → ≈1.09; ρ̄=0 → k_eff=k); **floor property** — a correlated confirmer never drops `block_conviction` below the strongest single member (heterogeneous 3.5+1 @ρ̄=0.5 → 3.83 ≥ 3.5); ρ̄=0 ⇒ gate byte-identical to today; k=1 guard (no deflation); cross-block full credit; sizing (`ticker_w`) unchanged by Tier-2.
 - §4.1 return series: cumulative `unrealized_pnl_pct` is **differenced** to daily Δ before correlation (regression against the level-correlation bug); close-day uses `realized_pnl_pct − last unrealized`.
 - Cold-start singletons (insufficient history) never fold/block.
-- CRISIS uses stress-prior path; state-probability blend correct.
+- Per-regime similarity built independently; live path reads the single resolved regime (state-probability blend deferred — see §4.2 AS-BUILT).
 - Shadow mode routes nothing, logs the delta.
 - Similarity substrate: Jaccard over week-bucketed co-firing; data-adaptive α(n) → 0 with no joint history, → ceiling with ample.
 
@@ -204,6 +207,7 @@ A weekly `#strategy-memos` post lists strategy pairs/groups that have shared a f
 - **Information ratio** — separate follow-on; the `strategy_daily_returns` table (§4.1) is the prerequisite this spec lands.
 - **Continuous eigenvalue deflation** — someday-when-data-is-rich replacement for discrete cuts.
 - **Threshold calibration** — 0.85 / 0.40 are seed defaults; tune from shadow-mode observation.
+- **Tier-3: monthly stack convergence (orthogonal-stack pruning)** — the automation of §7's chronic-fold report into a process that converges the stack toward a *prime orthogonal* set of top-Sharpe strategies (and cleaner similarity matrices). **Recommendation-first, not auto-delete.** A monthly job consumes `strategy_fold_audit`; a strategy is eligible for demotion only if it is a chronic weak confirmer **(a) across every regime it is eligible in, and (b) for N consecutive monthly runs** — guarding against regime-dependent value (a LOW_VOL redundant strategy may be the primary CRISIS signal, where data is thinnest) and noisy in-sample Sharpe rankings. Output is a demotion **recommendation** (✅/❌, mirroring the universe-recs flow), operator-confirmed → lifecycle **demote to `monitoring`**, auto-`deprecated` only after a further dormant period. Never a `DELETE` — demotion is a recoverable flag, preserving the row + track record (append-only ethos) and the optionality to re-promote if the survivor degrades. Separate spec; depends on this engine's outputs.
 
 ---
 
