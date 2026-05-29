@@ -1514,6 +1514,11 @@ def execute_single(sess, equity, order, run_date):
         if _crypto_res is not None:
             return _crypto_res
 
+    # Options intercept (SP-5.1a)
+    _option_res = _route_option_order(order, equity, coid)
+    if _option_res is not None:
+        return _option_res
+
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',
                 'reason': f'unsupported on Alpaca paper ({raw_ticker})',
