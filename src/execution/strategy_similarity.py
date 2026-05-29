@@ -22,6 +22,20 @@ ALPHA_FULL_OBS = 60              # overlapping observations at which alpha reach
 MAX_OFF_DIAGONAL = 0.95
 SPARSE_DEFAULT = 0.05
 
+_DOTENV_LOADED = False
+
+
+def _db():
+    global _DOTENV_LOADED
+    import psycopg2
+    if not _DOTENV_LOADED:
+        from dotenv import load_dotenv
+        load_dotenv()
+        _DOTENV_LOADED = True
+    return psycopg2.connect(os.environ.get('DATABASE_URL')
+                            or os.environ.get('POSTGRES_URI')
+                            or 'postgresql://openclaw:password@localhost:5432/openclaw')
+
 
 def jaccard(a: set, b: set) -> float:
     if not a or not b:
@@ -115,8 +129,8 @@ def cluster_two_cuts(sim: dict[str, dict[str, float]], strategies: list[str],
     strategies = sorted(strategies)
     n = len(strategies)
     if n < 2:
-        groups = {i: [s] for i, s in enumerate(strategies)}
-        return dict(groups), dict(groups)
+        return ({i: [s] for i, s in enumerate(strategies)},
+                {i: [s] for i, s in enumerate(strategies)})
 
     import numpy as np
     from scipy.cluster.hierarchy import linkage, fcluster
@@ -138,3 +152,263 @@ def cluster_two_cuts(sim: dict[str, dict[str, float]], strategies: list[str],
         return groups
 
     return _cut(fold_thr), _cut(block_thr)
+
+
+def _iso_week(d) -> str:
+    iso = d.isocalendar()
+    return f"{iso[0]}W{iso[1]:02d}"
+
+
+def _cofiring_sets_by_regime(window_days: int) -> dict[str, dict[str, set]]:
+    """{regime_state: {strategy_id: {(iso_week, ticker, direction_int), ...}}} from execution_signals."""
+    sql = """
+        SELECT regime_state, strategy_id, signal_date, ticker, direction
+          FROM execution_signals
+         WHERE signal_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+           AND strategy_id IS NOT NULL AND ticker IS NOT NULL
+    """
+    out: dict[str, dict[str, set]] = {r: {} for r in REGIME_STATES}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (window_days,))
+            for regime, sid, sdate, ticker, direction in cur.fetchall():
+                if regime not in out:
+                    out.setdefault(regime, {})
+                d = 1 if str(direction).upper().startswith('L') or str(direction).upper() in ('BUY', 'LONG') else -1
+                out[regime].setdefault(sid, set()).add((_iso_week(sdate), ticker, d))
+    finally:
+        conn.close()
+    return out
+
+
+def _returns_by_regime(window_days: int) -> dict[str, dict[str, dict[str, float]]]:
+    """{regime_state: {strategy_id: {date_str: daily_return}}} from strategy_daily_returns."""
+    sql = """
+        SELECT regime_state, strategy_id, ret_date::text, daily_return_pct::float
+          FROM strategy_daily_returns
+         WHERE ret_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+    """
+    out: dict[str, dict[str, dict[str, float]]] = {r: {} for r in REGIME_STATES}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (window_days,))
+            for regime, sid, d, ret in cur.fetchall():
+                if regime in out:
+                    out[regime].setdefault(sid, {})[d] = float(ret)
+    finally:
+        conn.close()
+    return out
+
+
+def current_state_probabilities() -> dict[str, float]:
+    """Mirror of correlation_matrix.current_state_probabilities (reads market_regime latest row)."""
+    out = {r: 0.0 for r in REGIME_STATES}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT state, regime_data
+                  FROM market_regime
+                 ORDER BY id DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return out
+    state, data = row
+    if isinstance(data, dict):
+        probs = data.get('state_probabilities') or {}
+        for r in REGIME_STATES:
+            if r in probs:
+                try:
+                    out[r] = float(probs[r])
+                except (TypeError, ValueError):
+                    pass
+    total = sum(out.values())
+    if total <= 0:
+        # No state_probabilities — fall back to hard one-hot on `state`
+        if state in out:
+            out[state] = 1.0
+        return out
+    return {r: out[r] / total for r in REGIME_STATES}
+
+
+def _eff_sharpe_by_strat(regime_state: str) -> dict[str, float]:
+    from execution import strategy_weights as sw
+    return {r['strategy_id']: float(r['effective_sharpe']) for r in sw.load_current(regime_state)}
+
+
+def similarity_for_regime(regime_state: str, window_days: int = DEFAULT_WINDOW_DAYS,
+                          cofiring=None, returns=None) -> dict[str, dict[str, float]]:
+    """Blended similarity matrix for one regime's strategy set (union of co-firing + returns keys)."""
+    cofiring = cofiring if cofiring is not None else _cofiring_sets_by_regime(window_days).get(regime_state, {})
+    returns = returns if returns is not None else _returns_by_regime(window_days).get(regime_state, {})
+    overlap = overlap_similarity(cofiring) if cofiring else {}
+    retcorr, n_obs = (return_correlation(returns) if returns else ({}, {}))
+    strats = sorted(set(overlap) | set(retcorr))
+    if not strats:
+        return {}
+    return blend_similarity(
+        {a: {b: overlap.get(a, {}).get(b, 1.0 if a == b else 0.0) for b in strats} for a in strats},
+        {a: {b: retcorr.get(a, {}).get(b, 1.0 if a == b else SPARSE_DEFAULT) for b in strats} for a in strats},
+        n_obs)
+
+
+def representatives(fold_groups: dict[int, list[str]],
+                    eff_sharpe: dict[str, float]) -> dict[int, str]:
+    """group_id -> max-effective_sharpe member (ties broken by strategy_id for determinism)."""
+    out: dict[int, str] = {}
+    for gid, members in fold_groups.items():
+        out[gid] = max(sorted(members), key=lambda s: eff_sharpe.get(s, float('-inf')))
+    return out
+
+
+def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS, verbose: bool = False) -> dict:
+    """Build per-regime similarity + clusters; persist matrix, fold-groups, factor-blocks, audit."""
+    import json
+    cof = _cofiring_sets_by_regime(window_days)
+    rets = _returns_by_regime(window_days)
+    summary: dict[str, dict] = {}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            for regime in REGIME_STATES:
+                sim = similarity_for_regime(regime, window_days,
+                                            cofiring=cof.get(regime, {}),
+                                            returns=rets.get(regime, {}))
+                if not sim:
+                    summary[regime] = {'strategies': 0}
+                    continue
+                strats = sorted(sim.keys())
+                fold, blocks = cluster_two_cuts(sim, strats)
+                eff = _eff_sharpe_by_strat(regime)
+                reps = representatives(fold, eff)
+
+                # Flip is_current=FALSE for existing current rows
+                cur.execute(
+                    "UPDATE strategy_similarity_matrix SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+                cur.execute(
+                    "UPDATE strategy_fold_groups SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+                cur.execute(
+                    "UPDATE strategy_factor_blocks SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+
+                # Insert new similarity matrix row
+                cur.execute(
+                    "INSERT INTO strategy_similarity_matrix (regime_state, matrix, trigger) VALUES (%s, %s, %s)",
+                    (regime, json.dumps(sim), trigger))
+
+                # Insert fold groups + audit
+                members_by_gid: dict[int, list[str]] = {}
+                for gid, members in fold.items():
+                    members_by_gid[gid] = members
+                    for s in members:
+                        cur.execute(
+                            """INSERT INTO strategy_fold_groups
+                               (regime_state, group_id, strategy_id, is_representative, effective_sharpe, trigger)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            (regime, gid, s, s == reps[gid], eff.get(s), trigger))
+                    if len(members) >= 2:
+                        cur.execute(
+                            """INSERT INTO strategy_fold_audit
+                               (regime_state, group_id, strategy_ids, representative, member_sharpes)
+                               VALUES (%s, %s, %s, %s, %s)""",
+                            (regime, gid, members,
+                             reps[gid],
+                             json.dumps({s: eff.get(s) for s in members})))
+
+                # Insert factor blocks
+                for bid, members in blocks.items():
+                    for s in members:
+                        cur.execute(
+                            """INSERT INTO strategy_factor_blocks
+                               (regime_state, block_id, strategy_id, trigger)
+                               VALUES (%s, %s, %s, %s)""",
+                            (regime, bid, s, trigger))
+
+                summary[regime] = {
+                    'strategies': len(strats),
+                    'fold_groups': sum(1 for m in fold.values() if len(m) >= 2),
+                    'factor_blocks': sum(1 for m in blocks.values() if len(m) >= 2),
+                }
+                if verbose:
+                    print(f"[{regime}] {summary[regime]}")
+        conn.commit()
+    finally:
+        conn.close()
+    return summary
+
+
+def load_groups(regime_state: str) -> dict:
+    """Live read for the sizer: {fold_map, rep_map, block_map, matrix}.
+    fold_map: strategy_id -> group_id (multi-member groups only).
+    rep_map:  group_id -> representative strategy_id.
+    block_map: strategy_id -> block_id (multi-member blocks only).
+    matrix:   {strategy_id: {strategy_id: rho}} (current row, or {})."""
+    out = {'fold_map': {}, 'rep_map': {}, 'block_map': {}, 'matrix': {}}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            # Load fold groups
+            cur.execute(
+                "SELECT group_id, strategy_id, is_representative FROM strategy_fold_groups "
+                "WHERE regime_state=%s AND is_current",
+                (regime_state,))
+            members: dict[int, list[str]] = {}
+            for gid, sid, is_rep in cur.fetchall():
+                members.setdefault(gid, []).append(sid)
+                if is_rep:
+                    out['rep_map'][gid] = sid
+            for gid, ms in members.items():
+                if len(ms) >= 2:
+                    for s in ms:
+                        out['fold_map'][s] = gid
+
+            # Load factor blocks
+            cur.execute(
+                "SELECT block_id, strategy_id FROM strategy_factor_blocks "
+                "WHERE regime_state=%s AND is_current",
+                (regime_state,))
+            bmembers: dict[int, list[str]] = {}
+            for bid, sid in cur.fetchall():
+                bmembers.setdefault(bid, []).append(sid)
+            for bid, ms in bmembers.items():
+                if len(ms) >= 2:
+                    for s in ms:
+                        out['block_map'][s] = bid
+
+            # Load similarity matrix
+            cur.execute(
+                "SELECT matrix FROM strategy_similarity_matrix "
+                "WHERE regime_state=%s AND is_current ORDER BY id DESC LIMIT 1",
+                (regime_state,))
+            row = cur.fetchone()
+            if row and isinstance(row[0], dict):
+                out['matrix'] = row[0]
+    finally:
+        conn.close()
+    return out
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--rebuild', action='store_true')
+    p.add_argument('--trigger', default='manual')
+    p.add_argument('--window-days', type=int, default=DEFAULT_WINDOW_DAYS)
+    p.add_argument('--verbose', action='store_true')
+    args = p.parse_args()
+    if args.rebuild:
+        s = rebuild(trigger=args.trigger, window_days=args.window_days, verbose=args.verbose)
+        print('similarity rebuild:', s)
+    return 0
+
+
+if __name__ == '__main__':
+    import sys
+    sys.exit(main())
