@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 import argparse, json, subprocess, sys, os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import pandas as pd
 
@@ -196,12 +197,15 @@ def main():
         w_start = windows[i].strftime('%Y-%m-%dT00:00:00Z')
         w_end = (windows[i + 1] if i + 1 < len(windows) else pd.Timestamp(args.end)).strftime('%Y-%m-%dT23:59:59Z')
         # Collect this window's rows across symbol-chunks, then flush incrementally.
-        window_rows: list[dict] = []
-        for j in range(0, len(symbols), 50):
-            chunk = symbols[j:j + 50]
-            arts = _fetch_window(chunk, w_start, w_end)
-            if arts:
-                window_rows.extend(articles_to_daily_rows(score_articles(arts)))
+        # Fetch is the bottleneck (Alpaca pagination, ~12.5 min/window serial). Fetch the
+        # symbol-chunks CONCURRENTLY (pagination within a chunk stays serial → max ~4x), then
+        # score all articles in one batched pass. This is the actual wall-clock lever, not
+        # FinBERT batching (scoring wasn't the dominant cost for the multi-symbol case).
+        chunks = [symbols[j:j + 50] for j in range(0, len(symbols), 50)]
+        with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as ex:
+            fetched = list(ex.map(lambda c: _fetch_window(c, w_start, w_end), chunks))
+        all_arts = [a for lst in fetched for a in (lst or [])]
+        window_rows: list[dict] = articles_to_daily_rows(score_articles(all_arts)) if all_arts else []
         if args.dry_run:
             uniq = (len(pd.DataFrame(window_rows, columns=NEWS_COLS).drop_duplicates(['ticker', 'date']))
                     if window_rows else 0)
