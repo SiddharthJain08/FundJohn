@@ -8251,67 +8251,53 @@ function _stRenderDataUsage() {
 // four regimes as compact chips so the operator can see at a glance how
 // the strategy performs across the regime axis. Active regimes (declared
 // in active_in_regimes) get a blue accent; the current market regime
-// gets a small dot indicator. Cells without live trade data render as 'na'.
+// gets a small dot indicator. Cells without backtest trades render as 'na'.
 //
-// Source: live trades only — live_regime_breakdown[regime] = {trades,
-// arr, adr, act, win_rate}. arr is a fraction (0.05 = 5%).
+// Source: BACKTEST only — backtest_regime_breakdown[regime] = {sharpe,
+// trade_count, total_return_pct, hit_rate}. Shows backtest Sharpe per regime.
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
 function _regimeBreakdown(r) {
-  const breakdown = r.live_regime_breakdown || {};
-  // Eligibility source-of-truth = manifest.eligible_regimes (what
-  // regime_gate.is_eligible() actually enforces). Fall back to
-  // active_in_regimes from strategy_registry when manifest has no field
-  // (legacy strategies — gate treats those as eligible-everywhere).
+  const breakdown = r.backtest_regime_breakdown || {};
   const eligible = Array.isArray(r.eligible_regimes)
     ? r.eligible_regimes
     : (r.active_in_regimes && r.active_in_regimes.length ? r.active_in_regimes : _REGIME_AXIS);
-  const current   = r.current_regime || null;
-  const sid       = r.strategy_id;
-  const editable  = r.state === 'live';
+  const current  = r.current_regime || null;
+  const sid      = r.strategy_id;
+  const editable = r.state === 'live';
   const cells = _REGIME_AXIS.map(rg => {
     const isEligible = eligible.includes(rg);
     const b      = breakdown[rg];
-    const trades = b && b.trades ? parseInt(b.trades) : 0;
-    const arrPct = (b && b.arr != null) ? parseFloat(b.arr) * 100 : null;
+    const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
+    const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (!trades)        klass.push('st-rg-na');
     if (!isEligible)    klass.push('st-rg-ineligible');
     if (editable)       klass.push('st-rg-editable');
-    const valTxt = arrPct != null
-      ? (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%'
-      : '—';
-    const statsLine = !trades
-      ? 'no live trades'
-      : 'ARR ' + valTxt
-        + ' · ADR ' + (b.adr != null ? ((b.adr * 100 >= 0 ? '+' : '') + (b.adr * 100).toFixed(3) + '%') : '—')
-        + ' · ACT ' + (b.act != null ? b.act.toFixed(1) + 'd' : '—')
-        + ' · Win ' + (b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—')
+    const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
+    // NOTE: the /api/strategies per-regime object emits the return field as
+    // total_return_pct (server.js ~1238), not return_pct as the plan's
+    // Step 3b snippet assumed — read the key the API actually surfaces so the
+    // tooltip's Ret segment renders instead of always showing a dash.
+    const retPct = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
+    const statsLine = !trades ? 'no backtest trades'
+      : 'Sharpe ' + valTxt
+        + ' · Ret ' + (retPct != null ? (retPct >= 0 ? '+' : '') + parseFloat(retPct).toFixed(1) + '%' : '—')
+        + ' · Win ' + (b.hit_rate != null ? Math.round(b.hit_rate * 100) + '%' : '—')
         + ' · ' + trades + ' trades';
     const eligLine = isEligible ? 'eligible' : 'NOT eligible';
     const editHint = editable ? ' · click to toggle' : '';
-    // Phase 2C drift badge — dot in top-left when drift signal present.
-    const driftSig = _rdDriftFor(sid, rg);
-    const driftBadge = driftSig && (driftSig.severity === 'WARN' || driftSig.severity === 'FAIL')
-      ? \`<span class="st-rg-drift" style="position:absolute;top:1px;left:2px;width:5px;height:5px;border-radius:50%;background:\${driftSig.severity === 'FAIL' ? '#f85149' : '#d29922'}"></span>\`
-      : '';
-    const driftTtl = driftSig
-      ? \` · drift=\${driftSig.severity} (\${driftSig.reason || ''})\`
-      : '';
-    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint + driftTtl;
-    const onclick = editable
-      ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\`
-      : '';
+    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint;
+    const onclick = editable ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\` : '';
     return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}"\${onclick}>
-              \${driftBadge}
               <span class="st-rg-tag">\${rg}</span>
               <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
   }).join('');
   const gridTitle = editable
-    ? 'Per-regime live ARR · click a regime to toggle eligibility'
-    : "Per-regime live ARR · operator toggle available only for state='live'";
+    ? 'Per-regime BACKTEST Sharpe · click a regime to toggle eligibility'
+    : "Per-regime BACKTEST Sharpe · operator toggle only for state='live'";
   return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
@@ -8391,20 +8377,11 @@ let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent ex
 let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
 
 function _stSetRegimeFilter(rg) {
-  _stRegimeFilter = rg;
-  // Update tab visuals.
-  const filter = document.getElementById('st-regime-filter');
-  if (filter) {
-    for (const btn of filter.querySelectorAll('.srf-btn')) {
-      btn.classList.toggle('active', btn.dataset.regime === rg);
-    }
-    const hint = document.getElementById('srf-hint');
-    if (hint) hint.textContent = rg === 'ALL'
-      ? ''
-      : 'Showing live ARR / ADR / ACT / Win for ' + rg + ' trades only';
-  }
-  // Re-render the active stack with swapped metrics.
-  _renderActiveStack(strategiesData.filter(_inActiveStack));
+  // No-op: the active-stack metric columns are now backtest-sourced and the
+  // live per-regime breakdown the filter depended on is gone from the payload.
+  // The filter control is hidden in _renderActiveStack; this stub keeps any
+  // residual onclick handlers harmless.
+  _stRegimeFilter = 'ALL';
 }
 
 function _stToggleExpand(sid) {
@@ -8646,64 +8623,31 @@ function _stCloseExpand() {
 
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
+  // The per-regime filter tab swapped the metric columns to LIVE per-regime
+  // ARR/ADR/ACT/Win pulled from live_regime_breakdown. Those columns are now
+  // backtest-sourced and live_regime_breakdown is gone from the payload, so
+  // the filter has no coherent target — hide the orphaned control.
+  const _rf = document.getElementById('st-regime-filter');
+  if (_rf) _rf.style.display = 'none';
   if (!rows.length) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
   }
   // Compute derived columns for sorting.
-  //   d1_total         = O+U+E (click count on # O/U/E)
+  //   _oue_total       = O+U+E (sort key on # O/U/E)
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
-  // ADR (Average Daily Return) = ARR / ACT, the natural decomposition of
-  // per-trade average return into a daily rate using average closing time.
-  // Filled for any strategy with closed trades. Annualization was rejected
-  // because regime-gated strategies activate with variable density across
-  // years — keeping the daily mean keeps the metric comparable.
   //
-  // When the regime filter is set to a specific regime, the row's ARR /
-  // ADR / ACT / Win % / Closed columns swap to that regime's values from
-  // live_regime_breakdown so the operator can see how each strategy
-  // performs under one regime at a time. 'ALL' uses the cross-regime
-  // aggregates already on the row.
-  const filterRg = _stRegimeFilter && _stRegimeFilter !== 'ALL' ? _stRegimeFilter : null;
-  const enriched = rows.map(r => {
-    let avgRet, actDays, winRate, closedCount;
-    if (filterRg) {
-      const b = (r.live_regime_breakdown || {})[filterRg];
-      avgRet      = b && b.arr      != null ? parseFloat(b.arr)      : null;
-      actDays     = b && b.act      != null ? parseFloat(b.act)      : null;
-      winRate     = b && b.win_rate != null ? parseFloat(b.win_rate) : null;
-      closedCount = b && b.trades   != null ? parseInt(b.trades)     : 0;
-    } else {
-      avgRet      = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
-      actDays     = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
-      winRate     = r.win_rate         != null ? parseFloat(r.win_rate)         : null;
-      closedCount = r.closed_count     != null ? parseInt(r.closed_count)       : 0;
-    }
-    const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
-    const adrPct = (avgRet != null && actDays != null && actDays > 0)
-                   ? (avgRet * 100 / actDays) : null;            // per-day %
-    // FWD ER (= ARR × per-regime OUE multiplier) removed 2026-05-18.
-    // The multiplier defaults to 1.0 until the OUE sample threshold is
-    // hit (≥30 closes / ≥5 outliers per regime), which most strategies
-    // never reach, so FWD ER was always == ARR for the typical row —
-    // a redundant column. The OUE multiplier itself is still computed
-    // and surfaced via the # O/U/E column + per-row tooltip.
-    const mults = r.oue_multipliers_by_regime || {};
-    const mult_for = filterRg || r.current_regime || 'TRANSITIONING';
-    const oueMult = mults[mult_for] != null ? mults[mult_for] : 1.0;
-    return Object.assign({}, r, {
-      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
-      _active_rank:    _activeRankFor(r),
-      _arr_pct:        arrPct,
-      _adr_pct:        adrPct,
-      _act_days:       actDays,
-      _filtered_win:   winRate,
-      _filtered_closed: closedCount,
-      _oue_mult:       oueMult,
-    });
-  });
+  // All per-row metrics (sharpe / effective_sharpe / closed_count / win_rate /
+  // arr_pct / adr_pct / act_days) now arrive backtest-sourced straight from
+  // the /api/strategies payload — no live recompute. The only derived sort
+  // keys are _oue_total (sum of the backtest OUE counts) and _active_rank
+  // (Waiting<Stale<Live, drives the Status column sort).
+  const enriched = rows.map(r => Object.assign({}, r, {
+    _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
+    _active_rank: _activeRankFor(r),
+  }));
   // Default sort: status sub-group then strategy_id. Operator clicks override.
   let sorted;
   const s = _sortState['st-active-wrap'];
@@ -8724,23 +8668,19 @@ function _renderActiveStack(rows) {
   // Persist for the expansion-panel renderer to read without re-prop.
   _stActiveSnapshot = activeStrategiesById;
   const expandedSid = _stExpandedSid;
-  // Header tag on metric columns when the regime filter is non-ALL —
-  // makes it obvious which subset of trades the numbers describe.
-  const filterTag = filterRg
-    ? \` <span class="srf-col-tag srf-col-tag-\${filterRg}" title="\${filterRg} only">\${_REGIME_TAGS[filterRg]}</span>\`
-    : '';
   el.innerHTML = \`<table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="_active_rank" data-sort-type="num" title="Sort: Waiting → Stale → Live (ascending)">Status</th>
-      <th title="Per-regime LIVE ARR (mean realized P&amp;L per closed trade). Small dot = current market regime, blue border = declared in active_in_regimes">By Regime</th>
-      <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
-      <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
-      <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
-      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}. Pure realized fact — no OUE adjustment.">ARR&nbsp;%\${filterTag}</th>
-      <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
-      <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
-      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
+      <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
+      <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
+      <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
+      <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sharpe / sqrt(avg holding days)">Eff.Sharpe</th>
+      <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
+      <th class="num" data-sort-key="win_rate" data-sort-type="num" title="Backtest hit rate">Win&nbsp;%</th>
+      <th class="num" data-sort-key="arr_pct" data-sort-type="num" title="Backtest mean trade return %">ARR&nbsp;%</th>
+      <th class="num" data-sort-key="adr_pct" data-sort-type="num" title="Backtest ARR / ACT">ADR&nbsp;%</th>
+      <th class="num" data-sort-key="act_days" data-sort-type="num" title="Backtest avg holding days">ACT</th>
+      <th class="num" data-sort-key="_oue_total" data-sort-type="num" title="BACKTEST OUE (GBM σ): O=realized>expectation by ≥2σ, U=below, E=within. O+U+E = backtest trades.">#&nbsp;O/U/E</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
     </tr>
@@ -8750,21 +8690,22 @@ function _renderActiveStack(rows) {
       const title = sub === 'waiting'
         ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
         : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
-      const arr = r._arr_pct;
-      const adr = r._adr_pct;
-      const act = r._act_days;
-      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, e = r.d1_expected || 0;
-      const oueEmpty = o === 0 && u === 0 && e === 0;
+      const arr = r.arr_pct, adr = r.adr_pct, act = r.act_days;
+      const o = r.oue_over || 0, u = r.oue_under || 0, e = r.oue_expected || 0;
+      const oueEmpty = (o + u + e) === 0;
       const ourCell = oueEmpty
         ? '<span style="color:var(--dim)">—</span>'
         : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${e}</span>\`;
+      const sh = r.sharpe, esh = r.effective_sharpe;
+      const closedTxt = r.closed_count || 0;
+      const winTxt = r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—';
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
-          <td colspan="11">
+          <td colspan="12">
             <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
               <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
                 <div class="st-expand-head">
@@ -8780,25 +8721,20 @@ function _renderActiveStack(rows) {
             </div>
           </td>
         </tr>\` : '';
-      // Closed/Win cells respect the regime filter so the operator sees the
-      // trade count + win rate that actually feeds the displayed ARR/ADR.
-      const closedTxt = r._filtered_closed != null ? r._filtered_closed : (r.closed_count || 0);
-      const winTxt    = r._filtered_win != null ? Math.round(r._filtered_win * 100) + '%'
-                       : (r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—');
-      const dimWhenFiltered = filterRg && (closedTxt === 0) ? 'style="color:var(--dim)"' : '';
       return \`<tr class="st-row-expandable \${isOpen ? 'st-row-open' : ''}" data-sid="\${_escStr(r.strategy_id)}">
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
           <span class="st-chevron">▶</span>\${r.strategy_id}
         </td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
         <td>\${_regimeBreakdown(r)}</td>
-        <td class="num">\${r.open_count || 0}</td>
-        <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
-        <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
-        <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
+        <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
+        <td class="num">\${closedTxt}</td>
+        <td class="num">\${winTxt}</td>
+        <td class="num \${pnlCls(arr)}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
-        <td class="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ.">\${ourCell}</td>
+        <td class="num" title="BACKTEST OUE (GBM σ): O=realized>expectation by ≥2σ, U=below, E=within.">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
       </tr>\${expandRow}\`;
@@ -9147,20 +9083,13 @@ function _renderInactiveStack(rows) {
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="state" data-sort-type="str">Status</th>
       <th>Regimes</th>
-      <th class="num" data-sort-key="live_days" data-sort-type="num">Live Days</th>
-      <th class="num" data-sort-key="live_sharpe" data-sort-type="num">Live Sharpe</th>
-      <th class="num" data-sort-key="live_return_pct" data-sort-type="num">Live Return</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
     </tr>
     \${shown.map(r => {
-      const liveRet = r.live_return_pct != null ? parseFloat(r.live_return_pct) : null;
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
         <td>\${_regimesCell(r)}</td>
-        <td class="num" style="color:var(--muted)">\${r.live_days != null ? r.live_days : '—'}</td>
-        <td class="num">\${_fmtNum(r.live_sharpe)}</td>
-        <td class="num \${pnlCls(liveRet)}">\${liveRet != null ? (liveRet >= 0 ? '+' : '') + liveRet.toFixed(2) + '%' : '—'}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
     }).join('')}
