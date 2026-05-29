@@ -92,3 +92,43 @@ def test_constituents_reverse_lookup():
     tech = sm.constituents('Tech')
     assert 'AAPL' in tech and 'MSFT' in tech
     assert all(sm.TICKER_SECTOR[t] == 'Tech' for t in tech)
+
+
+from strategies.confirmation import sector_flow as sf
+
+
+def _trend_prices(direction_map):
+    idx = pd.bdate_range('2024-01-01', periods=260)
+    cols = {}
+    for t, d in direction_map.items():
+        if d == 'up':
+            cols[t] = np.linspace(80, 120, 260)
+        elif d == 'down':
+            cols[t] = np.linspace(120, 80, 260)
+        else:
+            cols[t] = np.full(260, 100.0)
+    return pd.DataFrame(cols, index=idx)
+
+
+def test_sector_flow_long_confirmed_when_sector_and_market_up():
+    p = _trend_prices({'AAPL': 'up', 'XLK': 'up', 'SPY': 'up', 'QQQ': 'up'})
+    passes, score = sf.confirm('LONG', 'AAPL', p, sm, as_of=p.index[-1])
+    assert passes is True
+    assert score > 0
+
+
+def test_sector_flow_long_rejected_when_sector_down():
+    p = _trend_prices({'AAPL': 'up', 'XLK': 'down', 'SPY': 'up', 'QQQ': 'up'})
+    passes, _ = sf.confirm('LONG', 'AAPL', p, sm, as_of=p.index[-1])
+    assert passes is False
+
+
+def test_sector_flow_short_confirmed_when_sector_and_market_down():
+    p = _trend_prices({'XOM': 'down', 'XLE': 'down', 'SPY': 'down', 'QQQ': 'down'})
+    passes, _ = sf.confirm('SHORT', 'XOM', p, sm, as_of=p.index[-1])
+    assert passes is True
+
+
+def test_sector_flow_unmapped_ticker_unconfirmed():
+    p = _trend_prices({'ZZZZ': 'up', 'SPY': 'up', 'QQQ': 'up'})
+    assert sf.confirm('LONG', 'ZZZZ', p, sm, as_of=p.index[-1]) == (False, 0.0)
