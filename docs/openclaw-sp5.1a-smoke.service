@@ -1,0 +1,19 @@
+[Unit]
+Description=SP-5.1a one-shot live paper smoke (long-call + short-put + gate-off)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/root/openclaw/.env
+Environment=OPENCLAW_INSTRUMENT_CLASS_ROUTING=1
+Environment=OPENCLAW_OPTION_EXEC=1
+WorkingDirectory=/root/openclaw/.claude/worktrees/sp5.1a-single-leg-options-exec
+ExecStart=/usr/bin/python3 /root/openclaw/.claude/worktrees/sp5.1a-single-leg-options-exec/scripts/sp5_1a_smoke.py
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
