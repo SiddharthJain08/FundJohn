@@ -476,10 +476,17 @@ def _list_strikes(underlying: str, expiry, option_type: str) -> list[float]:
     return sorted(set(out))
 
 
-def _list_expiries(underlying: str) -> list:
-    """Distinct listed expiry dates for an underlying (monthly+weekly)."""
-    ok, payload, _ = _run_alpaca_cli([
-        'option','contracts','--underlying-symbols', underlying, '--limit','500'])
+def _list_expiries(underlying: str, gte: str | None = None) -> list:
+    """Distinct listed expiry dates for an underlying (monthly+weekly).
+
+    `gte` (ISO date) narrows the API page server-side via --expiration-date-gte.
+    Without it, SPY's first 500 rows are all same-day expiries (~500 strikes
+    × 1 expiry); the eligible set then comes back empty for any dte_target>0.
+    Regression caught by SP-5.1a smoke 2026-05-29 13:35 UTC."""
+    args = ['option','contracts','--underlying-symbols', underlying, '--limit','500']
+    if gte:
+        args.extend(['--expiration-date-gte', gte])
+    ok, payload, _ = _run_alpaca_cli(args)
     if not ok or not payload: return []
     rows = payload.get('option_contracts') or []
     out = set()
@@ -516,7 +523,7 @@ def _resolve_expiry(spec, as_of):
     """Nearest monthly expiry >= as_of + dte_target days, intersected with listed."""
     import datetime as _dt
     target = as_of + _dt.timedelta(days=int(spec.dte_target))
-    listed = _list_expiries(spec.underlying)
+    listed = _list_expiries(spec.underlying, gte=target.isoformat())
     eligible = [e for e in listed if e >= target]
     return eligible[0] if eligible else None
 

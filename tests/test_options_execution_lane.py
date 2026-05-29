@@ -69,6 +69,44 @@ def test_resolve_expiry_returns_none_on_empty():
     with patch('execution.alpaca_executor._list_expiries', return_value=[]):
         assert _resolve_expiry(spec, as_of=dt.date(2026,5,29)) is None
 
+
+def test_list_expiries_passes_expiration_date_gte_when_given():
+    """Regression: smoke 2026-05-29 found `option contracts --limit 500` returns
+    500 same-day rows for SPY → _list_expiries saw only today's expiry, eligible
+    set was empty, resolver fail-closed every option submit. Fix: narrow the
+    page by --expiration-date-gte so future expiries appear in the first page."""
+    from execution.alpaca_executor import _list_expiries
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        captured['args'] = list(args)
+        return True, {'option_contracts': [
+            {'expiration_date': '2026-07-16'},
+            {'expiration_date': '2026-08-20'},
+        ]}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _list_expiries('SPY', gte='2026-06-20')
+    assert '--expiration-date-gte' in captured['args']
+    i = captured['args'].index('--expiration-date-gte')
+    assert captured['args'][i+1] == '2026-06-20'
+    assert out == [dt.date(2026,7,16), dt.date(2026,8,20)]
+
+
+def test_resolve_expiry_forwards_target_to_list_expiries():
+    """_resolve_expiry must hand its computed target ISO-date to _list_expiries
+    so the API narrows server-side. Otherwise the first-page-of-500 bug returns."""
+    spec = type('S',(),{'underlying':'SPY','dte_target':22,'right':'call'})()
+    captured = {}
+    def _fake_list(underlying, gte=None):
+        captured['underlying'] = underlying
+        captured['gte'] = gte
+        return [dt.date(2026,6,22), dt.date(2026,7,16)]
+    with patch('execution.alpaca_executor._list_expiries', side_effect=_fake_list):
+        e = _resolve_expiry(spec, as_of=dt.date(2026,5,29))
+    assert captured['underlying'] == 'SPY'
+    assert captured['gte'] == '2026-06-20'  # 2026-05-29 + 22d
+    assert e == dt.date(2026,6,22)
+
+
 from execution.alpaca_executor import _options_position_intent
 
 def test_intent_long_no_position():

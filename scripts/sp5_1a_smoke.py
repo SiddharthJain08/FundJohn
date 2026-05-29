@@ -127,17 +127,20 @@ def smoke_a_long_call(dry_run: bool) -> dict:
     return {'smoke':'A','status':'ok','submit':res,'terminal':term,'close':close_res,'coid':coid}
 
 def smoke_b_short_put(dry_run: bool) -> dict:
-    log('SMOKE B: cash-secured short put non-marketable')
-    cash = _account_cash() if not dry_run else 14_800.0
+    log('SMOKE B: cash-secured short put non-marketable (IWM)')
+    # IWM (~$290) has deep-OTM strikes (down to ~$145) on near expiries; SPY
+    # 6/26 puts only go to $425 → $42.5k collateral, exceeds paper cash.
+    # IWM 6/26 puts down to $145 → ~$14.5k collateral fits a $30k cash account.
+    cash = _account_cash() if not dry_run else 30_000.0
     log(f'account cash: ${cash:.0f}')
-    # Pick a deep-OTM put whose strike*100 fits cash budget
-    # SPY ~$750, moneyness 0.20 → strike ~$150 → collateral $15k.
-    # Choose moneyness so strike*100 ≤ 0.95*cash for safety.
-    target_strike = (cash * 0.95) / 100.0
-    moneyness = target_strike / 750.0  # rough; resolver will pick nearest listed
-    order = _option_order('short', 'put', 'fixed_moneyness', moneyness=moneyness)
-    # Set notional low so contracts=1 (cash-collateral check, not sizing, gates this).
-    order['notional_usd'] = 500.0
+    underlying = 'IWM'
+    # Estimate spot for moneyness target — resolver will pick the nearest listed.
+    spot_est = 290.0
+    target_strike = (cash * 0.90) / 100.0  # 90% headroom; collateral = strike*100
+    moneyness = max(0.20, min(0.95, target_strike / spot_est))
+    order = _option_order('short', 'put', 'fixed_moneyness',
+                          moneyness=moneyness, underlying=underlying)
+    order['notional_usd'] = 500.0  # contracts=1; cash-collateral guard governs
     coid = f'sp5-1a-B-{int(time.time())}'
     equity = 100_000.0
     if dry_run:
