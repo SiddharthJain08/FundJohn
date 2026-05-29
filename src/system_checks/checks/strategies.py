@@ -206,21 +206,23 @@ def _live_strategies_have_weights():
 
 @check(name='live_strategies_have_cadence', tags=['strategies'], requires=['db', 'fs'])
 def _live_strategies_have_cadence():
-    """Every live strategy_weights_by_regime row must carry cadence_days > 0.
-    A cadence of 0 means the sizer's `daily_weight = w / sqrt(cadence)` blows
-    up and the strategy effectively sizes to zero (or NaN). Backstop for the
-    cadence-bootstrap fix added 2026-05-29: if neither live_avg nor backtest
-    avg_holding_days resolves, static_cad must still be ≥1."""
+    """Every is_current strategy_weights_by_regime row must carry cadence_days
+    > 0. Sub-day cadences (e.g. 0.5 for an intraday strategy) are valid;
+    cadence_days = 0 or NULL would blow up the sizer's
+    `daily_weight = w / sqrt(cadence_days)` to inf/NaN. Backstop for the
+    cadence-bootstrap (mig-122 cadence_days NUMERIC(10,4), 2026-05-29):
+    if neither backtest_avg nor live_avg resolves, the static fallback still
+    has to be > 0."""
     with _pg() as conn, conn.cursor() as cur:
         cur.execute('''SELECT strategy_id, regime_state, cadence_days
                          FROM strategy_weights_by_regime
                         WHERE is_current = TRUE
-                          AND (cadence_days IS NULL OR cadence_days < 1)''')
+                          AND (cadence_days IS NULL OR cadence_days <= 0)''')
         bad = cur.fetchall()
     if bad:
         sample = [f'{sid}/{rgm}={cad}' for sid, rgm, cad in bad[:5]]
-        return Status.FAIL, f'{len(bad)} rows with cadence_days < 1 or NULL: ' + '; '.join(sample)
-    return Status.PASS, 'all weights rows have cadence_days ≥ 1'
+        return Status.FAIL, f'{len(bad)} rows with cadence_days <= 0 or NULL: ' + '; '.join(sample)
+    return Status.PASS, 'all current weights rows have cadence_days > 0'
 
 
 @check(name='manifest_no_active_under_decommissioned', tags=['strategies'], requires=['fs'])

@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 class StrategyWeightRow:
     strategy_id: str
     regime_state: str
-    cadence_days: int
+    cadence_days: float
     bt_sharpe: float | None
     bt_n: int | None
     live_sharpe: float | None
@@ -249,16 +249,13 @@ def _load_active_strategies(conn) -> list[dict]:
             except (TypeError, ValueError):
                 pass
 
-    # Backtest avg_holding_days as the BOOTSTRAP fallback for freshly-promoted
-    # strategies that haven't accumulated live fills yet. Without this, every
-    # candidate→live transition sized at static_cad (the signal_frequency
-    # label's coarse trading-day count, e.g. 'daily'→1) regardless of the
-    # backtest's measured holding period. A momentum strategy whose backtest
-    # holds ~4 trading days was being treated as daily for its entire
-    # first-week-of-live window. Pull from `strategy_backtest_runs` where
-    # primary_window=true (the canonical unified_backtest result). Used as
-    # a fallback when live_avg is null/0, NOT a floor — once live fills
-    # materialize, live_avg_by_strat takes over.
+    # Backtest avg_holding_days is the CANONICAL cadence source for every
+    # strategy (operator directive 2026-05-29). The static signal_frequency
+    # label ('daily'/'weekly'/'monthly') is a placeholder — actual cadence
+    # comes from the backtest's measured holding period (primary_window=true
+    # unified_backtest result). live_avg becomes a fallback for the edge case
+    # where a strategy is live but has no primary_window backtest; static_cad
+    # is the final fallback (should not occur for properly-promoted strats).
     cur.execute('''
         SELECT DISTINCT ON (strategy_id) strategy_id, avg_holding_days
           FROM strategy_backtest_runs
@@ -299,17 +296,22 @@ def _load_active_strategies(conn) -> list[dict]:
         static_cad = cadence_days(sig_freq)
         live_avg = live_avg_by_strat.get(sid)
         backtest_avg = backtest_avg_by_strat.get(sid)
-        if live_avg and live_avg > 0:
-            chosen_avg, chosen_src = live_avg, 'live'
-        elif backtest_avg and backtest_avg > 0:
+        # Backtest is canonical. Falls back to live_avg only if backtest is
+        # absent, and to static_cad only if neither measured source exists.
+        # static_cad is NOT applied as a max-floor — a strategy declared
+        # 'monthly' whose backtest shows 4-day holds is sized as 4-day.
+        # EXACT value — no ceil/round (operator directive 2026-05-29; DB column
+        # was widened to NUMERIC(10,4) in migration 122 to preserve precision).
+        if backtest_avg and backtest_avg > 0:
             chosen_avg, chosen_src = backtest_avg, 'backtest'
+        elif live_avg and live_avg > 0:
+            chosen_avg, chosen_src = live_avg, 'live'
         else:
-            chosen_avg, chosen_src = 0.0, 'static'
-        chosen_cad = max(1, math.ceil(chosen_avg)) if chosen_avg > 0 else 0
-        effective_cad = max(static_cad, chosen_cad)
-        if chosen_cad > static_cad:
-            logger.info('strategy_weights: %s cadence_days %d → %d (%s avg=%.2f overrides static "%s")',
-                        sid, static_cad, effective_cad, chosen_src, chosen_avg, sig_freq or 'unknown')
+            chosen_avg, chosen_src = 0.0, 'static_fallback'
+        effective_cad = float(chosen_avg) if chosen_avg > 0 else float(static_cad)
+        if chosen_src != 'static_fallback':
+            logger.info('strategy_weights: %s cadence_days %.4f (%s; declared "%s"→%d)',
+                        sid, effective_cad, chosen_src, sig_freq or 'unknown', static_cad)
         out.append({
             'strategy_id': sid,
             'eligible_regimes': eligible,

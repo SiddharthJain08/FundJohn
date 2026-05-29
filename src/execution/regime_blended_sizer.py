@@ -175,7 +175,7 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
 
 
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
-                                cadence_by_strat: dict[str, int]):
+                                cadence_by_strat: dict[str, float]):
     """Pull every open signal still within its strategy's cadence window.
 
     "Information staying relevant in the period" per design spec: a
@@ -204,8 +204,12 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     # appears stale on Monday morning genuinely hasn't generated new info.
     # The user's invariant (2026-05-19): only fresh information from the
     # cycle's actual cadence window — no expired information.
-    max_cad = max(cadence_by_strat.get(s, 1) for s in weight_by_strat) if cadence_by_strat else 1
-    earliest = today - _timedelta(days=max_cad)
+    # Coarse SQL lower-bound: math.ceil so the query never tightens past the
+    # precise per-strategy filter below. cadence_by_strat values are floats
+    # (NUMERIC(10,4) post-mig-122).
+    import math as _math
+    max_cad = max(cadence_by_strat.get(s, 1.0) for s in weight_by_strat) if cadence_by_strat else 1.0
+    earliest = today - _timedelta(days=_math.ceil(max_cad))
 
     sids = list(weight_by_strat.keys())
     out = []
@@ -244,7 +248,7 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     dropped_stale = 0
     for r in rows:
         sid = r['strategy_id']
-        cad = cadence_by_strat.get(sid, 1)
+        cad = cadence_by_strat.get(sid, 1.0)
         age = (today - r['signal_date']).days
         # Strict cadence: a cad=1 (daily) strategy contributes ONLY today's
         # signal; a cad=4 (4-day-holding) strategy contributes the last
@@ -336,7 +340,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         return []
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
-    cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
+    cadence_by_strat  = {r['strategy_id']: float(r['cadence_days']) for r in rows}
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
