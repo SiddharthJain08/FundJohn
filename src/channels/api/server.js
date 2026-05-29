@@ -1308,7 +1308,8 @@ app.get('/api/strategies', async (req, res) => {
 
     // Best/worst realized trade % from the latest primary_window backtest run.
     const bwRows = (await dbQuery(`
-      SELECT t.strategy_id, MAX(t.pnl_pct) AS best, MIN(t.pnl_pct) AS worst
+      SELECT t.strategy_id, MAX(t.pnl_pct) AS best, MIN(t.pnl_pct) AS worst,
+             AVG(t.pnl_pct) AS avg_pnl
         FROM strategy_backtest_trades t
         JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
                 FROM strategy_backtest_runs WHERE primary_window=TRUE

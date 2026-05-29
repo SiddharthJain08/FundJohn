@@ -6,7 +6,10 @@ function buildStrategyRow(x) {
   const panel = x.panel || {};
   const bw = x.bestWorst || {};
   const act = run.avg_holding_days != null ? Number(run.avg_holding_days) : null;
-  const arr = run.total_trades ? (Number(run.total_return_pct) / Number(run.total_trades)) : null; // mean trade %
+  // ARR = mean per-trade return %, i.e. AVG(pnl_pct)*100 over backtest trades.
+  // (NOT total_return_pct/total_trades — that divides a compounded total by the
+  // trade count and collapses to ~0% for high-trade strategies.)
+  const arr = bw.avg_pnl != null ? Number(bw.avg_pnl) * 100 : null;
   const adr = (arr != null && act) ? (arr / Math.max(1, act)) : null;
   return {
     strategy_id: x.sid,
