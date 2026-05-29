@@ -121,6 +121,55 @@ def _manifest_in_registry_impl_map():
     return Status.PASS, f'all live/staging entries registered ({candidates_skipped} candidates + {archived_skipped} archived skipped)'
 
 
+_IMPL_DIR = ROOT / 'src' / 'strategies' / 'implementations'
+
+
+@check(name='manifest_canonical_file_consistency', tags=['strategies'], requires=['fs'])
+def _manifest_canonical_file_consistency():
+    """Every manifest strategy's `metadata.canonical_file` must point at an
+    actual .py file in src/strategies/implementations/. Drift causes the
+    orchestrator's `_resolveImplPath` to return a missing path → validator
+    emits `Contract validation failed — File not found` → strategy gets
+    quarantined as `validation_failed` despite working code.
+
+    Sat 2026-05-29 incident: strategycoder.md template used uppercase `S_XX...`
+    for the manifest key but lowercase `s_xx....py` for canonical_file. The LLM
+    made inconsistent choices file-by-file; 9 strategies ended up stuck this way
+    before the prompt was tightened + `_resolveImplPath` got a case-toggle
+    fallback (commit 7708d1b).
+
+    This check reports any future drift. Repair with:
+        python3 scripts/repair_manifest_canonical_files.py
+    """
+    if not MANIFEST.exists():
+        return Status.SKIP, 'no manifest'
+    m = json.loads(MANIFEST.read_text())
+    case_drift = []   # file exists but with toggled-case basename
+    truly_missing = []
+    checked = 0
+    for sid, rec in (m.get('strategies') or {}).items():
+        cf = (rec.get('metadata') or {}).get('canonical_file')
+        if not cf:
+            continue
+        checked += 1
+        if (_IMPL_DIR / cf).is_file():
+            continue
+        # File doesn't exist at recorded path — try case-toggled
+        toggled = cf[0].swapcase() + cf[1:] if cf else cf
+        if (_IMPL_DIR / toggled).is_file():
+            case_drift.append(f'{sid}: {cf!r} → {toggled!r}')
+        else:
+            truly_missing.append(f'{sid}: {cf!r}')
+    if case_drift or truly_missing:
+        msgs = []
+        if case_drift:
+            msgs.append(f'{len(case_drift)} case-drift (repairable): ' + '; '.join(case_drift[:3]))
+        if truly_missing:
+            msgs.append(f'{len(truly_missing)} truly-missing: ' + '; '.join(truly_missing[:3]))
+        return Status.FAIL, ' | '.join(msgs)
+    return Status.PASS, f'all {checked} canonical_file entries resolve cleanly'
+
+
 @check(name='manifest_no_active_under_decommissioned', tags=['strategies'], requires=['fs'])
 def _manifest_no_active_under_decommissioned():
     """An entry under m['decommissioned'] must NOT carry state='live',
