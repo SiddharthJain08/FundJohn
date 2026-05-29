@@ -816,6 +816,13 @@ def run_backtest(strategy_id: str, *,
     _log(f'wrote run_id={run_id}  total_sharpe={total_metrics["sharpe"]}  '
          f'trades={total_metrics["total_trades"]}  '
          f'regimes={list(per_regime.keys())}')
+    # Refresh the dashboard backtest panel for this strategy (best-effort;
+    # a panel build failure must never fail the backtest itself).
+    try:
+        from backtest.backtest_panel import rebuild as _rebuild_panel
+        _rebuild_panel(strategy_id)
+    except Exception as _e:
+        print(f'[unified_backtest] panel rebuild skipped: {_e}')
     return run_id
 
 
