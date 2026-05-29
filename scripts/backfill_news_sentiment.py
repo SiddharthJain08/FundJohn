@@ -96,7 +96,8 @@ def score_articles(articles: list[dict], batch_size: int = 64) -> list[dict]:
     if not articles:
         return articles
     from src.services.finbert.client import FinbertClient
-    client = FinbertClient(timeout=30.0)
+    client = FinbertClient(base_url=os.environ.get('OPENCLAW_FINBERT_URL', 'http://127.0.0.1:7872'),
+                           timeout=30.0)
     texts = [_article_text(a) for a in articles]
     try:
         results: list[dict] = []
