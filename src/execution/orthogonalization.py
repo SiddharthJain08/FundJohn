@@ -11,10 +11,19 @@ from __future__ import annotations
 
 
 def _dir_to_int(direction) -> int:
+    """Map a Signal.direction to {+1, -1, 0}, matching the sizer's _DIR_MAP
+    (LONG/BUY/BUY_VOL -> +1, SHORT/SELL/SELL_VOL -> -1, FLAT/unknown -> 0)."""
     d = str(direction or '').upper()
-    if d.startswith('L') or d in ('BUY',):
+    if d in ('LONG', 'BUY', 'BUY_VOL'):
         return 1
-    if d.startswith('S') or d in ('SELL',):
+    if d in ('SHORT', 'SELL', 'SELL_VOL'):
+        return -1
+    if d == 'FLAT':
+        return 0
+    # Defensive fallback for unanticipated variants
+    if d.startswith('L'):
+        return 1
+    if d.startswith('S'):
         return -1
     return 0
 

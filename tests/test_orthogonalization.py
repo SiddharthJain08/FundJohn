@@ -46,3 +46,15 @@ def test_fold_passes_through_ungrouped_strategies():
     active = [_sig('X', 'AAPL', 'LONG'), _sig('Y', 'AAPL', 'LONG')]
     out = og.fold_active_contributions(active, {}, {}, {'X': 1.0, 'Y': 1.0})
     assert len(out) == 2   # no fold-groups -> unchanged
+
+
+def test_dir_to_int_known_directions():
+    assert og._dir_to_int('LONG') == 1
+    assert og._dir_to_int('BUY') == 1
+    assert og._dir_to_int('BUY_VOL') == 1     # regression: was 0 under prefix matching
+    assert og._dir_to_int('SHORT') == -1
+    assert og._dir_to_int('SELL') == -1
+    assert og._dir_to_int('SELL_VOL') == -1
+    assert og._dir_to_int('FLAT') == 0
+    assert og._dir_to_int(None) == 0
+    assert og._dir_to_int('') == 0
