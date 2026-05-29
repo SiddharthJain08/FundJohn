@@ -8579,7 +8579,7 @@ function _renderActiveStack(rows) {
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
-          <td colspan="12">
+          <td colspan="13">
             <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
               <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
                 <div class="st-expand-head">
