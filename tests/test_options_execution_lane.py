@@ -250,3 +250,24 @@ def test_route_short_put_with_insufficient_cash_skips():
                                    equity=100000, coid='c1')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res and res.get('status') == 'skipped' and 'insufficient cash' in res.get('reason','')
+
+
+def test_record_submission_writes_instrument_class():
+    """A submitted option row carries instrument_class='option' (NULL for legacy equity)."""
+    from execution.alpaca_executor import record_submission
+    # Use a mocked psycopg2 connection; capture execute() args.
+    captured = []
+    class _C:
+        def cursor(self): return self
+        def execute(self, sql, params): captured.append((sql, params))
+        def commit(self): pass
+        def close(self): pass
+    conn = _C()
+    order = {'ticker': 'SPY260618C00750000', 'strategy_id': 'S_test', 'direction': 'long',
+             'instrument_class': 'option'}
+    resp = {'qty': 1, 'entry': 20.0, 'notional': 2000.0, 'order_id': 'xyz'}
+    record_submission(conn, '2026-05-29', order, resp,
+                      tif='day', order_class='simple', coid='c1')
+    assert captured, 'execute was not called'
+    _, params = captured[-1]
+    assert 'option' in params  # the instrument_class column value

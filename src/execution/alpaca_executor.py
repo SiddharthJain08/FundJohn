@@ -348,8 +348,9 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           entry_price, stop_price, target_price, pct_nav, notional_usd,
           time_in_force, order_class, client_order_id,
           alpaca_order_id, alpaca_status, alpaca_http, alpaca_error,
+          instrument_class,
           submitted_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
           alpaca_order_id = COALESCE(EXCLUDED.alpaca_order_id, alpaca_submissions.alpaca_order_id),
           alpaca_status   = EXCLUDED.alpaca_status,
@@ -367,7 +368,12 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           stop_price      = EXCLUDED.stop_price,
           target_price    = EXCLUDED.target_price,
           notional_usd    = EXCLUDED.notional_usd,
-          pct_nav         = EXCLUDED.pct_nav
+          pct_nav         = EXCLUDED.pct_nav,
+          -- SP-5.1a (mig 122): refresh instrument_class on retry so a
+          -- downgrade or re-tag leaves an accurate audit trail; preserve
+          -- prior non-NULL value if the retry omits it (legacy equity rows
+          -- pass NULL — keep them NULL via COALESCE on EXCLUDED first).
+          instrument_class = COALESCE(EXCLUDED.instrument_class, alpaca_submissions.instrument_class)
     """, (
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
         (order.get('direction') or 'long').lower(),
@@ -382,6 +388,7 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
         alpaca_resp.get('status'),
         alpaca_resp.get('http'),
         alpaca_resp.get('body') or alpaca_resp.get('reason'),
+        order.get('instrument_class'),
     ))
     conn.commit()
     cur.close()
