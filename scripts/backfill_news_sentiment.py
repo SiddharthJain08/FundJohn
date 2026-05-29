@@ -54,9 +54,21 @@ def articles_to_daily_rows(articles: list[dict]) -> list[dict]:
 
 
 def merge_append_only(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
-    """Append only (ticker,date) rows not already present. Existing rows win."""
+    """Append only (ticker,date) rows not already present. Existing rows win.
+
+    Normalizes `date` to datetime64 on BOTH sides before concat so the written parquet has a
+    uniform dtype. Mixing new string dates ('2022-03-01') with the existing file's
+    date/Timestamp objects produces an `object` column that pyarrow refuses to serialize
+    (ArrowTypeError on `to_parquet`) — the bug that crashed the first backfill run.
+    """
+    if new is None or new.empty:
+        return existing if (existing is not None and not existing.empty) else new
+    new = new.copy()
+    new['date'] = pd.to_datetime(new['date'])
     if existing is None or existing.empty:
         return new.drop_duplicates(['ticker', 'date'])
+    existing = existing.copy()
+    existing['date'] = pd.to_datetime(existing['date'])
     key = ['ticker', 'date']
     have = set(map(tuple, existing[key].astype(str).values.tolist()))
     fresh = new[~new[key].astype(str).apply(tuple, axis=1).isin(have)]
