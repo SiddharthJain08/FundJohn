@@ -565,6 +565,34 @@ def _account_cash() -> float | None:
     except (TypeError, ValueError): return None
 
 
+import os as _os
+
+def _option_min_notional_usd() -> float:
+    raw = _os.environ.get('OPENCLAW_OPTION_MIN_NOTIONAL_USD', '100')
+    try: return float(raw)
+    except ValueError: return 100.0
+
+
+def _resolve_option_qty(order: dict, limit_price: float) -> tuple[int, str | None]:
+    """Resolves integer contract qty with sub-contract refuse-or-floor.
+    Returns (qty, skip_reason|None)."""
+    contracts = order.get('contracts')
+    if contracts is None:
+        notional = float(order.get('notional_usd', 0))
+        if limit_price <= 0:
+            return 0, 'option: non-positive limit_price; cannot derive contracts'
+        contracts = notional / (limit_price * 100.0)
+    contracts = float(contracts)
+    if contracts <= 0:
+        return 0, 'option: zero contracts sized'
+    if contracts >= 1:
+        return int(contracts), None
+    notional = float(order.get('notional_usd', 0))
+    if notional >= _option_min_notional_usd():
+        return 1, None
+    return 0, f'option: sub-contract sizing below minimum (notional ${notional:.0f})'
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.

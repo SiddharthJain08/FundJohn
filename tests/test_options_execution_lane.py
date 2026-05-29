@@ -116,3 +116,29 @@ def test_cash_guard_skips_when_zero_fit():
     qty, reason = _apply_cash_collateral_guard(right='put', side='sell',
                                                 strike=200, qty=1, account_cash=10000)
     assert qty == 0 and reason and 'insufficient' in reason
+
+from execution.alpaca_executor import _resolve_option_qty
+
+def test_qty_uses_contracts_when_ge_one():
+    qty, reason = _resolve_option_qty(order={'contracts':3.2, 'notional_usd':50000},
+                                       limit_price=20.0)
+    assert qty == 3 and reason is None
+
+def test_qty_floors_to_one_when_sub_contract_and_above_min_notional():
+    qty, reason = _resolve_option_qty(order={'contracts':0.5, 'notional_usd':200},
+                                       limit_price=1.5)
+    assert qty == 1 and reason is None
+
+def test_qty_skips_when_sub_contract_and_below_min_notional():
+    qty, reason = _resolve_option_qty(order={'contracts':0.1, 'notional_usd':50},
+                                       limit_price=0.5)
+    assert qty == 0 and reason and 'below minimum' in reason
+
+def test_qty_falls_back_to_notional_when_contracts_missing():
+    qty, reason = _resolve_option_qty(order={'notional_usd':2000}, limit_price=10.0)
+    assert qty == 2 and reason is None  # 2000 / (10*100) = 2
+
+def test_qty_zero_contracts_skips():
+    qty, reason = _resolve_option_qty(order={'contracts':0, 'notional_usd':100},
+                                       limit_price=1.0)
+    assert qty == 0 and reason and 'zero contracts' in reason
