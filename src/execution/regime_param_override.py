@@ -20,6 +20,27 @@ def gate_on() -> bool:
     return os.environ.get(GATE_ENV) == '1'
 
 
+def direction_sign(direction) -> int:
+    """Normalize a Signal.direction to +1 (long) / -1 (short) / 0 (skip).
+
+    MUST stay in sync with the backtest normalizer
+    `src/backtest/unified_backtest.py:_signal_to_long_short` — both live
+    override application and backtest simulation classify direction the same
+    way, or backtest↔live parity breaks. Mapping (mirrored exactly):
+        LONG | BUY  | BUY_VOL  → +1
+        SHORT | SELL | SELL_VOL → -1
+        None / FLAT / unknown   →  0  (backtest skips these trades)
+    """
+    if direction is None:
+        return 0
+    u = str(direction).strip().upper()
+    if u in ('LONG', 'BUY', 'BUY_VOL'):
+        return 1
+    if u in ('SHORT', 'SELL', 'SELL_VOL'):
+        return -1
+    return 0
+
+
 def resolve_override(strategy_id: str, regime_state: str, *,
                      injected: Optional[dict] = None) -> Optional[dict]:
     """Return {'stop_pct': x?, 'target_pct': y?} or None.

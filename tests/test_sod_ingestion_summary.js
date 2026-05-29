@@ -23,4 +23,14 @@ assert.strictEqual(phaseBullets.length, 5, 'one bullet per phase (full breakdown
 const failBody = formatIngestionSummary('SOD', { ok: false, date: '2026-05-29' });
 assert(failBody.includes('FAILED'), 'failure body marked FAILED');
 
+// A {phase, rows:null} item (the live-capture remap shape) renders the phase
+// alone with NO trailing ': '.
+const nullRowBody = formatIngestionSummary('SOD', {
+  ok: true,
+  date: '2026-05-29',
+  phases: [{ phase: 'x', rows: null }],
+});
+const xLine = nullRowBody.split('\n').find(l => l.includes('• x'));
+assert.strictEqual(xLine.trim(), '• x', 'null row count → no trailing colon');
+
 console.log('OK test_sod_ingestion_summary');

@@ -69,6 +69,14 @@ def _load_recs(rec_date=None) -> list:
     params = []
     if rec_date:
         sql += " AND rec_date = %s"; params.append(rec_date)
+    else:
+        # No explicit date → scope to the LATEST pending batch only. Otherwise we
+        # would re-process the entire pending backlog (e.g. 36 superseded rows from
+        # prior weeks), each triggering a multi-hour backtest and applying off stale
+        # recommendations. MAX over zero pending rows → NULL → returns empty (same
+        # as today's no-pending case).
+        sql += (" AND rec_date = (SELECT MAX(rec_date) FROM strategy_sizing_recommendations"
+                " WHERE action_taken = 'pending')")
     with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
         cur.execute(sql, params)
         cols = [d[0] for d in cur.description]

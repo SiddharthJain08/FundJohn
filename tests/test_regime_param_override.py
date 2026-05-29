@@ -2,6 +2,17 @@ import os
 import pytest
 from execution import regime_param_override as rpo
 
+def test_direction_sign_mapping():
+    from execution import regime_param_override as rpo
+    assert rpo.direction_sign('LONG') == 1
+    assert rpo.direction_sign('BUY') == 1
+    assert rpo.direction_sign('BUY_VOL') == 1
+    assert rpo.direction_sign('SHORT') == -1
+    assert rpo.direction_sign('SELL') == -1
+    assert rpo.direction_sign('SELL_VOL') == -1
+    assert rpo.direction_sign('FLAT') == 0
+    assert rpo.direction_sign('whatever') == 0
+
 def test_apply_override_long_replaces_bracket():
     stop, target = rpo.apply_override(
         entry_price=100.0, direction=1, stop_loss=98.0, target_1=104.0,

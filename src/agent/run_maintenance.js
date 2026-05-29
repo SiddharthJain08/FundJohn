@@ -509,7 +509,13 @@ the coupler ran and wrote at least one adjustment.
       FROM strategy_backtest_runs
      WHERE run_at::date = '{{TODAY_ISO}}';
 
-    -- Check every live strategy has a run today
+    -- Check every live strategy has a run today. NOTE: the authoritative
+    -- "live" source-of-truth is the manifest (strategies/manifest.json,
+    -- state='live') — NOT strategy_registry. The query below uses the
+    -- registry's state only as a convenient proxy; if it disagrees with the
+    -- manifest, trust the manifest and cross-check
+    -- (python3 -c "from strategies import lifecycle; ...") before concluding
+    -- a strategy was missed.
     SELECT s.name, MAX(r.run_at) AS last_run
       FROM strategy_registry s
       LEFT JOIN strategy_backtest_runs r ON r.strategy_id = s.id
@@ -519,7 +525,7 @@ the coupler ran and wrote at least one adjustment.
         OR MAX(r.run_at) IS NULL
      ORDER BY last_run ASC NULLS FIRST;
 
-Any live strategy with no run today → backtest refresh incomplete.
+Any manifest-live strategy with no run today → backtest refresh incomplete.
 
 ## Step 6 — Verify strategy weights refreshed (step 6)
 

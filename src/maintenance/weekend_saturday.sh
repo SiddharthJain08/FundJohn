@@ -10,6 +10,10 @@ export PYTHONPATH=src
 LOG="/var/log/openclaw/weekend_saturday_$(date -u +%Y%m%d_%H%M%S).log"
 mkdir -p "$(dirname "$LOG")"
 DRY="${1:-}"   # pass --dry-run to skip live writes where supported
+# NOTE: $DRY (--dry-run) is forwarded ONLY to the coupling step (step 4 below).
+# The mastermind modes (review/critique/position-recs), backtest refresh,
+# weekly weights, panel rebuild, and universe-recs all still run LIVE — they
+# do not consume $DRY. Use a no-trading day if you need a fully dry run.
 
 step() { echo "[weekend_saturday] $(date -u +%FT%TZ) >>> $*" | tee -a "$LOG"; }
 

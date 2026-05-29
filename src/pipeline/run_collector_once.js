@@ -94,8 +94,15 @@ function formatIngestionSummary(kind, data) {
       lines.push('(no phase output captured)');
     } else {
       for (const p of phases) {
-        const rows = (p.rows != null) ? `**${p.rows}** rows` : (p.line || '');
-        lines.push(`  • ${p.phase}: ${rows}`);
+        if (p.rows != null) {
+          lines.push(`  • ${p.phase}: **${p.rows}** rows`);
+        } else if (p.line) {
+          lines.push(`  • ${p.phase}: ${p.line}`);
+        } else {
+          // No row count and no captured line → render the phase alone, with
+          // NO trailing ': ' (the remapped {phase, rows:null} live-capture shape).
+          lines.push(`  • ${p.phase}`);
+        }
       }
     }
   } else {

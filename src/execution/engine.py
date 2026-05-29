@@ -636,7 +636,14 @@ def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
     if not ov:
         return
     for sig in signals or []:
-        d = 1 if str(sig.direction).upper() == 'LONG' else -1
+        # Classify via the shared normalizer (mirrors the backtest's
+        # _signal_to_long_short): LONG/BUY/BUY_VOL → +1, SHORT/SELL/SELL_VOL → -1,
+        # FLAT/unknown → 0. Skip 0 so FLAT/unknown directions get NO override —
+        # the backtest skips those trades, so live must too (parity + safety:
+        # never persist an inverted bracket for a non-long/short signal).
+        d = regime_param_override.direction_sign(sig.direction)
+        if d == 0:
+            continue
         ep = float(sig.entry_price) if getattr(sig, 'entry_price', 0) else 0.0
         if ep <= 0:
             continue
