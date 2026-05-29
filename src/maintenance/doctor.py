@@ -1509,6 +1509,49 @@ def check_node_syntax():
     return _ok('node_syntax', f'{len(JS_PREFLIGHT_FILES)} files parsed')
 
 
+# ── SP-5.1a: options-exec health ───────────────────────────────────────────
+
+@_check('option_exec_health')
+def check_option_exec_health():
+    """SP-5.1a: surface skip ratio for option submissions in the last 24h.
+
+    Gated on OPENCLAW_OPTION_EXEC=1. With the gate off the check is a no-op
+    (PASS with 'gate OFF — skipped', matching the established
+    check_liquidator_audit precedent — doctor.py severity space is
+    PASS/WARN/FAIL only, no SKIP).
+
+    When live: WARN if (rows with alpaca_order_id IS NULL OR
+    alpaca_status='skipped') / total option rows in the last 24h > 0.5."""
+    name = 'option_exec_health'
+    if os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
+        return _ok(name, 'gate OFF — skipped')
+    uri = os.environ.get('POSTGRES_URI', '')
+    if not uri:
+        return _warn(name, 'POSTGRES_URI not set — skipped')
+    try:
+        import psycopg2
+        conn = psycopg2.connect(uri, connect_timeout=5)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE alpaca_order_id IS NULL OR alpaca_status='skipped'),
+                   COUNT(*)
+              FROM alpaca_submissions
+             WHERE instrument_class = 'option'
+               AND submitted_at >= NOW() - INTERVAL '24 hours'
+        """)
+        skipped, total = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as exc:
+        return _warn(name, f'query failed: {type(exc).__name__}: {exc}'[:120])
+    if total == 0:
+        return _ok(name, 'no option submits in 24h')
+    ratio = skipped / total
+    if ratio > 0.5:
+        return _warn(name, f'skip ratio {ratio:.2%} ({skipped}/{total})')
+    return _ok(name, f'skip ratio {ratio:.2%} ({skipped}/{total})')
+
+
 # ── Orchestration ──────────────────────────────────────────────────────────
 
 def _all_checks():
