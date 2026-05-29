@@ -86,3 +86,33 @@ def test_intent_long_closes_existing_short():
 def test_intent_short_closes_existing_long():
     s, i = _options_position_intent(direction='short', current_qty=1)
     assert (s, i) == ('sell', 'sell_to_close')
+
+from execution.alpaca_executor import _cash_collateral_required, _apply_cash_collateral_guard
+
+def test_collateral_zero_for_long_calls():
+    assert _cash_collateral_required(right='call', side='buy', strike=750, qty=5) == 0.0
+
+def test_collateral_zero_for_long_puts():
+    assert _cash_collateral_required(right='put', side='buy', strike=200, qty=5) == 0.0
+
+def test_collateral_zero_for_short_calls():
+    # Short calls are REFUSED elsewhere; collateral function returns 0 (no responsibility).
+    assert _cash_collateral_required(right='call', side='sell', strike=750, qty=1) == 0.0
+
+def test_collateral_required_for_short_puts():
+    assert _cash_collateral_required(right='put', side='sell', strike=200, qty=2) == 40000.0
+
+def test_cash_guard_passes_when_cash_sufficient():
+    qty, reason = _apply_cash_collateral_guard(right='put', side='sell',
+                                                strike=200, qty=2, account_cash=50000)
+    assert qty == 2 and reason is None
+
+def test_cash_guard_reduces_qty_when_partial_fit():
+    qty, reason = _apply_cash_collateral_guard(right='put', side='sell',
+                                                strike=200, qty=5, account_cash=50000)
+    assert qty == 2 and reason and 'reduced' in reason  # 50000/(200*100)=2.5 -> 2
+
+def test_cash_guard_skips_when_zero_fit():
+    qty, reason = _apply_cash_collateral_guard(right='put', side='sell',
+                                                strike=200, qty=1, account_cash=10000)
+    assert qty == 0 and reason and 'insufficient' in reason

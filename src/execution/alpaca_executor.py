@@ -537,6 +537,34 @@ def _options_current_qty(occ_symbol: str) -> float:
     return 0.0
 
 
+def _cash_collateral_required(right: str, side: str, strike: float, qty: float) -> float:
+    """Cash collateral for the cash-secured-put L1 path. Zero for everything else."""
+    if str(right).lower() == 'put' and str(side).lower() == 'sell':
+        return float(strike) * 100.0 * float(qty)
+    return 0.0
+
+
+def _apply_cash_collateral_guard(right, side, strike, qty, account_cash):
+    """Returns (final_qty, skip_reason|None). Reduces qty to fit cash; SKIPs at 0."""
+    required = _cash_collateral_required(right, side, strike, qty)
+    if required == 0.0:
+        return int(qty), None
+    if required <= account_cash:
+        return int(qty), None
+    fit = int(account_cash // (float(strike) * 100.0))
+    if fit < 1:
+        return 0, f'option: insufficient cash for short put (need {required:.0f}, have {account_cash:.0f})'
+    return fit, f'short-put qty reduced {int(qty)}->{fit} for cash budget'
+
+
+def _account_cash() -> float | None:
+    """Live account.cash from Alpaca CLI."""
+    ok, payload, _ = _run_alpaca_cli(['account','get'])
+    if not ok or not payload: return None
+    try: return float(payload.get('cash', 0))
+    except (TypeError, ValueError): return None
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
