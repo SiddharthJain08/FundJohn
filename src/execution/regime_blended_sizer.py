@@ -690,11 +690,27 @@ def _choose_bracket(candidates: list[dict], dir_sign: int,
     """Gate decision for the bracket attached to an emission.
     OPENCLAW_STRATEGY_BRACKET_STACK ON + block substrate present -> stacked bracket
     (falls back to the legacy max-weight _select_bracket if stacking yields nothing).
-    OFF (or no substrate) -> _select_bracket, byte-identical to legacy."""
+    OFF (or no substrate) -> _select_bracket, byte-identical to legacy.
+    Under ORTHO_SHADOW (and stacking OFF) it logs the would-be stacked bracket."""
     if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
         from execution import bracket_stacking as _bs
         stacked = _bs.stacked_bracket(candidates, dir_sign,
                                       ortho_groups['block_map'], sharpe_by_strat)
         if stacked:
             return stacked
-    return _select_bracket(candidates, dir_sign)
+    selected = _select_bracket(candidates, dir_sign)
+    if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            and not _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        try:
+            from execution import bracket_stacking as _bs
+            shadow_b = _bs.stacked_bracket(candidates, dir_sign,
+                                           ortho_groups['block_map'], sharpe_by_strat)
+            if shadow_b:
+                logger.info(
+                    'bracket_stack.shadow: selected(stop=%.2f t1=%.2f) vs '
+                    'stacked(stop=%.2f t1=%.2f n=%d) %s',
+                    float(selected.get('stop') or 0.0), float(selected.get('t1') or 0.0),
+                    shadow_b['stop'], shadow_b['t1'], shadow_b['n_blocks'], shadow_b['why'])
+        except Exception as _e:
+            logger.warning('bracket_stack.shadow failed (%s)', _e)
+    return selected
