@@ -39,12 +39,16 @@ AGG_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 EARNINGS_PATH = ROOT / 'data' / 'master' / 'earnings.parquet'
 VOL_INDICES_PATH = ROOT / 'data' / 'master' / 'vol_indices.parquet'
 INSIDER_PATH = ROOT / 'data' / 'master' / 'insider.parquet'
+SENTIMENT_PATH = ROOT / 'data' / 'master' / 'sentiment.parquet'
 
 log = logging.getLogger(__name__)
 
 _AGG_DF: Optional[pd.DataFrame] = None
 _EARNINGS_DF: Optional[pd.DataFrame] = None
 _VOL_INDICES_DF: Optional[pd.DataFrame] = None
+_SENT_DF = None
+SENTIMENT_FIELDS = ['news_count_24h', 'news_mean_score', 'news_finbert_pos',
+                    'news_finbert_neu', 'news_finbert_neg']
 
 
 def _load_panel() -> pd.DataFrame:
@@ -318,6 +322,37 @@ def _vol_indices_slice(date_str: str) -> dict:
     return out
 
 
+def _load_sentiment_panel():
+    global _SENT_DF
+    if _SENT_DF is not None:
+        return _SENT_DF
+    if not SENTIMENT_PATH.exists():
+        _SENT_DF = pd.DataFrame(); return _SENT_DF
+    df = pd.read_parquet(SENTIMENT_PATH)
+    df['date'] = pd.to_datetime(df['date'])
+    _SENT_DF = df
+    return df
+
+
+def _sentiment_day_slice(date_str):
+    panel = _load_sentiment_panel()
+    if panel.empty:
+        return {}
+    ts = pd.to_datetime(date_str)
+    day = panel[panel['date'] <= ts]          # point-in-time: never future
+    if day.empty:
+        return {}
+    latest = day.sort_values('date').drop_duplicates('ticker', keep='last')
+    out = {}
+    for row in latest.itertuples(index=False):
+        d = {f: getattr(row, f) for f in SENTIMENT_FIELDS
+             if hasattr(row, f) and getattr(row, f) is not None
+             and not (isinstance(getattr(row, f), float) and pd.isna(getattr(row, f)))}
+        if d:
+            out[row.ticker] = d
+    return out
+
+
 # Cooldown lookback for recent stop-outs (calendar days). The strategy's
 # `cooldown_after_stop_days` is in trading days (~10), so use a generous
 # calendar buffer to cover weekends/holidays. This is the OUTER envelope —
@@ -414,6 +449,7 @@ def load_aux_data(
         'vol_indices':          _vol_indices_slice(date_str),
         'insider_txns':         _insider_slice(date_str),
         'insider_history_long': _insider_long_slice(date_str),
+        'sentiment':            _sentiment_day_slice(date_str),
     }
     if strategy_id:
         out['recent_stop_outs'] = _recent_stop_outs(
