@@ -46,6 +46,7 @@ from datetime import date
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 from execution.regime_blended_sizer import _select_bracket, _dir_to_int  # noqa: E402
 from execution import bracket_stacking as bs  # noqa: E402
@@ -114,7 +115,8 @@ def _load_events(days):
 def _new_bucket():
     return {'n': 0, 'pnl': {'current': 0.0, 'stacked': 0.0},
             'hold': {'current': 0.0, 'stacked': 0.0},
-            'reasons': {'current': defaultdict(int), 'stacked': defaultdict(int)}}
+            'reasons': {'current': defaultdict(int), 'stacked': defaultdict(int)},
+            'diffs': []}
 
 
 def _accumulate(bucket, res):
@@ -123,6 +125,26 @@ def _accumulate(bucket, res):
         bucket['pnl'][key] += res[key]['pnl_pct']
         bucket['hold'][key] += res[key]['holding_days']
         bucket['reasons'][key][res[key]['exit_reason']] += 1
+    bucket['diffs'].append(res['stacked']['pnl_pct'] - res['current']['pnl_pct'])
+
+
+def _paired_stats(diffs):
+    """Per-event paired Δ(stacked-current): bootstrap 95% CI on the mean (robust
+    to the skewed, high-stop-rate distribution), win-rate, and edge concentration
+    (share of the summed Δ contributed by the top-10 events — >100% means a few
+    outliers carry it while the rest are net-negative)."""
+    a = np.asarray(diffs, dtype=float)
+    n = len(a)
+    if n == 0:
+        return None
+    rng = np.random.default_rng(12345)        # fixed seed -> reproducible
+    boot = a[rng.integers(0, n, size=(2000, n))].mean(axis=1)
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    total = a.sum()
+    top10 = np.sort(a)[::-1][:10].sum()
+    return {'mean': float(a.mean()), 'lo': float(lo), 'hi': float(hi),
+            'win': float((a > 0).mean()),
+            'top10_share': float(top10 / total) if total != 0 else float('nan')}
 
 
 def _report(name, b):
@@ -138,6 +160,11 @@ def _report(name, b):
     print(f'  stacked   mean_pnl/trade={stk_m:+.4f}  avg_hold={b["hold"]["stacked"]/b["n"]:5.2f}d  '
           f'exits={dict(b["reasons"]["stacked"])}')
     print(f'  stacked - current: {delta:+.4f} mean pnl/trade')
+    ps = _paired_stats(b['diffs'])
+    if ps:
+        sig = 'CI excludes 0' if (ps['lo'] > 0 or ps['hi'] < 0) else 'CI includes 0 (not distinguishable)'
+        print(f'  paired Δ: mean={ps["mean"]:+.4f}  boot95%CI=[{ps["lo"]:+.4f},{ps["hi"]:+.4f}] ({sig})  '
+              f'win_rate={ps["win"]:.0%}  top10_share_of_edge={ps["top10_share"]:.0%}')
 
 
 def main():
