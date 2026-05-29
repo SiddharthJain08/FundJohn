@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-29T04:33:03.990401+00:00",
+  "updated_at": "2026-05-29T05:05:06.011920+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -4111,8 +4111,8 @@
       "instrument_class": "equity"
     },
     "S_financial_constraint_kz_factor": {
-      "state": "staging",
-      "state_since": "2026-05-23T14:47:24.934Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:50:08.241688+00:00",
       "metadata": {
         "canonical_file": "S_financial_constraint_kz_factor.py",
         "class": "FinancialConstraintKZFactor",
@@ -4148,13 +4148,21 @@
             },
             "candidate_id": "46b71290-bac8-4f9b-94fe-0e2fb58fcdae"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:48:59.247622+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_fama_french_three_factor_composite": {
       "state": "candidate",
-      "state_since": "2026-05-24T00:00:00.000000+00:00",
+      "state_since": "2026-05-29T04:49:30.954705+00:00",
       "metadata": {
         "canonical_file": "S_fama_french_three_factor_composite.py",
         "class": "FamaFrenchThreeFactorComposite",
@@ -4168,8 +4176,8 @@
       "instrument_class": "equity"
     },
     "S_january_btm_size_seasonal": {
-      "state": "staging",
-      "state_since": "2026-05-23T14:47:24.934Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:49:49.582601+00:00",
       "metadata": {
         "canonical_file": "S_january_btm_size_seasonal.py",
         "class": "S_january_btm_size_seasonal",
@@ -4204,6 +4212,14 @@
             },
             "candidate_id": "0be87f14-834c-4b00-b324-958d86536402"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:49:49.582601+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4439,12 +4455,17 @@
       "instrument_class": "equity"
     },
     "S_bppp_bayesian_parametric_weights": {
-      "state": "staging",
-      "state_since": "2026-05-23T20:24:40.454Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T05:04:47.194174+00:00",
       "metadata": {
         "canonical_file": "S_bppp_bayesian_parametric_weights.py",
         "class": "S_bppp_bayesian_parametric_weights",
-        "description": "Placing a Bayesian prior on parametric portfolio policy coefficients corrects for estimation risk, shrinking overexposure to high-magnitude signals and delivering superior risk-adjusted returns and lower turnover vs standard PPP, with the largest edge during crisis episodes."
+        "description": "Placing a Bayesian prior on parametric portfolio policy coefficients corrects for estimation risk, shrinking overexposure to high-magnitude signals and delivering superior risk-adjusted returns and lower turnover vs standard PPP, with the largest edge during crisis episodes.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -4478,13 +4499,21 @@
             },
             "candidate_id": "55a2e361-f8e9-4b0b-af57-f72c845e7db7"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:59:07.592624+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 0.01, DD 5.9%, trades 28000",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_spx_death_cross_contrarian_fade": {
-      "state": "staging",
-      "state_since": "2026-05-23T20:24:40.454Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:50:27.188585+00:00",
       "metadata": {
         "canonical_file": "S_spx_death_cross_contrarian_fade.py",
         "class": "SpxDeathCrossContrarianFade",
@@ -4526,6 +4555,14 @@
             },
             "candidate_id": "a2645236-9918-4681-b390-8dc8f78642cd"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:50:27.188585+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe -1.94, DD 4.1%, trades 4",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4542,8 +4579,8 @@
       "instrument_class": "equity"
     },
     "S_tactical_yield_credit_term_premium": {
-      "state": "staging",
-      "state_since": "2026-05-25T08:06:56.453Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T05:02:16.637378+00:00",
       "metadata": {
         "canonical_file": "S_tactical_yield_credit_term_premium.py",
         "class": "S_tactical_yield_credit_term_premium",
@@ -4578,13 +4615,21 @@
             },
             "candidate_id": "1eceaad4-6c5f-4bd7-8bf0-bfff61b06118"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T05:02:16.637378+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_book_to_market_value_premium": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T05:05:06.010429+00:00",
       "metadata": {
         "canonical_file": "S_book_to_market_value_premium.py",
         "class": "BookToMarketValuePremium",
@@ -4620,13 +4665,21 @@
             },
             "candidate_id": "25c871cc-b8ad-4bff-b033-a81d1dab35db"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T05:01:47.808933+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_fama_french_three_factor_anomalies": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T05:01:30.172730+00:00",
       "metadata": {
         "canonical_file": "S_fama_french_three_factor_anomalies.py",
         "class": "S_fama_french_three_factor_anomalies",
@@ -4662,17 +4715,31 @@
             },
             "candidate_id": "32bf5a47-8aca-4cd8-ab97-9731f79b293e"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T05:01:30.172730+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_fama_french_anomaly_dissection": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:56:39.607664+00:00",
       "metadata": {
         "canonical_file": "S_fama_french_anomaly_dissection.py",
         "class": "S_fama_french_anomaly_dissection",
-        "description": "Net stock issuance, accruals, and price momentum are pervasive cross-sectional return predictors across all cap tiers; combining these three signals into an equal-weighted composite score produces a robust long-short anomaly that survives size-controls and sorts."
+        "description": "Net stock issuance, accruals, and price momentum are pervasive cross-sectional return predictors across all cap tiers; combining these three signals into an equal-weighted composite score produces a robust long-short anomaly that survives size-controls and sorts.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -4704,13 +4771,21 @@
             },
             "candidate_id": "2b9dfba8-3882-46e2-a724-6f083e0210a2"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:56:39.607664+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.31, DD 17.3%, trades 63010",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_earnings_distraction_pead": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:59:24.849409+00:00",
       "metadata": {
         "canonical_file": "S_earnings_distraction_pead.py",
         "class": "S_earnings_distraction_pead",
@@ -4755,13 +4830,21 @@
             },
             "candidate_id": "1abd9832-2508-4654-ad22-49f38c04f070"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:54:02.915250+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_daniel_titman_characteristics_cross_section": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:53:46.057589+00:00",
       "metadata": {
         "canonical_file": "S_daniel_titman_characteristics_cross_section.py",
         "class": "S_daniel_titman_characteristics_cross_section",
@@ -4796,13 +4879,21 @@
             },
             "candidate_id": "d8f5d99b-f7b8-4544-8695-f77d2c5e0556"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:53:46.057589+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_friday_earnings_inattention_drift": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:53:28.961803+00:00",
       "metadata": {
         "canonical_file": "S_friday_earnings_inattention_drift.py",
         "class": "S_friday_earnings_inattention_drift",
@@ -4847,17 +4938,30 @@
             },
             "candidate_id": "983e909d-ccf3-4cee-bba1-309cc0e6fcee"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:53:28.961803+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
     },
     "S_value_momentum_everywhere": {
-      "state": "staging",
-      "state_since": "2026-05-25T14:46:13.679Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:53:10.739755+00:00",
       "metadata": {
         "canonical_file": "S_value_momentum_everywhere.py",
         "class": "S_value_momentum_everywhere",
-        "description": "Value (book-to-market) and momentum (12-1 month return) premia are universal across eight asset classes and share a common global factor structure driven partly by funding-liquidity risk, making a combined long-short equity composite robust and persistent."
+        "description": "Value (book-to-market) and momentum (12-1 month return) premia are universal across eight asset classes and share a common global factor structure driven partly by funding-liquidity risk, making a combined long-short equity composite robust and persistent.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -4889,6 +4993,14 @@
             },
             "candidate_id": "026077b3-ac84-47d7-baa6-c527351add52"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:53:10.739755+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe 1.28, DD 16.8%, trades 71875",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
