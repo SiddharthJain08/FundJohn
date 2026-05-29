@@ -2447,6 +2447,22 @@ app.get('/api/strategies/:id/arr-curve', async (req, res) => {
   }
 });
 
+// ── Precomputed backtest equity curve (vs SP500, regime-tagged) ──────────────
+// Returns strategy_backtest_panel.equity_curve JSONB for the expansion-panel
+// chart. Each element: { date, strat_equity, spx_equity, regime }.
+// Returns { rows: [] } for strategies without a panel row.
+app.get('/api/strategies/:id/backtest-curve', async (req, res) => {
+  const sid = String(req.params.id || '');
+  if (!sid) return res.status(400).json({ error: 'strategy id required' });
+  try {
+    const r = (await dbQuery(
+      `SELECT equity_curve FROM strategy_backtest_panel WHERE strategy_id=$1`, [sid])).rows[0];
+    res.json({ rows: (r && r.equity_curve) ? r.equity_curve : [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Broker-side watchlist (Phase 2.5 of alpaca-cli integration) ──────────────
 // Replaces the manual operator-edited list pattern with a broker watchlist
 // named OPENCLAW_WATCHLIST_NAME (default 'fundjohn-core'). The dashboard
