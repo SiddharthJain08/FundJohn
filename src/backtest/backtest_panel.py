@@ -241,4 +241,7 @@ if __name__ == '__main__':
     ap.add_argument('--rebuild', action='store_true')
     ap.add_argument('--strategy-id', default=None)
     a = ap.parse_args()
-    print(rebuild(a.strategy_id))
+    if a.rebuild:
+        print(rebuild(a.strategy_id))
+    else:
+        ap.print_help()

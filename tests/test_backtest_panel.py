@@ -67,3 +67,41 @@ def test_build_hv21_lookup_returns_callable_with_annualized_vol():
     v = hv('AAA', dates[40].strftime('%Y-%m-%d'))
     assert v is not None and v > 0
     assert hv('MISSING', dates[40].strftime('%Y-%m-%d')) is None
+
+
+def test_equity_curve_nonflat_benchmark_consistent_anchor():
+    trades = [
+        {'ticker':'AAA','entry_date':'2025-01-02','pnl_pct':0.10,'holding_days':5},
+        {'ticker':'AAA','entry_date':'2025-02-02','pnl_pct':-0.05,'holding_days':5},
+    ]
+    bench = pd.Series([0.001]*400, index=pd.date_range('2025-01-01', periods=400, freq='D'))
+    def regime_for(dates):
+        return pd.Series(['LOW_VOL']*len(list(dates)), index=list(dates))
+    curve = build_equity_curve(trades, bench_daily_ret=bench, regime_series_fn=regime_for, weekly=True)
+    assert curve[0]['strat_equity'] == 1.0
+    assert curve[0]['spx_equity'] == 1.0          # both anchor to 1.0 at first displayed point
+    assert curve[-1]['spx_equity'] != 1.0         # benchmark moves independently (drift)
+
+
+def test_hv21_asof_no_lookahead():
+    import numpy as np
+    dates = pd.date_range('2025-01-01', periods=60, freq='B')
+    rets = np.concatenate([np.full(44, 0.001), np.array([0.05, -0.05] * 8)[:15]])
+    close = 100 * np.cumprod(np.concatenate([[1.0], 1 + rets]))[:60]
+    px = pd.DataFrame({'ticker': 'AAA', 'date': dates, 'close': close})
+    hv = build_hv21_lookup(px)
+    calm = hv('AAA', dates[30].strftime('%Y-%m-%d'))   # inside the constant-return window
+    assert calm is not None and calm < 1e-6            # ~0 vol => future volatility NOT leaked in
+
+
+def test_oue_unknown_regime_bucket_and_invariant():
+    def hv(ticker, entry_date):
+        return None
+    trades = [
+        {'ticker':'X','entry_date':'2025-01-02','pnl_pct':0.01,'holding_days':5},          # no entry_regime
+        {'ticker':'Y','entry_date':'2025-01-02','pnl_pct':0.01,'holding_days':5,'entry_regime':'LOW_VOL'},
+    ]
+    overall, by_regime = classify_trades_oue(trades, hv, sigma_gate=2.0)
+    assert 'UNKNOWN' in by_regime
+    assert by_regime['UNKNOWN'] == {'over':0,'under':0,'expected':1}
+    assert sum(overall.values()) == len(trades)
