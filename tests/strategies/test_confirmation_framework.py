@@ -65,3 +65,30 @@ def test_options_flow_pcr_gates_even_without_skew():
     passes, score = of.confirm('LONG', {'pc_ratio': 0.6})
     assert passes is True
     assert score > 0
+
+
+from strategies.confirmation import sector_map as sm
+
+
+def test_sector_map_known_tickers():
+    assert sm.TICKER_SECTOR['AAPL'] == 'Tech'
+    assert sm.TICKER_SECTOR['JPM'] == 'Fin'
+    assert sm.SECTOR_ETF['Tech'] == 'XLK'
+    assert sm.SECTOR_ETF['Fin'] == 'XLF'
+
+
+def test_etf_for_ticker():
+    assert sm.etf_for_ticker('AAPL') == 'XLK'
+    assert sm.etf_for_ticker('XOM') == 'XLE'
+    assert sm.etf_for_ticker('UNKNOWN_TICKER') is None
+
+
+def test_every_sector_has_an_etf():
+    for sector in set(sm.TICKER_SECTOR.values()):
+        assert sector in sm.SECTOR_ETF, f'sector {sector} missing ETF'
+
+
+def test_constituents_reverse_lookup():
+    tech = sm.constituents('Tech')
+    assert 'AAPL' in tech and 'MSFT' in tech
+    assert all(sm.TICKER_SECTOR[t] == 'Tech' for t in tech)
