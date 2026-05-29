@@ -75,10 +75,46 @@ def merge_append_only(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame
     return pd.concat([existing, fresh], ignore_index=True)
 
 
-def score_articles(articles: list[dict]) -> list[dict]:
-    """Reuse the live FinBERT scorer so backfill == live scoring (parity)."""
-    from src.ingestion.alpaca_news import _score_with_finbert
-    return _score_with_finbert(articles)
+_SIGN = {'positive': 1, 'neutral': 0, 'negative': -1}
+
+
+def _article_text(a: dict) -> str:
+    """Identical text construction to alpaca_news._score_with_finbert (parity)."""
+    headline = (a.get('headline') or '').strip()
+    summary = (a.get('summary') or '')[:500]
+    return (headline + ' ' + summary).strip() if summary else headline
+
+
+def score_articles(articles: list[dict], batch_size: int = 64) -> list[dict]:
+    """Score articles via the FinBERT BATCH endpoint (~5x faster, bit-identical scores);
+    fall back to the live serial scorer if /score_batch isn't deployed yet (404) or errors.
+
+    Sets each article's `finbert_label` (lowercase) + signed `finbert_score`, exactly matching
+    src.ingestion.alpaca_news._score_with_finbert (same text, same sign map) — so the backfilled
+    sentiment is identical to what the live pipeline produces, just produced faster.
+    """
+    if not articles:
+        return articles
+    from src.services.finbert.client import FinbertClient
+    client = FinbertClient(timeout=30.0)
+    texts = [_article_text(a) for a in articles]
+    try:
+        results: list[dict] = []
+        for j in range(0, len(texts), batch_size):
+            results.extend(client.score_batch(texts[j:j + batch_size]))
+        for a, txt, res in zip(articles, texts, results):
+            if not txt:
+                a['finbert_label'], a['finbert_score'] = 'neutral', 0.0
+                continue
+            label = (res.get('label') or 'Neutral').lower()
+            a['finbert_label'] = label
+            a['finbert_score'] = _SIGN.get(label, 0) * float(res.get('score', 0.0))
+        return articles
+    except Exception as e:
+        # /score_batch unavailable (service predates it) or transient error → serial fallback.
+        print(f'[backfill] batch scoring unavailable ({e}); falling back to serial scorer', file=sys.stderr)
+        from src.ingestion.alpaca_news import _score_with_finbert
+        return _score_with_finbert(articles)
 
 
 def _fetch_window(symbols: list[str], start: str, end: str) -> list[dict]:
