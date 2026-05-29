@@ -149,6 +149,30 @@ _IMPL_MAP = {
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
     # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
     'S_short_straddle_vrp':              ('strategies.implementations.S_short_straddle_vrp',              'ShortStraddleVRP'),
+    # Value + Momentum Everywhere — Asness, Moskowitz & Pedersen (2013)
+    'S_value_momentum_everywhere':       ('strategies.implementations.S_value_momentum_everywhere',       'ValueMomentumEverywhere'),
+    # Ang et al. 2006 — idiosyncratic volatility puzzle
+    'S_idiosyncratic_vol_puzzle':        ('strategies.implementations.s_idiosyncratic_vol_puzzle',        'IdiosyncraticVolPuzzle'),
+    # DellaVigna & Pollet 2009: Friday earnings inattention drift (PEAD premium)
+    'S_friday_earnings_inattention_drift': ('strategies.implementations.S_friday_earnings_inattention_drift', 'FridayEarningsInattentionDrift'),
+    # Daniel & Titman 1997: characteristics cross-section (size + B/M long-short)
+    'S_daniel_titman_characteristics_cross_section': ('strategies.implementations.S_daniel_titman_characteristics_cross_section', 'DanielTitmanCharacteristicsCrossSection'),
+    # Hirshleifer, Lim & Teoh 2009: distraction hypothesis PEAD
+    'S_earnings_distraction_pead': ('strategies.implementations.S_earnings_distraction_pead', 'EarningsDistractionPEAD'),
+    # Fama & French 2008: NSI + accruals + momentum composite cross-sectional anomaly
+    'S_fama_french_anomaly_dissection': ('strategies.implementations.S_fama_french_anomaly_dissection', 'FamaFrenchAnomalyDissection'),
+    # Fama & French 1996: three-factor anomalies (HML + SMB composite long-short)
+    'S_fama_french_three_factor_anomalies': ('strategies.implementations.S_fama_french_three_factor_anomalies', 'FamaFrenchThreeFactorAnomalies'),
+    # Davis, Fama & French 2000: book-to-market value premium (B/M long-short, R3000)
+    'S_book_to_market_value_premium': ('strategies.implementations.S_book_to_market_value_premium', 'BookToMarketValuePremium'),
+    # Herculano 2026: Bayesian Parametric Portfolio Policy (L1-shrunk PPP coefficients)
+    'S_bppp_bayesian_parametric_weights': ('strategies.implementations.S_bppp_bayesian_parametric_weights', 'BPPPBayesianParametricWeights'),
+    # Meb Faber Tactical Yield: term/credit premium expanding-window percentile → IEF/LQD/cash
+    'S_tactical_yield_credit_term_premium': ('strategies.implementations.S_tactical_yield_credit_term_premium', 'TacticalYieldCreditTermPremium'),
+    # Tier-B staging — awaiting data backfill; stubs return [] until gate clears
+    'S_bm_divy_market_timing':              ('strategies.implementations.s_bm_divy_market_timing',              'S_bm_divy_market_timing'),
+    'S_rd_intensity_intangible_factor':     ('strategies.implementations.s_rd_intensity_intangible_factor',     'S_rd_intensity_intangible_factor'),
+    'S_growth_defensive_smooth_score_timing': ('strategies.implementations.s_growth_defensive_smooth_score_timing', 'S_growth_defensive_smooth_score_timing'),
 }
 
 
