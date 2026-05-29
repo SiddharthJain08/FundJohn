@@ -53,3 +53,17 @@ def test_build_equity_curve_normalizes_and_tags_regime():
     assert all('date' in p and 'spx_equity' in p and 'regime' in p for p in curve)
     assert all(abs(p['spx_equity'] - 1.0) < 1e-9 for p in curve)
     assert len(curve) <= 60
+
+
+from backtest.backtest_panel import build_hv21_lookup
+
+
+def test_build_hv21_lookup_returns_callable_with_annualized_vol():
+    import numpy as np
+    dates = pd.date_range('2025-01-01', periods=60, freq='B')
+    px = pd.DataFrame({'ticker':'AAA','date':dates,
+                       'close': 100*np.cumprod(1+np.linspace(0.001,0.002,60))})
+    hv = build_hv21_lookup(px)
+    v = hv('AAA', dates[40].strftime('%Y-%m-%d'))
+    assert v is not None and v > 0
+    assert hv('MISSING', dates[40].strftime('%Y-%m-%d')) is None

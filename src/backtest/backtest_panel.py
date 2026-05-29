@@ -98,3 +98,147 @@ def build_equity_curve(trades: list[dict],
                     'spx_equity': round(float(row['spx_equity']), 6),
                     'regime': None if pd.isna(row['regime']) else str(row['regime'])})
     return out
+
+
+TRADING_DAYS = 252
+
+
+def build_hv21_lookup(prices: pd.DataFrame):
+    """From a long prices frame [ticker, date, close], build a per-ticker
+    21-day annualized realized-vol series and return hv21(ticker, date) →
+    Optional[float] (asof nearest prior date)."""
+    prices = prices[['ticker', 'date', 'close']].dropna()
+    prices = prices.assign(date=pd.to_datetime(prices['date']))
+    hv_by_ticker: dict[str, pd.Series] = {}
+    for tkr, g in prices.sort_values('date').groupby('ticker'):
+        s = g.set_index('date')['close'].astype(float)
+        logret = np.log(s).diff()
+        hv = logret.rolling(21).std() * math.sqrt(TRADING_DAYS)
+        hv_by_ticker[tkr] = hv.dropna()
+
+    def lookup(ticker: str, entry_date: str) -> Optional[float]:
+        s = hv_by_ticker.get(ticker)
+        if s is None or s.empty:
+            return None
+        ts = pd.Timestamp(entry_date)
+        prior = s.loc[:ts]
+        if prior.empty:
+            return None
+        v = float(prior.iloc[-1])
+        return v if math.isfinite(v) and v > 0 else None
+    return lookup
+
+
+def _sigma_gate(cur) -> float:
+    try:
+        cur.execute("SELECT value FROM pipeline_config WHERE key='sigma_gate'")
+        r = cur.fetchone()
+        return float(r[0]) if r else 2.0
+    except Exception:
+        return 2.0
+
+
+def _benchmark_daily_returns(prices: pd.DataFrame, ticker: str = '^GSPC') -> pd.Series:
+    g = prices[prices['ticker'] == ticker][['date', 'close']].dropna()
+    g = g.assign(date=pd.to_datetime(g['date'])).sort_values('date').set_index('date')
+    return g['close'].astype(float).pct_change().fillna(0.0)
+
+
+def build_panel(strategy_id: str, conn, prices: pd.DataFrame,
+                hv21_for, bench_ret: pd.Series) -> Optional[dict]:
+    """Compute the panel dict for one strategy from its primary_window run.
+    Returns None if the strategy has no primary_window backtest trades."""
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("""
+            SELECT run_id, total_sharpe, avg_holding_days
+              FROM strategy_backtest_runs
+             WHERE strategy_id=%s AND primary_window=TRUE
+             ORDER BY run_at DESC LIMIT 1
+        """, (strategy_id,))
+        run = cur.fetchone()
+        if not run:
+            return None
+        cur.execute("""
+            SELECT ticker, entry_date, pnl_pct, holding_days, entry_regime
+              FROM strategy_backtest_trades WHERE run_id=%s ORDER BY exit_date
+        """, (run['run_id'],))
+        trades = [dict(r) for r in cur.fetchall()]
+        gate = _sigma_gate(cur)
+    if not trades:
+        return None
+    overall, by_regime = classify_trades_oue(trades, hv21_for, sigma_gate=gate)
+    curve = build_equity_curve(trades, bench_ret, weekly=True)
+    eff = effective_sharpe(run['total_sharpe'], run['avg_holding_days'])
+    return {
+        'strategy_id': strategy_id,
+        'run_id': run['run_id'],
+        'effective_sharpe': eff,
+        'cadence_days': float(run['avg_holding_days'] or 1.0),
+        'oue_over': overall['over'], 'oue_under': overall['under'],
+        'oue_expected': overall['expected'], 'oue_by_regime': by_regime,
+        'oue_sigma_gate': gate, 'equity_curve': curve, 'n_trades': len(trades),
+    }
+
+
+def persist_panel(conn, panel: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO strategy_backtest_panel
+              (strategy_id, run_id, effective_sharpe, cadence_days,
+               oue_over, oue_under, oue_expected, oue_by_regime,
+               oue_sigma_gate, equity_curve, n_trades, computed_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+            ON CONFLICT (strategy_id) DO UPDATE SET
+               run_id=EXCLUDED.run_id, effective_sharpe=EXCLUDED.effective_sharpe,
+               cadence_days=EXCLUDED.cadence_days, oue_over=EXCLUDED.oue_over,
+               oue_under=EXCLUDED.oue_under, oue_expected=EXCLUDED.oue_expected,
+               oue_by_regime=EXCLUDED.oue_by_regime, oue_sigma_gate=EXCLUDED.oue_sigma_gate,
+               equity_curve=EXCLUDED.equity_curve, n_trades=EXCLUDED.n_trades,
+               computed_at=NOW()
+        """, (panel['strategy_id'], panel['run_id'], panel['effective_sharpe'],
+              panel['cadence_days'], panel['oue_over'], panel['oue_under'],
+              panel['oue_expected'], json.dumps(panel['oue_by_regime']),
+              panel['oue_sigma_gate'], json.dumps(panel['equity_curve']),
+              panel['n_trades']))
+    conn.commit()
+
+
+def rebuild(strategy_id: Optional[str] = None) -> dict:
+    """Build + persist panels. If strategy_id is None, rebuild all strategies
+    that have a primary_window run."""
+    prices = pd.read_parquet(PRICES_PARQUET, columns=['ticker', 'date', 'close'])
+    hv21_for = build_hv21_lookup(prices)
+    bench_ret = _benchmark_daily_returns(prices, '^GSPC')
+    conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+    try:
+        if strategy_id:
+            sids = [strategy_id]
+        else:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT strategy_id FROM strategy_backtest_runs WHERE primary_window=TRUE")
+                sids = [r[0] for r in cur.fetchall()]
+        stats = {'built': 0, 'skipped': 0}
+        for sid in sids:
+            panel = build_panel(sid, conn, prices, hv21_for, bench_ret)
+            if panel is None:
+                stats['skipped'] += 1
+                continue
+            persist_panel(conn, panel)
+            stats['built'] += 1
+        return stats
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    import argparse
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+    except Exception:
+        pass
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--rebuild', action='store_true')
+    ap.add_argument('--strategy-id', default=None)
+    a = ap.parse_args()
+    print(rebuild(a.strategy_id))
