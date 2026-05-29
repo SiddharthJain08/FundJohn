@@ -60,6 +60,7 @@ sys.path.insert(0, str(ROOT))
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 from strategies.validate_strategy import validate                     # noqa: E402
 from backtest import options_backtest  # SP-4 Phase 0
+from execution import regime_param_override  # noqa: E402  # per-(strategy, regime) bracket override
 from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -436,6 +437,7 @@ def _per_bar_simulate(
     *,
     strategy_id: Optional[str] = None,
     resolver=None,
+    param_override=None,
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
@@ -554,6 +556,12 @@ def _per_bar_simulate(
                         else (entry_price * 0.93 if direction > 0 else entry_price * 1.07)
             target_1 = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
                        else (entry_price * 1.08 if direction > 0 else entry_price * 0.92)
+            _ov = regime_param_override.resolve_override(
+                strategy_id, str(regime_state), injected=param_override)
+            if _ov:
+                stop_loss, target_1 = regime_param_override.apply_override(
+                    entry_price=entry_price, direction=direction,
+                    stop_loss=stop_loss, target_1=target_1, override=_ov)
             # Defensive: a bad signal with stop/target on the wrong side of
             # entry will produce a guaranteed-loss trade. Skip rather than
             # carry the bug through.
@@ -642,6 +650,8 @@ def run_backtest(strategy_id: str, *,
                  conn: Optional[psycopg2.extensions.connection] = None,
                  commit: bool = True,
                  resolver=None,
+                 param_override=None,
+                 return_metrics: bool = False,
                  instrument_class: str = 'equity') -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
@@ -684,6 +694,7 @@ def run_backtest(strategy_id: str, *,
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         strategy_id=strategy_id,
         resolver=resolver,
+        param_override=param_override,
         max_hold_days=max_hold_days,
     )
     trades         = sim['trades']
@@ -817,12 +828,25 @@ def run_backtest(strategy_id: str, *,
          f'trades={total_metrics["total_trades"]}  '
          f'regimes={list(per_regime.keys())}')
     # Refresh the dashboard backtest panel for this strategy (best-effort;
-    # a panel build failure must never fail the backtest itself).
-    try:
-        from backtest.backtest_panel import rebuild as _rebuild_panel
-        _rebuild_panel(strategy_id)
-    except Exception as _e:
-        print(f'[unified_backtest] panel rebuild skipped: {_e}')
+    # a panel build failure must never fail the backtest itself). Skipped for
+    # ephemeral (commit=False) runs — the persist block rolled back, so there
+    # is no new run for the panel to read.
+    if commit:
+        try:
+            from backtest.backtest_panel import rebuild as _rebuild_panel
+            _rebuild_panel(strategy_id)
+        except Exception as _e:
+            print(f'[unified_backtest] panel rebuild skipped: {_e}')
+    if return_metrics:
+        import statistics
+        sd = [abs(t['entry_price'] - t['signal_stop']) / t['entry_price']
+              for t in trades if t.get('signal_stop') and t.get('entry_price')]
+        td = [abs(t['signal_target'] - t['entry_price']) / t['entry_price']
+              for t in trades if t.get('signal_target') and t.get('entry_price')]
+        total_metrics = {**total_metrics,
+                         'median_stop_pct':   (statistics.median(sd) if sd else None),
+                         'median_target_pct': (statistics.median(td) if td else None)}
+        return run_id, total_metrics
     return run_id
 
 

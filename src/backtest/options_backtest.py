@@ -185,8 +185,11 @@ def _price_single_cycle(spec, close: pd.Series, entry_dt, sign: int,
 
 
 def simulate(instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt, *,
-             strategy_id=None, resolver=None, max_hold_days=21,
+             strategy_id=None, resolver=None, param_override=None, max_hold_days=21,
              vrp_factor=None, window=None):
+    # ``param_override`` is accepted for call-site parity with the equity
+    # _per_bar_simulate but deliberately IGNORED here: option brackets are
+    # priced contracts, so an equity stop/target-pct override does not apply.
     from backtest.synthetic_iv import DEFAULT_VRP_FACTOR, DEFAULT_WINDOW
     vrp_factor = DEFAULT_VRP_FACTOR if vrp_factor is None else vrp_factor
     window = DEFAULT_WINDOW if window is None else window
