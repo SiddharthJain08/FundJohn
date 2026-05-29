@@ -14,7 +14,7 @@ def _prices():
 
 def test_options_strategy_longs_confirmed_by_bullish_flow():
     s = OptionsFlowConfirmedMomentum()
-    regime = {'state': 'LOW_VOL'}
+    regime = {'state': 'TRANSITIONING'}
     aux = {'options': {
         'AAA': {'pc_ratio': 0.5, 'skew_20d': -0.03},
         'BBB': {'pc_ratio': 1.3, 'skew_20d': 0.04},
@@ -27,7 +27,7 @@ def test_options_strategy_longs_confirmed_by_bullish_flow():
 
 def test_options_strategy_skips_when_flow_contradicts():
     s = OptionsFlowConfirmedMomentum()
-    regime = {'state': 'LOW_VOL'}
+    regime = {'state': 'TRANSITIONING'}
     aux = {'options': {'AAA': {'pc_ratio': 1.5}}}
     sigs = s.generate_signals(_prices(), regime, ['AAA', 'BBB', 'CCC'], aux)
     assert all(sig.ticker != 'AAA' for sig in sigs)
@@ -35,7 +35,7 @@ def test_options_strategy_skips_when_flow_contradicts():
 
 def test_options_strategy_no_options_no_signals():
     s = OptionsFlowConfirmedMomentum()
-    sigs = s.generate_signals(_prices(), {'state': 'LOW_VOL'}, ['AAA', 'BBB'], {'options': {}})
+    sigs = s.generate_signals(_prices(), {'state': 'TRANSITIONING'}, ['AAA', 'BBB'], {'options': {}})
     assert sigs == []
 
 

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-29T12:23:03.535071+00:00",
+  "updated_at": "2026-05-29T13:29:15.613717+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -5277,18 +5277,21 @@
         "description": "Cross-sectional momentum corroborated by put-call ratio / IV skew (LONG & SHORT)",
         "instrument_class": "equity",
         "eligible_regimes": [
-          "LOW_VOL",
           "TRANSITIONING"
         ],
         "backtest_results": {
-          "sharpe": 0.964,
-          "max_drawdown": 0.173,
-          "return_pct": 46.9,
-          "total_trades": 8276,
+          "regime_scope": "TRANSITIONING-only (live)",
+          "sharpe": 1.906,
+          "max_drawdown": 0.115,
+          "return_pct": 54.25,
+          "total_trades": 5901,
+          "hit_rate": 0.345,
+          "base_only_sharpe_in_transitioning": 1.271,
+          "lift_note": "PCR corroboration lifts Sharpe 1.27->1.91 in TRANSITIONING; halves trade count (13110->5901).",
+          "all_regime_discovery_sharpe": 0.964,
           "window": "2024-04-22..2026-04-22",
-          "base_only_sharpe": -0.466,
-          "lift": "confirmed +0.96 vs base-only -0.47",
-          "note": "PCR primary gate; IV-skew soft secondary. Calm-window caveat (mostly LOW_VOL/TRANS)."
+          "run_id": "91077572-5e44-46aa-9d80-c41bde8e47e5",
+          "caveat": "Restricted to TRANSITIONING (LOW_VOL was -0.25 drag). ~2yr window. Verify live aux options pc_ratio parity before promote."
         }
       },
       "history": [],

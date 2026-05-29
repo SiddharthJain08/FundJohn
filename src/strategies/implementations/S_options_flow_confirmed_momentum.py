@@ -30,8 +30,10 @@ class OptionsFlowConfirmedMomentum(BaseStrategy):
     tier = 2
     signal_frequency = 'daily'
     min_lookback = 70
-    active_in_regimes = ['LOW_VOL', 'TRANSITIONING']
-    data_requirements = ['prices', 'options_aggregates']
+    # TRANSITIONING-only: per-regime backtest showed the PCR-corroborated edge lives entirely in
+    # TRANSITIONING (Sharpe 1.91, vs base-only 1.27 there); LOW_VOL was a drag (-0.25 Sharpe).
+    active_in_regimes = ['TRANSITIONING']
+    data_requirements = ['prices', 'options_eod']   # canonical live-engine options source token
 
     def default_parameters(self) -> dict:
         return {'lookback': 63, 'skip': 5, 'decile': 0.10, 'max_each': 20}

@@ -1,5 +1,5 @@
 {
   "strategy_id": "S_options_flow_confirmed_momentum",
-  "required": ["prices", "options_aggregates"],
+  "required": ["prices", "options_eod"],
   "optional": []
 }
