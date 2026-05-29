@@ -142,7 +142,7 @@ Add to the `"strategies"` object (inside it, before the closing `}`):
   "state": "candidate",
   "state_since": "<ISO-8601 timestamp>",
   "metadata": {
-    "canonical_file": "s_xx_your_strategy_id.py",
+    "canonical_file": "S_XX_your_strategy_id.py",
     "class": "YourStrategyClass",
     "description": "Brief description from strategy_spec"
   },
@@ -150,6 +150,9 @@ Add to the `"strategies"` object (inside it, before the closing `}`):
   "instrument_class": "<INFERRED_INSTRUMENT_CLASS, default equity>"
 }
 ```
+
+**CRITICAL — filename casing:** `canonical_file` MUST exactly match the strategy_id case + `.py` (i.e. `<strategy_id>.py` verbatim — do NOT lowercase, do NOT transform). The orchestrator's `_resolveImplPath` uses this string to locate the file you wrote; any case drift makes the validator emit `Contract validation failed — File not found` and the strategy is quarantined as `validation_failed` even when the code is correct. The actual `.py` file you write to disk MUST use the same name — `src/strategies/implementations/<strategy_id>.py`. Project convention is uppercase `S_` (85 of 95 files) — match the strategy_id exactly, never invent your own casing.
+
 New strategies always start as `state: candidate`. A Postgres `strategy_registry` row with
 `status='pending_approval'` is inserted automatically by the orchestrator after you succeed —
 you do NOT need to generate any SQL.

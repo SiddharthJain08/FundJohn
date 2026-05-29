@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_tactical_yield_credit_term_premium",
+  "required": ["prices", "macro"],
+  "optional": []
+}

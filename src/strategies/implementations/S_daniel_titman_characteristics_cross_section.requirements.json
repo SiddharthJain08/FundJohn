@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_daniel_titman_characteristics_cross_section",
+  "required": ["prices", "financials"],
+  "optional": []
+}

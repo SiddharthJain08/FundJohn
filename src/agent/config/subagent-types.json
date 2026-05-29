@@ -77,7 +77,7 @@
       "parallel": false,
       "vetoAuthority": false,
       "effortLevel": "medium",
-      "maxBudgetUsd": 1.0,
+      "maxBudgetUsd": 2.0,
       "modes": ["DEPLOY"],
       "skills": [
         "fundjohn:strategy-coder",

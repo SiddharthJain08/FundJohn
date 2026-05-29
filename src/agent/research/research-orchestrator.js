@@ -45,7 +45,22 @@ function _resolveImplPath(stratId) {
     const cf = m.strategies?.[stratId]?.metadata?.canonical_file;
     if (cf) canonical = cf;
   } catch (_) { /* manifest read error → fall back to default */ }
-  return path.join(IMPLEMENTATIONS_DIR, canonical);
+  const primary = path.join(IMPLEMENTATIONS_DIR, canonical);
+  // Case-toggle fallback for strategycoder casing drift — the prompt template's
+  // mixed example ("S_..." key + "s_..." canonical_file) historically produced
+  // manifest entries that pointed at the wrong-case filename even though the
+  // .py file existed (just with the strategy_id's actual case). Without this
+  // fallback the validator emitted `Contract validation failed — File not
+  // found` and quarantined the strategy as `validation_failed` despite working
+  // code. 9 strategies were stuck this way before 2026-05-29.
+  if (!fs.existsSync(primary) && canonical.length > 0) {
+    const toggled = canonical[0].toUpperCase() === canonical[0]
+      ? canonical[0].toLowerCase() + canonical.slice(1)
+      : canonical[0].toUpperCase() + canonical.slice(1);
+    const alt = path.join(IMPLEMENTATIONS_DIR, toggled);
+    if (fs.existsSync(alt)) return alt;
+  }
+  return primary;
 }
 
 const PYTHON = process.env.PYTHON_BIN || 'python3';

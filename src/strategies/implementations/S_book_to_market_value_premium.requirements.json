@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_book_to_market_value_premium",
+  "required": ["prices", "financials"],
+  "optional": ["macro"]
+}

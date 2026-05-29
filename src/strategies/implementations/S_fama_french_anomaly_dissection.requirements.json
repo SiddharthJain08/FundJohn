@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_fama_french_anomaly_dissection",
+  "required": ["prices", "financials"],
+  "optional": []
+}

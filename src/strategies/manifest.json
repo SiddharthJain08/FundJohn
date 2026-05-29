@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-28T15:30:06.193621+00:00",
+  "updated_at": "2026-05-29T04:33:03.990401+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -4171,7 +4171,7 @@
       "state": "staging",
       "state_since": "2026-05-23T14:47:24.934Z",
       "metadata": {
-        "canonical_file": "s_january_btm_size_seasonal.py",
+        "canonical_file": "S_january_btm_size_seasonal.py",
         "class": "S_january_btm_size_seasonal",
         "description": "The book-to-market premium in U.S. equities is a January seasonal concentrated in small/young/growth stocks \u2014 not a pervasive cross-sectional factor \u2014 enabling a size-filtered value long-short timed around the turn of year."
       },
@@ -4209,8 +4209,8 @@
       "instrument_class": "equity"
     },
     "S_bm_divy_market_timing": {
-      "state": "staging",
-      "state_since": "2026-05-23T14:47:24.934Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:31:46.947120+00:00",
       "metadata": {
         "canonical_file": "s_bm_divy_market_timing.py",
         "class": "S_bm_divy_market_timing",
@@ -4255,6 +4255,14 @@
             },
             "candidate_id": "4badd41f-af8e-4520-8833-de4c5fa2bdd7"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:31:46.947120+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4302,8 +4310,8 @@
       "instrument_class": "equity"
     },
     "S_growth_defensive_smooth_score_timing": {
-      "state": "staging",
-      "state_since": "2026-05-23T14:47:24.934Z",
+      "state": "candidate",
+      "state_since": "2026-05-29T04:33:03.951508+00:00",
       "metadata": {
         "canonical_file": "s_growth_defensive_smooth_score_timing.py",
         "class": "S_growth_defensive_smooth_score_timing",
@@ -4347,6 +4355,14 @@
             },
             "candidate_id": "b2932b31-f388-406c-b18f-c8aa1ec6dc00"
           }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-05-29T04:33:03.951508+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4426,7 +4442,7 @@
       "state": "staging",
       "state_since": "2026-05-23T20:24:40.454Z",
       "metadata": {
-        "canonical_file": "s_bppp_bayesian_parametric_weights.py",
+        "canonical_file": "S_bppp_bayesian_parametric_weights.py",
         "class": "S_bppp_bayesian_parametric_weights",
         "description": "Placing a Bayesian prior on parametric portfolio policy coefficients corrects for estimation risk, shrinking overexposure to high-magnitude signals and delivering superior risk-adjusted returns and lower turnover vs standard PPP, with the largest edge during crisis episodes."
       },
@@ -4529,7 +4545,7 @@
       "state": "staging",
       "state_since": "2026-05-25T08:06:56.453Z",
       "metadata": {
-        "canonical_file": "s_tactical_yield_credit_term_premium.py",
+        "canonical_file": "S_tactical_yield_credit_term_premium.py",
         "class": "S_tactical_yield_credit_term_premium",
         "description": "Allocate to US Treasuries (IEF) and/or IG corporate bonds (LQD) only when the respective yield premium (term or credit spread over T-Bills) ranks in the top half of its full expanding historical distribution, otherwise hold cash; this systematically avoids bond exposure when carr"
       },
@@ -4570,8 +4586,8 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_book_to_market_value_premium.py",
-        "class": "S_book_to_market_value_premium",
+        "canonical_file": "S_book_to_market_value_premium.py",
+        "class": "BookToMarketValuePremium",
         "description": "High book-to-market equity stocks earn a robust value premium over low B/M stocks across all US market eras because elevated B/M proxies for priced distress risk that factor covariance exposure \u2014 not mere characteristic compensation \u2014 explains."
       },
       "history": [
@@ -4612,7 +4628,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_fama_french_three_factor_anomalies.py",
+        "canonical_file": "S_fama_french_three_factor_anomalies.py",
         "class": "S_fama_french_three_factor_anomalies",
         "description": "Most cross-sectional return anomalies tied to size, book-to-market, earnings/price, cashflow/price, sales growth, and long-term reversal are captured by a three-factor model (market, SMB, HML), implying rational ICAPM/APT risk compensation \u2014 with excess returns in high-B/M small-"
       },
@@ -4654,7 +4670,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_fama_french_anomaly_dissection.py",
+        "canonical_file": "S_fama_french_anomaly_dissection.py",
         "class": "S_fama_french_anomaly_dissection",
         "description": "Net stock issuance, accruals, and price momentum are pervasive cross-sectional return predictors across all cap tiers; combining these three signals into an equal-weighted composite score produces a robust long-short anomaly that survives size-controls and sorts."
       },
@@ -4696,7 +4712,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_earnings_distraction_pead.py",
+        "canonical_file": "S_earnings_distraction_pead.py",
         "class": "S_earnings_distraction_pead",
         "description": "When many firms announce earnings simultaneously, investors suffer attention overload and underreact to individual earnings surprises, creating stronger post-announcement drift that can be exploited by trading in the direction of the surprise on high-distraction days."
       },
@@ -4747,7 +4763,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_daniel_titman_characteristics_cross_section.py",
+        "canonical_file": "S_daniel_titman_characteristics_cross_section.py",
         "class": "S_daniel_titman_characteristics_cross_section",
         "description": "Small-cap and high book-to-market stocks earn persistent return premia because of their observable characteristics directly rather than their comovement with systematic risk factors, making a long-short portfolio ranked by size and B/M viable independent of factor-loading control"
       },
@@ -4788,7 +4804,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_friday_earnings_inattention_drift.py",
+        "canonical_file": "S_friday_earnings_inattention_drift.py",
         "class": "S_friday_earnings_inattention_drift",
         "description": "Earnings announced on Fridays receive 15% less immediate market attention and generate 70% more post-announcement drift, because investor inattention on Fridays causes systematic underreaction that can be harvested by going long positive-surprise and short negative-surprise Frida"
       },
@@ -4839,7 +4855,7 @@
       "state": "staging",
       "state_since": "2026-05-25T14:46:13.679Z",
       "metadata": {
-        "canonical_file": "s_value_momentum_everywhere.py",
+        "canonical_file": "S_value_momentum_everywhere.py",
         "class": "S_value_momentum_everywhere",
         "description": "Value (book-to-market) and momentum (12-1 month return) premia are universal across eight asset classes and share a common global factor structure driven partly by funding-liquidity risk, making a combined long-short equity composite robust and persistent."
       },
