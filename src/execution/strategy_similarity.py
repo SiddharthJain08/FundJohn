@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from execution.orthogonalization import _dir_to_int
+
 REGIME_STATES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 DEFAULT_WINDOW_DAYS = 90
 FOLD_THRESHOLD  = float(os.environ.get('OPENCLAW_FOLD_THRESHOLD', '0.85'))
@@ -175,7 +177,9 @@ def _cofiring_sets_by_regime(window_days: int) -> dict[str, dict[str, set]]:
             for regime, sid, sdate, ticker, direction in cur.fetchall():
                 if regime not in out:
                     out.setdefault(regime, {})
-                d = 1 if str(direction).upper().startswith('L') or str(direction).upper() in ('BUY', 'LONG') else -1
+                d = _dir_to_int(direction)
+                if d == 0:
+                    continue                     # FLAT / unknown: not a directional co-fire
                 out[regime].setdefault(sid, set()).add((_iso_week(sdate), ticker, d))
     finally:
         conn.close()
@@ -200,40 +204,6 @@ def _returns_by_regime(window_days: int) -> dict[str, dict[str, dict[str, float]
     finally:
         conn.close()
     return out
-
-
-def current_state_probabilities() -> dict[str, float]:
-    """Mirror of correlation_matrix.current_state_probabilities (reads market_regime latest row)."""
-    out = {r: 0.0 for r in REGIME_STATES}
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT state, regime_data
-                  FROM market_regime
-                 ORDER BY id DESC LIMIT 1
-            """)
-            row = cur.fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return out
-    state, data = row
-    if isinstance(data, dict):
-        probs = data.get('state_probabilities') or {}
-        for r in REGIME_STATES:
-            if r in probs:
-                try:
-                    out[r] = float(probs[r])
-                except (TypeError, ValueError):
-                    pass
-    total = sum(out.values())
-    if total <= 0:
-        # No state_probabilities — fall back to hard one-hot on `state`
-        if state in out:
-            out[state] = 1.0
-        return out
-    return {r: out[r] / total for r in REGIME_STATES}
 
 
 def _eff_sharpe_by_strat(regime_state: str) -> dict[str, float]:
@@ -276,6 +246,18 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS, ver
     try:
         with conn.cursor() as cur:
             for regime in REGIME_STATES:
+                # Flip is_current=FALSE for existing current rows BEFORE any early-continue
+                # so a regime with no new data doesn't keep stale rows alive.
+                cur.execute(
+                    "UPDATE strategy_similarity_matrix SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+                cur.execute(
+                    "UPDATE strategy_fold_groups SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+                cur.execute(
+                    "UPDATE strategy_factor_blocks SET is_current=FALSE WHERE regime_state=%s AND is_current",
+                    (regime,))
+
                 sim = similarity_for_regime(regime, window_days,
                                             cofiring=cof.get(regime, {}),
                                             returns=rets.get(regime, {}))
@@ -287,26 +269,13 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS, ver
                 eff = _eff_sharpe_by_strat(regime)
                 reps = representatives(fold, eff)
 
-                # Flip is_current=FALSE for existing current rows
-                cur.execute(
-                    "UPDATE strategy_similarity_matrix SET is_current=FALSE WHERE regime_state=%s AND is_current",
-                    (regime,))
-                cur.execute(
-                    "UPDATE strategy_fold_groups SET is_current=FALSE WHERE regime_state=%s AND is_current",
-                    (regime,))
-                cur.execute(
-                    "UPDATE strategy_factor_blocks SET is_current=FALSE WHERE regime_state=%s AND is_current",
-                    (regime,))
-
                 # Insert new similarity matrix row
                 cur.execute(
                     "INSERT INTO strategy_similarity_matrix (regime_state, matrix, trigger) VALUES (%s, %s, %s)",
                     (regime, json.dumps(sim), trigger))
 
                 # Insert fold groups + audit
-                members_by_gid: dict[int, list[str]] = {}
                 for gid, members in fold.items():
-                    members_by_gid[gid] = members
                     for s in members:
                         cur.execute(
                             """INSERT INTO strategy_fold_groups
