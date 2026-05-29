@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+#
+# Saturday 08:00 ET — Strategy Adjustment + Backtest Refresh pipeline.
+# Sequenced: review -> critique -> position-recs -> backtest-coupling ->
+# full backtest refresh -> weekly weights -> panel rebuild/verify -> universe-recs.
+# Steps 1-4 WARN-and-continue; step 5 (backtest refresh) failing aborts 6-7.
+set -uo pipefail
+cd /root/openclaw
+export PYTHONPATH=src
+LOG="/var/log/openclaw/weekend_saturday_$(date -u +%Y%m%d_%H%M%S).log"
+mkdir -p "$(dirname "$LOG")"
+DRY="${1:-}"   # pass --dry-run to skip live writes where supported
+
+step() { echo "[weekend_saturday] $(date -u +%FT%TZ) >>> $*" | tee -a "$LOG"; }
+
+step "1/8 comprehensive-review"
+node src/agent/curators/run_mastermind.js --mode comprehensive-review 2>&1 | tee -a "$LOG" || step "WARN review rc=$?"
+
+step "2/8 critique"
+node src/agent/curators/run_mastermind.js --mode critique 2>&1 | tee -a "$LOG" || step "WARN critique rc=$?"
+
+step "3/8 position-recs"
+node src/agent/curators/run_mastermind.js --mode position-recs 2>&1 | tee -a "$LOG" || step "WARN position-recs rc=$?"
+
+step "4/8 backtest-coupling"
+python3 -m execution.backtest_coupled_recs $DRY 2>&1 | tee -a "$LOG" || step "WARN coupling rc=$?"
+
+step "5/8 full backtest refresh"
+bash src/maintenance/refresh_backtests.sh 2>&1 | tee -a "$LOG"
+BT_RC=${PIPESTATUS[0]}
+if [ "$BT_RC" -ne 0 ]; then
+  step "ABORT backtest refresh rc=$BT_RC — skipping weights/panels"
+  exit "$BT_RC"
+fi
+
+step "6/8 weekly strategy weights"
+node src/agent/curators/weekly_live_sharpe.js 2>&1 | tee -a "$LOG" || step "WARN weights rc=$?"
+
+step "7/8 panel rebuild + verify"
+python3 -m backtest.backtest_panel --rebuild 2>&1 | tee -a "$LOG" || step "WARN panel rebuild rc=$?"
+python3 - <<'PY' 2>&1 | tee -a "$LOG"
+import os, psycopg2
+c=psycopg2.connect(os.environ['POSTGRES_URI']); cur=c.cursor()
+cur.execute("""SELECT COUNT(*) FROM strategy_backtest_panel p
+               JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_at FROM strategy_backtest_runs
+                     WHERE primary_window=TRUE ORDER BY strategy_id, run_at DESC) r
+                 ON r.strategy_id=p.strategy_id
+              WHERE p.computed_at < r.run_at""")
+stale=cur.fetchone()[0]
+print(f'[weekend_saturday] panel staleness check: {stale} panels older than their run')
+PY
+
+step "8/8 universe-recs (gated)"
+node src/agent/curators/run_mastermind.js --mode universe-recs 2>&1 | tee -a "$LOG" || step "WARN universe-recs rc=$?"
+
+step "DONE log=$LOG"
