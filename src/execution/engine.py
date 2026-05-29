@@ -856,8 +856,11 @@ def detect_confluence(cur, strategy_results: dict, regime_state: str, run_date: 
 # 7. UPDATE P&L
 # ──────────────────────────────────────────────────────────
 
-def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
-    """Update unrealized P&L for all open signals. Close if stop/target hit."""
+def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
+    """Update unrealized P&L for all open signals. Close if stop/target hit.
+
+    Returns (n_updates, newly_closed_signal_ids). The ids are classified by
+    the caller AFTER it commits — see the note at the end of this function."""
     cur.execute("""
         SELECT id, strategy_id, ticker, direction, entry_price,
                stop_loss, target_1, signal_date
@@ -965,21 +968,13 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
         except Exception as e:
             logger.error(f"update_pnl error {sig_id}: {e}")
 
-    # Classify newly-closed signals via the OUE pipeline. Best-effort:
-    # individual failures don't fail the cycle. Skipped signals stay
-    # NULL and a later run picks them up (the classifier itself skips
-    # already-classified rows).
-    if _newly_closed_signal_ids:
-        try:
-            from execution.oue_classifier import classify_batch
-            uri = os.environ.get('POSTGRES_URI', '')
-            if uri:
-                stats = classify_batch(uri, _newly_closed_signal_ids)
-                logger.info(f"OUE classified {len(_newly_closed_signal_ids)} closes: {stats}")
-        except Exception as e:
-            logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
-
-    return updates
+    # OUE classification is intentionally NOT done here. classify_batch
+    # reads on its own connection, so it must run AFTER the caller commits
+    # these closes — otherwise it sees uncommitted rows, finds no realized
+    # P&L, and skips every signal (the 2026-05-16→2026-05-29 bug where
+    # oue_kind stayed NULL: logs showed 'skipped': N for every close).
+    # Return the newly-closed ids so run() can classify them post-commit.
+    return updates, _newly_closed_signal_ids
 
 
 # ──────────────────────────────────────────────────────────
@@ -1162,7 +1157,7 @@ def main():
         logger.info(f"Confluence signals: {confluence_count}")
 
         # 7. P&L updates
-        pnl_updates = update_pnl(cur, prices, run_date)
+        pnl_updates, newly_closed_ids = update_pnl(cur, prices, run_date)
         logger.info(f"P&L rows updated: {pnl_updates}")
 
         # 8. Report triggers
@@ -1183,6 +1178,22 @@ def main():
         })
 
         conn.commit()
+
+        # OUE classification — MUST be after the commit above so the
+        # classifier's own connection can see the just-closed signal_pnl
+        # rows. Best-effort: failures here never fail the cycle (closes are
+        # already durable); a later run/backfill picks up any stragglers
+        # since classify_batch skips already-classified signals.
+        if newly_closed_ids:
+            try:
+                from execution.oue_classifier import classify_batch
+                uri = os.environ.get('POSTGRES_URI', '')
+                if uri:
+                    stats = classify_batch(uri, newly_closed_ids)
+                    logger.info(f"OUE classified {len(newly_closed_ids)} closes: {stats}")
+            except Exception as e:
+                logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
+
         logger.info(f"=== Execution Engine DONE in {duration_s}s ===")
 
         # Output JSON for caller
