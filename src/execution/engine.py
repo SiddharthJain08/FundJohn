@@ -36,6 +36,7 @@ from strategies.registry import get_approved_strategies
 from strategies.regime_gate import is_eligible
 from strategies.instrument_class import instrument_class_for
 from regime.crypto_regime import load_crypto_regime_state
+from execution import regime_param_override
 
 logging.basicConfig(
     level=logging.INFO,
@@ -627,6 +628,24 @@ def load_aux_data(universe: list) -> dict:
 # 4. RUN STRATEGIES
 # ──────────────────────────────────────────────────────────
 
+def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
+    """Mutate each Signal's stop_loss/target_1 with the per-(strategy, regime)
+    override (gated; no-op when OPENCLAW_BACKTEST_COUPLED_RECS is unset). Mirrors
+    the backtest's simulate-time application so live and backtest agree."""
+    ov = regime_param_override.resolve_override(strategy_id, str(regime_state))
+    if not ov:
+        return
+    for sig in signals or []:
+        d = 1 if str(sig.direction).upper() == 'LONG' else -1
+        ep = float(sig.entry_price) if getattr(sig, 'entry_price', 0) else 0.0
+        if ep <= 0:
+            continue
+        sig.stop_loss, sig.target_1 = regime_param_override.apply_override(
+            entry_price=ep, direction=d,
+            stop_loss=float(sig.stop_loss or 0), target_1=float(sig.target_1 or 0),
+            override=ov)
+
+
 def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
@@ -654,6 +673,7 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
                 logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, strat_regime_str)
                 continue
             signals = strat.generate_signals(prices, strat_regime, universe, aux_data)
+            _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
             results[strat.id] = signals or []
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
         except Exception as e:
