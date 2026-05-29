@@ -506,7 +506,12 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         timeout = int(os.environ.get('IC_TIMEOUT_SECONDS', '600')) + 120
     else:
         timeout = 300
-    return (_maybe_dry(['python3', str(py_exec), '--date', run_date]), timeout)
+    exec_argv = ['python3', str(py_exec), '--date', run_date]
+    # Daily cycle runs during RTH → stop_reattach places GTC OCO (take-profit +
+    # stop). Default-ON; OPENCLAW_STOP_REATTACH_OCO=0 reverts to stops-only.
+    if script == 'stop_reattach' and os.environ.get('OPENCLAW_STOP_REATTACH_OCO') != '0':
+        exec_argv.append('--oco')
+    return (_maybe_dry(exec_argv), timeout)
 
 
 def filter_steps(steps, requested_csv):
