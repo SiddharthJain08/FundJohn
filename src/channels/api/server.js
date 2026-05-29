@@ -2321,132 +2321,6 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Per-strategy rolling ARR curve.
-// ARR = Average Return Rate, the mean of `realized_pnl_pct` across closed
-// trades. "ARR over time" plots a trailing-N-day rolling mean so the
-// metric tracks how the strategy's per-trade economics shift across
-// regimes. The response also carries the regime per day so the chart
-// can paint the regime backdrop without a second fetch.
-//
-// Window default = 30d. The curve starts at the strategy's first close
-// date (or first regime sample, whichever later) and runs to today.
-// Days with no trades in the trailing window emit `rolling_arr_pct: null`
-// so the line breaks correctly across long quiet stretches.
-app.get('/api/strategies/:id/arr-curve', async (req, res) => {
-  const sid    = String(req.params.id || '');
-  const window = Math.min(Math.max(parseInt(req.query.window) || 30, 7), 365);
-  if (!sid) return res.status(400).json({ error: 'strategy id required' });
-  try {
-    // Pull every closed trade for the strategy ordered by close date.
-    // realized_pnl_pct is stored as a fraction (0.05 = 5%); we leave it
-    // as a fraction in the response and let the client multiply by 100
-    // for display, matching the convention used elsewhere.
-    const trades = (await dbQuery(`
-      SELECT closed_at::date AS d, realized_pnl_pct
-      FROM signal_pnl
-      WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
-        AND realized_pnl_pct IS NOT NULL
-      ORDER BY closed_at
-    `, [sid])).rows;
-    if (!trades.length) return res.json({ window_days: window, rows: [] });
-
-    // Daily position-flow counts: # signals opened (signal_date) and
-    // # signals closed (closed_at). Bucketed per day for the bar chart
-    // stacked under the ARR curve so the operator can see trade flow
-    // alongside per-trade economics.
-    const openedByDay = new Map();
-    const closedByDay = new Map();
-    const [openedRes, closedRes] = await Promise.all([
-      dbQuery(`SELECT signal_date::date AS d, COUNT(*)::int AS n
-                 FROM execution_signals
-                WHERE strategy_id = $1 AND signal_date IS NOT NULL
-                GROUP BY signal_date`, [sid]).catch(() => ({ rows: [] })),
-      dbQuery(`SELECT closed_at::date AS d, COUNT(*)::int AS n
-                 FROM signal_pnl
-                WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
-                GROUP BY closed_at`, [sid]).catch(() => ({ rows: [] })),
-    ]);
-    for (const row of openedRes.rows) {
-      openedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
-    }
-    for (const row of closedRes.rows) {
-      closedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
-    }
-
-    // Bucket trades by close date, then sweep a rolling window across the
-    // calendar from first close → today.
-    const byDay = new Map();
-    for (const t of trades) {
-      const d = t.d.toISOString().slice(0, 10);
-      if (!byDay.has(d)) byDay.set(d, []);
-      byDay.get(d).push(parseFloat(t.realized_pnl_pct));
-    }
-    const startIso = trades[0].d.toISOString().slice(0, 10);
-    const endIso   = new Date().toISOString().slice(0, 10);
-
-    const regimeMap = new Map();
-    for (const r of await _loadRegimeParquet()) {
-      if (r.date >= startIso) regimeMap.set(r.date, r.regime || null);
-    }
-    // Daily JSON overrides win over parquet for the recent days.
-    const stateDir = require('path').join(__dirname, '../../../.agents/market-state');
-    if (fs.existsSync(stateDir)) {
-      for (const f of fs.readdirSync(stateDir)
-        .filter(f => /^regime_\d{4}-\d{2}-\d{2}\.json$/.test(f))) {
-        const d = f.slice(7, 17);
-        if (d < startIso) continue;
-        try {
-          const j = JSON.parse(fs.readFileSync(require('path').join(stateDir, f), 'utf8'));
-          if (j.state) regimeMap.set(d, j.state);
-        } catch (_) {}
-      }
-    }
-
-    // Iterate calendar days [startIso, endIso]. We accumulate an explicit
-    // window deque so the rolling mean is O(N) total rather than
-    // O(N*window).
-    const out  = [];
-    const deque = [];   // [{d, ret}]
-    let sum   = 0;
-    let lastRegime = null; // forward-fill carry: weekends + gap days
-                           // inherit the prior trading day's regime so
-                           // the ARR chart's regime backdrop paints
-                           // continuously rather than going blank
-                           // across non-trading days.
-    const start = new Date(startIso + 'T00:00:00Z');
-    const end   = new Date(endIso   + 'T00:00:00Z');
-    for (let cur = new Date(start); cur <= end; cur.setUTCDate(cur.getUTCDate() + 1)) {
-      const dIso = cur.toISOString().slice(0, 10);
-      // Push today's trades.
-      const todays = byDay.get(dIso);
-      if (todays) {
-        for (const v of todays) { deque.push({ d: dIso, ret: v }); sum += v; }
-      }
-      // Drop trades that fell out of the trailing window.
-      const cutoff = new Date(cur);
-      cutoff.setUTCDate(cutoff.getUTCDate() - window);
-      const cutoffIso = cutoff.toISOString().slice(0, 10);
-      while (deque.length && deque[0].d < cutoffIso) {
-        sum -= deque.shift().ret;
-      }
-      // Forward-fill regime: use today's reading if we have one, else
-      // carry forward the most recent prior reading.
-      if (regimeMap.has(dIso)) lastRegime = regimeMap.get(dIso);
-      out.push({
-        date:             dIso,
-        rolling_arr_pct:  deque.length ? (sum / deque.length) : null,
-        trade_count:      deque.length,
-        regime:           lastRegime,
-        opened:           openedByDay.get(dIso) || 0,
-        closed:           closedByDay.get(dIso) || 0,
-      });
-    }
-    res.json({ window_days: window, rows: out });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // ── Precomputed backtest equity curve (vs SP500, regime-tagged) ──────────────
 // Returns strategy_backtest_panel.equity_curve JSONB for the expansion-panel
 // chart. Each element: { date, strat_equity, spx_equity, regime }.
@@ -8370,9 +8244,9 @@ const _SUB_ORDER = { live: 0, stale: 1, waiting: 2 };
 // sort changes, polling refreshes, and approval-job updates so the
 // operator's selection isn't lost on every redraw.
 let _stExpandedSid = null;
-let _stArrChart    = null;   // active Chart.js instance for the ARR curve
-let _stFlowChart   = null;   // active Chart.js instance for the position-flow bars
-let _stArrCache    = {};     // sid → arr-curve payload (cached for the session)
+// Chart instances (_stEqChart / _stCprChart) are declared inline beside their
+// render functions below.
+let _stArrCache    = {};     // sid → backtest-curve payload (cached for the session)
 let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent expands)
 let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
 
@@ -8615,18 +8489,18 @@ async function _stToggleRegimeEligibility(event, sid, regime) {
   }
 }
 function _stCloseExpand() {
-  if (_stArrChart)  { try { _stArrChart.destroy();  } catch (_) {} _stArrChart  = null; }
-  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
+  if (_stEqChart)  { try { _stEqChart.destroy();  } catch (_) {} _stEqChart  = null; }
+  if (_stCprChart) { try { _stCprChart.destroy(); } catch (_) {} _stCprChart = null; }
   _stExpandedSid = null;
   _renderActiveStack(strategiesData.filter(_inActiveStack));
 }
 
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
-  // The per-regime filter tab swapped the metric columns to LIVE per-regime
-  // ARR/ADR/ACT/Win pulled from live_regime_breakdown. Those columns are now
-  // backtest-sourced and live_regime_breakdown is gone from the payload, so
-  // the filter has no coherent target — hide the orphaned control.
+  // The per-regime filter tab once swapped the metric columns to a LIVE
+  // per-regime breakdown. Those columns are now backtest-sourced and that
+  // live breakdown is gone from the payload, so the filter has no coherent
+  // target — hide the orphaned control.
   const _rf = document.getElementById('st-regime-filter');
   if (_rf) _rf.style.display = 'none';
   if (!rows.length) {
@@ -8751,13 +8625,11 @@ let _stActiveSnapshot = {};
 
 // Paint the expansion panel for a strategy. The panel content (regime
 // stats + similar-strategies heatmap) renders synchronously so it's
-// visible immediately. The ARR chart waits for two things in parallel:
-//   1. /api/strategies/:id/arr-curve fetch (cached after first call)
-//   2. The shell's max-height transition to *complete* — so Chart.js
-//      reads the final container height when it sizes the canvas.
-// Without #2 the canvas measured an in-flight transition height and
-// shrank on every re-render — the "moving downwards / disappearing"
-// glitch the operator reported.
+// visible immediately. The equity-vs-SP500 chart then fills in after the
+// /api/strategies/:id/backtest-curve fetch (cached after first call). The
+// canvas wrapper has a fixed CSS height (.st-arr-canvas-wrap) so Chart.js
+// sizes correctly even while the shell's max-height transition runs — no
+// need to wait for transitionend.
 async function _stPaintExpand(sid) {
   const shell = document.getElementById('st-expand-shell-' + sid);
   const body  = document.getElementById('st-expand-body-' + sid);
@@ -8769,13 +8641,14 @@ async function _stPaintExpand(sid) {
   const r = (strategiesData || []).find(x => x.strategy_id === sid);
   if (!r) return;
 
-  // ── Live per-regime stats grid (was backtest, now live trades) ─────────
-  const breakdown = r.live_regime_breakdown || {};
+  // ── Backtest per-regime stats grid (Sharpe · Return · Win · Trades) ─────
+  const breakdown = r.backtest_regime_breakdown || {};
   const active    = new Set(r.active_in_regimes || []);
   const current   = r.current_regime || null;
   const cellsHtml = _REGIME_AXIS.map(rg => {
     const b = breakdown[rg];
-    const has = b && (b.trades || 0) > 0;
+    const trades = (b && b.trade_count != null) ? parseInt(b.trade_count) : 0;
+    const has = trades > 0;
     const tagBg = ({
       LOW_VOL:       'rgba(63,185,80,0.18)',
       TRANSITIONING: 'rgba(210,153,34,0.22)',
@@ -8788,26 +8661,27 @@ async function _stPaintExpand(sid) {
                + '<span>' + rg + '</span><span>' + star + dot + '</span></div>';
     if (!has) {
       const why = active.has(rg)
-        ? 'no closed trades under this regime yet'
+        ? 'no backtest trades under this regime yet'
         : 'not in active_in_regimes';
       return '<div class="st-rs-cell">' + head + '<div class="st-rs-na">' + why + '</div></div>';
     }
-    const arrPct = b.arr * 100;
-    const adrPct = b.adr != null ? b.adr * 100 : null;
-    const winPct = b.win_rate != null ? Math.round(b.win_rate * 100) : null;
+    // API emits the return field as total_return_pct (server.js ~1238), not
+    // return_pct — read the key the API surfaces, falling back for old rows.
+    const retSrc = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
+    const retPct = retSrc != null ? parseFloat(retSrc) : null;
+    const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
+    const winPct = b.hit_rate != null ? Math.round(b.hit_rate * 100) : null;
     const inner = ''
-      + '<div class="st-rs-row"><span>ARR</span><b style="color:' + (arrPct >= 0 ? 'var(--green)' : 'var(--red)') + '">'
-      +   (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%</b></div>'
-      + '<div class="st-rs-row"><span>ADR</span><b' + (adrPct != null ? ' style="color:' + (adrPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
-      +   (adrPct != null ? ((adrPct >= 0 ? '+' : '') + adrPct.toFixed(3) + '%') : '—') + '</b></div>'
-      + '<div class="st-rs-row"><span>ACT</span><b>' + (b.act != null ? b.act.toFixed(1) + 'd' : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Sharpe</span><b>' + (sharpe != null ? sharpe.toFixed(2) : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Return</span><b' + (retPct != null ? ' style="color:' + (retPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
+      +   (retPct != null ? ((retPct >= 0 ? '+' : '') + retPct.toFixed(1) + '%') : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Win</span><b>' + (winPct != null ? winPct + '%' : '—') + '</b></div>'
-      + '<div class="st-rs-row"><span>Trades</span><b>' + (b.trades || 0) + '</b></div>';
+      + '<div class="st-rs-row"><span>Trades</span><b>' + trades + '</b></div>';
     return '<div class="st-rs-cell">' + head + inner + '</div>';
   }).join('');
 
   // ── Similar strategies (overlap on at least one regime) ────────────────
-  // Heatmap cell shows live ARR % for that regime — directly comparable
+  // Heatmap cell shows backtest Sharpe for that regime — directly comparable
   // to the focused strategy's per-regime cells above.
   const myRegimes = new Set(r.active_in_regimes || []);
   const similar = Object.values(_stActiveSnapshot)
@@ -8817,12 +8691,13 @@ async function _stPaintExpand(sid) {
     .slice(0, 12);
   const similarHtml = similar.length ? similar.map(o => {
     const cells = _REGIME_AXIS.map(rg => {
-      const b = (o.live_regime_breakdown || {})[rg];
-      if (!b || !b.trades) return '<span class="st-sm-cell empty" title="' + rg + ': no live trades">—</span>';
-      const arrPct = b.arr != null ? b.arr * 100 : null;
-      const cls = arrPct == null ? 'empty' : (arrPct > 0 ? 'pos' : arrPct < 0 ? 'neg' : '');
-      const txt = arrPct == null ? '—' : (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%';
-      const ttl = rg + ': ARR ' + txt + ' · ' + b.trades + ' trades';
+      const b = (o.backtest_regime_breakdown || {})[rg];
+      const bt = (b && b.trade_count != null) ? parseInt(b.trade_count) : 0;
+      if (!b || !bt) return '<span class="st-sm-cell empty" title="' + rg + ': no backtest trades">—</span>';
+      const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
+      const cls = sharpe == null ? 'empty' : (sharpe > 0 ? 'pos' : sharpe < 0 ? 'neg' : '');
+      const txt = sharpe == null ? '—' : sharpe.toFixed(2);
+      const ttl = rg + ': Sharpe ' + txt + ' · ' + bt + ' trades';
       return '<span class="st-sm-cell ' + cls + '" title="' + _escStr(ttl) + '">' + txt + '</span>';
     }).join('');
     return '<div class="st-similar-row" title="Open ' + o.strategy_id + '">'
@@ -8836,9 +8711,9 @@ async function _stPaintExpand(sid) {
   body.innerHTML = \`
     <div class="st-expand-grid">
       <div class="st-expand-section">
-        <div class="st-expand-section-title"><span>Live Trades by Regime</span><span style="color:var(--dim);font-size:9px">ARR · ADR · ACT · Win · Trades</span></div>
+        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Return · Win · Trades</span></div>
         <div class="st-regime-stats">\${cellsHtml}</div>
-        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">live ARR % · share ≥1 regime · click to open</span></div>
+        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">backtest Sharpe · share ≥1 regime · click to open</span></div>
         <div class="st-similar">
           <div class="st-similar-row" style="background:transparent">
             <span class="st-sm-name" style="color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em">Strategy</span>
@@ -8848,24 +8723,23 @@ async function _stPaintExpand(sid) {
         </div>
       </div>
       <div class="st-expand-section st-arr-wrap">
-        <div class="st-expand-section-title"><span>ARR over time</span><span class="st-arr-window" style="color:var(--dim);font-size:9px">30-day rolling</span></div>
-        <div class="st-arr-meta" id="st-arr-meta-\${sid}"><span style="color:var(--dim)">Loading…</span></div>
-        <div class="st-arr-canvas-wrap"><canvas id="st-arr-chart-\${sid}"></canvas></div>
+        <div class="st-expand-section-title"><span>Backtest equity vs SP500</span><span style="color:var(--dim);font-size:9px">regime-shaded</span></div>
+        <div class="st-arr-canvas-wrap"><canvas id="st-eq-chart-\${sid}"></canvas></div>
         <div class="st-flow-row">
-          <div class="st-flow-meta" id="st-flow-meta-\${sid}"><span style="color:var(--dim);font-size:9.5px;letter-spacing:.04em">Positions opened / closed per day</span><span></span></div>
-          <div class="st-flow-canvas-wrap"><canvas id="st-flow-chart-\${sid}"></canvas></div>
+          <div class="st-flow-meta"><span style="color:var(--dim);font-size:9.5px">Backtest positions closed per regime</span><span></span></div>
+          <div class="st-flow-canvas-wrap"><canvas id="st-cpr-chart-\${sid}"></canvas></div>
         </div>
       </div>
     </div>\`;
 
-  // Fetch (or read cached) ARR curve. The canvas wrapper has fixed CSS
-  // height (.st-arr-canvas-wrap) so Chart.js can size correctly even
-  // while the shell's max-height transition is still running — no need
+  // Fetch (or read cached) backtest equity curve. The canvas wrapper has
+  // fixed CSS height (.st-arr-canvas-wrap) so Chart.js can size correctly
+  // even while the shell's max-height transition is still running — no need
   // to wait for transitionend.
   let payload = _stArrCache[sid];
   if (!payload) {
     if (!_stArrFetching[sid]) {
-      _stArrFetching[sid] = fetch('/api/strategies/' + encodeURIComponent(sid) + '/arr-curve?window=30')
+      _stArrFetching[sid] = fetch('/api/strategies/' + encodeURIComponent(sid) + '/backtest-curve')
         .then(r => r.ok ? r.json() : { rows: [] })
         .catch(() => ({ rows: [] }));
     }
@@ -8875,190 +8749,91 @@ async function _stPaintExpand(sid) {
   }
   // If the user closed or jumped to another row in the interim, bail out.
   if (_stExpandedSid !== sid) return;
-  _stRenderArrChart(sid, payload);
-  _stRenderFlowChart(sid, payload);
+  _stRenderEquityChart(sid, payload);
+  _stRenderClosedPerRegimeChart(sid, r);   // r.backtest_regime_breakdown
 }
 
-function _stRenderArrChart(sid, payload) {
-  const canvas = document.getElementById('st-arr-chart-' + sid);
-  const meta   = document.getElementById('st-arr-meta-' + sid);
+// Backtest equity-vs-SP500 line chart. Two datasets (strategy solid-blue
+// fill + SP500 dashed grey) over the precomputed backtest equity curve, with
+// the regimeBands plugin painting a per-point regime backdrop. Y-axis is
+// formatted as a growth multiple (Nx).
+let _stEqChart = null;
+function _stRenderEquityChart(sid, payload) {
+  const canvas = document.getElementById('st-eq-chart-' + sid);
   if (!canvas) return;
-  if (_stArrChart) { try { _stArrChart.destroy(); } catch (_) {} _stArrChart = null; }
+  if (_stEqChart) { try { _stEqChart.destroy(); } catch (_) {} _stEqChart = null; }
   const rows = (payload && payload.rows) || [];
-  if (!rows.length) {
-    if (meta) meta.innerHTML = '<span style="color:var(--dim)">No closed trades yet — ARR curve will fill in once trades close.</span>';
-    const wrap = canvas.parentElement;
-    if (wrap) wrap.style.display = 'none';
-    return;
-  }
   const wrap = canvas.parentElement;
+  if (!rows.length) { if (wrap) wrap.style.display = 'none'; return; }
   if (wrap) wrap.style.display = '';
   const labels = rows.map(r => r.date);
-  const values = rows.map(r => r.rolling_arr_pct != null ? r.rolling_arr_pct * 100 : null);
+  const strat  = rows.map(r => r.strat_equity);
+  const spx    = rows.map(r => r.spx_equity);
   const regimeMap = {};
   for (const r of rows) if (r.regime) regimeMap[r.date] = r.regime;
-  const last  = [...values].reverse().find(v => v != null);
-  const first = values.find(v => v != null);
-  if (meta) {
-    const lastTxt  = last  != null ? (last  >= 0 ? '+' : '') + last.toFixed(3) + '%' : '—';
-    const firstTxt = first != null ? (first >= 0 ? '+' : '') + first.toFixed(3) + '%' : '—';
-    meta.innerHTML = '<span>' + (payload.window_days || 30) + 'd rolling mean of realized P&amp;L per closed trade</span>'
-                   + '<span>start <b style="color:var(--text)">' + firstTxt + '</b> · latest <b style="color:var(--text)">' + lastTxt + '</b></span>';
-  }
-  const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-  _stArrChart = new Chart(canvas.getContext('2d'), {
+  _stEqChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
-    data: { labels, datasets: [{
-      data: values,
-      borderColor: '#58a6ff',
-      backgroundColor: 'rgba(88,166,255,0.10)',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.15,
-      spanGaps: false,
-    }]},
+    data: { labels, datasets: [
+      { label:'strategy', data:strat, borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,0.10)',
+        borderWidth:1.6, pointRadius:0, fill:true, tension:0.15 },
+      { label:'SP500', data:spx, borderColor:'#8b949e', borderWidth:1.2, pointRadius:0,
+        borderDash:[4,3], fill:false, tension:0.15 },
+    ]},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      // Disable initial animation — the chart's intro slide combined with
-      // the expand transition was contributing to the perceived "drift".
-      animation: false,
-      // Debounce ResizeObserver callbacks so layout reflows during the
-      // page's other live updates don't keep nudging the canvas.
-      resizeDelay: 200,
-      interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 0 } },
+      responsive:true, maintainAspectRatio:false, animation:false, resizeDelay:200,
+      interaction:{ mode:'index', intersect:false },
       plugins: {
-        legend: { display: false },
-        regimeBands: { map: regimeMap },
-        tooltip: {
-          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
-          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
-          displayColors: false, padding: 8,
-          callbacks: {
-            label: ctx => {
-              const r = rows[ctx.dataIndex];
-              const v = ctx.parsed.y;
-              const arr = v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(3) + '%';
-              return [
-                'ARR ' + arr,
-                'trades in window: ' + (r ? r.trade_count : 0),
-                'regime: ' + (r && r.regime ? r.regime : '—'),
-              ];
-            },
-          },
-        },
+        legend:{ display:true, labels:{ color:'#8b949e', font:{size:9}, boxWidth:10 } },
+        regimeBands:{ map: regimeMap },
+        tooltip:{ backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3', displayColors:true, padding:8,
+          callbacks:{ label: ctx => {
+            const r = rows[ctx.dataIndex];
+            return ctx.dataset.label + ' ' + ctx.parsed.y.toFixed(3) + 'x' +
+                   (ctx.datasetIndex===0 && r ? '  · '+(r.regime||'—') : '');
+          }}},
       },
       scales: {
-        x: { ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0 }, grid: { color:'rgba(48,54,61,0.45)' } },
-        y: { position:'right', ticks: { color:'#484f58', font:{size:9}, callback: fmt$, maxTicksLimit: 5 },
-             grid:  { color:'rgba(48,54,61,0.45)' } }
+        x:{ ticks:{ color:'#484f58', maxTicksLimit:8, font:{size:9} }, grid:{ color:'rgba(48,54,61,0.45)' } },
+        y:{ position:'right', ticks:{ color:'#484f58', font:{size:9}, callback:v=>v.toFixed(1)+'x', maxTicksLimit:5 },
+            grid:{ color:'rgba(48,54,61,0.45)' } }
       }
     }
   });
 }
 
-// Position-flow bar chart: positions opened (green) and closed (red) per
-// day, rendered directly underneath the ARR curve. Shares x-axis dates
-// with the ARR chart so the operator can correlate trade-flow density
-// with the per-trade economics line above. Bars are grouped (not
-// stacked) so a same-day open + close shows two distinguishable bars
-// rather than a fused colour block.
-function _stRenderFlowChart(sid, payload) {
-  const canvas = document.getElementById('st-flow-chart-' + sid);
-  const meta   = document.getElementById('st-flow-meta-' + sid);
+// Backtest positions-closed-per-regime bar chart. One bar per regime over
+// the fixed _CPR_AXIS, height = backtest_regime_breakdown[rg].trade_count,
+// coloured by regime. Hidden entirely when no regime has any trades.
+let _stCprChart = null;
+const _CPR_AXIS = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'];
+const _CPR_COLORS = { LOW_VOL:'rgba(63,185,80,0.9)', TRANSITIONING:'rgba(210,153,34,0.9)',
+                      HIGH_VOL:'rgba(240,136,62,0.9)', CRISIS:'rgba(248,81,73,0.9)' };
+function _stRenderClosedPerRegimeChart(sid, r) {
+  const canvas = document.getElementById('st-cpr-chart-' + sid);
   if (!canvas) return;
-  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
-  const rows = (payload && payload.rows) || [];
-  if (!rows.length) {
-    if (meta) meta.innerHTML = '<span style="color:var(--dim);font-size:9.5px">No trade flow yet.</span><span></span>';
-    const wrap = canvas.parentElement;
-    if (wrap) wrap.style.display = 'none';
-    return;
-  }
+  if (_stCprChart) { try { _stCprChart.destroy(); } catch (_) {} _stCprChart = null; }
+  const bd = r.backtest_regime_breakdown || {};
+  const counts = _CPR_AXIS.map(rg => (bd[rg] && bd[rg].trade_count) ? bd[rg].trade_count : 0);
   const wrap = canvas.parentElement;
+  if (!counts.some(c => c > 0)) { if (wrap) wrap.style.display = 'none'; return; }
   if (wrap) wrap.style.display = '';
-  const labels = rows.map(r => r.date);
-  const opened = rows.map(r => r.opened || 0);
-  const closed = rows.map(r => r.closed || 0);
-  const totalOpened = opened.reduce((a, b) => a + b, 0);
-  const totalClosed = closed.reduce((a, b) => a + b, 0);
-  if (meta) {
-    meta.innerHTML = '<span style="font-size:9.5px;letter-spacing:.04em">Positions <span style="color:var(--green);font-weight:600">opened</span> / <span style="color:var(--red);font-weight:600">closed</span> per day</span>'
-                   + '<span style="font-size:9.5px"><b style="color:var(--green)">' + totalOpened + ' opened</b> · <b style="color:var(--red)">' + totalClosed + ' closed</b></span>';
-  }
-  // Bar geometry:
-  //   barPercentage:      1.0  → opened + closed bars within the same day
-  //                              touch with no gap
-  //   categoryPercentage: 0.5  → each day's bar pair occupies half its
-  //                              slot, leaving the other half as inter-
-  //                              day whitespace so a month of bars reads
-  //                              cleanly even at narrow chart widths
-  _stFlowChart = new Chart(canvas.getContext('2d'), {
+  _stCprChart = new Chart(canvas.getContext('2d'), {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'opened',
-          data: opened,
-          backgroundColor: 'rgba(63,185,80,0.95)',
-          borderWidth:     0,
-          borderRadius:    0,
-          barPercentage:      1.0,
-          categoryPercentage: 0.5,
-        },
-        {
-          label: 'closed',
-          data: closed,
-          backgroundColor: 'rgba(248,81,73,0.95)',
-          borderWidth:     0,
-          borderRadius:    0,
-          barPercentage:      1.0,
-          categoryPercentage: 0.5,
-        },
-      ],
-    },
+    data: { labels: _CPR_AXIS, datasets: [{ data: counts,
+      backgroundColor: _CPR_AXIS.map(rg => _CPR_COLORS[rg]), borderWidth: 0, barPercentage: 0.7 }]},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: false,
-      resizeDelay: 200,
-      interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 0 } },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
-          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
-          displayColors: false, padding: 8,
-          callbacks: {
-            title: items => items[0]?.label || '',
-            label: ctx => {
-              const r = rows[ctx.dataIndex];
-              if (!r) return '';
-              return [
-                'opened: ' + (r.opened || 0),
-                'closed: ' + (r.closed || 0),
-              ];
-            },
-          },
-        },
-      },
+      responsive:true, maintainAspectRatio:false, animation:false, resizeDelay:200,
+      plugins: { legend:{ display:false },
+        tooltip:{ backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3', displayColors:false, padding:8,
+          callbacks:{ label: ctx => 'closed: ' + ctx.parsed.y }}},
       scales: {
-        x: {
-          ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0, maxRotation: 0 },
-          grid:  { display: false },
-          border:{ color:'#30363d' },
-        },
-        y: {
-          position:'right',
-          beginAtZero: true,
-          ticks: { color:'#484f58', font:{size:9}, maxTicksLimit: 3, precision: 0 },
-          grid:  { display: false },
-          border:{ display: false },
-        },
-      },
-    },
+        x:{ ticks:{ color:'#484f58', font:{size:9} }, grid:{ display:false } },
+        y:{ position:'right', beginAtZero:true, ticks:{ color:'#484f58', font:{size:9}, precision:0, maxTicksLimit:3 },
+            grid:{ display:false } }
+      }
+    }
   });
 }
 
