@@ -21,6 +21,11 @@ from execution.tradejohn_confirmer import confirm as default_confirmer
 logger = logging.getLogger(__name__)
 
 
+def _ortho_enabled(gate: str) -> bool:
+    import os
+    return os.environ.get(gate) == '1'
+
+
 def size_positions(
     signals: list[dict],
     account_state: dict,
@@ -363,6 +368,24 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
     else:
         logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
+
+    # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
+    _ortho_groups = None
+    if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
+            or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW'):
+        try:
+            from execution import strategy_similarity as _ss
+            _ortho_groups = _ss.load_groups(regime_state)
+        except Exception as e:
+            logger.warning('orthogonalization: load_groups failed (%s); proceeding without', e)
+            _ortho_groups = None
+
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_FOLD'):
+        from execution import orthogonalization as _og
+        before = len(active)
+        active = _og.fold_active_contributions(
+            active, _ortho_groups['fold_map'], _ortho_groups['rep_map'], sharpe_by_strat)
+        logger.info('orthogonalization.fold: %d -> %d contributions', before, len(active))
 
     # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
     # is the SIGNED sum of effective_sharpe — opposing strategies cancel
