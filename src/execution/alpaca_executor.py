@@ -593,6 +593,17 @@ def _resolve_option_qty(order: dict, limit_price: float) -> tuple[int, str | Non
     return 0, f'option: sub-contract sizing below minimum (notional ${notional:.0f})'
 
 
+def _options_session_gate() -> tuple[bool, str | None]:
+    """Options orders are RTH-only (per SP-5.0 grounding §4b).
+    Returns (allowed, skip_reason|None)."""
+    kind = _alpaca_session_kind()
+    if kind == 'rth':
+        return True, None
+    if kind == 'closed':
+        return False, 'option: market closed'
+    return False, f'option: RTH-only (current session={kind})'
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.

@@ -142,3 +142,25 @@ def test_qty_zero_contracts_skips():
     qty, reason = _resolve_option_qty(order={'contracts':0, 'notional_usd':100},
                                        limit_price=1.0)
     assert qty == 0 and reason and 'zero contracts' in reason
+
+from execution.alpaca_executor import _options_session_gate
+
+def test_options_session_gate_rth_allows():
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'):
+        ok, reason = _options_session_gate()
+    assert ok and reason is None
+
+def test_options_session_gate_premarket_skips():
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='premarket'):
+        ok, reason = _options_session_gate()
+    assert not ok and 'RTH-only' in reason
+
+def test_options_session_gate_closed_skips():
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='closed'):
+        ok, reason = _options_session_gate()
+    assert not ok and 'market closed' in reason
+
+def test_options_session_gate_afterhours_skips():
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='afterhours'):
+        ok, reason = _options_session_gate()
+    assert not ok and 'RTH-only' in reason
