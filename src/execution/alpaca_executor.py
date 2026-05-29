@@ -514,6 +514,29 @@ def _resolve_expiry(spec, as_of):
     return eligible[0] if eligible else None
 
 
+def _options_position_intent(direction: str, current_qty: float) -> tuple[str, str]:
+    """Resolves (side, position_intent) from desired direction and existing position.
+    Prevents the 422 'inferred sell_to_close vs specified sell_to_open' class of error
+    surfaced by SP-5.0 test-5."""
+    d = str(direction).lower()
+    if d == 'long':
+        return ('buy', 'buy_to_open') if current_qty >= 0 else ('buy', 'buy_to_close')
+    if d == 'short':
+        return ('sell', 'sell_to_open') if current_qty <= 0 else ('sell', 'sell_to_close')
+    raise ValueError(f"unknown direction: {direction!r}")
+
+
+def _options_current_qty(occ_symbol: str) -> float:
+    """Lookup existing option position qty by OCC symbol. Returns 0.0 if none."""
+    ok, payload, _ = _run_alpaca_cli(['position','list'])
+    if not ok or not payload: return 0.0
+    for p in payload:
+        if str(p.get('symbol')) == occ_symbol:
+            try: return float(p.get('qty', 0))
+            except (TypeError, ValueError): return 0.0
+    return 0.0
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.

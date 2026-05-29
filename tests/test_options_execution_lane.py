@@ -68,3 +68,21 @@ def test_resolve_expiry_returns_none_on_empty():
     spec = type('S',(),{'underlying':'SPY','dte_target':30,'right':'call'})()
     with patch('execution.alpaca_executor._list_expiries', return_value=[]):
         assert _resolve_expiry(spec, as_of=dt.date(2026,5,29)) is None
+
+from execution.alpaca_executor import _options_position_intent
+
+def test_intent_long_no_position():
+    s, i = _options_position_intent(direction='long', current_qty=0)
+    assert (s, i) == ('buy', 'buy_to_open')
+
+def test_intent_short_no_position():
+    s, i = _options_position_intent(direction='short', current_qty=0)
+    assert (s, i) == ('sell', 'sell_to_open')
+
+def test_intent_long_closes_existing_short():
+    s, i = _options_position_intent(direction='long', current_qty=-1)
+    assert (s, i) == ('buy', 'buy_to_close')
+
+def test_intent_short_closes_existing_long():
+    s, i = _options_position_intent(direction='short', current_qty=1)
+    assert (s, i) == ('sell', 'sell_to_close')
