@@ -330,7 +330,7 @@ async function _phaseDataPipelineSetup(job, ctx) {
 function _dataAlertsPoster() {
   try {
     const personas = require('../../channels/discord/agent-personas');
-    return (msg) => personas.post('databot', 'data-alerts', msg).catch(() => {});
+    return (msg) => personas.post('botjohn', 'data-alerts', msg).catch(() => {});
   } catch (_) {
     return () => {};
   }

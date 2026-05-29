@@ -9,8 +9,8 @@
  *
  * Usage:
  *   await agentPersonas.initWebhooks(client, channelMap);   // call once at startup
- *   agentPersonas.post('databot', 'data-alerts', 'message'); // post as DataBot
- *   agentPersonas.setStatus('databot', 'busy', 'Collecting AAPL prices');
+ *   agentPersonas.post('botjohn', 'data-alerts', 'message'); // post as BotJohn
+ *   agentPersonas.setStatus('botjohn', 'busy', 'Collecting AAPL prices');
  *   const all = await agentPersonas.getAllStatuses();
  */
 
@@ -26,7 +26,13 @@ const AGENTS = {
     emoji:       '🦞',
     model:       'claude-sonnet-4-6',
     description: 'Portfolio Manager & Orchestrator',
-    channelKeys: ['general', 'botjohn-log', 'ic-approvals'],
+    channelKeys: [
+      'general', 'botjohn-log', 'ic-approvals',
+      // Inherited from the retired DataBot persona — BotJohn now owns the
+      // data-pipeline alert surface (freshness, collector summaries,
+      // pipeline-feed step boundaries, strategy memos, pre-market alerts).
+      'data-alerts', 'pipeline-feed', 'strategy-memos', 'pre-market-alerts',
+    ],
   },
   // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below
   // (Opus 4.7) which now owns both #research-feed and #strategy-memos.
@@ -102,7 +108,7 @@ async function initWebhooks(client, channelMap) {
  * Post a message as an agent.
  * Falls back to direct channel send if webhook unavailable.
  *
- * @param {string} agentId    — 'databot' | 'researchdesk' | etc.
+ * @param {string} agentId    — 'botjohn' | 'mastermind' | 'tradedesk'
  * @param {string} channelKey — 'data-alerts' | 'pipeline-feed' | etc.
  * @param {string} message
  */

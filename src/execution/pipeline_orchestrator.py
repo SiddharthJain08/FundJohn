@@ -760,14 +760,14 @@ def main(argv=None):
     # Agent status mapping: step_key → (agent_id, busy_task, idle_task).
     # Covers the 10am cycle step list.
     STEP_AGENTS = {
-        'collect':     ('databot',      f'Collecting data: {run_date}',             None),
-        'sentiment':   ('databot',      f'Scraping social + scoring news: {run_date}', None),
-        'signals':     ('databot',      f'Running strategy signals: {run_date}',    None),
+        'collect':     ('botjohn',      f'Collecting data: {run_date}',             None),
+        'sentiment':   ('botjohn',      f'Scraping social + scoring news: {run_date}', None),
+        'signals':     ('botjohn',      f'Running strategy signals: {run_date}',    None),
         'ic_gate':     ('tradedesk',    f'IC approval gate: {run_date}',            None),
-        'handoff':     ('researchdesk', f'Building TradeJohn handoff: {run_date}',  None),
+        'handoff':     ('botjohn',      f'Building TradeJohn handoff: {run_date}',  None),
         'trade':       ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
         'alpaca':      ('tradedesk',    f'Submitting Alpaca orders: {run_date}',    None),
-        'reconcile':   ('databot',      f'Reconciling fills: {run_date}',           None),
+        'reconcile':   ('botjohn',      f'Reconciling fills: {run_date}',           None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 

@@ -404,7 +404,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         const tickerArgs = args.filter(a => !a.startsWith('--') && !/^(sp500|all)$/i.test(a));
 
         // DataBot owns all fill responses
-        const dbPost = (msg) => agentPersonas.post('databot', 'data-alerts', msg).catch(() => {});
+        const dbPost = (msg) => agentPersonas.post('botjohn', 'data-alerts', msg).catch(() => {});
 
         const fullUniverse = await storeLib.getActiveUniverse().catch(() => []);
         if (fullUniverse.length === 0) {
@@ -527,7 +527,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
         // Otherwise: natural language data collection request → data agent
         // DataBot owns all responses from here
-        const dbPost2 = (msg) => agentPersonas.post('databot', 'data-alerts', msg).catch(() => {});
+        const dbPost2 = (msg) => agentPersonas.post('botjohn', 'data-alerts', msg).catch(() => {});
 
         const description = args.join(' ').trim();
         if (!description) {
@@ -592,7 +592,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
       case 'data-status': {
         // DataBot reports its own task history
-        const dbPost3 = (msg) => agentPersonas.post('databot', 'data-alerts', msg).catch(() => notify(msg));
+        const dbPost3 = (msg) => agentPersonas.post('botjohn', 'data-alerts', msg).catch(() => notify(msg));
         const { Pool: DS2 } = require('pg');
         const ds2 = new DS2({ connectionString: process.env.POSTGRES_URI });
         const tasks = await ds2.query(
@@ -804,7 +804,6 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
             ``,
             `**Agents**`,
             agentStatusLine('botjohn',      '🦞'),
-            agentStatusLine('databot',      '📡'),
             agentStatusLine('mastermind', '🔬'),
             agentStatusLine('tradedesk',    '📈'),
             ``,
@@ -1713,13 +1712,13 @@ client.once('ready', async () => {
       if (data.message && (
         data.message.includes('✅') || data.message.includes('⚠️') || data.message.includes('📅') || data.message.includes('🚀')
       )) {
-        agentPersonas.post('databot', 'pipeline-feed', `\`${new Date().toISOString().slice(11, 19)}\` ${data.message}`).catch(() => {});
+        agentPersonas.post('botjohn', 'pipeline-feed', `\`${new Date().toISOString().slice(11, 19)}\` ${data.message}`).catch(() => {});
       }
     };
 
     // DataBot posts progress to #data-alerts every 10 tickers
     const alertPost = (msg) => {
-      agentPersonas.post('databot', 'data-alerts', msg).catch(() => {});
+      agentPersonas.post('botjohn', 'data-alerts', msg).catch(() => {});
       // Broadcast pipeline event to dashboard after each phase completion
       if (msg.includes('✅') && dashboardBroadcast) {
         dashboardBroadcast({ type: 'pipeline', message: msg });
@@ -1747,13 +1746,13 @@ client.once('ready', async () => {
         ``,
         `When done: \`!john /pipeline pause\` to halt | \`!john /shutdown confirm\` to stop the bot`,
       ].join('\n');
-      await agentPersonas.post('databot', 'data-alerts', msg).catch(() => {});
-      await agentPersonas.setStatus('databot', 'idle', 'Steady-state — awaiting next cycle');
+      await agentPersonas.post('botjohn', 'data-alerts', msg).catch(() => {});
+      await agentPersonas.setStatus('botjohn', 'idle', 'Steady-state — awaiting next cycle');
     };
 
     collector.setBroadcast(pipelineNotify);
     collector.setDiscordHooks({ presence: setPresence, alertPost, onComplete });
-    await agentPersonas.setStatus('databot', 'online', 'Pipeline running');
+    await agentPersonas.setStatus('botjohn', 'online', 'Pipeline running');
     collector.start().catch((err) => console.warn('[bot] Pipeline start error:', err.message));
     console.log('[bot] Data pipeline started');
   }

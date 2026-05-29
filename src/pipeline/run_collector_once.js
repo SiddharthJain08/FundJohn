@@ -7,7 +7,8 @@
  * script as the `collect` step. The collector runs one cycle against the
  * master parquets + configured universe and exits 0 on clean completion,
  * non-zero on any phase error. Posts a descriptive end-of-run summary to
- * #data-alerts via the DataBot webhook (bypasses bot-token 403s).
+ * #data-alerts via the BotJohn webhook (inherited from the retired
+ * DataBot persona; bypasses bot-token 403s).
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '../../.env') });
@@ -27,7 +28,7 @@ async function getWebhook() {
   await client.connect();
   try {
     const r = await client.query(
-      "SELECT webhook_urls FROM agent_registry WHERE id='databot'"
+      "SELECT webhook_urls FROM agent_registry WHERE id='botjohn'"
     );
     return ((r.rows[0]?.webhook_urls) || {})['data-alerts'] || null;
   } finally { await client.end(); }
@@ -130,7 +131,7 @@ async function main() {
   //   Ticker: `{ticker}` | Speed: **{rate} tickers/min** | ETA: **{eta}**
   //   Rows written this phase: **{rows}** | Errors: {errors}
   // Without setDiscordHooks the alerts go to console only — fix is to
-  // pipe an alertPost callback that POSTs to the DataBot webhook.
+  // pipe an alertPost callback that POSTs to the BotJohn webhook.
   let _webhookUrl = null;
   try { _webhookUrl = await getWebhook(); } catch (_) { /* best effort */ }
   if (_webhookUrl) {

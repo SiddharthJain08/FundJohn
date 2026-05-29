@@ -7,8 +7,8 @@
  * Invoked by pipeline_orchestrator.py as the final `health` step after
  * all trading has completed. Builds the digest (via the existing
  * src/engine/daily-health-digest buildDigest) and posts it to
- * #pipeline-feed via the DataBot persona webhook persisted in
- * agent_registry.webhook_urls.
+ * #botjohn-log via the BotJohn persona webhook persisted in
+ * agent_registry.webhook_urls (was DataBot pre-2026-05-28).
  *
  * Posting via webhook URL (not bot token) bypasses Discord channel
  * role-permission issues that blocked direct bot POSTs.

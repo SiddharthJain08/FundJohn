@@ -57,6 +57,10 @@ const STRUCTURE = [
         name: 'data-alerts', key: 'data-alerts', operatorWrite: false,
         topic: 'API errors, rate limit warnings, missing data gaps, and coverage drops.',
       },
+      {
+        name: 'pre-market-alerts', key: 'pre-market-alerts', operatorWrite: false,
+        topic: 'Pre-market data alerts — panic scanner, EDGAR 8-K filings, overnight sentiment spikes.',
+      },
     ],
   },
   {

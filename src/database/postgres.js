@@ -21,10 +21,21 @@ function getPool() {
 
 async function query(sql, params = []) {
   const client = await getPool().connect();
+  let errored = null;
   try {
     return await client.query(sql, params);
+  } catch (err) {
+    errored = err;
+    throw err;
   } finally {
-    client.release();
+    // Pass the error to release(): a truthy arg DESTROYS the connection rather
+    // than returning it to the pool. Without this, a query that aborts a
+    // transaction (e.g. a non-idempotent migration on re-run) leaves the
+    // connection in "current transaction is aborted" state and every
+    // subsequent caller that picks it up fails silently. Pre-existing wart in
+    // migrations 008/027/069; surfaced 2026-05-29 when agent_registry
+    // webhook_urls writes all started failing post-restart.
+    client.release(errored);
   }
 }
 

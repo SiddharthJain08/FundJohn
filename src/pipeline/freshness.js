@@ -112,12 +112,13 @@ async function runFreshnessCheck({ warnThreshold = 'stale' } = {}) {
       lines.push(`\`${line}\``);
     }
 
-    // Phase 4: surface staleness in #data-alerts via DataBot. Lazy-require
-    // agent-personas to avoid circular imports at boot.
+    // Surface staleness in #data-alerts via BotJohn (inherited from the
+    // retired DataBot persona). Lazy-require agent-personas to avoid
+    // circular imports at boot.
     try {
       const { post: _post } = require('../channels/discord/agent-personas');
       const body = [`⚠️ **Freshness alert — ${alerts.length} dataset(s) stale**`, ...lines].join('\n');
-      Promise.resolve(_post('databot', 'data-alerts', body)).catch(() => {});
+      Promise.resolve(_post('botjohn', 'data-alerts', body)).catch(() => {});
     } catch (_) { /* personas not ready */ }
   }
   return { rows: report, alerts, skipped: false };

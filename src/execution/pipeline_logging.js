@@ -31,17 +31,17 @@ const STEP_FAILURE_CHANNEL = {
 // Which agent's identity claims each step in the dashboard registry.
 // Ported from pipeline_orchestrator.py:743-758.
 const STEP_AGENTS = {
-  'collect':                'databot',
-  'sentiment':              'databot',
-  'signals':                'databot',
+  'collect':                'botjohn',
+  'sentiment':              'botjohn',
+  'signals':                'botjohn',
   'ic_gate':                'tradebot',
   'handoff':                'tradebot',
   'trade':                  'tradebot',
   'alpaca':                 'tradebot',
   'reconcile':              'tradebot',
   'report':                 'tradebot',
-  'pyportfolioopt_shadow':  'databot',
-  'health':                 'databot',
+  'pyportfolioopt_shadow':  'botjohn',
+  'health':                 'botjohn',
 };
 
 async function _safePost(channel, text) {
