@@ -113,14 +113,18 @@ def main():
     if os.environ.get('OPENCLAW_FOLD_REPORT_POST') == '1':
         import json
         import urllib.request
+        import urllib.error
         url = _get_strategy_memos_webhook()
         if url:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps({'content': msg[:1900]}).encode(),
-                headers={'Content-Type': 'application/json'},
-            )
-            urllib.request.urlopen(req, timeout=10)
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps({'content': msg[:1900]}).encode(),
+                    headers={'Content-Type': 'application/json'},
+                )
+                urllib.request.urlopen(req, timeout=10)
+            except Exception as e:
+                print(f'fold_report: webhook post failed ({e})')
         else:
             print('[fold_report] OPENCLAW_FOLD_REPORT_POST=1 but no webhook URL found '
                   '(set DISCORD_STRATEGY_MEMOS_WEBHOOK or seed agent_registry.webhook_urls)')
