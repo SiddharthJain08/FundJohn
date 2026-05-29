@@ -65,6 +65,7 @@ def _build_steps() -> list[tuple[str, str]]:
         ('trade',                'regime_blended_sizer_live'), # sizer + TradeJohn confirmer
         ('alpaca',               'alpaca_executor'),           # submit to Alpaca
         ('reconcile',            'alpaca_reconcile'),          # reconcile fills
+        ('stop_reattach',        'stop_reattach'),             # attach GTC stops to naked positions (gated OPENCLAW_STOP_REATTACH, default-ON)
         ('report',               'send_report'),               # post to Discord
         ('pyportfolioopt_shadow','pyportfolioopt_shadow'),     # shadow alt-sizer (active daily step; gated on OPENCLAW_PYPORTFOLIOOPT_SHADOW=1; never routes)
         ('health',               'daily_health_digest'),       # daily health digest
@@ -768,6 +769,7 @@ def main(argv=None):
         'trade':       ('tradedesk',    f'TradeJohn signal generation: {run_date}', None),
         'alpaca':      ('tradedesk',    f'Submitting Alpaca orders: {run_date}',    None),
         'reconcile':   ('botjohn',      f'Reconciling fills: {run_date}',           None),
+        'stop_reattach': ('tradedesk',  f'Attaching protective stops: {run_date}',  None),
         'report':      ('tradedesk',    f'Daily report: {run_date}',                'Steady-state — awaiting next cycle'),
     }
 
