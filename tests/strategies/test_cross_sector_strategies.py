@@ -55,8 +55,11 @@ def _sector_prices():
         'XOM':  np.linspace(150, 90, 300),
         'XLK':  np.linspace(80, 130, 300),
         'XLE':  np.linspace(130, 85, 300),
+        # Mixed broad market (SPY up, QQQ down) so confirm-mode can corroborate BOTH a
+        # LONG (AAPL: XLK up + SPY up) and a SHORT (XOM: XLE down + QQQ down) in one bar —
+        # sector_flow.confirm requires >=1 broad ETF aligned with the trade direction.
         'SPY':  np.linspace(380, 520, 300),
-        'QQQ':  np.linspace(300, 460, 300),
+        'QQQ':  np.linspace(460, 300, 300),
     }, index=idx)
 
 
