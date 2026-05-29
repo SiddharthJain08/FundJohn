@@ -106,6 +106,22 @@ def _active_universe() -> list[str]:
     return sorted(resolver.union_universe(as_of=_date.today(), states=('live', 'candidate')))
 
 
+def _flush(new_rows: list[dict]) -> tuple[int, int]:
+    """Append-only merge `new_rows` into SENT_PATH immediately. Returns (before, after).
+
+    Called per-window so a long backfill is crash-safe, resumable (existing (ticker,date)
+    rows win on re-run), and yields usable partial depth before the full run completes.
+    """
+    existing = pd.read_parquet(SENT_PATH) if SENT_PATH.exists() else pd.DataFrame()
+    before = len(existing)
+    if not new_rows:
+        return before, before
+    new_df = pd.DataFrame(new_rows, columns=NEWS_COLS).drop_duplicates(['ticker', 'date'])
+    merged = merge_append_only(existing, new_df)
+    merged.to_parquet(SENT_PATH, index=False)
+    return before, len(merged)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--start', required=True)
@@ -122,28 +138,28 @@ def main():
         sys.exit('no symbols (pass --symbols or --universe-active)')
 
     windows = pd.date_range(args.start, args.end, freq=f'{args.chunk_days}D')
-    all_rows: list[dict] = []
+    dry_total = 0
     for i in range(len(windows)):
         w_start = windows[i].strftime('%Y-%m-%dT00:00:00Z')
         w_end = (windows[i + 1] if i + 1 < len(windows) else pd.Timestamp(args.end)).strftime('%Y-%m-%dT23:59:59Z')
+        # Collect this window's rows across symbol-chunks, then flush incrementally.
+        window_rows: list[dict] = []
         for j in range(0, len(symbols), 50):
             chunk = symbols[j:j + 50]
             arts = _fetch_window(chunk, w_start, w_end)
             if arts:
-                all_rows.extend(articles_to_daily_rows(score_articles(arts)))
-        print(f'[backfill] window {w_start[:10]} rows so far={len(all_rows)}', file=sys.stderr)
+                window_rows.extend(articles_to_daily_rows(score_articles(arts)))
+        if args.dry_run:
+            uniq = (len(pd.DataFrame(window_rows, columns=NEWS_COLS).drop_duplicates(['ticker', 'date']))
+                    if window_rows else 0)
+            dry_total += uniq
+            print(f'[dry-run] window {w_start[:10]}: +{uniq} (cum {dry_total})', file=sys.stderr)
+        else:
+            before, after = _flush(window_rows)
+            print(f'[backfill] window {w_start[:10]} flushed: {before} -> {after} rows', file=sys.stderr)
 
-    new_df = pd.DataFrame(all_rows, columns=NEWS_COLS)
-    # Chunk windows overlap on the shared boundary day, so boundary-day articles
-    # can be fetched in two adjacent windows -> duplicate (ticker,date) rows.
-    new_df = new_df.drop_duplicates(['ticker', 'date'])
     if args.dry_run:
-        print(f'[dry-run] would append {len(new_df)} (ticker,date) rows', file=sys.stderr)
-        return
-    existing = pd.read_parquet(SENT_PATH) if SENT_PATH.exists() else pd.DataFrame()
-    merged = merge_append_only(existing, new_df)
-    merged.to_parquet(SENT_PATH, index=False)
-    print(f'[backfill] sentiment.parquet rows {len(existing)} -> {len(merged)}', file=sys.stderr)
+        print(f'[dry-run] would append ~{dry_total} (ticker,date) rows total', file=sys.stderr)
 
 
 if __name__ == '__main__':
