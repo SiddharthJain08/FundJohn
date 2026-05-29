@@ -432,6 +432,18 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
     return t
 
 
+def _build_occ_symbol(spec, strike: float, expiry) -> str:
+    """OCC option symbol: <root><YYMMDD><C|P><strike*1000, 8-digit zero-pad>.
+    e.g. SPY 2026-06-18 call 750 -> 'SPY260618C00750000'."""
+    if strike <= 0:
+        raise ValueError(f"strike must be > 0; got {strike}")
+    root = spec.underlying.upper()
+    ymd = expiry.strftime('%y%m%d')
+    cp = 'C' if str(spec.right).lower() == 'call' else 'P'
+    strike_int = int(round(strike * 1000))
+    return f"{root}{ymd}{cp}{strike_int:08d}"
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
