@@ -17,6 +17,9 @@ LIMITATIONS (documented, by design):
     execution_signals), so the "current" max-weight pick degenerates to the first
     deterministic (strategy_id-ordered) finite bracket. The stacked policy does not
     depend on weight, so the comparison still isolates the exit-shape effect.
+  * The current vs. stacked policies may anchor to different entry_price values
+    when co-firing strategies wrote different entries; pnl_pct is relative so the
+    comparison remains valid as an exit-shape diagnostic.
 Read-only. Touches no master data.
 
 Usage: python3 scripts/backtest_bracket_stacking.py [--days N] [--regime LOW_VOL] [--max-hold 10]

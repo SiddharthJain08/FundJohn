@@ -104,3 +104,26 @@ def test_rep_tiebreak_is_deterministic_smallest_sid():
     # Tie on sharpe -> 'Aaa' chosen -> stop 5%, tp 9%.
     assert math.isclose(out['stop'], 95.0, rel_tol=1e-9)
     assert math.isclose(out['t1'], 109.0, rel_tol=1e-9)
+
+
+def test_t2_never_inverts_past_stacked_t1():
+    # Long: anchor t2 (108) is below the stacked t1 (110) -> clamp up to t1.
+    cands = [
+        _b('A', 1, 5.0, 100.0, 98.0, 105.0, t2=108.0),   # block1, sharpe high (anchor)
+        _b('B', 1, 5.0, 100.0, 96.0, 105.0, t2=109.0),   # block2
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': 2.0, 'B': 1.0})
+    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
+    assert out['t2'] >= out['t1']                         # no inversion
+
+    # Single block long with a finite t2 above t1 is preserved unchanged.
+    out1 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=112.0)], 1,
+                              block_map={'A': 1}, eff_sharpe={'A': 1.0})
+    assert math.isclose(out1['t1'], 105.0, rel_tol=1e-9)
+    assert math.isclose(out1['t2'], 112.0, rel_tol=1e-9)
+
+    # None t2 stays None.
+    out2 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=None)], 1,
+                              block_map={'A': 1}, eff_sharpe={'A': 1.0})
+    assert out2['t2'] is None

@@ -113,8 +113,15 @@ def stacked_bracket(brackets: list[dict], dir_sign: int,
     else:
         stop = entry * (1.0 + stop_total)
         t1 = entry * (1.0 - tp_total)
+    _t2 = anchor['t2']
+    if not _finite(_t2):
+        t2_out = None
+    elif dir_sign > 0:
+        t2_out = max(float(_t2), t1)
+    else:
+        t2_out = min(float(_t2), t1)
     return {
-        'entry': entry, 'stop': stop, 't1': t1, 't2': anchor['t2'],
+        'entry': entry, 'stop': stop, 't1': t1, 't2': t2_out,
         'weight': max(r['weight'] for r in reps),
         'direction': dir_sign, 'n_blocks': len(reps),
         'why': (f'stacked tp={tp_total:.4f}(sum={tp_sum:.4f},'
