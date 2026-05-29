@@ -9,6 +9,7 @@ const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
+const { buildStrategyRow } = require('./strategy_row');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1157,8 +1158,10 @@ app.get('/api/strategies', async (req, res) => {
     const path  = require('path');
     const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
-    const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
+    // strategy_stats is retained SOLELY to discover orphan strategy_ids
+    // (signals but no manifest entry). Its metric columns are no longer read
+    // — every per-strategy metric is now backtest-sourced (Task 7 rewrite).
+    const statsRows = (await dbQuery(`SELECT strategy_id FROM strategy_stats`)).rows;
 
     // Load regime_conditions + backtest/live metrics from strategy_registry DB.
     // Saturday-brain additions (058): data_requirements_planned (the missing
@@ -1200,11 +1203,12 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRunRows = (await dbQuery(`
       SELECT DISTINCT ON (strategy_id)
              strategy_id, total_sharpe, total_max_dd_pct, total_return_pct,
-             total_trades, run_at
+             total_trades, total_hit_rate, avg_holding_days, run_at
       FROM strategy_backtest_runs
       WHERE primary_window = TRUE
       ORDER BY strategy_id, run_at DESC
     `).catch(() => ({ rows: [] }))).rows;
+    const ubtRunById = Object.fromEntries(ubtRunRows.map(r => [r.strategy_id, r]));
     const ubtRegimeRows = (await dbQuery(`
       SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
              br.max_dd_pct, br.return_pct, br.hit_rate
@@ -1292,87 +1296,34 @@ app.get('/api/strategies', async (req, res) => {
       console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
     }
 
-    // Cumulative per-strategy O/U/E counts (Over / Under / Expected)
-    // across every closed trade. Replaces 2026-05-16 the prior O/U/R
-    // (Rejected-signal-count) metric — see migration 101 + oue_classifier.py.
-    // Invariant: O + U + E = total closed trades for that strategy.
-    //   O = realized > expectation by ≥1σ
-    //   U = realized < expectation by ≥1σ
-    //   E = within ±1σ band (i.e. behaved as the GBM model predicted)
-    const d1StrategyStats = {};
-    try {
-      const oueRes = await dbQuery(`
-        SELECT strategy_id, oue_kind, COUNT(*)::int AS n
-          FROM execution_signals
-         WHERE strategy_id IS NOT NULL
-           AND oue_kind IS NOT NULL
-         GROUP BY strategy_id, oue_kind
-      `).catch(() => ({ rows: [] }));
-      for (const row of oueRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, expected: 0 });
-        if (row.oue_kind === 'over')     s.overperf  = row.n;
-        if (row.oue_kind === 'under')    s.underperf = row.n;
-        if (row.oue_kind === 'expected') s.expected  = row.n;
-      }
-    } catch (_) {}
+    // ── Backtest dashboard panel (precomputed; strategy_backtest_panel) ──
+    // Effective Sharpe + GBM-σ OUE counts (overall + per regime). This
+    // REPLACES the prior live OUE (execution_signals.oue_kind), the live
+    // per-regime aggregates (signal_pnl × execution_signals), and the live
+    // strategy_weights_by_regime OUE multiplier — every per-strategy metric
+    // is now backtest-sourced (only last_signal_date + status stay live).
+    const panelRows = (await dbQuery(`
+      SELECT strategy_id, effective_sharpe, oue_over, oue_under, oue_expected, oue_by_regime
+        FROM strategy_backtest_panel`).catch(() => ({ rows: [] }))).rows;
+    const panelById = Object.fromEntries(panelRows.map(r => [r.strategy_id, r]));
 
-    // Live per-strategy per-regime aggregates, computed from closed trades.
-    // Joined to execution_signals for the regime tag captured at signal entry.
-    // Keyed by strategy_id → regime_state → {trades, arr, adr, act, win_rate}.
-    // arr is a fraction (0.05 = 5%); the dashboard converts to percent for
-    // display, matching the convention used elsewhere on the page.
-    const liveRegimeBreakdown = {};
-    try {
-      const lrRes = await dbQuery(`
-        SELECT es.strategy_id,
-               es.regime_state                                                  AS regime,
-               COUNT(*)::int                                                    AS trades,
-               AVG(sp.realized_pnl_pct)                                         AS arr,
-               AVG(sp.days_held)                                                AS act,
-               COUNT(*) FILTER (WHERE sp.realized_pnl_pct > 0)::numeric
-                 / NULLIF(COUNT(*), 0)                                          AS win_rate,
-               MIN(sp.realized_pnl_pct)                                         AS worst,
-               MAX(sp.realized_pnl_pct)                                         AS best
-        FROM signal_pnl sp
-        JOIN execution_signals es ON sp.signal_id = es.id
-        WHERE sp.status = 'closed'
-          AND sp.realized_pnl_pct IS NOT NULL
-          AND es.regime_state IS NOT NULL
-        GROUP BY es.strategy_id, es.regime_state
-      `);
-      for (const row of lrRes.rows) {
-        const arr  = row.arr != null ? parseFloat(row.arr) : null;
-        const act  = row.act != null ? parseFloat(row.act) : null;
-        const adr  = (arr != null && act != null && act > 0) ? (arr / act) : null;
-        if (!liveRegimeBreakdown[row.strategy_id]) liveRegimeBreakdown[row.strategy_id] = {};
-        liveRegimeBreakdown[row.strategy_id][row.regime] = {
-          trades:    parseInt(row.trades) || 0,
-          arr,                          // fraction (0.05 = 5%)
-          adr,                          // fraction per day
-          act,                          // days
-          win_rate:  row.win_rate != null ? parseFloat(row.win_rate) : null,
-          best:      row.best != null ? parseFloat(row.best) : null,
-          worst:     row.worst != null ? parseFloat(row.worst) : null,
-        };
-      }
-    } catch (_) { /* leave breakdown empty if join fails */ }
+    // Best/worst realized trade % from the latest primary_window backtest run.
+    const bwRows = (await dbQuery(`
+      SELECT t.strategy_id, MAX(t.pnl_pct) AS best, MIN(t.pnl_pct) AS worst
+        FROM strategy_backtest_trades t
+        JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+                FROM strategy_backtest_runs WHERE primary_window=TRUE
+                ORDER BY strategy_id, run_at DESC) r ON r.run_id=t.run_id
+       GROUP BY t.strategy_id`).catch(() => ({ rows: [] }))).rows;
+    const bwById = Object.fromEntries(bwRows.map(r => [r.strategy_id, r]));
 
-    // Per-strategy per-regime OUE multiplier from the latest strategy_weights_by_regime
-    // snapshot. Surfaced as the "# O/U/E" cell tooltip. Written by the
-    // Sunday weight cron (strategy_weights.py rebuild()).
-    const oueMultipliersByStrategy = {};
-    try {
-      const omRes = await dbQuery(`
-        SELECT strategy_id, regime_state, oue_multiplier
-          FROM strategy_weights_by_regime
-         WHERE is_current
-           AND oue_multiplier IS NOT NULL
-      `);
-      for (const row of omRes.rows) {
-        if (!oueMultipliersByStrategy[row.strategy_id]) oueMultipliersByStrategy[row.strategy_id] = {};
-        oueMultipliersByStrategy[row.strategy_id][row.regime_state] = parseFloat(row.oue_multiplier);
-      }
-    } catch (_) { /* leave empty if column missing pre-migration */ }
+    // Last signal date — the ONLY live per-strategy fact retained (drives
+    // is_stale + the Last Signal column).
+    const lsRows = (await dbQuery(`
+      SELECT strategy_id, MAX(signal_date) AS last_signal_date
+        FROM execution_signals WHERE strategy_id IS NOT NULL GROUP BY strategy_id`
+      ).catch(() => ({ rows: [] }))).rows;
+    const lastSignalById = Object.fromEntries(lsRows.map(r => [r.strategy_id, r.last_signal_date]));
 
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
@@ -1382,14 +1333,15 @@ app.get('/api/strategies', async (req, res) => {
     const seen = new Set();
     for (const [sid, rec] of Object.entries(manifest.strategies || {})) {
       seen.add(sid);
-      const s   = statsById[sid] || {};
       const sr  = srById[sid]    || {};
       const rc  = sr.regime_conditions || {};
       const activeRegimes = rc.active_in_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL'];
       const regimeActive  = activeRegimes.includes(currentRegime);
-      const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
+      // last_signal_date is now sourced from execution_signals (lastSignalById)
+      // so is_stale and the Last Signal column share one live source.
+      const _lastSig = lastSignalById[sid] || null;
+      const lastTs   = _lastSig ? new Date(_lastSig).getTime() : 0;
       const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
-      const d1 = d1StrategyStats[sid] || null;
       // Eligibility precedence: strategy_regime_params (Phase 2A DB
       // source-of-truth, what the live sizer enforces) → manifest
       // eligible_regimes (legacy, may still be set on unmigrated rows) →
@@ -1407,110 +1359,53 @@ app.get('/api/strategies', async (req, res) => {
       const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
       const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
       rows.push({
-        strategy_id:        sid,
-        state:              rec.state || 'unknown',
-        is_stale:           isStale,
-        regime_active:      regimeActive,
-        active_in_regimes:  activeRegimes,
-        eligible_regimes:   _eligRaw,
-        current_regime:     currentRegime,
-        description:        rec.metadata?.description || '',
-        state_since:        rec.state_since || null,
-        open_count:         s.open_count || 0,
-        closed_count:       s.closed_count || 0,
-        total_count:        s.total_count || 0,
-        wins:               s.wins || 0,
-        losses:             s.losses || 0,
-        win_rate:           s.win_rate,
-        avg_realized_pct:   s.avg_realized_pct,
-        avg_unrealized_pct: s.avg_unrealized_pct,
-        best_trade_pct:     s.best_trade_pct,
-        worst_trade_pct:    s.worst_trade_pct,
-        avg_days_held:      s.avg_days_held,
-        last_signal_date:   s.last_signal_date,
-        dominant_regime:    s.dominant_regime,
-        // Unified backtest (2026-05-14) is canonical; fall back to legacy
-        // strategy_registry columns for strategies not yet backfilled.
-        backtest_sharpe:           unifiedBacktest[sid]?.sharpe           ?? sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       unifiedBacktest[sid]?.return_pct       ?? sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      unifiedBacktest[sid]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: _decoratedBreakdown,
-        backtest_run_at:           unifiedBacktest[sid]?.run_at           ?? null,
-        live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
-        live_days:           sr.live_days           ?? null,
-        live_sharpe:         sr.live_sharpe         ?? null,
-        live_return_pct:     sr.live_return_pct     ?? null,
-        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
-        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_expected:         d1 ? (d1.expected  || 0) : 0,
-        // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
-        // also feeds the live weights-by-regime engine.
-        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
-        // Saturday-brain Tier-B fields. Only populated for state='staging'
-        // strategies pushed by Saturday brain. The dashboard's strategies
-        // page renders these so the operator sees exactly what the Approve
-        // click would fetch + when they last approved.
+        ...buildStrategyRow({
+          sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime,
+          run: ubtRunById[sid] || {},
+          regimeBreakdown: _decoratedBreakdown,
+          panel: panelById[sid] || null,
+          bestWorst: bwById[sid] || {},
+          lastSignalDate: _lastSig,
+        }),
+        // Carry-overs the active-stack rewrite (Tasks 9/10) does NOT cover but
+        // the CANDIDATE-table renderer (_renderCandidates) still reads. The
+        // mapper already emits backtest_return_pct / backtest_max_dd_pct /
+        // backtest_regime_breakdown; it does NOT emit these two, so restore
+        // them (same unified→legacy fallback) to keep the candidate table's
+        // BT Sharpe + Backtest Trades columns + sort keys working.
+        backtest_sharpe:           unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
+        backtest_trade_count:      unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
+        // Non-metric carry-overs preserved for the staging UI (NOT backtest
+        // metrics): lifecycle timestamp + Saturday-brain staging fields that
+        // drive the candidate table's Approve flow + ⚠ data badge.
+        state_since:               rec.state_since || null,
         data_requirements_planned: sr.data_requirements_planned || null,
         staging_approved_at:       sr.staging_approved_at || null,
-        // Columns from data_requirements_planned that no collector/provider
-        // knows about — would fail the staging worker's source-validation
-        // step. Dashboard renders a ⚠ data badge on staging rows.
         unsupported_sources:       unsupportedByStrategyId[sid] || null,
       });
     }
-    // Orphans: strategy_ids with signals but no manifest entry
+    // Orphans: strategy_ids with signals but no manifest entry. statsRows
+    // (Q1 strategy_stats) is retained SOLELY to discover these — its metric
+    // columns are no longer read (every metric is now backtest-sourced).
+    // Orphans route through the same backtest mapper with a synthetic rec.
     for (const s of statsRows) {
       if (seen.has(s.strategy_id)) continue;
-      const sr = srById[s.strategy_id] || {};
-      const d1 = d1StrategyStats[s.strategy_id] || null;
-      rows.push({
-        strategy_id:        s.strategy_id,
-        state:              'orphan',
-        is_stale:           false,
-        regime_active:      true,
-        active_in_regimes:  [],
-        eligible_regimes:   null,
-        current_regime:     currentRegime,
-        description:        '',
-        state_since:        null,
-        open_count:         s.open_count || 0,
-        closed_count:       s.closed_count || 0,
-        total_count:        s.total_count || 0,
-        wins:               s.wins || 0,
-        losses:             s.losses || 0,
-        win_rate:           s.win_rate,
-        avg_realized_pct:   s.avg_realized_pct,
-        avg_unrealized_pct: s.avg_unrealized_pct,
-        best_trade_pct:     s.best_trade_pct,
-        worst_trade_pct:    s.worst_trade_pct,
-        avg_days_held:      s.avg_days_held,
-        last_signal_date:   s.last_signal_date,
-        dominant_regime:    s.dominant_regime,
-        // Unified backtest (2026-05-14) is canonical; fall back to legacy
-        // strategy_registry columns for strategies not yet backfilled.
-        backtest_sharpe:           unifiedBacktest[s.strategy_id]?.sharpe           ?? sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       unifiedBacktest[s.strategy_id]?.return_pct       ?? sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       unifiedBacktest[s.strategy_id]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      unifiedBacktest[s.strategy_id]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: _decorateDeclared(
-          unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
-          null,  // orphans have no manifest → no declared eligibility
-        ),
-        backtest_run_at:           unifiedBacktest[s.strategy_id]?.run_at           ?? null,
-        live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
-        live_days:           sr.live_days           ?? null,
-        live_sharpe:         sr.live_sharpe         ?? null,
-        live_return_pct:     sr.live_return_pct     ?? null,
-        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
-        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_expected:         d1 ? (d1.expected  || 0) : 0,
-        // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
-        // also feeds the live weights-by-regime engine.
-        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
-      });
+      const sid = s.strategy_id;
+      const sr  = srById[sid] || {};
+      const _orphanBreakdown = _decorateDeclared(
+        unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        null,  // orphans have no manifest → no declared eligibility
+      );
+      rows.push(buildStrategyRow({
+        sid, rec: { state: 'orphan', metadata: {} },
+        isStale: false, regimeActive: true, activeRegimes: [], eligRaw: null,
+        currentRegime,
+        run: ubtRunById[sid] || {},
+        regimeBreakdown: _orphanBreakdown,
+        panel: panelById[sid] || null,
+        bestWorst: bwById[sid] || {},
+        lastSignalDate: lastSignalById[sid] || null,
+      }));
     }
     res.json(rows);
   } catch (err) {
