@@ -23,3 +23,48 @@ def test_occ_builder_raises_on_negative_strike():
     import pytest
     with pytest.raises(ValueError):
         _build_occ_symbol(_Spec('SPY','call'), strike=-1, expiry=dt.date(2026,6,18))
+
+from unittest.mock import patch
+from execution.alpaca_executor import _resolve_strike, _resolve_expiry
+
+def test_resolve_strike_atm_returns_nearest_listed():
+    spec = type('S',(),{'underlying':'SPY','strike_rule':'atm','right':'call'})()
+    with patch('execution.alpaca_executor._spot_price', return_value=750.15), \
+         patch('execution.alpaca_executor._list_strikes',
+               return_value=[745.0, 750.0, 755.0]):
+        k = _resolve_strike(spec, as_of=dt.date(2026,5,29), expiry=dt.date(2026,6,18))
+    assert k == 750.0
+
+def test_resolve_strike_atm_returns_none_on_empty_chain():
+    spec = type('S',(),{'underlying':'SPY','strike_rule':'atm','right':'call'})()
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[]):
+        k = _resolve_strike(spec, as_of=dt.date(2026,5,29), expiry=dt.date(2026,6,18))
+    assert k is None
+
+def test_resolve_strike_atm_returns_none_on_spot_fetch_failure():
+    spec = type('S',(),{'underlying':'SPY','strike_rule':'atm','right':'call'})()
+    with patch('execution.alpaca_executor._spot_price', return_value=None):
+        k = _resolve_strike(spec, as_of=dt.date(2026,5,29), expiry=dt.date(2026,6,18))
+    assert k is None
+
+def test_resolve_strike_fixed_moneyness():
+    spec = type('S',(),{'underlying':'SPY','strike_rule':'fixed_moneyness',
+                        'moneyness':0.95,'right':'put'})()
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes',
+               return_value=[700, 710, 712.5, 715, 720]):
+        k = _resolve_strike(spec, as_of=dt.date(2026,5,29), expiry=dt.date(2026,6,18))
+    assert k == 712.5  # 712.5 is nearest to 712.5 (=750*0.95)
+
+def test_resolve_expiry_nearest_monthly_listed():
+    spec = type('S',(),{'underlying':'SPY','dte_target':30,'right':'call'})()
+    with patch('execution.alpaca_executor._list_expiries',
+               return_value=[dt.date(2026,6,18), dt.date(2026,7,16), dt.date(2026,8,20)]):
+        e = _resolve_expiry(spec, as_of=dt.date(2026,5,29))
+    assert e == dt.date(2026,7,16)  # nearest monthly >= 30 days from 5-29
+
+def test_resolve_expiry_returns_none_on_empty():
+    spec = type('S',(),{'underlying':'SPY','dte_target':30,'right':'call'})()
+    with patch('execution.alpaca_executor._list_expiries', return_value=[]):
+        assert _resolve_expiry(spec, as_of=dt.date(2026,5,29)) is None

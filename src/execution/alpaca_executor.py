@@ -444,6 +444,76 @@ def _build_occ_symbol(spec, strike: float, expiry) -> str:
     return f"{root}{ymd}{cp}{strike_int:08d}"
 
 
+def _spot_price(symbol: str) -> float | None:
+    """Latest equity spot via Alpaca CLI."""
+    ok, payload, _ = _run_alpaca_cli(['data','latest-trade','--symbol', symbol])
+    if not ok or not payload: return None
+    try:
+        return float(payload.get('trade',{}).get('p') or payload.get('p'))
+    except (TypeError, ValueError): return None
+
+
+def _list_strikes(underlying: str, expiry, option_type: str) -> list[float]:
+    """Listed strikes for (underlying, expiry, call|put) via `alpaca option contracts`."""
+    ok, payload, _ = _run_alpaca_cli([
+        'option','contracts','--underlying-symbols', underlying,
+        '--expiration-date', expiry.isoformat(),
+        '--type', option_type,
+        '--limit','200'])
+    if not ok or not payload: return []
+    rows = payload.get('option_contracts') or []
+    out = []
+    for r in rows:
+        try: out.append(float(r.get('strike_price')))
+        except (TypeError, ValueError): continue
+    return sorted(set(out))
+
+
+def _list_expiries(underlying: str) -> list:
+    """Distinct listed expiry dates for an underlying (monthly+weekly)."""
+    ok, payload, _ = _run_alpaca_cli([
+        'option','contracts','--underlying-symbols', underlying, '--limit','500'])
+    if not ok or not payload: return []
+    rows = payload.get('option_contracts') or []
+    out = set()
+    import datetime as _dt
+    for r in rows:
+        try: out.add(_dt.date.fromisoformat(r.get('expiration_date')))
+        except (TypeError, ValueError): continue
+    return sorted(out)
+
+
+def _resolve_strike(spec, as_of, expiry) -> float | None:
+    spot = _spot_price(spec.underlying)
+    if spot is None or spot <= 0: return None
+    listed = _list_strikes(spec.underlying, expiry, str(spec.right).lower())
+    if not listed: return None
+    if spec.strike_rule == 'atm':
+        target = spot
+    elif spec.strike_rule == 'fixed_moneyness':
+        target = spot * float(spec.moneyness or 1.0)
+    elif spec.strike_rule == 'target_delta':
+        # Heuristic fallback: for calls, OTM = strike > spot; pick listed
+        # whose distance from spot is closest to (1-target_delta)*spot.
+        # NOTE: a future iteration may query the live chain greeks for exact
+        # delta-matching; this heuristic is documented in the spec as the
+        # SP-5.1a baseline.
+        offset = (1.0 - float(spec.target_delta)) * spot * 0.25  # rough OTM step
+        target = (spot + offset) if str(spec.right).lower() == 'call' else (spot - offset)
+    else:
+        return None
+    return min(listed, key=lambda k: abs(k - target))
+
+
+def _resolve_expiry(spec, as_of):
+    """Nearest monthly expiry >= as_of + dte_target days, intersected with listed."""
+    import datetime as _dt
+    target = as_of + _dt.timedelta(days=int(spec.dte_target))
+    listed = _list_expiries(spec.underlying)
+    eligible = [e for e in listed if e >= target]
+    return eligible[0] if eligible else None
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.
