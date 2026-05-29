@@ -49,3 +49,52 @@ def classify_trades_oue(trades: list[dict],
         overall[kind] += 1
         slot[kind] += 1
     return overall, by_regime
+
+
+from backtest.unified_backtest import _portfolio_daily_returns   # noqa: E402
+
+
+def effective_sharpe(total_sharpe: Optional[float], cadence_days: Optional[float]) -> Optional[float]:
+    """Sharpe / sqrt(cadence). cadence floored at 1 day."""
+    if total_sharpe is None:
+        return None
+    return float(total_sharpe) / math.sqrt(max(1.0, float(cadence_days or 1.0)))
+
+
+def build_equity_curve(trades: list[dict],
+                       bench_daily_ret: pd.Series,
+                       regime_series_fn=historical_regimes.regime_series,
+                       weekly: bool = True) -> list[dict]:
+    """Reconstruct the strategy's equity curve from backtest trades (reusing
+    unified_backtest._portfolio_daily_returns), overlay the benchmark
+    (^GSPC) normalized to the same start (1.0), tag each point with its
+    regime, and downsample to weekly. Returns [{date, strat_equity,
+    spx_equity, regime}, ...] (ascending date)."""
+    daily_ret, dates = _portfolio_daily_returns(trades)
+    if len(daily_ret) == 0:
+        return []
+    idx = pd.DatetimeIndex(dates)
+    strat_eq = pd.Series(np.cumprod(1.0 + daily_ret), index=idx)
+    b = bench_daily_ret.reindex(pd.date_range(idx.min(), idx.max(), freq='D')).fillna(0.0)
+    bench_eq_full = (1.0 + b).cumprod()
+    bench_eq = bench_eq_full.reindex(idx, method='ffill')
+    regimes = regime_series_fn(idx)
+    regimes.index = idx
+    frame = pd.DataFrame({'strat_equity': strat_eq,
+                          'spx_equity': bench_eq.values,
+                          'regime': regimes.values}, index=idx)
+    if weekly:
+        frame = frame.groupby(frame.index.to_period('W')).tail(1)
+    # Normalize both equity series to 1.0 at the first sampled point.
+    first_strat = float(frame['strat_equity'].iloc[0])
+    first_bench = float(frame['spx_equity'].iloc[0])
+    frame = frame.copy()
+    frame['strat_equity'] = frame['strat_equity'] / first_strat
+    frame['spx_equity'] = frame['spx_equity'] / first_bench
+    out = []
+    for ts, row in frame.iterrows():
+        out.append({'date': ts.strftime('%Y-%m-%d'),
+                    'strat_equity': round(float(row['strat_equity']), 6),
+                    'spx_equity': round(float(row['spx_equity']), 6),
+                    'regime': None if pd.isna(row['regime']) else str(row['regime'])})
+    return out
