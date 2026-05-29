@@ -455,6 +455,33 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
         return []
 
+    # Shadow: log what orthogonalization WOULD change without affecting routing.
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            and not (_ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT')):
+        try:
+            from execution import orthogonalization as _og
+            shadow_contribs = {
+                tkr: list(zip(meta['strategies'], meta['directions']))
+                for tkr, meta in ticker_meta.items()
+            }
+            shadow_gate = _og.deflated_net_sharpe(
+                shadow_contribs, _ortho_groups['block_map'],
+                _ortho_groups['matrix'], sharpe_by_strat)
+            would_drop = [t for t in ticker_w
+                          if abs(shadow_gate.get(t, 0.0)) < min_cum_sharpe]
+            mat = _ortho_groups.get('matrix') or {}
+            offdiag = [mat[a][b] for a in mat for b in mat.get(a, {}) if a != b]
+            hist = {}
+            for v in offdiag:
+                bucket = round(float(v) * 10) / 10
+                hist[bucket] = hist.get(bucket, 0) + 1
+            logger.info('orthogonalization.shadow: would_drop=%s similarity_histogram=%s '
+                        'fold_pairs=%d block_pairs=%d',
+                        would_drop, dict(sorted(hist.items())),
+                        len(_ortho_groups['fold_map']), len(_ortho_groups['block_map']))
+        except Exception as e:
+            logger.warning('orthogonalization.shadow failed (%s)', e)
+
     gross = sum(abs(w) for w in ticker_w.values())
     if gross <= 0:
         return []
