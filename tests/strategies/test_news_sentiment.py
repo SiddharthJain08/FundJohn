@@ -29,3 +29,24 @@ def test_merge_append_only_is_idempotent():
     aaa = merged[(merged.ticker == 'AAA') & (merged.date == '2022-03-01')].iloc[0]
     assert aaa['news_count_24h'] == 2
     assert len(merged) == 2
+
+
+from strategies.confirmation import news_flow as nf
+
+
+def test_score_positive_with_volume():
+    s = nf.score({'news_mean_score': 0.6, 'news_count_24h': 5}, {'min_articles': 2})
+    assert s > 0
+
+
+def test_score_zero_below_min_articles():
+    assert nf.score({'news_mean_score': 0.9, 'news_count_24h': 1}, {'min_articles': 2}) == 0.0
+
+
+def test_score_negative_for_bearish_news():
+    assert nf.score({'news_mean_score': -0.5, 'news_count_24h': 4}, {'min_articles': 2}) < 0
+
+
+def test_score_missing_data_is_zero():
+    assert nf.score(None, {'min_articles': 2}) == 0.0
+    assert nf.score({}, {'min_articles': 2}) == 0.0
