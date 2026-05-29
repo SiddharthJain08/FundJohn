@@ -33,3 +33,35 @@ def test_rank_long_short_directionality():
     assert 'AAA' in longs and 'DDD' in longs
     assert 'CCC' in shorts and 'EEE' in shorts
     assert 'BBB' not in longs and 'BBB' not in shorts
+
+
+from strategies.confirmation import options_flow as of
+
+
+def test_options_flow_long_confirmed_by_low_pcr():
+    passes, score = of.confirm('LONG', {'pc_ratio': 0.5, 'skew_20d': -0.03})
+    assert passes is True
+    assert score > 0
+
+
+def test_options_flow_long_rejected_by_high_pcr():
+    passes, _ = of.confirm('LONG', {'pc_ratio': 1.4})
+    assert passes is False
+
+
+def test_options_flow_short_confirmed_by_high_pcr():
+    passes, score = of.confirm('SHORT', {'pc_ratio': 1.3, 'skew_20d': 0.04})
+    assert passes is True
+    assert score > 0
+
+
+def test_options_flow_missing_data_is_unconfirmed():
+    assert of.confirm('LONG', None) == (False, 0.0)
+    assert of.confirm('LONG', {}) == (False, 0.0)
+    assert of.confirm('LONG', {'pc_ratio': None}) == (False, 0.0)
+
+
+def test_options_flow_pcr_gates_even_without_skew():
+    passes, score = of.confirm('LONG', {'pc_ratio': 0.6})
+    assert passes is True
+    assert score > 0
