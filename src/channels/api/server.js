@@ -1171,7 +1171,6 @@ app.get('/api/strategies', async (req, res) => {
       SELECT id, regime_conditions,
              backtest_sharpe, backtest_return_pct, backtest_max_dd_pct, backtest_trade_count,
              backtest_regime_breakdown,
-             live_days, live_sharpe, live_return_pct,
              data_requirements_planned, staging_approved_at
       FROM strategy_registry
     `)).rows;
@@ -1375,6 +1374,8 @@ app.get('/api/strategies', async (req, res) => {
         // BT Sharpe + Backtest Trades columns + sort keys working.
         backtest_sharpe:           unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
         backtest_trade_count:      unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
+        backtest_return_pct:       unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
         // Non-metric carry-overs preserved for the staging UI (NOT backtest
         // metrics): lifecycle timestamp + Saturday-brain staging fields that
         // drive the candidate table's Approve flow + ⚠ data badge.
@@ -1396,16 +1397,22 @@ app.get('/api/strategies', async (req, res) => {
         unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
         null,  // orphans have no manifest → no declared eligibility
       );
-      rows.push(buildStrategyRow({
-        sid, rec: { state: 'orphan', metadata: {} },
-        isStale: false, regimeActive: true, activeRegimes: [], eligRaw: null,
-        currentRegime,
-        run: ubtRunById[sid] || {},
-        regimeBreakdown: _orphanBreakdown,
-        panel: panelById[sid] || null,
-        bestWorst: bwById[sid] || {},
-        lastSignalDate: lastSignalById[sid] || null,
-      }));
+      rows.push({
+        ...buildStrategyRow({
+          sid, rec: { state: 'orphan', metadata: {} },
+          isStale: false, regimeActive: true, activeRegimes: [], eligRaw: null,
+          currentRegime,
+          run: ubtRunById[sid] || {},
+          regimeBreakdown: _orphanBreakdown,
+          panel: panelById[sid] || null,
+          bestWorst: bwById[sid] || {},
+          lastSignalDate: lastSignalById[sid] || null,
+        }),
+        backtest_sharpe:      unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
+        backtest_trade_count: unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
+        backtest_return_pct:  unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
+        backtest_max_dd_pct:  unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
+      });
     }
     res.json(rows);
   } catch (err) {
