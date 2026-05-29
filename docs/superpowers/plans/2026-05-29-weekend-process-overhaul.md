@@ -639,8 +639,30 @@ In `src/backtest/unified_backtest.py`:
 - Add to the `run_backtest` signature (after `resolver=None,` at L644): `param_override=None,` and `return_metrics: bool = False,`
 - In the `_simulate_for(...)` call (L683-688), add the kwarg: pass `param_override=param_override,` alongside `resolver=resolver,`.
 - Add `param_override=None,` to the `_per_bar_simulate` signature (after `resolver=None,` at L439).
-- **Ephemeral-run contract (load-bearing for the coupling step):** when `commit=False`, `run_backtest` must NOT write `strategy_backtest_runs`/`_regimes`/`_trades` AND must NOT trigger the inline panel rebuild (the `_rebuild_panel(strategy_id)` call at ~L819-825). Confirm the existing `commit=False` path already skips the DB writes; **guard the panel rebuild on `commit` too** if it isn't already (wrap `if commit:` around the `_rebuild_panel` block). This prevents the coupling's baseline/candidate probe runs from polluting the dashboard panel or leaving a misleading `primary_window` run.
-- When `return_metrics=True`, return `(run_id_or_None, total_metrics)` where `total_metrics` is the dict from `aggregate_metrics(trades)` (L705) — it has `'sharpe'` and `'total_trades'`. When `return_metrics=False` (default, all existing callers), return `run_id` exactly as today (signature-compatible).
+- **Ephemeral-run contract (load-bearing, VERIFIED against the code):** the persist INSERTs at L719-805 run unconditionally inside the `try`, but `conn.commit()` is gated by `if commit:` (L807) and the own-conn `conn.close()` (L814) rolls back when not committed — so `commit=False` (with NO `conn` passed, i.e. own-conn) leaves nothing persisted. **However the panel rebuild at L821-825 runs unconditionally** — wrap it in `if commit:` so ephemeral coupling runs never rebuild the dashboard panel:
+  ```python
+      if commit:
+          try:
+              from backtest.backtest_panel import rebuild as _rebuild_panel
+              _rebuild_panel(strategy_id)
+          except Exception as _e:
+              print(f'[unified_backtest] panel rebuild skipped: {_e}')
+      return run_id
+  ```
+- When `return_metrics=True`, return `(run_id, total_metrics)` where `total_metrics` is `aggregate_metrics(trades)` (L705) **augmented with median bracket distances** computed from the run's trades (each trade dict has `signal_stop`, `signal_target`, `entry_price` — L785-786, L581):
+  ```python
+      if return_metrics:
+          import statistics
+          sd = [abs(t['entry_price'] - t['signal_stop']) / t['entry_price']
+                for t in trades if t.get('signal_stop') and t.get('entry_price')]
+          td = [abs(t['signal_target'] - t['entry_price']) / t['entry_price']
+                for t in trades if t.get('signal_target') and t.get('entry_price')]
+          total_metrics = {**total_metrics,
+                           'median_stop_pct':   (statistics.median(sd) if sd else None),
+                           'median_target_pct': (statistics.median(td) if td else None)}
+          return run_id, total_metrics
+  ```
+  Place this `return` immediately before the existing `return run_id` (after the `if commit:` rebuild block). When `return_metrics=False` (default, all existing callers), return `run_id` exactly as today (signature-compatible).
 
 - [ ] **Step 6: Apply the override inside the simulate loop**
 
@@ -916,12 +938,6 @@ def qualifies(*, baseline_sharpe: float, candidate_sharpe: float,
 
 # ── DB-touching orchestration (integration; covered by the live dry-run, not unit) ──
 
-def _current_override(strategy_id, regime) -> dict:
-    from execution import regime_param_resolver as rpr
-    return {'stop_pct': rpr.stop_pct_override(strategy_id, regime),
-            'target_pct': rpr.target_pct_override(strategy_id, regime)}
-
-
 def _eligible_regimes(strategy_id) -> list:
     """Regimes the strategy is eligible in; all four if none seeded."""
     from execution import regime_param_resolver as rpr
@@ -929,15 +945,16 @@ def _eligible_regimes(strategy_id) -> list:
     return elig or list(CANONICAL_REGIMES)
 
 
-def _run_sharpe_and_trades(strategy_id, param_override) -> tuple:
-    """Ephemeral backtest → (sharpe, n_trades). commit=False so the probe runs
-    do NOT persist to strategy_backtest_runs or rebuild the dashboard panel.
-    The authoritative panel-populating run is the post-apply --all-live refresh."""
+def _run_metrics(strategy_id, param_override) -> dict:
+    """Ephemeral backtest → metrics dict (sharpe, total_trades, median_stop_pct,
+    median_target_pct). commit=False (own-conn) so probe runs roll back — they do
+    NOT persist to strategy_backtest_runs nor rebuild the dashboard panel. The
+    authoritative panel-populating run is the post-apply --all-live refresh."""
     from backtest import unified_backtest as ub
     _run_id, metrics = ub.run_backtest(strategy_id, commit=False,
                                        param_override=param_override,
                                        return_metrics=True)
-    return float(metrics.get('sharpe') or 0.0), int(metrics.get('total_trades') or 0)
+    return metrics
 
 
 def _load_recs(rec_date=None) -> list:
@@ -974,16 +991,20 @@ def run(rec_date=None, dry_run: bool = False, log=print) -> dict:
         sid = rec['strategy_id']
         if not has_actionable_delta(rec):
             continue
-        cur_lo = _current_override(sid, 'LOW_VOL')  # representative base
-        cand_stop = candidate_pct(cur_lo.get('stop_pct'), rec.get('stop_delta_pct'), DEFAULT_STOP_PCT)
-        cand_tgt = candidate_pct(cur_lo.get('target_pct'), rec.get('target_delta_pct'), DEFAULT_TARGET_PCT)
+        # Baseline first: its median bracket distances ARE the strategy's current
+        # effective stop/target (already reflect any prior override, gate is ON).
+        base = _run_metrics(sid, None)
+        base_sharpe = float(base.get('sharpe') or 0.0)
+        cand_stop = candidate_pct(base.get('median_stop_pct'), rec.get('stop_delta_pct'), DEFAULT_STOP_PCT)
+        cand_tgt = candidate_pct(base.get('median_target_pct'), rec.get('target_delta_pct'), DEFAULT_TARGET_PCT)
         if cand_stop is None and cand_tgt is None:
             continue
         regimes = _eligible_regimes(sid)
         cand_map = {r: {k: v for k, v in (('stop_pct', cand_stop), ('target_pct', cand_tgt)) if v is not None}
                     for r in regimes}
-        base_sharpe, base_n = _run_sharpe_and_trades(sid, None)
-        cand_sharpe, cand_n = _run_sharpe_and_trades(sid, cand_map)
+        cand = _run_metrics(sid, cand_map)
+        cand_sharpe = float(cand.get('sharpe') or 0.0)
+        cand_n = int(cand.get('total_trades') or 0)
         ok = qualifies(baseline_sharpe=base_sharpe, candidate_sharpe=cand_sharpe, candidate_n_trades=cand_n)
         note = f'ΔSharpe {cand_sharpe - base_sharpe:+.3f} ({base_sharpe:.2f}->{cand_sharpe:.2f}), n={cand_n}'
         log(f'[coupling] {sid}: stop={cand_stop} target={cand_tgt} {note} -> {"APPLY" if ok else "reject"}')
