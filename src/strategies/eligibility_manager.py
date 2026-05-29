@@ -94,7 +94,10 @@ def set_params(*,
                max_hold_days: Optional[int] = None,
                actor: str,
                reason: str = '',
-               source: str = 'cli') -> dict:
+               source: str = 'cli',
+               bt_sharpe_before: Optional[float] = None,
+               bt_sharpe_after: Optional[float] = None,
+               bt_n_trades: Optional[int] = None) -> dict:
     """Upsert one (strategy, regime) row. None args mean 'keep existing'.
 
     Raises:
@@ -143,11 +146,13 @@ def set_params(*,
             cur.execute("""
                 INSERT INTO strategy_regime_param_changes
                     (actor, strategy_id, regime_state,
-                     before_row, after_row, reason, source)
-                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                     before_row, after_row, reason, source,
+                     bt_sharpe_before, bt_sharpe_after, bt_n_trades)
+                VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s)
             """, (actor, strategy_id, regime_state,
                   _row_to_json(before), _row_to_json(after_row),
-                  reason, source))
+                  reason, source,
+                  bt_sharpe_before, bt_sharpe_after, bt_n_trades))
 
             cur.execute("""
                 INSERT INTO strategy_regime_params
