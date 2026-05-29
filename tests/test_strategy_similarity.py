@@ -61,3 +61,31 @@ def test_blend_weights_return_corr_when_history_ample():
     blended = ss.blend_similarity(overlap, retcorr, n_obs)
     # 0.4*0.2 + 0.6*0.9 = 0.62
     assert abs(blended['A']['B'] - 0.62) < 1e-9
+
+
+def test_cluster_two_cuts_folds_near_identical_and_blocks_factor():
+    # S1,S2 near-identical (0.9); S3 same factor as S1/S2 (0.5); S4 unrelated.
+    strats = ['S1', 'S2', 'S3', 'S4']
+    sim = {
+        'S1': {'S1': 1.0, 'S2': 0.90, 'S3': 0.50, 'S4': 0.05},
+        'S2': {'S1': 0.90, 'S2': 1.0, 'S3': 0.50, 'S4': 0.05},
+        'S3': {'S1': 0.50, 'S2': 0.50, 'S3': 1.0, 'S4': 0.05},
+        'S4': {'S1': 0.05, 'S2': 0.05, 'S3': 0.05, 'S4': 1.0},
+    }
+    fold, blocks = ss.cluster_two_cuts(sim, strats, fold_thr=0.85, block_thr=0.40)
+    # Fold: S1+S2 together; S3 and S4 singletons.
+    fold_of = {s: g for g, members in fold.items() for s in members}
+    assert fold_of['S1'] == fold_of['S2']
+    assert fold_of['S3'] != fold_of['S1'] and fold_of['S4'] != fold_of['S1']
+    # Block: S1+S2+S3 together (factor family); S4 alone.
+    block_of = {s: g for g, members in blocks.items() for s in members}
+    assert block_of['S1'] == block_of['S2'] == block_of['S3']
+    assert block_of['S4'] != block_of['S1']
+
+
+def test_cluster_singletons_when_all_dissimilar():
+    strats = ['A', 'B']
+    sim = {'A': {'A': 1.0, 'B': 0.1}, 'B': {'A': 0.1, 'B': 1.0}}
+    fold, blocks = ss.cluster_two_cuts(sim, strats, fold_thr=0.85, block_thr=0.40)
+    assert len({g for g, m in fold.items() for _ in m}) == 2     # two singleton folds
+    assert len({g for g, m in blocks.items() for _ in m}) == 2   # two singleton blocks

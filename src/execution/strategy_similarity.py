@@ -104,3 +104,37 @@ def blend_similarity(overlap: dict[str, dict[str, float]],
             al = adaptive_alpha(n_obs_per_pair.get((a, b), 0))
             out[a][b] = (1.0 - al) * o + al * r
     return out
+
+
+def cluster_two_cuts(sim: dict[str, dict[str, float]], strategies: list[str],
+                     fold_thr: float = FOLD_THRESHOLD, block_thr: float = BLOCK_THRESHOLD
+                     ) -> tuple[dict[int, list[str]], dict[int, list[str]]]:
+    """Agglomerative average-linkage clustering on distance = 1 - similarity.
+    Cut at two heights -> (fold_groups, factor_blocks). Each maps group_id -> [strategy_id].
+    <2 strategies -> each its own singleton group."""
+    strategies = sorted(strategies)
+    n = len(strategies)
+    if n < 2:
+        groups = {i: [s] for i, s in enumerate(strategies)}
+        return dict(groups), dict(groups)
+
+    import numpy as np
+    from scipy.cluster.hierarchy import linkage, fcluster
+    from scipy.spatial.distance import squareform
+
+    dist = np.zeros((n, n))
+    for i, a in enumerate(strategies):
+        for k, b in enumerate(strategies):
+            if i < k:
+                s = max(0.0, min(1.0, sim.get(a, {}).get(b, 0.0)))
+                dist[i][k] = dist[k][i] = 1.0 - s
+    Z = linkage(squareform(dist, checks=False), method='average')
+
+    def _cut(thr: float) -> dict[int, list[str]]:
+        labels = fcluster(Z, t=1.0 - thr, criterion='distance')  # distance cut = 1 - similarity
+        groups: dict[int, list[str]] = {}
+        for idx, lab in enumerate(labels):
+            groups.setdefault(int(lab), []).append(strategies[idx])
+        return groups
+
+    return _cut(fold_thr), _cut(block_thr)
