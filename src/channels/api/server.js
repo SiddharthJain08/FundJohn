@@ -4034,9 +4034,22 @@ body.rs-chat-locked{overflow:hidden}
     <!-- Phase 2B — Mastermind proposals panel (collapsed if none pending) -->
     <div class="pf-section" id="rp-section" style="display:none">
       <div class="pf-section-header">
-        <span>📋 Pending Regime Proposals <span class="st-sub-label" id="rp-count">—</span></span>
-        <span class="st-sub-label">from MastermindJohn Saturday review</span>
+        <span>⚙️ Strategy Adjustments</span>
+        <span class="st-sub-label">applied stop/TP changes + pending weight/eligibility proposals</span>
       </div>
+      <div class="st-sub-label" style="margin:4px 0">Applied this week <span id="sa-applied-count">—</span></div>
+      <table id="sa-applied-table" style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:14px">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:11px">
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Regime</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Stop →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Target →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">ΔSharpe</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Trades</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="st-sub-label" style="margin:4px 0">Pending proposals <span class="st-sub-label" id="rp-count">—</span></div>
       <table id="rp-table" style="border-collapse:collapse;width:100%;font-size:12px">
         <thead>
           <tr style="text-align:left;color:var(--muted);font-size:11px">
@@ -7910,18 +7923,20 @@ async function _sharpeGatePut(regime, value, statEl) {
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals, driftResp] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp] = await Promise.all([
       _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
       _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
       _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
       _safeFetch('/api/data/usage',                  null, { label: 'data usage' }),
       _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
+      _safeFetch('/api/regime-proposals/applied?days=7', { applied: [] }, { label: 'applied adjustments' }),
     ]);
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
     _rpRender(proposals?.proposals || []);
+    _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
     // edits Mastermind's weekly prompt — research-page-only entry).
     _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
@@ -8294,12 +8309,8 @@ function _rpRender(proposals) {
   const tbody = document.querySelector('#rp-table tbody');
   const countEl = document.getElementById('rp-count');
   if (!section || !tbody) return;
-  if (!proposals.length) {
-    section.style.display = 'none';
-    return;
-  }
   section.style.display = '';
-  countEl.textContent = '(' + proposals.length + ' awaiting decision)';
+  if (countEl) countEl.textContent = proposals.length ? '(' + proposals.length + ' awaiting decision)' : '(none)';
   tbody.innerHTML = '';
   for (const p of proposals) {
     const tr = document.createElement('tr');
@@ -8334,6 +8345,32 @@ function _rpRender(proposals) {
   }
   for (const btn of tbody.querySelectorAll('.rp-pathmc-btn')) {
     btn.onclick = () => _rpRunPathMC(btn.dataset.id, btn);
+  }
+}
+
+function _saRenderApplied(applied) {
+  const tbody = document.querySelector('#sa-applied-table tbody');
+  const countEl = document.getElementById('sa-applied-count');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (countEl) countEl.textContent = '(' + applied.length + ')';
+  if (!applied.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No stop/TP changes applied in the last 7 days.</td></tr>';
+    return;
+  }
+  const fmt = (v) => (v == null ? '—' : Number(v).toFixed(3));
+  for (const a of applied) {
+    const d = (a.bt_sharpe_after != null && a.bt_sharpe_before != null)
+      ? (a.bt_sharpe_after - a.bt_sharpe_before) : null;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + a.strategy_id + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + a.regime_state + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.stop_before) + ' → ' + fmt(a.stop_after) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.target_before) + ' → ' + fmt(a.target_after) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right">' + (a.bt_n_trades != null ? a.bt_n_trades : '—') + '</td>';
+    tbody.appendChild(tr);
   }
 }
 
