@@ -10,6 +10,7 @@ const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
+const { blendScope } = require('./blend_scope');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1365,6 +1366,35 @@ app.get('/api/strategies', async (req, res) => {
       const _eligibleSet = new Set(_eligRaw || activeRegimes);
       const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
       const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
+      // ── Regime-scoped metric variants (Active Stack filter) ──────────────
+      // ALL mirrors the legacy top-level fields exactly (built from the same
+      // run/panel/bestWorst sources strategy_row.js uses). ELIGIBLE +
+      // single-regime come from blendScope over the raw per-regime breakdown.
+      const _runForScope   = ubtRunById[sid] || {};
+      const _panelForScope = panelById[sid] || null;
+      const _bwForScope    = bwById[sid] || {};
+      const _actAll = _runForScope.avg_holding_days != null ? Number(_runForScope.avg_holding_days) : null;
+      const _arrAll = _bwForScope.avg_pnl != null ? Number(_bwForScope.avg_pnl) * 100 : null;
+      const _allScope = {
+        sharpe:           _runForScope.total_sharpe ?? null,
+        effective_sharpe: _panelForScope?.effective_sharpe ?? null,
+        return_pct:       _runForScope.total_return_pct ?? null,
+        max_dd_pct:       _runForScope.total_max_dd_pct ?? null,
+        closed_count:     _runForScope.total_trades ?? 0,
+        win_rate:         _runForScope.total_hit_rate ?? null,
+        arr_pct:          _arrAll,
+        adr_pct:          (_arrAll != null && _actAll) ? (_arrAll / Math.max(1, _actAll)) : null,
+        act_days:         _actAll,
+      };
+      const _metricsByScope = { ALL: _allScope };
+      for (const _rg of _CANON_AXIS) {
+        const _s = blendScope(_rawBreakdown, [_rg]);
+        if (_s) _metricsByScope[_rg] = _s;
+      }
+      // ELIGIBLE: blend over the eligible set; null eligRaw (eligible-everywhere) ⇒ ALL.
+      const _eligScope = _eligRaw ? blendScope(_rawBreakdown, _eligRaw) : null;
+      _metricsByScope.ELIGIBLE = _eligScope || _allScope;
+      const _defaultScope = _eligRaw ? 'ELIGIBLE' : 'ALL';
       rows.push({
         ...buildStrategyRow({
           sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime,
@@ -1373,6 +1403,8 @@ app.get('/api/strategies', async (req, res) => {
           panel: panelById[sid] || null,
           bestWorst: bwById[sid] || {},
           lastSignalDate: _lastSig,
+          metricsByScope: _metricsByScope,
+          defaultScope: _defaultScope,
         }),
         // Carry-overs the active-stack rewrite (Tasks 9/10) does NOT cover but
         // the CANDIDATE-table renderer (_renderCandidates) still reads. The
