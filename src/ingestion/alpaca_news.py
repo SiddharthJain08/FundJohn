@@ -64,30 +64,60 @@ def _record_call(provider, endpoint, *, success, error=None):
         pass
 
 
-def _fetch_news_chunk(symbols: list[str], start: str, retries: int = 3) -> list[dict]:
-    """Returns list of {id, symbols, headline, summary, created_at}. Empty on graceful degrade."""
-    if not symbols:
-        return []
+NEWS_PAGE_LIMIT = '50'   # Alpaca news max items per result page
+NEWS_MAX_PAGES = 20      # safety cap: 20 * 50 = up to 1000 articles per chunk/24h
+
+
+def _fetch_news_page(symbols: list[str], start: str, page_token: str,
+                     retries: int = 3) -> dict | None:
+    """Fetch ONE news page with retry/backoff. Returns the parsed payload dict,
+    or None on graceful degrade (all retries exhausted)."""
     backoff = 1.0
     for attempt in range(retries):
         try:
-            raw = _call_alpaca_cli([
+            args = [
                 'data', 'news',
                 '--symbols', ','.join(symbols),
                 '--start', start,
-                '--limit', '50',
+                '--limit', NEWS_PAGE_LIMIT,
                 '--sort', 'desc',
                 '--exclude-contentless',
-            ])
-            payload = json.loads(raw)
-            return payload.get('news', []) or []
+            ]
+            if page_token:
+                args += ['--page-token', page_token]
+            raw = _call_alpaca_cli(args)
+            return json.loads(raw)
         except (RuntimeError, ValueError, json.JSONDecodeError) as e:
-            log.warning('alpaca news chunk error attempt %d/%d: %s', attempt + 1, retries, e)
+            log.warning('alpaca news page error attempt %d/%d: %s', attempt + 1, retries, e)
             if attempt < retries - 1:
                 time.sleep(backoff)
                 backoff *= 2
-    log.warning('alpaca news chunk failed all retries for symbols=%s', symbols[:5])
-    return []
+    log.warning('alpaca news page failed all retries for symbols=%s', symbols[:5])
+    return None
+
+
+def _fetch_news_chunk(symbols: list[str], start: str, retries: int = 3,
+                      max_pages: int = NEWS_MAX_PAGES) -> list[dict]:
+    """Returns list of {id, symbols, headline, summary, created_at}. Empty on graceful degrade.
+
+    Pages through ``next_page_token`` (mirrors scripts/backfill_news_sentiment._fetch_window)
+    so a busy 50-symbol chunk isn't truncated at the first --limit 50 page — the truncation
+    that left live coverage at ~half the paginating backfill's breadth. Per-page retry/backoff
+    is preserved; a page that fails all retries ends pagination with whatever was collected.
+    """
+    if not symbols:
+        return []
+    articles: list[dict] = []
+    page_token = ''
+    for _page in range(max_pages):
+        payload = _fetch_news_page(symbols, start, page_token, retries=retries)
+        if payload is None:
+            break
+        articles.extend(payload.get('news', []) or [])
+        page_token = payload.get('next_page_token') or ''
+        if not page_token:
+            break
+    return articles
 
 
 def _score_with_finbert(articles: list[dict]) -> list[dict]:
