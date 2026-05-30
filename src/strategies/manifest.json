@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-30T04:41:53.941146+00:00",
+  "updated_at": "2026-05-30T10:53:44.128209+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -5269,8 +5269,8 @@
       "instrument_class": "equity"
     },
     "S_options_flow_confirmed_momentum": {
-      "state": "candidate",
-      "state_since": "2026-05-29T12:23:03.530731+00:00",
+      "state": "live",
+      "state_since": "2026-05-30T10:53:44.067142+00:00",
       "metadata": {
         "canonical_file": "S_options_flow_confirmed_momentum.py",
         "class": "OptionsFlowConfirmedMomentum",
@@ -5294,12 +5294,24 @@
           "caveat": "Restricted to TRANSITIONING (LOW_VOL was -0.25 drag). ~2yr window. Verify live aux options pc_ratio parity before promote."
         }
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-30T10:53:44.067142+00:00",
+          "actor": "botjohn",
+          "reason": "PCR-corroborated momentum; backtest Sharpe 1.91/DD 11.5% TRANSITIONING-only; live pc_ratio parity verified.",
+          "metadata": {
+            "sharpe": 1.906,
+            "max_drawdown": 0.115
+          }
+        }
+      ],
       "instrument_class": "equity"
     },
     "S_news_sentiment_long_short": {
-      "state": "candidate",
-      "state_since": "2026-05-30T04:41:53.751591+00:00",
+      "state": "live",
+      "state_since": "2026-05-30T10:53:44.112876+00:00",
       "metadata": {
         "canonical_file": "S_news_sentiment_long_short.py",
         "class": "NewsSentimentLongShort",
@@ -5327,7 +5339,19 @@
           "caveat": "NEWS-ONLY backtest on backfilled Alpaca/Benzinga news (334k rows, 2022-11-15+, median ~191 tickers/day). Live signal ALSO includes Reddit/StockTwits social sentiment (real-time-only, not reconstructable) so live behavior will differ. Positive Sharpe in every regime; CRISIS (+0.39) untraded per active_in_regimes."
         }
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-05-30T10:53:44.112876+00:00",
+          "actor": "botjohn",
+          "reason": "FinBERT news-sentiment L/S; backtest Sharpe 0.996/DD 11.8%; live aux wired (alpaca_news_*) + ingestion pagination breadth fix.",
+          "metadata": {
+            "sharpe": 0.996,
+            "max_drawdown": 0.1183
+          }
+        }
+      ],
       "instrument_class": "equity"
     }
   },
