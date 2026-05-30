@@ -371,7 +371,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
     _ortho_groups = None
     if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
-            or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW'):
+            or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            or _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
         try:
             from execution import strategy_similarity as _ss
             _ortho_groups = _ss.load_groups(regime_state)
@@ -412,6 +413,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # (direction, weight, bracket) tuple here; final selection happens
         # after ticker_w sign is known.
         ticker_meta[tkr]['brackets'].append({
+            'sid':        sid,
             'direction':  d,
             'weight':     weight_by_strat[sid],
             'entry':      s.get('entry_price'),
@@ -615,7 +617,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if kind in ('orphan_close', 'flip_close'):
             bracket = {}     # forces close_only=True downstream
         else:
-            bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
+            bracket = _choose_bracket(ticker_meta[tkr].get('brackets', []),
+                                      dir_sign, _ortho_groups, sharpe_by_strat)
         real_sid = '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120]
         if kind == 'flip_close':
             sid_out = '__flip_close__'
@@ -680,3 +683,34 @@ def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
         return {}
     usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
     return usable[0]
+
+
+def _choose_bracket(candidates: list[dict], dir_sign: int,
+                    ortho_groups: dict | None, sharpe_by_strat: dict) -> dict:
+    """Gate decision for the bracket attached to an emission.
+    OPENCLAW_STRATEGY_BRACKET_STACK ON + block substrate present -> stacked bracket
+    (falls back to the legacy max-weight _select_bracket if stacking yields nothing).
+    OFF (or no substrate) -> _select_bracket, byte-identical to legacy.
+    Under ORTHO_SHADOW (and stacking OFF) it logs the would-be stacked bracket."""
+    if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        from execution import bracket_stacking as _bs
+        stacked = _bs.stacked_bracket(candidates, dir_sign,
+                                      ortho_groups['block_map'], sharpe_by_strat)
+        if stacked:
+            return stacked
+    selected = _select_bracket(candidates, dir_sign)
+    if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            and not _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        try:
+            from execution import bracket_stacking as _bs
+            shadow_b = _bs.stacked_bracket(candidates, dir_sign,
+                                           ortho_groups['block_map'], sharpe_by_strat)
+            if shadow_b:
+                logger.info(
+                    'bracket_stack.shadow: selected(stop=%.2f t1=%.2f) vs '
+                    'stacked(stop=%.2f t1=%.2f n=%d) %s',
+                    float(selected.get('stop') or 0.0), float(selected.get('t1') or 0.0),
+                    shadow_b['stop'], shadow_b['t1'], shadow_b['n_blocks'], shadow_b['why'])
+        except Exception as _e:
+            logger.warning('bracket_stack.shadow failed (%s)', _e)
+    return selected
