@@ -80,7 +80,12 @@ def _run_capture(strategy_cls, close_wide, bars_by_ticker, regimes,
     real_aggregate = ub.aggregate_metrics
 
     def capturing_aggregate(trades):
-        captured['trades'] = list(trades)
+        # aggregate_metrics is called multiple times per run: once with the
+        # FULL trade list (run_backtest line ~752) and then once per regime
+        # subset inside aggregate_per_regime (line ~438). Only capture the
+        # first (full) call so per-regime subsets don't overwrite it.
+        if captured['trades'] is None:
+            captured['trades'] = list(trades)
         return real_aggregate(trades)
 
     mock_conn = _make_mock_conn()
