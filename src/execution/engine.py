@@ -230,6 +230,50 @@ def load_prices(universe: list) -> pd.DataFrame:
     return wide
 
 
+_SENTIMENT_COLS = ['ticker', 'date', 'alpaca_news_count_24h', 'alpaca_news_mean_score',
+                   'alpaca_news_finbert_pos', 'alpaca_news_finbert_neu', 'alpaca_news_finbert_neg']
+
+
+def _sentiment_slice(universe: list, as_of=None) -> dict:
+    """Live per-ticker news sentiment for aux_data['sentiment'].
+
+    Reads ticker_sentiment_daily.alpaca_news_* — the live home of Alpaca-news FinBERT
+    scores — and remaps to the news_* keys S_news_sentiment_long_short expects, applying
+    the same point-in-time forward-fill + 7-day staleness cap the backtest aux loader uses.
+    (The legacy live news_* columns are a dead RSS source, ~0% covered since 2026-05-22;
+    backtest parity is news_* ↔ alpaca_news_*. See src/execution/sentiment_aux.py.)
+
+    Fail-open: any DB error → {} (sentiment feeds one strategy, not the whole cycle).
+    """
+    if not universe:
+        return {}
+    try:
+        from execution.sentiment_aux import build_sentiment_aux, SENTIMENT_MAX_AGE_DAYS
+        from datetime import date as _date
+        if as_of is None:
+            as_of = _date.today()
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {', '.join(_SENTIMENT_COLS)}
+                      FROM ticker_sentiment_daily
+                     WHERE ticker = ANY(%s)
+                       AND date BETWEEN (%s::date - %s) AND %s::date
+                       AND alpaca_news_count_24h > 0
+                    """,
+                    (list(universe), as_of, SENTIMENT_MAX_AGE_DAYS, as_of),
+                )
+                rows = [dict(zip(_SENTIMENT_COLS, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+        return build_sentiment_aux(rows, as_of=as_of, max_age_days=SENTIMENT_MAX_AGE_DAYS)
+    except Exception as e:
+        logger.warning(f"Could not load sentiment: {e}")
+        return {}
+
+
 def load_aux_data(universe: list) -> dict:
     """Load financials + insider from master Parquets; convert to dict formats the strategies expect."""
     aux = {}
@@ -619,6 +663,12 @@ def load_aux_data(universe: list) -> dict:
                 logger.info(f"Macro loaded: {list(mac_dict.keys())} series")
         except Exception as e:
             logger.warning(f"Could not load macro: {e}")
+
+    # Sentiment: {ticker: {news_count_24h, news_mean_score, news_finbert_pos/neu/neg}}
+    # Read from ticker_sentiment_daily.alpaca_news_* (live Alpaca-news FinBERT scores),
+    # remapped to the news_* keys S_news_sentiment_long_short expects — backtest parity.
+    aux['sentiment'] = _sentiment_slice(universe)
+    logger.info(f"Sentiment loaded: {len(aux['sentiment'])} tickers")
 
     return aux
 
