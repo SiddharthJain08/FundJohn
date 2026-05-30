@@ -4131,7 +4131,7 @@ body.rs-chat-locked{overflow:hidden}
         <button class="srf-btn srf-TRANSITIONING" data-regime="TRANSITIONING" onclick="_stSetRegimeFilter('TRANSITIONING')">Transitioning</button>
         <button class="srf-btn srf-HIGH_VOL"      data-regime="HIGH_VOL"      onclick="_stSetRegimeFilter('HIGH_VOL')">High Vol</button>
         <button class="srf-btn srf-CRISIS"        data-regime="CRISIS"        onclick="_stSetRegimeFilter('CRISIS')">Crisis</button>
-        <span class="srf-hint" id="srf-hint"></span>
+        <span class="srf-hint" id="srf-hint">showing eligible-regimes blend (regimes the strategy is approved to trade)</span>
       </div>
       <div class="pf-section-body"><div id="st-active-wrap"><div class="empty">Loading...</div></div></div>
     </div>
@@ -8606,10 +8606,30 @@ function _renderActiveStack(rows) {
   // the /api/strategies payload — no live recompute. The only derived sort
   // keys are _oue_total (sum of the backtest OUE counts) and _active_rank
   // (Waiting<Stale<Live, drives the Status column sort).
-  const enriched = rows.map(r => Object.assign({}, r, {
-    _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
-    _active_rank: _activeRankFor(r),
-  }));
+  // Resolve which metric scope to display (regime filter). Fall back to the
+  // row's own default_scope, then to ALL, then to the legacy top-level fields.
+  const _scope = _stRegimeFilter;
+  const _pickScope = (r) => {
+    const mbs = r.metrics_by_scope;
+    if (!mbs) return null;
+    return mbs[_scope] || mbs[r.default_scope] || mbs.ALL || null;
+  };
+  const enriched = rows.map(r => {
+    const m = _pickScope(r);
+    const overlay = m ? {
+      sharpe:           m.sharpe,
+      effective_sharpe: m.effective_sharpe,
+      closed_count:     m.closed_count,
+      win_rate:         m.win_rate,
+      arr_pct:          m.arr_pct,
+      adr_pct:          m.adr_pct,
+      act_days:         m.act_days,
+    } : {};
+    return Object.assign({}, r, overlay, {
+      _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
+      _active_rank: _activeRankFor(r),
+    });
+  });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
   let sorted;
   const s = _sortState['st-active-wrap'];
@@ -8630,7 +8650,11 @@ function _renderActiveStack(rows) {
   // Persist for the expansion-panel renderer to read without re-prop.
   _stActiveSnapshot = activeStrategiesById;
   const expandedSid = _stExpandedSid;
-  el.innerHTML = \`<table class="db-table st-active-table" style="min-width:1180px">
+  const _scopeLabel = _scope === 'ALL' ? 'All regimes'
+    : _scope === 'ELIGIBLE' ? 'Eligible regimes'
+    : _scope + ' only';
+  el.innerHTML = \`<div class="st-scope-caption" style="font-size:9.5px;color:var(--dim);padding:2px 4px 6px;letter-spacing:.04em">Metrics scope: <b style="color:var(--muted)">\${_scopeLabel}</b> — Sharpe / Eff / Closed / Win / ARR / ADR / ACT reflect this regime selection. "By Regime" always shows all four.</div>
+  <table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
