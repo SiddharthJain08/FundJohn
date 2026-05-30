@@ -165,3 +165,65 @@ class TestNextBarFill:
         assert abs(tr['entry_price'] - closes[pos]) < 1e-9
         # And it must differ from the signal-bar close (t = pos-1).
         assert abs(tr['entry_price'] - closes[pos - 1]) > 0.5
+
+
+class TestExitTimingAndLastBar:
+    def test_exit_ignores_fill_bar_and_walks_from_t_plus_2(self):
+        # Signal fires on bar t (the last bar of prices when len>=10).
+        # The TARGET is touchable on the FILL bar (t+1) but must be ignored
+        # (no same-bar exit on the fill), then first legitimately reachable on
+        # t+2. We assert the exit_date is strictly after the fill bar and lands
+        # on t+2.
+        dates = pd.date_range('2024-01-01', periods=13, freq='B')
+        closes = [100.0] * 13
+        close_wide = pd.DataFrame({'AAA': closes}, index=dates)
+        close_wide.index.name = 'date'
+        rows = [(100.0, 100.2, 99.8, 100.0) for _ in range(13)]
+        # Signal fires when len(prices)>=10 -> current_date = dates[9];
+        # fill = dates[10]. Spike the FILL bar's HIGH so a wrong same-bar check
+        # would exit there; the target must instead first fire at t+2 = dates[11].
+        rows[10] = (100.0, 999.0, 99.8, 100.0)   # fill bar: huge high (must be ignored)
+        rows[11] = (100.0, 999.0, 99.8, 100.0)   # t+2: target legitimately hit here
+        bars = _bars_from_closes({'AAA': rows}, dates)
+        regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+        trades = _run_capture(_stub_cls(stop_pct=0.50, target_pct=0.08),
+                              close_wide, bars, regimes)
+        assert trades
+        tr = trades[0]
+        fill_dt = pd.Timestamp(tr['entry_date'])     # = dates[10]
+        exit_dt = pd.Timestamp(tr['exit_date'])
+        assert exit_dt > fill_dt, 'exit must be strictly after the fill bar'
+        assert tr['exit_reason'] == 'target'
+        assert exit_dt == dates[11]
+
+    def test_signal_on_last_bar_is_skipped(self):
+        # A strategy whose signal bar is the FINAL dataset bar -> no t+1 ->
+        # the trade is skipped (zero trades).
+        from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES
+
+        dates = pd.date_range('2024-01-01', periods=12, freq='B')
+        closes = [100.0 + i for i in range(12)]
+        close_wide = pd.DataFrame({'AAA': closes}, index=dates)
+        close_wide.index.name = 'date'
+        rows = [(c, c + 0.2, c - 0.2, c) for c in closes]
+        bars = _bars_from_closes({'AAA': rows}, dates)
+        regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+
+        class LastBarStub(BaseStrategy):
+            id = 'stub_t1'
+            min_lookback = 5
+            active_in_regimes = list(CANONICAL_REGIMES)
+
+            def generate_signals(self, prices, regime, universe, aux_data=None):
+                # fire ONLY when prices ends on the very last dataset date
+                if prices.index[-1] != dates[-1] or not universe:
+                    return []
+                t = universe[0]
+                c = float(prices[t].iloc[-1])
+                return [Signal(ticker=t, direction='LONG', entry_price=c,
+                               stop_loss=c * 0.93, target_1=c * 1.08,
+                               target_2=0.0, target_3=0.0,
+                               position_size_pct=0.0, confidence='MED')]
+
+        trades = _run_capture(LastBarStub, close_wide, bars, regimes)
+        assert trades == []
