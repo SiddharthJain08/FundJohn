@@ -269,6 +269,28 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
             'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl}
 
 
+def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
+                      stop_ref: float, target_ref: float) -> tuple[float, float]:
+    """Re-express a stop/target defined as pct distances from ``ref`` so they
+    sit the SAME pct distances from ``entry_price`` (the actual fill).
+
+    Mirrors the live executor's re-anchor: preserves R:R geometry across an
+    overnight gap instead of carrying absolute levels (which would invert the
+    bracket when the fill gaps through a level). ``direction`` is +1 long / -1
+    short. Returns (stop_loss, target_1).
+    """
+    if ref <= 0:
+        return stop_ref, target_ref
+    if direction > 0:  # long: stop below, target above
+        stop_pct   = (ref - stop_ref) / ref
+        target_pct = (target_ref - ref) / ref
+        return entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
+    # short: stop above, target below
+    stop_pct   = (stop_ref - ref) / ref
+    target_pct = (ref - target_ref) / ref
+    return entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
+
+
 # ── Metric aggregation ───────────────────────────────────────────────────────
 
 def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Timestamp]]:
