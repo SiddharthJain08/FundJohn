@@ -1210,7 +1210,8 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRunById = Object.fromEntries(ubtRunRows.map(r => [r.strategy_id, r]));
     const ubtRegimeRows = (await dbQuery(`
       SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
-             br.max_dd_pct, br.return_pct, br.hit_rate
+             br.max_dd_pct, br.return_pct, br.hit_rate,
+             br.avg_pnl_pct, br.avg_holding_days, br.oos_days_in_regime
       FROM strategy_backtest_regimes br
       JOIN (
         SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -1238,6 +1239,12 @@ app.get('/api/strategies', async (req, res) => {
         total_return_pct: r.return_pct,
         trade_count: r.trade_count,
         hit_rate:    r.hit_rate,
+        // Raw per-regime fields consumed by blendScope (percent units kept as-is):
+        max_dd_pct:        r.max_dd_pct,
+        return_pct:        r.return_pct,
+        avg_pnl_pct:       r.avg_pnl_pct,
+        avg_holding_days:  r.avg_holding_days,
+        oos_days_in_regime: r.oos_days_in_regime,
       };
     }
 
