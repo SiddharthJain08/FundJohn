@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-29T13:29:15.613717+00:00",
+  "updated_at": "2026-05-30T04:41:53.941146+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -5292,6 +5292,39 @@
           "window": "2024-04-22..2026-04-22",
           "run_id": "91077572-5e44-46aa-9d80-c41bde8e47e5",
           "caveat": "Restricted to TRANSITIONING (LOW_VOL was -0.25 drag). ~2yr window. Verify live aux options pc_ratio parity before promote."
+        }
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_news_sentiment_long_short": {
+      "state": "candidate",
+      "state_since": "2026-05-30T04:41:53.751591+00:00",
+      "metadata": {
+        "canonical_file": "S_news_sentiment_long_short.py",
+        "class": "NewsSentimentLongShort",
+        "description": "Sentiment-primary cross-sectional long/short from FinBERT news (news-only in backtest)",
+        "instrument_class": "equity",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ],
+        "backtest_results": {
+          "sharpe": 0.996,
+          "max_drawdown": 0.1183,
+          "return_pct": 49.6,
+          "total_trades": 29439,
+          "hit_rate": 0.341,
+          "window": "2022-11-15..2026-04-30",
+          "run_id": "73e9a029-df24-467c-8c00-704834e775b7",
+          "per_regime_sharpe": {
+            "LOW_VOL": 0.46,
+            "TRANSITIONING": 1.53,
+            "HIGH_VOL": 2.16,
+            "CRISIS": 0.39
+          },
+          "caveat": "NEWS-ONLY backtest on backfilled Alpaca/Benzinga news (334k rows, 2022-11-15+, median ~191 tickers/day). Live signal ALSO includes Reddit/StockTwits social sentiment (real-time-only, not reconstructable) so live behavior will differ. Positive Sharpe in every regime; CRISIS (+0.39) untraded per active_in_regimes."
         }
       },
       "history": [],

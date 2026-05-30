@@ -43,8 +43,11 @@ _IMPL_MAP = {
     'S25_dual_momentum_v2':     ('strategies.implementations.S25_dual_momentum',         'DualMomentum'),
     # Cross-sector corroboration (2026-05-29). ① passed the equity gate (Sharpe 0.96 / MaxDD
     # 17.3% on 2024-04-22..2026-04-22; base-only -0.47 → strong PCR-corroboration lift).
-    # ② sector-flow NOT registered (failed gate, all modes negative). ③ sentiment pending backfill.
+    # ② sector-flow NOT registered (failed gate, all modes negative).
+    # ③ news-sentiment PASSED on real backfilled news (Sharpe 0.996 / MaxDD 11.8% / +49.6% over
+    # 2022-11-15..2026-04-30, 29439 trades; positive in every regime). NEWS-ONLY (live adds social).
     'S_options_flow_confirmed_momentum': ('strategies.implementations.S_options_flow_confirmed_momentum', 'OptionsFlowConfirmedMomentum'),
+    'S_news_sentiment_long_short': ('strategies.implementations.S_news_sentiment_long_short', 'NewsSentimentLongShort'),
         'S_HV13_call_put_iv_spread': ('strategies.implementations.shv13_call_put_iv_spread', 'CallPutIVSpread'),
         'S_HV14_otm_skew_factor':      ('strategies.implementations.shv14_otm_skew_factor',      'OTMSkewFactor'),
         'S_HV15_iv_term_structure':    ('strategies.implementations.shv15_iv_term_structure',    'IVTermStructure'),
