@@ -41,7 +41,15 @@ function resolveScript(step, runDate, env = process.env, root = DEFAULT_ROOT) {
     if (step === 'ic_gate_runner') {
       timeoutSec = parseInt(env.IC_TIMEOUT_SECONDS || '600', 10) + 120;
     }
-    return { argv: maybeDry(['python3', pyExec, '--date', runDate]), timeoutSec };
+    const execArgv = ['python3', pyExec, '--date', runDate];
+    // The daily cycle runs during RTH, so the stop_reattach step places GTC
+    // OCO exits (take-profit + stop) — Alpaca accepts OCO during RTH. The
+    // 16:10 ET timer keeps running bare-stop-only as the overnight floor.
+    // Default-ON; set OPENCLAW_STOP_REATTACH_OCO=0 to revert to stops-only.
+    if (step === 'stop_reattach' && env.OPENCLAW_STOP_REATTACH_OCO !== '0') {
+      execArgv.push('--oco');
+    }
+    return { argv: maybeDry(execArgv), timeoutSec };
   }
   throw new Error(`unknown step: ${step} (no script found at ${pyPipe}, ${jsPipe}, or ${pyExec})`);
 }

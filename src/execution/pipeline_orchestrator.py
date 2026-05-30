@@ -378,6 +378,13 @@ def pipeline_feed(msg):
     post_channel('pipeline-feed', msg)
 
 
+def data_alerts(msg):
+    """Post a concise one-liner to #data-alerts (per-step boundaries + data
+    notifications consolidate here; #pipeline-feed keeps only the daily cycle
+    bookend). Non-blocking."""
+    post_channel('data-alerts', msg)
+
+
 def broadcast_dashboard_refresh(run_date):
     """POST to the dashboard's internal SSE broadcast so every open browser
     tab auto-refreshes once the pipeline finishes. Contract: fires market_update
@@ -506,7 +513,12 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         timeout = int(os.environ.get('IC_TIMEOUT_SECONDS', '600')) + 120
     else:
         timeout = 300
-    return (_maybe_dry(['python3', str(py_exec), '--date', run_date]), timeout)
+    exec_argv = ['python3', str(py_exec), '--date', run_date]
+    # Daily cycle runs during RTH → stop_reattach places GTC OCO (take-profit +
+    # stop). Default-ON; OPENCLAW_STOP_REATTACH_OCO=0 reverts to stops-only.
+    if script == 'stop_reattach' and os.environ.get('OPENCLAW_STOP_REATTACH_OCO') != '0':
+        exec_argv.append('--oco')
+    return (_maybe_dry(exec_argv), timeout)
 
 
 def filter_steps(steps, requested_csv):
@@ -775,6 +787,8 @@ def main(argv=None):
 
     try:
       try:
+        _cycle_scope = 'subset' if is_subset else 'full cycle'
+        pipeline_feed(f'{reason_tag}🚀 **Cycle starting** — {run_date} ({_cycle_scope})')
         for step_key, script in effective_steps:
 
             # Skip already-completed steps
@@ -814,9 +828,9 @@ def main(argv=None):
             if agent_info:
                 set_agent_status(r, agent_info[0], 'busy', agent_info[1])
 
-            # #pipeline-feed: phase boundary START
+            # #data-alerts: phase boundary START
             _t0 = time.time()
-            pipeline_feed(f'{reason_tag}▶️ `{step_key}` starting ({run_date})')
+            data_alerts(f'{reason_tag}▶️ `{step_key}` starting ({run_date})')
 
             # Full daily cycle always overwrites any intraday-redeploy sized
             # handoff so the canonical 10 AM run is authoritative. The
@@ -857,10 +871,10 @@ def main(argv=None):
                     mark_completed(r, run_date)
                 raise CycleAbort(step_key, rc, detail=f'{script} returned exit 2')
 
-            # #pipeline-feed: phase boundary END
+            # #data-alerts: phase boundary END
             dt = int(time.time() - _t0)
             icon = '✅' if ok else '❌'
-            pipeline_feed(f'{reason_tag}{icon} `{step_key}` {"done" if ok else "FAILED"} in {dt}s ({run_date})')
+            data_alerts(f'{reason_tag}{icon} `{step_key}` {"done" if ok else "FAILED"} in {dt}s ({run_date})')
 
             # Update agent status → idle
             if agent_info:

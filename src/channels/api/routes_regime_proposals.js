@@ -75,6 +75,32 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Applied-this-week: stop/target overrides auto-applied by the Saturday
+// backtest-coupling step (source='saturday_coupling'), with the ΔSharpe that
+// justified each. Read-only; powers "Strategy Adjustments → Applied this week".
+router.get('/applied', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
+  try {
+    const result = await query(`
+      SELECT id, changed_at, strategy_id, regime_state,
+             (before_row->>'stop_pct')::float   AS stop_before,
+             (after_row ->>'stop_pct')::float    AS stop_after,
+             (before_row->>'target_pct')::float  AS target_before,
+             (after_row ->>'target_pct')::float  AS target_after,
+             bt_sharpe_before::float             AS bt_sharpe_before,
+             bt_sharpe_after::float              AS bt_sharpe_after,
+             bt_n_trades, reason
+        FROM strategy_regime_param_changes
+       WHERE source = 'saturday_coupling'
+         AND changed_at >= NOW() - ($1 || ' days')::interval
+       ORDER BY changed_at DESC, strategy_id, regime_state
+    `, [String(days)]);
+    res.json({ applied: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 function _validateDecision(body) {
   if (typeof body?.actor !== 'string' || !body.actor.trim()) {
     return 'actor required';

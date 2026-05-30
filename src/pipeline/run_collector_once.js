@@ -78,6 +78,39 @@ if (dryRun) {
   console.log('[collector-once] DRY-RUN: parquet writes + coverage updates will be skipped');
 }
 
+function formatIngestionSummary(kind, data) {
+  // kind ∈ {'SOD','EOD'}. data.ok=false → failure line.
+  const day = data && data.date ? data.date : new Date().toISOString().slice(0, 10);
+  if (!data || !data.ok) {
+    const label = kind === 'EOD' ? 'EOD refresh' : 'Start-of-day ingestion';
+    return `❌ **${label} FAILED** — ${day}`;
+  }
+  const elapsed = data.elapsed_s != null ? ` · ${data.elapsed_s}s` : '';
+  const lines = [];
+  if (kind === 'SOD') {
+    lines.push(`📦 **Start-of-day ingestion complete** — ${day}${elapsed}`);
+    const phases = data.phases || [];
+    if (!phases.length) {
+      lines.push('(no phase output captured)');
+    } else {
+      for (const p of phases) {
+        if (p.rows != null) {
+          lines.push(`  • ${p.phase}: **${p.rows}** rows`);
+        } else if (p.line) {
+          lines.push(`  • ${p.phase}: ${p.line}`);
+        } else {
+          // No row count and no captured line → render the phase alone, with
+          // NO trailing ': ' (the remapped {phase, rows:null} live-capture shape).
+          lines.push(`  • ${p.phase}`);
+        }
+      }
+    }
+  } else {
+    return formatEodAlert(data.summary, data.ok);
+  }
+  return lines.join('\n');
+}
+
 function formatEodAlert(summary, ok) {
   // summary is what runEodRefresh returns; ok=false means an exception was thrown.
   if (!summary || !ok) {
@@ -161,11 +194,12 @@ async function main() {
       if (eodOnly) {
         body = formatEodAlert(eodSummary, ok);
       } else {
-        const phaseLines = phases.slice(-15).map((p) => `• ${p.line}`).join('\n') || '(no phase output captured)';
-        const header = ok
-          ? `📦 **Daily ingestion complete** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`
-          : `❌ **Daily ingestion FAILED** — ${new Date().toISOString().slice(0,10)} · ${total_s}s`;
-        body = `${header}\n${phaseLines}`;
+        body = formatIngestionSummary('SOD', {
+          ok,
+          elapsed_s: total_s,
+          date: new Date().toISOString().slice(0, 10),
+          phases: (phases || []).map(p => (p.phase ? p : { phase: p.line, rows: null })),
+        });
       }
       await post(url, body);
     }
@@ -176,4 +210,6 @@ async function main() {
   process.exit(ok ? 0 : 1);
 }
 
-main();
+if (require.main === module) { main(); }
+
+module.exports = { formatIngestionSummary, formatEodAlert };

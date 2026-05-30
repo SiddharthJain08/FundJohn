@@ -1,0 +1,9 @@
+[Unit]
+Description=OpenClaw weekend — Saturday 20:00 ET maintenance (audit adjustment+backtest pipeline)
+
+[Timer]
+OnCalendar=Sat *-*-* 20:00:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target
