@@ -227,3 +227,58 @@ class TestExitTimingAndLastBar:
 
         trades = _run_capture(LastBarStub, close_wide, bars, regimes)
         assert trades == []
+
+
+class TestRegimeStampingAndOverride:
+    def _dataset_regime_changes_at_fill(self):
+        # Regime is LOW_VOL on the signal bar (t) and CRISIS on the fill bar
+        # (t+1). entry_regime must remain the SIGNAL-day regime (LOW_VOL).
+        dates = pd.date_range('2024-01-01', periods=12, freq='B')
+        closes = [100.0 + i for i in range(12)]
+        close_wide = pd.DataFrame({'AAA': closes}, index=dates)
+        close_wide.index.name = 'date'
+        rows = [(c, c + 0.2, c - 0.2, c) for c in closes]
+        bars = _bars_from_closes({'AAA': rows}, dates)
+        # signal fires at dates[9] (t); fill at dates[10] (t+1).
+        regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+        regimes[dates[10]] = 'CRISIS'   # different regime on the fill bar
+        return close_wide, bars, regimes, dates
+
+    def test_entry_regime_is_signal_day_not_fill_day(self):
+        close_wide, bars, regimes, dates = self._dataset_regime_changes_at_fill()
+        trades = _run_capture(_stub_cls(), close_wide, bars, regimes)
+        assert trades
+        tr = trades[0]
+        assert pd.Timestamp(tr['entry_date']) == dates[10]   # fill = t+1
+        assert tr['entry_regime'] == 'LOW_VOL'               # signal day = t
+
+    def test_coupling_override_reanchors_to_t_plus_1_fill(self, monkeypatch):
+        # With an injected param_override on the signal-day regime (LOW_VOL),
+        # the recorded signal_stop/signal_target must sit the override's pct
+        # distances from the t+1 fill (entry_price), not from close[t].
+        #
+        # Real regime_param_override contract (confirmed against source
+        # src/execution/regime_param_override.py):
+        #   * resolve_override(strategy_id, regime_state, *, injected=...)
+        #     returns None UNLESS the gate env OPENCLAW_BACKTEST_COUPLED_RECS=='1'
+        #     (gate_on()). With an injected map it ignores the DB and returns
+        #     dict(injected.get(regime_state)) (or None if that regime absent).
+        #   * The override dict fields are 'stop_pct' / 'target_pct' (flat
+        #     fractional distances from entry — ABSOLUTE-REPLACE semantics).
+        #   * apply_override(LONG): stop = entry*(1 - stop_pct),
+        #                           target = entry*(1 + target_pct).
+        # So we (a) flip the gate ON for this test and (b) key the injected
+        # map on the SIGNAL-day regime (LOW_VOL), because _per_bar_simulate
+        # calls resolve_override(strategy_id, str(regime_state)=signal-day
+        # regime). entry_price is the t+1 fill close, proving re-anchoring.
+        monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
+        close_wide, bars, regimes, dates = self._dataset_regime_changes_at_fill()
+        override = {'LOW_VOL': {'stop_pct': 0.10, 'target_pct': 0.15}}
+        trades = _run_capture(_stub_cls(), close_wide, bars, regimes,
+                              param_override=override)
+        assert trades
+        tr = trades[0]
+        ep = tr['entry_price']
+        # Re-anchored to the t+1 FILL price, not the signal-day close[t].
+        assert abs(tr['signal_stop'] - ep * (1 - 0.10)) < 1e-6
+        assert abs(tr['signal_target'] - ep * (1 + 0.15)) < 1e-6
