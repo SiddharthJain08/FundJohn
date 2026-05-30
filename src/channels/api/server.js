@@ -4125,7 +4125,8 @@ body.rs-chat-locked{overflow:hidden}
       </div>
       <div class="st-regime-filter" id="st-regime-filter">
         <span class="srf-label">View by Regime</span>
-        <button class="srf-btn active" data-regime="ALL"           onclick="_stSetRegimeFilter('ALL')">All</button>
+        <button class="srf-btn active" data-regime="ELIGIBLE"      onclick="_stSetRegimeFilter('ELIGIBLE')">Eligible</button>
+        <button class="srf-btn" data-regime="ALL"                  onclick="_stSetRegimeFilter('ALL')">All</button>
         <button class="srf-btn srf-LOW_VOL"       data-regime="LOW_VOL"       onclick="_stSetRegimeFilter('LOW_VOL')">Low Vol</button>
         <button class="srf-btn srf-TRANSITIONING" data-regime="TRANSITIONING" onclick="_stSetRegimeFilter('TRANSITIONING')">Transitioning</button>
         <button class="srf-btn srf-HIGH_VOL"      data-regime="HIGH_VOL"      onclick="_stSetRegimeFilter('HIGH_VOL')">High Vol</button>
@@ -8303,14 +8304,26 @@ let _stExpandedSid = null;
 // render functions below.
 let _stArrCache    = {};     // sid → backtest-curve payload (cached for the session)
 let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent expands)
-let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
+let _stRegimeFilter = 'ELIGIBLE'; // 'ELIGIBLE' | 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
 
 function _stSetRegimeFilter(rg) {
-  // No-op: the active-stack metric columns are now backtest-sourced and the
-  // live per-regime breakdown the filter depended on is gone from the payload.
-  // The filter control is hidden in _renderActiveStack; this stub keeps any
-  // residual onclick handlers harmless.
-  _stRegimeFilter = 'ALL';
+  _stRegimeFilter = rg;
+  // Toggle the active button class.
+  const bar = document.getElementById('st-regime-filter');
+  if (bar) {
+    bar.querySelectorAll('.srf-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.regime === rg);
+    });
+    const hint = document.getElementById('srf-hint');
+    if (hint) {
+      hint.textContent = rg === 'ALL'
+        ? 'showing all-regime backtest stats'
+        : rg === 'ELIGIBLE'
+          ? 'showing eligible-regimes blend (regimes the strategy is approved to trade)'
+          : 'showing ' + rg + ' backtest stats';
+    }
+  }
+  _renderActiveStack(strategiesData.filter(_inActiveStack));
 }
 
 function _stToggleExpand(sid) {
@@ -8574,12 +8587,10 @@ function _stCloseExpand() {
 
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
-  // The per-regime filter tab once swapped the metric columns to a LIVE
-  // per-regime breakdown. Those columns are now backtest-sourced and that
-  // live breakdown is gone from the payload, so the filter has no coherent
-  // target — hide the orphaned control.
+  // Regime filter: scopes the headline metric columns to ALL / ELIGIBLE / a
+  // single regime via each row's metrics_by_scope. Show the control.
   const _rf = document.getElementById('st-regime-filter');
-  if (_rf) _rf.style.display = 'none';
+  if (_rf) _rf.style.display = '';
   if (!rows.length) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
