@@ -808,6 +808,54 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
 
 
 # ──────────────────────────────────────────────────────────
+# 4.5. WRITE EOD COMPUTE HEALTH SENTINEL
+# ──────────────────────────────────────────────────────────
+
+def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
+                     n_strategies_total: int, regime_ok: bool, universe_size: int) -> None:
+    """
+    INSERT one eod_compute_health row after run_strategies.
+
+    Gated by _eod_signal_register_gate_on(): caller is responsible for the gate
+    check so this function can also be called directly in tests with any cursor.
+
+    n_strategies_ok: strategies that emitted ≥1 signal (not merely "didn't raise").
+        Intentionally stricter than "no exception": run_strategies stores [] for
+        any failed strategy, so `is not None` would always be True — marking an
+        all-failed run as healthy.  A strategy that fired but emitted 0 signals
+        is counted as NOT ok (same-direction as the empty-signals blowout guard).
+
+    healthy = (rc == 0 AND regime_ok AND universe_size > 0 AND n_strategies_ok > 0)
+    """
+    healthy = (rc == 0 and regime_ok and universe_size > 0 and n_strategies_ok > 0)
+    detail = {
+        'rc': rc,
+        'n_strategies_ok': n_strategies_ok,
+        'n_strategies_total': n_strategies_total,
+        'regime_ok': regime_ok,
+        'universe_size': universe_size,
+        'healthy': healthy,
+    }
+
+    cur.execute(
+        """
+        INSERT INTO eod_compute_health
+            (run_date, rc, n_strategies_ok, n_strategies_total,
+             regime_ok, universe_size, healthy, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (run_date, rc, n_strategies_ok, n_strategies_total,
+         regime_ok, universe_size, healthy, json.dumps(detail)),
+    )
+
+    logger.info(
+        "[engine] eod_compute_health: rc=%s ok=%s/%s regime_ok=%s "
+        "universe_size=%s healthy=%s",
+        rc, n_strategies_ok, n_strategies_total, regime_ok, universe_size, healthy,
+    )
+
+
+# ──────────────────────────────────────────────────────────
 # 5. WRITE SIGNALS
 # ──────────────────────────────────────────────────────────
 
@@ -1318,6 +1366,25 @@ def main():
             except Exception as _e:
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe, aux_data)
+
+        # 4.5 Write eod_compute_health sentinel (gated: OPENCLAW_EOD_SIGNAL_REGISTER==1)
+        if _eod_signal_register_gate_on():
+            n_strategies_ok = sum(
+                1 for signals in strategy_results.values() if signals
+            )
+            regime_ok = bool(
+                regime_state and
+                regime_state in ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+            )
+            write_eod_health(
+                cur,
+                run_date,
+                rc=0,
+                n_strategies_ok=n_strategies_ok,
+                n_strategies_total=len(strategies),
+                regime_ok=regime_ok,
+                universe_size=len(universe),
+            )
 
         # 5. Write signals
         total_signals = write_signals(cur, strategy_results, regime_state, run_date)
