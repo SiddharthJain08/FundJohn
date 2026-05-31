@@ -774,12 +774,22 @@ def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
 def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
+
+    Side-effect: sets run_strategies.last_run_stats after every call:
+        {'total': <len(strategies)>, 'errored': <count of exception paths>,
+         'ran_ok': total - errored}
+    Strategies that were skipped (regime-ineligible, no crypto regime) are NOT
+    counted as errored — they didn't raise.  Callers that need to distinguish
+    "ran fine but emitted zero signals" from "raised an exception" should read
+    last_run_stats rather than checking `if signals` on the results dict (which
+    cannot distinguish the two cases since both store []).
     """
     # regime is the full dict from load_regime(); the eligibility gate takes
     # the regime-state string. Strategies still get the full dict.
     equity_regime_str = regime['state'] if isinstance(regime, dict) else regime
     _crypto_regime = None  # lazily loaded only if a crypto strategy is present
     results = {}
+    errored_ids: set = set()
     for strat in strategies:
         try:
             # SP-3.1 Phase C: crypto strategies gate on the CRYPTO regime, not equity.
@@ -803,7 +813,14 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
         except Exception as e:
             logger.error(f"  {strat.id} FAILED: {e}\n{traceback.format_exc()}")
+            errored_ids.add(strat.id)
             results[strat.id] = []
+    total = len(strategies)
+    run_strategies.last_run_stats = {
+        'total': total,
+        'errored': len(errored_ids),
+        'ran_ok': total - len(errored_ids),
+    }
     return results
 
 
@@ -819,11 +836,14 @@ def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
     Gated by _eod_signal_register_gate_on(): caller is responsible for the gate
     check so this function can also be called directly in tests with any cursor.
 
-    n_strategies_ok: strategies that emitted ≥1 signal (not merely "didn't raise").
-        Intentionally stricter than "no exception": run_strategies stores [] for
-        any failed strategy, so `is not None` would always be True — marking an
-        all-failed run as healthy.  A strategy that fired but emitted 0 signals
-        is counted as NOT ok (same-direction as the empty-signals blowout guard).
+    n_strategies_ok: strategies that executed WITHOUT raising an exception,
+        regardless of whether they emitted signals.  Read from
+        run_strategies.last_run_stats['ran_ok'] at the call-site.
+        An all-flat successful day (every strategy ran fine, none emitted
+        signals) → ran_ok == total > 0 → healthy=True → Task 8 flatten fires.
+        An all-errored day → ran_ok=0 → healthy=False → flatten refused.
+        (Cannot infer this from strategy_results.values() because both the
+        exception path and the genuine-zero-signal path store [].)
 
     healthy = (rc == 0 AND regime_ok AND universe_size > 0 AND n_strategies_ok > 0)
     """
@@ -1369,9 +1389,9 @@ def main():
 
         # 4.5 Write eod_compute_health sentinel (gated: OPENCLAW_EOD_SIGNAL_REGISTER==1)
         if _eod_signal_register_gate_on():
-            n_strategies_ok = sum(
-                1 for signals in strategy_results.values() if signals
-            )
+            _stats = run_strategies.last_run_stats
+            n_strategies_total = _stats['total']
+            n_strategies_ok = _stats['ran_ok']
             regime_ok = bool(
                 regime_state and
                 regime_state in ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
@@ -1381,7 +1401,7 @@ def main():
                 run_date,
                 rc=0,
                 n_strategies_ok=n_strategies_ok,
-                n_strategies_total=len(strategies),
+                n_strategies_total=n_strategies_total,
                 regime_ok=regime_ok,
                 universe_size=len(universe),
             )
