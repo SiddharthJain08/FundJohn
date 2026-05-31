@@ -4081,7 +4081,7 @@ body.rs-chat-locked{overflow:hidden}
     <div class="pf-section" id="rp-section" style="display:none">
       <div class="pf-section-header">
         <span>⚙️ Strategy Adjustments</span>
-        <span class="st-sub-label">applied stop/TP changes + pending weight/eligibility proposals</span>
+        <span class="st-sub-label">backtest-applied stop/TP/max-hold changes + pending size/eligibility proposals</span>
       </div>
       <div class="st-sub-label" style="margin:4px 0">Applied this week <span id="sa-applied-count">—</span></div>
       <table id="sa-applied-table" style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:14px">
@@ -8373,12 +8373,12 @@ function _rpRender(proposals) {
   tbody.innerHTML = '';
   for (const p of proposals) {
     const tr = document.createElement('tr');
+    // Pending proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
+    // max_hold are decided by the backtest-coupling step, not approved here, so
+    // they are no longer rendered (the columns would always be empty).
     const proposedBits = [];
     if (p.proposed_eligible !== null && p.proposed_eligible !== undefined) proposedBits.push('elig=' + p.proposed_eligible);
     if (p.proposed_size_scalar !== null) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
-    if (p.proposed_stop_pct !== null) proposedBits.push('stop=' + Number(p.proposed_stop_pct).toFixed(3));
-    if (p.proposed_target_pct !== null) proposedBits.push('target=' + Number(p.proposed_target_pct).toFixed(3));
-    if (p.proposed_max_hold_days !== null) proposedBits.push('hold=' + p.proposed_max_hold_days + 'd');
     const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '?';
     tr.innerHTML =
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + p.strategy_id + '</td>' +
@@ -8387,23 +8387,14 @@ function _rpRender(proposals) {
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
-        (_rpProposalHasPolicyFields(p)
-          ? '<button class="rp-pathmc-btn" data-id="' + p.id + '" style="padding:3px 8px;font-size:11px;background:#555;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Path-MC</button>'
-          : '') +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
       '</td>';
     tbody.appendChild(tr);
-    // Stash proposal data on Path-MC button if present
-    const pathBtn = tr.querySelector('.rp-pathmc-btn');
-    if (pathBtn) pathBtn._proposalData = p;
   }
   // Wire buttons
   for (const btn of tbody.querySelectorAll('.rp-btn')) {
     btn.onclick = () => _rpDecide(btn.dataset.id, btn.dataset.action);
-  }
-  for (const btn of tbody.querySelectorAll('.rp-pathmc-btn')) {
-    btn.onclick = () => _rpRunPathMC(btn.dataset.id, btn);
   }
 }
 
@@ -8434,51 +8425,6 @@ function _saRenderApplied(applied) {
 }
 
 // Phase 2E — inline path-MC button on proposal rows
-function _rpProposalHasPolicyFields(p) {
-  return p.proposed_stop_pct != null || p.proposed_target_pct != null || p.proposed_max_hold_days != null;
-}
-
-async function _rpRunPathMC(id, btn) {
-  const row = btn.closest('tr');
-  if (!row) return;
-  const p = btn._proposalData;
-  if (!p) return;
-  btn.disabled = true; btn.textContent = '…';
-  // Surface a placeholder cell for the result if not already present
-  let outRow = row.nextElementSibling;
-  if (!outRow || !outRow.classList.contains('rp-mc-out-' + id)) {
-    outRow = document.createElement('tr');
-    outRow.className = 'rp-mc-out-' + id;
-    outRow.innerHTML = '<td colspan="6" class="rp-mc-cell" style="padding:6px 12px;background:var(--bg2,#fafafa);border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">Running path-MC…</td>';
-    row.parentNode.insertBefore(outRow, row.nextSibling);
-  }
-  const out = outRow.querySelector('.rp-mc-cell');
-  const body = {
-    current_size:           Number(p.current_size_scalar ?? 1.0),
-    proposed_size:          Number(p.proposed_size_scalar ?? p.current_size_scalar ?? 1.0),
-    proposed_stop_pct:      Number(p.proposed_stop_pct ?? 0.05),
-    proposed_target_pct:    Number(p.proposed_target_pct ?? 0.10),
-    proposed_max_hold_days: Number(p.proposed_max_hold_days ?? 5),
-    n_iter: 500, seed: 42, proposal_id: Number(p.id),
-  };
-  try {
-    const res = await fetch('/api/regime-mc-intraday/' + encodeURIComponent(p.strategy_id) + '/' + encodeURIComponent(p.regime_state), {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-    });
-    const j = await res.json();
-    if (!res.ok || j.status !== 'OK') {
-      out.textContent = 'Path-MC: ' + (j.note || j.error || ('status=' + (j.status || res.status)));
-      btn.disabled = false; btn.textContent = 'Path-MC';
-      return;
-    }
-    const fmt = (v, d=2) => (v == null ? '—' : Number(v).toFixed(d));
-    const pct = (v) => (v == null ? '—' : (Number(v) * 100).toFixed(1) + '%');
-    const diff = j.linear_mc_diff || {};
-    const sharpeDelta = diff.sharpe_p50_delta;
-    const ddDelta = diff.max_dd_p95_delta;
-    const diffBadge = (sharpeDelta != null && Math.abs(sharpeDelta) > 0.3)
-      ? ' <span style="background:#a04040;color:white;padding:1px 5px;border-radius:3px;font-size:10px">size assumption matters</span>'
-      : '';
     out.innerHTML =
       '<b>Path-MC</b> (n=' + j.n_bootstrap_iter + ', source=' + j.path_source + ', trades=' + j.n_trades_sampled + ')' + diffBadge +
       ' &nbsp; Sharpe[' + fmt(j.sharpe_p05) + ', ' + fmt(j.sharpe_p50) + ', ' + fmt(j.sharpe_p95) + ']' +
