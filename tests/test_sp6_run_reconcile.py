@@ -159,8 +159,15 @@ def _insert_gate_sentinel(conn, *, target_date):
 
 
 def _submitted(entry):
-    """A mock ae.execute_single result that counts as a confirmed close fill."""
-    return {'status': 'submitted', 'entry': entry, 'order_id': 'ord-1',
+    """A mock ae.execute_single result that counts as a CONFIRMED close fill.
+
+    SP-6 Task 10: execute_single's is_dropped close path polls to terminal and
+    returns status='filled' (with the real fill price) ONLY on a confirmed fill;
+    open_reconcile._resolve_fill_price now gates the ledger-close strictly on
+    status=='filled' (the 8b ack≠fill landmine fix). So the "confirmed fill"
+    mock must carry status='filled' — a bare 'submitted' ack no longer triggers a
+    ledger-close. Helper name kept for minimal churn; intent unchanged."""
+    return {'status': 'filled', 'entry': entry, 'order_id': 'ord-1',
             'qty': 10, 'notional': abs(entry) * 10, 'http': 200,
             'tif': 'day', 'order_class': 'simple', 'client_order_id': 'coid-1'}
 

@@ -431,19 +431,33 @@ def _held_signal_rows(cur, ticker: str) -> list[tuple[str, str]]:
 
 
 def _resolve_fill_price(result: dict):
-    """Extract a usable close fill price from an ae.execute_single result dict.
+    """Extract a CONFIRMED close fill price from an ae.execute_single result dict.
 
-    The close-only path returns the fill/limit price under 'entry' (see
-    alpaca_executor close_only branches). We DO NOT treat ack as fill blindly:
-    the ledger-close is gated by status ∈ {submitted, recovered} AND a finite,
-    positive price. (Phase A naive contract; Task 10 inserts the real
-    poll-to-terminal OPG dual-path that confirms a {filled} status before the
-    ledger write — the 'never ack=fill' invariant lands there.)
+    SP-6 Task 10 — the 8b landmine fix (NEVER ack=fill). The ledger-close MUST
+    fire only on a broker-confirmed FILL, not on a submit-ack. The is_dropped
+    close path in alpaca_executor.execute_single now polls every close order
+    (RTH `position close`, OPG, or the day-sweep) to a terminal status and returns
+    status='filled' with the real fill price ONLY when the broker actually filled;
+    otherwise it returns the polled terminal status (expired/canceled/rejected/
+    pending/…) with NO usable price. So we gate the ledger-close strictly on
+    status=='filled':
 
-    Returns float price or None when no usable fill price is available."""
+      • status=='filled' + finite positive price → return the price (ledger-close
+        fires for every held row of the ticker).
+      • anything else (submitted/recovered/expired/canceled/pending/…) → None →
+        run_reconcile writes NO ledger row, counts an error, and alerts. The
+        position stays open (the 9:31 day-sweep / next pass retries).
+
+    This is the exact guard that stops a paper-OPG ACK-but-EXPIRE (the 2026-05-18
+    incident: 214/224 OPG closes ack'd-but-expired) from writing CLOSED_AT_OPEN on
+    a still-held position — which the phantom-row fix (Task 9) would then HIDE.
+    'submitted'/'recovered' are deliberately NO LONGER accepted (a bare ack can
+    never prove a fill); 'recovered' likewise cannot sneak a ledger-close.
+
+    Returns float price or None when no CONFIRMED fill price is available."""
     if not isinstance(result, dict):
         return None
-    if result.get('status') not in ('submitted', 'recovered'):
+    if result.get('status') != 'filled':
         return None
     for key in ('fill_price', 'entry'):
         val = result.get(key)
