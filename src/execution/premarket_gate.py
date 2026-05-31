@@ -44,8 +44,15 @@ logger = logging.getLogger(__name__)
 
 ENV_GATE = 'OPENCLAW_EOD_PREMARKET_GATE'
 
-# panic_score >= this threshold → run confirmer; reject only on bearish verdict
-ADVISORY_THRESHOLD = 60.0
+# panic_score threshold — mirrors the scanner's env default (35).
+# Read at run_gate() call-time from OPENCLAW_PREMARKET_ADVISORY_THRESHOLD so
+# gate and scanner stay in sync without a code change.
+_DEFAULT_ADVISORY_THRESHOLD = 35.0
+
+
+def _advisory_threshold() -> float:
+    """Read threshold from env, defaulting to 35 (matches premarket scanner)."""
+    return float(os.environ.get('OPENCLAW_PREMARKET_ADVISORY_THRESHOLD', _DEFAULT_ADVISORY_THRESHOLD))
 
 # Gate type identifiers
 GATE_TYPE_SIGNAL = 'news_sentiment'
@@ -253,29 +260,36 @@ def run_gate(conn=None) -> dict:
 
                 news_data = news_by_ticker.get(ticker, {})
                 news_count = news_data.get('news_count_24h', 0) or 0
+                # Mirror the premarket scanner exactly: pass raw neg count, not ratio.
+                # (run_premarket_scan.py line 189 does the same — panic_score clamps to [0,1])
                 neg_count = news_data.get('news_finbert_neg', 0) or 0
-                finbert_neg_ratio = (neg_count / news_count) if news_count > 0 else 0.0
                 mean_score = news_data.get('news_mean_score') or 0.0
                 top_headlines = news_data.get('news_top_headlines', []) or []
                 evidence_uuids = news_data.get('evidence_uuids', []) or []
 
                 score_inp = ScoreInputs(
                     news_count_window=news_count,
-                    news_finbert_neg_ratio=finbert_neg_ratio,
+                    news_finbert_neg_ratio=float(neg_count),  # raw count, matches scanner
                     news_finbert_mean_score=float(mean_score),
                     social_post_count_window=0,
                     social_bear_ratio=0.0,
                 )
                 ps = panic_score(score_inp)
 
+                # Ratio for confirmer display / audit (raw count / total)
+                finbert_neg_ratio = (neg_count / news_count) if news_count > 0 else 0.0
+
                 verdict = 'APPROVED'
                 severity: Optional[int] = None
                 model_label = 'rule_based_panic_score'
+                advisory_threshold = _advisory_threshold()
 
                 # Only REJECT on clear bearish evidence: panic≥threshold AND
-                # confirmer returns bearish. Confirmer is always run past threshold.
+                # confirmer returns bearish. Confirmer is always run past threshold
+                # (treated as always-on; future OPENCLAW_PREMARKET_CONFIRMER gate
+                # not wired here since we can only veto on confirmed evidence).
                 # Confirmer errors → fail-open (APPROVED).
-                if ps >= ADVISORY_THRESHOLD:
+                if ps >= advisory_threshold:
                     model_label = 'sonnet_premarket_confirmer'
                     try:
                         headline_tuples: list[tuple[str, float, str]] = []
@@ -319,7 +333,7 @@ def run_gate(conn=None) -> dict:
                     'panic_score': float(ps),
                     'news_count': news_count,
                     'finbert_neg_ratio': float(finbert_neg_ratio),
-                    'threshold': ADVISORY_THRESHOLD,
+                    'threshold': advisory_threshold,
                 }
                 try:
                     _write_gate_verdict(
