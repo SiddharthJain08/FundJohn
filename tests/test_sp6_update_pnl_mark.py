@@ -4,11 +4,15 @@ Integration tests for engine.update_pnl P&L calculation with mark_entry_price
 and lifecycle_state filtering (SP-6 Task 6).
 
 Invariants:
-  (a) mark_entry_price preferred: P&L computed off mark, NOT entry_price; asserts
+  (a) FILLED + mark_entry_price: P&L computed off mark, NOT entry_price; asserts
       result DIFFERS from entry_price-based value and MATCHES mark-based math.
-  (b) legacy NULL mark_entry_price: falls back to entry_price — byte-identical;
-      also asserts days_held comes from signal_date when target_date is NULL.
+  (b) legacy NULL mark_entry_price (lifecycle_state IS NULL): falls back to
+      entry_price — byte-identical; also asserts days_held comes from signal_date
+      when target_date is NULL.
   (c) CLOSED_AT_OPEN skip: no signal_pnl row created even when status='open'.
+  (d) COMPUTED signal (status='open', lifecycle_state='COMPUTED'): NOT marked —
+      no signal_pnl row created (not-yet-held).
+  (e) EXECUTING signal: NOT marked.
 
 Run:
     source ./worktree-env.sh
@@ -105,12 +109,13 @@ def _insert_signal(cur, *, ws_id, strategy_id,
 
 class TestUpdatePnlMarkEntryPrice:
     # ─────────────────────────────────────────────────────────────────
-    # (a) mark_entry_price preferred
+    # (a) FILLED + mark_entry_price preferred
     # ─────────────────────────────────────────────────────────────────
     def test_mark_entry_price_preferred_over_entry_price(self, db_conn, _db_meta):
-        """Signal with mark_entry_price=105 (entry_price=100):
+        """FILLED signal with mark_entry_price=105 (entry_price=100):
         P&L computed off 105, NOT 100; asserts both that it DIFFERS from the
         entry_price path and MATCHES the mark-based math.
+        Only FILLED (and NULL-legacy) rows are marked post-SP-6-Task-6.
         """
         sig_id = _insert_signal(
             db_conn,
@@ -122,7 +127,7 @@ class TestUpdatePnlMarkEntryPrice:
             entry_price=100.0,
             mark_entry_price=105.0,
             target_date=date(2026, 6, 20),
-            lifecycle_state='COMPUTED',
+            lifecycle_state='FILLED',
             stop_loss=95.0,
             target_1=115.0,
         )
@@ -243,13 +248,14 @@ class TestUpdatePnlMarkEntryPrice:
         )
 
     # ─────────────────────────────────────────────────────────────────
-    # non-finite mark_entry_price falls back to entry_price
+    # non-finite mark_entry_price falls back to entry_price (FILLED row)
     # ─────────────────────────────────────────────────────────────────
     def test_non_finite_mark_falls_back_to_entry_price(self, db_conn, _db_meta):
-        """Signal with mark_entry_price=NaN (Decimal) falls back to entry_price.
+        """FILLED signal with mark_entry_price=NaN (Decimal) falls back to entry_price.
 
         This matches the documented Decimal('NaN') case from the sharpe_cadence
         drift incident — the isfinite guard must fire and use entry_price.
+        Uses lifecycle_state='FILLED' so the row is actually marked post-SP-6-Task-6.
         """
         import decimal
         sig_id = _insert_signal(
@@ -262,7 +268,7 @@ class TestUpdatePnlMarkEntryPrice:
             entry_price=100.0,
             mark_entry_price=decimal.Decimal('NaN'),  # NUMERIC NaN
             target_date=date(2026, 6, 20),
-            lifecycle_state='COMPUTED',
+            lifecycle_state='FILLED',
             stop_loss=95.0,
             target_1=115.0,
         )
@@ -286,10 +292,12 @@ class TestUpdatePnlMarkEntryPrice:
         )
 
     # ─────────────────────────────────────────────────────────────────
-    # target_date used for days_held when present
+    # target_date used for days_held when present (FILLED row)
     # ─────────────────────────────────────────────────────────────────
     def test_target_date_used_for_days_held_when_present(self, db_conn, _db_meta):
-        """target_date overrides signal_date for days_held calculation."""
+        """FILLED signal: target_date overrides signal_date for days_held.
+        Uses lifecycle_state='FILLED' so the row is actually marked post-SP-6-Task-6.
+        """
         signal_date = date(2026, 5, 1)  # far earlier
         target_date = date(2026, 6, 10)
         run_date = date(2026, 5, 21)
@@ -304,7 +312,7 @@ class TestUpdatePnlMarkEntryPrice:
             entry_price=100.0,
             mark_entry_price=100.0,
             target_date=target_date,
-            lifecycle_state='COMPUTED',
+            lifecycle_state='FILLED',
             stop_loss=95.0,
             target_1=115.0,
         )
@@ -330,4 +338,109 @@ class TestUpdatePnlMarkEntryPrice:
         signal_date_days = (run_date - signal_date).days
         assert expected_days != signal_date_days, (
             "test is trivial: target_date path and signal_date path give same days_held"
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # (f) FILLED is-marked — dedicated clean test
+    # ─────────────────────────────────────────────────────────────────
+    def test_filled_signal_is_marked(self, db_conn, _db_meta):
+        """A FILLED signal with mark_entry_price must produce a signal_pnl row."""
+        sig_id = _insert_signal(
+            db_conn,
+            ws_id=_db_meta['ws_id'],
+            strategy_id=_db_meta['strategy_id'],
+            signal_date=date(2026, 5, 20),
+            ticker='ZZPNLFIL',
+            direction='LONG',
+            entry_price=100.0,
+            mark_entry_price=102.0,
+            target_date=date(2026, 6, 20),
+            lifecycle_state='FILLED',
+            stop_loss=95.0,
+            target_1=115.0,
+        )
+
+        prices = pd.DataFrame({'ZZPNLFIL': [104.0]})
+        engine.update_pnl(db_conn, prices, date(2026, 5, 21))
+
+        db_conn.execute(
+            "SELECT unrealized_pnl_pct FROM signal_pnl WHERE signal_id = %s",
+            (sig_id,)
+        )
+        row = db_conn.fetchone()
+        assert row is not None, "FILLED signal must produce a signal_pnl row"
+
+        # mark-based: (104 - 102) / 102
+        expected_pct = (104.0 - 102.0) / 102.0
+        assert abs(float(row['unrealized_pnl_pct']) - expected_pct) < 1e-5, (
+            f"Expected mark-based pct {expected_pct:.6f}, got {float(row['unrealized_pnl_pct']):.6f}"
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # (g) COMPUTED signal — NOT marked
+    # ─────────────────────────────────────────────────────────────────
+    def test_computed_signal_is_not_marked(self, db_conn, _db_meta):
+        """COMPUTED signal (status='open', lifecycle_state='COMPUTED', target_date
+        in future) must NOT be marked — no signal_pnl row created.
+
+        SP-6 parity requirement: a COMPUTED signal registered at 4 PM[T] has not
+        yet been filled; writing a spurious P&L row with days_held=-1 would pollute
+        the strategy ledger parity vs backtest.
+        """
+        sig_id = _insert_signal(
+            db_conn,
+            ws_id=_db_meta['ws_id'],
+            strategy_id=_db_meta['strategy_id'],
+            signal_date=date(2026, 5, 20),
+            ticker='ZZPNLCMP',
+            direction='LONG',
+            entry_price=100.0,
+            mark_entry_price=None,
+            target_date=date(2026, 6, 20),
+            lifecycle_state='COMPUTED',
+            stop_loss=95.0,
+            target_1=115.0,
+        )
+
+        prices = pd.DataFrame({'ZZPNLCMP': [101.0]})
+        engine.update_pnl(db_conn, prices, date(2026, 5, 21))
+
+        db_conn.execute(
+            "SELECT id FROM signal_pnl WHERE signal_id = %s",
+            (sig_id,)
+        )
+        assert db_conn.fetchone() is None, (
+            "COMPUTED signal must NOT produce a signal_pnl row (not-yet-held)"
+        )
+
+    # ─────────────────────────────────────────────────────────────────
+    # (h) EXECUTING signal — NOT marked
+    # ─────────────────────────────────────────────────────────────────
+    def test_executing_signal_is_not_marked(self, db_conn, _db_meta):
+        """EXECUTING signal must NOT be marked — execution is in-flight,
+        no fill confirmed yet."""
+        sig_id = _insert_signal(
+            db_conn,
+            ws_id=_db_meta['ws_id'],
+            strategy_id=_db_meta['strategy_id'],
+            signal_date=date(2026, 5, 20),
+            ticker='ZZPNLEXC',
+            direction='LONG',
+            entry_price=100.0,
+            mark_entry_price=None,
+            target_date=date(2026, 6, 20),
+            lifecycle_state='EXECUTING',
+            stop_loss=95.0,
+            target_1=115.0,
+        )
+
+        prices = pd.DataFrame({'ZZPNLEXC': [101.0]})
+        engine.update_pnl(db_conn, prices, date(2026, 5, 21))
+
+        db_conn.execute(
+            "SELECT id FROM signal_pnl WHERE signal_id = %s",
+            (sig_id,)
+        )
+        assert db_conn.fetchone() is None, (
+            "EXECUTING signal must NOT produce a signal_pnl row (fill not confirmed)"
         )

@@ -1106,6 +1106,7 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
                stop_loss, target_1, signal_date
         FROM execution_signals
         WHERE workspace_id = %s AND status = 'open'
+          AND (lifecycle_state IS NULL OR lifecycle_state = 'FILLED')
     """, (WORKSPACE,))
     open_signals = cur.fetchall()
 
