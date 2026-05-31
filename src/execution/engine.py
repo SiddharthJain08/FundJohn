@@ -1410,6 +1410,27 @@ def main():
         total_signals = write_signals(cur, strategy_results, regime_state, run_date)
         logger.info(f"Signals written: {total_signals}")
 
+        # 5a. Parity marks — mark entry at close[T+1] and re-anchor brackets.
+        #     Gated by OPENCLAW_EOD_SIGNAL_REGISTER==1 (same gate as write_signals).
+        #     Builds closes dict from prices (wide: date-index × ticker-columns)
+        #     using last non-NaN close per ticker — mirrors update_pnl's proven
+        #     pattern (prices[ticker].dropna().iloc[-1]).
+        parity_mark_count = 0
+        if _eod_signal_register_gate_on():
+            try:
+                from execution.parity_mark import finalize_parity_marks
+                _closes: dict = {}
+                if not prices.empty:
+                    for _tk in prices.columns:
+                        _ts = prices[_tk].dropna()
+                        if not _ts.empty:
+                            _closes[_tk] = float(_ts.iloc[-1])
+                parity_mark_count = finalize_parity_marks(cur, _closes, run_date)
+                logger.info(f"Parity marks finalized: {parity_mark_count}")
+            except Exception as _pm_err:
+                logger.error(f"[engine] parity_mark failed: {_pm_err}")
+                errors.append(f"parity_mark: {_pm_err}")
+
         # 6. Confluence
         confluence_count = detect_confluence(cur, strategy_results, regime_state, run_date)
         logger.info(f"Confluence signals: {confluence_count}")
