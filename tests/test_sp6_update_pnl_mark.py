@@ -243,6 +243,49 @@ class TestUpdatePnlMarkEntryPrice:
         )
 
     # ─────────────────────────────────────────────────────────────────
+    # non-finite mark_entry_price falls back to entry_price
+    # ─────────────────────────────────────────────────────────────────
+    def test_non_finite_mark_falls_back_to_entry_price(self, db_conn, _db_meta):
+        """Signal with mark_entry_price=NaN (Decimal) falls back to entry_price.
+
+        This matches the documented Decimal('NaN') case from the sharpe_cadence
+        drift incident — the isfinite guard must fire and use entry_price.
+        """
+        import decimal
+        sig_id = _insert_signal(
+            db_conn,
+            ws_id=_db_meta['ws_id'],
+            strategy_id=_db_meta['strategy_id'],
+            signal_date=date(2026, 5, 20),
+            ticker='ZZPNLNAN',
+            direction='LONG',
+            entry_price=100.0,
+            mark_entry_price=decimal.Decimal('NaN'),  # NUMERIC NaN
+            target_date=date(2026, 6, 20),
+            lifecycle_state='COMPUTED',
+            stop_loss=95.0,
+            target_1=115.0,
+        )
+
+        current_price = 103.0
+        prices = pd.DataFrame({'ZZPNLNAN': [current_price]})
+        engine.update_pnl(db_conn, prices, date(2026, 5, 21))
+
+        db_conn.execute(
+            "SELECT unrealized_pnl_pct FROM signal_pnl WHERE signal_id = %s",
+            (sig_id,)
+        )
+        row = db_conn.fetchone()
+        assert row is not None, "signal_pnl row must be created"
+
+        # Should fall back to entry_price=100, not NaN
+        expected_pct = (current_price - 100.0) / 100.0
+        assert abs(float(row['unrealized_pnl_pct']) - expected_pct) < 1e-5, (
+            f"NaN mark should fall back to entry_price; expected {expected_pct:.6f}, "
+            f"got {float(row['unrealized_pnl_pct']):.6f}"
+        )
+
+    # ─────────────────────────────────────────────────────────────────
     # target_date used for days_held when present
     # ─────────────────────────────────────────────────────────────────
     def test_target_date_used_for_days_held_when_present(self, db_conn, _db_meta):
