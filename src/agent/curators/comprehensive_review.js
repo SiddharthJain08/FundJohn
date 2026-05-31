@@ -480,9 +480,14 @@ print(json.dumps(propose_eligible_regimes(df, sid, thresh)))`,
         log(`dropped malformed regime_recommendation: ${JSON.stringify(rec).slice(0, 120)}`);
         continue;
       }
-      // Defensive: at least one of the proposed fields must be non-null,
-      // otherwise the entry is informational only — skip.
-      const fields = ['eligible', 'size_scalar', 'stop_pct', 'target_pct', 'max_hold_days'];
+      // Defensive: the pending-proposals queue carries ONLY size + eligibility
+      // (2026-05-31, operator). A recommendation that proposes only bracket/hold
+      // config (stop_pct / target_pct / max_hold_days) and NO size/eligible
+      // change is skipped here — those go through the Saturday backtest-coupling
+      // step instead (strategy_sizing_recommendations → backtest_coupled_recs,
+      // applied only on a backtest Sharpe gain with >= MIN_TRADES). Guarding on
+      // only [eligible, size_scalar] prevents inserting an all-null proposal.
+      const fields = ['eligible', 'size_scalar'];
       if (fields.every(f => rec[f] === null || rec[f] === undefined)) {
         continue;
       }
@@ -507,9 +512,17 @@ print(pid)`,
             current_row:           null,
             proposed_eligible:     typeof rec.eligible === 'boolean' ? rec.eligible : null,
             proposed_size_scalar:  typeof rec.size_scalar === 'number' ? rec.size_scalar : null,
-            proposed_stop_pct:     typeof rec.stop_pct === 'number' ? rec.stop_pct : null,
-            proposed_target_pct:   typeof rec.target_pct === 'number' ? rec.target_pct : null,
-            proposed_max_hold_days: Number.isInteger(rec.max_hold_days) ? rec.max_hold_days : null,
+            // Scope (2026-05-31, operator): the pending-proposals queue carries
+            // ONLY size + eligibility — operator allocation decisions. All
+            // bracket/hold config (stop_pct / target_pct / max_hold_days) is
+            // routed exclusively through the Saturday backtest-coupling step
+            // (position_recommender → strategy_sizing_recommendations →
+            // backtest_coupled_recs), which applies a change only when it raises
+            // backtest Sharpe by >= MIN_DELTA on >= MIN_TRADES trades. Forcing
+            // these to null keeps stop/target/max_hold out of the manual queue.
+            proposed_stop_pct:     null,
+            proposed_target_pct:   null,
+            proposed_max_hold_days: null,
             confidence:            typeof rec.confidence === 'number' ? rec.confidence : null,
             reasoning:             String(rec.reasoning_one_line || '').slice(0, 500),
             memo_id:               memoId,
