@@ -269,6 +269,28 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
             'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl}
 
 
+def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
+                      stop_ref: float, target_ref: float) -> tuple[float, float]:
+    """Re-express a stop/target defined as pct distances from ``ref`` so they
+    sit the SAME pct distances from ``entry_price`` (the actual fill).
+
+    Mirrors the live executor's re-anchor: preserves R:R geometry across an
+    overnight gap instead of carrying absolute levels (which would invert the
+    bracket when the fill gaps through a level). ``direction`` is +1 long / -1
+    short. Returns (stop_loss, target_1).
+    """
+    if ref <= 0:
+        return stop_ref, target_ref
+    if direction > 0:  # long: stop below, target above
+        stop_pct   = (ref - stop_ref) / ref
+        target_pct = (target_ref - ref) / ref
+        return entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
+    # short: stop above, target below
+    stop_pct   = (stop_ref - ref) / ref
+    target_pct = (ref - target_ref) / ref
+    return entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
+
+
 # ── Metric aggregation ───────────────────────────────────────────────────────
 
 def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Timestamp]]:
@@ -550,12 +572,26 @@ def _per_bar_simulate(
             # Need the signal-day bar so we can use its close as the entry price
             if current_date not in ticker_bars.index:
                 continue
-            entry_price = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
-                          else float(ticker_bars.loc[current_date, 'close'])
-            stop_loss = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
-                        else (entry_price * 0.93 if direction > 0 else entry_price * 1.07)
-            target_1 = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
-                       else (entry_price * 1.08 if direction > 0 else entry_price * 0.92)
+            # signal[t] -> execute[t+1]: the strategy decides on `current_date`
+            # (t) but the order fills on the NEXT available bar's close (t+1).
+            # `ref` is the strategy's intended price (signal-day close in
+            # practice — 127/140 strategies set entry_price themselves); brackets
+            # are shaped around it, then re-anchored to the actual fill.
+            ref = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
+                  else float(ticker_bars.loc[current_date, 'close'])
+            stop_ref = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
+                       else (ref * 0.93 if direction > 0 else ref * 1.07)
+            target_ref = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
+                         else (ref * 1.08 if direction > 0 else ref * 0.92)
+            # Locate t+1: first bar strictly after the signal bar.
+            _future_idx = ticker_bars.index[ticker_bars.index > current_date]
+            if len(_future_idx) == 0:
+                continue  # signal on the last available bar — cannot fill
+            fill_date = _future_idx[0]
+            entry_price = float(ticker_bars.loc[fill_date, 'close'])
+            stop_loss, target_1 = _reanchor_bracket(
+                ref=ref, entry_price=entry_price, direction=direction,
+                stop_ref=stop_ref, target_ref=target_ref)
             _ov = regime_param_override.resolve_override(
                 strategy_id, str(regime_state), injected=param_override)
             if _ov:
@@ -569,7 +605,7 @@ def _per_bar_simulate(
                 continue
             if direction < 0 and (stop_loss <= entry_price or target_1 >= entry_price):
                 continue
-            exit_info = simulate_trade(ticker_bars, current_date, direction,
+            exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
@@ -585,7 +621,7 @@ def _per_bar_simulate(
             trades.append({
                 'ticker':         ticker,
                 'direction':      'long' if direction > 0 else 'short',
-                'entry_date':     cur_d,
+                'entry_date':     fill_date.date() if hasattr(fill_date, 'date') else fill_date,
                 'entry_price':    entry_price,
                 'exit_date':      exit_info['exit_date'].date() if hasattr(exit_info['exit_date'], 'date') else exit_info['exit_date'],
                 'exit_price':     exit_info['exit_price'],
