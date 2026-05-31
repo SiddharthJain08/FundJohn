@@ -98,6 +98,8 @@ def test_migration_126_signal_gate_verdicts_table(db_conn):
         actual_type, actual_nullable = cols[col_name]
         assert actual_type == expected_type, \
             f'signal_gate_verdicts.{col_name}: expected {expected_type}, got {actual_type}'
+        assert actual_nullable == expected_nullable, \
+            f'signal_gate_verdicts.{col_name}: expected nullable={expected_nullable}, got {actual_nullable}'
 
 
 def test_migration_126_eod_compute_health_table(db_conn):
@@ -138,6 +140,8 @@ def test_migration_126_eod_compute_health_table(db_conn):
         actual_type, actual_nullable = cols[col_name]
         assert actual_type == expected_type, \
             f'eod_compute_health.{col_name}: expected {expected_type}, got {actual_type}'
+        assert actual_nullable == expected_nullable, \
+            f'eod_compute_health.{col_name}: expected nullable={expected_nullable}, got {actual_nullable}'
 
 
 def test_migration_126_signal_gate_verdicts_index(db_conn):
@@ -172,14 +176,14 @@ def test_migration_126_execution_signals_unique_constraint_preserved(db_conn):
     """Assert the original UNIQUE(strategy_id, signal_date, ticker, direction) is preserved."""
     cur = db_conn.cursor()
     cur.execute("""
-        SELECT constraint_name, constraint_type
-          FROM information_schema.table_constraints
-         WHERE table_name = 'execution_signals'
+        SELECT kcu.column_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage kcu
+            ON tc.constraint_name = kcu.constraint_name
+           AND tc.table_name = kcu.table_name
+         WHERE tc.table_name = 'execution_signals'
+           AND tc.constraint_type = 'UNIQUE'
     """)
-    constraints = {name: ctype for name, ctype in cur.fetchall()}
-
-    # Find the composite unique constraint
-    unique_found = any(
-        ctype == 'UNIQUE' for name, ctype in constraints.items()
-    )
-    assert unique_found, f'UNIQUE constraint missing on execution_signals; got {constraints}'
+    constraint_cols = {row[0] for row in cur.fetchall()}
+    assert constraint_cols == {'strategy_id', 'signal_date', 'ticker', 'direction'}, \
+        f'UNIQUE constraint columns wrong: got {constraint_cols}'

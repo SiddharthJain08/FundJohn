@@ -19,7 +19,7 @@ ALTER TABLE execution_signals
 -- 2. Create signal_gate_verdicts table (one row per gate decision audit)
 CREATE TABLE IF NOT EXISTS signal_gate_verdicts (
     id BIGSERIAL PRIMARY KEY,
-    signal_id UUID,
+    signal_id UUID, -- no FK: audit rows must survive signal deletion
     gate_type TEXT,
     ticker TEXT,
     target_date DATE,
