@@ -1,7 +1,7 @@
 # SP-6 Phase A — Rollout Runbook
 
 **Date:** 2026-05-31
-**Branch:** `feat/sp6-phase-a-eod-open-execution`
+**Branch:** `feat/sp6-phase-a-impl`
 **Spec:** `docs/superpowers/specs/2026-05-31-sp6-phase-a-eod-open-execution-design.md`
 **Status:** Gates OFF by default; staged validation required before activation.
 
@@ -49,10 +49,9 @@ The SP-6 Phase A day-cycle (all times ET, Mon–Fri) is a **time-split** in two 
 **4:15 PM (T) — EOD compute** (`OPENCLAW_EOD_SIGNAL_REGISTER`): `daily-cycle.js` runs
 `[collect, sentiment, signals]` with reason `eod-signal-register` on real `close[T]` prices
 (fires after the ~4:05 PM EOD price append). `engine.py:write_signals` writes
-`execution_signals` rows at `lifecycle_state='COMPUTED'` with `target_date=T+1`. Also writes
-an `eod_compute_health` sentinel and finalizes the parity mark (`mark_entry_price = close[T]`,
-bracket re-anchor via `_reanchor_bracket`) for any positions filled that day. No orders
-are submitted.
+`execution_signals` rows at `lifecycle_state='COMPUTED'` with `target_date=T+1`, using
+`close[T]` as the decision-price reference. Also writes an `eod_compute_health` sentinel.
+No orders are submitted.
 
 **9:15 AM (T+1) — carry-forward gate** (`OPENCLAW_EOD_PREMARKET_GATE`): reads the `COMPUTED`
 set, applies panic-score + FinBERT sentiment verdict per ticker, transitions rows to
@@ -80,9 +79,12 @@ then the `alpaca` step fills new/resize entries into `close[T+1]`. By 3:55 PM th
 are already closed, so the sizer's re-diff sees them gone (no double-close; any unfilled
 paper-OPG drop is also caught here as a free backstop).
 
-**4:15 PM (T+1) — parity mark finalized**: the next EOD compute sets `mark_entry_price =
-official close[T+1]` and re-anchors brackets for positions filled that day → zero-width
-execution ledger; strategy returns byte-match the t+1 backtest.
+**4:15 PM (T+1) — parity mark finalized**: the T+1 EOD compute sets
+`mark_entry_price = official close[T+1]` (the strategy-ledger entry mark) and
+re-anchors brackets via `_reanchor_bracket` for positions filled that day → zero-width
+execution ledger; strategy returns byte-match the t+1 backtest. This is the
+canonical mark: the backtest fills at `close[t+1]`, the strategy ledger marks at
+`close[T+1]` — they are the same price.
 
 ---
 
@@ -273,13 +275,10 @@ manually with:
 ```bash
 source /root/openclaw/.claude/worktrees/sp6-phase-a/worktree-env.sh
 cd /root/openclaw
-python3 -c "
-from src.system_checks.runner import run_checks
-import json, sys
-results = run_checks(tags=['pipeline'])
-for r in results:
-    print(r['name'], r['status'], r.get('detail',''))
-"
+# Run all pipeline-tagged system checks (uses src/system_checks/cli.py as __main__)
+PYTHONPATH=src python3 -m system_checks --tag pipeline
+# Or run the three SP-6 checks individually:
+PYTHONPATH=src python3 -m system_checks --check eod_compute_health_fresh --check carried_set_present --check gate_ran_today
 ```
 
 Also monitor daily:
