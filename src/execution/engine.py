@@ -1102,6 +1102,7 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
     the caller AFTER it commits — see the note at the end of this function."""
     cur.execute("""
         SELECT id, strategy_id, ticker, direction, entry_price,
+               mark_entry_price, target_date, lifecycle_state,
                stop_loss, target_1, signal_date
         FROM execution_signals
         WHERE workspace_id = %s AND status = 'open'
@@ -1115,10 +1116,29 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
         strat_id   = row['strategy_id']
         ticker     = row['ticker']
         direction  = row['direction']
-        entry      = float(row['entry_price'])
         stop_loss  = float(row['stop_loss'])
         target_1   = float(row['target_1'])
         sig_date   = row['signal_date']
+
+        # SP-6: skip CLOSED_AT_OPEN signals (belt-and-suspenders; normally
+        # already excluded by status='open', but a flattened/dropped position
+        # that retained status='open' must never be re-marked).
+        import math as _math
+        if row.get('lifecycle_state') == 'CLOSED_AT_OPEN':
+            continue
+
+        # SP-6: prefer mark_entry_price (close[T+1] fill mark) over
+        # entry_price; fall back to entry_price for legacy NULL rows.
+        _raw_mark = row.get('mark_entry_price')
+        _raw_entry = row['entry_price']
+        if _raw_mark is not None:
+            try:
+                _mark_f = float(_raw_mark)
+                entry = _mark_f if _math.isfinite(_mark_f) else float(_raw_entry)
+            except (ValueError, TypeError):
+                entry = float(_raw_entry)
+        else:
+            entry = float(_raw_entry)
 
         if ticker not in prices.columns:
             continue
@@ -1128,10 +1148,15 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
             continue
 
         current = float(ts.iloc[-1])
-        days_held = (run_date - sig_date).days if isinstance(sig_date, date) else 0
+        # SP-6: use target_date for days_held when present (aligns with backtest
+        # horizon); fall back to signal_date for legacy NULL rows.
+        _tgt_dt = row.get('target_date')
+        if _tgt_dt is not None and isinstance(_tgt_dt, date):
+            days_held = (run_date - _tgt_dt).days if isinstance(run_date, date) else 0
+        else:
+            days_held = (run_date - sig_date).days if isinstance(sig_date, date) else 0
 
         # Compute unrealized P&L; guard against zero/NaN entries.
-        import math as _math
         if not entry or not _math.isfinite(entry):
             unrealized_pct = 0.0
         elif direction == 'LONG':
