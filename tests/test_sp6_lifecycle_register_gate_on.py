@@ -143,7 +143,8 @@ def test_write_signals_gate_on_sets_lifecycle(
     cur = db_conn.cursor()
     run_date = date(2026, 5, 27)  # Tuesday → next session Wednesday
 
-    strategy_results = {approved_strategy_id: [_make_signal('TSLA')]}
+    # Use a sentinel ticker that cannot collide with any live open position.
+    strategy_results = {approved_strategy_id: [_make_signal('ZZSP6A')]}
     n_inserted = write_signals(cur, strategy_results, 'LOW_VOL', run_date)
     assert n_inserted == 1
 
@@ -152,7 +153,7 @@ def test_write_signals_gate_on_sets_lifecycle(
           FROM execution_signals
          WHERE strategy_id = %s AND ticker = %s AND status = 'open'
          ORDER BY created_at DESC LIMIT 1
-    """, (approved_strategy_id, 'TSLA'))
+    """, (approved_strategy_id, 'ZZSP6A'))
     row = cur.fetchone()
 
     assert row is not None, "Signal row not found after write_signals"
@@ -175,7 +176,8 @@ def test_write_signals_gate_off_leaves_null(
     cur = db_conn.cursor()
     run_date = date(2026, 5, 28)  # Wednesday
 
-    strategy_results = {approved_strategy_id: [_make_signal('NVDA')]}
+    # Use a sentinel ticker that cannot collide with any live open position.
+    strategy_results = {approved_strategy_id: [_make_signal('ZZSP6B')]}
     n_inserted = write_signals(cur, strategy_results, 'LOW_VOL', run_date)
     assert n_inserted == 1
 
@@ -184,7 +186,7 @@ def test_write_signals_gate_off_leaves_null(
           FROM execution_signals
          WHERE strategy_id = %s AND ticker = %s AND status = 'open'
          ORDER BY created_at DESC LIMIT 1
-    """, (approved_strategy_id, 'NVDA'))
+    """, (approved_strategy_id, 'ZZSP6B'))
     row = cur.fetchone()
 
     assert row is not None, "Signal row not found after write_signals"
@@ -205,9 +207,10 @@ def test_write_signals_gate_on_savepoint_preserved(
     cur = db_conn.cursor()
     run_date = date(2026, 5, 27)
 
-    good_signal = _make_signal('AAPL')
+    # Use sentinel tickers that cannot collide with any live open positions.
+    good_signal = _make_signal('ZZSP6C')
     # Degenerate geometry: stop == entry for LONG → will be dropped pre-SAVEPOINT
-    bad_signal = _make_signal('BAD_GEO', entry=100.0, stop=100.0, t1=104.0)
+    bad_signal = _make_signal('ZZSP6D', entry=100.0, stop=100.0, t1=104.0)
 
     strategy_results = {approved_strategy_id: [good_signal, bad_signal]}
     n_inserted = write_signals(cur, strategy_results, 'LOW_VOL', run_date)
@@ -219,7 +222,7 @@ def test_write_signals_gate_on_savepoint_preserved(
           FROM execution_signals
          WHERE strategy_id = %s AND ticker = %s AND status = 'open'
          ORDER BY created_at DESC LIMIT 1
-    """, (approved_strategy_id, 'AAPL'))
+    """, (approved_strategy_id, 'ZZSP6C'))
     row = cur.fetchone()
     assert row is not None
     assert row['lifecycle_state'] == 'COMPUTED'
@@ -229,5 +232,5 @@ def test_write_signals_gate_on_savepoint_preserved(
     cur.execute("""
         SELECT id FROM execution_signals
          WHERE strategy_id = %s AND ticker = %s
-    """, (approved_strategy_id, 'BAD_GEO'))
-    assert cur.fetchone() is None, "Degenerate-geometry signal must not be inserted"
+    """, (approved_strategy_id, 'ZZSP6D'))
+    assert cur.fetchone() is None, "Degenerate-geometry signal (ZZSP6D) must not be inserted"
