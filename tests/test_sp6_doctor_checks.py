@@ -266,6 +266,31 @@ class TestCarriedSetPresent:
         assert result[0] is Status.PASS
         assert '7' in result[1]
 
+    def test_query_includes_target_date_clause(self, monkeypatch):
+        """SQL must cover target_date=TODAY so next-session carried sets are found.
+
+        EOD computes on day T (signal_date=T, target_date=T+1). On T+1 morning
+        a check using only signal_date=CURRENT_DATE would miss the carried set.
+        """
+        monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
+        cur_mock = MagicMock()
+        cur_mock.fetchone.return_value = (0,)
+        cursor_cm = MagicMock()
+        cursor_cm.__enter__ = MagicMock(return_value=cur_mock)
+        cursor_cm.__exit__ = MagicMock(return_value=False)
+        conn_mock = MagicMock()
+        conn_mock.cursor.return_value = cursor_cm
+        conn_cm = MagicMock()
+        conn_cm.__enter__ = MagicMock(return_value=conn_mock)
+        conn_cm.__exit__ = MagicMock(return_value=False)
+        pg = MagicMock(return_value=conn_cm)
+        with patch('system_checks.checks.pipeline._pg', pg):
+            pipeline._carried_set_present()
+        sql_called = cur_mock.execute.call_args[0][0]
+        assert 'target_date' in sql_called, (
+            "SQL must include target_date clause to catch next-session carried sets"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 5.  system_checks pipeline._gate_ran_today

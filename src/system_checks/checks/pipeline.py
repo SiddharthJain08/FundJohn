@@ -177,7 +177,7 @@ def _carried_set_present():
     with _pg() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM execution_signals
-            WHERE signal_date = CURRENT_DATE
+            WHERE (signal_date = CURRENT_DATE OR target_date = CURRENT_DATE)
               AND lifecycle_state IN ('COMPUTED', 'APPROVED')
         """)
         n = cur.fetchone()[0]
