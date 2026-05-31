@@ -310,6 +310,73 @@ def _load_broker_positions_usd():
         return {}
 
 
+def _classify_position_deltas(
+    target_usd: dict[str, float],
+    broker: dict[str, float],
+    ticker_meta: dict,
+) -> list[tuple[str, float, str]]:
+    """Classify position deltas into emission kinds: delta, flip_close, flip_open, orphan_close.
+
+    Pure function: no DB, no broker calls. Takes target positions, current broker positions,
+    and ticker metadata; returns a list of (ticker, signed_usd, kind) tuples.
+
+    Each ticker is classified as one of:
+      • delta         — single order; close_only auto-detected downstream when the delta
+                        direction has no aligned bracket.
+      • orphan_close  — ticker held but absent from current targets;
+                        strategy_id='__close_orphan__', tier-0 in executor.
+      • flip_close    — current and target have OPPOSITE signs. Liquidates the existing
+                        position fully. Tier-1 in executor. Paired with flip_open below;
+                        flip_open must wait for the close to fill (executor polls). Alpaca
+                        bracket orders do not support auto-reverse so we CANNOT submit a
+                        single oversize bracket.
+      • flip_open     — the paired new-direction open following flip_close. Tier-2 (short)
+                        or tier-3 (long) in executor.
+
+    Args:
+        target_usd:  dict[str, float] — target position in USD, per ticker
+        broker:      dict[str, float] — current broker positions in USD
+                     (positive=long, negative=short)
+        ticker_meta: dict — mutable; will be populated with __close_orphan__ metadata
+                     for orphan tickers not already present
+
+    Returns:
+        list[tuple[str, float, str]] — each (ticker, signed_usd, kind) emission
+    """
+    # First pass: identify flips (opposite-sign transitions).
+    flip_tickers: set[str] = set()
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        if current == 0.0 or target == 0.0:
+            continue
+        # Opposite-sign check
+        if (target > 0 > current) or (target < 0 < current):
+            flip_tickers.add(tkr)
+
+    # Second pass: emit deltas and flips for all targets.
+    emissions: list[tuple[str, float, str]] = []
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        if tkr in flip_tickers:
+            emissions.append((tkr, -current, 'flip_close'))
+            emissions.append((tkr,  target,  'flip_open'))
+        else:
+            delta = target - current
+            if delta != 0.0:
+                emissions.append((tkr, delta, 'delta'))
+
+    # Third pass: emit orphan_closes for positions in broker but not in targets.
+    for tkr, current in broker.items():
+        if tkr in target_usd or current == 0.0:
+            continue
+        emissions.append((tkr, -current, 'orphan_close'))
+        if tkr not in ticker_meta:
+            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
+                                'brackets': []}
+
+    return emissions
+
+
 def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
@@ -538,33 +605,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     #   • flip_open     — the paired new-direction open following flip_close.
     #                     Tier-2 (short) or tier-3 (long) in executor.
     broker = _load_broker_positions_usd()
-
-    flip_tickers: set[str] = set()
-    for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        if current == 0.0 or target == 0.0:
-            continue
-        # Opposite-sign check
-        if (target > 0 > current) or (target < 0 < current):
-            flip_tickers.add(tkr)
-
-    emissions: list[tuple[str, float, str]] = []
-    for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        if tkr in flip_tickers:
-            emissions.append((tkr, -current, 'flip_close'))
-            emissions.append((tkr,  target,  'flip_open'))
-        else:
-            delta = target - current
-            if delta != 0.0:
-                emissions.append((tkr, delta, 'delta'))
-    for tkr, current in broker.items():
-        if tkr in target_usd or current == 0.0:
-            continue
-        emissions.append((tkr, -current, 'orphan_close'))
-        if tkr not in ticker_meta:
-            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
-                                'brackets': []}
+    emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
+    flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
     logger.info(
         'regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, emissions=%d (flips=%d)',
         len(target_usd), len(broker), len(emissions), len(flip_tickers))
