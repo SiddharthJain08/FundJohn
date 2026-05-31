@@ -89,17 +89,23 @@ def _next_trading_day(run_date: date) -> date:
             [_ALPACA_BIN, 'calendar',
              '--start', start.isoformat(),
              '--end', end.isoformat()],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=5,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            sessions = json.loads(result.stdout)
+        if result.returncode != 0:
+            logger.warning(
+                '_next_trading_day: alpaca calendar call failed (rc=%s); '
+                'falling back to weekday-skip math for run_date=%s',
+                result.returncode, run_date,
+            )
+        else:
+            sessions = json.loads(result.stdout) if result.stdout.strip() else []
             if sessions:
                 return date.fromisoformat(sessions[0]['date'])
-        logger.warning(
-            '_next_trading_day: alpaca calendar call failed (rc=%s); '
-            'falling back to weekday-skip math for run_date=%s',
-            result.returncode, run_date,
-        )
+            logger.warning(
+                '_next_trading_day: alpaca calendar returned empty session list; '
+                'falling back to weekday-skip math for run_date=%s',
+                run_date,
+            )
     except Exception as exc:
         logger.warning(
             '_next_trading_day: alpaca calendar exception (%s); '

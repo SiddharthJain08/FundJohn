@@ -14,6 +14,7 @@ All tests use rollback isolation — no persistent side-effects on the live DB.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -27,8 +28,6 @@ import psycopg2
 import psycopg2.extras
 
 from execution.engine import write_signals, _next_trading_day
-
-pytestmark = pytest.mark.integration
 
 
 # ─────────────────────────────────────────────────────────
@@ -67,42 +66,76 @@ def approved_strategy_id(db_conn):
 
 
 # ─────────────────────────────────────────────────────────
-# _next_trading_day unit tests
+# _next_trading_day unit tests (credential-free, mocked)
 # ─────────────────────────────────────────────────────────
 
-def test_next_trading_day_weekday():
-    """Tuesday → Wednesday (plain weekday case)."""
-    assert _next_trading_day(date(2026, 5, 27)) == date(2026, 5, 28)
+def test_next_trading_day_calendar_success_holiday_aware(monkeypatch):
+    """Mock the Alpaca CLI to return a holiday-aware next session.
 
-
-def test_next_trading_day_friday_to_monday():
-    """Friday → Monday (skip weekend)."""
-    assert _next_trading_day(date(2026, 5, 29)) == date(2026, 6, 1)
-
-
-def test_next_trading_day_skip_weekend_saturday():
-    """Saturday → Monday (input is on a weekend)."""
-    assert _next_trading_day(date(2026, 5, 30)) == date(2026, 6, 1)
-
-
-def test_next_trading_day_skip_weekend_sunday():
-    """Sunday → Monday."""
-    assert _next_trading_day(date(2026, 5, 31)) == date(2026, 6, 1)
-
-
-def test_next_trading_day_holiday_aware():
-    """2026-07-02 (Thu before observed July 4) → 2026-07-06, NOT 2026-07-03.
-
-    This is the discriminating test: weekday-only math would return 2026-07-03
-    (Friday), but the Alpaca calendar knows the market is closed and returns
-    2026-07-06 (Monday).  This test FAILS if the implementation degrades to
-    pure weekday-skip fallback.
+    Verifies the JSON parse + holiday handling path without network access.
+    run_date=2026-07-02 (Thursday before observed July 4): weekday math alone
+    would return 2026-07-03 (Friday), but the calendar response says 2026-07-06
+    (Monday) — the correct next open session.
     """
-    result = _next_trading_day(date(2026, 7, 2))
-    assert result == date(2026, 7, 6), (
-        f"Expected 2026-07-06 (next open session after observed July 4 holiday), "
-        f"got {result}. If weekday-only math is being used, the clock/calendar "
-        f"fallback may have triggered."
+    import execution.engine as eng
+
+    def fake_run(args, capture_output, text, timeout):
+        return subprocess.CompletedProcess(
+            args=args, returncode=0,
+            stdout='[{"date": "2026-07-06", "session": "full"}]',
+            stderr='',
+        )
+
+    monkeypatch.setattr(eng.subprocess, 'run', fake_run)
+    assert _next_trading_day(date(2026, 7, 2)) == date(2026, 7, 6)
+
+
+def test_next_trading_day_calendar_failure_falls_back_to_weekday_skip(monkeypatch, caplog):
+    """Mock the Alpaca CLI to fail (rc=1); assert weekday-skip fallback + warning logged.
+
+    run_date=2026-05-29 (Friday) → fallback returns 2026-06-01 (Monday).
+    """
+    import logging
+    import execution.engine as eng
+
+    def fake_run(args, capture_output, text, timeout):
+        return subprocess.CompletedProcess(
+            args=args, returncode=1,
+            stdout='',
+            stderr='error: unauthorized',
+        )
+
+    monkeypatch.setattr(eng.subprocess, 'run', fake_run)
+    with caplog.at_level(logging.WARNING, logger='execution.engine'):
+        result = _next_trading_day(date(2026, 5, 29))
+
+    assert result == date(2026, 6, 1), (
+        f"Expected 2026-06-01 (Mon after Fri via weekday-skip fallback), got {result}"
+    )
+    assert any('falling back to weekday-skip math' in r.message for r in caplog.records), (
+        "Expected a warning log about weekday-skip fallback"
+    )
+
+
+def test_next_trading_day_empty_session_list_falls_back(monkeypatch, caplog):
+    """Mock the CLI to return rc=0 but an empty JSON array; assert fallback + distinct warning."""
+    import logging
+    import execution.engine as eng
+
+    def fake_run(args, capture_output, text, timeout):
+        return subprocess.CompletedProcess(
+            args=args, returncode=0,
+            stdout='[]',
+            stderr='',
+        )
+
+    monkeypatch.setattr(eng.subprocess, 'run', fake_run)
+    with caplog.at_level(logging.WARNING, logger='execution.engine'):
+        result = _next_trading_day(date(2026, 5, 27))  # Tuesday → Wednesday via fallback
+
+    assert result == date(2026, 5, 28)
+    assert any('empty session list' in r.message for r in caplog.records), (
+        "Expected a warning log about empty session list (not 'call failed')"
     )
 
 
@@ -129,6 +162,7 @@ def _make_signal(ticker: str, direction: str = 'LONG',
     )
 
 
+@pytest.mark.integration
 def test_write_signals_gate_on_sets_lifecycle(
     db_conn, monkeypatch, workspace_id, approved_strategy_id
 ):
@@ -164,6 +198,7 @@ def test_write_signals_gate_on_sets_lifecycle(
     assert delta < 10, f"computed_at looks stale: {delta}s ago"
 
 
+@pytest.mark.integration
 def test_write_signals_gate_off_leaves_null(
     db_conn, monkeypatch, workspace_id, approved_strategy_id
 ):
@@ -195,6 +230,7 @@ def test_write_signals_gate_off_leaves_null(
     assert row['computed_at'] is None, "computed_at must be NULL when gate OFF"
 
 
+@pytest.mark.integration
 def test_write_signals_gate_on_savepoint_preserved(
     db_conn, monkeypatch, workspace_id, approved_strategy_id
 ):
