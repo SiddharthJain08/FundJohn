@@ -514,12 +514,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # Fix A: aggregate across cadence-window, not today-only.
         active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
     if not active:
-        # Fallback: use today's `signals` parameter (e.g. force_all day-1
+        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+            # EOD mode: an empty APPROVED set means every carried signal was
+            # vetoed (or none were computed). Do NOT fall back to the handoff
+            # signals — those may contain COMPUTED/legacy rows the pre-market
+            # gate deliberately rejected. Zero orders here is correct; the
+            # run_reconcile step (Task 8b) handles the flatten path when
+            # appropriate.
+            logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — no APPROVED carried signals; '
+                        'zero orders (flatten handled by run_reconcile if needed)')
+            return []
+        # Legacy fallback: use today's `signals` parameter (e.g. force_all day-1
         # of regime, before signals are persisted)
         active = signals or []
         logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
     else:
-        logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
+        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+            logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — %d APPROVED carried signals', len(active))
+        else:
+            logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
 
     # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
     _ortho_groups = None

@@ -172,6 +172,54 @@ class TestEodModeLoadsApprovedBypassesCadence:
         assert 'S1' in passed_sids, \
             'Cadence-pending signal must reach _sharpe_cadence_path in EOD mode'
 
+    def test_empty_approved_returns_empty_not_handoff_signals(self, monkeypatch):
+        """In EOD mode, when _load_approved_carried_signals returns [] (every
+        carried signal was vetoed or nothing was computed), size_positions must
+        return [] — it must NOT fall back to sizing the handoff's signals.
+
+        Without this guard, a vetoed handoff would silently re-enter the sizer
+        via the legacy fallback. The flatten path belongs to run_reconcile (Task 8b).
+        """
+        monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+
+        sharpe_cadence_calls = []
+
+        def capturing_sharpe_cadence_for_empty_test(signals, account_state, regime_state,
+                                                      params, confirmer):
+            # We DON'T want _sharpe_cadence_path to return early before reaching
+            # the loader, so use a minimal but real path. Instead, monkeypatch
+            # the loader to return empty and let the real fallback guard run.
+            sharpe_cadence_calls.append(signals)
+            return []
+
+        # Don't patch _sharpe_cadence_path here — let it run for real to exercise
+        # the empty-approved early-return. Patch only strategy_weights and the loader.
+        import unittest.mock as _mock
+        fake_weights_row = {
+            'strategy_id': 'S1', 'daily_weight': 1.0,
+            'effective_sharpe': 1.0, 'cadence_days': 1.0,
+        }
+
+        def empty_approved_loader(weight_by_strat):
+            return []  # every signal vetoed
+
+        monkeypatch.setattr(_sizer, '_load_approved_carried_signals', empty_approved_loader)
+
+        # Provide non-empty handoff signals — these must NOT get sized.
+        sigs = [_sig('S1'), _sig('S2', ticker='TSLA')]
+
+        with _mock.patch('execution.strategy_weights.load_current', return_value=[fake_weights_row]):
+            result = _sizer.size_positions(
+                signals=sigs, account_state=_account(), regime={'state': 'LOW_VOL'},
+                run_date=date(2026, 5, 12), strategy_state={},
+                regime_params=_params(), confirmer=None,
+            )
+
+        assert result == [], (
+            'EOD mode with empty APPROVED set must return [] '
+            '— must not fall back to sizing handoff signals'
+        )
+
     def test_approved_loader_called_not_active_window_gate_on(self, monkeypatch):
         """_load_approved_carried_signals must be called (not _load_active_window_signals)
         when OPENCLAW_EOD_RECONCILE=1."""
