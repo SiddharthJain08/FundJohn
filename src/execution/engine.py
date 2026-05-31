@@ -1425,7 +1425,7 @@ def main():
                         _ts = prices[_tk].dropna()
                         if not _ts.empty:
                             _closes[_tk] = float(_ts.iloc[-1])
-                parity_mark_count = finalize_parity_marks(cur, _closes, run_date)
+                parity_mark_count = finalize_parity_marks(cur, _closes, run_date, WORKSPACE)
                 logger.info(f"Parity marks finalized: {parity_mark_count}")
             except Exception as _pm_err:
                 logger.error(f"[engine] parity_mark failed: {_pm_err}")

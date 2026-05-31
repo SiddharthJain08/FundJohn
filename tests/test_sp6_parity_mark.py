@@ -173,7 +173,8 @@ def test_finalize_marks_executing_signal(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
-    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date)
+    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
+                                   _db_meta['ws_id'])
     assert marked == 1
 
     # Compute expected values by calling _reanchor_bracket directly —
@@ -232,7 +233,8 @@ def test_finalize_marks_short_signal(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
-    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date)
+    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
+                                   _db_meta['ws_id'])
     assert marked == 1
 
     expected_stop, expected_target = _reanchor_bracket(
@@ -271,7 +273,7 @@ def test_finalize_skips_wrong_target_date(db_conn, _db_meta):
     )
 
     # Run with today's date — should NOT mark the signal
-    marked = finalize_parity_marks(cur, {ticker: 102.0}, today)
+    marked = finalize_parity_marks(cur, {ticker: 102.0}, today, _db_meta['ws_id'])
     assert marked == 0
 
     cur.execute("""
@@ -297,7 +299,8 @@ def test_finalize_skips_ticker_not_in_closes(db_conn, _db_meta):
     )
 
     # closes dict has a DIFFERENT ticker
-    marked = finalize_parity_marks(cur, {'OTHERTICKER': 102.0}, run_date)
+    marked = finalize_parity_marks(cur, {'OTHERTICKER': 102.0}, run_date,
+                                   _db_meta['ws_id'])
     assert marked == 0
 
     cur.execute("""
@@ -323,7 +326,8 @@ def test_finalize_skips_unsupported_direction(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
-    marked = finalize_parity_marks(cur, {ticker: 102.0}, run_date)
+    marked = finalize_parity_marks(cur, {ticker: 102.0}, run_date,
+                                   _db_meta['ws_id'])
     assert marked == 0
 
     cur.execute("""
@@ -357,7 +361,8 @@ def test_finalize_already_filled_signal_is_idempotent(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
-    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date)
+    marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
+                                   _db_meta['ws_id'])
     assert marked == 1
 
     expected_stop, expected_target = _reanchor_bracket(
@@ -379,12 +384,13 @@ def test_finalize_already_filled_signal_is_idempotent(db_conn, _db_meta):
 
 
 @pytest.mark.integration
-def test_finalize_no_rows_returns_zero(db_conn):
+def test_finalize_no_rows_returns_zero(db_conn, _db_meta):
     """When no matching rows exist, returns 0 without error."""
     cur = db_conn.cursor()
     from datetime import timedelta
     # Use a date very far in the future so no real rows can match
     future_date = date.today() + timedelta(days=3650)
 
-    marked = finalize_parity_marks(cur, {'AAPL': 150.0}, future_date)
+    marked = finalize_parity_marks(cur, {'AAPL': 150.0}, future_date,
+                                   _db_meta['ws_id'])
     assert marked == 0

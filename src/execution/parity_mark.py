@@ -11,19 +11,34 @@ bracket geometry so that signal_pnl's daily-close exit walk reproduces backtest
 results.  The mark_entry_price is the OFFICIAL close (not the broker fill).
 
 API:
-    finalize_parity_marks(cur, closes: dict[str, float], run_date) -> int
+    finalize_parity_marks(cur, closes: dict[str, float], run_date,
+                          workspace_id: str = 'default') -> int
 """
 import logging
+import math
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
 
-def finalize_parity_marks(cur, closes: dict, run_date) -> int:
+def _safe_float(v, field: str):
+    """Return float(v) or None if v is None/NaN/Inf."""
+    if v is None:
+        return None
+    try:
+        f = float(v)
+        return f if math.isfinite(f) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def finalize_parity_marks(cur, closes: dict, run_date,
+                          workspace_id: str = 'default') -> int:
     """Mark execution_signals rows at close[T+1] and re-anchor brackets.
 
     Selects all EXECUTING/FILLED rows where target_date == run_date AND
-    the ticker is present in the closes dict.  For each:
+    workspace_id matches AND the ticker is present in the closes dict.
+    For each:
       1. Computes direction_sign (+1 LONG, -1 SHORT) via _signal_to_long_short;
          skips neutral/unknown directions (returns 0).
       2. Guards against None/NaN in entry_price, stop_loss, target_1 — rows
@@ -36,9 +51,10 @@ def finalize_parity_marks(cur, closes: dict, run_date) -> int:
          lifecycle_state='FILLED'.
 
     Args:
-        cur:      psycopg2 cursor (caller owns transaction + commit).
-        closes:   dict[ticker -> float] — latest official close per ticker.
-        run_date: date — matched against execution_signals.target_date.
+        cur:          psycopg2 cursor (caller owns transaction + commit).
+        closes:       dict[ticker -> float] — latest official close per ticker.
+        run_date:     date — matched against execution_signals.target_date.
+        workspace_id: str — scopes the SELECT to a single workspace (default='default').
 
     Returns:
         Number of rows updated.
@@ -48,7 +64,8 @@ def finalize_parity_marks(cur, closes: dict, run_date) -> int:
     if not closes:
         return 0
 
-    # Fetch EXECUTING/FILLED signals whose target_date falls on run_date.
+    # Fetch EXECUTING/FILLED signals whose target_date falls on run_date
+    # and belong to the specified workspace.
     # We filter by closes dict in Python — allows a simple equality predicate
     # without a Postgres IN clause that varies in length.
     cur.execute("""
@@ -56,8 +73,9 @@ def finalize_parity_marks(cur, closes: dict, run_date) -> int:
           FROM execution_signals
          WHERE lifecycle_state IN ('EXECUTING', 'FILLED')
            AND target_date = %s
+           AND workspace_id = %s
          ORDER BY id
-    """, (run_date,))
+    """, (run_date, workspace_id))
 
     rows = cur.fetchall()
     if not rows:
@@ -92,18 +110,6 @@ def finalize_parity_marks(cur, closes: dict, run_date) -> int:
             continue
 
         # Guard against None/NaN in core price fields
-        import math as _math
-
-        def _safe_float(v, field: str):
-            """Return float(v) or None if v is None/NaN/Inf."""
-            if v is None:
-                return None
-            try:
-                f = float(v)
-                return f if _math.isfinite(f) else None
-            except (ValueError, TypeError):
-                return None
-
         entry_price = _safe_float(entry_price_raw, 'entry_price')
         stop_loss = _safe_float(stop_raw, 'stop_loss')
         target_1 = _safe_float(target_raw, 'target_1')
