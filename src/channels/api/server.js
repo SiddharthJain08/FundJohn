@@ -8424,25 +8424,6 @@ function _saRenderApplied(applied) {
   }
 }
 
-// Phase 2E — inline path-MC button on proposal rows
-    out.innerHTML =
-      '<b>Path-MC</b> (n=' + j.n_bootstrap_iter + ', source=' + j.path_source + ', trades=' + j.n_trades_sampled + ')' + diffBadge +
-      ' &nbsp; Sharpe[' + fmt(j.sharpe_p05) + ', ' + fmt(j.sharpe_p50) + ', ' + fmt(j.sharpe_p95) + ']' +
-      ' &nbsp; MaxDD[' + pct(j.max_dd_p05) + ', ' + pct(j.max_dd_p50) + ', ' + pct(j.max_dd_p95) + ']' +
-      ' &nbsp; stop=' + pct(j.stop_hit_rate) +
-      ' · target=' + pct(j.target_hit_rate) +
-      ' · max-hold=' + pct(j.max_hold_hit_rate) +
-      (sharpeDelta != null
-         ? '<br><span style="color:var(--muted)">vs linear MC: Δsharpe_p50=' + fmt(sharpeDelta) + (ddDelta != null ? ' · Δmax_dd_p95=' + pct(ddDelta) : '') + '</span>'
-         : '');
-    btn.textContent = 'Re-run';
-    btn.disabled = false;
-  } catch (e) {
-    out.textContent = 'Path-MC failed: ' + e.message;
-    btn.disabled = false; btn.textContent = 'Path-MC';
-  }
-}
-
 // 2026-05-19: Phase 2F calibration-addenda render/load/decide/wire helpers
 // removed. The operator no longer interacts with MastermindJohn's weekly
 // review prompt — research-page is the single entry point for paper /
