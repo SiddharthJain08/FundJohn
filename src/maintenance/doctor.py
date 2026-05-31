@@ -343,6 +343,58 @@ def check_env_optional():
     return _warn('env_optional', f'missing: {",".join(missing)}')
 
 
+@_check('eod_mutual_exclusion')
+def check_eod_mutual_exclusion():
+    """Fail if BOTH OPENCLAW_EOD_SIGNAL_REGISTER and OPENCLAW_CLOSE_EXEC_LIVE are ON.
+    These modes are mutually exclusive: EOD_SIGNAL_REGISTER computes + persists new
+    signals for the day; CLOSE_EXEC_LIVE fires the legacy into-close execution.
+    Running both simultaneously creates conflicting signal sets and double-execution."""
+    eod_register = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    close_exec   = os.environ.get('OPENCLAW_CLOSE_EXEC_LIVE') == '1'
+    if eod_register and close_exec:
+        return _fail('eod_mutual_exclusion',
+                     'OPENCLAW_EOD_SIGNAL_REGISTER=1 AND OPENCLAW_CLOSE_EXEC_LIVE=1 (mutually exclusive flows)')
+    active = ('eod_signal_register' if eod_register
+              else 'close_exec_live' if close_exec
+              else 'neither')
+    return _ok('eod_mutual_exclusion', f'active_flow={active}')
+
+
+# EOD gate names used by consistency check.
+_EOD_GATES = (
+    'OPENCLAW_EOD_SIGNAL_REGISTER',
+    'OPENCLAW_EOD_PREMARKET_GATE',
+    'OPENCLAW_EOD_RECONCILE',
+)
+
+
+@_check('eod_gate_consistency')
+def check_eod_gate_consistency():
+    """Fail if the three EOD gates are partially activated.
+
+    The EOD flow requires all three gates ON together:
+      - EOD_SIGNAL_REGISTER  — compute + persist signals (15:55 sizer reads these)
+      - EOD_PREMARKET_GATE   — 9:28 premarket gate check before reconcile
+      - EOD_RECONCILE        — 9:32 reconcile/sweep + approved-set loading
+
+    Partial activation is a footgun: if SIGNAL_REGISTER=1 but RECONCILE=0, the
+    15:55 sizer runs WITHOUT its SP-6-aware APPROVED-set loading (Task 8a gates
+    that on RECONCILE), so it sizes against the wrong signal set. The 9:28 gate
+    and 9:32 sweep also won't fire.
+
+    PASS: all three =1, or all three unset/≠1.
+    FAIL: any mix (some =1, some not).
+    """
+    on  = [g for g in _EOD_GATES if os.environ.get(g) == '1']
+    off = [g for g in _EOD_GATES if os.environ.get(g) != '1']
+    if len(on) in (0, 3):
+        state = 'all_on' if len(on) == 3 else 'all_off'
+        return _ok('eod_gate_consistency', f'eod_gates={state}')
+    return _fail('eod_gate_consistency',
+                 f'partial activation: ON={[g.replace("OPENCLAW_","") for g in on]} '
+                 f'OFF={[g.replace("OPENCLAW_","") for g in off]}')
+
+
 @_check('regime_freshness')
 def check_regime_freshness():
     """Detect drift between `regime_latest.json` (daily-cron output) and

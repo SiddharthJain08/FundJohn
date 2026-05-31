@@ -136,3 +136,71 @@ def _pipeline_log_no_unhandled_traceback():
     if n_traceback == 0:
         return Status.PASS, 'no tracebacks in log'
     return Status.WARN, f'{n_traceback} tracebacks in log; inspect manually'
+
+
+# ── SP-6 Phase A: EOD signal-register + premarket-gate health ─────────────
+# All three checks are gated: they SKIP gracefully when the relevant EOD gate
+# is off, so the legacy close-exec flow gets zero spurious warnings.
+
+
+@check(name='eod_compute_health_fresh', tags=['pipeline'], requires=['db'])
+def _eod_compute_health_fresh():
+    """When OPENCLAW_EOD_SIGNAL_REGISTER=1: latest eod_compute_health row must
+    be for CURRENT_DATE and healthy=true.  WARN if missing/stale/unhealthy.
+    Gate off → SKIP (no spurious noise on the legacy flow)."""
+    if os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1':
+        return Status.SKIP, 'OPENCLAW_EOD_SIGNAL_REGISTER is OFF'
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT healthy, run_date FROM eod_compute_health
+            ORDER BY run_date DESC LIMIT 1
+        """)
+        row = cur.fetchone()
+    if row is None:
+        return Status.WARN, 'no eod_compute_health row yet today'
+    healthy, run_date = row
+    today = date.today()
+    if run_date != today:
+        return Status.WARN, f'latest eod_compute_health is {(today - run_date).days}d old'
+    if not healthy:
+        return Status.WARN, 'latest eod_compute_health marked unhealthy'
+    return Status.PASS, 'eod_compute_health fresh and healthy'
+
+
+@check(name='carried_set_present', tags=['pipeline'], requires=['db'])
+def _carried_set_present():
+    """When OPENCLAW_EOD_SIGNAL_REGISTER=1: expect COMPUTED and/or APPROVED
+    execution_signals rows for today.  WARN if zero (engine may have hit the
+    regime gate or universe was empty).  Gate off → SKIP."""
+    if os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1':
+        return Status.SKIP, 'OPENCLAW_EOD_SIGNAL_REGISTER is OFF'
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) FROM execution_signals
+            WHERE signal_date = CURRENT_DATE
+              AND lifecycle_state IN ('COMPUTED', 'APPROVED')
+        """)
+        n = cur.fetchone()[0]
+    if n == 0:
+        return Status.WARN, '0 COMPUTED/APPROVED signals for today despite gate ON'
+    return Status.PASS, f'{n} COMPUTED/APPROVED signals for today'
+
+
+@check(name='gate_ran_today', tags=['pipeline'], requires=['db'])
+def _gate_ran_today():
+    """When OPENCLAW_EOD_PREMARKET_GATE=1: expect a signal_gate_verdicts sentinel
+    row with gate_type='__gate_ran__' for today.  Without it the 9:32 reconcile
+    step will refuse to flatten (it checks for gate completion).
+    Gate off → SKIP."""
+    if os.environ.get('OPENCLAW_EOD_PREMARKET_GATE') != '1':
+        return Status.SKIP, 'OPENCLAW_EOD_PREMARKET_GATE is OFF'
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) FROM signal_gate_verdicts
+            WHERE target_date = CURRENT_DATE
+              AND gate_type = '__gate_ran__'
+        """)
+        n = cur.fetchone()[0]
+    if n == 0:
+        return Status.WARN, 'no __gate_ran__ sentinel for today; reconcile will refuse to flatten'
+    return Status.PASS, f'gate sentinel present for today ({n} row)'
