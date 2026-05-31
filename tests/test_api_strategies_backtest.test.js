@@ -16,6 +16,13 @@ const row = buildStrategyRow({
            oue_by_regime: { LOW_VOL: { over:10, under:5, expected:65 } } },
   bestWorst: { best: 0.22, worst: -0.09, avg_pnl: 0.012 },
   lastSignalDate: '2026-05-28',
+  metricsByScope: {
+    ALL:      { sharpe: 2.0, effective_sharpe: 1.0, return_pct: 50, max_dd_pct: 12,
+                closed_count: 120, win_rate: 0.55, arr_pct: 1.2, adr_pct: 0.3, act_days: 4 },
+    ELIGIBLE: { sharpe: 1.8, effective_sharpe: 0.9, return_pct: 30, max_dd_pct: 10,
+                closed_count: 80, win_rate: 0.60, arr_pct: 1.2, adr_pct: 0.3, act_days: 4 },
+  },
+  defaultScope: 'ELIGIBLE',
 });
 
 assert.strictEqual(row.sharpe, 2.0);
@@ -31,4 +38,11 @@ assert.strictEqual(row.status, 'live');
 assert.ok(!('open_count' in row), 'open_count must be removed');
 assert.ok(!('avg_unrealized_pct' in row), 'live unrealized removed');
 assert.ok(!('oue_multipliers_by_regime' in row), 'oue multiplier removed');
+assert.ok(row.metrics_by_scope, 'metrics_by_scope emitted');
+assert.strictEqual(row.default_scope, 'ELIGIBLE');
+// ALL scope must equal the legacy top-level values (no regression).
+assert.strictEqual(row.metrics_by_scope.ALL.sharpe, row.sharpe);
+assert.strictEqual(row.metrics_by_scope.ALL.closed_count, row.closed_count);
+assert.strictEqual(row.metrics_by_scope.ALL.win_rate, row.win_rate);
+assert.strictEqual(row.metrics_by_scope.ALL.arr_pct, row.arr_pct);
 console.log('ok');

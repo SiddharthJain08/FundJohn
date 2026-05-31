@@ -39,6 +39,12 @@ function buildStrategyRow(x) {
     oue_expected: panel.oue_expected ?? 0,
     oue_by_regime: panel.oue_by_regime || null,
     has_backtest_panel: !!x.panel,
+    // Per-regime-scoped metric variants. ALL == the legacy top-level fields
+    // (built by the caller from the same run/panel/bestWorst sources); ELIGIBLE
+    // + single-regime scopes are blendScope() outputs. default_scope tells the
+    // client which to show first. Absent → client falls back to top-level r.*.
+    metrics_by_scope: x.metricsByScope || null,
+    default_scope:    x.defaultScope || 'ALL',
     // ── Live (the ONLY live fields) ──
     last_signal_date: x.lastSignalDate ?? null,
   };

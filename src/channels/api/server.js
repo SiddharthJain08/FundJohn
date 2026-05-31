@@ -10,6 +10,8 @@ const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
+const { blendScope } = require('./blend_scope');
+const { isRegimeEligibleNow } = require('./regime_active');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1210,7 +1212,8 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRunById = Object.fromEntries(ubtRunRows.map(r => [r.strategy_id, r]));
     const ubtRegimeRows = (await dbQuery(`
       SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
-             br.max_dd_pct, br.return_pct, br.hit_rate
+             br.max_dd_pct, br.return_pct, br.hit_rate,
+             br.avg_pnl_pct, br.avg_holding_days, br.oos_days_in_regime
       FROM strategy_backtest_regimes br
       JOIN (
         SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -1238,6 +1241,12 @@ app.get('/api/strategies', async (req, res) => {
         total_return_pct: r.return_pct,
         trade_count: r.trade_count,
         hit_rate:    r.hit_rate,
+        // Raw per-regime fields consumed by blendScope (percent units kept as-is):
+        max_dd_pct:        r.max_dd_pct,
+        return_pct:        r.return_pct,
+        avg_pnl_pct:       r.avg_pnl_pct,
+        avg_holding_days:  r.avg_holding_days,
+        oos_days_in_regime: r.oos_days_in_regime,
       };
     }
 
@@ -1336,7 +1345,13 @@ app.get('/api/strategies', async (req, res) => {
       const sr  = srById[sid]    || {};
       const rc  = sr.regime_conditions || {};
       const activeRegimes = rc.active_in_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL'];
-      const regimeActive  = activeRegimes.includes(currentRegime);
+      // regime_active mirrors the LIVE engine gate (regime_param_resolver.is_eligible
+      // over strategy_regime_params), NOT code-level active_in_regimes — so the status
+      // badge + staleness match what actually trades. Previously a strategy toggled to
+      // e.g. CRISIS-only still showed LIVE in a LOW_VOL market while the engine skipped
+      // it. regimeParamsById[sid] is the same source the live sizer reads. See
+      // regime_active.js.
+      const regimeActive  = isRegimeEligibleNow(regimeParamsById[sid], currentRegime);
       // last_signal_date is now sourced from execution_signals (lastSignalById)
       // so is_stale and the Last Signal column share one live source.
       const _lastSig = lastSignalById[sid] || null;
@@ -1358,6 +1373,35 @@ app.get('/api/strategies', async (req, res) => {
       const _eligibleSet = new Set(_eligRaw || activeRegimes);
       const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
       const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
+      // ── Regime-scoped metric variants (Active Stack filter) ──────────────
+      // ALL mirrors the legacy top-level fields exactly (built from the same
+      // run/panel/bestWorst sources strategy_row.js uses). ELIGIBLE +
+      // single-regime come from blendScope over the raw per-regime breakdown.
+      const _runForScope   = ubtRunById[sid] || {};
+      const _panelForScope = panelById[sid] || null;
+      const _bwForScope    = bwById[sid] || {};
+      const _actAll = _runForScope.avg_holding_days != null ? Number(_runForScope.avg_holding_days) : null;
+      const _arrAll = _bwForScope.avg_pnl != null ? Number(_bwForScope.avg_pnl) * 100 : null;
+      const _allScope = {
+        sharpe:           _runForScope.total_sharpe ?? null,
+        effective_sharpe: _panelForScope?.effective_sharpe ?? null,
+        return_pct:       _runForScope.total_return_pct ?? null,
+        max_dd_pct:       _runForScope.total_max_dd_pct ?? null,
+        closed_count:     _runForScope.total_trades ?? 0,
+        win_rate:         _runForScope.total_hit_rate ?? null,
+        arr_pct:          _arrAll,
+        adr_pct:          (_arrAll != null && _actAll) ? (_arrAll / Math.max(1, _actAll)) : null,
+        act_days:         _actAll,
+      };
+      const _metricsByScope = { ALL: _allScope };
+      for (const _rg of _CANON_AXIS) {
+        const _s = blendScope(_rawBreakdown, [_rg]);
+        if (_s) _metricsByScope[_rg] = _s;
+      }
+      // ELIGIBLE: blend over the eligible set; null eligRaw (eligible-everywhere) ⇒ ALL.
+      const _eligScope = _eligRaw ? blendScope(_rawBreakdown, _eligRaw) : null;
+      _metricsByScope.ELIGIBLE = _eligScope || _allScope;
+      const _defaultScope = _eligRaw ? 'ELIGIBLE' : 'ALL';
       rows.push({
         ...buildStrategyRow({
           sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime,
@@ -1366,6 +1410,8 @@ app.get('/api/strategies', async (req, res) => {
           panel: panelById[sid] || null,
           bestWorst: bwById[sid] || {},
           lastSignalDate: _lastSig,
+          metricsByScope: _metricsByScope,
+          defaultScope: _defaultScope,
         }),
         // Carry-overs the active-stack rewrite (Tasks 9/10) does NOT cover but
         // the CANDIDATE-table renderer (_renderCandidates) still reads. The
@@ -4086,12 +4132,13 @@ body.rs-chat-locked{overflow:hidden}
       </div>
       <div class="st-regime-filter" id="st-regime-filter">
         <span class="srf-label">View by Regime</span>
-        <button class="srf-btn active" data-regime="ALL"           onclick="_stSetRegimeFilter('ALL')">All</button>
+        <button class="srf-btn active" data-regime="ELIGIBLE"      onclick="_stSetRegimeFilter('ELIGIBLE')">Eligible</button>
+        <button class="srf-btn" data-regime="ALL"                  onclick="_stSetRegimeFilter('ALL')">All</button>
         <button class="srf-btn srf-LOW_VOL"       data-regime="LOW_VOL"       onclick="_stSetRegimeFilter('LOW_VOL')">Low Vol</button>
         <button class="srf-btn srf-TRANSITIONING" data-regime="TRANSITIONING" onclick="_stSetRegimeFilter('TRANSITIONING')">Transitioning</button>
         <button class="srf-btn srf-HIGH_VOL"      data-regime="HIGH_VOL"      onclick="_stSetRegimeFilter('HIGH_VOL')">High Vol</button>
         <button class="srf-btn srf-CRISIS"        data-regime="CRISIS"        onclick="_stSetRegimeFilter('CRISIS')">Crisis</button>
-        <span class="srf-hint" id="srf-hint"></span>
+        <span class="srf-hint" id="srf-hint">showing eligible-regimes blend (regimes the strategy is approved to trade)</span>
       </div>
       <div class="pf-section-body"><div id="st-active-wrap"><div class="empty">Loading...</div></div></div>
     </div>
@@ -8264,14 +8311,26 @@ let _stExpandedSid = null;
 // render functions below.
 let _stArrCache    = {};     // sid → backtest-curve payload (cached for the session)
 let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent expands)
-let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
+let _stRegimeFilter = 'ELIGIBLE'; // 'ELIGIBLE' | 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
 
 function _stSetRegimeFilter(rg) {
-  // No-op: the active-stack metric columns are now backtest-sourced and the
-  // live per-regime breakdown the filter depended on is gone from the payload.
-  // The filter control is hidden in _renderActiveStack; this stub keeps any
-  // residual onclick handlers harmless.
-  _stRegimeFilter = 'ALL';
+  _stRegimeFilter = rg;
+  // Toggle the active button class.
+  const bar = document.getElementById('st-regime-filter');
+  if (bar) {
+    bar.querySelectorAll('.srf-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.regime === rg);
+    });
+    const hint = document.getElementById('srf-hint');
+    if (hint) {
+      hint.textContent = rg === 'ALL'
+        ? 'showing all-regime backtest stats'
+        : rg === 'ELIGIBLE'
+          ? 'showing eligible-regimes blend (regimes the strategy is approved to trade)'
+          : 'showing ' + rg + ' backtest stats';
+    }
+  }
+  _renderActiveStack(strategiesData.filter(_inActiveStack));
 }
 
 function _stToggleExpand(sid) {
@@ -8535,12 +8594,10 @@ function _stCloseExpand() {
 
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
-  // The per-regime filter tab once swapped the metric columns to a LIVE
-  // per-regime breakdown. Those columns are now backtest-sourced and that
-  // live breakdown is gone from the payload, so the filter has no coherent
-  // target — hide the orphaned control.
+  // Regime filter: scopes the headline metric columns to ALL / ELIGIBLE / a
+  // single regime via each row's metrics_by_scope. Show the control.
   const _rf = document.getElementById('st-regime-filter');
-  if (_rf) _rf.style.display = 'none';
+  if (_rf) _rf.style.display = '';
   if (!rows.length) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
@@ -8556,10 +8613,30 @@ function _renderActiveStack(rows) {
   // the /api/strategies payload — no live recompute. The only derived sort
   // keys are _oue_total (sum of the backtest OUE counts) and _active_rank
   // (Waiting<Stale<Live, drives the Status column sort).
-  const enriched = rows.map(r => Object.assign({}, r, {
-    _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
-    _active_rank: _activeRankFor(r),
-  }));
+  // Resolve which metric scope to display (regime filter). Fall back to the
+  // row's own default_scope, then to ALL, then to the legacy top-level fields.
+  const _scope = _stRegimeFilter;
+  const _pickScope = (r) => {
+    const mbs = r.metrics_by_scope;
+    if (!mbs) return null;
+    return mbs[_scope] || mbs[r.default_scope] || mbs.ALL || null;
+  };
+  const enriched = rows.map(r => {
+    const m = _pickScope(r);
+    const overlay = m ? {
+      sharpe:           m.sharpe,
+      effective_sharpe: m.effective_sharpe,
+      closed_count:     m.closed_count,
+      win_rate:         m.win_rate,
+      arr_pct:          m.arr_pct,
+      adr_pct:          m.adr_pct,
+      act_days:         m.act_days,
+    } : {};
+    return Object.assign({}, r, overlay, {
+      _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
+      _active_rank: _activeRankFor(r),
+    });
+  });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
   let sorted;
   const s = _sortState['st-active-wrap'];
@@ -8580,7 +8657,11 @@ function _renderActiveStack(rows) {
   // Persist for the expansion-panel renderer to read without re-prop.
   _stActiveSnapshot = activeStrategiesById;
   const expandedSid = _stExpandedSid;
-  el.innerHTML = \`<table class="db-table st-active-table" style="min-width:1180px">
+  const _scopeLabel = _scope === 'ALL' ? 'All regimes'
+    : _scope === 'ELIGIBLE' ? 'Eligible regimes'
+    : _scope + ' only';
+  el.innerHTML = \`<div class="st-scope-caption" style="font-size:9.5px;color:var(--dim);padding:2px 4px 6px;letter-spacing:.04em">Metrics scope: <b style="color:var(--muted)">\${_scopeLabel}</b> — Sharpe / Eff / Closed / Win / ARR / ADR / ACT reflect this regime selection. "By Regime" always shows all four.</div>
+  <table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
