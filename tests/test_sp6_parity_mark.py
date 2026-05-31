@@ -1,4 +1,4 @@
-"""test_sp6_parity_mark.py — parity_mark unit + DB integration tests (SP-6 Task 5).
+"""test_sp6_parity_mark.py — parity_mark unit + DB integration tests (SP-6 Task 5/8c).
 
 Key invariants under test:
   1. Parity test: finalize_parity_marks computes EXACTLY the same stop/target as
@@ -13,8 +13,12 @@ Key invariants under test:
   6. Skip unsupported direction (direction_sign==0).
   7. Skip row with None/NaN in core price fields.
   8. empty closes dict returns 0 immediately.
+  9. (Task 8c) APPROVED + held in broker → marked FILLED at close[T+1].
+  10. (Task 8c) APPROVED + NOT held → stays APPROVED, no mark written.
+  11. (Task 8c) EXECUTING/FILLED + held → still marked (existing behaviour preserved).
 
 All DB tests use rollback isolation — no persistent side-effects.
+Broker is always injected (broker_loader kwarg) — no live Alpaca calls in tests.
 """
 from __future__ import annotations
 
@@ -173,8 +177,12 @@ def test_finalize_marks_executing_signal(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
+    # Inject broker: ticker is "held" so the broker cross-check passes.
+    def _broker_held():
+        return {ticker: 5000.0}
+
     marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
-                                   _db_meta['ws_id'])
+                                   _db_meta['ws_id'], broker_loader=_broker_held)
     assert marked == 1
 
     # Compute expected values by calling _reanchor_bracket directly —
@@ -233,8 +241,12 @@ def test_finalize_marks_short_signal(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
+    # Inject broker: SHORT held (negative market_value).
+    def _broker_held_short():
+        return {ticker: -4000.0}
+
     marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
-                                   _db_meta['ws_id'])
+                                   _db_meta['ws_id'], broker_loader=_broker_held_short)
     assert marked == 1
 
     expected_stop, expected_target = _reanchor_bracket(
@@ -298,9 +310,14 @@ def test_finalize_skips_ticker_not_in_closes(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
-    # closes dict has a DIFFERENT ticker
+    # closes dict has a DIFFERENT ticker.
+    # Inject broker that DOES hold the signal's ticker — ensures the skip
+    # is isolated to the closes-dict check, not the broker check.
+    def _broker_holds_ticker():
+        return {ticker: 5000.0}
+
     marked = finalize_parity_marks(cur, {'OTHERTICKER': 102.0}, run_date,
-                                   _db_meta['ws_id'])
+                                   _db_meta['ws_id'], broker_loader=_broker_holds_ticker)
     assert marked == 0
 
     cur.execute("""
@@ -326,8 +343,13 @@ def test_finalize_skips_unsupported_direction(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
+    # Inject broker that DOES hold the ticker — ensures the skip is isolated
+    # to the direction check (NEUTRAL → direction_sign==0), not the broker check.
+    def _broker_holds_neutral():
+        return {ticker: 5000.0}
+
     marked = finalize_parity_marks(cur, {ticker: 102.0}, run_date,
-                                   _db_meta['ws_id'])
+                                   _db_meta['ws_id'], broker_loader=_broker_holds_neutral)
     assert marked == 0
 
     cur.execute("""
@@ -361,8 +383,12 @@ def test_finalize_already_filled_signal_is_idempotent(db_conn, _db_meta):
         ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
     )
 
+    # Inject broker: FILLED position is still held (position not closed yet).
+    def _broker_holds_idem():
+        return {ticker: 10000.0}
+
     marked = finalize_parity_marks(cur, {ticker: close_price}, run_date,
-                                   _db_meta['ws_id'])
+                                   _db_meta['ws_id'], broker_loader=_broker_holds_idem)
     assert marked == 1
 
     expected_stop, expected_target = _reanchor_bracket(
@@ -394,3 +420,213 @@ def test_finalize_no_rows_returns_zero(db_conn, _db_meta):
     marked = finalize_parity_marks(cur, {'AAPL': 150.0}, future_date,
                                    _db_meta['ws_id'])
     assert marked == 0
+
+
+# ──────────────────────────────────────────────────────────────────
+# Task 8c: broker-reconcile tests
+# ──────────────────────────────────────────────────────────────────
+
+@pytest.mark.integration
+def test_approved_and_held_gets_marked_filled(db_conn, _db_meta):
+    """(Task 8c) APPROVED + broker-held → marked FILLED at close[T+1].
+
+    This is the primary new case: an EOD open that was submitted (APPROVED)
+    and actually filled (broker holds it) must get its parity mark so that
+    signal_pnl tracks it from close[T+1], not close[T].
+    """
+    cur = db_conn.cursor()
+    run_date = date.today()
+    ticker = 'ZZP8CAPPHLD'
+
+    entry_price = 50.0
+    stop_loss   = 47.5   # 5% below — long
+    target_1    = 55.0   # 10% above — long
+    close_price = 51.5   # official T+1 close
+
+    sig_id = _insert_signal(
+        cur, ticker, 'LONG', entry_price, stop_loss, target_1,
+        'APPROVED', run_date,   # APPROVED (not yet advanced to EXECUTING)
+        ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
+    )
+
+    # Broker confirms position is held.
+    def _broker_held():
+        return {ticker: 5150.0}  # 100 shares × $51.50
+
+    marked = finalize_parity_marks(
+        cur, {ticker: close_price}, run_date,
+        _db_meta['ws_id'], broker_loader=_broker_held,
+    )
+    assert marked == 1, "APPROVED+held signal should be marked"
+
+    # Parity invariant: stop/target must equal _reanchor_bracket output exactly.
+    expected_stop, expected_target = _reanchor_bracket(
+        ref=entry_price,
+        entry_price=close_price,
+        direction=_signal_to_long_short('LONG'),
+        stop_ref=stop_loss,
+        target_ref=target_1,
+    )
+
+    cur.execute("""
+        SELECT mark_entry_price, fill_price, stop_loss, target_1,
+               filled_at, lifecycle_state
+          FROM execution_signals WHERE id = %s
+    """, (sig_id,))
+    row = cur.fetchone()
+    assert row is not None
+
+    assert abs(float(row['mark_entry_price']) - close_price) < 1e-9, (
+        f"mark_entry_price {row['mark_entry_price']} != close {close_price}"
+    )
+    assert abs(float(row['fill_price']) - close_price) < 1e-9, (
+        f"fill_price should be official close, not broker fill"
+    )
+    assert abs(float(row['stop_loss']) - expected_stop) < 1e-9, (
+        f"stop_loss {row['stop_loss']} != reanchor {expected_stop}"
+    )
+    assert abs(float(row['target_1']) - expected_target) < 1e-9, (
+        f"target_1 {row['target_1']} != reanchor {expected_target}"
+    )
+    assert row['lifecycle_state'] == 'FILLED', (
+        "APPROVED+held should transition to FILLED"
+    )
+    assert row['filled_at'] is not None, "filled_at should be set"
+    delta = (datetime.now(timezone.utc) - row['filled_at']).total_seconds()
+    assert delta < 30, f"filled_at looks stale: {delta}s ago"
+
+
+@pytest.mark.integration
+def test_approved_not_held_stays_approved(db_conn, _db_meta):
+    """(Task 8c) APPROVED + NOT broker-held → stays APPROVED, no mark written.
+
+    An APPROVED signal whose order did not fill must NOT be marked FILLED —
+    that would create a phantom position in signal_pnl and corrupt the ledger.
+    """
+    cur = db_conn.cursor()
+    run_date = date.today()
+    ticker = 'ZZP8CAPPNHLD'
+
+    entry_price = 80.0
+    stop_loss   = 76.0
+    target_1    = 88.0
+    close_price = 81.0
+
+    sig_id = _insert_signal(
+        cur, ticker, 'LONG', entry_price, stop_loss, target_1,
+        'APPROVED', run_date,
+        ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
+    )
+
+    # Broker returns empty (or different tickers) — this ticker is NOT held.
+    def _broker_empty():
+        return {}
+
+    marked = finalize_parity_marks(
+        cur, {ticker: close_price}, run_date,
+        _db_meta['ws_id'], broker_loader=_broker_empty,
+    )
+    assert marked == 0, "APPROVED+not-held should NOT be marked"
+
+    cur.execute("""
+        SELECT mark_entry_price, fill_price, stop_loss, target_1,
+               filled_at, lifecycle_state
+          FROM execution_signals WHERE id = %s
+    """, (sig_id,))
+    row = cur.fetchone()
+    assert row is not None
+
+    assert row['mark_entry_price'] is None, (
+        "mark_entry_price must remain NULL for unfilled signal"
+    )
+    assert row['fill_price'] is None, "fill_price must remain NULL"
+    assert row['lifecycle_state'] == 'APPROVED', (
+        "lifecycle_state must stay APPROVED — no phantom mark"
+    )
+    assert row['filled_at'] is None, "filled_at must remain NULL"
+
+
+@pytest.mark.integration
+def test_executing_and_held_still_marked(db_conn, _db_meta):
+    """(Task 8c) EXECUTING + broker-held → existing behaviour preserved.
+
+    Confirms the lifecycle-widen (APPROVED added) does not break the original
+    EXECUTING path: these signals are still marked FILLED at close[T+1].
+    """
+    cur = db_conn.cursor()
+    run_date = date.today()
+    ticker = 'ZZP8CEXHLD'
+
+    entry_price = 120.0
+    stop_loss   = 114.0   # 5% below
+    target_1    = 132.0   # 10% above
+    close_price = 121.5
+
+    sig_id = _insert_signal(
+        cur, ticker, 'LONG', entry_price, stop_loss, target_1,
+        'EXECUTING', run_date,
+        ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
+    )
+
+    def _broker_held():
+        return {ticker: 12150.0}
+
+    marked = finalize_parity_marks(
+        cur, {ticker: close_price}, run_date,
+        _db_meta['ws_id'], broker_loader=_broker_held,
+    )
+    assert marked == 1, "EXECUTING+held should be marked"
+
+    expected_stop, expected_target = _reanchor_bracket(
+        ref=entry_price,
+        entry_price=close_price,
+        direction=_signal_to_long_short('LONG'),
+        stop_ref=stop_loss,
+        target_ref=target_1,
+    )
+
+    cur.execute("""
+        SELECT mark_entry_price, stop_loss, target_1, lifecycle_state
+          FROM execution_signals WHERE id = %s
+    """, (sig_id,))
+    row = cur.fetchone()
+
+    assert abs(float(row['mark_entry_price']) - close_price) < 1e-9
+    assert abs(float(row['stop_loss']) - expected_stop) < 1e-9
+    assert abs(float(row['target_1']) - expected_target) < 1e-9
+    assert row['lifecycle_state'] == 'FILLED'
+
+
+@pytest.mark.integration
+def test_approved_held_crypto_symbol_normalization(db_conn, _db_meta):
+    """(Task 8c) Broker returns 'BTC/USD'; DB ticker is 'BTC-USD' → matches.
+
+    Verifies _norm_ticker normalises '/' → '-' on both sides so crypto
+    symbols are matched correctly regardless of separator convention.
+    """
+    cur = db_conn.cursor()
+    run_date = date.today()
+    ticker = 'BTC-USD'      # DB stores dash-form
+
+    entry_price = 60000.0
+    stop_loss   = 57000.0
+    target_1    = 66000.0
+    close_price = 61500.0
+
+    sig_id = _insert_signal(
+        cur, ticker, 'LONG', entry_price, stop_loss, target_1,
+        'APPROVED', run_date,
+        ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'],
+    )
+
+    # Broker returns slash-form (as Alpaca reports crypto).
+    def _broker_slash_form():
+        return {'BTC/USD': 61500.0}
+
+    marked = finalize_parity_marks(
+        cur, {ticker: close_price}, run_date,
+        _db_meta['ws_id'], broker_loader=_broker_slash_form,
+    )
+    assert marked == 1, (
+        "BTC/USD (broker) should match BTC-USD (DB) after normalisation"
+    )

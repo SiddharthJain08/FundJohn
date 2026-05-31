@@ -12,7 +12,8 @@ results.  The mark_entry_price is the OFFICIAL close (not the broker fill).
 
 API:
     finalize_parity_marks(cur, closes: dict[str, float], run_date,
-                          workspace_id: str = 'default') -> int
+                          workspace_id: str = 'default',
+                          broker_loader=None) -> int
 """
 import logging
 import math
@@ -32,13 +33,28 @@ def _safe_float(v, field: str):
         return None
 
 
+def _norm_ticker(s: str) -> str:
+    """Normalize a broker symbol or DB ticker for comparison.
+
+    Converts '/' to '-' (crypto: BTC/USD → BTC-USD) and upper-cases.
+    Applied to BOTH broker symbols and signal tickers before comparison.
+    """
+    return str(s).replace('/', '-').upper()
+
+
 def finalize_parity_marks(cur, closes: dict, run_date,
-                          workspace_id: str = 'default') -> int:
+                          workspace_id: str = 'default',
+                          broker_loader=None) -> int:
     """Mark execution_signals rows at close[T+1] and re-anchor brackets.
 
-    Selects all EXECUTING/FILLED rows where target_date == run_date AND
-    workspace_id matches AND the ticker is present in the closes dict.
-    For each:
+    Selects all APPROVED/EXECUTING/FILLED rows where target_date == run_date
+    AND workspace_id matches AND the ticker is present in the closes dict.
+    For each row a broker cross-check is performed: only signals whose ticker
+    is HELD in the broker book are marked FILLED.  Signals not held are left
+    in their current lifecycle_state (typically APPROVED for EOD opens that
+    did not fill).
+
+    For each row that passes all checks:
       1. Computes direction_sign (+1 LONG, -1 SHORT) via _signal_to_long_short;
          skips neutral/unknown directions (returns 0).
       2. Guards against None/NaN in entry_price, stop_loss, target_1 — rows
@@ -51,27 +67,34 @@ def finalize_parity_marks(cur, closes: dict, run_date,
          lifecycle_state='FILLED'.
 
     Args:
-        cur:          psycopg2 cursor (caller owns transaction + commit).
-        closes:       dict[ticker -> float] — latest official close per ticker.
-        run_date:     date — matched against execution_signals.target_date.
-        workspace_id: str — scopes the SELECT to a single workspace (default='default').
+        cur:           psycopg2 cursor (caller owns transaction + commit).
+        closes:        dict[ticker -> float] — latest official close per ticker.
+        run_date:      date — matched against execution_signals.target_date.
+        workspace_id:  str — scopes the SELECT to a single workspace
+                       (default='default').
+        broker_loader: optional callable() -> dict[str, float] returning
+                       current broker positions as {symbol: signed_market_value}.
+                       Pass a stub in tests to avoid live Alpaca calls.
+                       Defaults to execution.regime_blended_sizer._load_broker_positions_usd.
 
     Returns:
-        Number of rows updated.
+        Number of rows updated (marked FILLED).
     """
     from backtest.unified_backtest import _reanchor_bracket, _signal_to_long_short
 
     if not closes:
         return 0
 
-    # Fetch EXECUTING/FILLED signals whose target_date falls on run_date
-    # and belong to the specified workspace.
+    # Fetch APPROVED/EXECUTING/FILLED signals whose target_date falls on
+    # run_date and belong to the specified workspace.
+    # APPROVED is widened to capture EOD opens that were submitted but whose
+    # lifecycle_state was never advanced past APPROVED before the 4 PM mark.
     # We filter by closes dict in Python — allows a simple equality predicate
     # without a Postgres IN clause that varies in length.
     cur.execute("""
         SELECT id, ticker, direction, entry_price, stop_loss, target_1
           FROM execution_signals
-         WHERE lifecycle_state IN ('EXECUTING', 'FILLED')
+         WHERE lifecycle_state IN ('APPROVED', 'EXECUTING', 'FILLED')
            AND target_date = %s
            AND workspace_id = %s
          ORDER BY id
@@ -79,8 +102,22 @@ def finalize_parity_marks(cur, closes: dict, run_date,
 
     rows = cur.fetchall()
     if not rows:
-        logger.debug("[parity_mark] No EXECUTING/FILLED rows for target_date=%s", run_date)
+        logger.debug(
+            "[parity_mark] No APPROVED/EXECUTING/FILLED rows for target_date=%s",
+            run_date,
+        )
         return 0
+
+    # Load broker positions once after the no-rows guard to avoid a live
+    # Alpaca call when there is nothing to process.
+    if broker_loader is None:
+        from execution.regime_blended_sizer import _load_broker_positions_usd
+        broker_loader = _load_broker_positions_usd
+
+    broker_raw = broker_loader() or {}
+    # Build a normalized set of held tickers for O(1) lookup.
+    # Both sides normalised: '/' → '-', upper-cased (handles BTC/USD vs BTC-USD).
+    held = {_norm_ticker(sym) for sym in broker_raw}
 
     now_ts = datetime.now(timezone.utc)
     updated = 0
@@ -98,6 +135,16 @@ def finalize_parity_marks(cur, closes: dict, run_date,
 
         # Skip if ticker not in today's closes
         if ticker not in closes:
+            continue
+
+        # Broker cross-check: only mark signals that are ACTUALLY HELD.
+        # An APPROVED signal whose order did not fill is NOT held; marking it
+        # FILLED would create a phantom position in signal_pnl.
+        if _norm_ticker(ticker) not in held:
+            logger.debug(
+                "[parity_mark] Signal %s (%s) NOT held in broker — leaving unmarked",
+                row_id, ticker,
+            )
             continue
 
         # Map direction to ±1; skip neutral/unsupported directions
@@ -156,5 +203,8 @@ def finalize_parity_marks(cur, closes: dict, run_date,
             stop_loss, new_stop, target_1, new_target,
         )
 
-    logger.info("[parity_mark] %d signal(s) marked for target_date=%s", updated, run_date)
+    logger.info(
+        "[parity_mark] %d signal(s) marked FILLED (broker-held) for target_date=%s",
+        updated, run_date,
+    )
     return updated
