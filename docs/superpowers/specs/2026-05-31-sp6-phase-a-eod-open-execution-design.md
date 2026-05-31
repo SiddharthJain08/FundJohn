@@ -182,3 +182,18 @@ The existing panic scanner (`run_premarket_scan.py`) scores **held broker positi
 - Strategy de-approved between 4 PM[T] and 9:30[T+1]: honor vs implicit-drop (default honor) — confirm.
 - `opg_live` belt-and-suspenders: keep the 9:31 day sweep even on live, or trust the auction cross?
 - Resize-down timing: confirmed it goes through the algo (into-close in A), not the open — restate in the plan so it isn't mis-built as an open-close.
+
+---
+
+## 12. Implementation addendum (2026-05-31, discovered during execution) — EOD reconcile/sizing decomposition
+
+Building the 9:30 reconcile surfaced a gap §4/§7 under-specified: how NEW/RESIZE (open) entries get **sized** and filled into the close, and how the new reconcile coordinates with the EXISTING production sizer (`regime_blended_sizer_live` — which already does broker-diff → classify → sized handoff). Naive wirings conflicted: double-orphan-close, no sizer feeding the 3:55 fill, or a divergent `position_size_pct×NAV` sizing (changes sizes, not just timing).
+
+**Operator decision (2026-05-31): Option B — make the production sizer SP-6-aware** (preserve regime-blended sizing fidelity; change only timing). Resolved as a **time-split** (NOT a frozen `exec_window`-tagged handoff):
+
+- **9:30 open window = drops/flatten ONLY** — a pure *classify*, no sizing. `open_reconcile.run_reconcile` diffs the APPROVED carried set vs the broker book via `_classify_position_deltas` (Task 4) with **sign-only targets** (no NAV/sizing), acts on `orphan_close` + `flip_close` (+ zero-APPROVED flatten guarded by `eod_compute_health.healthy` AND the `__gate_ran__` sentinel) → closes **at the open via OPG** (Task 10) → strategy-ledger close (`drop_signal_close`/`flatten_signal_close`, Task 9). Does NOT size or submit opens.
+- **3:55 close window = the production sizer, run fresh** — sizes the APPROVED set against *current* NAV/BP and fills opens/resizes (incl. resize-down `delta<0`) **into close[T+1]**. By 3:55 the drops are already closed, so the sizer's re-diff sees them gone (no double-close; an unfilled paper-OPG close is caught here as a free backstop).
+- **Only live-sizer change:** in EOD mode (`OPENCLAW_EOD_RECONCILE=1`) the sizer loads the **APPROVED carried set** (`lifecycle_state='APPROVED' AND target_date=today`) and **bypasses the cadence gate** (already gated at 4 PM[T] + 9:15 premarket). Gate-OFF is **byte-identical** — proven by the existing ~50 sizer regression tests staying green + an explicit legacy-loading-unchanged test.
+- **Parity unchanged:** opens fill into close[T+1] at 3:55; `parity_mark` marks at the official close[T+1] at 4 PM → zero-width execution ledger holds.
+
+**Task re-decomposition:** Task 8 → **8a** (sizer SP-6 loading+cadence — gated, byte-identical) + **8b** (`run_reconcile`: 9:30 classify → drops/flatten → OPG → ledger-close). Task 10 (OPG dual-path) and Task 11 (crons: 4 PM compute, 9:15 gate, 9:30 `run_reconcile`, **3:55 production sizer + execute into close**) updated accordingly. Tasks 1–7 + 9 unaffected (Task 4's extracted classifier and Task 9's ledger-close helpers are reused as-is).
