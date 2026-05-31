@@ -1422,6 +1422,14 @@ def execute_single(sess, equity, order, run_date):
             # (with the real fill price) when the broker confirms a fill; an
             # expired/canceled close reports its terminal status with NO price so
             # _resolve_fill_price returns None and the position stays open.
+            # req_qty is the share count returned by the CLI's position-close
+            # submission. If the CLI omits 'qty' (unusual but possible), we fall
+            # back to current_d (the USD notional of the position) and then 1.0.
+            # current_d is a USD value, not a share count, so the fallback is
+            # intentionally oversized. This is SAFE: _opg_terminal_filled checks
+            # filled_qty >= req_qty, so a large USD req_qty causes that comparison
+            # to fail → the position is reported as un-filled rather than phantom-
+            # closed. The position stays open for the next sweep pass to retry.
             req_qty = float(res_sweep.get('qty') or 0) or current_d or 1.0
             final_sweep = _poll_to_terminal(sweep_oid, timeout_s=300, interval_s=3)
             if _opg_terminal_filled(final_sweep, req_qty):

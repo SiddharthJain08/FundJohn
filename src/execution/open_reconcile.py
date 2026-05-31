@@ -469,6 +469,17 @@ def _resolve_fill_price(result: dict):
             continue
         if math.isfinite(f) and f > 0:
             return f
+    # status=='filled' but no positive fill price found in either key.
+    # This means the broker confirmed a fill but the price was missing or
+    # zero — the position is closed at the broker but the ledger will NOT
+    # be updated (we return None so no CLOSED_AT_OPEN is written). The
+    # discrepancy must be investigated and manually reconciled.
+    logger.warning(
+        '_resolve_fill_price: status=filled but no positive fill price '
+        '(fill_price=%r, entry=%r) — position closed at broker but ledger '
+        'NOT updated; investigate and reconcile manually.',
+        result.get('fill_price'), result.get('entry'),
+    )
     return None
 
 
@@ -599,6 +610,21 @@ def run_reconcile(
             return counts
 
         # 6. Submit each close at the open + ledger-close on fill.
+        #
+        # Phase-A OPG serialization note (opg_then_day / opg_live modes):
+        #   execute_single's _poll_to_terminal call for the OPG order uses
+        #   timeout_s=3600, which blocks until the order reaches a terminal status
+        #   at or after the 9:30 open. The session classifier (_alpaca_session_kind)
+        #   is re-evaluated at the TOP of each execute_single call, so for the FIRST
+        #   dropped ticker in the loop the session is 'premarket' (OPG path taken);
+        #   by the time the loop reaches the SECOND+ ticker, the blocking poll has
+        #   advanced the clock into RTH, the session check returns 'rth', and those
+        #   tickers skip the OPG branch and go straight to the tif=day RTH day-sweep.
+        #   Net effect: only the FIRST dropped ticker reliably submits an OPG order;
+        #   the rest are handled by the RTH position-close fallback, which is correct
+        #   and safe (just not OPG-optimal). A submit-all-then-poll refactor that
+        #   fires all OPG orders in parallel before any polling is deferred to Phase B
+        #   (acceptable for Phase A's small drop counts — typically 1–3 per cycle).
         ae = None
         for tkr, signed_usd, kind in closes:
             current_usd = broker.get(tkr, signed_usd if signed_usd else 0.0)

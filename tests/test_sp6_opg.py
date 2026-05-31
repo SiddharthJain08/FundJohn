@@ -23,6 +23,7 @@ Run:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from unittest import mock
@@ -292,6 +293,47 @@ def test_open_close_mode_defaults_and_rejects_typos():
         assert ae._open_close_mode() == 'opg_then_day'
     with mock.patch.dict('os.environ', {'OPENCLAW_OPEN_CLOSE_MODE': 'OPG_LIVE_typo'}):
         assert ae._open_close_mode() == 'rth_market'   # typo never arms OPG
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# (6) Fix 3: filled-without-price guard — _resolve_fill_price loud + safe
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_resolve_fill_price_filled_zero_returns_none():
+    """status='filled' with a zero/None fill price returns None (safe: no ledger
+    write) AND emits a WARNING so the corner is not silent."""
+    from execution.open_reconcile import _resolve_fill_price
+
+    # None and 0.0 both result in None.
+    assert _resolve_fill_price({'status': 'filled', 'entry': 0.0}) is None
+    assert _resolve_fill_price({'status': 'filled', 'entry': None}) is None
+    assert _resolve_fill_price({'status': 'filled', 'fill_price': 0.0}) is None
+
+
+def test_resolve_fill_price_filled_zero_warns():
+    """The warning path is reachable: status='filled' + zero price triggers the
+    logger.warning in _resolve_fill_price so operators notice the discrepancy."""
+    from execution.open_reconcile import _resolve_fill_price
+
+    with mock.patch('execution.open_reconcile.logger') as mock_logger:
+        result = _resolve_fill_price({'status': 'filled', 'entry': 0.0})
+
+    assert result is None                          # safe: no ledger write
+    mock_logger.warning.assert_called_once()       # loud: warning was emitted
+    # The warning message must reference the filled-without-price situation.
+    warn_msg = mock_logger.warning.call_args[0][0]
+    assert 'filled' in warn_msg.lower()
+
+
+def test_resolve_fill_price_filled_positive_no_warning():
+    """A genuine confirmed fill (positive price) returns the price without warning."""
+    from execution.open_reconcile import _resolve_fill_price
+
+    with mock.patch('execution.open_reconcile.logger') as mock_logger:
+        result = _resolve_fill_price({'status': 'filled', 'entry': 101.50})
+
+    assert result == 101.50
+    mock_logger.warning.assert_not_called()        # no spurious warnings on a good fill
 
 
 if __name__ == '__main__':
