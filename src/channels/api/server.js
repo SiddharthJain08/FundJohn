@@ -11,6 +11,7 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
+const { isRegimeEligibleNow } = require('./regime_active');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1344,7 +1345,13 @@ app.get('/api/strategies', async (req, res) => {
       const sr  = srById[sid]    || {};
       const rc  = sr.regime_conditions || {};
       const activeRegimes = rc.active_in_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL'];
-      const regimeActive  = activeRegimes.includes(currentRegime);
+      // regime_active mirrors the LIVE engine gate (regime_param_resolver.is_eligible
+      // over strategy_regime_params), NOT code-level active_in_regimes — so the status
+      // badge + staleness match what actually trades. Previously a strategy toggled to
+      // e.g. CRISIS-only still showed LIVE in a LOW_VOL market while the engine skipped
+      // it. regimeParamsById[sid] is the same source the live sizer reads. See
+      // regime_active.js.
+      const regimeActive  = isRegimeEligibleNow(regimeParamsById[sid], currentRegime);
       // last_signal_date is now sourced from execution_signals (lastSignalById)
       // so is_stale and the Last Signal column share one live source.
       const _lastSig = lastSignalById[sid] || null;
