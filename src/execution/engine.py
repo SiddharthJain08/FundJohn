@@ -20,7 +20,8 @@ import json
 import logging
 import traceback
 import decimal
-from datetime import date, datetime, timedelta
+import subprocess
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
@@ -54,6 +55,67 @@ TARGET1_TRIGGER_PCT     =  0.005  # within 0.5% of target_1
 DRAWDOWN_REPORT_PCT     = -0.10   # -10% unrealized triggers review
 DAYS_HELD_REPORT        = 30      # flag if held > 30 days with no target hit
 CONFLUENCE_MIN          = 2       # min strategies agreeing for confluence
+
+
+_ALPACA_BIN = '/root/go/bin/alpaca'
+
+
+def _next_trading_day(run_date: date) -> date:
+    """Derive the next trading session date after run_date, respecting US market holidays.
+
+    Uses the Alpaca market calendar CLI (holiday-aware) as the primary source.
+    Queries --start run_date+1 --end run_date+7 and returns the first calendar
+    session date.  Falls back to plain weekday-skip math ONLY if the CLI call
+    fails, and logs a warning in that case.
+
+    The holiday-aware approach is required because the next-session reconcile
+    (Task 3 onwards) queries `target_date = today`.  If target_date were set to
+    a market holiday, the signal would be silently orphaned.
+
+    Example: run_date=2026-07-02 (Thursday before observed July 4)
+      - weekday math → 2026-07-03 (Friday) — WRONG; market is closed
+      - calendar     → 2026-07-06 (Monday) — correct next session
+
+    Args:
+        run_date: The current EOD run date.
+
+    Returns:
+        The next trading session date after run_date.
+    """
+    start = run_date + timedelta(days=1)
+    end = run_date + timedelta(days=7)
+    try:
+        result = subprocess.run(
+            [_ALPACA_BIN, 'calendar',
+             '--start', start.isoformat(),
+             '--end', end.isoformat()],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            sessions = json.loads(result.stdout)
+            if sessions:
+                return date.fromisoformat(sessions[0]['date'])
+        logger.warning(
+            '_next_trading_day: alpaca calendar call failed (rc=%s); '
+            'falling back to weekday-skip math for run_date=%s',
+            result.returncode, run_date,
+        )
+    except Exception as exc:
+        logger.warning(
+            '_next_trading_day: alpaca calendar exception (%s); '
+            'falling back to weekday-skip math for run_date=%s',
+            exc, run_date,
+        )
+    # Fallback: skip weekends only (no holiday awareness)
+    d = start
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d += timedelta(days=1)
+    return d
+
+
+def _eod_signal_register_gate_on() -> bool:
+    """Returns True if OPENCLAW_EOD_SIGNAL_REGISTER==1 (default OFF)."""
+    return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
 
 
 def get_db():
@@ -745,6 +807,10 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
 
 def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date) -> int:
     total = 0
+    # Hoist gate check and next-trading-day lookup ONCE per call (not per signal).
+    # When gate is OFF, next_td stays None — no CLI subprocess spawned.
+    _gate_on = _eod_signal_register_gate_on()
+    _next_td = _next_trading_day(run_date) if _gate_on else None
     for strategy_id, signals in strategy_results.items():
         for sig in signals:
             try:
@@ -863,21 +929,43 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                             continue
                     rows_inserted = 0   # not a new emit; bracket refresh only
                 else:
-                    cur.execute("""
-                        INSERT INTO execution_signals
-                            (strategy_id, workspace_id, signal_date, ticker, direction,
-                             entry_price, stop_loss, target_1, target_2, target_3,
-                             position_size_pct, regime_state, signal_params, status)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open')
-                        ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
-                    """, (
-                        strategy_id, WORKSPACE, run_date,
-                        sig.ticker, sig.direction,
-                        sig.entry_price, sig.stop_loss,
-                        sig.target_1, sig.target_2, sig.target_3,
-                        sig.position_size_pct, regime_state,
-                        json.dumps(params_clean),
-                    ))
+                    if _gate_on:
+                        # Gate ON: include lifecycle_state, computed_at, target_date
+                        cur.execute("""
+                            INSERT INTO execution_signals
+                                (strategy_id, workspace_id, signal_date, ticker, direction,
+                                 entry_price, stop_loss, target_1, target_2, target_3,
+                                 position_size_pct, regime_state, signal_params, status,
+                                 lifecycle_state, computed_at, target_date)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open',
+                                    %s,%s,%s)
+                            ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
+                        """, (
+                            strategy_id, WORKSPACE, run_date,
+                            sig.ticker, sig.direction,
+                            sig.entry_price, sig.stop_loss,
+                            sig.target_1, sig.target_2, sig.target_3,
+                            sig.position_size_pct, regime_state,
+                            json.dumps(params_clean),
+                            'COMPUTED', datetime.now(timezone.utc), _next_td,
+                        ))
+                    else:
+                        # Gate OFF: legacy INSERT — byte-identical to pre-SP-6 behavior
+                        cur.execute("""
+                            INSERT INTO execution_signals
+                                (strategy_id, workspace_id, signal_date, ticker, direction,
+                                 entry_price, stop_loss, target_1, target_2, target_3,
+                                 position_size_pct, regime_state, signal_params, status)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open')
+                            ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
+                        """, (
+                            strategy_id, WORKSPACE, run_date,
+                            sig.ticker, sig.direction,
+                            sig.entry_price, sig.stop_loss,
+                            sig.target_1, sig.target_2, sig.target_3,
+                            sig.position_size_pct, regime_state,
+                            json.dumps(params_clean),
+                        ))
                     rows_inserted = max(cur.rowcount, 0)  # ON CONFLICT DO NOTHING returns -1
                 cur.execute("RELEASE SAVEPOINT sp_signal")
                 total += rows_inserted
