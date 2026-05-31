@@ -157,8 +157,13 @@ psql "$POSTGRES_URI" -c "
 ### Step 3 — Dry-Run Reconcile (Manual, Gate Set Only for This Invocation)
 
 Simulate the 9:28 AM reconcile against the live book without submitting anything.
-Run this on the morning after a shadow-compute (so APPROVED rows exist; run the
-premarket gate manually first if needed, or note that dry-run works on COMPUTED rows too).
+Run this on the morning after a shadow-compute so that APPROVED rows exist.
+To get a meaningful dry-run you must have APPROVED rows for today, so run the
+premarket gate manually first (one-off `OPENCLAW_EOD_PREMARKET_GATE=1 python3 -c
+'import sys; sys.path.insert(0,"src"); from execution.premarket_gate import run_gate; run_gate()'`)
+before running the reconcile. With only COMPUTED rows (premarket gate has not run yet)
+the reconcile sees an empty approved set, hits the REFUSING-FLATTEN safety, and shows
+no planned closes — that is expected behavior, not a bug, but it is not a useful dry-run result.
 
 ```bash
 source /root/openclaw/.claude/worktrees/sp6-phase-a/worktree-env.sh
@@ -246,10 +251,19 @@ python3 src/maintenance/doctor.py 2>&1 | grep -E "eod_mutual|eod_gate|FAIL|WARN|
 **Verify crons are registered** (check johnbot logs after restart):
 
 ```bash
-journalctl --user -u johnbot.service -n 50 | grep -E "Cron|15 16|15 9|28 9|32 9|55 15"
-# Expect log lines for: EOD compute (4:15pm), premarket gate (9:15am),
-#                       open-window reconcile (9:28am), post-open sweep (9:32am),
-#                       into-close fill (3:55pm).
+journalctl --user -u johnbot.service -n 50 | grep "Cron schedule registered"
+# Expect a single startup line like: "Cron schedule registered (eod-flow=on, ...)"
+# node-cron does NOT log individual cron registrations and the cron expressions
+# (15 16, 15 9, etc.) never appear in logs. Individual cron fires are only visible
+# once they execute (earliest 9:15 AM next trading day).
+```
+
+Confirm the EOD flow is armed via doctor checks instead of log-grep:
+
+```bash
+source /root/openclaw/.claude/worktrees/sp6-phase-a/worktree-env.sh
+python3 -c "from maintenance import doctor; doctor.run_checks(['eod_mutual_exclusion', 'eod_gate_consistency'])"
+# Expect: eod_mutual_exclusion OK + eod_gate_consistency OK eod_gates=all_on
 ```
 
 **Critical timing note:** the 4:15 PM compute cron must fire AFTER the EOD price-append

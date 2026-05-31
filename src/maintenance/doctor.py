@@ -373,14 +373,14 @@ def check_eod_gate_consistency():
     """Fail if the three EOD gates are partially activated.
 
     The EOD flow requires all three gates ON together:
-      - EOD_SIGNAL_REGISTER  — compute + persist signals (15:55 sizer reads these)
-      - EOD_PREMARKET_GATE   — 9:28 premarket gate check before reconcile
-      - EOD_RECONCILE        — 9:32 reconcile/sweep + approved-set loading
+      - EOD_SIGNAL_REGISTER  — 4:15 PM compute + 3:55 PM into-close fill
+      - EOD_PREMARKET_GATE   — 9:15 AM carry-forward gate before reconcile
+      - EOD_RECONCILE        — 9:28 AM open-window reconcile + 9:32 AM post-open sweep
 
     Partial activation is a footgun: if SIGNAL_REGISTER=1 but RECONCILE=0, the
     15:55 sizer runs WITHOUT its SP-6-aware APPROVED-set loading (Task 8a gates
-    that on RECONCILE), so it sizes against the wrong signal set. The 9:28 gate
-    and 9:32 sweep also won't fire.
+    that on RECONCILE), so it sizes against the wrong signal set. The 9:15 gate,
+    9:28 reconcile, and 9:32 sweep also won't fire.
 
     PASS: all three =1, or all three unset/≠1.
     FAIL: any mix (some =1, some not).
