@@ -197,3 +197,19 @@ Building the 9:30 reconcile surfaced a gap §4/§7 under-specified: how NEW/RESI
 - **Parity unchanged:** opens fill into close[T+1] at 3:55; `parity_mark` marks at the official close[T+1] at 4 PM → zero-width execution ledger holds.
 
 **Task re-decomposition:** Task 8 → **8a** (sizer SP-6 loading+cadence — gated, byte-identical) + **8b** (`run_reconcile`: 9:30 classify → drops/flatten → OPG → ledger-close). Task 10 (OPG dual-path) and Task 11 (crons: 4 PM compute, 9:15 gate, 9:30 `run_reconcile`, **3:55 production sizer + execute into close**) updated accordingly. Tasks 1–7 + 9 unaffected (Task 4's extracted classifier and Task 9's ledger-close helpers are reused as-is).
+
+---
+
+## 13. Phase A — completion + follow-ups (final whole-branch review, READY-WITH-NITS)
+
+All 14 tasks implemented on `feat/sp6-phase-a-impl`, each individually + whole-branch reviewed. 128 SP-6 tests + 446 legacy regression green with all `OPENCLAW_EOD_*` gates OFF (gate-off byte-identical confirmed). All gates default-OFF; nothing deployed. **No must-fix before merge.**
+
+**KNOWN/ACCEPTED Phase-A limitations (documented, not bugs):**
+- The `EXECUTING` lifecycle state / `executing_at` is **not written** in the time-split — opens go `APPROVED → FILLED` directly (`parity_mark` reads APPROVED rows + broker-confirms). The §5 state diagram's `EXECUTING` node is aspirational for Phase A.
+- The 9:32 `--sweep` cron calls a **stub** — harmless/redundant: `execute_single`'s OPG poll blocks past the open, so an OPG-expiry triggers the inline RTH day-sweep within the 9:28 run; the 3:55 sizer re-diff is a second backstop.
+- **OPG sequential serialization:** only the first dropped ticker reliably gets a true OPG (its blocking poll advances the clock into RTH for the rest, which take the RTH close). Acceptable for typical 1–3 drops/cycle.
+- `parity_mark` sets `fill_price = official close[T+1]` (not the actual broker fill) — harmless in Phase A (zero-width execution ledger).
+
+**⚠️ Phase-B PREREQUISITE (must address before Phase B's non-zero execution ledger):** Phase B's execution ledger = `(close[T+1] − actual_fill) × qty`. Today the open path never persists the real broker fill and `parity_mark` overwrites `fill_price` with the official close, so that ledger is **structurally zero forever**. Before Phase B: either the open executor must persist the real fill (new column or a pre-`parity_mark` write) OR `parity_mark` must stop writing `fill_price`.
+
+**Hygiene follow-ups (non-blocking):** a stale-`APPROVED` reaper (an open that doesn't fill at 3:55 stays `APPROVED`/`open` — benign, excluded from `update_pnl`, accrues no phantom P&L); on first paper activation, eyeball that `parity_mark`'s 4:15 broker snapshot reflects the 3:55 fills (a filled-but-snapshot-missed position would be held-but-unmarked).
