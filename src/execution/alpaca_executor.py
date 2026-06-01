@@ -735,6 +735,19 @@ def _structure_net_quote(spec, legs, expiry):
     return net, leg_q
 
 
+def _build_mleg_legs_json(leg_q, direction, contracts) -> str:
+    """JSON `--legs` array. Per leg, side+intent from _options_position_intent on
+    that leg's existing qty (avoids the SP-5.0 test-5 inferred-intent 422).
+    ratio_qty MUST be a string (SP-5.0: bare number -> Go unmarshal error)."""
+    import json
+    out = []
+    for occ, _right, _ask in leg_q:
+        side, intent = _options_position_intent(direction, _options_current_qty(occ))
+        out.append({'symbol': occ, 'side': side,
+                    'ratio_qty': str(int(contracts)), 'position_intent': intent})
+    return json.dumps(out)
+
+
 def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
     """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
     if str(side).lower() == 'buy':

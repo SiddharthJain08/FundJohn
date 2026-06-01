@@ -529,3 +529,16 @@ def test_structure_net_quote_none_when_a_leg_unquoted():
         out = _structure_net_quote(type('S',(),{'underlying':'SPY'})(),
                                    [('call',750.0),('put',750.0)], _dt.date(2026,7,17))
     assert out is None
+
+
+def test_build_mleg_legs_json_long_open():
+    """Long structure -> both legs buy / buy_to_open, ratio_qty STRING (SP-5.0)."""
+    from execution.alpaca_executor import _build_mleg_legs_json
+    import json
+    leg_q = [('SPY260717C00750000','call',10.2), ('SPY260717P00750000','put',9.3)]
+    with patch('execution.alpaca_executor._options_current_qty', return_value=0):
+        legs = _build_mleg_legs_json(leg_q, direction='long', contracts=2)
+    arr = json.loads(legs)
+    assert {l['symbol'] for l in arr} == {'SPY260717C00750000','SPY260717P00750000'}
+    assert all(l['side']=='buy' and l['position_intent']=='buy_to_open' for l in arr)
+    assert all(l['ratio_qty']=='2' and isinstance(l['ratio_qty'], str) for l in arr)
