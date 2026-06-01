@@ -208,3 +208,105 @@ def finalize_parity_marks(cur, closes: dict, run_date,
         updated, run_date,
     )
     return updated
+
+
+def finalize_execution_ledger(cur, closes: dict, run_date,
+                              workspace_id: str = 'default') -> int:
+    """Materialize the per-ORDER execution ledger on alpaca_submissions.
+
+    For each filled ENTRY order on run_date, record the official close[T+1]
+    benchmark (official_close) and
+        exec_ledger_usd = (official_close - filled_avg_price)
+                          x (direction_sign x filled_qty)
+    where direction_sign = +1 for 'long', -1 for 'short'.
+
+    exec_ledger_usd > 0 ⟺ the fill BEAT the close benchmark (long filled below the
+    close / short filled above it) — the §28 beat-close objective.
+
+    Order grain: alpaca_submissions is one row per consolidated broker order, so the
+    ledger is intrinsically per-order (NOT per signal/strategy). Sentinel close/orphan
+    orders (strategy_id starting with '__') are excluded (entry-only scope). Orders
+    with no reconciled fill yet (filled_avg_price NULL) are left NULL and backfilled by
+    a later idempotent re-run.
+
+    Args:
+        cur:          psycopg2 cursor (caller owns the transaction).
+        closes:       dict[ticker -> float] official close per ticker (the same dict
+                      finalize_parity_marks receives).
+        run_date:     date — matched against alpaca_submissions.run_date.
+        workspace_id: unused (alpaca_submissions has no workspace_id); accepted so the
+                      call signature mirrors finalize_parity_marks.
+
+    Returns:
+        Number of alpaca_submissions rows updated.
+    """
+    if not closes:
+        return 0
+
+    # Normalize the closes keys once so BTC-USD (closes) matches BTC/USD (submission).
+    closes_norm = {}
+    for _k, _v in closes.items():
+        _fv = _safe_float(_v, 'close')
+        if _fv is not None:
+            closes_norm[_norm_ticker(_k)] = _fv
+
+    cur.execute("""
+        SELECT id, strategy_id, ticker, direction,
+               filled_avg_price, filled_qty, broker_status
+          FROM alpaca_submissions
+         WHERE run_date = %s
+         ORDER BY id
+    """, (run_date,))
+    rows = cur.fetchall()
+    if not rows:
+        return 0
+
+    updated = 0
+    for row in rows:
+        if hasattr(row, 'keys'):
+            row_id = row['id']
+            strategy_id = row['strategy_id']
+            ticker = row['ticker']
+            direction_raw = row['direction']
+            avg_raw = row['filled_avg_price']
+            qty_raw = row['filled_qty']
+            status = row['broker_status']
+        else:
+            (row_id, strategy_id, ticker, direction_raw,
+             avg_raw, qty_raw, status) = row
+
+        # Entry-only scope: skip sentinel close/orphan orders.
+        if strategy_id and str(strategy_id).startswith('__'):
+            continue
+        # Skip explicit non-fill broker states (error / rejected / ...).
+        if status is not None and status not in ('filled', 'partial'):
+            continue
+
+        avg = _safe_float(avg_raw, 'filled_avg_price')
+        qty = _safe_float(qty_raw, 'filled_qty')
+        if avg is None or qty is None:
+            continue  # no reconciled fill yet → leave NULL (deferrable)
+
+        close = closes_norm.get(_norm_ticker(ticker))
+        if close is None:
+            continue
+
+        d = str(direction_raw or '').lower()
+        if d not in ('long', 'short'):
+            continue
+        direction_sign = 1 if d == 'long' else -1
+
+        exec_ledger_usd = (close - avg) * (direction_sign * qty)
+
+        cur.execute("""
+            UPDATE alpaca_submissions
+               SET official_close  = %s,
+                   exec_ledger_usd = %s
+             WHERE id = %s
+        """, (close, exec_ledger_usd, row_id))
+        updated += max(cur.rowcount, 0)
+
+    logger.info(
+        "[exec_ledger] %d order(s) ledgered for run_date=%s", updated, run_date,
+    )
+    return updated
