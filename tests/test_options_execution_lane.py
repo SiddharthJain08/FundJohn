@@ -669,3 +669,21 @@ def test_route_mleg_close_works_when_expiry_unresolvable():
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res['status'] == 'submitted'   # NOT 'skipped: expiry unresolved'
     assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
+
+
+def test_record_submission_mleg_keeps_option_class_and_legs():
+    """An mleg option submission records instrument_class='option' and does not crash
+    on the mleg shape (ticker=underlying + structure/legs fields)."""
+    from execution.alpaca_executor import record_submission
+    captured = []
+    class _C:
+        def cursor(self): return self
+        def execute(self, sql, params): captured.append(params)
+        def commit(self): pass
+        def close(self): pass
+    order = {'ticker':'SPY','strategy_id':'S_t','direction':'long',
+             'instrument_class':'option','structure':'straddle'}
+    resp = {'qty':1,'entry':20.0,'notional':2000.0,'order_id':'mleg-1',
+            'order_class':'mleg','legs':['SPY260717C00750000','SPY260717P00750000']}
+    record_submission(_C(), '2026-06-01', order, resp, tif='day', order_class='mleg', coid='c1')
+    assert captured and 'option' in captured[-1]
