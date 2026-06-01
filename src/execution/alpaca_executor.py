@@ -776,6 +776,12 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     if not ok_session:
         return _option_skip(order, coid, equity, sess_reason)
 
+    # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
+    # reads HELD legs from the book and must NOT be blocked by open-path resolution
+    # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
+    if spec.structure in ('straddle', 'strangle') and order.get('close_only'):
+        return _route_mleg_close(order, spec, coid)
+
     direction = str(order.get('direction','long')).lower()
     right = str(spec.right).lower()
     side = 'buy' if direction == 'long' else 'sell'
@@ -791,8 +797,6 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
 
     if spec.structure in ('straddle', 'strangle'):
-        if order.get('close_only'):
-            return _route_mleg_close(order, spec, coid)   # Task 6 (closes HELD legs)
         legs = _resolve_structure_legs(spec, today, expiry)
         if not legs:
             return _option_skip(order, coid, equity, 'option: structure legs unresolved')

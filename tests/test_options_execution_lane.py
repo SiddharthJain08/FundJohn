@@ -645,3 +645,27 @@ def test_route_mleg_close_closes_HELD_legs_not_equity():
     assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
     assert 'SPY' not in closed and 'AAPL' not in closed   # equity untouched
     assert res['status'] == 'submitted' and res['ticker'] == 'SPY' and res['order_class'] == 'mleg'
+
+
+def test_route_mleg_close_works_when_expiry_unresolvable():
+    """A structure close must succeed even if expiry resolution would fail
+    (it reads held legs from the book, not the spec)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    closed = []
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['position','list']:
+            return True, [{'symbol':'SPY260717C00750000','qty':'1'},
+                          {'symbol':'SPY260717P00750000','qty':'1'}], None
+        if list(args[:2]) == ['position','close']:
+            closed.append(args[args.index('--symbol-or-asset-id')+1])
+        return True, {'id':'x'}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        order['close_only'] = True
+        res = _route_option_order(order, equity=100000, coid='c-close-noexp')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'submitted'   # NOT 'skipped: expiry unresolved'
+    assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
