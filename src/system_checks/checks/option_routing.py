@@ -95,6 +95,24 @@ def _option_routing():
                                  f'a resting order may linger')
         detail += f' sentinel={term} flat={occ}'
 
+    # mleg structure sentinel — a non-marketable straddle that rests + cancel + flat.
+    from strategies.base import OptionSpec
+    sspec = OptionSpec(underlying='SPY', right='call', strike_rule='atm',
+                       target_delta=0.30, dte_target=30, structure='straddle')
+    s_order = {'ticker': 'SPY', 'strategy_id': 'sys_check', 'direction': 'long',
+               'instrument_class': 'option', 'contracts': 1.0, 'notional_usd': 100,
+               'option_spec': sspec, 'limit_price_override': 0.01}
+    s_coid = f'syscheck-mleg-{int(time.time())}'
+    s_res = _route_option_order(s_order, equity=100000, coid=s_coid)
+    if s_res and s_res.get('status') == 'submitted' and s_res.get('order_id'):
+        _run_alpaca_cli(['order', 'cancel', '--order-id', s_res['order_id']])
+        term = _poll_order_terminal(_run_alpaca_cli, s_res['order_id'])
+        if term not in ('canceled', 'expired', 'rejected'):
+            return Status.FAIL, f'mleg sentinel cancel UNCONFIRMED (status={term!r})'
+        detail += f' mleg_sentinel={term}'
+    elif s_res and s_res.get('status') == 'skipped':
+        detail += f' mleg_sentinel=skipped({s_res.get("reason")})'
+
     return Status.PASS, detail
 
 
