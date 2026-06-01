@@ -641,6 +641,46 @@ def _option_quote(occ_symbol: str) -> dict | None:
     return None
 
 
+def _occ_strike(occ_symbol: str) -> float | None:
+    """Strike from an OCC symbol: last 8 digits / 1000 (e.g. ...00760000 -> 760.0)."""
+    try:
+        return int(occ_symbol[-8:]) / 1000.0
+    except (ValueError, IndexError):
+        return None
+
+
+def _option_chain_greeks(underlying, expiry, right, spot, band_pct=0.15):
+    """[(strike, delta, occ)] for `underlying` at `expiry`/`right`, over a strike
+    band of spot*(1±band_pct). Reads per-contract greeks.delta from the chain
+    snapshot (verified live in the SP-5.1b grounding spike). Bounded by
+    --strike-price-gte/lte so the 100-row page covers the band; paginates via
+    --page-token if a full page returns."""
+    import datetime as _dt
+    lo, hi = spot * (1.0 - band_pct), spot * (1.0 + band_pct)
+    args = ['data','option','chain','--underlying-symbol', underlying,
+            '--expiration-date', expiry.isoformat() if isinstance(expiry, _dt.date) else str(expiry),
+            '--type', str(right).lower(),
+            '--strike-price-gte', f'{lo:.2f}', '--strike-price-lte', f'{hi:.2f}']
+    out, token = [], None
+    for _ in range(6):  # page cap
+        a = args + (['--page-token', token] if token else [])
+        ok, payload, _ = _run_alpaca_cli(a)
+        if not ok or not payload:
+            break
+        for occ, snap in (payload.get('snapshots') or {}).items():
+            d = ((snap or {}).get('greeks') or {}).get('delta')
+            k = _occ_strike(occ)
+            if d is not None and k is not None:
+                try:
+                    out.append((float(k), float(d), occ))
+                except (TypeError, ValueError):
+                    pass
+        token = payload.get('next_page_token')
+        if not token:
+            break
+    return out
+
+
 def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
     """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
     if str(side).lower() == 'buy':

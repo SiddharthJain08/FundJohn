@@ -405,3 +405,24 @@ def test_route_uses_marketable_limit_when_no_override():
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res and res.get('status') == 'submitted'
     assert res.get('entry') == 5.12  # ask 5.10 + 0.02 slip
+
+
+def test_option_chain_greeks_returns_strike_delta_occ():
+    """Strike-band chain fetch returns (strike, delta, occ) per contract, filtered
+    by expiry+type+strike band. delta path: snapshots[occ].greeks.delta."""
+    from execution.alpaca_executor import _option_chain_greeks
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        captured['args'] = list(args)
+        return True, {'snapshots': {
+            'SPY260717C00760000': {'greeks': {'delta': 0.42}},
+            'SPY260717C00780000': {'greeks': {'delta': 0.28}},
+        }}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', __import__('datetime').date(2026,7,17),
+                                   'call', spot=750.0, band_pct=0.15)
+    a = captured['args']
+    assert a[:3] == ['data','option','chain']
+    assert '--expiration-date' in a and '--type' in a
+    assert '--strike-price-gte' in a and '--strike-price-lte' in a
+    assert (780.0, 0.28, 'SPY260717C00780000') in [(s,d,o) for (s,d,o) in out]
