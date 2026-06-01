@@ -348,8 +348,9 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           entry_price, stop_price, target_price, pct_nav, notional_usd,
           time_in_force, order_class, client_order_id,
           alpaca_order_id, alpaca_status, alpaca_http, alpaca_error,
+          instrument_class,
           submitted_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
         ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
           alpaca_order_id = COALESCE(EXCLUDED.alpaca_order_id, alpaca_submissions.alpaca_order_id),
           alpaca_status   = EXCLUDED.alpaca_status,
@@ -367,7 +368,12 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           stop_price      = EXCLUDED.stop_price,
           target_price    = EXCLUDED.target_price,
           notional_usd    = EXCLUDED.notional_usd,
-          pct_nav         = EXCLUDED.pct_nav
+          pct_nav         = EXCLUDED.pct_nav,
+          -- SP-5.1a (mig 122): refresh instrument_class on retry so a
+          -- downgrade or re-tag leaves an accurate audit trail; preserve
+          -- prior non-NULL value if the retry omits it (legacy equity rows
+          -- pass NULL — keep them NULL via COALESCE on EXCLUDED first).
+          instrument_class = COALESCE(EXCLUDED.instrument_class, alpaca_submissions.instrument_class)
     """, (
         run_date, order['ticker'], order.get('strategy_id') or 'unknown',
         (order.get('direction') or 'long').lower(),
@@ -382,6 +388,7 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
         alpaca_resp.get('status'),
         alpaca_resp.get('http'),
         alpaca_resp.get('body') or alpaca_resp.get('reason'),
+        order.get('instrument_class'),
     ))
     conn.commit()
     cur.close()
@@ -430,6 +437,343 @@ def _normalize_alpaca_symbol(raw: str) -> str | None:
         if suffix.isalpha() and len(suffix) >= 3:
             return None
     return t
+
+
+def _build_occ_symbol(spec, strike: float, expiry) -> str:
+    """OCC option symbol: <root><YYMMDD><C|P><strike*1000, 8-digit zero-pad>.
+    e.g. SPY 2026-06-18 call 750 -> 'SPY260618C00750000'."""
+    if strike <= 0:
+        raise ValueError(f"strike must be > 0; got {strike}")
+    root = spec.underlying.upper()
+    ymd = expiry.strftime('%y%m%d')
+    cp = 'C' if str(spec.right).lower() == 'call' else 'P'
+    strike_int = int(round(strike * 1000))
+    return f"{root}{ymd}{cp}{strike_int:08d}"
+
+
+def _spot_price(symbol: str) -> float | None:
+    """Latest equity spot via Alpaca CLI."""
+    ok, payload, _ = _run_alpaca_cli(['data','latest-trade','--symbol', symbol])
+    if not ok or not payload: return None
+    try:
+        return float(payload.get('trade',{}).get('p') or payload.get('p'))
+    except (TypeError, ValueError): return None
+
+
+def _list_strikes(underlying: str, expiry, option_type: str) -> list[float]:
+    """Listed strikes for (underlying, expiry, call|put) via `alpaca option contracts`."""
+    ok, payload, _ = _run_alpaca_cli([
+        'option','contracts','--underlying-symbols', underlying,
+        '--expiration-date', expiry.isoformat(),
+        '--type', option_type,
+        '--limit','200'])
+    if not ok or not payload: return []
+    rows = payload.get('option_contracts') or []
+    out = []
+    for r in rows:
+        try: out.append(float(r.get('strike_price')))
+        except (TypeError, ValueError): continue
+    return sorted(set(out))
+
+
+def _list_expiries(underlying: str, gte: str | None = None) -> list:
+    """Distinct listed expiry dates for an underlying (monthly+weekly).
+
+    `gte` (ISO date) narrows the API page server-side via --expiration-date-gte.
+    Without it, SPY's first 500 rows are all same-day expiries (~500 strikes
+    × 1 expiry); the eligible set then comes back empty for any dte_target>0.
+    Regression caught by SP-5.1a smoke 2026-05-29 13:35 UTC."""
+    args = ['option','contracts','--underlying-symbols', underlying, '--limit','500']
+    if gte:
+        args.extend(['--expiration-date-gte', gte])
+    ok, payload, _ = _run_alpaca_cli(args)
+    if not ok or not payload: return []
+    rows = payload.get('option_contracts') or []
+    out = set()
+    import datetime as _dt
+    for r in rows:
+        try: out.add(_dt.date.fromisoformat(r.get('expiration_date')))
+        except (TypeError, ValueError): continue
+    return sorted(out)
+
+
+def _resolve_strike(spec, as_of, expiry) -> float | None:
+    spot = _spot_price(spec.underlying)
+    if spot is None or spot <= 0: return None
+    listed = _list_strikes(spec.underlying, expiry, str(spec.right).lower())
+    if not listed: return None
+    if spec.strike_rule == 'atm':
+        target = spot
+    elif spec.strike_rule == 'fixed_moneyness':
+        target = spot * float(spec.moneyness or 1.0)
+    elif spec.strike_rule == 'target_delta':
+        # Heuristic fallback: for calls, OTM = strike > spot; pick listed
+        # whose distance from spot is closest to (1-target_delta)*spot.
+        # NOTE: a future iteration may query the live chain greeks for exact
+        # delta-matching; this heuristic is documented in the spec as the
+        # SP-5.1a baseline.
+        offset = (1.0 - float(spec.target_delta)) * spot * 0.25  # rough OTM step
+        target = (spot + offset) if str(spec.right).lower() == 'call' else (spot - offset)
+    else:
+        return None
+    return min(listed, key=lambda k: abs(k - target))
+
+
+def _resolve_expiry(spec, as_of):
+    """Nearest monthly expiry >= as_of + dte_target days, intersected with listed."""
+    import datetime as _dt
+    target = as_of + _dt.timedelta(days=int(spec.dte_target))
+    listed = _list_expiries(spec.underlying, gte=target.isoformat())
+    eligible = [e for e in listed if e >= target]
+    return eligible[0] if eligible else None
+
+
+def _options_position_intent(direction: str, current_qty: float) -> tuple[str, str]:
+    """Resolves (side, position_intent) from desired direction and existing position.
+    Prevents the 422 'inferred sell_to_close vs specified sell_to_open' class of error
+    surfaced by SP-5.0 test-5."""
+    d = str(direction).lower()
+    if d == 'long':
+        return ('buy', 'buy_to_open') if current_qty >= 0 else ('buy', 'buy_to_close')
+    if d == 'short':
+        return ('sell', 'sell_to_open') if current_qty <= 0 else ('sell', 'sell_to_close')
+    raise ValueError(f"unknown direction: {direction!r}")
+
+
+def _options_current_qty(occ_symbol: str) -> float:
+    """Lookup existing option position qty by OCC symbol. Returns 0.0 if none."""
+    ok, payload, _ = _run_alpaca_cli(['position','list'])
+    if not ok or not payload: return 0.0
+    for p in payload:
+        if str(p.get('symbol')) == occ_symbol:
+            try: return float(p.get('qty', 0))
+            except (TypeError, ValueError): return 0.0
+    return 0.0
+
+
+def _cash_collateral_required(right: str, side: str, strike: float, qty: float) -> float:
+    """Cash collateral for the cash-secured-put L1 path. Zero for everything else."""
+    if str(right).lower() == 'put' and str(side).lower() == 'sell':
+        return float(strike) * 100.0 * float(qty)
+    return 0.0
+
+
+def _apply_cash_collateral_guard(right, side, strike, qty, account_cash):
+    """Returns (final_qty, skip_reason|None). Reduces qty to fit cash; SKIPs at 0."""
+    required = _cash_collateral_required(right, side, strike, qty)
+    if required == 0.0:
+        return int(qty), None
+    if required <= account_cash:
+        return int(qty), None
+    fit = int(account_cash // (float(strike) * 100.0))
+    if fit < 1:
+        return 0, f'option: insufficient cash for short put (need {required:.0f}, have {account_cash:.0f})'
+    return fit, f'short-put qty reduced {int(qty)}->{fit} for cash budget'
+
+
+def _account_cash() -> float | None:
+    """Live account.cash from Alpaca CLI."""
+    ok, payload, _ = _run_alpaca_cli(['account','get'])
+    if not ok or not payload: return None
+    try: return float(payload.get('cash', 0))
+    except (TypeError, ValueError): return None
+
+
+import os as _os
+
+def _option_min_notional_usd() -> float:
+    raw = _os.environ.get('OPENCLAW_OPTION_MIN_NOTIONAL_USD', '100')
+    try: return float(raw)
+    except ValueError: return 100.0
+
+
+def _resolve_option_qty(order: dict, limit_price: float) -> tuple[int, str | None]:
+    """Resolves integer contract qty with sub-contract refuse-or-floor.
+    Returns (qty, skip_reason|None)."""
+    contracts = order.get('contracts')
+    if contracts is None:
+        notional = float(order.get('notional_usd', 0))
+        if limit_price <= 0:
+            return 0, 'option: non-positive limit_price; cannot derive contracts'
+        contracts = notional / (limit_price * 100.0)
+    contracts = float(contracts)
+    if contracts <= 0:
+        return 0, 'option: zero contracts sized'
+    if contracts >= 1:
+        return int(contracts), None
+    notional = float(order.get('notional_usd', 0))
+    if notional >= _option_min_notional_usd():
+        return 1, None
+    return 0, f'option: sub-contract sizing below minimum (notional ${notional:.0f})'
+
+
+def _options_session_gate() -> tuple[bool, str | None]:
+    """Options orders are RTH-only (per SP-5.0 grounding §4b).
+    Returns (allowed, skip_reason|None)."""
+    kind = _alpaca_session_kind()
+    if kind == 'rth':
+        return True, None
+    if kind == 'closed':
+        return False, 'option: market closed'
+    return False, f'option: RTH-only (current session={kind})'
+
+
+def _option_quote(occ_symbol: str) -> dict | None:
+    """Best bid/ask for an OCC symbol via the exact-symbol latest-quotes endpoint.
+
+    Regression (SP-5.1a smoke 2026-06-01): the prior `data option chain
+    --underlying-symbol <U>` path defaults to `--limit 100`, and SPY has
+    hundreds of strikes per expiry, so the resolved OCC was almost always
+    truncated out of the snapshot page (true even when filtered by
+    expiry+type) → lookup miss → None → fail-closed 'no quote for limit price'.
+    `data option latest-quotes --symbols <OCC>` returns the one contract we
+    asked for with no pagination. Response shape: {"quotes": {<OCC>: {bp,ap}}}."""
+    ok, payload, _ = _run_alpaca_cli([
+        'data','option','latest-quotes','--symbols', occ_symbol])
+    if not ok or not payload: return None
+    q = (payload.get('quotes') or {}).get(occ_symbol) or {}
+    try:
+        bid = float(q.get('bp') or q.get('bid') or 0)
+        ask = float(q.get('ap') or q.get('ask') or 0)
+        if bid > 0 and ask > 0:
+            return {'bid': bid, 'ask': ask}
+    except (TypeError, ValueError): pass
+    return None
+
+
+def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
+    """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
+    if str(side).lower() == 'buy':
+        return round(float(quote['ask']) + slip, 2)
+    return round(max(0.01, float(quote['bid']) - slip), 2)
+
+
+def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
+    """SP-5.1a — single-leg options exec lane.
+    Returns a result dict for option orders (branches close_only internally) or
+    None to fall through. Equity-byte-identical when None is returned."""
+    import os as _os, datetime as _dt
+    if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
+        return None
+    if order.get('instrument_class') != 'option':
+        return None
+    spec = order.get('option_spec')
+    if spec is None:
+        return None
+    # 5.1a is SINGLE-LEG ONLY. mleg = SP-5.1b.
+    if getattr(spec, 'structure', 'single') != 'single':
+        return _option_skip(order, coid, equity,
+            f"option: structure={spec.structure!r} not in SP-5.1a (single-leg only)")
+    # RTH gate
+    ok_session, sess_reason = _options_session_gate()
+    if not ok_session:
+        return _option_skip(order, coid, equity, sess_reason)
+
+    direction = str(order.get('direction','long')).lower()
+    right = str(spec.right).lower()
+    side = 'buy' if direction == 'long' else 'sell'
+
+    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
+    if right == 'call' and side == 'sell':
+        return _option_skip(order, coid, equity,
+            'option: short call requires covered-call lookup (not in SP-5.1a)')
+
+    today = _dt.date.today()
+    expiry = _resolve_expiry(spec, today)
+    if expiry is None:
+        return _option_skip(order, coid, equity, 'option: expiry unresolved')
+    strike = _resolve_strike(spec, today, expiry)
+    if strike is None:
+        return _option_skip(order, coid, equity, 'option: strike unresolved')
+    occ = _build_occ_symbol(spec, strike, expiry)
+
+    # close_only branch
+    if order.get('close_only'):
+        return _route_option_close(order, occ, coid)
+
+    # Quote-driven marketable limit
+    quote = _option_quote(occ)
+    if quote is None:
+        return _option_skip(order, coid, equity, 'option: no quote for limit price')
+    # Sub-contract guard uses the limit price
+    side_intent_qty_lookup = _options_current_qty(occ)
+    final_side, intent = _options_position_intent(direction, side_intent_qty_lookup)
+    # `limit_price_override` lets a sentinel probe (system_check / smoke
+    # rest-then-cancel) force a deliberately non-marketable limit so the order
+    # RESTS instead of filling. The production sizer never sets this key, so
+    # real orders take the computed marketable limit and are byte-identical.
+    override = order.get('limit_price_override')
+    limit = (float(override) if override is not None
+             else _option_marketable_limit(final_side, quote))
+
+    raw_qty, qty_reason = _resolve_option_qty(order, limit)
+    if qty_reason and raw_qty == 0:
+        return _option_skip(order, coid, equity, qty_reason)
+    if qty_reason: log(qty_reason)
+
+    # Cash-collateral guard (short put only; zero otherwise)
+    cash = _account_cash()
+    if cash is None:
+        return _option_skip(order, coid, equity, 'option: account.cash fetch failed')
+    final_qty, cash_reason = _apply_cash_collateral_guard(
+        right=right, side=final_side, strike=strike, qty=raw_qty, account_cash=cash)
+    if final_qty == 0:
+        return _option_skip(order, coid, equity, cash_reason)
+    if cash_reason: log(cash_reason)
+
+    # Submit
+    args = ['order','submit',
+            '--symbol', occ, '--qty', str(int(final_qty)),
+            '--side', final_side, '--type','limit',
+            '--limit-price', f"{limit:.2f}",
+            '--time-in-force','day',
+            '--position-intent', intent,
+            '--client-order-id', coid]
+    ok, payload, err = _run_alpaca_cli(args)
+    if not ok or not payload:
+        return _option_skip(order, coid, equity, f'option: submit failed ({err or "no payload"})')
+
+    notional = float(final_qty) * 100.0 * float(limit)
+    return {
+        'ticker': occ, 'status': 'submitted',
+        'order_id': payload.get('id'),
+        'qty': final_qty, 'notional': notional, 'entry': limit,
+        'tif': 'day', 'order_class': 'simple',
+        'client_order_id': coid,
+        'instrument_class': 'option',
+    }
+
+
+def _route_option_close(order: dict, occ: str, coid: str) -> dict:
+    """Single-leg option close via `position close`."""
+    pct = order.get('close_percentage')
+    args = ['position','close','--symbol-or-asset-id', occ]
+    if pct is not None and 0 < float(pct) < 100:
+        args += ['--percentage', f"{float(pct):.2f}"]
+    ok, payload, err = _run_alpaca_cli(args)
+    if not ok or not payload:
+        return _option_skip(order, coid, equity=0.0,
+            reason=f'option-close: failed ({err or "no payload"})')
+    return {
+        'ticker': occ, 'status': 'submitted',
+        'order_id': payload.get('id') or payload.get('order_id'),
+        'qty': payload.get('qty'),
+        'notional': 0.0, 'entry': 0.0, 'tif': 'day',
+        'order_class': 'simple', 'client_order_id': coid,
+        'instrument_class': 'option',
+    }
+
+
+def _option_skip(order: dict, coid: str, equity: float, reason: str) -> dict:
+    """Standard SKIP result dict for options. Writes a SKIP audit row downstream."""
+    log(f'[option] SKIP {order.get("ticker","?")}: {reason}')
+    return {
+        'ticker': order.get('ticker', '?'),
+        'status': 'skipped', 'reason': reason,
+        'order_id': None, 'qty': 0, 'notional': 0.0, 'entry': 0.0,
+        'tif': 'day', 'order_class': 'simple',
+        'client_order_id': coid, 'instrument_class': 'option',
+    }
 
 
 def _is_crypto_ticker(raw: str | None) -> bool:
@@ -1189,6 +1533,11 @@ def execute_single(sess, equity, order, run_date):
         _crypto_res = _route_crypto_order(order, equity, coid)
         if _crypto_res is not None:
             return _crypto_res
+
+    # Options intercept (SP-5.1a)
+    _option_res = _route_option_order(order, equity, coid)
+    if _option_res is not None:
+        return _option_res
 
     if ticker is None:
         return {'ticker': raw_ticker, 'status': 'SKIP',
