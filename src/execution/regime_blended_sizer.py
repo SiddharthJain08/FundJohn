@@ -17,6 +17,7 @@ from datetime import date
 
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
 from execution.tradejohn_confirmer import confirm as default_confirmer
+from execution.alpaca_executor import _spot_price
 
 logger = logging.getLogger(__name__)
 
@@ -457,6 +458,59 @@ def _classify_position_deltas(
     return emissions
 
 
+def _inject_option_hedge_targets(cur, target_usd, account_state):
+    """SP-5.1b-ii: add option delta-hedge share targets ON TOP of the normalized
+    equity target_usd (post-normalization, cap-exempt — a hedge is a requirement,
+    not a discretionary allocation). Reads APPROVED is_hedge execution_signals rows
+    (written by the EOD compute_option_hedge_targets step) carrying hedge_shares in
+    signal_params; injects signed shares*price into target_usd[underlying].
+
+    Headroom guard (operator decision): the hedge adds gross on TOP of equity. If
+    the hedge's gross would breach available buying power (after equity), scale the
+    hedge DOWN proportionally + WARN; if no headroom, inject nothing + WARN. NEVER
+    reduce equity; never silently zero a hedge without logging.
+    """
+    import json
+    cur.execute(
+        """SELECT ticker, direction, signal_params FROM execution_signals
+           WHERE lifecycle_state='APPROVED' AND COALESCE(signal_params->>'is_hedge','')='true'
+                 AND target_date = (SELECT MAX(target_date) FROM execution_signals
+                                    WHERE lifecycle_state='APPROVED' AND COALESCE(signal_params->>'is_hedge','')='true')""")
+    rows = cur.fetchall()
+    if not rows:
+        return target_usd
+    # signed hedge $ per ticker
+    hedge_usd = {}
+    for ticker, direction, sparams in rows:
+        sp = sparams if isinstance(sparams, dict) else json.loads(sparams or '{}')
+        shares = float(sp.get('hedge_shares') or 0.0)
+        if shares <= 0:
+            continue
+        px = _spot_price(ticker)
+        if not px:
+            continue
+        signed = shares * px * (1.0 if str(direction).upper() == 'LONG' else -1.0)
+        hedge_usd[ticker] = hedge_usd.get(ticker, 0.0) + signed
+    if not hedge_usd:
+        return target_usd
+    # Headroom guard: hedge gross on top of equity gross must fit buying power.
+    nav = float(account_state.get('equity') or 100_000.0)
+    bp = float(account_state.get('buying_power') or account_state.get('daytrading_buying_power') or (4.0 * nav))
+    equity_gross = sum(abs(v) for v in target_usd.values())
+    hedge_gross = sum(abs(v) for v in hedge_usd.values())
+    headroom = bp - equity_gross
+    if hedge_gross > 0 and headroom <= 0:
+        logger.warning('option-hedge: no buying-power headroom (bp=%.0f equity_gross=%.0f); hedge NOT injected', bp, equity_gross)
+        return target_usd
+    if hedge_gross > headroom > 0:
+        scale = headroom / hedge_gross
+        logger.warning('option-hedge: hedge gross $%.0f > headroom $%.0f; scaling hedge by %.3f', hedge_gross, headroom, scale)
+        hedge_usd = {t: v * scale for t, v in hedge_usd.items()}
+    for t, v in hedge_usd.items():
+        target_usd[t] = target_usd.get(t, 0.0) + v
+    return target_usd
+
+
 def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
@@ -685,6 +739,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 target_usd = {t: w * new_scale for t, w in ticker_w.items()}
             logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
                         len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
+
+    # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
+    # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
+    # equity target_usd is byte-identical when gate is unset.
+    if os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') == '1':
+        import psycopg2
+        _hc = psycopg2.connect(os.environ['POSTGRES_URI'])
+        _hcur = _hc.cursor()
+        try:
+            target_usd = _inject_option_hedge_targets(_hcur, target_usd, account_state)
+        finally:
+            _hc.close()
 
     # Rebalance against current broker positions. Each ticker is classified as
     # one of four emission kinds:
