@@ -268,7 +268,7 @@ def _normalize_broker_symbol(t: str) -> str:
 
 
 def _load_approved_set(cur, today: date) -> dict[str, float]:
-    """Sign-only carried-APPROVED targets: {ticker: +1.0 if LONG else -1.0}.
+    """Sign-only carried-APPROVED targets: {ticker: +1.0 if LONG, -1.0 if SHORT, 0.0 if ambiguous}.
 
     9:30 is classify-only — NO NAV, NO sizing. The magnitude (+1/-1) only carries
     DIRECTION so `_classify_position_deltas` can detect opposite-sign flips; it is
@@ -276,11 +276,32 @@ def _load_approved_set(cur, today: date) -> dict[str, float]:
     it matches the broker book keys.
 
     Source: execution_signals WHERE lifecycle_state='APPROVED' AND target_date=today.
-    Last write per ticker wins (a per-ticker broker position is netted across
-    strategies; the sign-only target only needs one direction per ticker — if two
-    APPROVED rows disagree on direction for the same ticker, the classifier would
-    see a single sign, which is acceptable for a sign-only classify and is an
-    edge the 3:55 sizer resolves with real weights)."""
+    This includes both equity/crypto signals AND option delta-hedge rows (which are
+    written by compute_option_hedge_targets with lifecycle_state='APPROVED').
+
+    Gate-OFF (OPENCLAW_OPTION_DELTA_HEDGE != '1'): last-write-wins ±1 (byte-identical
+    to the original behavior; ORDER BY signal_date ASC, computed_at ASC NULLS FIRST
+    so the last/most-recent row wins per ticker).
+
+    Gate-ON (OPENCLAW_OPTION_DELTA_HEDGE == '1'): per-ticker conflict detection:
+      • All rows same sign → ±1.0 (common case; byte-identical to gate-OFF).
+      • Rows conflict (equity LONG + hedge SHORT on same ticker) → 0.0 sentinel.
+        0.0 means "present, sign-ambiguous"; it PREVENTS orphan-close (the ticker
+        IS in the approved set) AND skips flip-close (the 3:55 sizer has real
+        magnitudes to decide; 9:30 defers). _classify_position_deltas uses dict
+        MEMBERSHIP for the orphan check (`if tkr in target_usd`) so 0.0 is safe.
+        The flip-skip is structural: target==0 skips the opposite-sign branch in
+        the classifier (confirmed in _classify_position_deltas source: line
+        `if current == 0.0 or target == 0.0: continue`).
+
+    Why gate: gate-OFF preserves last-write-wins exactly (two equity strategies
+    with conflicting APPROVED directions stay last-write-wins under gate-OFF).
+    Gate-ON changes behavior only when OPENCLAW_OPTION_DELTA_HEDGE is ON, i.e.
+    when hedge rows can actually exist. "Naturally byte-identical with no hedge rows"
+    is not a sufficient guarantee because non-hedge row conflicts would also shift
+    from last-write-wins to 0.0 under an ungated implementation."""
+    _hedge_gate_on = os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') == '1'
+
     cur.execute(
         """
         SELECT ticker, direction
@@ -292,15 +313,49 @@ def _load_approved_set(cur, today: date) -> dict[str, float]:
         """,
         (today,),
     )
-    out: dict[str, float] = {}
+
+    if not _hedge_gate_on:
+        # Gate OFF: original last-write-wins behavior (byte-identical).
+        out: dict[str, float] = {}
+        for row in cur.fetchall():
+            tkr = _norm_row_get(row, 'ticker', 0)
+            direction = _norm_row_get(row, 'direction', 1)
+            if not tkr:
+                continue
+            key = _normalize_broker_symbol(tkr)
+            out[key] = -1.0 if (str(direction or '').upper() == 'SHORT') else 1.0
+        return out
+
+    # Gate ON: per-ticker sign aggregation with conflict detection.
+    # Two-pass: accumulate all signs per ticker, then decide.
+    seen: dict[str, set[float]] = {}  # key → set of signs seen
     for row in cur.fetchall():
         tkr = _norm_row_get(row, 'ticker', 0)
         direction = _norm_row_get(row, 'direction', 1)
         if not tkr:
             continue
         key = _normalize_broker_symbol(tkr)
-        out[key] = -1.0 if (str(direction or '').upper() == 'SHORT') else 1.0
-    return out
+        sign = -1.0 if (str(direction or '').upper() == 'SHORT') else 1.0
+        if key not in seen:
+            seen[key] = set()
+        seen[key].add(sign)
+
+    out2: dict[str, float] = {}
+    for key, signs in seen.items():
+        if len(signs) == 1:
+            # All rows agree — single sign (covers both pure-equity and hedge-only).
+            out2[key] = next(iter(signs))
+        else:
+            # Conflicting directions (e.g. equity LONG + hedge SHORT).
+            # 0.0 sentinel = "present, sign-ambiguous". Prevents orphan-close;
+            # skips flip-close; defers to 3:55 sizer.
+            logger.info(
+                '_load_approved_set: ticker %s has conflicting APPROVED directions '
+                '%s — marking ambiguous (0.0 sentinel); flip deferred to 3:55 sizer',
+                key, signs,
+            )
+            out2[key] = 0.0
+    return out2
 
 
 def _eod_health_green(cur, today: date) -> bool:
