@@ -645,20 +645,21 @@ def _occ_strike(occ_symbol: str) -> float | None:
     """Strike from an OCC symbol: last 8 digits / 1000 (e.g. ...00760000 -> 760.0)."""
     try:
         return int(occ_symbol[-8:]) / 1000.0
-    except (ValueError, IndexError):
+    except ValueError:
         return None
 
 
-def _option_chain_greeks(underlying, expiry, right, spot, band_pct=0.15):
+def _option_chain_greeks(
+    underlying: str, expiry, right: str, spot: float, band_pct: float = 0.15,
+) -> list[tuple[float, float, str]]:
     """[(strike, delta, occ)] for `underlying` at `expiry`/`right`, over a strike
     band of spot*(1±band_pct). Reads per-contract greeks.delta from the chain
     snapshot (verified live in the SP-5.1b grounding spike). Bounded by
     --strike-price-gte/lte so the 100-row page covers the band; paginates via
     --page-token if a full page returns."""
-    import datetime as _dt
     lo, hi = spot * (1.0 - band_pct), spot * (1.0 + band_pct)
     args = ['data','option','chain','--underlying-symbol', underlying,
-            '--expiration-date', expiry.isoformat() if isinstance(expiry, _dt.date) else str(expiry),
+            '--expiration-date', expiry.isoformat() if isinstance(expiry, date) else str(expiry),
             '--type', str(right).lower(),
             '--strike-price-gte', f'{lo:.2f}', '--strike-price-lte', f'{hi:.2f}']
     out, token = [], None
@@ -672,7 +673,7 @@ def _option_chain_greeks(underlying, expiry, right, spot, band_pct=0.15):
             k = _occ_strike(occ)
             if d is not None and k is not None:
                 try:
-                    out.append((float(k), float(d), occ))
+                    out.append((k, float(d), occ))
                 except (TypeError, ValueError):
                     pass
         token = payload.get('next_page_token')

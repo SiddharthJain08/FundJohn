@@ -426,3 +426,58 @@ def test_option_chain_greeks_returns_strike_delta_occ():
     assert '--expiration-date' in a and '--type' in a
     assert '--strike-price-gte' in a and '--strike-price-lte' in a
     assert (780.0, 0.28, 'SPY260717C00780000') in [(s,d,o) for (s,d,o) in out]
+
+
+def test_option_chain_greeks_paginates():
+    """_option_chain_greeks accumulates results across pages and passes
+    --page-token on the second request."""
+    from execution.alpaca_executor import _option_chain_greeks
+    import datetime as _dt
+    pages = [
+        (True, {'snapshots': {'SPY260717C00760000': {'greeks': {'delta': 0.42}}},
+                'next_page_token': 'tok2'}, None),
+        (True, {'snapshots': {'SPY260717C00780000': {'greeks': {'delta': 0.28}}}}, None),
+    ]
+    calls_args: list[list] = []
+    calls: dict[str, int] = {'n': 0}
+
+    def _fake_cli(args, *a, **kw):
+        i = calls['n']
+        calls['n'] += 1
+        calls_args.append(list(args))
+        return pages[i] if i < len(pages) else (True, {'snapshots': {}}, None)
+
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', _dt.date(2026, 7, 17), 'call', spot=750.0)
+
+    occs = {o for (_s, _d, o) in out}
+    assert occs == {'SPY260717C00760000', 'SPY260717C00780000'}  # both pages accumulated
+    # second call must carry --page-token with the token from page 1
+    assert '--page-token' in calls_args[1]
+    assert calls_args[1][calls_args[1].index('--page-token') + 1] == 'tok2'
+
+
+def test_option_chain_greeks_skips_none_delta_and_bad_strike():
+    """Rows with a missing/None greeks.delta or an unparseable strike (bad OCC key)
+    must be silently skipped — no crash, and they must not appear in the output."""
+    from execution.alpaca_executor import _option_chain_greeks
+    import datetime as _dt
+
+    def _fake_cli(args, *a, **kw):
+        return True, {'snapshots': {
+            # Valid row — must appear in output.
+            'SPY260717C00760000': {'greeks': {'delta': 0.42}},
+            # None delta — must be skipped.
+            'SPY260717C00770000': {'greeks': {'delta': None}},
+            # Missing greeks dict entirely — delta resolves to None → skipped.
+            'SPY260717C00775000': {},
+            # Unparseable strike (non-digit in last-8 slice) — _occ_strike returns
+            # None → skipped.
+            'SPY260717CBADSTRIKE': {'greeks': {'delta': 0.35}},
+        }}, None
+
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', _dt.date(2026, 7, 17), 'call', spot=750.0)
+
+    occs = {o for (_s, _d, o) in out}
+    assert occs == {'SPY260717C00760000'}, f"expected only valid occ, got {occs}"
