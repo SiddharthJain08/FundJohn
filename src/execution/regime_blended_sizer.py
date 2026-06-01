@@ -745,12 +745,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # equity target_usd is byte-identical when gate is unset.
     if os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') == '1':
         import psycopg2
-        _hc = psycopg2.connect(os.environ['POSTGRES_URI'])
-        _hcur = _hc.cursor()
-        try:
-            target_usd = _inject_option_hedge_targets(_hcur, target_usd, account_state)
-        finally:
-            _hc.close()
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as _hc:
+            with _hc.cursor() as _hcur:
+                target_usd = _inject_option_hedge_targets(_hcur, target_usd, account_state)
 
     # Rebalance against current broker positions. Each ticker is classified as
     # one of four emission kinds:
