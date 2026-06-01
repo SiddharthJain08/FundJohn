@@ -158,3 +158,82 @@ def test_hedge_step_gate_off_skips_with_date():
                         '--date', '2026-06-01'],
                        capture_output=True, text=True, env=env, cwd=os.getcwd())
     assert r.returncode == 0 and 'gate OFF' in r.stdout
+
+
+# ── Task 8: doctor dependency check + option_hedge system_check ───────────
+
+
+# Part A: doctor check — gate-dependency (no DB needed)
+
+def test_doctor_delta_hedge_gate_off_passes():
+    """OPENCLAW_OPTION_DELTA_HEDGE unset → doctor check returns severity='pass'."""
+    import importlib
+    import src.maintenance.doctor as doctor
+    importlib.reload(doctor)
+    env_bak = os.environ.copy()
+    os.environ.pop('OPENCLAW_OPTION_DELTA_HEDGE', None)
+    try:
+        result = doctor.check_option_delta_hedge_deps()
+        assert result['severity'] == 'pass', result
+    finally:
+        os.environ.clear(); os.environ.update(env_bak)
+
+
+def test_doctor_delta_hedge_gate_on_eod_off_fails():
+    """OPENCLAW_OPTION_DELTA_HEDGE=1 but EOD gates off → severity='fail'."""
+    import importlib
+    import src.maintenance.doctor as doctor
+    importlib.reload(doctor)
+    env_bak = os.environ.copy()
+    os.environ['OPENCLAW_OPTION_DELTA_HEDGE'] = '1'
+    os.environ.pop('OPENCLAW_EOD_SIGNAL_REGISTER', None)
+    os.environ.pop('OPENCLAW_EOD_RECONCILE', None)
+    try:
+        result = doctor.check_option_delta_hedge_deps()
+        assert result['severity'] == 'fail', result
+        assert 'EOD' in result['detail']
+    finally:
+        os.environ.clear(); os.environ.update(env_bak)
+
+
+def test_doctor_delta_hedge_gate_on_all_eod_on_passes():
+    """All three gates ON → severity='pass'."""
+    import importlib
+    import src.maintenance.doctor as doctor
+    importlib.reload(doctor)
+    env_bak = os.environ.copy()
+    os.environ['OPENCLAW_OPTION_DELTA_HEDGE'] = '1'
+    os.environ['OPENCLAW_EOD_SIGNAL_REGISTER'] = '1'
+    os.environ['OPENCLAW_EOD_RECONCILE'] = '1'
+    try:
+        result = doctor.check_option_delta_hedge_deps()
+        assert result['severity'] == 'pass', result
+    finally:
+        os.environ.clear(); os.environ.update(env_bak)
+
+
+# Part B: system_check option_hedge — gate-off SKIP + gate-on/EOD-off FAIL
+
+def test_option_hedge_check_gate_off_skips():
+    env = {**os.environ}; env.pop('OPENCLAW_OPTION_DELTA_HEDGE', None)
+    r = subprocess.run([sys.executable, '-m', 'src.system_checks',
+                        '--check', 'option_hedge', '--json'],
+                       capture_output=True, text=True, env=env,
+                       cwd=os.getcwd(), timeout=60)
+    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+    import json as _j
+    d = _j.loads(r.stdout)
+    st = d['results'][0]['status']
+    assert st in ('SKIP', 'PASS'), d
+
+
+def test_option_hedge_check_gate_on_no_eod_fails(monkeypatch):
+    """Gate ON but EOD gates off → FAIL with 'EOD' in detail (in-process)."""
+    monkeypatch.setenv('OPENCLAW_OPTION_DELTA_HEDGE', '1')
+    monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
+    monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+    from system_checks.checks.option_hedge import _option_hedge
+    from system_checks.types import Status
+    status, detail = _option_hedge()
+    assert status == Status.FAIL
+    assert 'EOD' in detail
