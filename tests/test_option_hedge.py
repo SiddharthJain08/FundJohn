@@ -82,7 +82,6 @@ def test_compute_option_hedge_targets_writes_APPROVED_tagged_row():
     import datetime as dt
     from unittest.mock import patch
     inserts = []
-    _FAKE_UUID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
     class _Cur:
         description = [('option_strategy_id',),('underlying',),('structure_legs',),
                        ('contracts',),('current_hedge_qty',),('target_hedge_qty',)]
@@ -91,11 +90,10 @@ def test_compute_option_hedge_targets_writes_APPROVED_tagged_row():
                 inserts.append((sql, params))
         def fetchall(self):
             return [('S_strad','SPY',[{'occ':'SPY260626C00759000','right':'call','strike':759.0,'expiry':'2026-06-26'}],2,0.0,None)]
-        def fetchone(self):
-            # resolve_workspace does SELECT id FROM workspaces; return a dict row
-            return {'id': _FAKE_UUID}
+    # Pass workspace_id explicitly — unit tests exercise the no-resolve path.
+    # Real-DB resolution (the None path) is covered by test_resolve_uses_dictcursor_when_workspace_none.
     with patch('execution.option_hedge.compute_structure_delta', return_value=8.0):
-        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1))
+        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1), workspace_id='ws-test')
     sig = [(s,p) for (s,p) in inserts if 'execution_signals' in s]
     assert sig, 'no execution_signals hedge row'
     s, p = sig[0]
@@ -104,8 +102,8 @@ def test_compute_option_hedge_targets_writes_APPROVED_tagged_row():
     assert any('hedge_shares' in str(x) for x in p)        # carries fixed share target
     # net +8 -> target_shares -8 -> direction SHORT
     assert 'SHORT' in str(p)
-    # workspace_id must be the resolved UUID (p[1] is workspace_id positional arg)
-    assert p[1] == _FAKE_UUID, f'expected resolved workspace UUID, got {p[1]!r}'
+    # workspace_id must be the explicitly-passed value (p[1] is workspace_id positional arg)
+    assert p[1] == 'ws-test', f'expected explicit workspace_id, got {p[1]!r}'
     led = [(s,p) for (s,p) in inserts if 'INSERT INTO option_hedge_ledger' in s]
     assert led and -8.0 in led[0][1]                       # ledger target = -net
 
@@ -119,9 +117,9 @@ def test_compute_option_hedge_targets_skips_on_none_delta():
         def execute(self, sql, params=None):
             if 'execution_signals' in sql: inserts.append(sql)
         def fetchall(self): return [('S','SPY',[{'occ':'X','right':'call','strike':1,'expiry':'2026-06-26'}],1,0.0,None)]
-        def fetchone(self): return {'id': 'test-uuid-none-delta-skip'}
+    # Pass workspace_id explicitly to skip resolution and isolate the skip logic.
     with patch('execution.option_hedge.compute_structure_delta', return_value=None):
-        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1))
+        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1), workspace_id='ws-test')
     assert not inserts  # fail-closed: no hedge row when delta unresolved
 
 
@@ -137,10 +135,66 @@ def test_compute_option_hedge_targets_skips_zero_delta():
         def execute(self, sql, params=None):
             if 'execution_signals' in sql: inserts.append((sql, params))
         def fetchall(self): return [('S_neutral','SPY',[{'occ':'X','right':'call','strike':1,'expiry':'2026-06-26'}],1,0.0,None)]
-        def fetchone(self): return {'id': 'test-uuid-zero-delta'}
+    # Pass workspace_id explicitly to skip resolution and isolate the skip logic.
     with patch('execution.option_hedge.compute_structure_delta', return_value=0.0):
-        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1))
+        compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1), workspace_id='ws-test')
     assert not inserts, 'zero-delta structure must not write an execution_signals row'
+
+
+def test_resolve_uses_dictcursor_when_workspace_none():
+    """When workspace_id=None, compute_option_hedge_targets must open a RealDictCursor
+    on the connection and call resolve_workspace on THAT cursor — NOT on the plain cur
+    passed by the EOD step. This test uses a plain cursor whose fetchone() returns a
+    TUPLE (as real plain cursors do); resolution must succeed via the DictCursor path.
+    Fails on the unfixed code (which calls resolve_workspace(cur,...) → row['id'] on a
+    tuple → TypeError); passes after the fix."""
+    from execution.option_hedge import compute_option_hedge_targets
+    import datetime as dt
+    from unittest.mock import patch, MagicMock
+    inserts = []
+
+    # Simulate a RealDictCursor context manager that returns a dict row
+    _dict_cur = MagicMock()
+    _dict_cur.__enter__ = lambda s: s
+    _dict_cur.__exit__ = MagicMock(return_value=False)
+    _dict_cur.fetchone.return_value = {'id': 'ws-uuid'}
+
+    # Simulate a connection whose cursor(cursor_factory=...) returns the dict cursor
+    _conn = MagicMock()
+    _conn.cursor.return_value = _dict_cur
+
+    class _PlainCur:
+        """Mimics a plain psycopg2 cursor: fetchone returns a TUPLE."""
+        description = [('option_strategy_id',), ('underlying',), ('structure_legs',),
+                       ('contracts',), ('current_hedge_qty',), ('target_hedge_qty',)]
+        connection = _conn
+
+        def execute(self, sql, params=None):
+            if 'INSERT INTO execution_signals' in sql or 'option_hedge_ledger' in sql:
+                inserts.append((sql, params))
+
+        def fetchall(self):
+            return [('S_strad', 'SPY',
+                     [{'occ': 'SPY260626C00759000', 'right': 'call',
+                       'strike': 759.0, 'expiry': '2026-06-26'}],
+                     2, 0.0, None)]
+
+        def fetchone(self):
+            # Plain cursor returns a tuple — index access only, NOT row['id']
+            return ('plain-workspace-id',)
+
+    with patch('execution.option_hedge.compute_structure_delta', return_value=8.0):
+        compute_option_hedge_targets(_PlainCur(), as_of=dt.date(2026, 6, 1))
+        # workspace_id=None (default) → must resolve via DictCursor, not plain cur
+
+    sig = [(s, p) for (s, p) in inserts if 'execution_signals' in s]
+    assert sig, 'no execution_signals row emitted'
+    s, p = sig[0]
+    # workspace_id is the second positional param (index 1)
+    assert p[1] == 'ws-uuid', (
+        f'expected DictCursor-resolved UUID "ws-uuid", got {p[1]!r}; '
+        f'fix did not route resolution through RealDictCursor'
+    )
 
 
 import subprocess, sys

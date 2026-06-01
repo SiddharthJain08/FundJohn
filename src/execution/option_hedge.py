@@ -127,8 +127,14 @@ def compute_option_hedge_targets(cur, as_of, workspace_id=None):
 
     # Resolve workspace_id once — mirrors engine.main()'s WORKSPACE = resolve_workspace(cur, WORKSPACE).
     # The resolved value is a 36-char UUID from workspaces.id (NOT 'default', NOT None).
+    # IMPORTANT: resolve_workspace requires a DictCursor (row['id'] access). The EOD step
+    # caller (run_option_hedge_targets.py) passes a plain cursor (conn.cursor()), which
+    # returns tuple rows. Opening a RealDictCursor from cur.connection ensures resolution
+    # works regardless of the caller's cursor type.
     if workspace_id is None:
-        workspace_id = resolve_workspace(cur, WORKSPACE)
+        import psycopg2.extras
+        with cur.connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as _wcur:
+            workspace_id = resolve_workspace(_wcur, WORKSPACE)
 
     for row in rows:
         option_sid  = row['option_strategy_id']
