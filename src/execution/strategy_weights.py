@@ -526,6 +526,20 @@ def _effective_sharpe(bt: dict | None, live: dict | None):
     return eff, bt_s, bt_n, lv_s, lv_n
 
 
+def _is_sizeable_sharpe(eff: Optional[float]) -> bool:
+    """A (strategy, regime) is sized ONLY when its effective Sharpe is a
+    finite positive number.
+
+    Non-finite (NaN/Inf) MUST be excluded: a regime's per-regime backtest
+    Sharpe can be NaN when its daily-return series compounds below -100%
+    (cumprod(1+r) <= 0 — reachable for high-frequency strategies in a single
+    regime, e.g. several live strategies in HIGH_VOL). The old guard
+    `eff is None or eff <= 0` did NOT catch it — `nan <= 0` is False — so a
+    NaN weight would slip through and poison the Σ-effective-sharpe gate and
+    the per-strategy daily_weight. `math.isfinite` rejects NaN and ±Inf."""
+    return eff is not None and math.isfinite(eff) and eff > 0
+
+
 def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeightRow]:
     """Recompute every (strategy, regime) weight and persist."""
     conn = _db()
@@ -558,7 +572,7 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             for R in s['eligible_regimes']:
                 eff, bt_s, bt_n, lv_s, lv_n = _effective_sharpe(bt.get((s['strategy_id'], R)),
                                                                 live.get((s['strategy_id'], R)))
-                if eff is None or eff <= 0:
+                if not _is_sizeable_sharpe(eff):
                     continue
                 # OUE counts are still loaded + persisted for the dashboard
                 # #O/U/E column + audit trail, but they NO LONGER scale the
