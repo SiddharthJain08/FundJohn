@@ -917,6 +917,52 @@ def _option_skip(order: dict, coid: str, equity: float, reason: str) -> dict:
     }
 
 
+def _held_option_legs(underlying: str) -> list:
+    """OCC symbols of currently-HELD option positions on `underlying` (qty != 0),
+    from `position list`. An option symbol's leading alpha run is its underlying
+    root and it is longer than that root (plain equity 'SPY' is excluded, so the
+    equity book is never closed)."""
+    ok, payload, _ = _run_alpaca_cli(['position', 'list'])
+    if not ok or not payload:
+        return []
+    out = []
+    for p in payload:
+        sym = str(p.get('symbol') or '')
+        root = ''
+        for c in sym:
+            if c.isalpha(): root += c
+            else: break
+        try:
+            qty = float(p.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if root == underlying and len(sym) > len(root) and qty != 0:
+            out.append(sym)
+    return out
+
+
+def _route_mleg_close(order, spec, coid):
+    """Close a straddle/strangle by closing the ACTUALLY-HELD option legs on the
+    underlying (from `position list`) — NOT by re-resolving strikes from spec,
+    which drift between open and close. Per-leg `position close` (credit-sign
+    independent; spec §4.1)."""
+    held = _held_option_legs(spec.underlying)
+    if not held:
+        return _option_skip(order, coid, equity=0.0, reason='option-close: no held legs')
+    closed = []
+    for occ in held:
+        ok, _payload, err = _run_alpaca_cli(['position', 'close', '--symbol-or-asset-id', occ])
+        closed.append((occ, ok, err))
+    any_fail = any((not ok) for _occ, ok, _err in closed)
+    return {
+        'ticker': spec.underlying, 'structure': spec.structure,
+        'status': 'submitted' if not any_fail else 'partial',
+        'order_id': None, 'qty': 0, 'notional': 0.0, 'entry': 0.0,
+        'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
+        'instrument_class': 'option', 'legs': [c[0] for c in closed],
+    }
+
+
 def _is_crypto_ticker(raw: str | None) -> bool:
     """True if `raw` is a crypto pair in the engine's BASE-USD convention
     (e.g. 'BTC-USD'). Mirrors collector.js _classifyMarketTicker's /-USD$/.

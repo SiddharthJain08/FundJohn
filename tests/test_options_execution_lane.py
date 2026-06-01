@@ -623,3 +623,25 @@ def test_route_straddle_skips_when_leg_unresolved():
         res = _route_option_order(order, equity=100000, coid='c-skip')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res['status'] == 'skipped' and submitted['n'] == 0
+
+
+def test_route_mleg_close_closes_HELD_legs_not_equity():
+    """close targets the ACTUALLY-HELD option legs from `position list` (robust to
+    strike/greeks drift) and never touches equity on the same underlying."""
+    from execution.alpaca_executor import _route_mleg_close
+    closed = []
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['position','list']:
+            return True, [{'symbol':'SPY260717C00750000','qty':'1'},
+                          {'symbol':'SPY260717P00750000','qty':'1'},
+                          {'symbol':'SPY','qty':'100'},        # equity SPY — must NOT close
+                          {'symbol':'AAPL','qty':'10'}], None  # other ticker — ignored
+        if list(args[:2]) == ['position','close']:
+            closed.append(args[args.index('--symbol-or-asset-id')+1])
+        return True, {'id':'x'}, None
+    spec = type('S',(),{'underlying':'SPY','structure':'straddle'})()
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        res = _route_mleg_close({'close_only': True}, spec, 'c-close')
+    assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
+    assert 'SPY' not in closed and 'AAPL' not in closed   # equity untouched
+    assert res['status'] == 'submitted' and res['ticker'] == 'SPY' and res['order_class'] == 'mleg'
