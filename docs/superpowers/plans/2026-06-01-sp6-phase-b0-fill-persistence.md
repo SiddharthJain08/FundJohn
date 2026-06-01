@@ -2,27 +2,28 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stop discarding the real broker entry fill — capture it into parity-mark-safe columns on `execution_signals` and materialize the `(close[T+1] − actual_fill) × signed_qty` execution ledger Phase B grades against.
+**Goal:** Capture the close[T+1] benchmark + materialize the `(close − fill) × signed_qty` execution ledger at the **order grain** (on `alpaca_submissions`, where the real fill already lives), so Phase B has ground-truth execution data once Phase A is live.
 
-**Architecture:** One additive migration adds four nullable columns. `finalize_parity_marks` is extended to read the already-reconciled fill from `alpaca_submissions` (keyed by `(strategy_id, ticker)` for the run's `target_date`) and write `actual_fill_price/qty/at` + `exec_ledger_usd` in the SAME row UPDATE that already marks the signal FILLED — *before* `fill_price` is clobbered with the official close. Pure data layer; no consumer, no hot-path coupling, no new broker call. Gate-off-inert (runs only in the gated SP-6 4 PM block).
+**Architecture:** One additive migration adds two nullable columns to `alpaca_submissions` (`official_close`, `exec_ledger_usd`). A new `finalize_execution_ledger(cur, closes, run_date)` — a **sibling** to `finalize_parity_marks` in `src/execution/parity_mark.py` — reads each filled entry order on `run_date`, looks up the official close, and writes the benchmark + signed ledger. It's wired into the gated SP-6 4 PM block right after `finalize_parity_marks`. No `execution_signals` changes; gate-off-inert.
 
 **Tech Stack:** Python 3 + psycopg2 (DictCursor), PostgreSQL, pytest with live-DB rollback isolation.
 
-**Spec:** `docs/superpowers/specs/2026-06-01-sp6-phase-b0-fill-persistence-design.md`
+**Spec:** `docs/superpowers/specs/2026-06-01-sp6-phase-b0-fill-persistence-design.md` (see §0 for why the grain is per-order, not per-signal).
 
 ---
 
 ## File Structure
 
-- **Create:** `src/database/migrations/127_sp6_b0_fill_persistence.sql` — additive columns (responsibility: schema).
-- **Modify:** `src/execution/parity_mark.py` — extend the SELECT (add `strategy_id`), load the day's fills into a `(strategy_id, norm_ticker)` dict, compute the ledger per row, extend the UPDATE (responsibility: capture + ledger).
-- **Create (test):** `tests/test_sp6_b0_fill_capture.py` — TDD suite (mirrors `tests/test_sp6_parity_mark.py` harness).
+- **Create:** `src/database/migrations/127_sp6_b0_fill_persistence.sql` — 2 additive columns on `alpaca_submissions`.
+- **Modify:** `src/execution/parity_mark.py` — add `finalize_execution_ledger` (new function; the existing `finalize_parity_marks` is untouched).
+- **Modify:** `src/execution/engine.py:1445-1458` — wire the sibling call into the gated 4 PM block.
+- **Create (test):** `tests/test_sp6_b0_fill_capture.py` — TDD suite (live-DB rollback; inserts `alpaca_submissions` rows + a `closes` dict; no `execution_signals`, no broker injection).
 
-**Pre-flight grounding (do before Task 1 — verify, don't assume):** confirm the production SP-6 sizer/executor records each open's `alpaca_submissions` row under the **signal's own** `strategy_id` (not a netted/synthetic aggregate id). Trace `src/execution/regime_blended_sizer.py` → `src/execution/alpaca_executor.py:record_submission` and confirm the `strategy_id` written matches `execution_signals.strategy_id`. If it nets per-ticker under a synthetic id, change the dict key in Task 2 to ticker-only (`_norm_ticker(ticker)`) and note the same-ticker-multi-strategy fills then share one VWAP. A mismatch is non-fatal (yields NULL ledger) but silently empty — so this must be checked.
+**Grounding already done (do not re-litigate):** the production sizer consolidates per ticker — `alpaca_submissions` is one row per broker order (verified live 2026-05-28: 1 row/ticker). The real fill (`filled_avg_price`/`filled_qty`) is already populated there by `alpaca_reconcile`. That is why B0 is per-order columns, not per-signal.
 
 ---
 
-### Task 1: Additive migration (four nullable columns)
+### Task 1: Additive migration (two columns on `alpaca_submissions`)
 
 **Files:**
 - Create: `src/database/migrations/127_sp6_b0_fill_persistence.sql`
@@ -31,17 +32,16 @@
 
 ```sql
 -- 127_sp6_b0_fill_persistence.sql
--- SP-6 Phase B0: persist the real broker ENTRY fill + materialize the execution ledger.
+-- SP-6 Phase B0: per-order execution ledger.
 --
--- Additive only (master-DB NEVER-DELETE invariant): four nullable columns, NO DEFAULT.
--- These hold the ground-truth broker fill (copied from alpaca_submissions before
--- parity_mark overwrites fill_price with the official close) and the entry execution
--- ledger (official close[T+1] - actual_fill) x signed_qty that Phase B grades against.
-ALTER TABLE execution_signals
-    ADD COLUMN IF NOT EXISTS actual_fill_price NUMERIC,
-    ADD COLUMN IF NOT EXISTS actual_fill_qty   NUMERIC,
-    ADD COLUMN IF NOT EXISTS actual_filled_at  TIMESTAMPTZ,
-    ADD COLUMN IF NOT EXISTS exec_ledger_usd   NUMERIC;
+-- Additive only (master-DB NEVER-DELETE invariant): two nullable columns, NO DEFAULT,
+-- on alpaca_submissions (the order grain — one row per consolidated broker order; the
+-- real fill already lives here as filled_avg_price/filled_qty via alpaca_reconcile).
+--   official_close  : official close[T+1] for this order's ticker (beat-close benchmark)
+--   exec_ledger_usd : (official_close - filled_avg_price) x (direction_sign x filled_qty)
+ALTER TABLE alpaca_submissions
+    ADD COLUMN IF NOT EXISTS official_close  NUMERIC,
+    ADD COLUMN IF NOT EXISTS exec_ledger_usd NUMERIC;
 ```
 
 - [ ] **Step 2: Apply to the live DB (additive/idempotent — in-pattern with migrations 119/126)**
@@ -49,54 +49,55 @@ ALTER TABLE execution_signals
 Run:
 ```bash
 cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence
-python3 -c "
+POSTGRES_URI=$(grep -E '^POSTGRES_URI=' /root/openclaw/.env | head -1 | cut -d= -f2- | tr -d '"') python3 -c "
 import os, psycopg2
 sql = open('src/database/migrations/127_sp6_b0_fill_persistence.sql').read()
 conn = psycopg2.connect(os.environ['POSTGRES_URI']); conn.autocommit = True
 cur = conn.cursor(); cur.execute(sql)
 cur.execute(\"\"\"SELECT column_name FROM information_schema.columns
-                 WHERE table_name='execution_signals'
-                   AND column_name IN ('actual_fill_price','actual_fill_qty',
-                                       'actual_filled_at','exec_ledger_usd')
+                 WHERE table_name='alpaca_submissions'
+                   AND column_name IN ('official_close','exec_ledger_usd')
                  ORDER BY column_name\"\"\")
 print('cols:', [r[0] for r in cur.fetchall()])
 conn.close()
 "
 ```
-Expected output: `cols: ['actual_fill_price', 'actual_fill_qty', 'actual_filled_at', 'exec_ledger_usd']`
+Expected output: `cols: ['exec_ledger_usd', 'official_close']`
 
-(The migration uses `ADD COLUMN IF NOT EXISTS`, so re-running is a no-op. Columns are nullable with no default → existing rows are unaffected; this is a pure ADD, allowed by the NEVER-DELETE invariant.)
+(Idempotent: `ADD COLUMN IF NOT EXISTS`. Nullable/no-default → existing rows unaffected; pure ADD, allowed by the NEVER-DELETE invariant. The `POSTGRES_URI` is read from `.env` without printing it.)
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add src/database/migrations/127_sp6_b0_fill_persistence.sql
-git commit -m "feat(sp6-b0): migration 127 — additive fill-persistence columns
+git commit -m "feat(sp6-b0): migration 127 — per-order execution-ledger columns
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 2: Capture the real fill + ledger in `finalize_parity_marks` (core happy path)
+### Task 2: `finalize_execution_ledger` + wiring + core happy-path test
 
 **Files:**
-- Modify: `src/execution/parity_mark.py` (SELECT ~line 94; row-unpack ~line 127; after `held` build ~line 120; per-row compute before the UPDATE ~line 172; UPDATE ~line 185)
+- Modify: `src/execution/parity_mark.py` (add the new function at end of file)
+- Modify: `src/execution/engine.py:1447,1454-1455` (import + sibling call)
 - Test: `tests/test_sp6_b0_fill_capture.py`
 
-- [ ] **Step 1: Write the failing test (LONG filled below close → +ledger, columns populated)**
+- [ ] **Step 1: Write the failing test (long filled below close → +ledger, benchmark set)**
 
 Create `tests/test_sp6_b0_fill_capture.py`:
 
 ```python
-"""test_sp6_b0_fill_capture.py — SP-6 Phase B0 fill-persistence + execution ledger.
+"""test_sp6_b0_fill_capture.py — SP-6 Phase B0 per-order execution ledger.
 
-finalize_parity_marks must, for each broker-held row it marks FILLED, copy the real
-broker fill (already reconciled into alpaca_submissions) into actual_fill_price/qty/at
-and materialize exec_ledger_usd = (official close - actual_fill) x (direction_sign x qty)
-— WITHOUT changing fill_price/mark_entry_price (still the official close → parity intact).
+finalize_execution_ledger reads filled ENTRY orders from alpaca_submissions on run_date
+and writes official_close (the close[T+1] benchmark) + exec_ledger_usd
+  = (official_close - filled_avg_price) x (direction_sign x filled_qty).
+exec_ledger_usd > 0 ⟺ the fill beat the close (long below close / short above close).
 
-DB tests use rollback isolation (no persistent side-effects). Broker is always injected.
+DB tests use rollback isolation (no persistent side-effects). No execution_signals rows,
+no broker injection — just alpaca_submissions rows + a closes dict.
 """
 from __future__ import annotations
 
@@ -111,7 +112,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
-from execution.parity_mark import finalize_parity_marks
+from execution.parity_mark import finalize_execution_ledger
 
 
 @pytest.fixture
@@ -126,41 +127,12 @@ def db_conn():
     conn.close()
 
 
-@pytest.fixture
-def _db_meta(db_conn):
-    cur = db_conn.cursor()
-    cur.execute("SELECT id FROM workspaces WHERE name='default' LIMIT 1")
-    ws_row = cur.fetchone()
-    assert ws_row is not None, "No 'default' workspace"
-    cur.execute("SELECT id FROM strategy_registry WHERE status='approved' LIMIT 1")
-    st_row = cur.fetchone()
-    assert st_row is not None, "No approved strategy in strategy_registry"
-    return {'ws_id': ws_row['id'], 'strategy_id': st_row['id']}
-
-
-def _insert_signal(cur, ticker, direction, entry_price, stop_loss, target_1,
-                   lifecycle_state, target_date, *, ws_id, strategy_id, run_date=None):
-    signal_date = run_date or date.today()
-    cur.execute("""
-        INSERT INTO execution_signals
-            (strategy_id, workspace_id, signal_date, ticker, direction,
-             entry_price, stop_loss, target_1, target_2, target_3,
-             position_size_pct, regime_state, signal_params, status,
-             lifecycle_state, target_date)
-        VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s::jsonb,%s, %s,%s)
-        RETURNING id
-    """, (strategy_id, ws_id, signal_date, ticker, direction,
-          entry_price, stop_loss, target_1, None, None,
-          0.05, 'NORMAL', '{}', 'open', lifecycle_state, target_date))
-    row = cur.fetchone()
-    return row['id'] if hasattr(row, 'keys') else row[0]
-
-
 def _insert_submission(cur, *, run_date, ticker, strategy_id, direction,
                        qty, filled_qty, filled_avg_price, broker_status,
                        entry_price=100.0):
-    """Insert an alpaca_submissions row carrying a (reconciled) broker fill."""
-    coid = f"b0test-{strategy_id}-{ticker}".replace('/', '-')
+    """Insert one alpaca_submissions row carrying a (reconciled) broker fill.
+    filled_avg_price=None / broker_status=None models an unreconciled order."""
+    coid = f"b0t-{strategy_id}-{ticker}".replace('/', '-')
     cur.execute("""
         INSERT INTO alpaca_submissions
             (run_date, ticker, strategy_id, direction, qty, entry_price,
@@ -171,386 +143,339 @@ def _insert_submission(cur, *, run_date, ticker, strategy_id, direction,
           'day', 'simple', coid, broker_status, filled_qty, filled_avg_price))
 
 
-def _broker_held(*held):
-    held_map = {t: 5000.0 for t in held}
-    def _loader():
-        return held_map
-    return _loader
-
-
-def _fetch(cur, sig_id):
-    cur.execute("""SELECT lifecycle_state, fill_price, mark_entry_price,
-                          actual_fill_price, actual_fill_qty, actual_filled_at,
-                          exec_ledger_usd
-                     FROM execution_signals WHERE id=%s""", (sig_id,))
+def _fetch(cur, *, run_date, ticker, strategy_id):
+    cur.execute("""SELECT official_close, exec_ledger_usd
+                     FROM alpaca_submissions
+                    WHERE run_date=%s AND ticker=%s AND strategy_id=%s""",
+                (run_date, ticker, strategy_id))
     return cur.fetchone()
 
 
 @pytest.mark.integration
-def test_long_filled_below_close_positive_ledger(db_conn, _db_meta):
+def test_long_filled_below_close_positive_ledger(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0LONG'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=100, filled_qty=100, filled_avg_price=99.0,
-                       broker_status='filled')
+    ticker, strat = 'ZZB0LONG', 'ZZB0_STRAT_A'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=100,
+                       filled_avg_price=99.0, broker_status='filled')
 
-    marked = finalize_parity_marks(cur, {ticker: close}, run_date,
-                                   _db_meta['ws_id'], broker_loader=_broker_held(ticker))
-    assert marked == 1
+    n = finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    assert n == 1
 
-    r = _fetch(cur, sig_id)
-    assert r['lifecycle_state'] == 'FILLED'
-    assert float(r['actual_fill_price']) == 99.0
-    assert float(r['actual_fill_qty']) == 100.0
-    assert r['actual_filled_at'] is not None
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
+    assert abs(float(r['official_close']) - 103.5) < 1e-6
     # (103.5 - 99.0) * (+1 * 100) = 450.0  → beat the close
     assert abs(float(r['exec_ledger_usd']) - 450.0) < 1e-6
-    # parity invariant: fill_price + mark_entry_price are STILL the official close
-    assert abs(float(r['fill_price']) - close) < 1e-6
-    assert abs(float(r['mark_entry_price']) - close) < 1e-6
 ```
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence && python3 -m pytest tests/test_sp6_b0_fill_capture.py::test_long_filled_below_close_positive_ledger -v`
-Expected: FAIL — `actual_fill_price`/`exec_ledger_usd` come back `None` (capture not implemented yet). (Migration 127 from Task 1 means the columns exist, so the failure is a NULL assertion, not a missing-column error.)
-
-- [ ] **Step 3: Implement the capture in `finalize_parity_marks`**
-
-In `src/execution/parity_mark.py`:
-
-(a) Extend the main SELECT to also pull `strategy_id`:
-
-```python
-    cur.execute("""
-        SELECT id, strategy_id, ticker, direction, entry_price, stop_loss, target_1
-          FROM execution_signals
-         WHERE lifecycle_state IN ('APPROVED', 'EXECUTING', 'FILLED')
-           AND target_date = %s
-           AND workspace_id = %s
-         ORDER BY id
-    """, (run_date, workspace_id))
+Run:
+```bash
+cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence
+POSTGRES_URI=$(grep -E '^POSTGRES_URI=' /root/openclaw/.env | head -1 | cut -d= -f2- | tr -d '"') python3 -m pytest tests/test_sp6_b0_fill_capture.py::test_long_filled_below_close_positive_ledger -v
 ```
+Expected: FAIL — `ImportError: cannot import name 'finalize_execution_ledger'` (function not defined yet).
 
-(b) After the `held = {...}` line, load the day's broker fills into a `(strategy_id, norm_ticker)` dict:
+- [ ] **Step 3: Implement `finalize_execution_ledger` in `src/execution/parity_mark.py`**
+
+Append at the end of `src/execution/parity_mark.py`:
 
 ```python
-    # ── B0: load today's reconciled broker fills from alpaca_submissions ──
-    # Keyed by (strategy_id, normalized ticker): that triple is UNIQUE per run_date,
-    # so two strategies trading the same ticker stay distinct.  Only rows with a
-    # finite fill price (and not an explicit non-fill broker_status) are kept.
+def finalize_execution_ledger(cur, closes: dict, run_date,
+                              workspace_id: str = 'default') -> int:
+    """Materialize the per-ORDER execution ledger on alpaca_submissions.
+
+    For each filled ENTRY order on run_date, record the official close[T+1]
+    benchmark (official_close) and
+        exec_ledger_usd = (official_close - filled_avg_price)
+                          x (direction_sign x filled_qty)
+    where direction_sign = +1 for 'long', -1 for 'short'.
+
+    exec_ledger_usd > 0 ⟺ the fill BEAT the close benchmark (long filled below the
+    close / short filled above it) — the §28 beat-close objective.
+
+    Order grain: alpaca_submissions is one row per consolidated broker order, so the
+    ledger is intrinsically per-order (NOT per signal/strategy). Sentinel close/orphan
+    orders (strategy_id starting with '__') are excluded (entry-only scope). Orders
+    with no reconciled fill yet (filled_avg_price NULL) are left NULL and backfilled by
+    a later idempotent re-run.
+
+    Args:
+        cur:          psycopg2 cursor (caller owns the transaction).
+        closes:       dict[ticker -> float] official close per ticker (the same dict
+                      finalize_parity_marks receives).
+        run_date:     date — matched against alpaca_submissions.run_date.
+        workspace_id: unused (alpaca_submissions has no workspace_id); accepted so the
+                      call signature mirrors finalize_parity_marks.
+
+    Returns:
+        Number of alpaca_submissions rows updated.
+    """
+    if not closes:
+        return 0
+
+    # Normalize the closes keys once so BTC-USD (closes) matches BTC/USD (submission).
+    closes_norm = {}
+    for _k, _v in closes.items():
+        _fv = _safe_float(_v, 'close')
+        if _fv is not None:
+            closes_norm[_norm_ticker(_k)] = _fv
+
     cur.execute("""
-        SELECT strategy_id, ticker, filled_avg_price, filled_qty,
-               reconciled_at, submitted_at, broker_status
+        SELECT id, strategy_id, ticker, direction,
+               filled_avg_price, filled_qty, broker_status
           FROM alpaca_submissions
          WHERE run_date = %s
+         ORDER BY id
     """, (run_date,))
-    fills = {}
-    for srow in cur.fetchall():
-        if hasattr(srow, 'keys'):
-            s_strat, s_tkr = srow['strategy_id'], srow['ticker']
-            s_avg, s_qty = srow['filled_avg_price'], srow['filled_qty']
-            s_recon, s_sub = srow['reconciled_at'], srow['submitted_at']
-            s_status = srow['broker_status']
-        else:
-            s_strat, s_tkr, s_avg, s_qty, s_recon, s_sub, s_status = srow
-        avg = _safe_float(s_avg, 'filled_avg_price')
-        if avg is None:
-            continue  # no real fill price → leave ledger NULL
-        if s_status is not None and s_status not in ('filled', 'partial'):
-            continue  # explicit non-fill state (error/rejected/…)
-        fills[(s_strat, _norm_ticker(s_tkr))] = (
-            avg, _safe_float(s_qty, 'filled_qty'), (s_recon or s_sub),
-        )
-```
+    rows = cur.fetchall()
+    if not rows:
+        return 0
 
-(c) Update the row-unpack block to read `strategy_id` (both cursor shapes):
-
-```python
+    updated = 0
+    for row in rows:
         if hasattr(row, 'keys'):
-            row_id, ticker = row['id'], row['ticker']
+            row_id = row['id']
             strategy_id = row['strategy_id']
+            ticker = row['ticker']
             direction_raw = row['direction']
-            entry_price_raw = row['entry_price']
-            stop_raw = row['stop_loss']
-            target_raw = row['target_1']
+            avg_raw = row['filled_avg_price']
+            qty_raw = row['filled_qty']
+            status = row['broker_status']
         else:
             (row_id, strategy_id, ticker, direction_raw,
-             entry_price_raw, stop_raw, target_raw) = row
-```
+             avg_raw, qty_raw, status) = row
 
-(d) Just before the `cur.execute("UPDATE ...")`, compute the fill + ledger:
+        # Entry-only scope: skip sentinel close/orphan orders.
+        if strategy_id and str(strategy_id).startswith('__'):
+            continue
+        # Skip explicit non-fill broker states (error / rejected / ...).
+        if status is not None and status not in ('filled', 'partial'):
+            continue
 
-```python
-        # ── B0: capture the real entry fill + execution ledger ──
-        fill = fills.get((strategy_id, _norm_ticker(ticker)))
-        if fill is not None:
-            actual_fill_price, actual_fill_qty, actual_filled_at = fill
-        else:
-            actual_fill_price, actual_fill_qty, actual_filled_at = None, None, None
+        avg = _safe_float(avg_raw, 'filled_avg_price')
+        qty = _safe_float(qty_raw, 'filled_qty')
+        if avg is None or qty is None:
+            continue  # no reconciled fill yet → leave NULL (deferrable)
 
-        if actual_fill_price is not None and actual_fill_qty is not None:
-            exec_ledger_usd = (
-                (mark_price - actual_fill_price) * (direction_sign * actual_fill_qty)
-            )
-        else:
-            exec_ledger_usd = None
-```
+        close = closes_norm.get(_norm_ticker(ticker))
+        if close is None:
+            continue
 
-(e) Extend the UPDATE statement to set the four new columns:
+        d = str(direction_raw or '').lower()
+        if d not in ('long', 'short'):
+            continue
+        direction_sign = 1 if d == 'long' else -1
 
-```python
+        exec_ledger_usd = (close - avg) * (direction_sign * qty)
+
         cur.execute("""
-            UPDATE execution_signals
-               SET mark_entry_price  = %s,
-                   fill_price        = %s,
-                   stop_loss         = %s,
-                   target_1          = %s,
-                   filled_at         = %s,
-                   lifecycle_state   = 'FILLED',
-                   actual_fill_price = %s,
-                   actual_fill_qty   = %s,
-                   actual_filled_at  = %s,
-                   exec_ledger_usd   = %s
+            UPDATE alpaca_submissions
+               SET official_close  = %s,
+                   exec_ledger_usd = %s
              WHERE id = %s
-        """, (mark_price, mark_price, new_stop, new_target, now_ts,
-              actual_fill_price, actual_fill_qty, actual_filled_at, exec_ledger_usd,
-              row_id))
+        """, (close, exec_ledger_usd, row_id))
+        updated += max(cur.rowcount, 0)
+
+    logger.info(
+        "[exec_ledger] %d order(s) ledgered for run_date=%s", updated, run_date,
+    )
+    return updated
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence && python3 -m pytest tests/test_sp6_b0_fill_capture.py::test_long_filled_below_close_positive_ledger -v`
+Run:
+```bash
+cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence
+POSTGRES_URI=$(grep -E '^POSTGRES_URI=' /root/openclaw/.env | head -1 | cut -d= -f2- | tr -d '"') python3 -m pytest tests/test_sp6_b0_fill_capture.py::test_long_filled_below_close_positive_ledger -v
+```
 Expected: PASS
 
-- [ ] **Step 5: Update the module docstring + commit**
+- [ ] **Step 5: Wire the sibling call into the gated 4 PM block**
 
-In `src/execution/parity_mark.py`, append to the module docstring (after the existing "mark_entry_price is the OFFICIAL close" sentence):
+In `src/execution/engine.py`, change line 1447 from:
+```python
+                from execution.parity_mark import finalize_parity_marks
+```
+to:
+```python
+                from execution.parity_mark import (
+                    finalize_parity_marks, finalize_execution_ledger)
+```
 
+And immediately after line 1455 (`logger.info(f"Parity marks finalized: {parity_mark_count}")`), inside the same `try`, add:
+```python
+                ledger_count = finalize_execution_ledger(cur, _closes, run_date)
+                logger.info(f"Execution ledger finalized: {ledger_count}")
 ```
-The real broker fill is preserved separately in actual_fill_price/qty/at (copied from
-alpaca_submissions before fill_price is set to the official close), and exec_ledger_usd
-= (official close - actual_fill) x (direction_sign x qty) is materialized for Phase B.
+
+- [ ] **Step 6: Verify the module imports cleanly + commit**
+
+Run:
+```bash
+cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence
+python3 -c "import sys; sys.path.insert(0,'src'); import execution.engine, execution.parity_mark; print('import ok')"
 ```
+Expected: `import ok`
 
 ```bash
-git add src/execution/parity_mark.py tests/test_sp6_b0_fill_capture.py
-git commit -m "feat(sp6-b0): capture real entry fill + execution ledger in parity_mark
+git add src/execution/parity_mark.py src/execution/engine.py tests/test_sp6_b0_fill_capture.py
+git commit -m "feat(sp6-b0): per-order execution ledger (finalize_execution_ledger + wiring)
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
 
 ---
 
-### Task 3: Sign-convention + edge-case tests
+### Task 3: Sign + edge-case + idempotency tests (and parity regression)
 
 **Files:**
 - Test: `tests/test_sp6_b0_fill_capture.py` (append)
 
-These assert distinct behaviors against the Task-2 implementation. Add all five, run them, and fix `parity_mark.py` if any fails.
-
-- [ ] **Step 1: Add the edge-case tests**
-
-Append to `tests/test_sp6_b0_fill_capture.py`:
+- [ ] **Step 1: Append the remaining tests**
 
 ```python
 @pytest.mark.integration
-def test_short_filled_above_close_positive_ledger(db_conn, _db_meta):
+def test_short_filled_above_close_positive_ledger(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0SHORT'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'SHORT', 100.0, 106.0, 88.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='short',
-                       qty=100, filled_qty=100, filled_avg_price=105.0,
-                       broker_status='filled')
-    finalize_parity_marks(cur, {ticker: close}, run_date,
-                          _db_meta['ws_id'], broker_loader=_broker_held(ticker))
-    r = _fetch(cur, sig_id)
+    ticker, strat = 'ZZB0SHORT', 'ZZB0_STRAT_B'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='short', qty=100, filled_qty=100,
+                       filled_avg_price=105.0, broker_status='filled')
+    finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
     # (103.5 - 105.0) * (-1 * 100) = 150.0  → sold above the close, beat it
     assert abs(float(r['exec_ledger_usd']) - 150.0) < 1e-6
 
 
 @pytest.mark.integration
-def test_long_filled_above_close_negative_ledger(db_conn, _db_meta):
+def test_long_filled_above_close_negative_ledger(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0LONGNEG'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=100, filled_qty=100, filled_avg_price=105.0,
-                       broker_status='filled')
-    finalize_parity_marks(cur, {ticker: close}, run_date,
-                          _db_meta['ws_id'], broker_loader=_broker_held(ticker))
-    r = _fetch(cur, sig_id)
+    ticker, strat = 'ZZB0LONGNEG', 'ZZB0_STRAT_C'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=100,
+                       filled_avg_price=105.0, broker_status='filled')
+    finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
     # (103.5 - 105.0) * (+1 * 100) = -150.0  → paid up vs the close
     assert abs(float(r['exec_ledger_usd']) + 150.0) < 1e-6
 
 
 @pytest.mark.integration
-def test_no_submission_leaves_fill_and_ledger_null(db_conn, _db_meta):
+def test_unreconciled_fill_left_null(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0NOSUB'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    # No alpaca_submissions row inserted.
-    marked = finalize_parity_marks(cur, {ticker: close}, run_date,
-                                   _db_meta['ws_id'], broker_loader=_broker_held(ticker))
-    assert marked == 1
-    r = _fetch(cur, sig_id)
-    assert r['lifecycle_state'] == 'FILLED'         # still marked
-    assert r['actual_fill_price'] is None
-    assert r['actual_fill_qty'] is None
+    ticker, strat = 'ZZB0NULL', 'ZZB0_STRAT_D'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=None,
+                       filled_avg_price=None, broker_status=None)
+    n = finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    assert n == 0
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
+    assert r['official_close'] is None
     assert r['exec_ledger_usd'] is None
-    assert abs(float(r['fill_price']) - close) < 1e-6  # parity untouched
 
 
 @pytest.mark.integration
-def test_partial_fill_uses_filled_qty(db_conn, _db_meta):
+def test_partial_fill_uses_filled_qty(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0PARTIAL'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=100, filled_qty=60, filled_avg_price=99.0,
-                       broker_status='partial')
-    finalize_parity_marks(cur, {ticker: close}, run_date,
-                          _db_meta['ws_id'], broker_loader=_broker_held(ticker))
-    r = _fetch(cur, sig_id)
-    assert float(r['actual_fill_qty']) == 60.0
+    ticker, strat = 'ZZB0PARTIAL', 'ZZB0_STRAT_E'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=60,
+                       filled_avg_price=99.0, broker_status='partial')
+    finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
     # (103.5 - 99.0) * (1 * 60) = 270.0
     assert abs(float(r['exec_ledger_usd']) - 270.0) < 1e-6
 
 
 @pytest.mark.integration
-def test_crypto_symbol_normalization(db_conn, _db_meta):
-    """Signal ticker BTC-USD, submission ticker BTC/USD, broker holds BTC/USD —
-    normalization (/ → -) must match all three; fractional qty preserved."""
+def test_crypto_symbol_normalization(db_conn):
+    """Submission ticker BTC/USD, closes keyed BTC-USD — normalization (/ → -) must
+    match; fractional qty preserved."""
     cur = db_conn.cursor()
     run_date = date.today()
-    sig_ticker = 'BTC-USD'
-    close = 50000.0
-    sig_id = _insert_signal(cur, sig_ticker, 'LONG', 49000.0, 45000.0, 55000.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker='BTC/USD',
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=1, filled_qty=0.5, filled_avg_price=49500.0,
-                       broker_status='filled', entry_price=49000.0)
-    marked = finalize_parity_marks(cur, {sig_ticker: close}, run_date,
-                                   _db_meta['ws_id'], broker_loader=_broker_held('BTC/USD'))
-    assert marked == 1
-    r = _fetch(cur, sig_id)
-    assert float(r['actual_fill_qty']) == 0.5            # fractional preserved
+    strat = 'ZZB0_STRAT_F'
+    _insert_submission(cur, run_date=run_date, ticker='BTC/USD', strategy_id=strat,
+                       direction='long', qty=1, filled_qty=0.5,
+                       filled_avg_price=49500.0, broker_status='filled',
+                       entry_price=49000.0)
+    finalize_execution_ledger(cur, {'BTC-USD': 50000.0}, run_date)
+    r = _fetch(cur, run_date=run_date, ticker='BTC/USD', strategy_id=strat)
     # (50000 - 49500) * (1 * 0.5) = 250.0
     assert abs(float(r['exec_ledger_usd']) - 250.0) < 1e-6
-```
 
-- [ ] **Step 2: Run the edge-case tests**
 
-Run: `cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence && python3 -m pytest tests/test_sp6_b0_fill_capture.py -v -k "short or above_close or no_submission or partial or crypto"`
-Expected: 5 PASS. If any fails, fix `parity_mark.py` (do NOT weaken the test) and re-run.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add tests/test_sp6_b0_fill_capture.py
-git commit -m "test(sp6-b0): sign-convention + null/partial/crypto edge cases
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
-
----
-
-### Task 4: Regression + idempotency tests (parity preserved)
-
-**Files:**
-- Test: `tests/test_sp6_b0_fill_capture.py` (append)
-
-- [ ] **Step 1: Add regression + idempotency tests**
-
-Append to `tests/test_sp6_b0_fill_capture.py`:
-
-```python
 @pytest.mark.integration
-def test_not_held_row_skipped_no_capture(db_conn, _db_meta):
-    """APPROVED + NOT held in broker → stays APPROVED, no fill captured even if a
-    submission row exists (the row is skipped before the capture)."""
+def test_ticker_absent_from_closes_left_null(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0NOTHELD'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'APPROVED', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=100, filled_qty=100, filled_avg_price=99.0,
-                       broker_status='filled')
-    # Broker holds NOTHING.
-    marked = finalize_parity_marks(cur, {ticker: close}, run_date,
-                                   _db_meta['ws_id'], broker_loader=_broker_held())
-    assert marked == 0
-    r = _fetch(cur, sig_id)
-    assert r['lifecycle_state'] == 'APPROVED'   # untouched
-    assert r['actual_fill_price'] is None
+    ticker, strat = 'ZZB0ABSENT', 'ZZB0_STRAT_G'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=100,
+                       filled_avg_price=99.0, broker_status='filled')
+    n = finalize_execution_ledger(cur, {'SOMETHINGELSE': 103.5}, run_date)
+    assert n == 0
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
     assert r['exec_ledger_usd'] is None
 
 
 @pytest.mark.integration
-def test_idempotent_rerun_identical(db_conn, _db_meta):
-    """Re-running parity_mark over the now-FILLED row yields identical capture."""
+def test_orphan_close_order_excluded(db_conn):
     cur = db_conn.cursor()
     run_date = date.today()
-    ticker = 'ZZB0IDEM'
-    close = 103.5
-    sig_id = _insert_signal(cur, ticker, 'LONG', 100.0, 94.0, 112.0,
-                            'EXECUTING', run_date,
-                            ws_id=_db_meta['ws_id'], strategy_id=_db_meta['strategy_id'])
-    _insert_submission(cur, run_date=run_date, ticker=ticker,
-                       strategy_id=_db_meta['strategy_id'], direction='long',
-                       qty=100, filled_qty=100, filled_avg_price=99.0,
-                       broker_status='filled')
-    loader = _broker_held(ticker)
-    finalize_parity_marks(cur, {ticker: close}, run_date, _db_meta['ws_id'], broker_loader=loader)
-    first = _fetch(cur, sig_id)
-    finalize_parity_marks(cur, {ticker: close}, run_date, _db_meta['ws_id'], broker_loader=loader)
-    second = _fetch(cur, sig_id)
+    ticker, strat = 'ZZB0ORPHAN', '__close_orphan__'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=100,
+                       filled_avg_price=99.0, broker_status='filled')
+    n = finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    assert n == 0
+    r = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
+    assert r['official_close'] is None
+    assert r['exec_ledger_usd'] is None
+
+
+@pytest.mark.integration
+def test_idempotent_rerun_identical(db_conn):
+    cur = db_conn.cursor()
+    run_date = date.today()
+    ticker, strat = 'ZZB0IDEM', 'ZZB0_STRAT_H'
+    _insert_submission(cur, run_date=run_date, ticker=ticker, strategy_id=strat,
+                       direction='long', qty=100, filled_qty=100,
+                       filled_avg_price=99.0, broker_status='filled')
+    finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    first = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
+    finalize_execution_ledger(cur, {ticker: 103.5}, run_date)
+    second = _fetch(cur, run_date=run_date, ticker=ticker, strategy_id=strat)
     assert float(second['exec_ledger_usd']) == float(first['exec_ledger_usd'])
-    assert float(second['actual_fill_price']) == float(first['actual_fill_price'])
-    assert float(second['fill_price']) == float(first['fill_price'])
+    assert float(second['official_close']) == float(first['official_close'])
+
+
+@pytest.mark.integration
+def test_empty_closes_returns_zero(db_conn):
+    assert finalize_execution_ledger(db_conn.cursor(), {}, date.today()) == 0
 ```
 
 - [ ] **Step 2: Run the full B0 suite + the existing parity regression suite**
 
-Run: `cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence && python3 -m pytest tests/test_sp6_b0_fill_capture.py tests/test_sp6_parity_mark.py -v`
-Expected: all PASS (new B0 suite green AND the pre-existing `test_sp6_parity_mark.py` still green — proves the extension didn't regress parity behavior).
+Run:
+```bash
+cd /root/.config/superpowers/worktrees/sp6-phase-b0-fill-persistence
+POSTGRES_URI=$(grep -E '^POSTGRES_URI=' /root/openclaw/.env | head -1 | cut -d= -f2- | tr -d '"') python3 -m pytest tests/test_sp6_b0_fill_capture.py tests/test_sp6_parity_mark.py -v
+```
+Expected: all PASS — the new B0 suite green AND the pre-existing `test_sp6_parity_mark.py` still green (B0 touches a different table + a separate function, so parity behavior is unaffected).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add tests/test_sp6_b0_fill_capture.py
-git commit -m "test(sp6-b0): not-held skip + idempotency regression (parity preserved)
+git commit -m "test(sp6-b0): sign + null/partial/crypto/orphan/idempotency edge cases
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```
@@ -560,15 +485,14 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ## Self-Review (completed during plan authoring)
 
 **Spec coverage:**
-- §3 data model (4 columns) → Task 1. ✓
-- §4 capture mechanism (submissions dict keyed by `(strategy_id, norm_ticker)`, SELECT+`strategy_id`, single extended UPDATE, ledger formula) → Task 2. ✓
-- §4 sign convention (LONG/SHORT beat-close) → Task 3 (short-above-close, long-above-close-negative). ✓
-- §5 edge cases: no submission → NULL (Task 3); partial → filled_qty (Task 3); fractional crypto + normalization (Task 3); gate-off-inert (structural — `finalize_parity_marks` only runs in the gated block, no code path added outside it); parity unchanged (Task 2 + Task 4 assertions on `fill_price`/`mark_entry_price`); idempotent re-run (Task 4); not-held skip preserved (Task 4). ✓
-- §6 testing — every listed test mapped to Tasks 2–4. ✓
-- §4 plan-grounding verification (strategy_id mapping) → pre-flight grounding section. ✓
+- §3 data model (2 cols on `alpaca_submissions`) → Task 1. ✓
+- §4 capture mechanism (`finalize_execution_ledger`: SELECT, sentinel/status/fill/closes/direction skips, ledger formula, UPDATE, idempotent, empty-closes→0) → Task 2 (+ wiring into engine.py). ✓
+- §4 sign convention (long/short beat-close) → Task 3 (short-above-close, long-above-close-negative). ✓
+- §5 edge cases: unreconciled fill → NULL (Task 3 `test_unreconciled_fill_left_null`); partial → filled_qty (Task 3); fractional crypto + normalization (Task 3); ticker-absent → NULL (Task 3); orphan exclusion (Task 3); idempotent (Task 3); gate-off-inert (structural — only called in the gated block, Task 2 wiring); parity unchanged (writes a different table; Task 3 reruns the parity suite). ✓
+- §6 testing — all 9 listed tests mapped to Tasks 2–3 (+ empty-closes). ✓
 
 **Placeholder scan:** none — every step has concrete SQL/Python/commands + expected output.
 
-**Type/name consistency:** `actual_fill_price`/`actual_fill_qty`/`actual_filled_at`/`exec_ledger_usd`, `fills[(strategy_id, norm_ticker)]`, `_norm_ticker`, `_safe_float`, `direction_sign`, `mark_price` — used identically across migration, implementation, and tests. Helper names (`_insert_signal`, `_insert_submission`, `_broker_held`, `_fetch`) are defined once in Task 2 and reused in Tasks 3–4.
+**Type/name consistency:** `official_close`, `exec_ledger_usd`, `finalize_execution_ledger`, `_norm_ticker`, `_safe_float`, `closes_norm`, `direction_sign` — identical across migration, implementation, wiring, and tests. Helpers (`_insert_submission`, `_fetch`) defined once in Task 2 and reused in Task 3. `_insert_submission` arg names match the `alpaca_submissions` columns.
 
-**Out of scope (confirmed not in any task):** exit/close-side slippage; any consumer/readout; B1 scheduler / B2 Hawkes.
+**Out of scope (confirmed not in any task):** exit/close-side ledger; per-strategy attribution / per-symbol rollup; any consumer/readout; B1 scheduler / B2 Hawkes.
