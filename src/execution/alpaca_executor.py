@@ -786,6 +786,13 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     right = str(spec.right).lower()
     side = 'buy' if direction == 'long' else 'sell'
 
+    # Short calls REFUSED for single-leg (covered-call lookup out of scope).
+    # Structures fall through to the mleg envelope guard below (which refuses
+    # non-long / hedged structures with a clearer message).
+    if spec.structure == 'single' and right == 'call' and side == 'sell':
+        return _option_skip(order, coid, equity,
+            'option: short call requires covered-call lookup (not in SP-5.1a)')
+
     today = _dt.date.today()
     expiry = _resolve_expiry(spec, today)
     if expiry is None:
@@ -830,11 +837,6 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
             'instrument_class': 'option', 'legs': [lq[0] for lq in leg_q],
         }
-
-    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
-    if right == 'call' and side == 'sell':
-        return _option_skip(order, coid, equity,
-            'option: short call requires covered-call lookup (not in SP-5.1a)')
 
     strike = _resolve_strike(spec, today, expiry)
     if strike is None:
