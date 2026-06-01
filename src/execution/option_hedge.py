@@ -44,3 +44,35 @@ def close_hedge(cur, strategy_id, underlying):
     cur.execute("""UPDATE option_hedge_ledger SET status='closed', target_hedge_qty=0,
                    updated_at=NOW() WHERE option_strategy_id=%s AND underlying=%s""",
                 (strategy_id, underlying))
+
+
+def _leg_delta(occ, right, strike, expiry):
+    """Live delta for one option leg, from the chain at its exact strike. Reuses
+    SP-5.1b-i's _option_chain_greeks (snapshots[occ].greeks.delta). Returns the
+    matched OCC's delta, or None if unavailable (fail-closed upstream)."""
+    import datetime as _dt
+    from execution.alpaca_executor import _option_chain_greeks, _spot_price
+    und = ''.join(c for c in occ if c.isalpha())
+    spot = _spot_price(und)
+    if spot is None or spot <= 0:
+        return None
+    exp = _dt.date.fromisoformat(expiry) if isinstance(expiry, str) else expiry
+    # band wide enough to include this strike (its distance from spot) + margin
+    band = max(0.02, abs(float(strike) - spot) / spot + 0.005)
+    for (k, d, o) in _option_chain_greeks(und, exp, right, spot, band_pct=band):
+        if o == occ:
+            return float(d)
+    return None
+
+
+def compute_structure_delta(legs, contracts):
+    """Net share-delta of the long structure = Σ(leg delta) × 100 × contracts.
+    Returns None (fail-closed) if ANY leg delta can't be resolved — so the hedge
+    target producer emits no (wrong) hedge for that structure."""
+    total = 0.0
+    for leg in legs:
+        d = _leg_delta(leg['occ'], leg['right'], leg['strike'], leg.get('expiry'))
+        if d is None:
+            return None
+        total += d
+    return total * 100.0 * float(contracts)

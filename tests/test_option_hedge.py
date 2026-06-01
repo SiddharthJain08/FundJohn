@@ -55,3 +55,23 @@ def test_close_hedge_marks_closed_and_zeros_target():
     sql, params = captured[-1]
     assert "status='closed'" in sql and 'target_hedge_qty=0' in sql
     assert 'S_strad' in params and 'SPY' in params
+
+
+def test_compute_structure_delta_sums_leg_deltas():
+    from execution.option_hedge import compute_structure_delta
+    from unittest.mock import patch
+    legs = [{'occ':'SPY260626C00759000','right':'call','strike':759.0,'expiry':'2026-06-26'},
+            {'occ':'SPY260626P00759000','right':'put','strike':759.0,'expiry':'2026-06-26'}]
+    def _fake_leg_delta(occ, right, strike, expiry):
+        return 0.52 if right == 'call' else -0.48
+    with patch('execution.option_hedge._leg_delta', side_effect=_fake_leg_delta):
+        net = compute_structure_delta(legs, contracts=2)
+    assert round(net, 1) == round((0.52 - 0.48) * 100 * 2, 1)   # +8.0
+
+def test_compute_structure_delta_none_when_a_leg_delta_missing():
+    from execution.option_hedge import compute_structure_delta
+    from unittest.mock import patch
+    legs = [{'occ':'C','right':'call','strike':1.0,'expiry':'2026-06-26'},
+            {'occ':'P','right':'put','strike':1.0,'expiry':'2026-06-26'}]
+    with patch('execution.option_hedge._leg_delta', side_effect=[0.5, None]):
+        assert compute_structure_delta(legs, contracts=1) is None  # fail-closed
