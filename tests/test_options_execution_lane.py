@@ -481,3 +481,29 @@ def test_option_chain_greeks_skips_none_delta_and_bad_strike():
 
     occs = {o for (_s, _d, o) in out}
     assert occs == {'SPY260717C00760000'}, f"expected only valid occ, got {occs}"
+
+
+def test_resolve_structure_legs_straddle_same_atm_strike():
+    """Straddle: call+put at the SAME ATM strike (parity with options_backtest)."""
+    from execution.alpaca_executor import _resolve_structure_legs
+    import datetime as _dt
+    spec = type('S',(),{'underlying':'SPY','structure':'straddle','strike_rule':'atm',
+                        'right':'call','target_delta':0.30,'moneyness':None})()
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]):
+        legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
+    assert legs == [('call',750.0),('put',750.0)]
+
+def test_resolve_structure_legs_strangle_delta_matched():
+    """Strangle: call near +target_delta, put near -target_delta (abs-delta match)."""
+    from execution.alpaca_executor import _resolve_structure_legs
+    import datetime as _dt
+    spec = type('S',(),{'underlying':'SPY','structure':'strangle','strike_rule':'target_delta',
+                        'right':'call','target_delta':0.30,'moneyness':None})()
+    def _fake_greeks(u, e, right, spot, band_pct=0.15):
+        if right == 'call': return [(760.0,0.42,'c1'),(780.0,0.29,'c2')]
+        return [(740.0,-0.41,'p1'),(720.0,-0.31,'p2')]
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks):
+        legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
+    assert legs == [('call',780.0),('put',720.0)]  # closest |delta| to 0.30

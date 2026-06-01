@@ -682,6 +682,43 @@ def _option_chain_greeks(
     return out
 
 
+def _with(spec, **overrides):
+    """Shallow clone of an OptionSpec-like object with field overrides (for reusing
+    _resolve_strike's atm path per leg without mutating the caller's spec)."""
+    import copy
+    s = copy.copy(spec)
+    for k, v in overrides.items():
+        setattr(s, k, v)
+    return s
+
+
+def _resolve_structure_legs(spec, as_of, expiry):
+    """Return [(right, strike)] for a straddle/strangle, mirroring
+    options_backtest._legs_for but resolved against LIVE listed strikes/greeks:
+      straddle -> ATM call + ATM put at the same strike (via _resolve_strike atm).
+      strangle -> call near +target_delta, put near -target_delta (live chain greeks).
+    Returns None if any leg cannot be resolved (fail-closed)."""
+    spot = _spot_price(spec.underlying)
+    if spot is None or spot <= 0:
+        return None
+    if spec.structure == 'straddle':
+        k = _resolve_strike(_with(spec, strike_rule='atm', right='call'), as_of, expiry)
+        if k is None:
+            return None
+        return [('call', k), ('put', k)]
+    if spec.structure == 'strangle':
+        tgt = float(spec.target_delta)
+        legs = []
+        for right in ('call', 'put'):
+            grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+            if not grk:
+                return None
+            k = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
+            legs.append((right, k))
+        return legs
+    return None
+
+
 def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
     """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
     if str(side).lower() == 'buy':
