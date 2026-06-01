@@ -542,3 +542,57 @@ def test_build_mleg_legs_json_long_open():
     assert {l['symbol'] for l in arr} == {'SPY260717C00750000','SPY260717P00750000'}
     assert all(l['side']=='buy' and l['position_intent']=='buy_to_open' for l in arr)
     assert all(l['ratio_qty']=='2' and isinstance(l['ratio_qty'], str) for l in arr)
+
+
+# --- SP-5.1b: _route_option_order straddle/strangle mleg open branch ---
+
+def test_route_straddle_submits_mleg_net_debit():
+    """structure='straddle' -> one mleg order, net-debit marketable limit,
+    instrument_class='option', status submitted."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']:
+            captured['args'] = list(args)
+            return True, {'id':'mleg-1'}, None
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid':9.9,'ask':10.0}), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-strad')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    a = captured['args']
+    assert '--order-class' in a and a[a.index('--order-class')+1] == 'mleg'
+    assert '--legs' in a
+    assert res['status'] == 'submitted' and res['instrument_class'] == 'option'
+    assert res['ticker'] == 'SPY' and res['structure'] == 'straddle'
+    assert float(a[a.index('--limit-price')+1]) >= 20.0   # net debit 10+10 + slip
+
+def test_route_strangle_submits_mleg():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    def _fake_cli(args, *a, **kw):
+        return (True, {'id':'mleg-2'}, None) if list(args[:2])==['order','submit'] else (True, {}, None)
+    def _fake_greeks(u,e,right,spot,band_pct=0.15):
+        return [(780.0,0.29,'SPY260717C00780000')] if right=='call' else [(720.0,-0.31,'SPY260717P00720000')]
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid':4.0,'ask':4.1}), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(); order['option_spec'].structure = 'strangle'
+        order['option_spec'].strike_rule = 'target_delta'
+        res = _route_option_order(order, equity=100000, coid='c-strang')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'submitted' and res['order_class'] == 'mleg'

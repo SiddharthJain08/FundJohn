@@ -767,10 +767,10 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     spec = order.get('option_spec')
     if spec is None:
         return None
-    # 5.1a is SINGLE-LEG ONLY. mleg = SP-5.1b.
-    if getattr(spec, 'structure', 'single') != 'single':
+    # 5.1b: single + straddle/strangle supported. Verticals/condors = SP-5.2.
+    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle'):
         return _option_skip(order, coid, equity,
-            f"option: structure={spec.structure!r} not in SP-5.1a (single-leg only)")
+            f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
     ok_session, sess_reason = _options_session_gate()
     if not ok_session:
@@ -789,6 +789,40 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     expiry = _resolve_expiry(spec, today)
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
+
+    if spec.structure in ('straddle', 'strangle'):
+        if order.get('close_only'):
+            return _route_mleg_close(order, spec, coid)   # Task 6 (closes HELD legs)
+        legs = _resolve_structure_legs(spec, today, expiry)
+        if not legs:
+            return _option_skip(order, coid, equity, 'option: structure legs unresolved')
+        nq = _structure_net_quote(spec, legs, expiry)
+        if nq is None:
+            return _option_skip(order, coid, equity, 'option: no quote for a structure leg')
+        net_ask, leg_q = nq
+        override = order.get('limit_price_override')
+        net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
+        raw_qty, qty_reason = _resolve_option_qty(
+            {'contracts': order.get('contracts'), 'notional_usd': order.get('notional_usd')},
+            net_limit)
+        if qty_reason and raw_qty == 0:
+            return _option_skip(order, coid, equity, qty_reason)
+        legs_json = _build_mleg_legs_json(leg_q, str(order.get('direction','long')).lower(),
+                                          int(raw_qty))
+        args = ['order','submit','--order-class','mleg','--legs', legs_json,
+                '--type','limit','--limit-price', f'{net_limit:.2f}',
+                '--time-in-force','day','--client-order-id', coid]
+        ok, payload, err = _run_alpaca_cli(args)
+        if not ok or not payload:
+            return _option_skip(order, coid, equity, f'option: mleg submit failed ({err or "no payload"})')
+        return {
+            'ticker': spec.underlying, 'structure': spec.structure, 'status': 'submitted',
+            'order_id': payload.get('id'), 'qty': int(raw_qty),
+            'notional': float(raw_qty) * 100.0 * float(net_limit), 'entry': net_limit,
+            'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
+            'instrument_class': 'option', 'legs': [lq[0] for lq in leg_q],
+        }
+
     strike = _resolve_strike(spec, today, expiry)
     if strike is None:
         return _option_skip(order, coid, equity, 'option: strike unresolved')
