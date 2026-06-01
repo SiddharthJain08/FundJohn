@@ -507,3 +507,25 @@ def test_resolve_structure_legs_strangle_delta_matched():
          patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks):
         legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
     assert legs == [('call',780.0),('put',720.0)]  # closest |delta| to 0.30
+
+
+def test_structure_net_quote_sums_leg_asks():
+    """Net debit = sum of per-leg asks; returns per-leg (occ, right, ask)."""
+    from execution.alpaca_executor import _structure_net_quote
+    import datetime as _dt
+    legs = [('call', 750.0), ('put', 750.0)]
+    spec = type('S',(),{'underlying':'SPY'})()
+    def _fake_quote(occ):
+        return {'bid': 10.0, 'ask': 10.2} if occ.endswith('C00750000') else {'bid': 9.0, 'ask': 9.3}
+    with patch('execution.alpaca_executor._option_quote', side_effect=_fake_quote):
+        net, leg_q = _structure_net_quote(spec, legs, _dt.date(2026,7,17))
+    assert round(net, 2) == 19.50            # 10.2 + 9.3
+    assert len(leg_q) == 2 and leg_q[0][1] == 'call'
+
+def test_structure_net_quote_none_when_a_leg_unquoted():
+    from execution.alpaca_executor import _structure_net_quote
+    import datetime as _dt
+    with patch('execution.alpaca_executor._option_quote', side_effect=[{'bid':1,'ask':1.1}, None]):
+        out = _structure_net_quote(type('S',(),{'underlying':'SPY'})(),
+                                   [('call',750.0),('put',750.0)], _dt.date(2026,7,17))
+    assert out is None

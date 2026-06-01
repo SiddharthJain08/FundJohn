@@ -719,6 +719,22 @@ def _resolve_structure_legs(spec, as_of, expiry):
     return None
 
 
+def _structure_net_quote(spec, legs, expiry):
+    """For each (right, strike) leg: build the OCC + fetch the quote. Returns
+    (net_ask_debit, [(occ, right, ask)]) or None if any leg has no quote
+    (fail-closed — never submit a partial structure)."""
+    leg_q = []
+    net = 0.0
+    for right, strike in legs:
+        occ = _build_occ_symbol(_with(spec, right=right), strike, expiry)
+        q = _option_quote(occ)
+        if q is None:
+            return None
+        net += float(q['ask'])
+        leg_q.append((occ, right, float(q['ask'])))
+    return net, leg_q
+
+
 def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
     """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
     if str(side).lower() == 'buy':
