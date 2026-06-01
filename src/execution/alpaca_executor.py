@@ -735,16 +735,17 @@ def _structure_net_quote(spec, legs, expiry):
     return net, leg_q
 
 
-def _build_mleg_legs_json(leg_q, direction, contracts) -> str:
-    """JSON `--legs` array. Per leg, side+intent from _options_position_intent on
-    that leg's existing qty (avoids the SP-5.0 test-5 inferred-intent 422).
-    ratio_qty MUST be a string (SP-5.0: bare number -> Go unmarshal error)."""
+def _build_mleg_legs_json(leg_q, direction) -> str:
+    """JSON `--legs` array for a 1:1 structure (straddle/strangle). Per leg,
+    side+intent from _options_position_intent on that leg's existing qty (avoids
+    the SP-5.0 test-5 inferred-intent 422). ratio_qty is the within-package ratio
+    "1" (a string — SP-5.0); the package COUNT is the order's top-level --qty."""
     import json
     out = []
     for occ, _right, _ask in leg_q:
         side, intent = _options_position_intent(direction, _options_current_qty(occ))
         out.append({'symbol': occ, 'side': side,
-                    'ratio_qty': str(int(contracts)), 'position_intent': intent})
+                    'ratio_qty': '1', 'position_intent': intent})
     return json.dumps(out)
 
 
@@ -822,8 +823,9 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             net_limit)
         if qty_reason and raw_qty == 0:
             return _option_skip(order, coid, equity, qty_reason)
-        legs_json = _build_mleg_legs_json(leg_q, direction, int(raw_qty))
-        args = ['order','submit','--order-class','mleg','--legs', legs_json,
+        legs_json = _build_mleg_legs_json(leg_q, direction)
+        args = ['order','submit','--order-class','mleg','--qty', str(int(raw_qty)),
+                '--legs', legs_json,
                 '--type','limit','--limit-price', f'{net_limit:.2f}',
                 '--time-in-force','day','--client-order-id', coid]
         ok, payload, err = _run_alpaca_cli(args)

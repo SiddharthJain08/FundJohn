@@ -533,16 +533,17 @@ def test_structure_net_quote_none_when_a_leg_unquoted():
 
 
 def test_build_mleg_legs_json_long_open():
-    """Long structure -> both legs buy / buy_to_open, ratio_qty STRING (SP-5.0)."""
+    """Long structure -> both legs buy / buy_to_open, ratio_qty='1' STRING (SP-5.1b spike).
+    ratio_qty is the within-package ratio '1'; package count is the top-level --qty."""
     from execution.alpaca_executor import _build_mleg_legs_json
     import json
     leg_q = [('SPY260717C00750000','call',10.2), ('SPY260717P00750000','put',9.3)]
     with patch('execution.alpaca_executor._options_current_qty', return_value=0):
-        legs = _build_mleg_legs_json(leg_q, direction='long', contracts=2)
+        legs = _build_mleg_legs_json(leg_q, direction='long')
     arr = json.loads(legs)
     assert {l['symbol'] for l in arr} == {'SPY260717C00750000','SPY260717P00750000'}
     assert all(l['side']=='buy' and l['position_intent']=='buy_to_open' for l in arr)
-    assert all(l['ratio_qty']=='2' and isinstance(l['ratio_qty'], str) for l in arr)
+    assert all(l['ratio_qty']=='1' and isinstance(l['ratio_qty'], str) for l in arr)
 
 
 # --- SP-5.1b: _route_option_order straddle/strangle mleg open branch ---
@@ -576,10 +577,15 @@ def test_route_straddle_submits_mleg_net_debit():
     assert res['status'] == 'submitted' and res['instrument_class'] == 'option'
     assert res['ticker'] == 'SPY' and res['structure'] == 'straddle'
     assert float(a[a.index('--limit-price')+1]) >= 20.0   # net debit 10+10 + slip
+    # SP-5.1b spike: --qty must be present (omitting it yields 422 "qty must be > 0")
+    assert '--qty' in a, '--qty must be present in mleg submit args'
+    assert a[a.index('--qty')+1] == '1', f"--qty should be '1' (1 contract order), got {a[a.index('--qty')+1]!r}"
     import json as _json
     legs = _json.loads(a[a.index('--legs')+1])
     assert len(legs) == 2
     assert all(l['position_intent'] == 'buy_to_open' for l in legs)
+    # SP-5.1b spike: ratio_qty must be '1' (structural ratio); count is in top-level --qty
+    assert all(l['ratio_qty'] == '1' for l in legs), f"ratio_qty must be '1' per leg, got {[l['ratio_qty'] for l in legs]}"
     assert all(isinstance(l['ratio_qty'], str) for l in legs)
     assert {l['symbol'][:3] for l in legs} == {'SPY'}
 
