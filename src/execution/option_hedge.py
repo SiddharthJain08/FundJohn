@@ -93,7 +93,7 @@ def compute_structure_delta(legs, contracts):
     return total * 100.0 * float(contracts)
 
 
-def compute_option_hedge_targets(cur, as_of):
+def compute_option_hedge_targets(cur, as_of, workspace_id=None):
     """For each active option_hedge_ledger row, compute the net structure delta and
     inject a lifecycle_state='APPROVED' execution_signals row (gate-bypass) carrying
     a fixed hedge_shares target.  Also upserts the ledger's target_hedge_qty.
@@ -102,17 +102,33 @@ def compute_option_hedge_targets(cur, as_of):
       - net = compute_structure_delta(legs, contracts)
       - If net is None → skip (fail-closed, no hedge row emitted for that structure)
       - target_shares = -net  (hedge offsets the structure's delta)
+      - If target_shares == 0 → skip (perfectly delta-neutral; no hedge row needed)
       - direction = 'LONG' if target_shares > 0 else 'SHORT'
       - Writes execution_signals: strategy_id = '__hedge__<option_sid>',
         lifecycle_state='APPROVED', approved_at=NOW() (gate-bypass — risk hedge
         must not be panic/sentiment-vetoed), signal_params carries is_hedge + hedge_shares
+      - workspace_id: callers (run_option_hedge_targets.py) should resolve and pass the
+        same UUID that engine.write_signals writes — i.e. resolve_workspace(cur, WORKSPACE).
+        When None, we mirror engine.main()'s resolution: resolve_workspace(cur, WORKSPACE)
+        using the module-level WORKSPACE constant (identical bare string os.environ
+        WORKSPACE_ID / 'default').  This guarantees workspace-scoped consumers (e.g. the
+        sizer, parity step) see the hedge rows — writing None or bare 'default' would
+        silently drop them from workspace-filtered queries.
+        engine.write_signals writes: resolve_workspace(cur, WORKSPACE) → a 36-char UUID
+        from workspaces.id.  This function now writes the IDENTICAL resolved UUID.
       - ON CONFLICT DO UPDATE (hedge targets may change each EOD cycle)
       - Upserts ledger target_hedge_qty = target_shares via upsert_hedge_target()
     """
     from datetime import datetime, timezone
+    from execution.engine import resolve_workspace
 
     rows = load_active_hedges(cur)
     target_date = _next_trading_day(as_of)
+
+    # Resolve workspace_id once — mirrors engine.main()'s WORKSPACE = resolve_workspace(cur, WORKSPACE).
+    # The resolved value is a 36-char UUID from workspaces.id (NOT 'default', NOT None).
+    if workspace_id is None:
+        workspace_id = resolve_workspace(cur, WORKSPACE)
 
     for row in rows:
         option_sid  = row['option_strategy_id']
@@ -126,6 +142,11 @@ def compute_option_hedge_targets(cur, as_of):
             continue
 
         target_shares = -net
+        if target_shares == 0:
+            # Perfectly delta-neutral structure — no hedge needed; skip to avoid
+            # emitting a SHORT-0 row that would confuse the executor.
+            continue
+
         direction = 'LONG' if target_shares > 0 else 'SHORT'
         hedge_strategy_id = f'__hedge__{option_sid}'
 
@@ -152,7 +173,7 @@ def compute_option_hedge_targets(cur, as_of):
                 target_date=EXCLUDED.target_date,
                 approved_at=EXCLUDED.approved_at
         """, (
-            hedge_strategy_id, None, as_of, underlying, direction,
+            hedge_strategy_id, workspace_id, as_of, underlying, direction,
             signal_params, now_utc, target_date, now_utc,
         ))
 
