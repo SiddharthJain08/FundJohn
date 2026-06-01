@@ -70,21 +70,45 @@ def _option_routing():
 
     detail = f'status={res.get("status")} reason={res.get("reason", "-")}'
 
-    # Self-clean: cancel the resting sentinel + confirm flat (never trust the
-    # submit ack). A skipped status (e.g. market closed -> RTH gate) leaves
-    # nothing to cancel.
+    # Self-clean: cancel the resting sentinel, then CONFIRM both that the cancel
+    # took (poll to a terminal state — never trust the cancel ack) and that no
+    # position opened. A resting $1 buy never opens a position, so the flat
+    # check alone can't prove the cancel succeeded; an un-cancelled sentinel
+    # would linger and accumulate across gate-ON runs. A skipped status (e.g.
+    # market closed -> RTH gate) leaves nothing to cancel.
     order_id = res.get('order_id')
     occ = res.get('ticker')
     if res.get('status') == 'submitted' and order_id:
-        _run_alpaca_cli(['order', 'cancel', '--order-id', order_id])
+        cancel_ok, _, _ = _run_alpaca_cli(['order', 'cancel', '--order-id', order_id])
+        term = _poll_order_terminal(_run_alpaca_cli, order_id)
         residual = _options_current_qty(occ) if occ else 0.0
-        if residual != 0:
+        if term == 'filled' or residual != 0:
             # Sentinel unexpectedly FILLED -> the routing placed a marketable
             # order. Flatten and FAIL loudly; this is the footgun the refactor
             # exists to prevent.
             _run_alpaca_cli(['position', 'close', '--symbol-or-asset-id', occ])
-            return Status.FAIL, (f'sentinel FILLED (qty={residual} {occ}) — '
+            return Status.FAIL, (f'sentinel FILLED (term={term} qty={residual} {occ}) — '
                                  f'flattened; routing placed a marketable order')
-        detail += f' sentinel=canceled flat={occ}'
+        if term not in ('canceled', 'expired', 'rejected'):
+            return Status.FAIL, (f'sentinel cancel UNCONFIRMED (order {order_id} '
+                                 f'status={term!r} cancel_ok={cancel_ok}) — '
+                                 f'a resting order may linger')
+        detail += f' sentinel={term} flat={occ}'
 
     return Status.PASS, detail
+
+
+def _poll_order_terminal(run_cli, order_id, timeout: float = 5.0, poll: float = 0.5):
+    """Poll `order get` until terminal; returns the lowercased status (or the
+    last seen / None). A cancel is near-instant, so the bounded loop normally
+    returns on the first read — it exists only to confirm the cancel took."""
+    deadline = time.time() + timeout
+    status = None
+    while time.time() < deadline:
+        ok, payload, _ = run_cli(['order', 'get', '--order-id', order_id])
+        if ok and payload:
+            status = (payload.get('status') or '').lower()
+            if status in ('canceled', 'expired', 'rejected', 'filled', 'done_for_day'):
+                return status
+        time.sleep(poll)
+    return status

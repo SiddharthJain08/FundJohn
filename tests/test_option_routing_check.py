@@ -39,6 +39,8 @@ def test_sentinel_passes_override_and_cancels(monkeypatch):
 
     def _fake_cli(args, *a, **kw):
         calls.append(list(args))
+        if list(args[:2]) == ['order', 'get']:
+            return True, {'status': 'canceled'}, None  # cancel confirmed terminal
         return True, {}, None
 
     with patch('execution.alpaca_executor._route_option_order', side_effect=_fake_route), \
@@ -50,9 +52,48 @@ def test_sentinel_passes_override_and_cancels(monkeypatch):
     # the routed order must request a NON-MARKETABLE sentinel limit
     assert routed.get('limit_price_override') is not None
     assert float(routed['limit_price_override']) < 5.0  # far below an ATM SPY call
-    # a cancel was issued for the resting sentinel
+    # a cancel was issued AND confirmed terminal (poll), not just acked
     assert any(c[:2] == ['order', 'cancel'] for c in calls), calls
+    assert any(c[:2] == ['order', 'get'] for c in calls), calls
     assert 'canceled' in detail
+
+
+def test_sentinel_cancel_unconfirmed_fails(monkeypatch):
+    """If the cancel doesn't reach a terminal state, claim it FAIL (a resting
+    order may linger) rather than falsely reporting 'canceled'."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+
+    def _fake_route(order, equity, coid):
+        return {'ticker': 'SPY260717C00750000', 'status': 'submitted',
+                'order_id': 'sentinel-3', 'client_order_id': coid,
+                'instrument_class': 'option', 'entry': 1.00}
+
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order', 'cancel']:
+            return False, None, 'cancel rejected'   # cancel ack fails
+        if list(args[:2]) == ['order', 'get']:
+            return True, {'status': 'new'}, None     # never reaches terminal
+        return True, {}, None
+
+    # Fake clock so the bounded poll loop exits after one read instead of
+    # spinning the real 5s timeout; sleep no-op'd.
+    import system_checks.checks.option_routing as orc
+
+    class _Clock:
+        def __init__(self): self.n = 0
+        def __call__(self):
+            self.n += 1
+            return 1000.0 if self.n <= 3 else 1e9  # jump past deadline after first read
+
+    with patch('execution.alpaca_executor._route_option_order', side_effect=_fake_route), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch.object(orc.time, 'time', new=_Clock()), \
+         patch.object(orc.time, 'sleep', new=lambda *_: None):
+        status, detail = _option_routing()
+
+    assert status == Status.FAIL
+    assert 'UNCONFIRMED' in detail
 
 
 def test_sentinel_filled_flattens_and_fails(monkeypatch):
@@ -67,6 +108,8 @@ def test_sentinel_filled_flattens_and_fails(monkeypatch):
 
     def _fake_cli(args, *a, **kw):
         calls.append(list(args))
+        if list(args[:2]) == ['order', 'get']:
+            return True, {'status': 'filled'}, None  # terminal: the sentinel filled
         return True, {}, None
 
     with patch('execution.alpaca_executor._route_option_order', side_effect=_fake_route), \
