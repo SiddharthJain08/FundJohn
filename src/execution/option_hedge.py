@@ -1,6 +1,21 @@
 """src/execution/option_hedge.py — SP-5.1b-ii delta-hedge ledger + target producer."""
 from __future__ import annotations
 import json
+import os
+
+# Mirror engine.py's workspace constant (resolved to UUID at runtime by caller)
+WORKSPACE = os.environ.get('WORKSPACE_ID', 'default')
+
+
+def _next_trading_day(d):
+    """Return the next weekday after d, skipping Saturday (5) and Sunday (6).
+    This is a simple calendar-math fallback; the engine uses Alpaca CLI for
+    holiday-awareness, which is not available in the hedge module context."""
+    import datetime as _dt
+    nd = d + _dt.timedelta(days=1)
+    while nd.weekday() >= 5:
+        nd += _dt.timedelta(days=1)
+    return nd
 
 
 def upsert_hedge_target(cur, strategy_id, underlying, legs, contracts,
@@ -76,3 +91,76 @@ def compute_structure_delta(legs, contracts):
             return None
         total += d
     return total * 100.0 * float(contracts)
+
+
+def compute_option_hedge_targets(cur, as_of):
+    """For each active option_hedge_ledger row, compute the net structure delta and
+    inject a lifecycle_state='APPROVED' execution_signals row (gate-bypass) carrying
+    a fixed hedge_shares target.  Also upserts the ledger's target_hedge_qty.
+
+    Design:
+      - net = compute_structure_delta(legs, contracts)
+      - If net is None → skip (fail-closed, no hedge row emitted for that structure)
+      - target_shares = -net  (hedge offsets the structure's delta)
+      - direction = 'LONG' if target_shares > 0 else 'SHORT'
+      - Writes execution_signals: strategy_id = '__hedge__<option_sid>',
+        lifecycle_state='APPROVED', approved_at=NOW() (gate-bypass — risk hedge
+        must not be panic/sentiment-vetoed), signal_params carries is_hedge + hedge_shares
+      - ON CONFLICT DO UPDATE (hedge targets may change each EOD cycle)
+      - Upserts ledger target_hedge_qty = target_shares via upsert_hedge_target()
+    """
+    from datetime import datetime, timezone
+
+    rows = load_active_hedges(cur)
+    target_date = _next_trading_day(as_of)
+
+    for row in rows:
+        option_sid  = row['option_strategy_id']
+        underlying  = row['underlying']
+        legs        = row['structure_legs']
+        contracts   = row['contracts']
+
+        net = compute_structure_delta(legs, contracts)
+        if net is None:
+            # Fail-closed: can't determine delta → emit no hedge row
+            continue
+
+        target_shares = -net
+        direction = 'LONG' if target_shares > 0 else 'SHORT'
+        hedge_strategy_id = f'__hedge__{option_sid}'
+
+        signal_params = json.dumps({
+            'is_hedge': True,
+            'hedge_strategy_id': option_sid,
+            'hedge_underlying': underlying,
+            'hedge_shares': abs(target_shares),
+        })
+
+        now_utc = datetime.now(timezone.utc)
+
+        cur.execute("""
+            INSERT INTO execution_signals
+                (strategy_id, workspace_id, signal_date, ticker, direction,
+                 entry_price, stop_loss, target_1, target_2, target_3,
+                 position_size_pct, regime_state, signal_params, status,
+                 lifecycle_state, computed_at, target_date, approved_at)
+            VALUES (%s,%s,%s,%s,%s,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
+                    %s::jsonb,'open','APPROVED',%s,%s,%s)
+            ON CONFLICT (strategy_id, signal_date, ticker, direction) DO UPDATE SET
+                signal_params=EXCLUDED.signal_params,
+                lifecycle_state='APPROVED',
+                target_date=EXCLUDED.target_date,
+                approved_at=EXCLUDED.approved_at
+        """, (
+            hedge_strategy_id, None, as_of, underlying, direction,
+            signal_params, now_utc, target_date, now_utc,
+        ))
+
+        # Upsert the ledger's target (pass option_sid, not hedge_sid)
+        upsert_hedge_target(cur,
+                            strategy_id=option_sid,
+                            underlying=underlying,
+                            legs=legs,
+                            contracts=contracts,
+                            target_hedge_qty=target_shares,
+                            as_of=as_of)
