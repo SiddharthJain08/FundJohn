@@ -786,17 +786,21 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     right = str(spec.right).lower()
     side = 'buy' if direction == 'long' else 'sell'
 
-    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
-    if right == 'call' and side == 'sell':
-        return _option_skip(order, coid, equity,
-            'option: short call requires covered-call lookup (not in SP-5.1a)')
-
     today = _dt.date.today()
     expiry = _resolve_expiry(spec, today)
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
 
     if spec.structure in ('straddle', 'strangle'):
+        # SP-5.1b-i envelope: long debit only, hedge='none' only. (delta-hedge =
+        # the separate 5.1b-ii subsystem.) Fail-closed on out-of-envelope specs
+        # rather than submit a malformed short/unhedged structure.
+        if str(order.get('direction', 'long')).lower() != 'long':
+            return _option_skip(order, coid, equity,
+                f"option: structure exec is long-only in SP-5.1b-i (direction={order.get('direction')!r})")
+        if getattr(spec, 'hedge', 'none') not in (None, 'none'):
+            return _option_skip(order, coid, equity,
+                f"option: hedge={spec.hedge!r} needs the SP-5.1b-ii delta-hedge subsystem (not in 5.1b-i)")
         legs = _resolve_structure_legs(spec, today, expiry)
         if not legs:
             return _option_skip(order, coid, equity, 'option: structure legs unresolved')
@@ -826,6 +830,11 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
             'instrument_class': 'option', 'legs': [lq[0] for lq in leg_q],
         }
+
+    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
+    if right == 'call' and side == 'sell':
+        return _option_skip(order, coid, equity,
+            'option: short call requires covered-call lookup (not in SP-5.1a)')
 
     strike = _resolve_strike(spec, today, expiry)
     if strike is None:

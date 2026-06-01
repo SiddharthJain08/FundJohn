@@ -214,6 +214,7 @@ def _spec(structure='single', right='call', strike_rule='atm', moneyness=None,
     s.structure = structure; s.right = right; s.strike_rule = strike_rule
     s.moneyness = moneyness; s.target_delta = target_delta
     s.dte_target = dte_target; s.underlying = underlying
+    s.hedge = 'none'  # OptionSpec default; tests that need delta-hedge set it explicitly
     return s
 
 def _option_order(direction='long', right='call', contracts=1, notional=20000,
@@ -687,3 +688,43 @@ def test_record_submission_mleg_keeps_option_class_and_legs():
             'order_class':'mleg','legs':['SPY260717C00750000','SPY260717P00750000']}
     record_submission(_C(), '2026-06-01', order, resp, tif='day', order_class='mleg', coid='c1')
     assert captured and 'option' in captured[-1]
+
+
+def test_route_structure_refuses_non_long_direction():
+    """SP-5.1b-i is long-only: a short straddle fails closed (no submit)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']: submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(direction='short', strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-short')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and 'long-only' in res['reason'] and submitted['n'] == 0
+
+def test_route_structure_refuses_delta_hedge():
+    """SP-5.1b-i does NOT hedge: a hedge='delta' straddle fails closed (defers to 5.1b-ii)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']: submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(direction='long', strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        order['option_spec'].hedge = 'delta'
+        res = _route_option_order(order, equity=100000, coid='c-hedge')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and 'hedge' in res['reason'] and submitted['n'] == 0
