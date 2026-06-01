@@ -619,19 +619,19 @@ def _options_session_gate() -> tuple[bool, str | None]:
 
 
 def _option_quote(occ_symbol: str) -> dict | None:
-    """Best bid/ask for an OCC symbol from `alpaca data option chain` snapshot."""
-    underlying = ''
-    # OCC root parse: alpha prefix
-    for c in occ_symbol:
-        if c.isalpha(): underlying += c
-        else: break
+    """Best bid/ask for an OCC symbol via the exact-symbol latest-quotes endpoint.
+
+    Regression (SP-5.1a smoke 2026-06-01): the prior `data option chain
+    --underlying-symbol <U>` path defaults to `--limit 100`, and SPY has
+    hundreds of strikes per expiry, so the resolved OCC was almost always
+    truncated out of the snapshot page (true even when filtered by
+    expiry+type) → lookup miss → None → fail-closed 'no quote for limit price'.
+    `data option latest-quotes --symbols <OCC>` returns the one contract we
+    asked for with no pagination. Response shape: {"quotes": {<OCC>: {bp,ap}}}."""
     ok, payload, _ = _run_alpaca_cli([
-        'data','option','chain','--underlying-symbol', underlying])
+        'data','option','latest-quotes','--symbols', occ_symbol])
     if not ok or not payload: return None
-    snapshots = payload.get('snapshots') or {}
-    snap = snapshots.get(occ_symbol)
-    if not snap: return None
-    q = snap.get('latestQuote') or {}
+    q = (payload.get('quotes') or {}).get(occ_symbol) or {}
     try:
         bid = float(q.get('bp') or q.get('bid') or 0)
         ask = float(q.get('ap') or q.get('ask') or 0)

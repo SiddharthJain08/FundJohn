@@ -309,3 +309,43 @@ def test_record_submission_writes_instrument_class():
     assert captured, 'execute was not called'
     _, params = captured[-1]
     assert 'option' in params  # the instrument_class column value
+
+
+# --- _option_quote: latest-quotes endpoint (regression: chain limit=100 paging) ---
+from execution.alpaca_executor import _option_quote
+
+def test_option_quote_uses_latest_quotes_endpoint_not_chain():
+    """Regression: SP-5.1a smoke 2026-06-01 fail-closed 'no quote for limit price'.
+    `data option chain` defaults to limit=100; SPY has hundreds of strikes per
+    expiry so (even filtered) the resolved OCC is truncated out of the page and
+    the snapshot lookup misses → None → fail-closed. The exact-symbol
+    `data option latest-quotes --symbols <OCC>` endpoint has no such truncation."""
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        captured['args'] = list(args)
+        return True, {'quotes': {'SPY260626C00756000': {'bp': 10.42, 'ap': 10.45}}}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_quote('SPY260626C00756000')
+    assert captured['args'][:3] == ['data', 'option', 'latest-quotes']
+    assert '--symbols' in captured['args']
+    assert captured['args'][captured['args'].index('--symbols') + 1] == 'SPY260626C00756000'
+    assert 'chain' not in captured['args']  # the paginated endpoint must NOT be used
+    assert out == {'bid': 10.42, 'ask': 10.45}
+
+def test_option_quote_returns_none_when_symbol_absent():
+    def _fake_cli(args, *a, **kw):
+        return True, {'quotes': {}}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        assert _option_quote('SPY260626C00756000') is None
+
+def test_option_quote_returns_none_on_zero_bid_or_ask():
+    def _fake_cli(args, *a, **kw):
+        return True, {'quotes': {'IWM260626P00272000': {'bp': 0, 'ap': 2.2}}}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        assert _option_quote('IWM260626P00272000') is None
+
+def test_option_quote_returns_none_on_cli_failure():
+    def _fake_cli(args, *a, **kw):
+        return False, None, 'boom'
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        assert _option_quote('IWM260626P00272000') is None
