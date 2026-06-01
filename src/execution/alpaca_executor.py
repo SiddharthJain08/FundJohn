@@ -641,6 +641,114 @@ def _option_quote(occ_symbol: str) -> dict | None:
     return None
 
 
+def _occ_strike(occ_symbol: str) -> float | None:
+    """Strike from an OCC symbol: last 8 digits / 1000 (e.g. ...00760000 -> 760.0)."""
+    try:
+        return int(occ_symbol[-8:]) / 1000.0
+    except ValueError:
+        return None
+
+
+def _option_chain_greeks(
+    underlying: str, expiry, right: str, spot: float, band_pct: float = 0.15,
+) -> list[tuple[float, float, str]]:
+    """[(strike, delta, occ)] for `underlying` at `expiry`/`right`, over a strike
+    band of spot*(1±band_pct). Reads per-contract greeks.delta from the chain
+    snapshot (verified live in the SP-5.1b grounding spike). Bounded by
+    --strike-price-gte/lte so the 100-row page covers the band; paginates via
+    --page-token if a full page returns."""
+    lo, hi = spot * (1.0 - band_pct), spot * (1.0 + band_pct)
+    args = ['data','option','chain','--underlying-symbol', underlying,
+            '--expiration-date', expiry.isoformat() if isinstance(expiry, date) else str(expiry),
+            '--type', str(right).lower(),
+            '--strike-price-gte', f'{lo:.2f}', '--strike-price-lte', f'{hi:.2f}']
+    out, token = [], None
+    for _ in range(6):  # page cap
+        a = args + (['--page-token', token] if token else [])
+        ok, payload, _ = _run_alpaca_cli(a)
+        if not ok or not payload:
+            break
+        for occ, snap in (payload.get('snapshots') or {}).items():
+            d = ((snap or {}).get('greeks') or {}).get('delta')
+            k = _occ_strike(occ)
+            if d is not None and k is not None:
+                try:
+                    out.append((k, float(d), occ))
+                except (TypeError, ValueError):
+                    pass
+        token = payload.get('next_page_token')
+        if not token:
+            break
+    return out
+
+
+def _with(spec, **overrides):
+    """Shallow clone of an OptionSpec-like object with field overrides (for reusing
+    _resolve_strike's atm path per leg without mutating the caller's spec)."""
+    import copy
+    s = copy.copy(spec)
+    for k, v in overrides.items():
+        setattr(s, k, v)
+    return s
+
+
+def _resolve_structure_legs(spec, as_of, expiry):
+    """Return [(right, strike)] for a straddle/strangle, mirroring
+    options_backtest._legs_for but resolved against LIVE listed strikes/greeks:
+      straddle -> ATM call + ATM put at the same strike (via _resolve_strike atm).
+      strangle -> call near +target_delta, put near -target_delta (live chain greeks).
+    Returns None if any leg cannot be resolved (fail-closed)."""
+    spot = _spot_price(spec.underlying)
+    if spot is None or spot <= 0:
+        return None
+    if spec.structure == 'straddle':
+        k = _resolve_strike(_with(spec, strike_rule='atm', right='call'), as_of, expiry)
+        if k is None:
+            return None
+        return [('call', k), ('put', k)]
+    if spec.structure == 'strangle':
+        tgt = float(spec.target_delta)
+        legs = []
+        for right in ('call', 'put'):
+            grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+            if not grk:
+                return None
+            k = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
+            legs.append((right, k))
+        return legs
+    return None
+
+
+def _structure_net_quote(spec, legs, expiry):
+    """For each (right, strike) leg: build the OCC + fetch the quote. Returns
+    (net_ask_debit, [(occ, right, ask)]) or None if any leg has no quote
+    (fail-closed — never submit a partial structure)."""
+    leg_q = []
+    net = 0.0
+    for right, strike in legs:
+        occ = _build_occ_symbol(_with(spec, right=right), strike, expiry)
+        q = _option_quote(occ)
+        if q is None:
+            return None
+        net += float(q['ask'])
+        leg_q.append((occ, right, float(q['ask'])))
+    return net, leg_q
+
+
+def _build_mleg_legs_json(leg_q, direction) -> str:
+    """JSON `--legs` array for a 1:1 structure (straddle/strangle). Per leg,
+    side+intent from _options_position_intent on that leg's existing qty (avoids
+    the SP-5.0 test-5 inferred-intent 422). ratio_qty is the within-package ratio
+    "1" (a string — SP-5.0); the package COUNT is the order's top-level --qty."""
+    import json
+    out = []
+    for occ, _right, _ask in leg_q:
+        side, intent = _options_position_intent(direction, _options_current_qty(occ))
+        out.append({'symbol': occ, 'side': side,
+                    'ratio_qty': '1', 'position_intent': intent})
+    return json.dumps(out)
+
+
 def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> float:
     """For buys: ask + slip (immediate fill bounded by slip). For sells: bid - slip."""
     if str(side).lower() == 'buy':
@@ -649,9 +757,9 @@ def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> floa
 
 
 def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
-    """SP-5.1a — single-leg options exec lane.
-    Returns a result dict for option orders (branches close_only internally) or
-    None to fall through. Equity-byte-identical when None is returned."""
+    """SP-5.1a/b — options exec lane. Single-leg (calls/puts, cash-secured short put)
+    + multi-leg long straddle/strangle (--order-class mleg). Returns a result dict or
+    None to fall through (equity byte-identical when None)."""
     import os as _os, datetime as _dt
     if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
         return None
@@ -660,21 +768,29 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     spec = order.get('option_spec')
     if spec is None:
         return None
-    # 5.1a is SINGLE-LEG ONLY. mleg = SP-5.1b.
-    if getattr(spec, 'structure', 'single') != 'single':
+    # 5.1b: single + straddle/strangle supported. Verticals/condors = SP-5.2.
+    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle'):
         return _option_skip(order, coid, equity,
-            f"option: structure={spec.structure!r} not in SP-5.1a (single-leg only)")
+            f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
     ok_session, sess_reason = _options_session_gate()
     if not ok_session:
         return _option_skip(order, coid, equity, sess_reason)
 
+    # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
+    # reads HELD legs from the book and must NOT be blocked by open-path resolution
+    # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
+    if spec.structure in ('straddle', 'strangle') and order.get('close_only'):
+        return _route_mleg_close(order, spec, coid)
+
     direction = str(order.get('direction','long')).lower()
     right = str(spec.right).lower()
     side = 'buy' if direction == 'long' else 'sell'
 
-    # Short calls REFUSED (covered-call lookup is out of 5.1a scope)
-    if right == 'call' and side == 'sell':
+    # Short calls REFUSED for single-leg (covered-call lookup out of scope).
+    # Structures fall through to the mleg envelope guard below (which refuses
+    # non-long / hedged structures with a clearer message).
+    if spec.structure == 'single' and right == 'call' and side == 'sell':
         return _option_skip(order, coid, equity,
             'option: short call requires covered-call lookup (not in SP-5.1a)')
 
@@ -682,6 +798,48 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     expiry = _resolve_expiry(spec, today)
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
+
+    if spec.structure in ('straddle', 'strangle'):
+        # SP-5.1b-i envelope: long debit only, hedge='none' only. (delta-hedge =
+        # the separate 5.1b-ii subsystem.) Fail-closed on out-of-envelope specs
+        # rather than submit a malformed short/unhedged structure.
+        if str(order.get('direction', 'long')).lower() != 'long':
+            return _option_skip(order, coid, equity,
+                f"option: structure exec is long-only in SP-5.1b-i (direction={order.get('direction')!r})")
+        if getattr(spec, 'hedge', 'none') not in (None, 'none'):
+            return _option_skip(order, coid, equity,
+                f"option: hedge={spec.hedge!r} needs the SP-5.1b-ii delta-hedge subsystem (not in 5.1b-i)")
+        legs = _resolve_structure_legs(spec, today, expiry)
+        if not legs:
+            return _option_skip(order, coid, equity, 'option: structure legs unresolved')
+        nq = _structure_net_quote(spec, legs, expiry)
+        if nq is None:
+            return _option_skip(order, coid, equity, 'option: no quote for a structure leg')
+        net_ask, leg_q = nq
+        override = order.get('limit_price_override')
+        net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
+        raw_qty, qty_reason = _resolve_option_qty(
+            {'contracts': order.get('contracts'), 'notional_usd': order.get('notional_usd')},
+            net_limit)
+        if qty_reason and raw_qty == 0:
+            return _option_skip(order, coid, equity, qty_reason)
+        legs_json = _build_mleg_legs_json(leg_q, direction)
+        args = ['order','submit','--order-class','mleg','--qty', str(int(raw_qty)),
+                '--legs', legs_json,
+                '--type','limit','--limit-price', f'{net_limit:.2f}',
+                '--time-in-force','day','--client-order-id', coid]
+        ok, payload, err = _run_alpaca_cli(args)
+        if not ok or not payload:
+            return _option_skip(order, coid, equity, f'option: mleg submit failed ({err or "no payload"})')
+        # mleg result uses ticker=underlying (e.g. 'SPY') + separate structure/legs fields; downstream (record_submission, close) keys on the underlying, not a per-leg OCC.
+        return {
+            'ticker': spec.underlying, 'structure': spec.structure, 'status': 'submitted',
+            'order_id': payload.get('id'), 'qty': int(raw_qty),
+            'notional': float(raw_qty) * 100.0 * float(net_limit), 'entry': net_limit,
+            'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
+            'instrument_class': 'option', 'legs': [lq[0] for lq in leg_q],
+        }
+
     strike = _resolve_strike(spec, today, expiry)
     if strike is None:
         return _option_skip(order, coid, equity, 'option: strike unresolved')
@@ -773,6 +931,52 @@ def _option_skip(order: dict, coid: str, equity: float, reason: str) -> dict:
         'order_id': None, 'qty': 0, 'notional': 0.0, 'entry': 0.0,
         'tif': 'day', 'order_class': 'simple',
         'client_order_id': coid, 'instrument_class': 'option',
+    }
+
+
+def _held_option_legs(underlying: str) -> list:
+    """OCC symbols of currently-HELD option positions on `underlying` (qty != 0),
+    from `position list`. An option symbol's leading alpha run is its underlying
+    root and it is longer than that root (plain equity 'SPY' is excluded, so the
+    equity book is never closed)."""
+    ok, payload, _ = _run_alpaca_cli(['position', 'list'])
+    if not ok or not payload:
+        return []
+    out = []
+    for p in payload:
+        sym = str(p.get('symbol') or '')
+        root = ''
+        for c in sym:
+            if c.isalpha(): root += c
+            else: break
+        try:
+            qty = float(p.get('qty') or 0)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if root == underlying and len(sym) > len(root) and qty != 0:
+            out.append(sym)
+    return out
+
+
+def _route_mleg_close(order, spec, coid):
+    """Close a straddle/strangle by closing the ACTUALLY-HELD option legs on the
+    underlying (from `position list`) — NOT by re-resolving strikes from spec,
+    which drift between open and close. Per-leg `position close` (credit-sign
+    independent; spec §4.1)."""
+    held = _held_option_legs(spec.underlying)
+    if not held:
+        return _option_skip(order, coid, equity=0.0, reason='option-close: no held legs')
+    closed = []
+    for occ in held:
+        ok, _payload, err = _run_alpaca_cli(['position', 'close', '--symbol-or-asset-id', occ])
+        closed.append((occ, ok, err))
+    any_fail = any((not ok) for _occ, ok, _err in closed)
+    return {
+        'ticker': spec.underlying, 'structure': spec.structure,
+        'status': 'submitted' if not any_fail else 'partial',
+        'order_id': None, 'qty': 0, 'notional': 0.0, 'entry': 0.0,
+        'tif': 'day', 'order_class': 'mleg', 'client_order_id': coid,
+        'instrument_class': 'option', 'legs': [c[0] for c in closed],
     }
 
 

@@ -120,3 +120,29 @@ def test_sentinel_filled_flattens_and_fails(monkeypatch):
     assert status == Status.FAIL
     assert 'FILLED' in detail
     assert any(c[:2] == ['position', 'close'] for c in calls), calls
+
+
+def test_option_routing_includes_mleg_sentinel(monkeypatch):
+    """Gate ON: the check routes a straddle sentinel with limit_price_override and
+    cancels it; detail mentions the structure sentinel."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    def _fake_route(order, equity, coid):
+        # both the single-leg sentinel and the mleg sentinel route through here;
+        # return a submitted dict for whichever is asked.
+        is_mleg = (getattr(order.get('option_spec'), 'structure', 'single') != 'single')
+        return {'ticker':'SPY','structure':'straddle' if is_mleg else None,
+                'status':'submitted','order_id':('mleg-s1' if is_mleg else 'sl1'),
+                'client_order_id':coid,'instrument_class':'option',
+                'order_class':('mleg' if is_mleg else 'simple'),
+                'limit_price_override': order.get('limit_price_override')}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','get']: return True, {'status':'canceled'}, None
+        return True, {}, None
+    with patch('execution.alpaca_executor._route_option_order', side_effect=_fake_route), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0):
+        from system_checks.checks.option_routing import _option_routing
+        status, detail = _option_routing()
+    from system_checks.types import Status
+    assert status == Status.PASS
+    assert 'mleg' in detail

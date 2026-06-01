@@ -214,6 +214,7 @@ def _spec(structure='single', right='call', strike_rule='atm', moneyness=None,
     s.structure = structure; s.right = right; s.strike_rule = strike_rule
     s.moneyness = moneyness; s.target_delta = target_delta
     s.dte_target = dte_target; s.underlying = underlying
+    s.hedge = 'none'  # OptionSpec default; tests that need delta-hedge set it explicitly
     return s
 
 def _option_order(direction='long', right='call', contracts=1, notional=20000,
@@ -405,3 +406,331 @@ def test_route_uses_marketable_limit_when_no_override():
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res and res.get('status') == 'submitted'
     assert res.get('entry') == 5.12  # ask 5.10 + 0.02 slip
+
+
+def test_option_chain_greeks_returns_strike_delta_occ():
+    """Strike-band chain fetch returns (strike, delta, occ) per contract, filtered
+    by expiry+type+strike band. delta path: snapshots[occ].greeks.delta."""
+    from execution.alpaca_executor import _option_chain_greeks
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        captured['args'] = list(args)
+        return True, {'snapshots': {
+            'SPY260717C00760000': {'greeks': {'delta': 0.42}},
+            'SPY260717C00780000': {'greeks': {'delta': 0.28}},
+        }}, None
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', __import__('datetime').date(2026,7,17),
+                                   'call', spot=750.0, band_pct=0.15)
+    a = captured['args']
+    assert a[:3] == ['data','option','chain']
+    assert '--expiration-date' in a and '--type' in a
+    assert '--strike-price-gte' in a and '--strike-price-lte' in a
+    assert (780.0, 0.28, 'SPY260717C00780000') in [(s,d,o) for (s,d,o) in out]
+
+
+def test_option_chain_greeks_paginates():
+    """_option_chain_greeks accumulates results across pages and passes
+    --page-token on the second request."""
+    from execution.alpaca_executor import _option_chain_greeks
+    import datetime as _dt
+    pages = [
+        (True, {'snapshots': {'SPY260717C00760000': {'greeks': {'delta': 0.42}}},
+                'next_page_token': 'tok2'}, None),
+        (True, {'snapshots': {'SPY260717C00780000': {'greeks': {'delta': 0.28}}}}, None),
+    ]
+    calls_args: list[list] = []
+    calls: dict[str, int] = {'n': 0}
+
+    def _fake_cli(args, *a, **kw):
+        i = calls['n']
+        calls['n'] += 1
+        calls_args.append(list(args))
+        return pages[i] if i < len(pages) else (True, {'snapshots': {}}, None)
+
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', _dt.date(2026, 7, 17), 'call', spot=750.0)
+
+    occs = {o for (_s, _d, o) in out}
+    assert occs == {'SPY260717C00760000', 'SPY260717C00780000'}  # both pages accumulated
+    # second call must carry --page-token with the token from page 1
+    assert '--page-token' in calls_args[1]
+    assert calls_args[1][calls_args[1].index('--page-token') + 1] == 'tok2'
+
+
+def test_option_chain_greeks_skips_none_delta_and_bad_strike():
+    """Rows with a missing/None greeks.delta or an unparseable strike (bad OCC key)
+    must be silently skipped — no crash, and they must not appear in the output."""
+    from execution.alpaca_executor import _option_chain_greeks
+    import datetime as _dt
+
+    def _fake_cli(args, *a, **kw):
+        return True, {'snapshots': {
+            # Valid row — must appear in output.
+            'SPY260717C00760000': {'greeks': {'delta': 0.42}},
+            # None delta — must be skipped.
+            'SPY260717C00770000': {'greeks': {'delta': None}},
+            # Missing greeks dict entirely — delta resolves to None → skipped.
+            'SPY260717C00775000': {},
+            # Unparseable strike (non-digit in last-8 slice) — _occ_strike returns
+            # None → skipped.
+            'SPY260717CBADSTRIKE': {'greeks': {'delta': 0.35}},
+        }}, None
+
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        out = _option_chain_greeks('SPY', _dt.date(2026, 7, 17), 'call', spot=750.0)
+
+    occs = {o for (_s, _d, o) in out}
+    assert occs == {'SPY260717C00760000'}, f"expected only valid occ, got {occs}"
+
+
+def test_resolve_structure_legs_straddle_same_atm_strike():
+    """Straddle: call+put at the SAME ATM strike (parity with options_backtest)."""
+    from execution.alpaca_executor import _resolve_structure_legs
+    import datetime as _dt
+    spec = type('S',(),{'underlying':'SPY','structure':'straddle','strike_rule':'atm',
+                        'right':'call','target_delta':0.30,'moneyness':None})()
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]):
+        legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
+    assert legs == [('call',750.0),('put',750.0)]
+
+def test_resolve_structure_legs_strangle_delta_matched():
+    """Strangle: call near +target_delta, put near -target_delta (abs-delta match)."""
+    from execution.alpaca_executor import _resolve_structure_legs
+    import datetime as _dt
+    spec = type('S',(),{'underlying':'SPY','structure':'strangle','strike_rule':'target_delta',
+                        'right':'call','target_delta':0.30,'moneyness':None})()
+    def _fake_greeks(u, e, right, spot, band_pct=0.15):
+        if right == 'call': return [(760.0,0.42,'c1'),(780.0,0.29,'c2')]
+        return [(740.0,-0.41,'p1'),(720.0,-0.31,'p2')]
+    with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks):
+        legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
+    assert legs == [('call',780.0),('put',720.0)]  # closest |delta| to 0.30
+
+
+def test_structure_net_quote_sums_leg_asks():
+    """Net debit = sum of per-leg asks; returns per-leg (occ, right, ask)."""
+    from execution.alpaca_executor import _structure_net_quote
+    import datetime as _dt
+    legs = [('call', 750.0), ('put', 750.0)]
+    spec = type('S',(),{'underlying':'SPY'})()
+    def _fake_quote(occ):
+        return {'bid': 10.0, 'ask': 10.2} if occ.endswith('C00750000') else {'bid': 9.0, 'ask': 9.3}
+    with patch('execution.alpaca_executor._option_quote', side_effect=_fake_quote):
+        net, leg_q = _structure_net_quote(spec, legs, _dt.date(2026,7,17))
+    assert round(net, 2) == 19.50            # 10.2 + 9.3
+    assert len(leg_q) == 2 and leg_q[0][1] == 'call'
+
+def test_structure_net_quote_none_when_a_leg_unquoted():
+    from execution.alpaca_executor import _structure_net_quote
+    import datetime as _dt
+    with patch('execution.alpaca_executor._option_quote', side_effect=[{'bid':1,'ask':1.1}, None]):
+        out = _structure_net_quote(type('S',(),{'underlying':'SPY'})(),
+                                   [('call',750.0),('put',750.0)], _dt.date(2026,7,17))
+    assert out is None
+
+
+def test_build_mleg_legs_json_long_open():
+    """Long structure -> both legs buy / buy_to_open, ratio_qty='1' STRING (SP-5.1b spike).
+    ratio_qty is the within-package ratio '1'; package count is the top-level --qty."""
+    from execution.alpaca_executor import _build_mleg_legs_json
+    import json
+    leg_q = [('SPY260717C00750000','call',10.2), ('SPY260717P00750000','put',9.3)]
+    with patch('execution.alpaca_executor._options_current_qty', return_value=0):
+        legs = _build_mleg_legs_json(leg_q, direction='long')
+    arr = json.loads(legs)
+    assert {l['symbol'] for l in arr} == {'SPY260717C00750000','SPY260717P00750000'}
+    assert all(l['side']=='buy' and l['position_intent']=='buy_to_open' for l in arr)
+    assert all(l['ratio_qty']=='1' and isinstance(l['ratio_qty'], str) for l in arr)
+
+
+# --- SP-5.1b: _route_option_order straddle/strangle mleg open branch ---
+
+def test_route_straddle_submits_mleg_net_debit():
+    """structure='straddle' -> one mleg order, net-debit marketable limit,
+    instrument_class='option', status submitted."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']:
+            captured['args'] = list(args)
+            return True, {'id':'mleg-1'}, None
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid':9.9,'ask':10.0}), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-strad')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    a = captured['args']
+    assert '--order-class' in a and a[a.index('--order-class')+1] == 'mleg'
+    assert '--legs' in a
+    assert res['status'] == 'submitted' and res['instrument_class'] == 'option'
+    assert res['ticker'] == 'SPY' and res['structure'] == 'straddle'
+    assert float(a[a.index('--limit-price')+1]) >= 20.0   # net debit 10+10 + slip
+    # SP-5.1b spike: --qty must be present (omitting it yields 422 "qty must be > 0")
+    assert '--qty' in a, '--qty must be present in mleg submit args'
+    assert a[a.index('--qty')+1] == '1', f"--qty should be '1' (1 contract order), got {a[a.index('--qty')+1]!r}"
+    import json as _json
+    legs = _json.loads(a[a.index('--legs')+1])
+    assert len(legs) == 2
+    assert all(l['position_intent'] == 'buy_to_open' for l in legs)
+    # SP-5.1b spike: ratio_qty must be '1' (structural ratio); count is in top-level --qty
+    assert all(l['ratio_qty'] == '1' for l in legs), f"ratio_qty must be '1' per leg, got {[l['ratio_qty'] for l in legs]}"
+    assert all(isinstance(l['ratio_qty'], str) for l in legs)
+    assert {l['symbol'][:3] for l in legs} == {'SPY'}
+
+def test_route_strangle_submits_mleg():
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    def _fake_cli(args, *a, **kw):
+        return (True, {'id':'mleg-2'}, None) if list(args[:2])==['order','submit'] else (True, {}, None)
+    def _fake_greeks(u,e,right,spot,band_pct=0.15):
+        return [(780.0,0.29,'SPY260717C00780000')] if right=='call' else [(720.0,-0.31,'SPY260717P00720000')]
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid':4.0,'ask':4.1}), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(); order['option_spec'].structure = 'strangle'
+        order['option_spec'].strike_rule = 'target_delta'
+        res = _route_option_order(order, equity=100000, coid='c-strang')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'submitted' and res['order_class'] == 'mleg'
+
+
+def test_route_straddle_skips_when_leg_unresolved():
+    """If a structure leg can't be quoted, the whole order skips (no partial submit)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']:
+            submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_quote', return_value=None), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm'); order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-skip')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and submitted['n'] == 0
+
+
+def test_route_mleg_close_closes_HELD_legs_not_equity():
+    """close targets the ACTUALLY-HELD option legs from `position list` (robust to
+    strike/greeks drift) and never touches equity on the same underlying."""
+    from execution.alpaca_executor import _route_mleg_close
+    closed = []
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['position','list']:
+            return True, [{'symbol':'SPY260717C00750000','qty':'1'},
+                          {'symbol':'SPY260717P00750000','qty':'1'},
+                          {'symbol':'SPY','qty':'100'},        # equity SPY — must NOT close
+                          {'symbol':'AAPL','qty':'10'}], None  # other ticker — ignored
+        if list(args[:2]) == ['position','close']:
+            closed.append(args[args.index('--symbol-or-asset-id')+1])
+        return True, {'id':'x'}, None
+    spec = type('S',(),{'underlying':'SPY','structure':'straddle'})()
+    with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        res = _route_mleg_close({'close_only': True}, spec, 'c-close')
+    assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
+    assert 'SPY' not in closed and 'AAPL' not in closed   # equity untouched
+    assert res['status'] == 'submitted' and res['ticker'] == 'SPY' and res['order_class'] == 'mleg'
+
+
+def test_route_mleg_close_works_when_expiry_unresolvable():
+    """A structure close must succeed even if expiry resolution would fail
+    (it reads held legs from the book, not the spec)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    closed = []
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['position','list']:
+            return True, [{'symbol':'SPY260717C00750000','qty':'1'},
+                          {'symbol':'SPY260717P00750000','qty':'1'}], None
+        if list(args[:2]) == ['position','close']:
+            closed.append(args[args.index('--symbol-or-asset-id')+1])
+        return True, {'id':'x'}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        order['close_only'] = True
+        res = _route_option_order(order, equity=100000, coid='c-close-noexp')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'submitted'   # NOT 'skipped: expiry unresolved'
+    assert sorted(closed) == ['SPY260717C00750000','SPY260717P00750000']
+
+
+def test_record_submission_mleg_keeps_option_class_and_legs():
+    """An mleg option submission records instrument_class='option' and does not crash
+    on the mleg shape (ticker=underlying + structure/legs fields)."""
+    from execution.alpaca_executor import record_submission
+    captured = []
+    class _C:
+        def cursor(self): return self
+        def execute(self, sql, params): captured.append(params)
+        def commit(self): pass
+        def close(self): pass
+    order = {'ticker':'SPY','strategy_id':'S_t','direction':'long',
+             'instrument_class':'option','structure':'straddle'}
+    resp = {'qty':1,'entry':20.0,'notional':2000.0,'order_id':'mleg-1',
+            'order_class':'mleg','legs':['SPY260717C00750000','SPY260717P00750000']}
+    record_submission(_C(), '2026-06-01', order, resp, tif='day', order_class='mleg', coid='c1')
+    assert captured and 'option' in captured[-1]
+
+
+def test_route_structure_refuses_non_long_direction():
+    """SP-5.1b-i is long-only: a short straddle fails closed (no submit)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']: submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(direction='short', strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-short')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and 'long-only' in res['reason'] and submitted['n'] == 0
+
+def test_route_structure_refuses_delta_hedge():
+    """SP-5.1b-i does NOT hedge: a hedge='delta' straddle fails closed (defers to 5.1b-ii)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']: submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(direction='long', strike_rule='atm')
+        order['option_spec'].structure = 'straddle'
+        order['option_spec'].hedge = 'delta'
+        res = _route_option_order(order, equity=100000, coid='c-hedge')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and 'hedge' in res['reason'] and submitted['n'] == 0
