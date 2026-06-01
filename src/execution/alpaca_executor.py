@@ -756,9 +756,9 @@ def _option_marketable_limit(side: str, quote: dict, slip: float = 0.02) -> floa
 
 
 def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
-    """SP-5.1a — single-leg options exec lane.
-    Returns a result dict for option orders (branches close_only internally) or
-    None to fall through. Equity-byte-identical when None is returned."""
+    """SP-5.1a/b — options exec lane. Single-leg (calls/puts, cash-secured short put)
+    + multi-leg long straddle/strangle (--order-class mleg). Returns a result dict or
+    None to fall through (equity byte-identical when None)."""
     import os as _os, datetime as _dt
     if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
         return None
@@ -807,14 +807,14 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             net_limit)
         if qty_reason and raw_qty == 0:
             return _option_skip(order, coid, equity, qty_reason)
-        legs_json = _build_mleg_legs_json(leg_q, str(order.get('direction','long')).lower(),
-                                          int(raw_qty))
+        legs_json = _build_mleg_legs_json(leg_q, direction, int(raw_qty))
         args = ['order','submit','--order-class','mleg','--legs', legs_json,
                 '--type','limit','--limit-price', f'{net_limit:.2f}',
                 '--time-in-force','day','--client-order-id', coid]
         ok, payload, err = _run_alpaca_cli(args)
         if not ok or not payload:
             return _option_skip(order, coid, equity, f'option: mleg submit failed ({err or "no payload"})')
+        # mleg result uses ticker=underlying (e.g. 'SPY') + separate structure/legs fields; downstream (record_submission, close) keys on the underlying, not a per-leg OCC.
         return {
             'ticker': spec.underlying, 'structure': spec.structure, 'status': 'submitted',
             'order_id': payload.get('id'), 'qty': int(raw_qty),

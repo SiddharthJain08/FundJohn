@@ -575,6 +575,12 @@ def test_route_straddle_submits_mleg_net_debit():
     assert res['status'] == 'submitted' and res['instrument_class'] == 'option'
     assert res['ticker'] == 'SPY' and res['structure'] == 'straddle'
     assert float(a[a.index('--limit-price')+1]) >= 20.0   # net debit 10+10 + slip
+    import json as _json
+    legs = _json.loads(a[a.index('--legs')+1])
+    assert len(legs) == 2
+    assert all(l['position_intent'] == 'buy_to_open' for l in legs)
+    assert all(isinstance(l['ratio_qty'], str) for l in legs)
+    assert {l['symbol'][:3] for l in legs} == {'SPY'}
 
 def test_route_strangle_submits_mleg():
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
@@ -596,3 +602,24 @@ def test_route_strangle_submits_mleg():
         res = _route_option_order(order, equity=100000, coid='c-strang')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res['status'] == 'submitted' and res['order_class'] == 'mleg'
+
+
+def test_route_straddle_skips_when_leg_unresolved():
+    """If a structure leg can't be quoted, the whole order skips (no partial submit)."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    submitted = {'n': 0}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order','submit']:
+            submitted['n'] += 1
+        return True, {}, None
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._option_quote', return_value=None), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        order = _option_order(strike_rule='atm'); order['option_spec'].structure = 'straddle'
+        res = _route_option_order(order, equity=100000, coid='c-skip')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res['status'] == 'skipped' and submitted['n'] == 0
