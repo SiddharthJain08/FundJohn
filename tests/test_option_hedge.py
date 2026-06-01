@@ -141,3 +141,20 @@ def test_compute_option_hedge_targets_skips_zero_delta():
     with patch('execution.option_hedge.compute_structure_delta', return_value=0.0):
         compute_option_hedge_targets(_Cur(), as_of=dt.date(2026,6,1))
     assert not inserts, 'zero-delta structure must not write an execution_signals row'
+
+
+import subprocess, sys
+def test_hedge_step_gate_off_skips():
+    env = {**os.environ}; env.pop('OPENCLAW_OPTION_DELTA_HEDGE', None)
+    r = subprocess.run([sys.executable, 'src/pipeline/run_option_hedge_targets.py'],
+                       capture_output=True, text=True, env=env, cwd=os.getcwd())
+    assert r.returncode == 0 and 'gate OFF' in r.stdout
+
+
+def test_hedge_step_gate_off_skips_with_date():
+    """Confirm gate-off path also works when --date is passed (the real cycle path)."""
+    env = {**os.environ}; env.pop('OPENCLAW_OPTION_DELTA_HEDGE', None)
+    r = subprocess.run([sys.executable, 'src/pipeline/run_option_hedge_targets.py',
+                        '--date', '2026-06-01'],
+                       capture_output=True, text=True, env=env, cwd=os.getcwd())
+    assert r.returncode == 0 and 'gate OFF' in r.stdout

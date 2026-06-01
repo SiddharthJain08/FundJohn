@@ -20,7 +20,7 @@ const pipelineLog    = require('../../execution/pipeline_logging');
 const { makeStepNode } = require('./daily_cycle_node');
 
 const STEPS_IN_ORDER = [
-  'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
+  'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
   'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
 ];
@@ -34,6 +34,7 @@ const STEP_SCRIPTS = {
   'collect':                'run_collector_once',
   'sentiment':              'run_sentiment_step',
   'signals':                'engine',
+  'option_hedge':           'run_option_hedge_targets',
   'ic_gate':                'ic_gate_runner',
   'handoff':                'trade_handoff_builder',
   'trade':                  'regime_blended_sizer_live',

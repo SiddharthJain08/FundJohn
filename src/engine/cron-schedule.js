@@ -367,8 +367,8 @@ function start(swarm, generateId, notifyDiscord) {
         // eod_compute_health sentinel and parity_mark (mark_entry_price) for
         // any positions filled that day.
         cron.schedule('15 16 * * 1-5', () => {
-            log('EOD compute (4:15pm ET): collect → sentiment → signals');
-            dispatchCycle('eod-signal-register', ['collect', 'sentiment', 'signals']);
+            log('EOD compute (4:15pm ET): collect → sentiment → signals → option_hedge');
+            dispatchCycle('eod-signal-register', ['collect', 'sentiment', 'signals', 'option_hedge']);
         }, { timezone: 'America/New_York' });
 
         // (b) 09:15 ET Mon–Fri — pre-market carry-forward gate.
