@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw weekend — Saturday adjustment+backtest pipeline (review->recs->coupling->refresh->weights->panels->universe)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/bin/bash /root/openclaw/src/maintenance/weekend_saturday.sh
+StandardOutput=append:/var/log/openclaw/weekend_saturday.log
+StandardError=append:/var/log/openclaw/weekend_saturday.log
+TimeoutStartSec=28800
+
+[Install]
+WantedBy=multi-user.target

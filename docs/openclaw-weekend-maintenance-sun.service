@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw weekend — Sunday maintenance (--mode weekend-sun; audits research)
+After=network-online.target postgresql.service openclaw-weekend-sunday.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/node /root/openclaw/src/agent/run_maintenance.js --mode weekend-sun
+StandardOutput=append:/var/log/openclaw/weekend_maint_sun.log
+StandardError=append:/var/log/openclaw/weekend_maint_sun.log
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

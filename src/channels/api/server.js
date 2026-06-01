@@ -9,6 +9,9 @@ const { readParquet } = require('../../data/parquet_store');
 const fs = require('fs');
 const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
+const { buildStrategyRow } = require('./strategy_row');
+const { blendScope } = require('./blend_scope');
+const { isRegimeEligibleNow } = require('./regime_active');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1157,8 +1160,10 @@ app.get('/api/strategies', async (req, res) => {
     const path  = require('path');
     const manifestPath = path.join(__dirname, '../../strategies/manifest.json');
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const statsRows = (await dbQuery(`SELECT * FROM strategy_stats`)).rows;
-    const statsById = Object.fromEntries(statsRows.map(r => [r.strategy_id, r]));
+    // strategy_stats is retained SOLELY to discover orphan strategy_ids
+    // (signals but no manifest entry). Its metric columns are no longer read
+    // — every per-strategy metric is now backtest-sourced (Task 7 rewrite).
+    const statsRows = (await dbQuery(`SELECT strategy_id FROM strategy_stats`)).rows;
 
     // Load regime_conditions + backtest/live metrics from strategy_registry DB.
     // Saturday-brain additions (058): data_requirements_planned (the missing
@@ -1168,7 +1173,6 @@ app.get('/api/strategies', async (req, res) => {
       SELECT id, regime_conditions,
              backtest_sharpe, backtest_return_pct, backtest_max_dd_pct, backtest_trade_count,
              backtest_regime_breakdown,
-             live_days, live_sharpe, live_return_pct,
              data_requirements_planned, staging_approved_at
       FROM strategy_registry
     `)).rows;
@@ -1200,14 +1204,16 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRunRows = (await dbQuery(`
       SELECT DISTINCT ON (strategy_id)
              strategy_id, total_sharpe, total_max_dd_pct, total_return_pct,
-             total_trades, run_at
+             total_trades, total_hit_rate, avg_holding_days, run_at
       FROM strategy_backtest_runs
       WHERE primary_window = TRUE
       ORDER BY strategy_id, run_at DESC
     `).catch(() => ({ rows: [] }))).rows;
+    const ubtRunById = Object.fromEntries(ubtRunRows.map(r => [r.strategy_id, r]));
     const ubtRegimeRows = (await dbQuery(`
       SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
-             br.max_dd_pct, br.return_pct, br.hit_rate
+             br.max_dd_pct, br.return_pct, br.hit_rate,
+             br.avg_pnl_pct, br.avg_holding_days, br.oos_days_in_regime
       FROM strategy_backtest_regimes br
       JOIN (
         SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -1235,6 +1241,12 @@ app.get('/api/strategies', async (req, res) => {
         total_return_pct: r.return_pct,
         trade_count: r.trade_count,
         hit_rate:    r.hit_rate,
+        // Raw per-regime fields consumed by blendScope (percent units kept as-is):
+        max_dd_pct:        r.max_dd_pct,
+        return_pct:        r.return_pct,
+        avg_pnl_pct:       r.avg_pnl_pct,
+        avg_holding_days:  r.avg_holding_days,
+        oos_days_in_regime: r.oos_days_in_regime,
       };
     }
 
@@ -1292,87 +1304,35 @@ app.get('/api/strategies', async (req, res) => {
       console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
     }
 
-    // Cumulative per-strategy O/U/E counts (Over / Under / Expected)
-    // across every closed trade. Replaces 2026-05-16 the prior O/U/R
-    // (Rejected-signal-count) metric — see migration 101 + oue_classifier.py.
-    // Invariant: O + U + E = total closed trades for that strategy.
-    //   O = realized > expectation by ≥1σ
-    //   U = realized < expectation by ≥1σ
-    //   E = within ±1σ band (i.e. behaved as the GBM model predicted)
-    const d1StrategyStats = {};
-    try {
-      const oueRes = await dbQuery(`
-        SELECT strategy_id, oue_kind, COUNT(*)::int AS n
-          FROM execution_signals
-         WHERE strategy_id IS NOT NULL
-           AND oue_kind IS NOT NULL
-         GROUP BY strategy_id, oue_kind
-      `).catch(() => ({ rows: [] }));
-      for (const row of oueRes.rows) {
-        const s = d1StrategyStats[row.strategy_id] || (d1StrategyStats[row.strategy_id] = { overperf: 0, underperf: 0, expected: 0 });
-        if (row.oue_kind === 'over')     s.overperf  = row.n;
-        if (row.oue_kind === 'under')    s.underperf = row.n;
-        if (row.oue_kind === 'expected') s.expected  = row.n;
-      }
-    } catch (_) {}
+    // ── Backtest dashboard panel (precomputed; strategy_backtest_panel) ──
+    // Effective Sharpe + GBM-σ OUE counts (overall + per regime). This
+    // REPLACES the prior live OUE (execution_signals.oue_kind), the live
+    // per-regime aggregates (signal_pnl × execution_signals), and the live
+    // strategy_weights_by_regime OUE multiplier — every per-strategy metric
+    // is now backtest-sourced (only last_signal_date + status stay live).
+    const panelRows = (await dbQuery(`
+      SELECT strategy_id, effective_sharpe, oue_over, oue_under, oue_expected, oue_by_regime
+        FROM strategy_backtest_panel`).catch(() => ({ rows: [] }))).rows;
+    const panelById = Object.fromEntries(panelRows.map(r => [r.strategy_id, r]));
 
-    // Live per-strategy per-regime aggregates, computed from closed trades.
-    // Joined to execution_signals for the regime tag captured at signal entry.
-    // Keyed by strategy_id → regime_state → {trades, arr, adr, act, win_rate}.
-    // arr is a fraction (0.05 = 5%); the dashboard converts to percent for
-    // display, matching the convention used elsewhere on the page.
-    const liveRegimeBreakdown = {};
-    try {
-      const lrRes = await dbQuery(`
-        SELECT es.strategy_id,
-               es.regime_state                                                  AS regime,
-               COUNT(*)::int                                                    AS trades,
-               AVG(sp.realized_pnl_pct)                                         AS arr,
-               AVG(sp.days_held)                                                AS act,
-               COUNT(*) FILTER (WHERE sp.realized_pnl_pct > 0)::numeric
-                 / NULLIF(COUNT(*), 0)                                          AS win_rate,
-               MIN(sp.realized_pnl_pct)                                         AS worst,
-               MAX(sp.realized_pnl_pct)                                         AS best
-        FROM signal_pnl sp
-        JOIN execution_signals es ON sp.signal_id = es.id
-        WHERE sp.status = 'closed'
-          AND sp.realized_pnl_pct IS NOT NULL
-          AND es.regime_state IS NOT NULL
-        GROUP BY es.strategy_id, es.regime_state
-      `);
-      for (const row of lrRes.rows) {
-        const arr  = row.arr != null ? parseFloat(row.arr) : null;
-        const act  = row.act != null ? parseFloat(row.act) : null;
-        const adr  = (arr != null && act != null && act > 0) ? (arr / act) : null;
-        if (!liveRegimeBreakdown[row.strategy_id]) liveRegimeBreakdown[row.strategy_id] = {};
-        liveRegimeBreakdown[row.strategy_id][row.regime] = {
-          trades:    parseInt(row.trades) || 0,
-          arr,                          // fraction (0.05 = 5%)
-          adr,                          // fraction per day
-          act,                          // days
-          win_rate:  row.win_rate != null ? parseFloat(row.win_rate) : null,
-          best:      row.best != null ? parseFloat(row.best) : null,
-          worst:     row.worst != null ? parseFloat(row.worst) : null,
-        };
-      }
-    } catch (_) { /* leave breakdown empty if join fails */ }
+    // Best/worst realized trade % from the latest primary_window backtest run.
+    const bwRows = (await dbQuery(`
+      SELECT t.strategy_id, MAX(t.pnl_pct) AS best, MIN(t.pnl_pct) AS worst,
+             AVG(t.pnl_pct) AS avg_pnl
+        FROM strategy_backtest_trades t
+        JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+                FROM strategy_backtest_runs WHERE primary_window=TRUE
+                ORDER BY strategy_id, run_at DESC) r ON r.run_id=t.run_id
+       GROUP BY t.strategy_id`).catch(() => ({ rows: [] }))).rows;
+    const bwById = Object.fromEntries(bwRows.map(r => [r.strategy_id, r]));
 
-    // Per-strategy per-regime OUE multiplier from the latest strategy_weights_by_regime
-    // snapshot. Surfaced as the "# O/U/E" cell tooltip. Written by the
-    // Sunday weight cron (strategy_weights.py rebuild()).
-    const oueMultipliersByStrategy = {};
-    try {
-      const omRes = await dbQuery(`
-        SELECT strategy_id, regime_state, oue_multiplier
-          FROM strategy_weights_by_regime
-         WHERE is_current
-           AND oue_multiplier IS NOT NULL
-      `);
-      for (const row of omRes.rows) {
-        if (!oueMultipliersByStrategy[row.strategy_id]) oueMultipliersByStrategy[row.strategy_id] = {};
-        oueMultipliersByStrategy[row.strategy_id][row.regime_state] = parseFloat(row.oue_multiplier);
-      }
-    } catch (_) { /* leave empty if column missing pre-migration */ }
+    // Last signal date — the ONLY live per-strategy fact retained (drives
+    // is_stale + the Last Signal column).
+    const lsRows = (await dbQuery(`
+      SELECT strategy_id, MAX(signal_date) AS last_signal_date
+        FROM execution_signals WHERE strategy_id IS NOT NULL GROUP BY strategy_id`
+      ).catch(() => ({ rows: [] }))).rows;
+    const lastSignalById = Object.fromEntries(lsRows.map(r => [r.strategy_id, r.last_signal_date]));
 
     // is_stale: manifest-active, regime-active, but hasn't produced a signal in N days.
     const STALE_DAYS = 7;
@@ -1382,14 +1342,21 @@ app.get('/api/strategies', async (req, res) => {
     const seen = new Set();
     for (const [sid, rec] of Object.entries(manifest.strategies || {})) {
       seen.add(sid);
-      const s   = statsById[sid] || {};
       const sr  = srById[sid]    || {};
       const rc  = sr.regime_conditions || {};
       const activeRegimes = rc.active_in_regimes || ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL'];
-      const regimeActive  = activeRegimes.includes(currentRegime);
-      const lastTs   = s.last_signal_date ? new Date(s.last_signal_date).getTime() : 0;
+      // regime_active mirrors the LIVE engine gate (regime_param_resolver.is_eligible
+      // over strategy_regime_params), NOT code-level active_in_regimes — so the status
+      // badge + staleness match what actually trades. Previously a strategy toggled to
+      // e.g. CRISIS-only still showed LIVE in a LOW_VOL market while the engine skipped
+      // it. regimeParamsById[sid] is the same source the live sizer reads. See
+      // regime_active.js.
+      const regimeActive  = isRegimeEligibleNow(regimeParamsById[sid], currentRegime);
+      // last_signal_date is now sourced from execution_signals (lastSignalById)
+      // so is_stale and the Last Signal column share one live source.
+      const _lastSig = lastSignalById[sid] || null;
+      const lastTs   = _lastSig ? new Date(_lastSig).getTime() : 0;
       const isStale  = regimeActive && (!lastTs || lastTs < staleCutoff);
-      const d1 = d1StrategyStats[sid] || null;
       // Eligibility precedence: strategy_regime_params (Phase 2A DB
       // source-of-truth, what the live sizer enforces) → manifest
       // eligible_regimes (legacy, may still be set on unmigrated rows) →
@@ -1406,110 +1373,92 @@ app.get('/api/strategies', async (req, res) => {
       const _eligibleSet = new Set(_eligRaw || activeRegimes);
       const _rawBreakdown = unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null;
       const _decoratedBreakdown = _decorateDeclared(_rawBreakdown, _eligibleSet);
+      // ── Regime-scoped metric variants (Active Stack filter) ──────────────
+      // ALL mirrors the legacy top-level fields exactly (built from the same
+      // run/panel/bestWorst sources strategy_row.js uses). ELIGIBLE +
+      // single-regime come from blendScope over the raw per-regime breakdown.
+      const _runForScope   = ubtRunById[sid] || {};
+      const _panelForScope = panelById[sid] || null;
+      const _bwForScope    = bwById[sid] || {};
+      const _actAll = _runForScope.avg_holding_days != null ? Number(_runForScope.avg_holding_days) : null;
+      const _arrAll = _bwForScope.avg_pnl != null ? Number(_bwForScope.avg_pnl) * 100 : null;
+      const _allScope = {
+        sharpe:           _runForScope.total_sharpe ?? null,
+        effective_sharpe: _panelForScope?.effective_sharpe ?? null,
+        return_pct:       _runForScope.total_return_pct ?? null,
+        max_dd_pct:       _runForScope.total_max_dd_pct ?? null,
+        closed_count:     _runForScope.total_trades ?? 0,
+        win_rate:         _runForScope.total_hit_rate ?? null,
+        arr_pct:          _arrAll,
+        adr_pct:          (_arrAll != null && _actAll) ? (_arrAll / Math.max(1, _actAll)) : null,
+        act_days:         _actAll,
+      };
+      const _metricsByScope = { ALL: _allScope };
+      for (const _rg of _CANON_AXIS) {
+        const _s = blendScope(_rawBreakdown, [_rg]);
+        if (_s) _metricsByScope[_rg] = _s;
+      }
+      // ELIGIBLE: blend over the eligible set; null eligRaw (eligible-everywhere) ⇒ ALL.
+      const _eligScope = _eligRaw ? blendScope(_rawBreakdown, _eligRaw) : null;
+      _metricsByScope.ELIGIBLE = _eligScope || _allScope;
+      const _defaultScope = _eligRaw ? 'ELIGIBLE' : 'ALL';
       rows.push({
-        strategy_id:        sid,
-        state:              rec.state || 'unknown',
-        is_stale:           isStale,
-        regime_active:      regimeActive,
-        active_in_regimes:  activeRegimes,
-        eligible_regimes:   _eligRaw,
-        current_regime:     currentRegime,
-        description:        rec.metadata?.description || '',
-        state_since:        rec.state_since || null,
-        open_count:         s.open_count || 0,
-        closed_count:       s.closed_count || 0,
-        total_count:        s.total_count || 0,
-        wins:               s.wins || 0,
-        losses:             s.losses || 0,
-        win_rate:           s.win_rate,
-        avg_realized_pct:   s.avg_realized_pct,
-        avg_unrealized_pct: s.avg_unrealized_pct,
-        best_trade_pct:     s.best_trade_pct,
-        worst_trade_pct:    s.worst_trade_pct,
-        avg_days_held:      s.avg_days_held,
-        last_signal_date:   s.last_signal_date,
-        dominant_regime:    s.dominant_regime,
-        // Unified backtest (2026-05-14) is canonical; fall back to legacy
-        // strategy_registry columns for strategies not yet backfilled.
-        backtest_sharpe:           unifiedBacktest[sid]?.sharpe           ?? sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       unifiedBacktest[sid]?.return_pct       ?? sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      unifiedBacktest[sid]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: _decoratedBreakdown,
-        backtest_run_at:           unifiedBacktest[sid]?.run_at           ?? null,
-        live_regime_breakdown:     liveRegimeBreakdown[sid] || null,
-        live_days:           sr.live_days           ?? null,
-        live_sharpe:         sr.live_sharpe         ?? null,
-        live_return_pct:     sr.live_return_pct     ?? null,
-        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
-        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_expected:         d1 ? (d1.expected  || 0) : 0,
-        // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
-        // also feeds the live weights-by-regime engine.
-        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
-        // Saturday-brain Tier-B fields. Only populated for state='staging'
-        // strategies pushed by Saturday brain. The dashboard's strategies
-        // page renders these so the operator sees exactly what the Approve
-        // click would fetch + when they last approved.
+        ...buildStrategyRow({
+          sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime,
+          run: ubtRunById[sid] || {},
+          regimeBreakdown: _decoratedBreakdown,
+          panel: panelById[sid] || null,
+          bestWorst: bwById[sid] || {},
+          lastSignalDate: _lastSig,
+          metricsByScope: _metricsByScope,
+          defaultScope: _defaultScope,
+        }),
+        // Carry-overs the active-stack rewrite (Tasks 9/10) does NOT cover but
+        // the CANDIDATE-table renderer (_renderCandidates) still reads. The
+        // mapper already emits backtest_return_pct / backtest_max_dd_pct /
+        // backtest_regime_breakdown; it does NOT emit these two, so restore
+        // them (same unified→legacy fallback) to keep the candidate table's
+        // BT Sharpe + Backtest Trades columns + sort keys working.
+        backtest_sharpe:           unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
+        backtest_trade_count:      unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
+        backtest_return_pct:       unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
+        backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
+        // Non-metric carry-overs preserved for the staging UI (NOT backtest
+        // metrics): lifecycle timestamp + Saturday-brain staging fields that
+        // drive the candidate table's Approve flow + ⚠ data badge.
+        state_since:               rec.state_since || null,
         data_requirements_planned: sr.data_requirements_planned || null,
         staging_approved_at:       sr.staging_approved_at || null,
-        // Columns from data_requirements_planned that no collector/provider
-        // knows about — would fail the staging worker's source-validation
-        // step. Dashboard renders a ⚠ data badge on staging rows.
         unsupported_sources:       unsupportedByStrategyId[sid] || null,
       });
     }
-    // Orphans: strategy_ids with signals but no manifest entry
+    // Orphans: strategy_ids with signals but no manifest entry. statsRows
+    // (Q1 strategy_stats) is retained SOLELY to discover these — its metric
+    // columns are no longer read (every metric is now backtest-sourced).
+    // Orphans route through the same backtest mapper with a synthetic rec.
     for (const s of statsRows) {
       if (seen.has(s.strategy_id)) continue;
-      const sr = srById[s.strategy_id] || {};
-      const d1 = d1StrategyStats[s.strategy_id] || null;
+      const sid = s.strategy_id;
+      const sr  = srById[sid] || {};
+      const _orphanBreakdown = _decorateDeclared(
+        unifiedBacktest[sid]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
+        null,  // orphans have no manifest → no declared eligibility
+      );
       rows.push({
-        strategy_id:        s.strategy_id,
-        state:              'orphan',
-        is_stale:           false,
-        regime_active:      true,
-        active_in_regimes:  [],
-        eligible_regimes:   null,
-        current_regime:     currentRegime,
-        description:        '',
-        state_since:        null,
-        open_count:         s.open_count || 0,
-        closed_count:       s.closed_count || 0,
-        total_count:        s.total_count || 0,
-        wins:               s.wins || 0,
-        losses:             s.losses || 0,
-        win_rate:           s.win_rate,
-        avg_realized_pct:   s.avg_realized_pct,
-        avg_unrealized_pct: s.avg_unrealized_pct,
-        best_trade_pct:     s.best_trade_pct,
-        worst_trade_pct:    s.worst_trade_pct,
-        avg_days_held:      s.avg_days_held,
-        last_signal_date:   s.last_signal_date,
-        dominant_regime:    s.dominant_regime,
-        // Unified backtest (2026-05-14) is canonical; fall back to legacy
-        // strategy_registry columns for strategies not yet backfilled.
-        backtest_sharpe:           unifiedBacktest[s.strategy_id]?.sharpe           ?? sr.backtest_sharpe           ?? null,
-        backtest_return_pct:       unifiedBacktest[s.strategy_id]?.return_pct       ?? sr.backtest_return_pct       ?? null,
-        backtest_max_dd_pct:       unifiedBacktest[s.strategy_id]?.max_dd_pct       ?? sr.backtest_max_dd_pct       ?? null,
-        backtest_trade_count:      unifiedBacktest[s.strategy_id]?.trade_count      ?? sr.backtest_trade_count      ?? null,
-        backtest_regime_breakdown: _decorateDeclared(
-          unifiedBacktest[s.strategy_id]?.regime_breakdown ?? sr.backtest_regime_breakdown ?? null,
-          null,  // orphans have no manifest → no declared eligibility
-        ),
-        backtest_run_at:           unifiedBacktest[s.strategy_id]?.run_at           ?? null,
-        live_regime_breakdown:     liveRegimeBreakdown[s.strategy_id] || null,
-        live_days:           sr.live_days           ?? null,
-        live_sharpe:         sr.live_sharpe         ?? null,
-        live_return_pct:     sr.live_return_pct     ?? null,
-        d1_overperf:         d1 ? (d1.overperf  || 0) : 0,
-        d1_underperf:        d1 ? (d1.underperf || 0) : 0,
-        d1_expected:         d1 ? (d1.expected  || 0) : 0,
-        // OUE multiplier per regime, from the latest Sunday weight cron.
-        // Surfaced as the dashboard '# O/U/E' tooltip; the multiplier
-        // also feeds the live weights-by-regime engine.
-        oue_multipliers_by_regime: oueMultipliersByStrategy[sid] || oueMultipliersByStrategy[s.strategy_id] || null,
+        ...buildStrategyRow({
+          sid, rec: { state: 'orphan', metadata: {} },
+          isStale: false, regimeActive: true, activeRegimes: [], eligRaw: null,
+          currentRegime,
+          run: ubtRunById[sid] || {},
+          regimeBreakdown: _orphanBreakdown,
+          panel: panelById[sid] || null,
+          bestWorst: bwById[sid] || {},
+          lastSignalDate: lastSignalById[sid] || null,
+        }),
+        backtest_sharpe:      unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
+        backtest_trade_count: unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
+        backtest_return_pct:  unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
+        backtest_max_dd_pct:  unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
       });
     }
     res.json(rows);
@@ -2419,127 +2368,17 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Per-strategy rolling ARR curve.
-// ARR = Average Return Rate, the mean of `realized_pnl_pct` across closed
-// trades. "ARR over time" plots a trailing-N-day rolling mean so the
-// metric tracks how the strategy's per-trade economics shift across
-// regimes. The response also carries the regime per day so the chart
-// can paint the regime backdrop without a second fetch.
-//
-// Window default = 30d. The curve starts at the strategy's first close
-// date (or first regime sample, whichever later) and runs to today.
-// Days with no trades in the trailing window emit `rolling_arr_pct: null`
-// so the line breaks correctly across long quiet stretches.
-app.get('/api/strategies/:id/arr-curve', async (req, res) => {
-  const sid    = String(req.params.id || '');
-  const window = Math.min(Math.max(parseInt(req.query.window) || 30, 7), 365);
+// ── Precomputed backtest equity curve (vs SP500, regime-tagged) ──────────────
+// Returns strategy_backtest_panel.equity_curve JSONB for the expansion-panel
+// chart. Each element: { date, strat_equity, spx_equity, regime }.
+// Returns { rows: [] } for strategies without a panel row.
+app.get('/api/strategies/:id/backtest-curve', async (req, res) => {
+  const sid = String(req.params.id || '');
   if (!sid) return res.status(400).json({ error: 'strategy id required' });
   try {
-    // Pull every closed trade for the strategy ordered by close date.
-    // realized_pnl_pct is stored as a fraction (0.05 = 5%); we leave it
-    // as a fraction in the response and let the client multiply by 100
-    // for display, matching the convention used elsewhere.
-    const trades = (await dbQuery(`
-      SELECT closed_at::date AS d, realized_pnl_pct
-      FROM signal_pnl
-      WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
-        AND realized_pnl_pct IS NOT NULL
-      ORDER BY closed_at
-    `, [sid])).rows;
-    if (!trades.length) return res.json({ window_days: window, rows: [] });
-
-    // Daily position-flow counts: # signals opened (signal_date) and
-    // # signals closed (closed_at). Bucketed per day for the bar chart
-    // stacked under the ARR curve so the operator can see trade flow
-    // alongside per-trade economics.
-    const openedByDay = new Map();
-    const closedByDay = new Map();
-    const [openedRes, closedRes] = await Promise.all([
-      dbQuery(`SELECT signal_date::date AS d, COUNT(*)::int AS n
-                 FROM execution_signals
-                WHERE strategy_id = $1 AND signal_date IS NOT NULL
-                GROUP BY signal_date`, [sid]).catch(() => ({ rows: [] })),
-      dbQuery(`SELECT closed_at::date AS d, COUNT(*)::int AS n
-                 FROM signal_pnl
-                WHERE strategy_id = $1 AND status = 'closed' AND closed_at IS NOT NULL
-                GROUP BY closed_at`, [sid]).catch(() => ({ rows: [] })),
-    ]);
-    for (const row of openedRes.rows) {
-      openedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
-    }
-    for (const row of closedRes.rows) {
-      closedByDay.set(row.d.toISOString().slice(0, 10), parseInt(row.n) || 0);
-    }
-
-    // Bucket trades by close date, then sweep a rolling window across the
-    // calendar from first close → today.
-    const byDay = new Map();
-    for (const t of trades) {
-      const d = t.d.toISOString().slice(0, 10);
-      if (!byDay.has(d)) byDay.set(d, []);
-      byDay.get(d).push(parseFloat(t.realized_pnl_pct));
-    }
-    const startIso = trades[0].d.toISOString().slice(0, 10);
-    const endIso   = new Date().toISOString().slice(0, 10);
-
-    const regimeMap = new Map();
-    for (const r of await _loadRegimeParquet()) {
-      if (r.date >= startIso) regimeMap.set(r.date, r.regime || null);
-    }
-    // Daily JSON overrides win over parquet for the recent days.
-    const stateDir = require('path').join(__dirname, '../../../.agents/market-state');
-    if (fs.existsSync(stateDir)) {
-      for (const f of fs.readdirSync(stateDir)
-        .filter(f => /^regime_\d{4}-\d{2}-\d{2}\.json$/.test(f))) {
-        const d = f.slice(7, 17);
-        if (d < startIso) continue;
-        try {
-          const j = JSON.parse(fs.readFileSync(require('path').join(stateDir, f), 'utf8'));
-          if (j.state) regimeMap.set(d, j.state);
-        } catch (_) {}
-      }
-    }
-
-    // Iterate calendar days [startIso, endIso]. We accumulate an explicit
-    // window deque so the rolling mean is O(N) total rather than
-    // O(N*window).
-    const out  = [];
-    const deque = [];   // [{d, ret}]
-    let sum   = 0;
-    let lastRegime = null; // forward-fill carry: weekends + gap days
-                           // inherit the prior trading day's regime so
-                           // the ARR chart's regime backdrop paints
-                           // continuously rather than going blank
-                           // across non-trading days.
-    const start = new Date(startIso + 'T00:00:00Z');
-    const end   = new Date(endIso   + 'T00:00:00Z');
-    for (let cur = new Date(start); cur <= end; cur.setUTCDate(cur.getUTCDate() + 1)) {
-      const dIso = cur.toISOString().slice(0, 10);
-      // Push today's trades.
-      const todays = byDay.get(dIso);
-      if (todays) {
-        for (const v of todays) { deque.push({ d: dIso, ret: v }); sum += v; }
-      }
-      // Drop trades that fell out of the trailing window.
-      const cutoff = new Date(cur);
-      cutoff.setUTCDate(cutoff.getUTCDate() - window);
-      const cutoffIso = cutoff.toISOString().slice(0, 10);
-      while (deque.length && deque[0].d < cutoffIso) {
-        sum -= deque.shift().ret;
-      }
-      // Forward-fill regime: use today's reading if we have one, else
-      // carry forward the most recent prior reading.
-      if (regimeMap.has(dIso)) lastRegime = regimeMap.get(dIso);
-      out.push({
-        date:             dIso,
-        rolling_arr_pct:  deque.length ? (sum / deque.length) : null,
-        trade_count:      deque.length,
-        regime:           lastRegime,
-        opened:           openedByDay.get(dIso) || 0,
-        closed:           closedByDay.get(dIso) || 0,
-      });
-    }
-    res.json({ window_days: window, rows: out });
+    const r = (await dbQuery(
+      `SELECT equity_curve FROM strategy_backtest_panel WHERE strategy_id=$1`, [sid])).rows[0];
+    res.json({ rows: (r && r.equity_curve) ? r.equity_curve : [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -4241,9 +4080,22 @@ body.rs-chat-locked{overflow:hidden}
     <!-- Phase 2B — Mastermind proposals panel (collapsed if none pending) -->
     <div class="pf-section" id="rp-section" style="display:none">
       <div class="pf-section-header">
-        <span>📋 Pending Regime Proposals <span class="st-sub-label" id="rp-count">—</span></span>
-        <span class="st-sub-label">from MastermindJohn Saturday review</span>
+        <span>⚙️ Strategy Adjustments</span>
+        <span class="st-sub-label">backtest-applied stop/TP/max-hold changes + pending size/eligibility proposals</span>
       </div>
+      <div class="st-sub-label" style="margin:4px 0">Applied this week <span id="sa-applied-count">—</span></div>
+      <table id="sa-applied-table" style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:14px">
+        <thead><tr style="text-align:left;color:var(--muted);font-size:11px">
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Regime</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Stop →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Target →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">ΔSharpe</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Trades</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="st-sub-label" style="margin:4px 0">Pending proposals <span class="st-sub-label" id="rp-count">—</span></div>
       <table id="rp-table" style="border-collapse:collapse;width:100%;font-size:12px">
         <thead>
           <tr style="text-align:left;color:var(--muted);font-size:11px">
@@ -4280,12 +4132,13 @@ body.rs-chat-locked{overflow:hidden}
       </div>
       <div class="st-regime-filter" id="st-regime-filter">
         <span class="srf-label">View by Regime</span>
-        <button class="srf-btn active" data-regime="ALL"           onclick="_stSetRegimeFilter('ALL')">All</button>
+        <button class="srf-btn active" data-regime="ELIGIBLE"      onclick="_stSetRegimeFilter('ELIGIBLE')">Eligible</button>
+        <button class="srf-btn" data-regime="ALL"                  onclick="_stSetRegimeFilter('ALL')">All</button>
         <button class="srf-btn srf-LOW_VOL"       data-regime="LOW_VOL"       onclick="_stSetRegimeFilter('LOW_VOL')">Low Vol</button>
         <button class="srf-btn srf-TRANSITIONING" data-regime="TRANSITIONING" onclick="_stSetRegimeFilter('TRANSITIONING')">Transitioning</button>
         <button class="srf-btn srf-HIGH_VOL"      data-regime="HIGH_VOL"      onclick="_stSetRegimeFilter('HIGH_VOL')">High Vol</button>
         <button class="srf-btn srf-CRISIS"        data-regime="CRISIS"        onclick="_stSetRegimeFilter('CRISIS')">Crisis</button>
-        <span class="srf-hint" id="srf-hint"></span>
+        <span class="srf-hint" id="srf-hint">showing eligible-regimes blend (regimes the strategy is approved to trade)</span>
       </div>
       <div class="pf-section-body"><div id="st-active-wrap"><div class="empty">Loading...</div></div></div>
     </div>
@@ -8117,18 +7970,20 @@ async function _sharpeGatePut(regime, value, statEl) {
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals, driftResp] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp] = await Promise.all([
       _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
       _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
       _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
       _safeFetch('/api/data/usage',                  null, { label: 'data usage' }),
       _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
+      _safeFetch('/api/regime-proposals/applied?days=7', { applied: [] }, { label: 'applied adjustments' }),
     ]);
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
     _rpRender(proposals?.proposals || []);
+    _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
     // edits Mastermind's weekly prompt — research-page-only entry).
     _rdIndex(driftResp?.signals || []);   // index drift by (strategy, regime) for cell badges
@@ -8333,67 +8188,53 @@ function _stRenderDataUsage() {
 // four regimes as compact chips so the operator can see at a glance how
 // the strategy performs across the regime axis. Active regimes (declared
 // in active_in_regimes) get a blue accent; the current market regime
-// gets a small dot indicator. Cells without live trade data render as 'na'.
+// gets a small dot indicator. Cells without backtest trades render as 'na'.
 //
-// Source: live trades only — live_regime_breakdown[regime] = {trades,
-// arr, adr, act, win_rate}. arr is a fraction (0.05 = 5%).
+// Source: BACKTEST only — backtest_regime_breakdown[regime] = {sharpe,
+// trade_count, total_return_pct, hit_rate}. Shows backtest Sharpe per regime.
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
 function _regimeBreakdown(r) {
-  const breakdown = r.live_regime_breakdown || {};
-  // Eligibility source-of-truth = manifest.eligible_regimes (what
-  // regime_gate.is_eligible() actually enforces). Fall back to
-  // active_in_regimes from strategy_registry when manifest has no field
-  // (legacy strategies — gate treats those as eligible-everywhere).
+  const breakdown = r.backtest_regime_breakdown || {};
   const eligible = Array.isArray(r.eligible_regimes)
     ? r.eligible_regimes
     : (r.active_in_regimes && r.active_in_regimes.length ? r.active_in_regimes : _REGIME_AXIS);
-  const current   = r.current_regime || null;
-  const sid       = r.strategy_id;
-  const editable  = r.state === 'live';
+  const current  = r.current_regime || null;
+  const sid      = r.strategy_id;
+  const editable = r.state === 'live';
   const cells = _REGIME_AXIS.map(rg => {
     const isEligible = eligible.includes(rg);
     const b      = breakdown[rg];
-    const trades = b && b.trades ? parseInt(b.trades) : 0;
-    const arrPct = (b && b.arr != null) ? parseFloat(b.arr) * 100 : null;
+    const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
+    const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (!trades)        klass.push('st-rg-na');
     if (!isEligible)    klass.push('st-rg-ineligible');
     if (editable)       klass.push('st-rg-editable');
-    const valTxt = arrPct != null
-      ? (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%'
-      : '—';
-    const statsLine = !trades
-      ? 'no live trades'
-      : 'ARR ' + valTxt
-        + ' · ADR ' + (b.adr != null ? ((b.adr * 100 >= 0 ? '+' : '') + (b.adr * 100).toFixed(3) + '%') : '—')
-        + ' · ACT ' + (b.act != null ? b.act.toFixed(1) + 'd' : '—')
-        + ' · Win ' + (b.win_rate != null ? Math.round(b.win_rate * 100) + '%' : '—')
+    const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
+    // NOTE: the /api/strategies per-regime object emits the return field as
+    // total_return_pct (server.js ~1238), not return_pct as the plan's
+    // Step 3b snippet assumed — read the key the API actually surfaces so the
+    // tooltip's Ret segment renders instead of always showing a dash.
+    const retPct = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
+    const statsLine = !trades ? 'no backtest trades'
+      : 'Sharpe ' + valTxt
+        + ' · Ret ' + (retPct != null ? (retPct >= 0 ? '+' : '') + parseFloat(retPct).toFixed(1) + '%' : '—')
+        + ' · Win ' + (b.hit_rate != null ? Math.round(b.hit_rate * 100) + '%' : '—')
         + ' · ' + trades + ' trades';
     const eligLine = isEligible ? 'eligible' : 'NOT eligible';
     const editHint = editable ? ' · click to toggle' : '';
-    // Phase 2C drift badge — dot in top-left when drift signal present.
-    const driftSig = _rdDriftFor(sid, rg);
-    const driftBadge = driftSig && (driftSig.severity === 'WARN' || driftSig.severity === 'FAIL')
-      ? \`<span class="st-rg-drift" style="position:absolute;top:1px;left:2px;width:5px;height:5px;border-radius:50%;background:\${driftSig.severity === 'FAIL' ? '#f85149' : '#d29922'}"></span>\`
-      : '';
-    const driftTtl = driftSig
-      ? \` · drift=\${driftSig.severity} (\${driftSig.reason || ''})\`
-      : '';
-    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint + driftTtl;
-    const onclick = editable
-      ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\`
-      : '';
+    const ttl = rg + ' [' + eligLine + ']: ' + statsLine + editHint;
+    const onclick = editable ? \` onclick="_stToggleRegimeEligibility(event, '\${_escStr(sid)}', '\${rg}')"\` : '';
     return \`<span class="\${klass.join(' ')}" title="\${_escStr(ttl)}"\${onclick}>
-              \${driftBadge}
               <span class="st-rg-tag">\${rg}</span>
               <span class="st-rg-val">\${valTxt}</span>
             </span>\`;
   }).join('');
   const gridTitle = editable
-    ? 'Per-regime live ARR · click a regime to toggle eligibility'
-    : "Per-regime live ARR · operator toggle available only for state='live'";
+    ? 'Per-regime BACKTEST Sharpe · click a regime to toggle eligibility'
+    : "Per-regime BACKTEST Sharpe · operator toggle only for state='live'";
   return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
@@ -8466,26 +8307,29 @@ const _SUB_ORDER = { live: 0, stale: 1, waiting: 2 };
 // sort changes, polling refreshes, and approval-job updates so the
 // operator's selection isn't lost on every redraw.
 let _stExpandedSid = null;
-let _stArrChart    = null;   // active Chart.js instance for the ARR curve
-let _stFlowChart   = null;   // active Chart.js instance for the position-flow bars
-let _stArrCache    = {};     // sid → arr-curve payload (cached for the session)
+// Chart instances (_stEqChart / _stCprChart) are declared inline beside their
+// render functions below.
+let _stArrCache    = {};     // sid → backtest-curve payload (cached for the session)
 let _stArrFetching = {};     // sid → in-flight Promise (de-dupe concurrent expands)
-let _stRegimeFilter = 'ALL'; // 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
+let _stRegimeFilter = 'ELIGIBLE'; // 'ELIGIBLE' | 'ALL' | 'LOW_VOL' | 'TRANSITIONING' | 'HIGH_VOL' | 'CRISIS'
 
 function _stSetRegimeFilter(rg) {
   _stRegimeFilter = rg;
-  // Update tab visuals.
-  const filter = document.getElementById('st-regime-filter');
-  if (filter) {
-    for (const btn of filter.querySelectorAll('.srf-btn')) {
-      btn.classList.toggle('active', btn.dataset.regime === rg);
-    }
+  // Toggle the active button class.
+  const bar = document.getElementById('st-regime-filter');
+  if (bar) {
+    bar.querySelectorAll('.srf-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.regime === rg);
+    });
     const hint = document.getElementById('srf-hint');
-    if (hint) hint.textContent = rg === 'ALL'
-      ? ''
-      : 'Showing live ARR / ADR / ACT / Win for ' + rg + ' trades only';
+    if (hint) {
+      hint.textContent = rg === 'ALL'
+        ? 'showing all-regime backtest stats'
+        : rg === 'ELIGIBLE'
+          ? 'showing eligible-regimes blend (regimes the strategy is approved to trade)'
+          : 'showing ' + rg + ' backtest stats';
+    }
   }
-  // Re-render the active stack with swapped metrics.
   _renderActiveStack(strategiesData.filter(_inActiveStack));
 }
 
@@ -8524,21 +8368,17 @@ function _rpRender(proposals) {
   const tbody = document.querySelector('#rp-table tbody');
   const countEl = document.getElementById('rp-count');
   if (!section || !tbody) return;
-  if (!proposals.length) {
-    section.style.display = 'none';
-    return;
-  }
   section.style.display = '';
-  countEl.textContent = '(' + proposals.length + ' awaiting decision)';
+  if (countEl) countEl.textContent = proposals.length ? '(' + proposals.length + ' awaiting decision)' : '(none)';
   tbody.innerHTML = '';
   for (const p of proposals) {
     const tr = document.createElement('tr');
+    // Pending proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
+    // max_hold are decided by the backtest-coupling step, not approved here, so
+    // they are no longer rendered (the columns would always be empty).
     const proposedBits = [];
     if (p.proposed_eligible !== null && p.proposed_eligible !== undefined) proposedBits.push('elig=' + p.proposed_eligible);
     if (p.proposed_size_scalar !== null) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
-    if (p.proposed_stop_pct !== null) proposedBits.push('stop=' + Number(p.proposed_stop_pct).toFixed(3));
-    if (p.proposed_target_pct !== null) proposedBits.push('target=' + Number(p.proposed_target_pct).toFixed(3));
-    if (p.proposed_max_hold_days !== null) proposedBits.push('hold=' + p.proposed_max_hold_days + 'd');
     const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '?';
     tr.innerHTML =
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + p.strategy_id + '</td>' +
@@ -8547,87 +8387,40 @@ function _rpRender(proposals) {
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
-        (_rpProposalHasPolicyFields(p)
-          ? '<button class="rp-pathmc-btn" data-id="' + p.id + '" style="padding:3px 8px;font-size:11px;background:#555;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Path-MC</button>'
-          : '') +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
       '</td>';
     tbody.appendChild(tr);
-    // Stash proposal data on Path-MC button if present
-    const pathBtn = tr.querySelector('.rp-pathmc-btn');
-    if (pathBtn) pathBtn._proposalData = p;
   }
   // Wire buttons
   for (const btn of tbody.querySelectorAll('.rp-btn')) {
     btn.onclick = () => _rpDecide(btn.dataset.id, btn.dataset.action);
   }
-  for (const btn of tbody.querySelectorAll('.rp-pathmc-btn')) {
-    btn.onclick = () => _rpRunPathMC(btn.dataset.id, btn);
-  }
 }
 
-// Phase 2E — inline path-MC button on proposal rows
-function _rpProposalHasPolicyFields(p) {
-  return p.proposed_stop_pct != null || p.proposed_target_pct != null || p.proposed_max_hold_days != null;
-}
-
-async function _rpRunPathMC(id, btn) {
-  const row = btn.closest('tr');
-  if (!row) return;
-  const p = btn._proposalData;
-  if (!p) return;
-  btn.disabled = true; btn.textContent = '…';
-  // Surface a placeholder cell for the result if not already present
-  let outRow = row.nextElementSibling;
-  if (!outRow || !outRow.classList.contains('rp-mc-out-' + id)) {
-    outRow = document.createElement('tr');
-    outRow.className = 'rp-mc-out-' + id;
-    outRow.innerHTML = '<td colspan="6" class="rp-mc-cell" style="padding:6px 12px;background:var(--bg2,#fafafa);border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">Running path-MC…</td>';
-    row.parentNode.insertBefore(outRow, row.nextSibling);
+function _saRenderApplied(applied) {
+  const tbody = document.querySelector('#sa-applied-table tbody');
+  const countEl = document.getElementById('sa-applied-count');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  if (countEl) countEl.textContent = '(' + applied.length + ')';
+  if (!applied.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No stop/TP changes applied in the last 7 days.</td></tr>';
+    return;
   }
-  const out = outRow.querySelector('.rp-mc-cell');
-  const body = {
-    current_size:           Number(p.current_size_scalar ?? 1.0),
-    proposed_size:          Number(p.proposed_size_scalar ?? p.current_size_scalar ?? 1.0),
-    proposed_stop_pct:      Number(p.proposed_stop_pct ?? 0.05),
-    proposed_target_pct:    Number(p.proposed_target_pct ?? 0.10),
-    proposed_max_hold_days: Number(p.proposed_max_hold_days ?? 5),
-    n_iter: 500, seed: 42, proposal_id: Number(p.id),
-  };
-  try {
-    const res = await fetch('/api/regime-mc-intraday/' + encodeURIComponent(p.strategy_id) + '/' + encodeURIComponent(p.regime_state), {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-    });
-    const j = await res.json();
-    if (!res.ok || j.status !== 'OK') {
-      out.textContent = 'Path-MC: ' + (j.note || j.error || ('status=' + (j.status || res.status)));
-      btn.disabled = false; btn.textContent = 'Path-MC';
-      return;
-    }
-    const fmt = (v, d=2) => (v == null ? '—' : Number(v).toFixed(d));
-    const pct = (v) => (v == null ? '—' : (Number(v) * 100).toFixed(1) + '%');
-    const diff = j.linear_mc_diff || {};
-    const sharpeDelta = diff.sharpe_p50_delta;
-    const ddDelta = diff.max_dd_p95_delta;
-    const diffBadge = (sharpeDelta != null && Math.abs(sharpeDelta) > 0.3)
-      ? ' <span style="background:#a04040;color:white;padding:1px 5px;border-radius:3px;font-size:10px">size assumption matters</span>'
-      : '';
-    out.innerHTML =
-      '<b>Path-MC</b> (n=' + j.n_bootstrap_iter + ', source=' + j.path_source + ', trades=' + j.n_trades_sampled + ')' + diffBadge +
-      ' &nbsp; Sharpe[' + fmt(j.sharpe_p05) + ', ' + fmt(j.sharpe_p50) + ', ' + fmt(j.sharpe_p95) + ']' +
-      ' &nbsp; MaxDD[' + pct(j.max_dd_p05) + ', ' + pct(j.max_dd_p50) + ', ' + pct(j.max_dd_p95) + ']' +
-      ' &nbsp; stop=' + pct(j.stop_hit_rate) +
-      ' · target=' + pct(j.target_hit_rate) +
-      ' · max-hold=' + pct(j.max_hold_hit_rate) +
-      (sharpeDelta != null
-         ? '<br><span style="color:var(--muted)">vs linear MC: Δsharpe_p50=' + fmt(sharpeDelta) + (ddDelta != null ? ' · Δmax_dd_p95=' + pct(ddDelta) : '') + '</span>'
-         : '');
-    btn.textContent = 'Re-run';
-    btn.disabled = false;
-  } catch (e) {
-    out.textContent = 'Path-MC failed: ' + e.message;
-    btn.disabled = false; btn.textContent = 'Path-MC';
+  const fmt = (v) => (v == null ? '—' : Number(v).toFixed(3));
+  for (const a of applied) {
+    const d = (a.bt_sharpe_after != null && a.bt_sharpe_before != null)
+      ? (a.bt_sharpe_after - a.bt_sharpe_before) : null;
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + a.strategy_id + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + a.regime_state + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.stop_before) + ' → ' + fmt(a.stop_after) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.target_before) + ' → ' + fmt(a.target_after) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right">' + (a.bt_n_trades != null ? a.bt_n_trades : '—') + '</td>';
+    tbody.appendChild(tr);
   }
 }
 
@@ -8720,70 +8513,55 @@ async function _stToggleRegimeEligibility(event, sid, regime) {
   }
 }
 function _stCloseExpand() {
-  if (_stArrChart)  { try { _stArrChart.destroy();  } catch (_) {} _stArrChart  = null; }
-  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
+  if (_stEqChart)  { try { _stEqChart.destroy();  } catch (_) {} _stEqChart  = null; }
+  if (_stCprChart) { try { _stCprChart.destroy(); } catch (_) {} _stCprChart = null; }
   _stExpandedSid = null;
   _renderActiveStack(strategiesData.filter(_inActiveStack));
 }
 
 function _renderActiveStack(rows) {
   const el = document.getElementById('st-active-wrap');
+  // Regime filter: scopes the headline metric columns to ALL / ELIGIBLE / a
+  // single regime via each row's metrics_by_scope. Show the control.
+  const _rf = document.getElementById('st-regime-filter');
+  if (_rf) _rf.style.display = '';
   if (!rows.length) {
     el.innerHTML = '<div class="empty">No strategies in the Active Stack.</div>';
     return;
   }
   // Compute derived columns for sorting.
-  //   d1_total         = O+U+E (click count on # O/U/E)
+  //   _oue_total       = O+U+E (sort key on # O/U/E)
   //   _active_rank     = Waiting(0) < Stale(1) < Live(2) — so ascending
   //                       surfaces most-activated strategies last;
   //                       descending surfaces LIVE rows first.
-  // ADR (Average Daily Return) = ARR / ACT, the natural decomposition of
-  // per-trade average return into a daily rate using average closing time.
-  // Filled for any strategy with closed trades. Annualization was rejected
-  // because regime-gated strategies activate with variable density across
-  // years — keeping the daily mean keeps the metric comparable.
   //
-  // When the regime filter is set to a specific regime, the row's ARR /
-  // ADR / ACT / Win % / Closed columns swap to that regime's values from
-  // live_regime_breakdown so the operator can see how each strategy
-  // performs under one regime at a time. 'ALL' uses the cross-regime
-  // aggregates already on the row.
-  const filterRg = _stRegimeFilter && _stRegimeFilter !== 'ALL' ? _stRegimeFilter : null;
+  // All per-row metrics (sharpe / effective_sharpe / closed_count / win_rate /
+  // arr_pct / adr_pct / act_days) now arrive backtest-sourced straight from
+  // the /api/strategies payload — no live recompute. The only derived sort
+  // keys are _oue_total (sum of the backtest OUE counts) and _active_rank
+  // (Waiting<Stale<Live, drives the Status column sort).
+  // Resolve which metric scope to display (regime filter). Fall back to the
+  // row's own default_scope, then to ALL, then to the legacy top-level fields.
+  const _scope = _stRegimeFilter;
+  const _pickScope = (r) => {
+    const mbs = r.metrics_by_scope;
+    if (!mbs) return null;
+    return mbs[_scope] || mbs[r.default_scope] || mbs.ALL || null;
+  };
   const enriched = rows.map(r => {
-    let avgRet, actDays, winRate, closedCount;
-    if (filterRg) {
-      const b = (r.live_regime_breakdown || {})[filterRg];
-      avgRet      = b && b.arr      != null ? parseFloat(b.arr)      : null;
-      actDays     = b && b.act      != null ? parseFloat(b.act)      : null;
-      winRate     = b && b.win_rate != null ? parseFloat(b.win_rate) : null;
-      closedCount = b && b.trades   != null ? parseInt(b.trades)     : 0;
-    } else {
-      avgRet      = r.avg_realized_pct != null ? parseFloat(r.avg_realized_pct) : null;
-      actDays     = r.avg_days_held    != null ? parseFloat(r.avg_days_held)    : null;
-      winRate     = r.win_rate         != null ? parseFloat(r.win_rate)         : null;
-      closedCount = r.closed_count     != null ? parseInt(r.closed_count)       : 0;
-    }
-    const arrPct = avgRet != null ? avgRet * 100 : null;        // per-trade %
-    const adrPct = (avgRet != null && actDays != null && actDays > 0)
-                   ? (avgRet * 100 / actDays) : null;            // per-day %
-    // FWD ER (= ARR × per-regime OUE multiplier) removed 2026-05-18.
-    // The multiplier defaults to 1.0 until the OUE sample threshold is
-    // hit (≥30 closes / ≥5 outliers per regime), which most strategies
-    // never reach, so FWD ER was always == ARR for the typical row —
-    // a redundant column. The OUE multiplier itself is still computed
-    // and surfaced via the # O/U/E column + per-row tooltip.
-    const mults = r.oue_multipliers_by_regime || {};
-    const mult_for = filterRg || r.current_regime || 'TRANSITIONING';
-    const oueMult = mults[mult_for] != null ? mults[mult_for] : 1.0;
-    return Object.assign({}, r, {
-      d1_total:        (r.d1_overperf || 0) + (r.d1_underperf || 0) + (r.d1_expected || 0),
-      _active_rank:    _activeRankFor(r),
-      _arr_pct:        arrPct,
-      _adr_pct:        adrPct,
-      _act_days:       actDays,
-      _filtered_win:   winRate,
-      _filtered_closed: closedCount,
-      _oue_mult:       oueMult,
+    const m = _pickScope(r);
+    const overlay = m ? {
+      sharpe:           m.sharpe,
+      effective_sharpe: m.effective_sharpe,
+      closed_count:     m.closed_count,
+      win_rate:         m.win_rate,
+      arr_pct:          m.arr_pct,
+      adr_pct:          m.adr_pct,
+      act_days:         m.act_days,
+    } : {};
+    return Object.assign({}, r, overlay, {
+      _oue_total:   (r.oue_over || 0) + (r.oue_under || 0) + (r.oue_expected || 0),
+      _active_rank: _activeRankFor(r),
     });
   });
   // Default sort: status sub-group then strategy_id. Operator clicks override.
@@ -8806,23 +8584,23 @@ function _renderActiveStack(rows) {
   // Persist for the expansion-panel renderer to read without re-prop.
   _stActiveSnapshot = activeStrategiesById;
   const expandedSid = _stExpandedSid;
-  // Header tag on metric columns when the regime filter is non-ALL —
-  // makes it obvious which subset of trades the numbers describe.
-  const filterTag = filterRg
-    ? \` <span class="srf-col-tag srf-col-tag-\${filterRg}" title="\${filterRg} only">\${_REGIME_TAGS[filterRg]}</span>\`
-    : '';
-  el.innerHTML = \`<table class="db-table st-active-table" style="min-width:1180px">
+  const _scopeLabel = _scope === 'ALL' ? 'All regimes'
+    : _scope === 'ELIGIBLE' ? 'Eligible regimes'
+    : _scope + ' only';
+  el.innerHTML = \`<div class="st-scope-caption" style="font-size:9.5px;color:var(--dim);padding:2px 4px 6px;letter-spacing:.04em">Metrics scope: <b style="color:var(--muted)">\${_scopeLabel}</b> — Sharpe / Eff / Closed / Win / ARR / ADR / ACT reflect this regime selection. "By Regime" always shows all four.</div>
+  <table class="db-table st-active-table" style="min-width:1180px">
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="_active_rank" data-sort-type="num" title="Sort: Waiting → Stale → Live (ascending)">Status</th>
-      <th title="Per-regime LIVE ARR (mean realized P&amp;L per closed trade). Small dot = current market regime, blue border = declared in active_in_regimes">By Regime</th>
-      <th class="num" data-sort-key="open_count" data-sort-type="num">Open</th>
-      <th class="num" data-sort-key="_filtered_closed" data-sort-type="num">Closed\${filterTag}</th>
-      <th class="num" data-sort-key="_filtered_win" data-sort-type="num">Win %\${filterTag}</th>
-      <th class="num" data-sort-key="_arr_pct" data-sort-type="num" title="Average Return Rate: mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}. Pure realized fact — no OUE adjustment.">ARR&nbsp;%\${filterTag}</th>
-      <th class="num" data-sort-key="_adr_pct" data-sort-type="num" title="Average Daily Return: ARR / ACT. Per-trade average return broken down into a daily rate.\${filterRg ? ' '+filterRg+' trades only.' : ''}">ADR&nbsp;%\${filterTag}</th>
-      <th class="num" data-sort-key="_act_days" data-sort-type="num" title="Average Closing Time: mean days_held across closed trades\${filterRg ? ' under '+filterRg : ''}.">ACT\${filterTag}</th>
-      <th class="num" data-sort-key="d1_total" data-sort-type="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ. Invariant: O + U + E = total closed trades.">#&nbsp;O/U/E</th>
+      <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
+      <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
+      <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
+      <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sharpe / sqrt(avg holding days)">Eff.Sharpe</th>
+      <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
+      <th class="num" data-sort-key="win_rate" data-sort-type="num" title="Backtest hit rate">Win&nbsp;%</th>
+      <th class="num" data-sort-key="arr_pct" data-sort-type="num" title="Backtest mean trade return %">ARR&nbsp;%</th>
+      <th class="num" data-sort-key="adr_pct" data-sort-type="num" title="Backtest ARR / ACT">ADR&nbsp;%</th>
+      <th class="num" data-sort-key="act_days" data-sort-type="num" title="Backtest avg holding days">ACT</th>
+      <th class="num" data-sort-key="_oue_total" data-sort-type="num" title="BACKTEST OUE (GBM σ): O=realized>expectation by ≥2σ, U=below, E=within. O+U+E = backtest trades.">#&nbsp;O/U/E</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
       <th>Actions</th>
     </tr>
@@ -8832,21 +8610,22 @@ function _renderActiveStack(rows) {
       const title = sub === 'waiting'
         ? 'Regime ' + (r.current_regime || '?') + ' not in active_in_regimes: ' + ((r.active_in_regimes || []).join(', ') || '?')
         : (sub === 'stale' ? 'Regime active but no signal in 7+ days' : 'Trading actively');
-      const arr = r._arr_pct;
-      const adr = r._adr_pct;
-      const act = r._act_days;
-      const o = r.d1_overperf || 0, u = r.d1_underperf || 0, e = r.d1_expected || 0;
-      const oueEmpty = o === 0 && u === 0 && e === 0;
+      const arr = r.arr_pct, adr = r.adr_pct, act = r.act_days;
+      const o = r.oue_over || 0, u = r.oue_under || 0, e = r.oue_expected || 0;
+      const oueEmpty = (o + u + e) === 0;
       const ourCell = oueEmpty
         ? '<span style="color:var(--dim)">—</span>'
         : \`<span style="color:#4ade80">\${o}</span>/<span style="color:#f87171">\${u}</span>/<span style="color:#94a3b8">\${e}</span>\`;
+      const sh = r.sharpe, esh = r.effective_sharpe;
+      const closedTxt = r.closed_count || 0;
+      const winTxt = r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—';
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
-          <td colspan="11">
+          <td colspan="13">
             <div class="st-expand-shell" id="st-expand-shell-\${_escStr(r.strategy_id)}">
               <div class="st-expand-pad" id="st-expand-pad-\${_escStr(r.strategy_id)}">
                 <div class="st-expand-head">
@@ -8862,25 +8641,20 @@ function _renderActiveStack(rows) {
             </div>
           </td>
         </tr>\` : '';
-      // Closed/Win cells respect the regime filter so the operator sees the
-      // trade count + win rate that actually feeds the displayed ARR/ADR.
-      const closedTxt = r._filtered_closed != null ? r._filtered_closed : (r.closed_count || 0);
-      const winTxt    = r._filtered_win != null ? Math.round(r._filtered_win * 100) + '%'
-                       : (r.win_rate != null ? Math.round(parseFloat(r.win_rate) * 100) + '%' : '—');
-      const dimWhenFiltered = filterRg && (closedTxt === 0) ? 'style="color:var(--dim)"' : '';
       return \`<tr class="st-row-expandable \${isOpen ? 'st-row-open' : ''}" data-sid="\${_escStr(r.strategy_id)}">
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
           <span class="st-chevron">▶</span>\${r.strategy_id}
         </td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
         <td>\${_regimeBreakdown(r)}</td>
-        <td class="num">\${r.open_count || 0}</td>
-        <td class="num" \${dimWhenFiltered}>\${closedTxt}</td>
-        <td class="num" \${dimWhenFiltered}>\${winTxt}</td>
-        <td class="num \${pnlCls(arr)}" title="Mean realized P&amp;L % across closed trades\${filterRg ? ' under '+filterRg : ''}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
+        <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
+        <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
+        <td class="num">\${closedTxt}</td>
+        <td class="num">\${winTxt}</td>
+        <td class="num \${pnlCls(arr)}">\${arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—'}</td>
         <td class="num \${pnlCls(adr)}" title="\${adrTitle}">\${adr != null ? ((adr >= 0 ? '+' : '') + adr.toFixed(2) + '%') : '—'}</td>
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
-        <td class="num" title="Per-closed-trade OUE classification (lifetime). O = realized > expectation by ≥1σ; U = realized < expectation by ≥1σ; E = within ±1σ.">\${ourCell}</td>
+        <td class="num" title="BACKTEST OUE (GBM σ): O=realized>expectation by ≥2σ, U=below, E=within.">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
         <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
       </tr>\${expandRow}\`;
@@ -8897,13 +8671,11 @@ let _stActiveSnapshot = {};
 
 // Paint the expansion panel for a strategy. The panel content (regime
 // stats + similar-strategies heatmap) renders synchronously so it's
-// visible immediately. The ARR chart waits for two things in parallel:
-//   1. /api/strategies/:id/arr-curve fetch (cached after first call)
-//   2. The shell's max-height transition to *complete* — so Chart.js
-//      reads the final container height when it sizes the canvas.
-// Without #2 the canvas measured an in-flight transition height and
-// shrank on every re-render — the "moving downwards / disappearing"
-// glitch the operator reported.
+// visible immediately. The equity-vs-SP500 chart then fills in after the
+// /api/strategies/:id/backtest-curve fetch (cached after first call). The
+// canvas wrapper has a fixed CSS height (.st-arr-canvas-wrap) so Chart.js
+// sizes correctly even while the shell's max-height transition runs — no
+// need to wait for transitionend.
 async function _stPaintExpand(sid) {
   const shell = document.getElementById('st-expand-shell-' + sid);
   const body  = document.getElementById('st-expand-body-' + sid);
@@ -8915,13 +8687,14 @@ async function _stPaintExpand(sid) {
   const r = (strategiesData || []).find(x => x.strategy_id === sid);
   if (!r) return;
 
-  // ── Live per-regime stats grid (was backtest, now live trades) ─────────
-  const breakdown = r.live_regime_breakdown || {};
+  // ── Backtest per-regime stats grid (Sharpe · Return · Win · Trades) ─────
+  const breakdown = r.backtest_regime_breakdown || {};
   const active    = new Set(r.active_in_regimes || []);
   const current   = r.current_regime || null;
   const cellsHtml = _REGIME_AXIS.map(rg => {
     const b = breakdown[rg];
-    const has = b && (b.trades || 0) > 0;
+    const trades = (b && b.trade_count != null) ? parseInt(b.trade_count) : 0;
+    const has = trades > 0;
     const tagBg = ({
       LOW_VOL:       'rgba(63,185,80,0.18)',
       TRANSITIONING: 'rgba(210,153,34,0.22)',
@@ -8934,26 +8707,27 @@ async function _stPaintExpand(sid) {
                + '<span>' + rg + '</span><span>' + star + dot + '</span></div>';
     if (!has) {
       const why = active.has(rg)
-        ? 'no closed trades under this regime yet'
+        ? 'no backtest trades under this regime yet'
         : 'not in active_in_regimes';
       return '<div class="st-rs-cell">' + head + '<div class="st-rs-na">' + why + '</div></div>';
     }
-    const arrPct = b.arr * 100;
-    const adrPct = b.adr != null ? b.adr * 100 : null;
-    const winPct = b.win_rate != null ? Math.round(b.win_rate * 100) : null;
+    // API emits the return field as total_return_pct (server.js ~1238), not
+    // return_pct — read the key the API surfaces, falling back for old rows.
+    const retSrc = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
+    const retPct = retSrc != null ? parseFloat(retSrc) : null;
+    const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
+    const winPct = b.hit_rate != null ? Math.round(b.hit_rate * 100) : null;
     const inner = ''
-      + '<div class="st-rs-row"><span>ARR</span><b style="color:' + (arrPct >= 0 ? 'var(--green)' : 'var(--red)') + '">'
-      +   (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%</b></div>'
-      + '<div class="st-rs-row"><span>ADR</span><b' + (adrPct != null ? ' style="color:' + (adrPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
-      +   (adrPct != null ? ((adrPct >= 0 ? '+' : '') + adrPct.toFixed(3) + '%') : '—') + '</b></div>'
-      + '<div class="st-rs-row"><span>ACT</span><b>' + (b.act != null ? b.act.toFixed(1) + 'd' : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Sharpe</span><b>' + (sharpe != null ? sharpe.toFixed(2) : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Return</span><b' + (retPct != null ? ' style="color:' + (retPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
+      +   (retPct != null ? ((retPct >= 0 ? '+' : '') + retPct.toFixed(1) + '%') : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Win</span><b>' + (winPct != null ? winPct + '%' : '—') + '</b></div>'
-      + '<div class="st-rs-row"><span>Trades</span><b>' + (b.trades || 0) + '</b></div>';
+      + '<div class="st-rs-row"><span>Trades</span><b>' + trades + '</b></div>';
     return '<div class="st-rs-cell">' + head + inner + '</div>';
   }).join('');
 
   // ── Similar strategies (overlap on at least one regime) ────────────────
-  // Heatmap cell shows live ARR % for that regime — directly comparable
+  // Heatmap cell shows backtest Sharpe for that regime — directly comparable
   // to the focused strategy's per-regime cells above.
   const myRegimes = new Set(r.active_in_regimes || []);
   const similar = Object.values(_stActiveSnapshot)
@@ -8963,12 +8737,13 @@ async function _stPaintExpand(sid) {
     .slice(0, 12);
   const similarHtml = similar.length ? similar.map(o => {
     const cells = _REGIME_AXIS.map(rg => {
-      const b = (o.live_regime_breakdown || {})[rg];
-      if (!b || !b.trades) return '<span class="st-sm-cell empty" title="' + rg + ': no live trades">—</span>';
-      const arrPct = b.arr != null ? b.arr * 100 : null;
-      const cls = arrPct == null ? 'empty' : (arrPct > 0 ? 'pos' : arrPct < 0 ? 'neg' : '');
-      const txt = arrPct == null ? '—' : (arrPct >= 0 ? '+' : '') + arrPct.toFixed(2) + '%';
-      const ttl = rg + ': ARR ' + txt + ' · ' + b.trades + ' trades';
+      const b = (o.backtest_regime_breakdown || {})[rg];
+      const bt = (b && b.trade_count != null) ? parseInt(b.trade_count) : 0;
+      if (!b || !bt) return '<span class="st-sm-cell empty" title="' + rg + ': no backtest trades">—</span>';
+      const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
+      const cls = sharpe == null ? 'empty' : (sharpe > 0 ? 'pos' : sharpe < 0 ? 'neg' : '');
+      const txt = sharpe == null ? '—' : sharpe.toFixed(2);
+      const ttl = rg + ': Sharpe ' + txt + ' · ' + bt + ' trades';
       return '<span class="st-sm-cell ' + cls + '" title="' + _escStr(ttl) + '">' + txt + '</span>';
     }).join('');
     return '<div class="st-similar-row" title="Open ' + o.strategy_id + '">'
@@ -8982,9 +8757,9 @@ async function _stPaintExpand(sid) {
   body.innerHTML = \`
     <div class="st-expand-grid">
       <div class="st-expand-section">
-        <div class="st-expand-section-title"><span>Live Trades by Regime</span><span style="color:var(--dim);font-size:9px">ARR · ADR · ACT · Win · Trades</span></div>
+        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Return · Win · Trades</span></div>
         <div class="st-regime-stats">\${cellsHtml}</div>
-        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">live ARR % · share ≥1 regime · click to open</span></div>
+        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">backtest Sharpe · share ≥1 regime · click to open</span></div>
         <div class="st-similar">
           <div class="st-similar-row" style="background:transparent">
             <span class="st-sm-name" style="color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em">Strategy</span>
@@ -8994,24 +8769,23 @@ async function _stPaintExpand(sid) {
         </div>
       </div>
       <div class="st-expand-section st-arr-wrap">
-        <div class="st-expand-section-title"><span>ARR over time</span><span class="st-arr-window" style="color:var(--dim);font-size:9px">30-day rolling</span></div>
-        <div class="st-arr-meta" id="st-arr-meta-\${sid}"><span style="color:var(--dim)">Loading…</span></div>
-        <div class="st-arr-canvas-wrap"><canvas id="st-arr-chart-\${sid}"></canvas></div>
+        <div class="st-expand-section-title"><span>Backtest equity vs SP500</span><span style="color:var(--dim);font-size:9px">regime-shaded</span></div>
+        <div class="st-arr-canvas-wrap"><canvas id="st-eq-chart-\${sid}"></canvas></div>
         <div class="st-flow-row">
-          <div class="st-flow-meta" id="st-flow-meta-\${sid}"><span style="color:var(--dim);font-size:9.5px;letter-spacing:.04em">Positions opened / closed per day</span><span></span></div>
-          <div class="st-flow-canvas-wrap"><canvas id="st-flow-chart-\${sid}"></canvas></div>
+          <div class="st-flow-meta"><span style="color:var(--dim);font-size:9.5px">Backtest positions closed per regime</span><span></span></div>
+          <div class="st-flow-canvas-wrap"><canvas id="st-cpr-chart-\${sid}"></canvas></div>
         </div>
       </div>
     </div>\`;
 
-  // Fetch (or read cached) ARR curve. The canvas wrapper has fixed CSS
-  // height (.st-arr-canvas-wrap) so Chart.js can size correctly even
-  // while the shell's max-height transition is still running — no need
+  // Fetch (or read cached) backtest equity curve. The canvas wrapper has
+  // fixed CSS height (.st-arr-canvas-wrap) so Chart.js can size correctly
+  // even while the shell's max-height transition is still running — no need
   // to wait for transitionend.
   let payload = _stArrCache[sid];
   if (!payload) {
     if (!_stArrFetching[sid]) {
-      _stArrFetching[sid] = fetch('/api/strategies/' + encodeURIComponent(sid) + '/arr-curve?window=30')
+      _stArrFetching[sid] = fetch('/api/strategies/' + encodeURIComponent(sid) + '/backtest-curve')
         .then(r => r.ok ? r.json() : { rows: [] })
         .catch(() => ({ rows: [] }));
     }
@@ -9021,190 +8795,91 @@ async function _stPaintExpand(sid) {
   }
   // If the user closed or jumped to another row in the interim, bail out.
   if (_stExpandedSid !== sid) return;
-  _stRenderArrChart(sid, payload);
-  _stRenderFlowChart(sid, payload);
+  _stRenderEquityChart(sid, payload);
+  _stRenderClosedPerRegimeChart(sid, r);   // r.backtest_regime_breakdown
 }
 
-function _stRenderArrChart(sid, payload) {
-  const canvas = document.getElementById('st-arr-chart-' + sid);
-  const meta   = document.getElementById('st-arr-meta-' + sid);
+// Backtest equity-vs-SP500 line chart. Two datasets (strategy solid-blue
+// fill + SP500 dashed grey) over the precomputed backtest equity curve, with
+// the regimeBands plugin painting a per-point regime backdrop. Y-axis is
+// formatted as a growth multiple (Nx).
+let _stEqChart = null;
+function _stRenderEquityChart(sid, payload) {
+  const canvas = document.getElementById('st-eq-chart-' + sid);
   if (!canvas) return;
-  if (_stArrChart) { try { _stArrChart.destroy(); } catch (_) {} _stArrChart = null; }
+  if (_stEqChart) { try { _stEqChart.destroy(); } catch (_) {} _stEqChart = null; }
   const rows = (payload && payload.rows) || [];
-  if (!rows.length) {
-    if (meta) meta.innerHTML = '<span style="color:var(--dim)">No closed trades yet — ARR curve will fill in once trades close.</span>';
-    const wrap = canvas.parentElement;
-    if (wrap) wrap.style.display = 'none';
-    return;
-  }
   const wrap = canvas.parentElement;
+  if (!rows.length) { if (wrap) wrap.style.display = 'none'; return; }
   if (wrap) wrap.style.display = '';
   const labels = rows.map(r => r.date);
-  const values = rows.map(r => r.rolling_arr_pct != null ? r.rolling_arr_pct * 100 : null);
+  const strat  = rows.map(r => r.strat_equity);
+  const spx    = rows.map(r => r.spx_equity);
   const regimeMap = {};
   for (const r of rows) if (r.regime) regimeMap[r.date] = r.regime;
-  const last  = [...values].reverse().find(v => v != null);
-  const first = values.find(v => v != null);
-  if (meta) {
-    const lastTxt  = last  != null ? (last  >= 0 ? '+' : '') + last.toFixed(3) + '%' : '—';
-    const firstTxt = first != null ? (first >= 0 ? '+' : '') + first.toFixed(3) + '%' : '—';
-    meta.innerHTML = '<span>' + (payload.window_days || 30) + 'd rolling mean of realized P&amp;L per closed trade</span>'
-                   + '<span>start <b style="color:var(--text)">' + firstTxt + '</b> · latest <b style="color:var(--text)">' + lastTxt + '</b></span>';
-  }
-  const fmt$ = v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-  _stArrChart = new Chart(canvas.getContext('2d'), {
+  _stEqChart = new Chart(canvas.getContext('2d'), {
     type: 'line',
-    data: { labels, datasets: [{
-      data: values,
-      borderColor: '#58a6ff',
-      backgroundColor: 'rgba(88,166,255,0.10)',
-      borderWidth: 1.5,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.15,
-      spanGaps: false,
-    }]},
+    data: { labels, datasets: [
+      { label:'strategy', data:strat, borderColor:'#58a6ff', backgroundColor:'rgba(88,166,255,0.10)',
+        borderWidth:1.6, pointRadius:0, fill:true, tension:0.15 },
+      { label:'SP500', data:spx, borderColor:'#8b949e', borderWidth:1.2, pointRadius:0,
+        borderDash:[4,3], fill:false, tension:0.15 },
+    ]},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      // Disable initial animation — the chart's intro slide combined with
-      // the expand transition was contributing to the perceived "drift".
-      animation: false,
-      // Debounce ResizeObserver callbacks so layout reflows during the
-      // page's other live updates don't keep nudging the canvas.
-      resizeDelay: 200,
-      interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 0 } },
+      responsive:true, maintainAspectRatio:false, animation:false, resizeDelay:200,
+      interaction:{ mode:'index', intersect:false },
       plugins: {
-        legend: { display: false },
-        regimeBands: { map: regimeMap },
-        tooltip: {
-          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
-          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
-          displayColors: false, padding: 8,
-          callbacks: {
-            label: ctx => {
-              const r = rows[ctx.dataIndex];
-              const v = ctx.parsed.y;
-              const arr = v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(3) + '%';
-              return [
-                'ARR ' + arr,
-                'trades in window: ' + (r ? r.trade_count : 0),
-                'regime: ' + (r && r.regime ? r.regime : '—'),
-              ];
-            },
-          },
-        },
+        legend:{ display:true, labels:{ color:'#8b949e', font:{size:9}, boxWidth:10 } },
+        regimeBands:{ map: regimeMap },
+        tooltip:{ backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3', displayColors:true, padding:8,
+          callbacks:{ label: ctx => {
+            const r = rows[ctx.dataIndex];
+            return ctx.dataset.label + ' ' + ctx.parsed.y.toFixed(3) + 'x' +
+                   (ctx.datasetIndex===0 && r ? '  · '+(r.regime||'—') : '');
+          }}},
       },
       scales: {
-        x: { ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0 }, grid: { color:'rgba(48,54,61,0.45)' } },
-        y: { position:'right', ticks: { color:'#484f58', font:{size:9}, callback: fmt$, maxTicksLimit: 5 },
-             grid:  { color:'rgba(48,54,61,0.45)' } }
+        x:{ ticks:{ color:'#484f58', maxTicksLimit:8, font:{size:9} }, grid:{ color:'rgba(48,54,61,0.45)' } },
+        y:{ position:'right', ticks:{ color:'#484f58', font:{size:9}, callback:v=>v.toFixed(1)+'x', maxTicksLimit:5 },
+            grid:{ color:'rgba(48,54,61,0.45)' } }
       }
     }
   });
 }
 
-// Position-flow bar chart: positions opened (green) and closed (red) per
-// day, rendered directly underneath the ARR curve. Shares x-axis dates
-// with the ARR chart so the operator can correlate trade-flow density
-// with the per-trade economics line above. Bars are grouped (not
-// stacked) so a same-day open + close shows two distinguishable bars
-// rather than a fused colour block.
-function _stRenderFlowChart(sid, payload) {
-  const canvas = document.getElementById('st-flow-chart-' + sid);
-  const meta   = document.getElementById('st-flow-meta-' + sid);
+// Backtest positions-closed-per-regime bar chart. One bar per regime over
+// the fixed _CPR_AXIS, height = backtest_regime_breakdown[rg].trade_count,
+// coloured by regime. Hidden entirely when no regime has any trades.
+let _stCprChart = null;
+const _CPR_AXIS = ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS'];
+const _CPR_COLORS = { LOW_VOL:'rgba(63,185,80,0.9)', TRANSITIONING:'rgba(210,153,34,0.9)',
+                      HIGH_VOL:'rgba(240,136,62,0.9)', CRISIS:'rgba(248,81,73,0.9)' };
+function _stRenderClosedPerRegimeChart(sid, r) {
+  const canvas = document.getElementById('st-cpr-chart-' + sid);
   if (!canvas) return;
-  if (_stFlowChart) { try { _stFlowChart.destroy(); } catch (_) {} _stFlowChart = null; }
-  const rows = (payload && payload.rows) || [];
-  if (!rows.length) {
-    if (meta) meta.innerHTML = '<span style="color:var(--dim);font-size:9.5px">No trade flow yet.</span><span></span>';
-    const wrap = canvas.parentElement;
-    if (wrap) wrap.style.display = 'none';
-    return;
-  }
+  if (_stCprChart) { try { _stCprChart.destroy(); } catch (_) {} _stCprChart = null; }
+  const bd = r.backtest_regime_breakdown || {};
+  const counts = _CPR_AXIS.map(rg => (bd[rg] && bd[rg].trade_count) ? bd[rg].trade_count : 0);
   const wrap = canvas.parentElement;
+  if (!counts.some(c => c > 0)) { if (wrap) wrap.style.display = 'none'; return; }
   if (wrap) wrap.style.display = '';
-  const labels = rows.map(r => r.date);
-  const opened = rows.map(r => r.opened || 0);
-  const closed = rows.map(r => r.closed || 0);
-  const totalOpened = opened.reduce((a, b) => a + b, 0);
-  const totalClosed = closed.reduce((a, b) => a + b, 0);
-  if (meta) {
-    meta.innerHTML = '<span style="font-size:9.5px;letter-spacing:.04em">Positions <span style="color:var(--green);font-weight:600">opened</span> / <span style="color:var(--red);font-weight:600">closed</span> per day</span>'
-                   + '<span style="font-size:9.5px"><b style="color:var(--green)">' + totalOpened + ' opened</b> · <b style="color:var(--red)">' + totalClosed + ' closed</b></span>';
-  }
-  // Bar geometry:
-  //   barPercentage:      1.0  → opened + closed bars within the same day
-  //                              touch with no gap
-  //   categoryPercentage: 0.5  → each day's bar pair occupies half its
-  //                              slot, leaving the other half as inter-
-  //                              day whitespace so a month of bars reads
-  //                              cleanly even at narrow chart widths
-  _stFlowChart = new Chart(canvas.getContext('2d'), {
+  _stCprChart = new Chart(canvas.getContext('2d'), {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'opened',
-          data: opened,
-          backgroundColor: 'rgba(63,185,80,0.95)',
-          borderWidth:     0,
-          borderRadius:    0,
-          barPercentage:      1.0,
-          categoryPercentage: 0.5,
-        },
-        {
-          label: 'closed',
-          data: closed,
-          backgroundColor: 'rgba(248,81,73,0.95)',
-          borderWidth:     0,
-          borderRadius:    0,
-          barPercentage:      1.0,
-          categoryPercentage: 0.5,
-        },
-      ],
-    },
+    data: { labels: _CPR_AXIS, datasets: [{ data: counts,
+      backgroundColor: _CPR_AXIS.map(rg => _CPR_COLORS[rg]), borderWidth: 0, barPercentage: 0.7 }]},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      animation: false,
-      resizeDelay: 200,
-      interaction: { mode: 'index', intersect: false },
-      layout: { padding: { bottom: 0 } },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
-          titleColor:'#c9d1d9', bodyColor:'#e6edf3',
-          displayColors: false, padding: 8,
-          callbacks: {
-            title: items => items[0]?.label || '',
-            label: ctx => {
-              const r = rows[ctx.dataIndex];
-              if (!r) return '';
-              return [
-                'opened: ' + (r.opened || 0),
-                'closed: ' + (r.closed || 0),
-              ];
-            },
-          },
-        },
-      },
+      responsive:true, maintainAspectRatio:false, animation:false, resizeDelay:200,
+      plugins: { legend:{ display:false },
+        tooltip:{ backgroundColor:'#0d1117', borderColor:'#30363d', borderWidth:1,
+          titleColor:'#c9d1d9', bodyColor:'#e6edf3', displayColors:false, padding:8,
+          callbacks:{ label: ctx => 'closed: ' + ctx.parsed.y }}},
       scales: {
-        x: {
-          ticks: { color:'#484f58', maxTicksLimit: 8, font:{size:9}, padding: 0, maxRotation: 0 },
-          grid:  { display: false },
-          border:{ color:'#30363d' },
-        },
-        y: {
-          position:'right',
-          beginAtZero: true,
-          ticks: { color:'#484f58', font:{size:9}, maxTicksLimit: 3, precision: 0 },
-          grid:  { display: false },
-          border:{ display: false },
-        },
-      },
-    },
+        x:{ ticks:{ color:'#484f58', font:{size:9} }, grid:{ display:false } },
+        y:{ position:'right', beginAtZero:true, ticks:{ color:'#484f58', font:{size:9}, precision:0, maxTicksLimit:3 },
+            grid:{ display:false } }
+      }
+    }
   });
 }
 
@@ -9229,20 +8904,13 @@ function _renderInactiveStack(rows) {
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="state" data-sort-type="str">Status</th>
       <th>Regimes</th>
-      <th class="num" data-sort-key="live_days" data-sort-type="num">Live Days</th>
-      <th class="num" data-sort-key="live_sharpe" data-sort-type="num">Live Sharpe</th>
-      <th class="num" data-sort-key="live_return_pct" data-sort-type="num">Live Return</th>
       <th data-sort-key="last_signal_date" data-sort-type="date">Last Signal</th>
     </tr>
     \${shown.map(r => {
-      const liveRet = r.live_return_pct != null ? parseFloat(r.live_return_pct) : null;
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
         <td>\${_regimesCell(r)}</td>
-        <td class="num" style="color:var(--muted)">\${r.live_days != null ? r.live_days : '—'}</td>
-        <td class="num">\${_fmtNum(r.live_sharpe)}</td>
-        <td class="num \${pnlCls(liveRet)}">\${liveRet != null ? (liveRet >= 0 ? '+' : '') + liveRet.toFixed(2) + '%' : '—'}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
     }).join('')}

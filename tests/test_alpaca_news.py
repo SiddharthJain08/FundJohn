@@ -74,6 +74,51 @@ def test_rate_limit_429_retries_then_degrades():
         assert out == []
 
 
+def test_fetch_news_chunk_paginates_until_token_exhausted():
+    """A chunk with more than one page accumulates ALL pages via next_page_token.
+
+    The live ingest previously took only the first --limit 50 page and dropped the
+    rest, starving busy 50-symbol chunks (live ~80 tickers/day vs the paginating
+    backfill's ~187). It must now follow next_page_token like the backfill does.
+    """
+    from src.ingestion.alpaca_news import _fetch_news_chunk
+    page1 = json.dumps({'news': [{'id': 1, 'symbols': ['AAPL']},
+                                 {'id': 2, 'symbols': ['MSFT']}],
+                        'next_page_token': 'PAGE2'})
+    page2 = json.dumps({'news': [{'id': 3, 'symbols': ['NVDA']}],
+                        'next_page_token': ''})
+    with patch('src.ingestion.alpaca_news._call_alpaca_cli') as mock_cli:
+        mock_cli.side_effect = [page1, page2]
+        out = _fetch_news_chunk(['AAPL', 'MSFT', 'NVDA'], start='2026-05-29T00:00:00Z')
+    assert [a['id'] for a in out] == [1, 2, 3]
+    # second call must carry the page token from page 1
+    second_args = mock_cli.call_args_list[1][0][0]
+    assert '--page-token' in second_args
+    assert second_args[second_args.index('--page-token') + 1] == 'PAGE2'
+
+
+def test_fetch_news_chunk_single_page_makes_one_call():
+    """Empty next_page_token on the first page → exactly one CLI call (no over-fetch)."""
+    from src.ingestion.alpaca_news import _fetch_news_chunk
+    page1 = json.dumps({'news': [{'id': 1, 'symbols': ['AAPL']}], 'next_page_token': ''})
+    with patch('src.ingestion.alpaca_news._call_alpaca_cli') as mock_cli:
+        mock_cli.side_effect = [page1]
+        out = _fetch_news_chunk(['AAPL'], start='2026-05-29T00:00:00Z')
+    assert [a['id'] for a in out] == [1]
+    assert mock_cli.call_count == 1
+
+
+def test_fetch_news_chunk_caps_pages():
+    """A never-ending token stream is capped (no infinite loop) but still returns data."""
+    from src.ingestion.alpaca_news import _fetch_news_chunk
+    forever = json.dumps({'news': [{'id': 9, 'symbols': ['AAPL']}], 'next_page_token': 'MORE'})
+    with patch('src.ingestion.alpaca_news._call_alpaca_cli') as mock_cli:
+        mock_cli.side_effect = [forever] * 100
+        out = _fetch_news_chunk(['AAPL'], start='2026-05-29T00:00:00Z')
+    assert len(out) >= 1
+    assert mock_cli.call_count <= 25  # bounded by max_pages safety cap
+
+
 def test_score_with_finbert_label_lowercased_and_signed():
     """The FinBERT adapter must lowercase 'Positive' → 'positive' and apply signed polarity."""
     with patch('src.services.finbert.client.FinbertClient') as MockClient:

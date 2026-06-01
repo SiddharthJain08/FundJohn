@@ -36,6 +36,7 @@ from strategies.registry import get_approved_strategies
 from strategies.regime_gate import is_eligible
 from strategies.instrument_class import instrument_class_for
 from regime.crypto_regime import load_crypto_regime_state
+from execution import regime_param_override
 
 logging.basicConfig(
     level=logging.INFO,
@@ -228,6 +229,50 @@ def load_prices(universe: list) -> pd.DataFrame:
 
     logger.info(f"Prices loaded: {wide.shape[1]} tickers × {wide.shape[0]} dates")
     return wide
+
+
+_SENTIMENT_COLS = ['ticker', 'date', 'alpaca_news_count_24h', 'alpaca_news_mean_score',
+                   'alpaca_news_finbert_pos', 'alpaca_news_finbert_neu', 'alpaca_news_finbert_neg']
+
+
+def _sentiment_slice(universe: list, as_of=None) -> dict:
+    """Live per-ticker news sentiment for aux_data['sentiment'].
+
+    Reads ticker_sentiment_daily.alpaca_news_* — the live home of Alpaca-news FinBERT
+    scores — and remaps to the news_* keys S_news_sentiment_long_short expects, applying
+    the same point-in-time forward-fill + 7-day staleness cap the backtest aux loader uses.
+    (The legacy live news_* columns are a dead RSS source, ~0% covered since 2026-05-22;
+    backtest parity is news_* ↔ alpaca_news_*. See src/execution/sentiment_aux.py.)
+
+    Fail-open: any DB error → {} (sentiment feeds one strategy, not the whole cycle).
+    """
+    if not universe:
+        return {}
+    try:
+        from execution.sentiment_aux import build_sentiment_aux, SENTIMENT_MAX_AGE_DAYS
+        from datetime import date as _date
+        if as_of is None:
+            as_of = _date.today()
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {', '.join(_SENTIMENT_COLS)}
+                      FROM ticker_sentiment_daily
+                     WHERE ticker = ANY(%s)
+                       AND date BETWEEN (%s::date - %s) AND %s::date
+                       AND alpaca_news_count_24h > 0
+                    """,
+                    (list(universe), as_of, SENTIMENT_MAX_AGE_DAYS, as_of),
+                )
+                rows = [dict(zip(_SENTIMENT_COLS, r)) for r in cur.fetchall()]
+        finally:
+            conn.close()
+        return build_sentiment_aux(rows, as_of=as_of, max_age_days=SENTIMENT_MAX_AGE_DAYS)
+    except Exception as e:
+        logger.warning(f"Could not load sentiment: {e}")
+        return {}
 
 
 def load_aux_data(universe: list) -> dict:
@@ -620,12 +665,43 @@ def load_aux_data(universe: list) -> dict:
         except Exception as e:
             logger.warning(f"Could not load macro: {e}")
 
+    # Sentiment: {ticker: {news_count_24h, news_mean_score, news_finbert_pos/neu/neg}}
+    # Read from ticker_sentiment_daily.alpaca_news_* (live Alpaca-news FinBERT scores),
+    # remapped to the news_* keys S_news_sentiment_long_short expects — backtest parity.
+    aux['sentiment'] = _sentiment_slice(universe)
+    logger.info(f"Sentiment loaded: {len(aux['sentiment'])} tickers")
+
     return aux
 
 
 # ──────────────────────────────────────────────────────────
 # 4. RUN STRATEGIES
 # ──────────────────────────────────────────────────────────
+
+def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
+    """Mutate each Signal's stop_loss/target_1 with the per-(strategy, regime)
+    override (gated; no-op when OPENCLAW_BACKTEST_COUPLED_RECS is unset). Mirrors
+    the backtest's simulate-time application so live and backtest agree."""
+    ov = regime_param_override.resolve_override(strategy_id, str(regime_state))
+    if not ov:
+        return
+    for sig in signals or []:
+        # Classify via the shared normalizer (mirrors the backtest's
+        # _signal_to_long_short): LONG/BUY/BUY_VOL → +1, SHORT/SELL/SELL_VOL → -1,
+        # FLAT/unknown → 0. Skip 0 so FLAT/unknown directions get NO override —
+        # the backtest skips those trades, so live must too (parity + safety:
+        # never persist an inverted bracket for a non-long/short signal).
+        d = regime_param_override.direction_sign(sig.direction)
+        if d == 0:
+            continue
+        ep = float(sig.entry_price) if getattr(sig, 'entry_price', 0) else 0.0
+        if ep <= 0:
+            continue
+        sig.stop_loss, sig.target_1 = regime_param_override.apply_override(
+            entry_price=ep, direction=d,
+            stop_loss=float(sig.stop_loss or 0), target_1=float(sig.target_1 or 0),
+            override=ov)
+
 
 def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
@@ -654,6 +730,7 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
                 logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, strat_regime_str)
                 continue
             signals = strat.generate_signals(prices, strat_regime, universe, aux_data)
+            _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
             results[strat.id] = signals or []
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
         except Exception as e:
@@ -856,8 +933,11 @@ def detect_confluence(cur, strategy_results: dict, regime_state: str, run_date: 
 # 7. UPDATE P&L
 # ──────────────────────────────────────────────────────────
 
-def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
-    """Update unrealized P&L for all open signals. Close if stop/target hit."""
+def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
+    """Update unrealized P&L for all open signals. Close if stop/target hit.
+
+    Returns (n_updates, newly_closed_signal_ids). The ids are classified by
+    the caller AFTER it commits — see the note at the end of this function."""
     cur.execute("""
         SELECT id, strategy_id, ticker, direction, entry_price,
                stop_loss, target_1, signal_date
@@ -965,21 +1045,13 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> int:
         except Exception as e:
             logger.error(f"update_pnl error {sig_id}: {e}")
 
-    # Classify newly-closed signals via the OUE pipeline. Best-effort:
-    # individual failures don't fail the cycle. Skipped signals stay
-    # NULL and a later run picks them up (the classifier itself skips
-    # already-classified rows).
-    if _newly_closed_signal_ids:
-        try:
-            from execution.oue_classifier import classify_batch
-            uri = os.environ.get('POSTGRES_URI', '')
-            if uri:
-                stats = classify_batch(uri, _newly_closed_signal_ids)
-                logger.info(f"OUE classified {len(_newly_closed_signal_ids)} closes: {stats}")
-        except Exception as e:
-            logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
-
-    return updates
+    # OUE classification is intentionally NOT done here. classify_batch
+    # reads on its own connection, so it must run AFTER the caller commits
+    # these closes — otherwise it sees uncommitted rows, finds no realized
+    # P&L, and skips every signal (the 2026-05-16→2026-05-29 bug where
+    # oue_kind stayed NULL: logs showed 'skipped': N for every close).
+    # Return the newly-closed ids so run() can classify them post-commit.
+    return updates, _newly_closed_signal_ids
 
 
 # ──────────────────────────────────────────────────────────
@@ -1162,7 +1234,7 @@ def main():
         logger.info(f"Confluence signals: {confluence_count}")
 
         # 7. P&L updates
-        pnl_updates = update_pnl(cur, prices, run_date)
+        pnl_updates, newly_closed_ids = update_pnl(cur, prices, run_date)
         logger.info(f"P&L rows updated: {pnl_updates}")
 
         # 8. Report triggers
@@ -1183,6 +1255,22 @@ def main():
         })
 
         conn.commit()
+
+        # OUE classification — MUST be after the commit above so the
+        # classifier's own connection can see the just-closed signal_pnl
+        # rows. Best-effort: failures here never fail the cycle (closes are
+        # already durable); a later run/backfill picks up any stragglers
+        # since classify_batch skips already-classified signals.
+        if newly_closed_ids:
+            try:
+                from execution.oue_classifier import classify_batch
+                uri = os.environ.get('POSTGRES_URI', '')
+                if uri:
+                    stats = classify_batch(uri, newly_closed_ids)
+                    logger.info(f"OUE classified {len(newly_closed_ids)} closes: {stats}")
+            except Exception as e:
+                logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
+
         logger.info(f"=== Execution Engine DONE in {duration_s}s ===")
 
         # Output JSON for caller

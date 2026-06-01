@@ -54,6 +54,31 @@ async function postDiscord(content) {
     process.exit(1);
   }
 
+  // Orthogonalization weekly steps (non-fatal). 1) per-strategy daily returns.
+  try {
+    execSync(`cd ${ROOT} && PYTHONPATH=src python3 -c "from execution import strategy_returns as s; print('daily_returns rows:', s.rebuild_daily_returns())"`,
+      { stdio: 'inherit', env: loadEnv() });
+  } catch (e) {
+    console.error('strategy_daily_returns rebuild failed (non-fatal):', e.message);
+  }
+
+  // 2) per-regime similarity + fold/factor groups.
+  try {
+    console.log('rebuilding strategy similarity (orthogonalization)…');
+    execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m execution.strategy_similarity --rebuild --trigger=weekly_cron --verbose`,
+      { stdio: 'inherit', env: loadEnv() });
+  } catch (e) {
+    console.error('similarity rebuild failed (non-fatal):', e.message);
+  }
+
+  // 3) chronic-fold report -> #strategy-memos (manual-retirement digest).
+  try {
+    execSync(`cd ${ROOT} && OPENCLAW_FOLD_REPORT_POST=1 PYTHONPATH=src python3 -m execution.fold_report`,
+      { stdio: 'inherit', env: loadEnv() });
+  } catch (e) {
+    console.error('fold report failed (non-fatal):', e.message);
+  }
+
   // Snapshot post + diff
   const post = await pool.query("SELECT strategy_id, regime_state, weight FROM strategy_weights_by_regime WHERE is_current");
   const postMap = {};

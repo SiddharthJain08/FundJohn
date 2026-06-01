@@ -6,10 +6,10 @@ docs/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = (bt_n × bt_sharpe + live_n × live_sharpe)
                        / (bt_n + live_n)
-    weight        = oue_adjusted_sharpe(s, R)
+    weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
     daily_weight  = weight / sqrt(cadence_days(s))
 
-`weight` is the raw OUE-adjusted Sharpe — NOT a normalised fraction.
+`weight` is the raw effective Sharpe — NOT a normalised fraction.
 The sizer's downstream renormalisation (scale = λ·NAV / Σ|ticker_w|)
 makes the absolute scale invariant for sizing; keeping weight in
 Sharpe units means both the cum-sharpe gate (Σ effective_sharpe ×
@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 class StrategyWeightRow:
     strategy_id: str
     regime_state: str
-    cadence_days: int
+    cadence_days: float
     bt_sharpe: float | None
     bt_n: int | None
     live_sharpe: float | None
@@ -67,9 +67,11 @@ class StrategyWeightRow:
     effective_sharpe: float
     weight: float
     daily_weight: float
-    # OUE health (per-regime closed-trade classification) and the
-    # multiplier we applied. Persisted so the dashboard + comprehensive
-    # review + operator audit can see exactly what the cron did.
+    # OUE health (per-regime closed-trade classification) for the dashboard
+    # + comprehensive review + operator audit. oue_multiplier /
+    # oue_adjusted_sharpe are retained as columns but are now always NULL —
+    # the OUE multiplier was removed from sizing 2026-05-29 (weight =
+    # effective_sharpe; corroboration + position-recs govern sizing).
     oue_over: int | None = None
     oue_under: int | None = None
     oue_expected: int | None = None
@@ -77,65 +79,30 @@ class StrategyWeightRow:
     oue_adjusted_sharpe: float | None = None
 
 
-# OUE multiplier gating constants. Operator-approved 2026-05-16; refined
-# 2026-05-16 to use time-decayed counts (τ=45d) instead of lifetime so the
-# multiplier responds to recent behavior within ~6 weeks. A strategy that
-# was disappointing 4 months ago but has delivered the last 6 weeks will
-# now see its multiplier rise on the next Sunday cron, not stay pinned to
-# a stale history.
+# Time-decay constant for the OUE *count* loader. The OUE multiplier was
+# removed from sizing 2026-05-29 (corroboration + position-recs now govern
+# strategy sizing), but the O/U/E counts are still loaded + persisted for
+# the dashboard / weekly-review audit columns — this τ weights a close
+# made `age_days` ago by exp(-age_days / OUE_TAU_DAYS).
 OUE_TAU_DAYS = 45.0      # half-life ≈ 31 days; trade @ 90d ago weighted 0.14
-OUE_MIN_TOTAL = 30       # time-weighted closes in regime (was 100 lifetime)
-OUE_MIN_OUTLIERS = 5     # time-weighted over+under (was 20 lifetime)
-OUE_FLOOR = 0.2          # never zero a strategy out (preserves rotation)
-OUE_CEIL = 2.0           # never more than 2× boost (prevents over-fitting to luck)
-
-# Lifetime-sign guardrail (operator-set 2026-05-16): cumulative
-# overperformers (lifetime O > U with enough sample) can be BOOSTED by
-# recent OUE but NEVER discounted below 1.0; cumulative underperformers
-# can be DISCOUNTED but never boosted above 1.0. Prevents weights from
-# drifting downward on a transient bad streak for an otherwise-proven
-# strategy, and prevents temporary luck from inflating a structurally
-# underperforming strategy.
-OUE_LIFETIME_MIN_TOTAL    = 50   # need this many lifetime closes to trust the sign
-OUE_LIFETIME_MIN_OUTLIERS = 10   # and this many lifetime outliers
 
 
-def _oue_multiplier(over: float, under: float, expected: float,
-                    lifetime_over: int = 0, lifetime_under: int = 0,
-                    lifetime_expected: int = 0) -> float:
-    """OUE-derived multiplier in [OUE_FLOOR, OUE_CEIL].
+def _regime_weight(effective_sharpe: float, cadence_days: float) -> tuple[float, float]:
+    """Per-(strategy, regime) sizing weight from effective Sharpe.
 
-    Two-stage computation:
-      1. Recent bias from TIME-DECAYED counts (over, under, expected) →
-         a multiplier that responds to recent behavior.
-      2. Lifetime-sign GUARDRAIL: if cumulative O > U with enough
-         sample, the multiplier is floored at 1.0 (overperformers can
-         only be boosted, never discounted). Mirror case for U > O.
+    weight       = effective_sharpe                       (no OUE multiplier)
+    daily_weight = effective_sharpe / sqrt(cadence_days)   (Sharpe scales as
+                   σ·sqrt(T), so a T-day holder's per-cycle contribution is
+                   w/sqrt(T)). cadence is floored at 1 day.
 
-    Returns 1.0 (no adjustment) on insufficient recent sample.
-    """
-    total = (over or 0.0) + (under or 0.0) + (expected or 0.0)
-    outliers = (over or 0.0) + (under or 0.0)
-    if total < OUE_MIN_TOTAL or outliers < OUE_MIN_OUTLIERS:
-        return 1.0
-    bias = ((over or 0.0) - (under or 0.0)) / outliers
-    mult = max(OUE_FLOOR, min(OUE_CEIL, 1.0 + bias))
-
-    # Lifetime-sign guardrail. Only applies once cumulative sample is
-    # large enough to trust the direction; small-history strategies
-    # remain governed purely by their recent-window bias.
-    lt_outliers = (lifetime_over or 0) + (lifetime_under or 0)
-    lt_total = lt_outliers + (lifetime_expected or 0)
-    if lt_total >= OUE_LIFETIME_MIN_TOTAL and lt_outliers >= OUE_LIFETIME_MIN_OUTLIERS:
-        if lifetime_over > lifetime_under:
-            # Cumulative OVER → never discount below 1.0
-            mult = max(1.0, mult)
-        elif lifetime_under > lifetime_over:
-            # Cumulative UNDER → never boost above 1.0
-            mult = min(1.0, mult)
-        # Exact tie → no sign constraint
-
-    return mult
+    The OUE multiplier was removed here 2026-05-29 (operator decision):
+    strategy sizing is governed by cross-sector corroboration + the weekly
+    position-recommendations (own multiplier + stop changes), so an
+    additional OUE-derived scaling was redundant. OUE classification is
+    still loaded for the audit columns — it just no longer scales size."""
+    w = effective_sharpe
+    w_daily = w / math.sqrt(max(1, cadence_days))
+    return w, w_daily
 
 
 def _load_oue_by_strategy_regime(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
@@ -249,6 +216,30 @@ def _load_active_strategies(conn) -> list[dict]:
             except (TypeError, ValueError):
                 pass
 
+    # Backtest avg_holding_days is the CANONICAL cadence source for every
+    # strategy (operator directive 2026-05-29). The static signal_frequency
+    # label ('daily'/'weekly'/'monthly') is a placeholder — actual cadence
+    # comes from the backtest's measured holding period (primary_window=true
+    # unified_backtest result). live_avg becomes a fallback for the edge case
+    # where a strategy is live but has no primary_window backtest; static_cad
+    # is the final fallback (should not occur for properly-promoted strats).
+    cur.execute('''
+        SELECT DISTINCT ON (strategy_id) strategy_id, avg_holding_days
+          FROM strategy_backtest_runs
+         WHERE strategy_id = ANY(%s)
+           AND primary_window = TRUE
+           AND avg_holding_days IS NOT NULL
+         ORDER BY strategy_id, run_at DESC
+    ''', (active_ids,))
+    backtest_avg_by_strat: dict[str, float] = {}
+    for r in cur:
+        v = r['avg_holding_days']
+        if v is not None:
+            try:
+                backtest_avg_by_strat[r['strategy_id']] = float(v)
+            except (TypeError, ValueError):
+                pass
+
     out: list[dict] = []
     for sid in active_ids:
         eligible = eligible_by_strat.get(sid, [])
@@ -271,11 +262,23 @@ def _load_active_strategies(conn) -> list[dict]:
                 logger.warning('strategy_weights: could not read %s: %s', impl_path, e)
         static_cad = cadence_days(sig_freq)
         live_avg = live_avg_by_strat.get(sid)
-        live_cad = max(1, math.ceil(live_avg)) if live_avg and live_avg > 0 else 0
-        effective_cad = max(static_cad, live_cad)
-        if live_cad > static_cad:
-            logger.info('strategy_weights: %s cadence_days %d → %d (live avg=%.2f overrides static "%s")',
-                        sid, static_cad, effective_cad, live_avg, sig_freq or 'unknown')
+        backtest_avg = backtest_avg_by_strat.get(sid)
+        # Backtest is canonical. Falls back to live_avg only if backtest is
+        # absent, and to static_cad only if neither measured source exists.
+        # static_cad is NOT applied as a max-floor — a strategy declared
+        # 'monthly' whose backtest shows 4-day holds is sized as 4-day.
+        # EXACT value — no ceil/round (operator directive 2026-05-29; DB column
+        # was widened to NUMERIC(10,4) in migration 122 to preserve precision).
+        if backtest_avg and backtest_avg > 0:
+            chosen_avg, chosen_src = backtest_avg, 'backtest'
+        elif live_avg and live_avg > 0:
+            chosen_avg, chosen_src = live_avg, 'live'
+        else:
+            chosen_avg, chosen_src = 0.0, 'static_fallback'
+        effective_cad = float(chosen_avg) if chosen_avg > 0 else float(static_cad)
+        if chosen_src != 'static_fallback':
+            logger.info('strategy_weights: %s cadence_days %.4f (%s; declared "%s"→%d)',
+                        sid, effective_cad, chosen_src, sig_freq or 'unknown', static_cad)
         out.append({
             'strategy_id': sid,
             'eligible_regimes': eligible,
@@ -523,6 +526,20 @@ def _effective_sharpe(bt: dict | None, live: dict | None):
     return eff, bt_s, bt_n, lv_s, lv_n
 
 
+def _is_sizeable_sharpe(eff: Optional[float]) -> bool:
+    """A (strategy, regime) is sized ONLY when its effective Sharpe is a
+    finite positive number.
+
+    Non-finite (NaN/Inf) MUST be excluded: a regime's per-regime backtest
+    Sharpe can be NaN when its daily-return series compounds below -100%
+    (cumprod(1+r) <= 0 — reachable for high-frequency strategies in a single
+    regime, e.g. several live strategies in HIGH_VOL). The old guard
+    `eff is None or eff <= 0` did NOT catch it — `nan <= 0` is False — so a
+    NaN weight would slip through and poison the Σ-effective-sharpe gate and
+    the per-strategy daily_weight. `math.isfinite` rejects NaN and ±Inf."""
+    return eff is not None and math.isfinite(eff) and eff > 0
+
+
 def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeightRow]:
     """Recompute every (strategy, regime) weight and persist."""
     conn = _db()
@@ -555,24 +572,18 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
             for R in s['eligible_regimes']:
                 eff, bt_s, bt_n, lv_s, lv_n = _effective_sharpe(bt.get((s['strategy_id'], R)),
                                                                 live.get((s['strategy_id'], R)))
-                if eff is None or eff <= 0:
+                if not _is_sizeable_sharpe(eff):
                     continue
-                # OUE multiplier (per regime, time-decayed). Multiplies
-                # effective_sharpe before normalization so the bucket is
-                # judged on recent OUE-adjusted edge — a strategy that
-                # was bad 4 months ago but is delivering now gets its
-                # multiplier back as old trades age out (τ=45d).
+                # OUE counts are still loaded + persisted for the dashboard
+                # #O/U/E column + audit trail, but they NO LONGER scale the
+                # weight (multiplier removed 2026-05-29 — corroboration +
+                # position-recs govern sizing). oue_multiplier /
+                # oue_adjusted_sharpe are persisted as NULL to mark that the
+                # multiplier is no longer applied.
                 oue_row = oue.get((s['strategy_id'], R), {
                     'over': 0.0, 'under': 0.0, 'expected': 0.0,
                     'lifetime_over': 0, 'lifetime_under': 0, 'lifetime_expected': 0,
                 })
-                mult = _oue_multiplier(
-                    oue_row['over'], oue_row['under'], oue_row['expected'],
-                    lifetime_over=oue_row['lifetime_over'],
-                    lifetime_under=oue_row['lifetime_under'],
-                    lifetime_expected=oue_row['lifetime_expected'],
-                )
-                eff_adj = eff * mult
                 per_regime_positives.setdefault(R, []).append({
                     'strategy_id': s['strategy_id'],
                     'cadence_days': s['cadence_days'],
@@ -584,21 +595,18 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                     'oue_over':            oue_row['lifetime_over'],
                     'oue_under':           oue_row['lifetime_under'],
                     'oue_expected':        oue_row['lifetime_expected'],
-                    'oue_multiplier':      mult,
-                    'oue_adjusted_sharpe': eff_adj,
+                    'oue_multiplier':      None,
+                    'oue_adjusted_sharpe': None,
                 })
 
         rows: list[StrategyWeightRow] = []
         for R, entries in per_regime_positives.items():
             for e in entries:
-                # weight = raw OUE-adjusted Sharpe (operator spec). The
+                # weight = effective Sharpe directly (no OUE multiplier). The
                 # sizer downstream re-normalises absolute scale via
                 # scale = λ·NAV / Σ|ticker_w|, so per-cycle allocation
                 # is invariant to scale.
-                w = e['oue_adjusted_sharpe']
-                # Sharpe scales as σ·sqrt(T): a T-day holder's per-cycle
-                # equivalent contribution is w/sqrt(T), not w/T.
-                w_daily = w / math.sqrt(max(1, e['cadence_days']))
+                w, w_daily = _regime_weight(e['effective_sharpe'], e['cadence_days'])
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
                     cadence_days=e['cadence_days'],
@@ -632,8 +640,8 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
 
         if verbose:
             for R, entries in per_regime_positives.items():
-                s_sum = sum(e['oue_adjusted_sharpe'] for e in entries)
-                print(f'  {R}: {len(entries)} strategies, Σ weight (=Σ oue_adj_sharpe) = {s_sum:.3f}')
+                s_sum = sum(e['effective_sharpe'] for e in entries)
+                print(f'  {R}: {len(entries)} strategies, Σ weight (=Σ effective_sharpe) = {s_sum:.3f}')
 
         # Auto-demote chain — gated by env flag so the first sweep is
         # operator-initiated, not implicit. Set OPENCLAW_AUTO_DEMOTE=1 in

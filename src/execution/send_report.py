@@ -231,31 +231,209 @@ def _fmt_outlier_section(rows: list[dict], kind: str, gate: float) -> list[str]:
     )
 
 
-def _fmt_oue_today_digest(run_date: str) -> tuple[str, str]:
-    """OUE summary for trades that closed in the LAST DAY (since-prev cycle).
+_OUE_EMOJI = {'over': '🚀', 'under': '🟥', 'expected': '🟢'}
 
-    Each closed trade is classified once by oue_classifier into one of
-    {over, under, expected} based on its realized return vs the GBM
-    expectation captured at signal time. The invariant is:
-        O + U + E = total closed today
-    (vs the old over/under-only metric where a trade could appear in
-    multiple cycles or never appear at all if it stayed within band).
 
-    Returns (summary, file_text). file_text is empty when there are no
-    closes today — keeps the post compact.
-    """
+def _fmt_money(v) -> str:
+    """Signed, comma-grouped whole-dollar string. '—' when unknown."""
+    if v is None:
+        return '—'
+    sign = '-' if v < 0 else '+'
+    return f'{sign}${abs(v):,.0f}'
+
+
+def _aggregate_closed_positions(rows: list[dict]) -> dict:
+    """Pure aggregation of closed-position legs into by-ticker + overall
+    stats. Each input row is one (ticker, strategy) close leg (see the
+    row contract in tests/test_send_report_closed_digest.py).
+
+    Dollar P&L is estimated at the TICKER level — notional × mean realized
+    % — because the broker nets one position per ticker, so per-strategy
+    dollar attribution isn't available. Percentage / win / OUE / reason
+    stats stay per-leg (per strategy)."""
+    oue = {'over': 0, 'under': 0, 'expected': 0}
+    by_reason: dict[str, int] = {}
+    wins = losses = flat = 0
+    realized_sum = 0.0
+    days_sum = 0.0
+    groups: dict[str, list[dict]] = {}
+
+    for r in rows:
+        rp = float(r.get('realized_pct') or 0.0)
+        realized_sum += rp
+        days_sum += float(r.get('days_held') or 0)
+        if rp > 0:
+            wins += 1
+        elif rp < 0:
+            losses += 1
+        else:
+            flat += 1
+        kind = r.get('oue_kind')
+        if kind in oue:
+            oue[kind] += 1
+        reason = r.get('close_reason') or 'unknown'
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+        groups.setdefault(r.get('ticker') or '?', []).append(r)
+
+    total = len(rows)
+    tickers: list[dict] = []
+    net_dollar = 0.0
+    dollar_known = 0
+    for tk, legs in groups.items():
+        t_avg = sum(float(l.get('realized_pct') or 0.0) for l in legs) / len(legs)
+        # Notional is a ticker property repeated on every leg; take the
+        # first non-None (the broker holds one netted position per ticker).
+        notional = next(
+            (float(l['ticker_notional_usd']) for l in legs
+             if l.get('ticker_notional_usd') is not None),
+            None,
+        )
+        est = notional * t_avg if notional is not None else None
+        if est is not None:
+            net_dollar += est
+            dollar_known += 1
+        tickers.append({
+            'ticker': tk,
+            'n': len(legs),
+            'avg_realized_pct': t_avg,
+            'notional_usd': notional,
+            'est_dollar_pnl': est,
+            'legs': legs,
+        })
+
+    tickers.sort(key=lambda t: (-t['avg_realized_pct'], t['ticker']))
+    return {
+        'total_closed': total,
+        'n_tickers': len(groups),
+        'wins': wins,
+        'losses': losses,
+        'flat': flat,
+        'win_rate': (wins / total) if total else 0.0,
+        'avg_realized_pct': (realized_sum / total) if total else 0.0,
+        'avg_days_held': (days_sum / total) if total else 0.0,
+        'net_dollar_pnl': net_dollar,
+        'dollar_known_tickers': dollar_known,
+        'by_reason': by_reason,
+        'oue': oue,
+        'tickers': tickers,
+    }
+
+
+def _fmt_closed_positions_digest(run_date: str, rows: list[dict]) -> tuple[str, str]:
+    """Build the #trade-reports digest of every position that closed in
+    this cycle, grouped by ticker with per-strategy legs. Returns
+    (summary, file_text); file_text is '' when nothing closed.
+
+    Reads nothing — pure function over the enriched leg rows produced by
+    `_load_closed_positions`. This is why the report is immune to the
+    persisted-oue_kind bug: it derives its own stats from realized P&L."""
+    agg = _aggregate_closed_positions(rows)
+    total = agg['total_closed']
+    if total == 0:
+        return (f'📊 **Closed positions — {run_date}** · '
+                f'no positions closed in this cycle.', '')
+
+    oue = agg['oue']
+    reason_str = ' · '.join(
+        f'{k}: **{v}**'
+        for k, v in sorted(agg['by_reason'].items(), key=lambda kv: -kv[1])
+    )
+    priced = agg['dollar_known_tickers']
+    price_note = '' if priced == agg['n_tickers'] else f' ({priced}/{agg["n_tickers"]} priced)'
+
+    tickers = agg['tickers']
+    winners = [t for t in tickers if t['avg_realized_pct'] > 0][:3]
+    losers = [t for t in reversed(tickers) if t['avg_realized_pct'] < 0][:3]
+
+    def _brief(t: dict) -> str:
+        return (f"`{t['ticker']}` {t['avg_realized_pct'] * 100:+.2f}% "
+                f"({_fmt_money(t['est_dollar_pnl'])})")
+
+    summary_lines = [
+        f'📊 **Closed positions — {run_date}** · **{total}** closed across '
+        f'**{agg["n_tickers"]}** ticker(s) · est. net {_fmt_money(agg["net_dollar_pnl"])}{price_note}',
+        '',
+        f'Realized: avg **{agg["avg_realized_pct"] * 100:+.2f}%** · '
+        f'win rate **{agg["win_rate"] * 100:.0f}%** ({agg["wins"]}W/{agg["losses"]}L) · '
+        f'avg hold **{agg["avg_days_held"]:.1f}**d',
+        f'By reason: {reason_str}',
+        f'OUE (live): {_OUE_EMOJI["over"]} over **{oue["over"]}** · '
+        f'{_OUE_EMOJI["under"]} under **{oue["under"]}** · '
+        f'{_OUE_EMOJI["expected"]} expected **{oue["expected"]}**',
+        '',
+        f'Top winners: {", ".join(_brief(t) for t in winners) if winners else "_none_"}',
+        f'Top losers: {", ".join(_brief(t) for t in losers) if losers else "_none_"}',
+        '',
+        '_Full by-ticker breakdown attached._',
+    ]
+
+    file_lines = [
+        f'Closed positions — {run_date}',
+        '=' * 64,
+        f'Total closed:   {total}  across {agg["n_tickers"]} ticker(s)',
+        f'Win/Loss:       {agg["wins"]}W / {agg["losses"]}L'
+        + (f' / {agg["flat"]} flat' if agg['flat'] else '')
+        + f'  (win rate {agg["win_rate"] * 100:.0f}%)',
+        f'Avg realized:   {agg["avg_realized_pct"] * 100:+.2f}%',
+        f'Avg hold:       {agg["avg_days_held"]:.1f} days',
+        f'Est. net P&L:   {_fmt_money(agg["net_dollar_pnl"])}{price_note}',
+        'By reason:      ' + ', '.join(
+            f'{k}={v}' for k, v in sorted(agg['by_reason'].items(), key=lambda kv: -kv[1])),
+        f'OUE (live):     over={oue["over"]}  under={oue["under"]}  expected={oue["expected"]}',
+        '',
+        'Dollar P&L is a ticker-level estimate (notional x mean realized %);',
+        'the broker nets one position per ticker, so it is not per-strategy.',
+        '',
+    ]
+    leg_header = (f'  {"strategy":<32} {"dir":<5} {"realized":>9} {"days":>5} '
+                  f'{"reason":<12} {"OUE":<9} {"sigma":>7}')
+    for t in tickers:
+        file_lines.append('')
+        file_lines.append(
+            f'── {t["ticker"]}  ·  {t["n"]} close(s)  ·  avg {t["avg_realized_pct"] * 100:+.2f}%  ·  '
+            f'est {_fmt_money(t["est_dollar_pnl"])}'
+            + (f'  (notional {_fmt_money(t["notional_usd"])})' if t['notional_usd'] is not None else '')
+            + ' ──'
+        )
+        file_lines.append(leg_header)
+        file_lines.append('  ' + '-' * (len(leg_header) - 2))
+        for leg in t['legs']:
+            sd = leg.get('oue_sigma_delta')
+            file_lines.append(
+                f'  {(leg.get("strategy_id") or "")[:32]:<32} '
+                f'{(leg.get("direction") or "")[:5]:<5} '
+                f'{float(leg.get("realized_pct") or 0.0) * 100:>+8.2f}% '
+                f'{int(leg.get("days_held") or 0):>5} '
+                f'{(leg.get("close_reason") or ""):<12} '
+                f'{(leg.get("oue_kind") or ""):<9} '
+                + (f'{float(sd):>+7.2f}' if sd is not None else f'{"—":>7}')
+            )
+    return ('\n'.join(summary_lines), '\n'.join(file_lines))
+
+
+def _load_closed_positions(run_date: str) -> list[dict]:
+    """Fetch every position that closed on run_date directly from
+    signal_pnl (the committed source of truth) — independent of the
+    persisted execution_signals.oue_kind field, which is why this
+    survives the classifier-ordering bug.
+
+    Each leg is enriched with (a) a live OUE classification recomputed
+    from the signal's handoff EV, and (b) a ticker-level broker notional
+    (latest filled submission for that ticker on/before the close)."""
     import os
     uri = os.environ.get('POSTGRES_URI', '')
     if not uri:
-        return (f'🟢 **OUE — Today’s closures ({run_date})** · '
-                f'no DB configured (POSTGRES_URI missing).', '')
+        return []
+    from execution.oue_classifier import _load_signal_ev, classify, _get_sigma_gate
     try:
         with psycopg2.connect(uri) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                sigma_gate = _get_sigma_gate(cur)
                 cur.execute("""
-                    SELECT es.id, es.strategy_id, es.ticker, es.direction,
-                           es.oue_kind, es.oue_sigma_delta,
-                           sp.realized_pnl_pct, sp.days_held, sp.close_reason
+                    SELECT es.id AS signal_id, es.ticker, es.strategy_id,
+                           es.direction, es.signal_date,
+                           sp.realized_pnl_pct, sp.days_held, sp.close_reason,
+                           sub.notional_usd
                       FROM execution_signals es
                       JOIN LATERAL (
                           SELECT realized_pnl_pct, days_held, close_reason, pnl_date
@@ -267,85 +445,53 @@ def _fmt_oue_today_digest(run_date: str) -> tuple[str, str]:
                            ORDER BY pnl_date DESC
                            LIMIT 1
                       ) sp ON TRUE
+                      LEFT JOIN LATERAL (
+                          -- Broker nets one position per ticker; submission
+                          -- strategy_id is a pipe-bundle, so match ticker only.
+                          SELECT notional_usd
+                            FROM alpaca_submissions
+                           WHERE ticker = es.ticker
+                             AND run_date <= sp.pnl_date
+                             AND notional_usd IS NOT NULL
+                           ORDER BY run_date DESC
+                           LIMIT 1
+                      ) sub ON TRUE
                      WHERE es.status = 'closed'
-                       AND es.oue_kind IS NOT NULL
-                     ORDER BY es.oue_kind, es.oue_sigma_delta DESC NULLS LAST
+                     ORDER BY es.ticker, es.strategy_id
                 """, (run_date,))
-                rows = cur.fetchall()
+                raw = cur.fetchall()
     except Exception as e:
-        return (f'🟢 **OUE — Today’s closures ({run_date})** · DB query failed: {e}', '')
+        print(f'[send_report] closed-positions query failed: {e}')
+        return []
 
-    if not rows:
-        return (f'🟢 **OUE — Today’s closures ({run_date})** · '
-                f'no trades closed in this cycle.', '')
-
-    by_kind = {'over': [], 'under': [], 'expected': []}
-    for r in rows:
-        kind = r['oue_kind']
-        if kind in by_kind:
-            by_kind[kind].append(r)
-    n_o, n_u, n_e = len(by_kind['over']), len(by_kind['under']), len(by_kind['expected'])
-    total = n_o + n_u + n_e
-
-    def _fmt_top(rows: list[dict], n: int = 5) -> str:
-        if not rows:
-            return '_none_'
-        return ', '.join(
-            f"`{r.get('ticker')}`/`{(r.get('strategy_id') or '')[:18]}` "
-            f"**{float(r.get('oue_sigma_delta') or 0):+.2f}σ** "
-            f"({float(r.get('realized_pnl_pct') or 0) * 100:+.2f}%)"
-            for r in rows[:n]
-        )
-
-    summary_lines = [
-        f'🎯 **OUE — Today’s closures ({run_date})** · **{total}** trade(s) closed',
-        '',
-        f'🚀 **Over**     — **{n_o}** ({100 * n_o / total:.0f}%) — '
-        f'realized > expectation by ≥1σ',
-        f'🟥 **Under**    — **{n_u}** ({100 * n_u / total:.0f}%) — '
-        f'realized < expectation by ≥1σ',
-        f'🟢 **Expected** — **{n_e}** ({100 * n_e / total:.0f}%) — '
-        f'within ±1σ of expectation',
-        '',
-        f'Top over (top 5): {_fmt_top(by_kind["over"])}',
-        f'Top under (top 5): {_fmt_top(by_kind["under"])}',
-        '',
-        f'_O + U + E = {n_o} + {n_u} + {n_e} = {total} (invariant)._',
-    ]
-
-    file_lines = [
-        f'OUE — Today’s closures ({run_date})',
-        '=' * 60,
-        '',
-        f'Total closed:  {total}',
-        f'Over:          {n_o}',
-        f'Under:         {n_u}',
-        f'Expected:      {n_e}',
-        '',
-    ]
-    header = f'{"ticker":<7}  {"strategy":<28}  {"dir":<5}  {"kind":<8}  {"σΔ":>6}  {"realized":>9}  {"days":>4}  reason'
-    sep = '-' * len(header)
-    for kind_name in ('over', 'under', 'expected'):
-        kind_rows = by_kind[kind_name]
-        if not kind_rows:
-            continue
-        file_lines += [
-            '',
-            f'── {kind_name.upper()} ({len(kind_rows)}) ──',
-            header, sep,
-        ]
-        for r in kind_rows:
-            file_lines.append(
-                f'{r.get("ticker") or "":<7}  '
-                f'{(r.get("strategy_id") or "")[:28]:<28}  '
-                f'{(r.get("direction") or "")[:5]:<5}  '
-                f'{(r.get("oue_kind") or ""):<8}  '
-                f'{float(r.get("oue_sigma_delta") or 0):>+6.2f}  '
-                f'{float(r.get("realized_pnl_pct") or 0) * 100:>+8.2f}%  '
-                f'{int(r.get("days_held") or 0):>4}  '
-                f'{r.get("close_reason") or ""}'
-            )
-    return ('\n'.join(summary_lines), '\n'.join(file_lines))
+    ev_cache: dict = {}
+    rows: list[dict] = []
+    for r in raw:
+        realized = float(r['realized_pnl_pct']) if r['realized_pnl_pct'] is not None else 0.0
+        days = int(r['days_held'] or 1)
+        key = (str(r['signal_date']), r['ticker'], r['strategy_id'])
+        if key not in ev_cache:
+            ev_cache[key] = _load_signal_ev(str(r['signal_date']), r['ticker'], r['strategy_id'])
+        ev = ev_cache[key]
+        if ev is not None:
+            kind, sigma_delta = classify(
+                realized, days, ev['ev_gbm'], ev['hv21'], sigma_gate=sigma_gate)
+        else:
+            # No handoff EV (rotated > ~30d, or pre-handoff signal) — count
+            # as 'expected' so OUE still sums to total closed.
+            kind, sigma_delta = 'expected', None
+        rows.append({
+            'ticker': r['ticker'],
+            'strategy_id': r['strategy_id'],
+            'direction': r['direction'],
+            'realized_pct': realized,
+            'days_held': days,
+            'close_reason': r['close_reason'],
+            'ticker_notional_usd': float(r['notional_usd']) if r['notional_usd'] is not None else None,
+            'oue_kind': kind,
+            'oue_sigma_delta': sigma_delta,
+        })
+    return rows
 
 
 def _fmt_outcomes_digest(run_date: str,
@@ -424,13 +570,14 @@ def main() -> int:
     print(f'[send_report] webhook lookup: trade-signals={"ok" if wh_signals else "missing"} '
           f'trade-reports={"ok" if wh_reports else "missing"}')
 
-    # OUE — Today's Closures (replaces 2026-05-16 the legacy over/under
-    # digest built from the unrealized-fallback handoff). Pulls
-    # execution_signals.oue_kind for trades that closed in this cycle,
-    # showing O / U / E counts and top realized moves. Invariant
-    # O + U + E = total closed today is enforced by the classifier
-    # marking every close exactly once.
-    summary, file_text = _fmt_oue_today_digest(run_date)
+    # Closed-positions digest (replaces 2026-05-29 the OUE-only digest
+    # that showed "0 closed" whenever execution_signals.oue_kind was
+    # NULL). Reads the closes straight from signal_pnl — the committed
+    # source of truth — grouped by ticker with per-strategy legs, and
+    # recomputes OUE live from each signal's handoff EV. Immune to the
+    # persisted-oue_kind classifier-ordering bug.
+    closed_rows = _load_closed_positions(run_date)
+    summary, file_text = _fmt_closed_positions_digest(run_date, closed_rows)
 
     if dry_run or (not wh_signals and not wh_reports):
         msg = '[send_report] DRY-RUN — printing post bodies to stdout' if dry_run \
@@ -441,7 +588,7 @@ def main() -> int:
         print('--- #trade-reports body ---')
         print(summary)
         if file_text:
-            print('--- ATTACHMENT (outcomes_d-1.txt) ---')
+            print('--- ATTACHMENT (closed_positions.txt) ---')
             print(file_text)
         return 0
 
@@ -451,10 +598,10 @@ def main() -> int:
         if file_text:
             ok2 = _post_webhook_with_file(
                 wh_reports, summary,
-                f'outcomes_d-1_{run_date}.txt', file_text,
+                f'closed_positions_{run_date}.txt', file_text,
             )
         else:
-            # No outliers — summary is short, no attachment needed.
+            # Nothing closed — summary is short, no attachment needed.
             ok2 = _post_webhook(wh_reports, summary)
     else:
         ok2 = False

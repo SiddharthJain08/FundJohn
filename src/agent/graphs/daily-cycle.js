@@ -21,7 +21,7 @@ const { makeStepNode } = require('./daily_cycle_node');
 
 const STEPS_IN_ORDER = [
   'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
-  'trade', 'alpaca', 'reconcile', 'report',
+  'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
 ];
 
@@ -39,6 +39,7 @@ const STEP_SCRIPTS = {
   'trade':                  'regime_blended_sizer_live',
   'alpaca':                 'alpaca_executor',
   'reconcile':              'alpaca_reconcile',
+  'stop_reattach':          'stop_reattach',
   'report':                 'send_report',
   'pyportfolioopt_shadow':  'pyportfolioopt_shadow',
   'health':                 'daily_health_digest',

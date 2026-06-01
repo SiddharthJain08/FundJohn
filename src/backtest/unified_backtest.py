@@ -60,6 +60,7 @@ sys.path.insert(0, str(ROOT))
 from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES  # noqa: E402
 from strategies.validate_strategy import validate                     # noqa: E402
 from backtest import options_backtest  # SP-4 Phase 0
+from execution import regime_param_override  # noqa: E402  # per-(strategy, regime) bracket override
 from strategies.lifecycle import VALID_INSTRUMENT_CLASSES, _detect_module_instrument_class  # noqa: E402  # SP-4 dispatch
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -268,6 +269,28 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
             'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl}
 
 
+def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
+                      stop_ref: float, target_ref: float) -> tuple[float, float]:
+    """Re-express a stop/target defined as pct distances from ``ref`` so they
+    sit the SAME pct distances from ``entry_price`` (the actual fill).
+
+    Mirrors the live executor's re-anchor: preserves R:R geometry across an
+    overnight gap instead of carrying absolute levels (which would invert the
+    bracket when the fill gaps through a level). ``direction`` is +1 long / -1
+    short. Returns (stop_loss, target_1).
+    """
+    if ref <= 0:
+        return stop_ref, target_ref
+    if direction > 0:  # long: stop below, target above
+        stop_pct   = (ref - stop_ref) / ref
+        target_pct = (target_ref - ref) / ref
+        return entry_price * (1 - stop_pct), entry_price * (1 + target_pct)
+    # short: stop above, target below
+    stop_pct   = (stop_ref - ref) / ref
+    target_pct = (ref - target_ref) / ref
+    return entry_price * (1 + stop_pct), entry_price * (1 - target_pct)
+
+
 # ── Metric aggregation ───────────────────────────────────────────────────────
 
 def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Timestamp]]:
@@ -436,6 +459,7 @@ def _per_bar_simulate(
     *,
     strategy_id: Optional[str] = None,
     resolver=None,
+    param_override=None,
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
@@ -548,12 +572,32 @@ def _per_bar_simulate(
             # Need the signal-day bar so we can use its close as the entry price
             if current_date not in ticker_bars.index:
                 continue
-            entry_price = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
-                          else float(ticker_bars.loc[current_date, 'close'])
-            stop_loss = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
-                        else (entry_price * 0.93 if direction > 0 else entry_price * 1.07)
-            target_1 = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
-                       else (entry_price * 1.08 if direction > 0 else entry_price * 0.92)
+            # signal[t] -> execute[t+1]: the strategy decides on `current_date`
+            # (t) but the order fills on the NEXT available bar's close (t+1).
+            # `ref` is the strategy's intended price (signal-day close in
+            # practice — 127/140 strategies set entry_price themselves); brackets
+            # are shaped around it, then re-anchored to the actual fill.
+            ref = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
+                  else float(ticker_bars.loc[current_date, 'close'])
+            stop_ref = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
+                       else (ref * 0.93 if direction > 0 else ref * 1.07)
+            target_ref = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
+                         else (ref * 1.08 if direction > 0 else ref * 0.92)
+            # Locate t+1: first bar strictly after the signal bar.
+            _future_idx = ticker_bars.index[ticker_bars.index > current_date]
+            if len(_future_idx) == 0:
+                continue  # signal on the last available bar — cannot fill
+            fill_date = _future_idx[0]
+            entry_price = float(ticker_bars.loc[fill_date, 'close'])
+            stop_loss, target_1 = _reanchor_bracket(
+                ref=ref, entry_price=entry_price, direction=direction,
+                stop_ref=stop_ref, target_ref=target_ref)
+            _ov = regime_param_override.resolve_override(
+                strategy_id, str(regime_state), injected=param_override)
+            if _ov:
+                stop_loss, target_1 = regime_param_override.apply_override(
+                    entry_price=entry_price, direction=direction,
+                    stop_loss=stop_loss, target_1=target_1, override=_ov)
             # Defensive: a bad signal with stop/target on the wrong side of
             # entry will produce a guaranteed-loss trade. Skip rather than
             # carry the bug through.
@@ -561,7 +605,7 @@ def _per_bar_simulate(
                 continue
             if direction < 0 and (stop_loss <= entry_price or target_1 >= entry_price):
                 continue
-            exit_info = simulate_trade(ticker_bars, current_date, direction,
+            exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
@@ -577,7 +621,7 @@ def _per_bar_simulate(
             trades.append({
                 'ticker':         ticker,
                 'direction':      'long' if direction > 0 else 'short',
-                'entry_date':     cur_d,
+                'entry_date':     fill_date.date() if hasattr(fill_date, 'date') else fill_date,
                 'entry_price':    entry_price,
                 'exit_date':      exit_info['exit_date'].date() if hasattr(exit_info['exit_date'], 'date') else exit_info['exit_date'],
                 'exit_price':     exit_info['exit_price'],
@@ -642,6 +686,8 @@ def run_backtest(strategy_id: str, *,
                  conn: Optional[psycopg2.extensions.connection] = None,
                  commit: bool = True,
                  resolver=None,
+                 param_override=None,
+                 return_metrics: bool = False,
                  instrument_class: str = 'equity') -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
@@ -684,6 +730,7 @@ def run_backtest(strategy_id: str, *,
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         strategy_id=strategy_id,
         resolver=resolver,
+        param_override=param_override,
         max_hold_days=max_hold_days,
     )
     trades         = sim['trades']
@@ -816,6 +863,26 @@ def run_backtest(strategy_id: str, *,
     _log(f'wrote run_id={run_id}  total_sharpe={total_metrics["sharpe"]}  '
          f'trades={total_metrics["total_trades"]}  '
          f'regimes={list(per_regime.keys())}')
+    # Refresh the dashboard backtest panel for this strategy (best-effort;
+    # a panel build failure must never fail the backtest itself). Skipped for
+    # ephemeral (commit=False) runs — the persist block rolled back, so there
+    # is no new run for the panel to read.
+    if commit:
+        try:
+            from backtest.backtest_panel import rebuild as _rebuild_panel
+            _rebuild_panel(strategy_id)
+        except Exception as _e:
+            print(f'[unified_backtest] panel rebuild skipped: {_e}')
+    if return_metrics:
+        import statistics
+        sd = [abs(t['entry_price'] - t['signal_stop']) / t['entry_price']
+              for t in trades if t.get('signal_stop') and t.get('entry_price')]
+        td = [abs(t['signal_target'] - t['entry_price']) / t['entry_price']
+              for t in trades if t.get('signal_target') and t.get('entry_price')]
+        total_metrics = {**total_metrics,
+                         'median_stop_pct':   (statistics.median(sd) if sd else None),
+                         'median_target_pct': (statistics.median(td) if td else None)}
+        return run_id, total_metrics
     return run_id
 
 

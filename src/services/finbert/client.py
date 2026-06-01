@@ -28,3 +28,25 @@ class FinbertClient:
             if r.status != 200:
                 raise RuntimeError(f"FinBERT service status {r.status}")
             return json.loads(r.read())
+
+    def score_batch(self, texts: list[str]) -> list[dict]:
+        """Score many texts in ONE batched forward pass (server-side) — ~5x faster than N
+        single /score calls, identical scores. Returns a list of {label, score} aligned to
+        `texts`. Empty/blank texts get {"Neutral", 0.0}. Raises if /score_batch is unavailable
+        (404 on a service that predates this endpoint) — callers should fall back to .score().
+        """
+        if not texts:
+            return []
+        body = json.dumps({"texts": list(texts)}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/score_batch",
+            data=body,
+            method="POST",
+            headers={"content-type": "application/json"},
+        )
+        # Scale timeout with batch size (one forward pass, but larger batches take longer).
+        timeout = max(self.timeout, 0.2 * len(texts))
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if r.status != 200:
+                raise RuntimeError(f"FinBERT service status {r.status}")
+            return json.loads(r.read())["results"]

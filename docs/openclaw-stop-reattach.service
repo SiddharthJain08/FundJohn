@@ -1,0 +1,21 @@
+[Unit]
+Description=Post-EOD GTC OCO (take-profit + stop) reattach for naked equity positions
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+# --oco: establish GTC OCO (take-profit + stop) overnight too, not just stops.
+# Advanced orders submitted after the 4pm ET close are queued for the next
+# session (extended_hours=false), so the take-profit is in place overnight;
+# any OCO that's rejected falls back to a bare stop (never naked).
+ExecStart=/usr/bin/python3 /root/openclaw/src/execution/stop_reattach.py --oco
+StandardOutput=append:/var/log/openclaw-stop-reattach.log
+StandardError=append:/var/log/openclaw-stop-reattach.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

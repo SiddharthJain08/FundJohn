@@ -21,6 +21,10 @@ from execution.tradejohn_confirmer import confirm as default_confirmer
 logger = logging.getLogger(__name__)
 
 
+def _ortho_enabled(gate: str) -> bool:
+    return os.environ.get(gate) == '1'
+
+
 def size_positions(
     signals: list[dict],
     account_state: dict,
@@ -175,7 +179,7 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
 
 
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
-                                cadence_by_strat: dict[str, int]):
+                                cadence_by_strat: dict[str, float]):
     """Pull every open signal still within its strategy's cadence window.
 
     "Information staying relevant in the period" per design spec: a
@@ -204,8 +208,12 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     # appears stale on Monday morning genuinely hasn't generated new info.
     # The user's invariant (2026-05-19): only fresh information from the
     # cycle's actual cadence window — no expired information.
-    max_cad = max(cadence_by_strat.get(s, 1) for s in weight_by_strat) if cadence_by_strat else 1
-    earliest = today - _timedelta(days=max_cad)
+    # Coarse SQL lower-bound: math.ceil so the query never tightens past the
+    # precise per-strategy filter below. cadence_by_strat values are floats
+    # (NUMERIC(10,4) post-mig-122).
+    import math as _math
+    max_cad = max(cadence_by_strat.get(s, 1.0) for s in weight_by_strat) if cadence_by_strat else 1.0
+    earliest = today - _timedelta(days=_math.ceil(max_cad))
 
     sids = list(weight_by_strat.keys())
     out = []
@@ -244,7 +252,7 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     dropped_stale = 0
     for r in rows:
         sid = r['strategy_id']
-        cad = cadence_by_strat.get(sid, 1)
+        cad = cadence_by_strat.get(sid, 1.0)
         age = (today - r['signal_date']).days
         # Strict cadence: a cad=1 (daily) strategy contributes ONLY today's
         # signal; a cad=4 (4-day-holding) strategy contributes the last
@@ -336,7 +344,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         return []
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
-    cadence_by_strat  = {r['strategy_id']: int(r['cadence_days'])  for r in rows}
+    cadence_by_strat  = {r['strategy_id']: float(r['cadence_days']) for r in rows}
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
@@ -359,6 +367,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
     else:
         logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
+
+    # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
+    _ortho_groups = None
+    if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
+            or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            or _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        try:
+            from execution import strategy_similarity as _ss
+            _ortho_groups = _ss.load_groups(regime_state)
+        except Exception as e:
+            logger.warning('orthogonalization: load_groups failed (%s); proceeding without', e)
+            _ortho_groups = None
+
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_FOLD'):
+        from execution import orthogonalization as _og
+        before = len(active)
+        active = _og.fold_active_contributions(
+            active, _ortho_groups['fold_map'], _ortho_groups['rep_map'], sharpe_by_strat)
+        logger.info('orthogonalization.fold: %d -> %d contributions', before, len(active))
 
     # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
     # is the SIGNED sum of effective_sharpe — opposing strategies cancel
@@ -386,6 +413,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # (direction, weight, bracket) tuple here; final selection happens
         # after ticker_w sign is known.
         ticker_meta[tkr]['brackets'].append({
+            'sid':        sid,
             'direction':  d,
             'weight':     weight_by_strat[sid],
             'entry':      s.get('entry_price'),
@@ -398,13 +426,26 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
         return []
 
+    # Tier-2: deflate the conviction gate by effective-independent-bets (gate only; sizing untouched).
+    gate_net_sharpe = ticker_net_sharpe
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
+        from execution import orthogonalization as _og
+        contribs_by_ticker = {
+            tkr: list(zip(meta['strategies'], meta['directions']))
+            for tkr, meta in ticker_meta.items()
+        }
+        gate_net_sharpe = _og.deflated_net_sharpe(
+            contribs_by_ticker, _ortho_groups['block_map'],
+            _ortho_groups['matrix'], sharpe_by_strat)
+        logger.info('orthogonalization.corr_weight: deflated gate for %d tickers', len(gate_net_sharpe))
+
     # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
     # below the configured floor (default 3.0, from pipeline_config). This
     # is the operator's primary conviction filter — kills single-strategy
     # bets AND near-cancellation tickers in one rule.
     if min_cum_sharpe > 0:
         gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if abs(ticker_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
+                     if abs(gate_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
         for tkr in gated_out:
             ticker_w.pop(tkr, None)
             ticker_meta.pop(tkr, None)
@@ -415,6 +456,33 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
         return []
+
+    # Shadow: log what orthogonalization WOULD change without affecting routing.
+    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            and not (_ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT')):
+        try:
+            from execution import orthogonalization as _og
+            shadow_contribs = {
+                tkr: list(zip(meta['strategies'], meta['directions']))
+                for tkr, meta in ticker_meta.items()
+            }
+            shadow_gate = _og.deflated_net_sharpe(
+                shadow_contribs, _ortho_groups['block_map'],
+                _ortho_groups['matrix'], sharpe_by_strat)
+            would_drop = [t for t in ticker_w
+                          if abs(shadow_gate.get(t, 0.0)) < min_cum_sharpe]
+            mat = _ortho_groups.get('matrix') or {}
+            offdiag = [mat[a][b] for a in mat for b in mat.get(a, {}) if a != b]
+            hist = {}
+            for v in offdiag:
+                bucket = round(float(v) * 10) / 10
+                hist[bucket] = hist.get(bucket, 0) + 1
+            logger.info('orthogonalization.shadow: would_drop=%s similarity_histogram=%s '
+                        'fold_pairs=%d block_pairs=%d',
+                        would_drop, dict(sorted(hist.items())),
+                        len(_ortho_groups['fold_map']), len(_ortho_groups['block_map']))
+        except Exception as e:
+            logger.warning('orthogonalization.shadow failed (%s)', e)
 
     gross = sum(abs(w) for w in ticker_w.values())
     if gross <= 0:
@@ -549,7 +617,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if kind in ('orphan_close', 'flip_close'):
             bracket = {}     # forces close_only=True downstream
         else:
-            bracket = _select_bracket(ticker_meta[tkr].get('brackets', []), dir_sign)
+            bracket = _choose_bracket(ticker_meta[tkr].get('brackets', []),
+                                      dir_sign, _ortho_groups, sharpe_by_strat)
         real_sid = '|'.join(sorted(set(ticker_meta[tkr]['strategies'])))[:120]
         if kind == 'flip_close':
             sid_out = '__flip_close__'
@@ -614,3 +683,34 @@ def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
         return {}
     usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
     return usable[0]
+
+
+def _choose_bracket(candidates: list[dict], dir_sign: int,
+                    ortho_groups: dict | None, sharpe_by_strat: dict) -> dict:
+    """Gate decision for the bracket attached to an emission.
+    OPENCLAW_STRATEGY_BRACKET_STACK ON + block substrate present -> stacked bracket
+    (falls back to the legacy max-weight _select_bracket if stacking yields nothing).
+    OFF (or no substrate) -> _select_bracket, byte-identical to legacy.
+    Under ORTHO_SHADOW (and stacking OFF) it logs the would-be stacked bracket."""
+    if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        from execution import bracket_stacking as _bs
+        stacked = _bs.stacked_bracket(candidates, dir_sign,
+                                      ortho_groups['block_map'], sharpe_by_strat)
+        if stacked:
+            return stacked
+    selected = _select_bracket(candidates, dir_sign)
+    if ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
+            and not _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+        try:
+            from execution import bracket_stacking as _bs
+            shadow_b = _bs.stacked_bracket(candidates, dir_sign,
+                                           ortho_groups['block_map'], sharpe_by_strat)
+            if shadow_b:
+                logger.info(
+                    'bracket_stack.shadow: selected(stop=%.2f t1=%.2f) vs '
+                    'stacked(stop=%.2f t1=%.2f n=%d) %s',
+                    float(selected.get('stop') or 0.0), float(selected.get('t1') or 0.0),
+                    shadow_b['stop'], shadow_b['t1'], shadow_b['n_blocks'], shadow_b['why'])
+        except Exception as _e:
+            logger.warning('bracket_stack.shadow failed (%s)', _e)
+    return selected
