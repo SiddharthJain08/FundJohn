@@ -698,7 +698,13 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     # Sub-contract guard uses the limit price
     side_intent_qty_lookup = _options_current_qty(occ)
     final_side, intent = _options_position_intent(direction, side_intent_qty_lookup)
-    limit = _option_marketable_limit(final_side, quote)
+    # `limit_price_override` lets a sentinel probe (system_check / smoke
+    # rest-then-cancel) force a deliberately non-marketable limit so the order
+    # RESTS instead of filling. The production sizer never sets this key, so
+    # real orders take the computed marketable limit and are byte-identical.
+    override = order.get('limit_price_override')
+    limit = (float(override) if override is not None
+             else _option_marketable_limit(final_side, quote))
 
     raw_qty, qty_reason = _resolve_option_qty(order, limit)
     if qty_reason and raw_qty == 0:

@@ -349,3 +349,59 @@ def test_option_quote_returns_none_on_cli_failure():
         return False, None, 'boom'
     with patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
         assert _option_quote('IWM260626P00272000') is None
+
+
+# --- limit_price_override: non-marketable sentinel hook (system_check / smoke probe) ---
+def test_route_honors_limit_price_override_sentinel():
+    """A non-marketable sentinel probe (system_check / smoke rest-then-cancel)
+    passes limit_price_override; the broker submit must use it verbatim instead
+    of the computed marketable limit, so the order RESTS instead of filling.
+    Production sizer never sets this key, so real orders are byte-identical."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order', 'submit']:
+            captured['args'] = list(args)
+            return True, {'id': 'sentinel-1'}, None
+        return True, {}, None
+    order = _option_order(direction='long', right='call', strike_rule='atm')
+    order['limit_price_override'] = 1.00
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,16)]), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid': 5.0, 'ask': 5.10}), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        res = _route_option_order(order, equity=100000, coid='sentinel')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'submitted'
+    assert res.get('entry') == 1.00, f"entry should be the override, got {res.get('entry')}"
+    a = captured['args']
+    assert a[a.index('--limit-price') + 1] == '1.00'  # override, NOT 5.12 marketable
+
+def test_route_uses_marketable_limit_when_no_override():
+    """Without limit_price_override the computed marketable buy limit (ask+slip) is used."""
+    _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    import datetime as _dt
+    captured = {}
+    def _fake_cli(args, *a, **kw):
+        if list(args[:2]) == ['order', 'submit']:
+            captured['args'] = list(args)
+            return True, {'id': 'mkt-1'}, None
+        return True, {}, None
+    order = _option_order(direction='long', right='call', strike_rule='atm')
+    with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
+         patch('execution.alpaca_executor._spot_price', return_value=750.0), \
+         patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,16)]), \
+         patch('execution.alpaca_executor._option_quote', return_value={'bid': 5.0, 'ask': 5.10}), \
+         patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
+         patch('execution.alpaca_executor._options_current_qty', return_value=0), \
+         patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
+        res = _route_option_order(order, equity=100000, coid='mkt')
+    _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
+    assert res and res.get('status') == 'submitted'
+    assert res.get('entry') == 5.12  # ask 5.10 + 0.02 slip
