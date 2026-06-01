@@ -40,6 +40,9 @@ def size_positions(
       1. Cadence gate (filter_by_cadence) — drops signals from strategies
          whose next_fire_date is still in the future. Bypassed for one
          cycle when regime_liquidator sets regime:transition:fresh in Redis.
+         **Bypassed entirely in EOD mode** (OPENCLAW_EOD_RECONCILE=1): the
+         APPROVED carried set was already gated at 4PM[T] + the 9:15
+         pre-market gate, so re-applying cadence would wrongly skip them.
       2. Sharpe-cadence path — pulls active-window signals from the DB,
          aggregates ticker_w across contributing strategies, normalizes
          to λ × NAV, delta-rebalances against current broker positions,
@@ -50,18 +53,29 @@ def size_positions(
     """
     regime_state = regime['state']
 
-    # Cadence gate. Bypassed for one cycle when the regime liquidator
-    # has set regime:transition:fresh in Redis (fresh post-transition
-    # cycle should run every eligible strategy without per-strategy gating).
-    force_all = _check_force_fire_flag()
-    passed, skipped = filter_by_cadence(signals, strategy_state, run_date, force_all=force_all)
-    if skipped:
-        logger.info('regime_blended_sizer: cadence skipped %d signals', len(skipped))
-    if force_all:
-        logger.info('regime_blended_sizer: force_all=True — cadence bypassed (regime transition)')
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        # SP-6 Phase A — EOD reconcile mode. The APPROVED carried set was
+        # already gated at the 4PM[T] EOD compute and the 9:15 pre-market
+        # carry-forward gate; re-applying cadence here would wrongly skip
+        # signals that are pre-approved for T+1 execution. Signal loading
+        # also switches to _load_approved_carried_signals (see
+        # _sharpe_cadence_path). Note: _check_force_fire_flag() is NOT
+        # called in EOD mode — the Redis regime:transition:fresh key must
+        # not be consumed mid-reconcile.
+        passed = list(signals)
+        logger.info('regime_blended_sizer: EOD mode — cadence gate bypassed, %d carried signals', len(passed))
+    else:
+        # Legacy path — untouched. Cadence gate guards against stacking on
+        # long-horizon strategies. Bypassed for one cycle on regime transition.
+        force_all = _check_force_fire_flag()
+        passed, skipped = filter_by_cadence(signals, strategy_state, run_date, force_all=force_all)
+        if skipped:
+            logger.info('regime_blended_sizer: cadence skipped %d signals', len(skipped))
+        if force_all:
+            logger.info('regime_blended_sizer: force_all=True — cadence bypassed (regime transition)')
 
-    if not passed:
-        return []
+        if not passed:
+            return []
 
     return _sharpe_cadence_path(passed, account_state, regime_state,
                                 regime_params, confirmer or default_confirmer)
@@ -176,6 +190,72 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
     except Exception:
         pass
     return default
+
+
+def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[dict]:
+    """SP-6 Phase A — load the APPROVED carried set for today's reconcile.
+
+    In EOD mode the sizer loads execution_signals WHERE lifecycle_state='APPROVED'
+    AND target_date=today instead of the legacy active-window query. These signals
+    were already gated at 4PM[T] (EOD compute) + 9:15AM (pre-market carry-forward
+    gate), so no additional age/cadence filter is applied here.
+
+    Return shape is identical to _load_active_window_signals: a list of
+    {strategy_id, ticker, direction, signal_date, entry_price, stop_loss,
+     target_1, target_2} dicts ready for the ticker-weight aggregation loop.
+
+    Filters to strategies present in weight_by_strat (same as the legacy
+    loader); strategies absent from weights are excluded by the aggregation
+    loop at L469 anyway, so this is a no-op guard, not a narrowing filter.
+    Applies the same fail-open alpaca_tradable_universe filter as the legacy
+    loader — dropped tickers are logged, not fatal.
+    """
+    import psycopg2
+    import psycopg2.extras
+    from datetime import date as _date
+
+    if not weight_by_strat:
+        return []
+
+    today = _date.today()
+    sids = list(weight_by_strat.keys())
+    out = []
+    tradable_symbols: set[str] = set()
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute('''
+                    SELECT DISTINCT ON (strategy_id, ticker)
+                           strategy_id, ticker, direction, signal_date,
+                           entry_price, stop_loss, target_1, target_2
+                    FROM execution_signals
+                    WHERE lifecycle_state = 'APPROVED'
+                      AND target_date = %s
+                      AND strategy_id = ANY(%s)
+                    ORDER BY strategy_id, ticker, signal_date DESC
+                ''', (today, sids))
+                rows = cur.fetchall()
+                cur.execute("""SELECT symbol FROM alpaca_tradable_universe
+                              WHERE status='active' AND tradable=TRUE""")
+                tradable_symbols = {r[0] for r in cur.fetchall()}
+    except Exception as e:
+        logger.warning('sharpe_cadence EOD: approved-carried fetch failed (%s); falling back to empty', e)
+        return []
+
+    dropped_untradable = 0
+    for r in rows:
+        if tradable_symbols and r['ticker'] not in tradable_symbols:
+            dropped_untradable += 1
+            continue
+        out.append({'strategy_id': r['strategy_id'], 'ticker': r['ticker'],
+                    'direction': r['direction'], 'signal_date': r['signal_date'],
+                    'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
+                    'target_1': r['target_1'], 'target_2': r['target_2']})
+    if dropped_untradable:
+        logger.info('sharpe_cadence EOD: dropped %d untradable signals (universe=%d)',
+                    dropped_untradable, len(tradable_symbols))
+    logger.info('sharpe_cadence EOD: loaded %d APPROVED carried signals for %s', len(out), today)
+    return out
 
 
 def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, float],
@@ -310,6 +390,73 @@ def _load_broker_positions_usd():
         return {}
 
 
+def _classify_position_deltas(
+    target_usd: dict[str, float],
+    broker: dict[str, float],
+    ticker_meta: dict,
+) -> list[tuple[str, float, str]]:
+    """Classify position deltas into emission kinds: delta, flip_close, flip_open, orphan_close.
+
+    Pure function: no DB, no broker calls. Takes target positions, current broker positions,
+    and ticker metadata; returns a list of (ticker, signed_usd, kind) tuples.
+
+    Each ticker is classified as one of:
+      • delta         — single order; close_only auto-detected downstream when the delta
+                        direction has no aligned bracket.
+      • orphan_close  — ticker held but absent from current targets;
+                        strategy_id='__close_orphan__', tier-0 in executor.
+      • flip_close    — current and target have OPPOSITE signs. Liquidates the existing
+                        position fully. Tier-1 in executor. Paired with flip_open below;
+                        flip_open must wait for the close to fill (executor polls). Alpaca
+                        bracket orders do not support auto-reverse so we CANNOT submit a
+                        single oversize bracket.
+      • flip_open     — the paired new-direction open following flip_close. Tier-2 (short)
+                        or tier-3 (long) in executor.
+
+    Args:
+        target_usd:  dict[str, float] — target position in USD, per ticker
+        broker:      dict[str, float] — current broker positions in USD
+                     (positive=long, negative=short)
+        ticker_meta: dict — mutable; will be populated with __close_orphan__ metadata
+                     for orphan tickers not already present
+
+    Returns:
+        list[tuple[str, float, str]] — each (ticker, signed_usd, kind) emission
+    """
+    # First pass: identify flips (opposite-sign transitions).
+    flip_tickers: set[str] = set()
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        if current == 0.0 or target == 0.0:
+            continue
+        # Opposite-sign check
+        if (target > 0 > current) or (target < 0 < current):
+            flip_tickers.add(tkr)
+
+    # Second pass: emit deltas and flips for all targets.
+    emissions: list[tuple[str, float, str]] = []
+    for tkr, target in target_usd.items():
+        current = broker.get(tkr, 0.0)
+        if tkr in flip_tickers:
+            emissions.append((tkr, -current, 'flip_close'))
+            emissions.append((tkr,  target,  'flip_open'))
+        else:
+            delta = target - current
+            if delta != 0.0:
+                emissions.append((tkr, delta, 'delta'))
+
+    # Third pass: emit orphan_closes for positions in broker but not in targets.
+    for tkr, current in broker.items():
+        if tkr in target_usd or current == 0.0:
+            continue
+        emissions.append((tkr, -current, 'orphan_close'))
+        if tkr not in ticker_meta:
+            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
+                                'brackets': []}
+
+    return emissions
+
+
 def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
@@ -358,15 +505,34 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam = lam_global * max(0.0, min(1.0, liq_regime))
     min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
 
-    # Fix A: aggregate across cadence-window, not today-only.
-    active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
+    # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
+    # legacy path loads the cadence-window active signals. Gate OFF is the
+    # legacy _load_active_window_signals call, unchanged.
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        active = _load_approved_carried_signals(weight_by_strat)
+    else:
+        # Fix A: aggregate across cadence-window, not today-only.
+        active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
     if not active:
-        # Fallback: use today's `signals` parameter (e.g. force_all day-1
+        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+            # EOD mode: an empty APPROVED set means every carried signal was
+            # vetoed (or none were computed). Do NOT fall back to the handoff
+            # signals — those may contain COMPUTED/legacy rows the pre-market
+            # gate deliberately rejected. Zero orders here is correct; the
+            # run_reconcile step (Task 8b) handles the flatten path when
+            # appropriate.
+            logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — no APPROVED carried signals; '
+                        'zero orders (flatten handled by run_reconcile if needed)')
+            return []
+        # Legacy fallback: use today's `signals` parameter (e.g. force_all day-1
         # of regime, before signals are persisted)
         active = signals or []
         logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
     else:
-        logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
+        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+            logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — %d APPROVED carried signals', len(active))
+        else:
+            logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
 
     # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
     _ortho_groups = None
@@ -538,33 +704,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     #   • flip_open     — the paired new-direction open following flip_close.
     #                     Tier-2 (short) or tier-3 (long) in executor.
     broker = _load_broker_positions_usd()
-
-    flip_tickers: set[str] = set()
-    for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        if current == 0.0 or target == 0.0:
-            continue
-        # Opposite-sign check
-        if (target > 0 > current) or (target < 0 < current):
-            flip_tickers.add(tkr)
-
-    emissions: list[tuple[str, float, str]] = []
-    for tkr, target in target_usd.items():
-        current = broker.get(tkr, 0.0)
-        if tkr in flip_tickers:
-            emissions.append((tkr, -current, 'flip_close'))
-            emissions.append((tkr,  target,  'flip_open'))
-        else:
-            delta = target - current
-            if delta != 0.0:
-                emissions.append((tkr, delta, 'delta'))
-    for tkr, current in broker.items():
-        if tkr in target_usd or current == 0.0:
-            continue
-        emissions.append((tkr, -current, 'orphan_close'))
-        if tkr not in ticker_meta:
-            ticker_meta[tkr] = {'strategies': ['__close_orphan__'], 'directions': [0],
-                                'brackets': []}
+    emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
+    flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
     logger.info(
         'regime_blended_sizer.sharpe_cadence: targets=%d, broker=%d, emissions=%d (flips=%d)',
         len(target_usd), len(broker), len(emissions), len(flip_tickers))

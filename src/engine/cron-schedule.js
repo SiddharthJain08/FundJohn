@@ -251,10 +251,23 @@ function start(swarm, generateId, notifyDiscord) {
     // into the ~3:55pm close to mirror the backtests' close[t] fill, plus a
     // 9:35am dashboard-only SOD refresh. When OFF, the legacy 10:00am cycle runs
     // unchanged. Spec: docs/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
-    const closeExecLive = process.env.OPENCLAW_CLOSE_EXEC_LIVE === '1';
+    const closeExecLive       = process.env.OPENCLAW_CLOSE_EXEC_LIVE       === '1';
+    const eodSignalRegister   = process.env.OPENCLAW_EOD_SIGNAL_REGISTER   === '1';
 
-    // 10:00 AM ET Mon–Fri — legacy daily cycle (registered only when close-exec is OFF).
-    if (!closeExecLive) cron.schedule('0 10 * * 1-5', () => {
+    // Mutual exclusion: EOD-flow and close-exec-live cannot both drive routed
+    // strategies simultaneously — they operate on incompatible timing assumptions.
+    if (eodSignalRegister && closeExecLive) {
+        throw new Error(
+            'OPENCLAW_EOD_SIGNAL_REGISTER and OPENCLAW_CLOSE_EXEC_LIVE cannot both be 1 ' +
+            '— they would both drive routed strategies on conflicting timing models. ' +
+            'Disable OPENCLAW_CLOSE_EXEC_LIVE before enabling the EOD flow.'
+        );
+    }
+
+    // 10:00 AM ET Mon–Fri — legacy daily cycle (registered only when NEITHER
+    // close-exec NOR EOD-flow is ON). EOD-flow supersedes the legacy same-day
+    // cycle (§4: entire live cycle re-timed to act-next-day).
+    if (!closeExecLive && !eodSignalRegister) cron.schedule('0 10 * * 1-5', () => {
         const useLangGraph = process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1';
         const today = new Date().toISOString().slice(0, 10);
 
@@ -325,6 +338,141 @@ function start(swarm, generateId, notifyDiscord) {
             catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
         }, { timezone: 'America/New_York' });
     }
+
+    // ── SP-6 Phase A: EOD→Open Execution Flow ────────────────────────────────
+    // Gated by OPENCLAW_EOD_SIGNAL_REGISTER (default OFF). When ON, the legacy
+    // same-day close-exec cycle is superseded: signals are computed at 4 PM[T]
+    // on real close[T] prices, carried overnight, gated at 9:15 AM[T+1], and
+    // executed into close[T+1] at 3:55 PM[T+1].
+    // Mutual exclusion with OPENCLAW_CLOSE_EXEC_LIVE is enforced at registration
+    // (throw above). Gate-OFF = zero new crons registered (byte-identical to pre-SP6).
+    // Spec: docs/superpowers/specs/2026-05-31-sp6-phase-a-eod-open-execution-design.md §4/§12
+    if (eodSignalRegister) {
+        const dispatchCycle = (reason, steps) => {
+            const today = new Date().toISOString().slice(0, 10);
+            try {
+                const { runDailyCycleGraph } = require('../agent/graphs/daily-cycle');
+                runDailyCycleGraph({ runDate: today, reason, requestedSteps: steps })
+                    .then((out) => log(`${reason} finished: status=${out.status} aborted=${out.abortedAt || 'none'}`))
+                    .catch((err) => log(`${reason} FAILED: ${err.message}`));
+            } catch (e) {
+                log(`${reason} dispatch error: ${e.message}`);
+            }
+        };
+
+        // (a) 16:15 ET Mon–Fri — EOD compute: collect → sentiment → signals.
+        // Fires after the ~4:05pm EOD price-append so close[T] is fully present.
+        // engine.py:run_strategies → write_signals writes execution_signals at
+        // lifecycle_state='COMPUTED' with target_date=T+1; also writes the
+        // eod_compute_health sentinel and parity_mark (mark_entry_price) for
+        // any positions filled that day.
+        cron.schedule('15 16 * * 1-5', () => {
+            log('EOD compute (4:15pm ET): collect → sentiment → signals');
+            dispatchCycle('eod-signal-register', ['collect', 'sentiment', 'signals']);
+        }, { timezone: 'America/New_York' });
+
+        // (b) 09:15 ET Mon–Fri — pre-market carry-forward gate.
+        // Reads COMPUTED signals, applies panic/sentiment verdict, transitions to
+        // APPROVED or REJECTED, writes signal_gate_verdicts + __gate_ran__ sentinel.
+        // Gated by OPENCLAW_EOD_PREMARKET_GATE; no-op if gate is OFF.
+        // premarket_gate.py has no __main__ block → spawn via -c one-liner with
+        // sys.path bootstrap (the module inserts ROOT/src itself via Path(__file__),
+        // but -c has no __file__ so we inject the path explicitly).
+        if (process.env.OPENCLAW_EOD_PREMARKET_GATE === '1') {
+            cron.schedule('15 9 * * 1-5', () => {
+                log('EOD pre-market carry-forward gate (9:15am ET)');
+                try {
+                    const fs    = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `premarket_gate_${today}.log`), 'a');
+                    const child = spawn(PYTHON, [
+                        '-c',
+                        'import sys; sys.path.insert(0, "src"); from execution.premarket_gate import run_gate; run_gate()',
+                    ], {
+                        cwd:      ROOT,
+                        env:      { ...process.env },
+                        detached: true,
+                        stdio:    ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`premarket-gate spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`premarket-gate spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+        }
+
+        // (c) 09:28 ET Mon–Fri — open-window reconcile: drops/flatten only, via OPG.
+        // MUST fire PRE-9:30: OPG orders only participate in the opening auction
+        // during the premarket session; at/after 9:30 ET OPG degrades to an RTH
+        // market order (per Task 10 / §7 of the design). 09:28 gives ~2 min for
+        // order submission before the auction. Gated by OPENCLAW_EOD_RECONCILE.
+        // open_reconcile.run_reconcile: diffs APPROVED set vs broker book →
+        // close dropped/flattened positions at the open (OPG dual-path) +
+        // strategy-ledger close; does NOT size or submit opens.
+        if (process.env.OPENCLAW_EOD_RECONCILE === '1') {
+            cron.schedule('28 9 * * 1-5', () => {
+                log('EOD open-window reconcile (9:28am ET — premarket, OPG required)');
+                try {
+                    const fs    = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `open_reconcile_${today}.log`), 'a');
+                    const child = spawn(PYTHON, ['src/execution/open_reconcile.py'], {
+                        cwd:      ROOT,
+                        env:      { ...process.env },
+                        detached: true,
+                        stdio:    ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`open-reconcile spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`open-reconcile spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+
+            // (d) 09:32 ET Mon–Fri — post-open OPG day-sweep.
+            // Day-closes any OPG drop/flatten orders that did not fill at the
+            // auction (the 2026-05-18 214/224-expired failure pattern). Fires
+            // after the 9:30 open so unfilled OPGs are visible as expired.
+            cron.schedule('32 9 * * 1-5', () => {
+                log('EOD post-open OPG day-sweep (9:32am ET)');
+                try {
+                    const fs    = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `open_reconcile_sweep_${today}.log`), 'a');
+                    const child = spawn(PYTHON, ['src/execution/open_reconcile.py', '--sweep'], {
+                        cwd:      ROOT,
+                        env:      { ...process.env },
+                        detached: true,
+                        stdio:    ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`open-reconcile --sweep spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`open-reconcile sweep spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+        }
+
+        // (e) 15:55 ET Mon–Fri — EOD into-close fill: size + execute + report + health.
+        // The production sizer (regime_blended_sizer_live, Task 8a SP-6-aware) runs
+        // as the 'trade' step: loads the APPROVED carried set, sizes against current
+        // NAV/BP, then 'alpaca' fills the sized opens/resizes into close[T+1].
+        // CRITICAL: 'trade' (sizer) must precede 'alpaca' (executor) — without it
+        // there is nothing sized to execute. Drops are already closed at 9:30;
+        // the sizer's re-diff sees them gone, so no double-close.
+        cron.schedule('55 15 * * 1-5', () => {
+            log('EOD into-close fill (3:55pm ET): trade → alpaca → reconcile → report → health');
+            dispatchCycle('eod-into-close-fill', ['trade', 'alpaca', 'reconcile', 'report', 'health']);
+        }, { timezone: 'America/New_York' });
+    }
+    // ── End SP-6 Phase A EOD block ────────────────────────────────────────────
 
     // 9:00 AM ET Mon–Fri: fresh regime at market open (run_market_state.py only — no signals/Alpaca)
     cron.schedule('0 9 * * 1-5', async () => {

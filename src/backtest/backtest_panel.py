@@ -93,9 +93,14 @@ def build_equity_curve(trades: list[dict],
     frame['spx_equity'] = frame['spx_equity'] / first_bench
     out = []
     for ts, row in frame.iterrows():
+        # Non-finite equity (NaN/inf) is possible when a strategy's normalized
+        # base is 0 (a −100% equity point, more reachable under conservative
+        # t+1 fills). Bare NaN/Infinity is INVALID JSON and aborts the panel
+        # INSERT, so emit None (renders as a gap on the dashboard line).
+        se = float(row['strat_equity']); sx = float(row['spx_equity'])
         out.append({'date': ts.strftime('%Y-%m-%d'),
-                    'strat_equity': round(float(row['strat_equity']), 6),
-                    'spx_equity': round(float(row['spx_equity']), 6),
+                    'strat_equity': round(se, 6) if np.isfinite(se) else None,
+                    'spx_equity': round(sx, 6) if np.isfinite(sx) else None,
                     'regime': None if pd.isna(row['regime']) else str(row['regime'])})
     return out
 
@@ -217,14 +222,23 @@ def rebuild(strategy_id: Optional[str] = None) -> dict:
             with conn.cursor() as cur:
                 cur.execute("SELECT DISTINCT strategy_id FROM strategy_backtest_runs WHERE primary_window=TRUE")
                 sids = [r[0] for r in cur.fetchall()]
-        stats = {'built': 0, 'skipped': 0}
+        stats = {'built': 0, 'skipped': 0, 'failed': 0}
         for sid in sids:
-            panel = build_panel(sid, conn, prices, hv21_for, bench_ret)
-            if panel is None:
-                stats['skipped'] += 1
-                continue
-            persist_panel(conn, panel)
-            stats['built'] += 1
+            # Per-strategy isolation: one bad panel (e.g. a JSON/NaN error or a
+            # missing-data strategy) must not abort the whole rebuild and leave
+            # every later strategy's panel stale. Roll back just this sid and
+            # continue; the failure is counted + logged.
+            try:
+                panel = build_panel(sid, conn, prices, hv21_for, bench_ret)
+                if panel is None:
+                    stats['skipped'] += 1
+                    continue
+                persist_panel(conn, panel)
+                stats['built'] += 1
+            except Exception as e:
+                conn.rollback()
+                stats['failed'] += 1
+                print(f"[backtest_panel] FAILED {sid}: {type(e).__name__}: {e}")
         return stats
     finally:
         conn.close()

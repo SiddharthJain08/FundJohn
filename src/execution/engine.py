@@ -20,7 +20,8 @@ import json
 import logging
 import traceback
 import decimal
-from datetime import date, datetime, timedelta
+import subprocess
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg2
@@ -54,6 +55,73 @@ TARGET1_TRIGGER_PCT     =  0.005  # within 0.5% of target_1
 DRAWDOWN_REPORT_PCT     = -0.10   # -10% unrealized triggers review
 DAYS_HELD_REPORT        = 30      # flag if held > 30 days with no target hit
 CONFLUENCE_MIN          = 2       # min strategies agreeing for confluence
+
+
+_ALPACA_BIN = '/root/go/bin/alpaca'
+
+
+def _next_trading_day(run_date: date) -> date:
+    """Derive the next trading session date after run_date, respecting US market holidays.
+
+    Uses the Alpaca market calendar CLI (holiday-aware) as the primary source.
+    Queries --start run_date+1 --end run_date+7 and returns the first calendar
+    session date.  Falls back to plain weekday-skip math ONLY if the CLI call
+    fails, and logs a warning in that case.
+
+    The holiday-aware approach is required because the next-session reconcile
+    (Task 3 onwards) queries `target_date = today`.  If target_date were set to
+    a market holiday, the signal would be silently orphaned.
+
+    Example: run_date=2026-07-02 (Thursday before observed July 4)
+      - weekday math → 2026-07-03 (Friday) — WRONG; market is closed
+      - calendar     → 2026-07-06 (Monday) — correct next session
+
+    Args:
+        run_date: The current EOD run date.
+
+    Returns:
+        The next trading session date after run_date.
+    """
+    start = run_date + timedelta(days=1)
+    end = run_date + timedelta(days=7)
+    try:
+        result = subprocess.run(
+            [_ALPACA_BIN, 'calendar',
+             '--start', start.isoformat(),
+             '--end', end.isoformat()],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                '_next_trading_day: alpaca calendar call failed (rc=%s); '
+                'falling back to weekday-skip math for run_date=%s',
+                result.returncode, run_date,
+            )
+        else:
+            sessions = json.loads(result.stdout) if result.stdout.strip() else []
+            if sessions:
+                return date.fromisoformat(sessions[0]['date'])
+            logger.warning(
+                '_next_trading_day: alpaca calendar returned empty session list; '
+                'falling back to weekday-skip math for run_date=%s',
+                run_date,
+            )
+    except Exception as exc:
+        logger.warning(
+            '_next_trading_day: alpaca calendar exception (%s); '
+            'falling back to weekday-skip math for run_date=%s',
+            exc, run_date,
+        )
+    # Fallback: skip weekends only (no holiday awareness)
+    d = start
+    while d.weekday() >= 5:  # 5=Sat, 6=Sun
+        d += timedelta(days=1)
+    return d
+
+
+def _eod_signal_register_gate_on() -> bool:
+    """Returns True if OPENCLAW_EOD_SIGNAL_REGISTER==1 (default OFF)."""
+    return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
 
 
 def get_db():
@@ -706,12 +774,22 @@ def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
 def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
+
+    Side-effect: sets run_strategies.last_run_stats after every call:
+        {'total': <len(strategies)>, 'errored': <count of exception paths>,
+         'ran_ok': total - errored}
+    Strategies that were skipped (regime-ineligible, no crypto regime) are NOT
+    counted as errored — they didn't raise.  Callers that need to distinguish
+    "ran fine but emitted zero signals" from "raised an exception" should read
+    last_run_stats rather than checking `if signals` on the results dict (which
+    cannot distinguish the two cases since both store []).
     """
     # regime is the full dict from load_regime(); the eligibility gate takes
     # the regime-state string. Strategies still get the full dict.
     equity_regime_str = regime['state'] if isinstance(regime, dict) else regime
     _crypto_regime = None  # lazily loaded only if a crypto strategy is present
     results = {}
+    errored_ids: set = set()
     for strat in strategies:
         try:
             # SP-3.1 Phase C: crypto strategies gate on the CRYPTO regime, not equity.
@@ -735,8 +813,66 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
         except Exception as e:
             logger.error(f"  {strat.id} FAILED: {e}\n{traceback.format_exc()}")
+            errored_ids.add(strat.id)
             results[strat.id] = []
+    total = len(strategies)
+    run_strategies.last_run_stats = {
+        'total': total,
+        'errored': len(errored_ids),
+        'ran_ok': total - len(errored_ids),
+    }
     return results
+
+
+# ──────────────────────────────────────────────────────────
+# 4.5. WRITE EOD COMPUTE HEALTH SENTINEL
+# ──────────────────────────────────────────────────────────
+
+def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
+                     n_strategies_total: int, regime_ok: bool, universe_size: int) -> None:
+    """
+    INSERT one eod_compute_health row after run_strategies.
+
+    Gated by _eod_signal_register_gate_on(): caller is responsible for the gate
+    check so this function can also be called directly in tests with any cursor.
+
+    n_strategies_ok: strategies that executed WITHOUT raising an exception,
+        regardless of whether they emitted signals.  Read from
+        run_strategies.last_run_stats['ran_ok'] at the call-site.
+        An all-flat successful day (every strategy ran fine, none emitted
+        signals) → ran_ok == total > 0 → healthy=True → Task 8 flatten fires.
+        An all-errored day → ran_ok=0 → healthy=False → flatten refused.
+        (Cannot infer this from strategy_results.values() because both the
+        exception path and the genuine-zero-signal path store [].)
+
+    healthy = (rc == 0 AND regime_ok AND universe_size > 0 AND n_strategies_ok > 0)
+    """
+    healthy = (rc == 0 and regime_ok and universe_size > 0 and n_strategies_ok > 0)
+    detail = {
+        'rc': rc,
+        'n_strategies_ok': n_strategies_ok,
+        'n_strategies_total': n_strategies_total,
+        'regime_ok': regime_ok,
+        'universe_size': universe_size,
+        'healthy': healthy,
+    }
+
+    cur.execute(
+        """
+        INSERT INTO eod_compute_health
+            (run_date, rc, n_strategies_ok, n_strategies_total,
+             regime_ok, universe_size, healthy, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (run_date, rc, n_strategies_ok, n_strategies_total,
+         regime_ok, universe_size, healthy, json.dumps(detail)),
+    )
+
+    logger.info(
+        "[engine] eod_compute_health: rc=%s ok=%s/%s regime_ok=%s "
+        "universe_size=%s healthy=%s",
+        rc, n_strategies_ok, n_strategies_total, regime_ok, universe_size, healthy,
+    )
 
 
 # ──────────────────────────────────────────────────────────
@@ -745,6 +881,10 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
 
 def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date) -> int:
     total = 0
+    # Hoist gate check and next-trading-day lookup ONCE per call (not per signal).
+    # When gate is OFF, next_td stays None — no CLI subprocess spawned.
+    _gate_on = _eod_signal_register_gate_on()
+    _next_td = _next_trading_day(run_date) if _gate_on else None
     for strategy_id, signals in strategy_results.items():
         for sig in signals:
             try:
@@ -863,21 +1003,43 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                             continue
                     rows_inserted = 0   # not a new emit; bracket refresh only
                 else:
-                    cur.execute("""
-                        INSERT INTO execution_signals
-                            (strategy_id, workspace_id, signal_date, ticker, direction,
-                             entry_price, stop_loss, target_1, target_2, target_3,
-                             position_size_pct, regime_state, signal_params, status)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open')
-                        ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
-                    """, (
-                        strategy_id, WORKSPACE, run_date,
-                        sig.ticker, sig.direction,
-                        sig.entry_price, sig.stop_loss,
-                        sig.target_1, sig.target_2, sig.target_3,
-                        sig.position_size_pct, regime_state,
-                        json.dumps(params_clean),
-                    ))
+                    if _gate_on:
+                        # Gate ON: include lifecycle_state, computed_at, target_date
+                        cur.execute("""
+                            INSERT INTO execution_signals
+                                (strategy_id, workspace_id, signal_date, ticker, direction,
+                                 entry_price, stop_loss, target_1, target_2, target_3,
+                                 position_size_pct, regime_state, signal_params, status,
+                                 lifecycle_state, computed_at, target_date)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open',
+                                    %s,%s,%s)
+                            ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
+                        """, (
+                            strategy_id, WORKSPACE, run_date,
+                            sig.ticker, sig.direction,
+                            sig.entry_price, sig.stop_loss,
+                            sig.target_1, sig.target_2, sig.target_3,
+                            sig.position_size_pct, regime_state,
+                            json.dumps(params_clean),
+                            'COMPUTED', datetime.now(timezone.utc), _next_td,
+                        ))
+                    else:
+                        # Gate OFF: legacy INSERT — byte-identical to pre-SP-6 behavior
+                        cur.execute("""
+                            INSERT INTO execution_signals
+                                (strategy_id, workspace_id, signal_date, ticker, direction,
+                                 entry_price, stop_loss, target_1, target_2, target_3,
+                                 position_size_pct, regime_state, signal_params, status)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,'open')
+                            ON CONFLICT (strategy_id, signal_date, ticker, direction) DO NOTHING
+                        """, (
+                            strategy_id, WORKSPACE, run_date,
+                            sig.ticker, sig.direction,
+                            sig.entry_price, sig.stop_loss,
+                            sig.target_1, sig.target_2, sig.target_3,
+                            sig.position_size_pct, regime_state,
+                            json.dumps(params_clean),
+                        ))
                     rows_inserted = max(cur.rowcount, 0)  # ON CONFLICT DO NOTHING returns -1
                 cur.execute("RELEASE SAVEPOINT sp_signal")
                 total += rows_inserted
@@ -940,9 +1102,11 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
     the caller AFTER it commits — see the note at the end of this function."""
     cur.execute("""
         SELECT id, strategy_id, ticker, direction, entry_price,
+               mark_entry_price, target_date, lifecycle_state,
                stop_loss, target_1, signal_date
         FROM execution_signals
         WHERE workspace_id = %s AND status = 'open'
+          AND (lifecycle_state IS NULL OR lifecycle_state = 'FILLED')
     """, (WORKSPACE,))
     open_signals = cur.fetchall()
 
@@ -953,10 +1117,29 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
         strat_id   = row['strategy_id']
         ticker     = row['ticker']
         direction  = row['direction']
-        entry      = float(row['entry_price'])
         stop_loss  = float(row['stop_loss'])
         target_1   = float(row['target_1'])
         sig_date   = row['signal_date']
+
+        # SP-6: skip CLOSED_AT_OPEN signals (belt-and-suspenders; normally
+        # already excluded by status='open', but a flattened/dropped position
+        # that retained status='open' must never be re-marked).
+        import math as _math
+        if row.get('lifecycle_state') == 'CLOSED_AT_OPEN':
+            continue
+
+        # SP-6: prefer mark_entry_price (close[T+1] fill mark) over
+        # entry_price; fall back to entry_price for legacy NULL rows.
+        _raw_mark = row.get('mark_entry_price')
+        _raw_entry = row['entry_price']
+        if _raw_mark is not None:
+            try:
+                _mark_f = float(_raw_mark)
+                entry = _mark_f if _math.isfinite(_mark_f) else float(_raw_entry)
+            except (ValueError, TypeError):
+                entry = float(_raw_entry)
+        else:
+            entry = float(_raw_entry)
 
         if ticker not in prices.columns:
             continue
@@ -966,10 +1149,15 @@ def update_pnl(cur, prices: pd.DataFrame, run_date: date) -> tuple[int, list]:
             continue
 
         current = float(ts.iloc[-1])
-        days_held = (run_date - sig_date).days if isinstance(sig_date, date) else 0
+        # SP-6: use target_date for days_held when present (aligns with backtest
+        # horizon); fall back to signal_date for legacy NULL rows.
+        _tgt_dt = row.get('target_date')
+        if _tgt_dt is not None and isinstance(_tgt_dt, date):
+            days_held = (run_date - _tgt_dt).days if isinstance(run_date, date) else 0
+        else:
+            days_held = (run_date - sig_date).days if isinstance(sig_date, date) else 0
 
         # Compute unrealized P&L; guard against zero/NaN entries.
-        import math as _math
         if not entry or not _math.isfinite(entry):
             unrealized_pct = 0.0
         elif direction == 'LONG':
@@ -1225,9 +1413,49 @@ def main():
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe, aux_data)
 
+        # 4.5 Write eod_compute_health sentinel (gated: OPENCLAW_EOD_SIGNAL_REGISTER==1)
+        if _eod_signal_register_gate_on():
+            _stats = run_strategies.last_run_stats
+            n_strategies_total = _stats['total']
+            n_strategies_ok = _stats['ran_ok']
+            regime_ok = bool(
+                regime_state and
+                regime_state in ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+            )
+            write_eod_health(
+                cur,
+                run_date,
+                rc=0,
+                n_strategies_ok=n_strategies_ok,
+                n_strategies_total=n_strategies_total,
+                regime_ok=regime_ok,
+                universe_size=len(universe),
+            )
+
         # 5. Write signals
         total_signals = write_signals(cur, strategy_results, regime_state, run_date)
         logger.info(f"Signals written: {total_signals}")
+
+        # 5a. Parity marks — mark entry at close[T+1] and re-anchor brackets.
+        #     Gated by OPENCLAW_EOD_SIGNAL_REGISTER==1 (same gate as write_signals).
+        #     Builds closes dict from prices (wide: date-index × ticker-columns)
+        #     using last non-NaN close per ticker — mirrors update_pnl's proven
+        #     pattern (prices[ticker].dropna().iloc[-1]).
+        parity_mark_count = 0
+        if _eod_signal_register_gate_on():
+            try:
+                from execution.parity_mark import finalize_parity_marks
+                _closes: dict = {}
+                if not prices.empty:
+                    for _tk in prices.columns:
+                        _ts = prices[_tk].dropna()
+                        if not _ts.empty:
+                            _closes[_tk] = float(_ts.iloc[-1])
+                parity_mark_count = finalize_parity_marks(cur, _closes, run_date, WORKSPACE)
+                logger.info(f"Parity marks finalized: {parity_mark_count}")
+            except Exception as _pm_err:
+                logger.error(f"[engine] parity_mark failed: {_pm_err}")
+                errors.append(f"parity_mark: {_pm_err}")
 
         # 6. Confluence
         confluence_count = detect_confluence(cur, strategy_results, regime_state, run_date)
