@@ -120,7 +120,11 @@ def main():
                 req = urllib.request.Request(
                     url,
                     data=json.dumps({'content': msg[:1900]}).encode(),
-                    headers={'Content-Type': 'application/json'},
+                    # Discord proxies through Cloudflare, which 403s the default
+                    # python-urllib/* User-Agent with error code 1010. Send an
+                    # explicit UA so the request passes the edge filter.
+                    headers={'Content-Type': 'application/json',
+                             'User-Agent': 'OpenClaw-FoldReport/1.0 (+botjohn)'},
                 )
                 urllib.request.urlopen(req, timeout=10)
             except Exception as e:
