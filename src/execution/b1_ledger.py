@@ -1,14 +1,36 @@
 """Persist B1 shadow ledger rows + build/post the go/no-go report. Discord posting
 uses requests (passes Cloudflare) with an explicit UA for safety."""
 from __future__ import annotations
+import math
 import os
 import psycopg2
 import psycopg2.extras
 import requests
 
 
+def _env(key):
+    """POSTGRES_URI from the env or /root/openclaw/.env (the worktree has no .env)."""
+    val = os.environ.get(key)
+    if val:
+        return val
+    for line in open('/root/openclaw/.env'):
+        if line.startswith(key + '='):
+            return line.split('=', 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def _num(x):
+    """Coerce to a finite float (NaN/None/non-numeric → 0.0) so one poisoned row can't
+    NaN the aggregate headline (defense-in-depth; the simulator already skips NaN bars)."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return x if not math.isnan(x) else 0.0
+
+
 def _conn():
-    return psycopg2.connect(os.environ['POSTGRES_URI'])
+    return psycopg2.connect(_env('POSTGRES_URI'))
 
 
 def persist_rows(mode, rows):
@@ -38,13 +60,13 @@ def build_report(rows):
            'total_exec_ledger': 0.0, 'total_naive_ledger': 0.0,
            'avg_completion': 0.0, 'by_regime': {}}
     for r in rows:
-        ex = r.get('exec_ledger') or 0.0
+        ex = _num(r.get('exec_ledger'))
         rep['total_exec_ledger'] += ex
-        rep['total_naive_ledger'] += r.get('naive_ledger') or 0.0
-        rep['avg_completion'] += r.get('completion') or 0.0
-        if ex > (r.get('naive_ledger') or 0.0):
+        rep['total_naive_ledger'] += _num(r.get('naive_ledger'))
+        rep['avg_completion'] += _num(r.get('completion'))
+        if ex > _num(r.get('naive_ledger')):
             rep['beats_naive'] += 1
-        if ex > (r.get('vwap_base_ledger') or 0.0):
+        if ex > _num(r.get('vwap_base_ledger')):
             rep['beats_base'] += 1
         g = r.get('regime_state') or 'UNKNOWN'
         rg = rep['by_regime'].setdefault(g, {'n': 0, 'exec_ledger': 0.0})

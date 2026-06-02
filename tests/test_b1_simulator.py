@@ -24,6 +24,18 @@ def test_missing_bar_reduces_completion_and_is_skipped():
     assert abs(r['completion'] - 0.5) < 1e-9
     assert r['filled_qty'] == 50.0
 
+def test_nan_vwap_bar_is_skipped_not_poisoning():
+    # legacy/partial bars can carry NaN vwap; it must be skipped, never poison the ledger
+    import math
+    plan = [(0, 50.0), (1, 50.0)]
+    bars = {0: {'vwap': float('nan'), 'high': 100.0, 'low': 100.0, 'volume': 1.0},
+            1: {'vwap': 100.0, 'high': 100.0, 'low': 100.0, 'volume': 1.0}}
+    r = simulate(plan, bars, close_t1=101.0, impact_bps=0.0)
+    assert r['filled_qty'] == 50.0                 # NaN bucket skipped, only bucket 1 fills
+    assert r['actual_fill'] == 100.0
+    assert not math.isnan(r['exec_ledger'])
+    assert abs(r['completion'] - 0.5) < 1e-9
+
 def test_no_fills_returns_zero_ledger():
     r = simulate([(0, 10.0)], {}, close_t1=100.0)
     assert r['filled_qty'] == 0.0 and r['exec_ledger'] == 0.0 and r['actual_fill'] is None

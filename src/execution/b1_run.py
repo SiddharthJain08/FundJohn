@@ -73,7 +73,9 @@ def _score_order(o, df_ticker):
     close_t1 = o['close_t1']
     if close_t1 is None:
         last = max(day_bars)                       # last available bucket vwap ≈ close proxy
-        close_t1 = day_bars[last]['vwap']
+        close_t1 = day_bars[last].get('vwap')
+    if close_t1 is None or not (close_t1 > 0):     # no usable close proxy → skip (never emit NaN ledger)
+        return None
     profile = expected_volume_profile(_trailing(by_date, session))
     alpha = simulate(plan(o['signed_qty'], o['s_i'], profile, LAM), day_bars, close_t1, o.get('naive_fill'))
     base = simulate(plan(o['signed_qty'], 0.0, profile, LAM), day_bars, close_t1, o.get('naive_fill'))

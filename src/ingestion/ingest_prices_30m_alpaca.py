@@ -112,7 +112,10 @@ def backfill(tickers, start, end, out_path=DATA_PARQUET):
         raise RuntimeError(f"NEVER-DELETE violation: write would drop tickers {missing}")
     if len(merged) < before:
         raise RuntimeError(f"NEVER-DELETE violation: write would shrink rows {before}→{len(merged)}")
-    merged.to_parquet(out_path, index=False)
+    # Atomic write: a kill/OOM/disk-full mid-write must never corrupt the master parquet.
+    tmp = out_path + '.tmp'
+    merged.to_parquet(tmp, index=False)
+    os.replace(tmp, out_path)   # atomic same-filesystem rename
     return before, len(merged)
 
 

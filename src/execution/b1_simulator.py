@@ -10,7 +10,7 @@ _HAIRCUT_CAP_BPS = 50.0
 def _haircut_px(bar, impact_bps):
     """Half-spread proxy (from bar high-low) + fixed impact, as a price delta."""
     v = bar.get('vwap', 0.0)
-    if v <= 0:
+    if not (v > 0):          # catches NaN/None/<=0 (NaN>0 is False) — never poison a fill
         return 0.0
     half_spread_bps = 0.5 * (bar.get('high', v) - bar.get('low', v)) / v * 1e4
     bps = min(half_spread_bps, _HAIRCUT_CAP_BPS) + impact_bps
@@ -27,7 +27,7 @@ def simulate(plan_slices, realized_bars, close_t1, naive_fill=None, impact_bps=2
     filled_qty = 0.0
     for bucket, q in plan_slices:
         bar = realized_bars.get(bucket)
-        if not bar or bar.get('vwap', 0.0) <= 0:
+        if not bar or not (bar.get('vwap', 0.0) > 0):   # NaN/None/<=0 vwap → skip, don't poison
             continue
         fill_px = bar['vwap'] + side * _haircut_px(bar, impact_bps)
         filled_notional += q * fill_px
