@@ -742,16 +742,21 @@ def _resolve_structure_legs(spec, as_of, expiry):
         right = str(spec.right).lower()
         if float(spec.spread_width_pct) <= 0:
             return None
-        near = _resolve_strike(_with(spec, right=right), as_of, expiry)
-        if near is None:
-            return None
         grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
         if not grk:
+            return None
+        if spec.strike_rule == 'target_delta':
+            near = min(grk, key=lambda sdo: abs(abs(sdo[1]) - float(spec.target_delta)))[0]
+        else:
+            near = _resolve_strike(_with(spec, right=right), as_of, expiry)
+        if near is None:
             return None
         sign = 1.0 if right == 'call' else -1.0
         far_target = near + sign * float(spec.spread_width_pct) * spot
         far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
-        if far == near:
+        if right == 'call' and not far > near:
+            return None
+        if right == 'put' and not far < near:
             return None
         return [(right, near, 'sell'), (right, far, 'buy')]
     if spec.structure == 'iron_condor':

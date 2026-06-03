@@ -56,3 +56,21 @@ def test_credit_vertical_zero_width_failclosed(monkeypatch):
     spec = OptionSpec(underlying='SPY', structure='credit_vertical', right='call',
                       spread_width_pct=0.0)
     assert ex._resolve_structure_legs(spec, EXP, EXP) is None
+
+
+def test_credit_vertical_target_delta_uses_chain_match_not_heuristic(monkeypatch):
+    # heuristic stub returns a bogus unlisted strike; chain-match must win
+    _chain(monkeypatch, [(515.0, 0.30), (520.0, 0.25), (535.0, 0.15)], [])
+    monkeypatch.setattr(ex, '_resolve_strike', lambda spec, a, e: 999.0)   # bogus heuristic
+    spec = OptionSpec(underlying='SPY', structure='credit_vertical', right='call',
+                      strike_rule='target_delta', target_delta=0.25, spread_width_pct=0.03)
+    legs = ex._resolve_structure_legs(spec, EXP, EXP)
+    assert legs == [('call', 520.0, 'sell'), ('call', 535.0, 'buy')]   # 520 from chain, NOT 999
+
+
+def test_credit_vertical_inverted_wing_failclosed(monkeypatch):
+    # chain band too narrow: wing target above the highest listed -> snaps BELOW near -> must fail-closed
+    _chain(monkeypatch, [(515.0, 0.30), (520.0, 0.25)], [])   # no strike above 520
+    spec = OptionSpec(underlying='SPY', structure='credit_vertical', right='call',
+                      strike_rule='target_delta', target_delta=0.25, spread_width_pct=0.03)
+    assert ex._resolve_structure_legs(spec, EXP, EXP) is None
