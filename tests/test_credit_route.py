@@ -74,9 +74,12 @@ def test_credit_without_contracts_refused(monkeypatch):
     assert res.get('status') == 'skipped'
 
 
-def test_credit_gate_off_none(monkeypatch):
+def test_credit_gate_off_skips_fail_closed(monkeypatch):
+    # NIT-1 contract: option order + gate OFF -> SKIP dict, never equity fall-through.
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
-    assert ex._route_option_order(_order(), equity=100_000.0, coid='c7') is None
+    res = ex._route_option_order(_order(), equity=100_000.0, coid='c7')
+    assert res is not None and res.get('status') == 'skipped'
+    assert 'gate is OFF' in (res.get('reason') or '')
 
 
 def test_credit_tiny_net_pad_crossover_refused(monkeypatch):

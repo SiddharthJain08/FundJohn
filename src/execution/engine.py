@@ -879,6 +879,34 @@ def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
 # 5. WRITE SIGNALS
 # ──────────────────────────────────────────────────────────
 
+def _params_with_option_spec(sig):
+    """Build the signal_params dict for an execution_signals row, folding in
+    Signal.features and Signal.option_spec (SP-5.1c). option_spec is additive:
+    equity/crypto/etp signals leave it None -> key absent -> byte-identical."""
+    import math as _math, dataclasses as _dc
+
+    def _to_native(v):
+        if hasattr(v, 'item'):
+            v = v.item()   # numpy scalar → Python scalar
+        if isinstance(v, float) and not _math.isfinite(v):
+            return None    # Postgres rejects NaN/Inf in jsonb
+        if isinstance(v, dict):
+            return {k: _to_native(vv) for k, vv in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_to_native(vv) for vv in v]
+        return v
+
+    params = {k: _to_native(v) for k, v in (sig.signal_params or {}).items()}
+    feats = getattr(sig, 'features', None)
+    if feats:
+        params['features'] = {k: _to_native(v) for k, v in feats.items()}
+    spec = getattr(sig, 'option_spec', None)
+    if spec is not None:
+        params['option_spec'] = {k: _to_native(v) for k, v in _dc.asdict(spec).items()}
+    return params
+
+
+
 def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date) -> int:
     total = 0
     # Hoist gate check and next-trading-day lookup ONCE per call (not per signal).
@@ -911,26 +939,11 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                             f'(direction={_dirn} entry={_ep:.4f} stop={_sl:.4f} t1={_t1:.4f})'
                         )
                         continue
-                # Serialize signal_params — convert numpy scalars to native Python
-                # and sanitize NaN/Infinity so Postgres JSON accepts the row.
-                def _to_native(v):
-                    if hasattr(v, 'item'):
-                        v = v.item()   # numpy scalar → Python scalar
-                    if isinstance(v, float) and not _math.isfinite(v):
-                        return None    # Postgres rejects NaN/Inf in jsonb
-                    if isinstance(v, dict):
-                        return {k: _to_native(vv) for k, vv in v.items()}
-                    if isinstance(v, (list, tuple)):
-                        return [_to_native(vv) for vv in v]
-                    return v
-                params_clean = {k: _to_native(v) for k, v in (sig.signal_params or {}).items()}
-                # Signal.features (added Phase 5) — fold into signal_params under
-                # a reserved 'features' key so trade_handoff_builder can pull them
-                # out when computing the structured handoff. Strategies that don't
-                # set features leave this absent.
-                feats = getattr(sig, 'features', None)
-                if feats:
-                    params_clean['features'] = {k: _to_native(v) for k, v in feats.items()}
+                # Serialize signal_params (SP-5.1c): delegate to module-level helper
+                # which reproduces the original _to_native + features-fold behaviour
+                # and additionally folds in option_spec when present (additive:
+                # equity/crypto/etp leave option_spec=None → key absent → byte-identical).
+                params_clean = _params_with_option_spec(sig)
 
                 cur.execute("SAVEPOINT sp_signal")
                 # 2026-05-19 Phase A: bracket-upsert per (strategy, ticker).

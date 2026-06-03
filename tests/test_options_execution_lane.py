@@ -226,9 +226,12 @@ def _option_order(direction='long', right='call', contracts=1, notional=20000,
         'option_spec': _spec(right=right, strike_rule=strike_rule, underlying=underlying),
     }
 
-def test_route_returns_none_when_gate_off(monkeypatch):
+def test_route_skips_fail_closed_when_gate_off(monkeypatch):
+    # NIT-1 contract: option order + gate OFF -> SKIP dict, never equity fall-through.
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
-    assert _route_option_order(_option_order(), equity=100000, coid='c1') is None
+    res = _route_option_order(_option_order(), equity=100000, coid='c1')
+    assert res is not None and res.get('status') == 'skipped'
+    assert 'gate is OFF' in (res.get('reason') or '')
 
 def test_route_returns_none_when_not_option():
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
@@ -236,10 +239,15 @@ def test_route_returns_none_when_not_option():
     try: assert _route_option_order(order, equity=100000, coid='c1') is None
     finally: _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
 
-def test_route_returns_none_when_missing_option_spec():
+def test_route_skips_when_missing_option_spec():
+    # NIT-1 contract: instrument_class=option with NO spec is a malformed order ->
+    # SKIP dict (fail-closed), never routed as equity shares of the underlying.
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
     order = {'ticker':'SPY','instrument_class':'option','notional_usd':1000}  # no option_spec
-    try: assert _route_option_order(order, equity=100000, coid='c1') is None
+    try:
+        res = _route_option_order(order, equity=100000, coid='c1')
+        assert res is not None and res.get('status') == 'skipped'
+        assert 'no option_spec' in (res.get('reason') or '')
     finally: _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
 
 def test_route_skips_outside_rth():

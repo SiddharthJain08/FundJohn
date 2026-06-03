@@ -1561,6 +1561,31 @@ def check_node_syntax():
     return _ok('node_syntax', f'{len(JS_PREFLIGHT_FILES)} files parsed')
 
 
+# ── SP-5.1b-ii: option delta-hedge dependency check ───────────────────────
+
+@_check('option_delta_hedge_deps')
+def check_option_delta_hedge_deps():
+    """SP-5.1b-ii: fail when OPENCLAW_OPTION_DELTA_HEDGE=1 but the EOD
+    pipeline gates it depends on are not both ON.
+
+    The hedge step (T5) writes targets into option_hedge_ledger; those
+    targets are reconciled/filled by the SP-6 EOD pipeline.  If
+    OPENCLAW_EOD_SIGNAL_REGISTER=1 AND OPENCLAW_EOD_RECONCILE=1 are not
+    BOTH active, the hedge targets are written but never acted on.
+
+    Gate OFF (hedge disabled) → PASS (no-op)."""
+    name = 'option_delta_hedge_deps'
+    if os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') != '1':
+        return _ok(name, 'gate OFF — skipped')
+    eod_register = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    eod_reconcile = os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+    if not (eod_register and eod_reconcile):
+        return _fail(name,
+                     'delta-hedge ON but EOD pipeline gates off '
+                     '(targets never reconcile/fill)')
+    return _ok(name, 'OPENCLAW_OPTION_DELTA_HEDGE=1 + EOD gates both ON')
+
+
 # ── SP-5.1a: options-exec health ───────────────────────────────────────────
 
 @_check('option_exec_health')

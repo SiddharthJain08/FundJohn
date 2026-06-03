@@ -89,10 +89,13 @@ def test_vertical_close_no_held_legs_returns_skip(monkeypatch):
     assert 'no held legs' in (res.get('reason') or '')
 
 
-def test_vertical_close_gate_off_returns_none(monkeypatch):
-    """Gate-off: no result when OPENCLAW_OPTION_EXEC is unset."""
+def test_vertical_close_gate_off_skips_fail_closed(monkeypatch):
+    """NIT-1 contract: an option CLOSE with the gate OFF skips fail-closed —
+    it must NEVER fall through to an equity position-close on the underlying."""
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
     spec = OptionSpec(underlying='SPY', structure='vertical', right='call')
     order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
              'option_spec': spec, 'close_only': True}
-    assert ex._route_option_order(order, equity=100_000.0, coid='vc3') is None
+    res = ex._route_option_order(order, equity=100_000.0, coid='vc3')
+    assert res is not None and res.get('status') == 'skipped'
+    assert 'gate is OFF' in (res.get('reason') or '')

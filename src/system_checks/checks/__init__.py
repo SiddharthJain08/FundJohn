@@ -16,3 +16,4 @@ from . import ticker_metadata_history_depth  # noqa: F401
 from . import universe_recs_health           # noqa: F401
 from . import papermint_predicate_coverage   # noqa: F401
 from . import option_routing                 # noqa: F401
+from . import option_hedge                   # noqa: F401
