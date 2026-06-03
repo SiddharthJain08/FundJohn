@@ -228,7 +228,8 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
                 cur.execute('''
                     SELECT DISTINCT ON (strategy_id, ticker)
                            strategy_id, ticker, direction, signal_date,
-                           entry_price, stop_loss, target_1, target_2
+                           entry_price, stop_loss, target_1, target_2,
+                           signal_params
                     FROM execution_signals
                     WHERE lifecycle_state = 'APPROVED'
                       AND target_date = %s
@@ -248,10 +249,20 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
         if tradable_symbols and r['ticker'] not in tradable_symbols:
             dropped_untradable += 1
             continue
+        # SP-5.1c: parse signal_params (psycopg2 DictCursor may deserialize jsonb
+        # to dict already; handle str defensively — mirrors trade_handoff_builder.py).
+        import json as _json
+        sp = r['signal_params'] or {}
+        if isinstance(sp, str):
+            try:
+                sp = _json.loads(sp) if sp else {}
+            except ValueError:
+                sp = {}
         out.append({'strategy_id': r['strategy_id'], 'ticker': r['ticker'],
                     'direction': r['direction'], 'signal_date': r['signal_date'],
                     'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
-                    'target_1': r['target_1'], 'target_2': r['target_2']})
+                    'target_1': r['target_1'], 'target_2': r['target_2'],
+                    'signal_params': sp})
     if dropped_untradable:
         logger.info('sharpe_cadence EOD: dropped %d untradable signals (universe=%d)',
                     dropped_untradable, len(tradable_symbols))
@@ -305,7 +316,8 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                 cur.execute('''
                     SELECT DISTINCT ON (strategy_id, ticker)
                            strategy_id, ticker, direction, signal_date,
-                           entry_price, stop_loss, target_1, target_2
+                           entry_price, stop_loss, target_1, target_2,
+                           signal_params
                     FROM execution_signals
                     WHERE status = 'open'
                       AND strategy_id = ANY(%s)
@@ -344,10 +356,20 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
         if tradable_symbols and r['ticker'] not in tradable_symbols:
             dropped_untradable += 1
             continue
+        # SP-5.1c: parse signal_params (psycopg2 DictCursor may deserialize jsonb
+        # to dict already; handle str defensively — mirrors trade_handoff_builder.py).
+        import json as _json
+        sp = r['signal_params'] or {}
+        if isinstance(sp, str):
+            try:
+                sp = _json.loads(sp) if sp else {}
+            except ValueError:
+                sp = {}
         out.append({'strategy_id': sid, 'ticker': r['ticker'],
                     'direction': r['direction'], 'signal_date': r['signal_date'],
                     'entry_price': r['entry_price'], 'stop_loss': r['stop_loss'],
-                    'target_1': r['target_1'], 'target_2': r['target_2']})
+                    'target_1': r['target_1'], 'target_2': r['target_2'],
+                    'signal_params': sp})
     if dropped_untradable:
         logger.info('sharpe_cadence: dropped %d untradable signals (universe=%d)',
                     dropped_untradable, len(tradable_symbols))
@@ -641,6 +663,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             't1':         s.get('target_1'),
             't2':         s.get('target_2'),
         })
+        # SP-5.1c: carry option_spec + instrument_class + contracts from
+        # signal_params onto ticker_meta. Attribution rule: first option-class
+        # strategy that has an option_spec wins; equity strategies do not
+        # overwrite a previously-set spec. Equity orders stay byte-identical
+        # (no option_spec in signal_params → this block is never entered).
+        _sp = s.get('signal_params') or {}
+        _ospec = _sp.get('option_spec')
+        if _ospec and 'option_spec' not in ticker_meta[tkr]:
+            ticker_meta[tkr]['option_spec'] = _ospec
+            ticker_meta[tkr]['instrument_class'] = 'option'
+            _ctrs = _ospec.get('contracts') if isinstance(_ospec, dict) else None
+            if _ctrs is not None:
+                ticker_meta[tkr]['contracts'] = _ctrs
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
@@ -836,7 +871,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             sid_out = real_sid
             out_target = target_usd.get(tkr, 0.0)
             out_current = broker.get(tkr, 0.0)
-        orders.append({
+        _order = {
             'ticker':                  tkr,
             'strategy_id':             sid_out,
             'direction':               'long' if dir_sign > 0 else 'short',
@@ -856,7 +891,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'contributing_strategies': ticker_meta[tkr]['strategies'],
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
-        })
+        }
+        # SP-5.1c: attach option_spec / instrument_class / contracts only when
+        # the ticker has an option strategy. Equity orders stay byte-identical
+        # (no new keys injected when option_spec is absent).
+        if ticker_meta[tkr].get('option_spec'):
+            _order['instrument_class'] = 'option'
+            _order['option_spec'] = ticker_meta[tkr]['option_spec']
+            if ticker_meta[tkr].get('contracts') is not None:
+                _order['contracts'] = ticker_meta[tkr]['contracts']
+        orders.append(_order)
     return orders
 
 

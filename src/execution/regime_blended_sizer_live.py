@@ -181,6 +181,24 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
         if 'tradejohn_decision' in o:
             order['tradejohn_decision'] = o['tradejohn_decision']
 
+        # SP-5.1c: option orders carry spec (reconstructed to OptionSpec) +
+        # normalized direction + contracts so alpaca_executor._route_option_order
+        # can route the structure. Guarded on instrument_class=='option' ->
+        # equity orders are byte-identical (zero new keys injected).
+        if o.get('instrument_class') == 'option' and o.get('option_spec'):
+            from strategies.option_direction import normalize_option_direction
+            from strategies.base import OptionSpec
+            _spec_in = o['option_spec']
+            _spec = OptionSpec.from_dict(_spec_in) if isinstance(_spec_in, dict) else _spec_in
+            if _spec is not None:
+                order['instrument_class'] = 'option'
+                order['option_spec'] = _spec
+                _nd = normalize_option_direction(o.get('direction'))
+                if _nd:
+                    order['direction'] = _nd
+                if o.get('contracts') is not None:
+                    order['contracts'] = o['contracts']
+
         payload['orders'].append(order)
 
     return payload
