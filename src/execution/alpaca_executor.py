@@ -834,7 +834,13 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     if spec is None:
         return None
     # 5.1b: single + straddle/strangle supported. 5.2: debit verticals + credit_vertical/iron_condor added.
-    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor'):
+    # SP-5 Phase 1b (G4a): the OPEN-envelope structure check is exempt for close_only —
+    # a close reads HELD legs and is structure-agnostic, so the synthesized 'held_legs'
+    # close (G4b orphan-close) must NOT be refused here. A non-close 'held_legs' (which
+    # never happens) would still be refused (an open needs a known structure to resolve).
+    if (not order.get('close_only')
+            and getattr(spec, 'structure', 'single') not in
+            ('single', 'straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor')):
         return _option_skip(order, coid, equity,
             f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
@@ -845,7 +851,12 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
     # reads HELD legs from the book and must NOT be blocked by open-path resolution
     # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
-    if spec.structure in ('straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor') and order.get('close_only'):
+    # SP-5 Phase 1b (G4a): generalized from the 5 known structures to ANY non-'single'
+    # structure (incl. the synthesized 'held_legs') — _route_mleg_close is held-legs-driven
+    # (reads `position list` filtered by underlying, closes per-leg; structure-agnostic).
+    # The 5 known structures take the SAME branch (byte-identical); 'single' keeps its
+    # existing proven _route_option_close path below.
+    if order.get('close_only') and getattr(spec, 'structure', 'single') != 'single':
         return _route_mleg_close(order, spec, coid)
 
     direction = str(order.get('direction','long')).lower()
@@ -1094,11 +1105,38 @@ def _held_option_legs(underlying: str) -> list:
     return out
 
 
+def _deactivate_hedge_for_underlying_guarded(underlying):
+    """SP-5 Phase 1b (G4c): deactivate option_hedge_ledger rows for `underlying` after a
+    structure close, so it stops generating EOD hedge targets. GUARDED exactly like the
+    on-fill ledger write (_route_option_order): opens its OWN psycopg2 connection from
+    POSTGRES_URI, logs loudly on failure, and NEVER raises — a deactivation failure must
+    not abort the close path (the structure is already flattened). Returns rows deactivated
+    (0 on any failure)."""
+    try:
+        from execution.option_hedge import deactivate_hedge_ledger_for_underlying
+        _uri = os.environ.get('POSTGRES_URI', '')
+        if not _uri:
+            raise RuntimeError('POSTGRES_URI not set')
+        with psycopg2.connect(_uri) as _hc:
+            with _hc.cursor() as _hcur:
+                n = deactivate_hedge_ledger_for_underlying(_hcur, underlying)
+        log(f'[sp5-G4c] deactivated {n} hedge-ledger row(s) for {underlying} on structure close')
+        return n
+    except Exception as _e:   # noqa: BLE001 — close path must never abort on ledger bookkeeping
+        log(f'[sp5-G4c] hedge-ledger deactivation failed for {underlying} '
+            f'(structure closed; stale hedge targets may persist until operator review): {_e}')
+        return 0
+
+
 def _route_mleg_close(order, spec, coid):
     """Close a straddle/strangle by closing the ACTUALLY-HELD option legs on the
     underlying (from `position list`) — NOT by re-resolving strikes from spec,
     which drift between open and close. Per-leg `position close` (credit-sign
-    independent; spec §4.1)."""
+    independent; spec §4.1).
+
+    Success semantics: there is NO exception path — every held leg is attempted and
+    recorded as (occ, ok, err). status='submitted' iff all legs closed OK, else 'partial'.
+    """
     held = _held_option_legs(spec.underlying)
     if not held:
         return _option_skip(order, coid, equity=0.0, reason='option-close: no held legs')
@@ -1107,6 +1145,16 @@ def _route_mleg_close(order, spec, coid):
         ok, _payload, err = _run_alpaca_cli(['position', 'close', '--symbol-or-asset-id', occ])
         closed.append((occ, ok, err))
     any_fail = any((not ok) for _occ, ok, _err in closed)
+    # SP-5 Phase 1b (G4c): after the per-leg close loop (success OR partial), deactivate
+    # the hedge ledger for this underlying — a closed structure must not keep generating
+    # EOD hedge targets. Guarded/non-aborting (the close already happened). On a PARTIAL
+    # close, deactivation is intentional too: the operator's flat-verify (runbook) catches
+    # any residual leg, and a leftover ACTIVE ledger row would keep injecting hedge targets
+    # against a half-gone structure.
+    if any_fail:
+        log(f'[sp5-G4c] PARTIAL close for {spec.underlying} — deactivating ledger anyway; '
+            f'operator must flat-verify residual leg(s)')
+    _deactivate_hedge_for_underlying_guarded(spec.underlying)
     return {
         'ticker': spec.underlying, 'structure': spec.structure,
         'status': 'submitted' if not any_fail else 'partial',

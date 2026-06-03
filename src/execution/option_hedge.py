@@ -104,6 +104,24 @@ def close_hedge(cur, strategy_id, underlying):
                 (strategy_id, underlying))
 
 
+def deactivate_hedge_ledger_for_underlying(cur, underlying):
+    """SP-5 Phase 1b (G4c): deactivate ALL active ledger rows for an underlying when its
+    option structure is closed (the executor's _route_mleg_close flattens the held legs).
+
+    A closed structure must NOT keep generating EOD hedge targets; once deactivated, the
+    existing equity hedge position then orphan-closes naturally on the next EOD when no
+    hedge row is reinjected. Returns the number of rows deactivated.
+
+    Keyed on `underlying` only (not strategy_id) so it catches the composite/sole-contributor
+    sid the on-fill write used, regardless of how the contributor set varied. mig-128 is
+    operational state (NOT canonical append-only) and this is the flag pattern (status='closed',
+    target_hedge_qty=0) — NEVER a DELETE (mirrors close_hedge)."""
+    cur.execute("""UPDATE option_hedge_ledger SET status='closed', target_hedge_qty=0,
+                   updated_at=NOW() WHERE underlying=%s AND status='active'""",
+                (underlying,))
+    return cur.rowcount
+
+
 def _ensure_hedge_strategy_registered(cur, hedge_strategy_id, option_sid):
     """Idempotently register the synthetic hedge strategy so the injected hedge
     execution_signals row satisfies execution_signals.strategy_id -> strategy_registry(id).
