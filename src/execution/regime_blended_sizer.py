@@ -442,6 +442,49 @@ def _load_broker_positions_usd():
         return {}
 
 
+def _held_option_underlyings() -> dict[str, list[str]]:
+    """SP-5 Phase 1b (G4b): held OCC option legs grouped by underlying root.
+
+    Returns {underlying: [occ, ...]} for every held OCC option leg on the broker
+    book. Underlying root = occ[:-15] (an OCC symbol is root + 6-digit yymmdd +
+    C/P + 8-digit strike = a fixed 15-char tail). Non-OCC positions (equity, crypto)
+    and zero-qty rows are ignored.
+
+    Runs the SAME `alpaca position list` CLI pattern as _load_broker_positions_usd
+    (subprocess, 15s timeout, fail-safe {} on ANY error). Used to orphan-close a held
+    option structure whose option signal has disappeared — the post-G1 equity book
+    logic is OCC-filtered and structurally blind to option legs, so nothing else
+    closes them.
+    """
+    import subprocess
+    import json as _json
+    try:
+        env = {**os.environ}
+        proc = subprocess.run(['/root/go/bin/alpaca', 'position', 'list'],
+                              capture_output=True, env=env, timeout=15)
+        if proc.returncode != 0:
+            logger.warning('held_option_underlyings: broker fetch failed (%s)',
+                           proc.stderr.decode()[:200])
+            return {}
+        positions = _json.loads(proc.stdout)
+        from collections import defaultdict
+        out = defaultdict(list)
+        for p in positions:
+            try:
+                if float(p.get('qty', 0)) == 0:
+                    continue
+                sym = str(p['symbol']).strip().upper()
+                if not _is_occ_symbol(sym):
+                    continue
+                out[sym[:-15]].append(sym)
+            except (TypeError, ValueError, KeyError):
+                continue
+        return dict(out)
+    except Exception as e:
+        logger.warning('held_option_underlyings: broker fetch error (%s)', e)
+        return {}
+
+
 def _classify_position_deltas(
     target_usd: dict[str, float],
     broker: dict[str, float],
@@ -1087,9 +1130,49 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # top of. When opt_active is empty (production today) this returns [] and `orders`
     # is byte-identical.
     _equity_gross = sum(abs(v) for v in target_usd.values())
-    orders.extend(_consolidate_option_orders(
+    _opt_orders = _consolidate_option_orders(
         opt_active, weight_by_strat, sharpe_by_strat, scale, nav,
-        min_cum_sharpe, account_state, _equity_gross))
+        min_cum_sharpe, account_state, _equity_gross)
+    orders.extend(_opt_orders)
+
+    # SP-5 Phase 1b (G4b): option orphan-close. The equity book logic above is
+    # OCC-filtered (G1 prong 2) so it is structurally blind to held option legs —
+    # nothing closes a held STRUCTURE whose option signal has disappeared. For each
+    # held option underlying NOT among today's option targets, emit an option CLOSE
+    # order. The executor's _route_mleg_close closes the actually-held legs per-leg
+    # (structure-agnostic); the synthesized 'held_legs' spec survives OptionSpec.from_dict
+    # (underlying present). Gated on OPENCLAW_OPTION_EXEC=1 so production today (gate off)
+    # makes ZERO extra CLI calls — byte-identical inert.
+    if os.environ.get('OPENCLAW_OPTION_EXEC') == '1':
+        _opt_target_tickers = {o['ticker'] for o in _opt_orders}
+        for _underlying, _legs in _held_option_underlyings().items():
+            if _underlying in _opt_target_tickers:
+                continue
+            logger.info('regime_blended_sizer.sharpe_cadence: option orphan-close for %s '
+                        '(%d held leg(s), no live option target)', _underlying, len(_legs))
+            orders.append({
+                'ticker':                  _underlying,
+                'strategy_id':             '__close_option_orphan__',
+                'direction':               'long',
+                'notional_usd':            0.0,
+                'pct_nav':                 0.0,
+                'shares':                  0,
+                'entry':                   None,
+                'stop':                    None,
+                't1':                      None,
+                't2':                      None,
+                'kelly_final':             0.0,
+                'ev':                      0.0,
+                'p_t1':                    0.5,
+                'source_mode':             'sharpe_cadence',
+                'target_usd':              0.0,
+                'current_usd':             0.0,
+                'contributing_strategies': ['__close_option_orphan__'],
+                'flip_action':             None,
+                'action':                  'CLOSE',
+                'instrument_class':        'option',
+                'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
+            })
     return orders
 
 
