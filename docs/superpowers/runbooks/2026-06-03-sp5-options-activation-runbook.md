@@ -1,7 +1,22 @@
 # SP-5 Options Activation Runbook (5.1b-ii + 5.1c stack)
 
 **Date:** 2026-06-03
-**Status:** ACTIVE — Phases 0/1a/1b COMPLETE (tip 5dbf3a7); Phase 2 review→merge→deploy next (operator-gated)
+**Status:** ACTIVE — Phases 0/1a/1b/2 COMPLETE; Phase 3 (T9 smoke) next, fires next RTH with operator OK
+
+**Phase 2 record (2026-06-03):** opus whole-branch review READY-WITH-NITS → all 3 NITs fixed
+(b29a0f4: intentional fail-closed gate ordering in _route_option_order — option orders with
+gate OFF now SKIP, never fall to equity; post-renorm option scale; NIT-3 → T9 checklist 5b).
+Both DB preconditions verified PRESENT live (mig 122 instrument_class, mig 128 ledger).
+297/297 focused surface + round-trip PASS; full-repo branch-vs-main diff: zero genuinely-new
+failures (5 apparent = isolation-green ordering pollution, pre-existing class; 41 = baseline
+env-dependent). MERGED to main `23bcf3b` (--no-ff, tree==branch YES, backup tag
+backup/pre-sp51c-merge/main-2026-06-03, pushed). DEPLOYED to live 2026-06-03 21:54 UTC:
+pre-deploy verify (eod_compute_health 20:26 UTC healthy rc=0 62/63, 574 COMPUTED) →
+pre-deploy tag backup/pre-sp51c-deploy/live-2026-06-03 @07441ad → ff-merge → integrity
+manifest regenerated → johnbot restarted (Active, NRestarts=0, cron registered, Discord
+connected). Doctor: 30 pass; option checks correctly 'gate OFF — skipped'; the 1 FAIL
+(intraday_mc_freshness, 3 stale pending proposals) + data_ledger-sync-skip boot message both
+confirmed PRE-EXISTING (identical on the Jun-01 boot).
 
 **Phase results:**
 - Phase 0 DONE: main merged in (04ca488; one conflict, executor re-expression verified
