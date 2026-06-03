@@ -31,7 +31,8 @@ class OptionSpec:
     target_delta:  float = 0.30              # used when strike_rule='target_delta'
     moneyness:     Optional[float] = None    # K/S, used when strike_rule='fixed_moneyness'
     dte_target:    int = 30                  # nearest monthly expiry >= this many calendar days
-    structure:     str = 'single'            # 'single' | 'straddle' | 'strangle'
+    structure:     str = 'single'            # 'single' | 'straddle' | 'strangle' | 'vertical' | 'credit_vertical' | 'iron_condor'
+    spread_width_pct: float = 0.03           # vertical: far(short) leg strike offset = near ± pct*spot
     hedge:         str = 'none'              # 'none' | 'delta'
     hedge_cadence: str = 'daily'             # rehedge frequency when hedge='delta'
     roll_dte:      int = 7                   # roll when remaining DTE <= this

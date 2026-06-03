@@ -44,6 +44,15 @@ run_reconcile() (SP-6 Task 8b — Option B time-split, §12 of the design doc):
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# Bootstrap sys.path so `from execution.xxx` resolves when this file is
+# run as a script (python3 src/execution/open_reconcile.py). Matches the
+# convention in regime_blended_sizer_live.py.
+_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_ROOT / 'src'))
+
 import logging
 import math
 import os
