@@ -63,6 +63,35 @@ the same underlying. G2 rides along (option-only contributor set ⇒ stable ledg
 TDD; **equity-byte-identical regression is the gate** (the sizer is live-critical for all
 strategies — SP-6 EOD trades through it daily).
 
+**Phase-1a design (locked 2026-06-03 after grounding; three prongs):**
+1. **Partition-at-source consolidation.** Split `active` by class at the top of the
+   aggregation (`option` iff `signal_params` carries `option_spec`); the ENTIRE existing
+   equity pipeline runs UNCHANGED on the equity partition (no option signals ⇒ the partition
+   is a no-op ⇒ byte-identical trivially). Option partition consolidates in a new
+   `_consolidate_option_orders` helper: per-underlying Σ weight×dir + Σ sharpe×dir, the SAME
+   `min_cum_sharpe` gate, first-spec-wins on conflicting specs (loud log), option-only
+   composite `strategy_id` (G2). **Sizing = on-top with the hedge-style headroom guard**
+   (scale OPTIONS down, never equity; mirrors the operator-approved 5.1b-ii hedge model) at
+   per-unit-weight USD parity with the equity scale. Option emissions are pass-through
+   `(underlying, usd, 'delta')` — NO broker netting, NO flip/orphan participation (option
+   position lifecycle belongs to the executor + EOD carried set, not the equity book logic).
+2. **Broker OCC-filter (grounding catch #2).** `_load_broker_positions_usd` returns EVERY
+   broker position keyed by raw symbol — held option legs (OCC symbols, e.g.
+   `SPY260626C00755000`) would be `orphan_close`d as equity by BOTH the daily sizer AND the
+   9:28 `run_reconcile` (same loader + `_classify_position_deltas`). Fix: OCC-pattern filter
+   (`[A-Z.]{1,6}\d{6}[CP]\d{8}$`) inside the shared loader (loud log of excluded legs) —
+   both consumers protected in one place.
+3. **Reconcile target-side class filter (grounding catch #3).** `_load_approved_set` builds
+   sign-only per-ticker targets from ALL APPROVED rows; an APPROVED option row for SPY would
+   wrongly shield a dropped equity SPY position from orphan-close. Fix: skip option-class
+   rows (signal_params carries option_spec) when building the reconcile's equity target map.
+   G4 (the option close path itself) remains Phase 1b.
+
+G2 residual: if a SECOND option strategy on the same underlying ever promotes, the composite
+key changes → `upsert_hedge_ledger_on_fill` gains a loud operator-visible warning when an
+ACTIVE ledger row exists for the same underlying under a different strategy_id (surfaced,
+never silently superseded).
+
 ### Phase 1b — G3 + G4 (task #68)
 G3: carried `option_spec` failing `OptionSpec.from_dict` currently falls through to the EQUITY
 executor → make it fail-closed (skip + loud log). G4: close-path `option_spec` carry — ground
