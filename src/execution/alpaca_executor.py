@@ -845,6 +845,31 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         ok, payload, err = _run_alpaca_cli(args)
         if not ok or not payload:
             return _option_skip(order, coid, equity, f'option: mleg submit failed ({err or "no payload"})')
+        # SP-5.1c: write the option_hedge_ledger structural row when hedge='delta'.
+        # Guarded: the structure is ALREADY submitted — a ledger-write failure must
+        # never abort the order path. Logs loudly on failure so the operator knows
+        # the hedge target will be MISSING from the EOD compute step.
+        if getattr(spec, 'hedge', 'none') == 'delta':
+            try:
+                from execution.option_hedge import upsert_hedge_ledger_on_fill
+                _leg_dicts = [
+                    {'occ': occ, 'right': right, 'strike': float(strike),
+                     'expiry': expiry.isoformat()}
+                    for (occ, _r, _a), (right, strike) in zip(leg_q, legs)]
+                _uri = _os.environ.get('POSTGRES_URI', '')
+                if not _uri:
+                    raise RuntimeError('POSTGRES_URI not set')
+                with psycopg2.connect(_uri) as _hc:
+                    with _hc.cursor() as _hcur:
+                        upsert_hedge_ledger_on_fill(
+                            _hcur,
+                            option_strategy_id=order.get('strategy_id') or spec.underlying,
+                            underlying=spec.underlying,
+                            legs=_leg_dicts,
+                            contracts=int(raw_qty))
+            except Exception as _e:
+                log(f'[sp5.1c] hedge ledger-write failed for {spec.underlying} '
+                    f'(structure submitted, hedge target will be MISSING): {_e}')
         # mleg result uses ticker=underlying (e.g. 'SPY') + separate structure/legs fields; downstream (record_submission, close) keys on the underlying, not a per-leg OCC.
         return {
             'ticker': spec.underlying, 'structure': spec.structure, 'status': 'submitted',

@@ -37,6 +37,25 @@ def upsert_hedge_target(cur, strategy_id, underlying, legs, contracts,
          target_hedge_qty, as_of))
 
 
+def upsert_hedge_ledger_on_fill(cur, option_strategy_id, underlying, legs, contracts):
+    """Create/refresh the option_hedge_ledger structural row when a delta-hedged
+    structure fills (SP-5.1c). target_hedge_qty starts at 0 — the EOD step
+    (compute_option_hedge_targets) computes the real hedge target. Idempotent.
+
+    ON CONFLICT DO UPDATE deliberately does NOT touch target_hedge_qty:
+    the EOD compute step owns that column; a re-fill must not clobber an
+    already-computed target back to 0."""
+    cur.execute(
+        """INSERT INTO option_hedge_ledger
+             (option_strategy_id, underlying, structure_legs, contracts,
+              target_hedge_qty, status, updated_at)
+           VALUES (%s,%s,%s::jsonb,%s,0,'active',NOW())
+           ON CONFLICT (option_strategy_id, underlying) DO UPDATE SET
+             structure_legs=EXCLUDED.structure_legs, contracts=EXCLUDED.contracts,
+             status='active', updated_at=NOW()""",
+        (option_strategy_id, underlying, json.dumps(legs), contracts))
+
+
 def load_active_hedges(cur):
     """All active ledger rows as dicts."""
     cur.execute("""SELECT option_strategy_id, underlying, structure_legs, contracts,
