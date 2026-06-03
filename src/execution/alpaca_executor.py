@@ -702,11 +702,8 @@ def _with(spec, **overrides):
 
 
 def _resolve_structure_legs(spec, as_of, expiry):
-    """Return [(right, strike)] for a straddle/strangle, mirroring
-    options_backtest._legs_for but resolved against LIVE listed strikes/greeks:
-      straddle -> ATM call + ATM put at the same strike (via _resolve_strike atm).
-      strangle -> call near +target_delta, put near -target_delta (live chain greeks).
-    Returns None if any leg cannot be resolved (fail-closed)."""
+    """Return [(right, strike, side)] for straddle/strangle/vertical, resolved
+    against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
     spot = _spot_price(spec.underlying)
     if spot is None or spot <= 0:
         return None
@@ -714,7 +711,7 @@ def _resolve_structure_legs(spec, as_of, expiry):
         k = _resolve_strike(_with(spec, strike_rule='atm', right='call'), as_of, expiry)
         if k is None:
             return None
-        return [('call', k), ('put', k)]
+        return [('call', k, 'buy'), ('put', k, 'buy')]
     if spec.structure == 'strangle':
         tgt = float(spec.target_delta)
         legs = []
@@ -723,38 +720,53 @@ def _resolve_structure_legs(spec, as_of, expiry):
             if not grk:
                 return None
             k = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
-            legs.append((right, k))
+            legs.append((right, k, 'buy'))
         return legs
+    if spec.structure == 'vertical':
+        right = str(spec.right).lower()
+        near = _resolve_strike(_with(spec, right=right), as_of, expiry)
+        if near is None:
+            return None
+        grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+        if not grk:
+            return None
+        sign = 1.0 if right == 'call' else -1.0
+        far_target = near + sign * float(spec.spread_width_pct) * spot
+        far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+        if far == near:
+            return None
+        return [(right, near, 'buy'), (right, far, 'sell')]
     return None
 
 
 def _structure_net_quote(spec, legs, expiry):
-    """For each (right, strike) leg: build the OCC + fetch the quote. Returns
-    (net_ask_debit, [(occ, right, ask)]) or None if any leg has no quote
-    (fail-closed — never submit a partial structure)."""
+    """For each (right, strike, side) leg: build OCC + fetch quote. Returns
+    (net_debit, [(occ, right, side)]) or None if any leg has no quote.
+    net = Σ(buy ask) − Σ(sell bid)."""
     leg_q = []
     net = 0.0
-    for right, strike in legs:
+    for right, strike, side in legs:
         occ = _build_occ_symbol(_with(spec, right=right), strike, expiry)
         q = _option_quote(occ)
         if q is None:
             return None
-        net += float(q['ask'])
-        leg_q.append((occ, right, float(q['ask'])))
+        if side == 'buy':
+            net += float(q['ask'])
+        else:
+            net -= float(q['bid'])
+        leg_q.append((occ, right, side))
     return net, leg_q
 
 
-def _build_mleg_legs_json(leg_q, direction) -> str:
-    """JSON `--legs` array for a 1:1 structure (straddle/strangle). Per leg,
-    side+intent from _options_position_intent on that leg's existing qty (avoids
-    the SP-5.0 test-5 inferred-intent 422). ratio_qty is the within-package ratio
-    "1" (a string — SP-5.0); the package COUNT is the order's top-level --qty."""
+def _build_mleg_legs_json(leg_q) -> str:
+    """JSON `--legs` array. Per leg, side+intent via _options_position_intent on the
+    leg's intended side ('buy'->long, 'sell'->short) and its existing qty. ratio_qty='1'."""
     import json
     out = []
-    for occ, _right, _ask in leg_q:
-        side, intent = _options_position_intent(direction, _options_current_qty(occ))
-        out.append({'symbol': occ, 'side': side,
-                    'ratio_qty': '1', 'position_intent': intent})
+    for occ, _right, side in leg_q:
+        d = 'long' if side == 'buy' else 'short'
+        s, intent = _options_position_intent(d, _options_current_qty(occ))
+        out.append({'symbol': occ, 'side': s, 'ratio_qty': '1', 'position_intent': intent})
     return json.dumps(out)
 
 
@@ -832,7 +844,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             net_limit)
         if qty_reason and raw_qty == 0:
             return _option_skip(order, coid, equity, qty_reason)
-        legs_json = _build_mleg_legs_json(leg_q, direction)
+        legs_json = _build_mleg_legs_json(leg_q)
         args = ['order','submit','--order-class','mleg','--qty', str(int(raw_qty)),
                 '--legs', legs_json,
                 '--type','limit','--limit-price', f'{net_limit:.2f}',

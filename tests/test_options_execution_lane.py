@@ -485,7 +485,8 @@ def test_option_chain_greeks_skips_none_delta_and_bad_strike():
 
 
 def test_resolve_structure_legs_straddle_same_atm_strike():
-    """Straddle: call+put at the SAME ATM strike (parity with options_backtest)."""
+    """Straddle: call+put at the SAME ATM strike (parity with options_backtest).
+    SP-5.2: legs are now 3-tuples (right, strike, side); straddle is all-buy."""
     from execution.alpaca_executor import _resolve_structure_legs
     import datetime as _dt
     spec = type('S',(),{'underlying':'SPY','structure':'straddle','strike_rule':'atm',
@@ -493,10 +494,11 @@ def test_resolve_structure_legs_straddle_same_atm_strike():
     with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]):
         legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
-    assert legs == [('call',750.0),('put',750.0)]
+    assert legs == [('call',750.0,'buy'),('put',750.0,'buy')]
 
 def test_resolve_structure_legs_strangle_delta_matched():
-    """Strangle: call near +target_delta, put near -target_delta (abs-delta match)."""
+    """Strangle: call near +target_delta, put near -target_delta (abs-delta match).
+    SP-5.2: legs are now 3-tuples (right, strike, side); strangle is all-buy."""
     from execution.alpaca_executor import _resolve_structure_legs
     import datetime as _dt
     spec = type('S',(),{'underlying':'SPY','structure':'strangle','strike_rule':'target_delta',
@@ -507,20 +509,21 @@ def test_resolve_structure_legs_strangle_delta_matched():
     with patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks):
         legs = _resolve_structure_legs(spec, _dt.date(2026,5,29), _dt.date(2026,7,17))
-    assert legs == [('call',780.0),('put',720.0)]  # closest |delta| to 0.30
+    assert legs == [('call',780.0,'buy'),('put',720.0,'buy')]  # closest |delta| to 0.30
 
 
 def test_structure_net_quote_sums_leg_asks():
-    """Net debit = sum of per-leg asks; returns per-leg (occ, right, ask)."""
+    """Net debit = sum of per-leg asks (all-buy straddle); returns per-leg (occ, right, side).
+    SP-5.2: legs are 3-tuples; leg_q shape is (occ, right, side) not (occ, right, ask)."""
     from execution.alpaca_executor import _structure_net_quote
     import datetime as _dt
-    legs = [('call', 750.0), ('put', 750.0)]
+    legs = [('call', 750.0, 'buy'), ('put', 750.0, 'buy')]
     spec = type('S',(),{'underlying':'SPY'})()
     def _fake_quote(occ):
         return {'bid': 10.0, 'ask': 10.2} if occ.endswith('C00750000') else {'bid': 9.0, 'ask': 9.3}
     with patch('execution.alpaca_executor._option_quote', side_effect=_fake_quote):
         net, leg_q = _structure_net_quote(spec, legs, _dt.date(2026,7,17))
-    assert round(net, 2) == 19.50            # 10.2 + 9.3
+    assert round(net, 2) == 19.50            # 10.2 + 9.3 (all-buy: sums asks)
     assert len(leg_q) == 2 and leg_q[0][1] == 'call'
 
 def test_structure_net_quote_none_when_a_leg_unquoted():
@@ -528,18 +531,18 @@ def test_structure_net_quote_none_when_a_leg_unquoted():
     import datetime as _dt
     with patch('execution.alpaca_executor._option_quote', side_effect=[{'bid':1,'ask':1.1}, None]):
         out = _structure_net_quote(type('S',(),{'underlying':'SPY'})(),
-                                   [('call',750.0),('put',750.0)], _dt.date(2026,7,17))
+                                   [('call',750.0,'buy'),('put',750.0,'buy')], _dt.date(2026,7,17))
     assert out is None
 
 
 def test_build_mleg_legs_json_long_open():
-    """Long structure -> both legs buy / buy_to_open, ratio_qty='1' STRING (SP-5.1b spike).
-    ratio_qty is the within-package ratio '1'; package count is the top-level --qty."""
+    """Long straddle structure -> both legs buy / buy_to_open, ratio_qty='1' STRING (SP-5.1b spike).
+    SP-5.2: direction param dropped; per-leg side is now in leg_q tuple (occ, right, side)."""
     from execution.alpaca_executor import _build_mleg_legs_json
     import json
-    leg_q = [('SPY260717C00750000','call',10.2), ('SPY260717P00750000','put',9.3)]
+    leg_q = [('SPY260717C00750000','call','buy'), ('SPY260717P00750000','put','buy')]
     with patch('execution.alpaca_executor._options_current_qty', return_value=0):
-        legs = _build_mleg_legs_json(leg_q, direction='long')
+        legs = _build_mleg_legs_json(leg_q)
     arr = json.loads(legs)
     assert {l['symbol'] for l in arr} == {'SPY260717C00750000','SPY260717P00750000'}
     assert all(l['side']=='buy' and l['position_intent']=='buy_to_open' for l in arr)
