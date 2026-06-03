@@ -291,3 +291,106 @@ def test_option_hedge_check_gate_on_no_eod_fails(monkeypatch):
     status, detail = _option_hedge()
     assert status == Status.FAIL
     assert 'EOD' in detail
+
+
+# ===========================================================================
+# SP-5 Phase 1b (G4c) — deactivate_hedge_ledger_for_underlying
+# ===========================================================================
+
+def test_deactivate_hedge_ledger_for_underlying_sql_shape():
+    """Unit: marks matching ACTIVE rows closed (status='closed', flag pattern — never
+    DELETE) for the underlying regardless of strategy_id; returns rowcount."""
+    from execution.option_hedge import deactivate_hedge_ledger_for_underlying
+    captured = []
+
+    class _Cur:
+        rowcount = 3
+        def execute(self, sql, params): captured.append((sql, params))
+    n = deactivate_hedge_ledger_for_underlying(_Cur(), 'SPY')
+    assert n == 3
+    sql, params = captured[-1]
+    assert "status='closed'" in sql and 'DELETE' not in sql.upper()
+    assert "status='active'" in sql or "status = 'active'" in sql  # only flips active rows
+    assert 'SPY' in params
+
+
+@pytest.mark.skipif(not (PG and psycopg2), reason='no POSTGRES_URI/psycopg2')
+def test_deactivate_hedge_ledger_for_underlying_db_rollback():
+    """DB-backed (auto-rollback): only ACTIVE rows for the matching underlying flip to
+    closed; rows for OTHER underlyings and already-closed rows are untouched. Uses
+    synthetic underlyings (ZZG4CU/ZZG4CV) so the rowcount is deterministic regardless
+    of any real SPY/IWM ledger rows in the live DB."""
+    from execution.option_hedge import deactivate_hedge_ledger_for_underlying
+    conn = psycopg2.connect(PG)
+    try:
+        cur = conn.cursor()
+        # Seed: 2 active ZZG4CU rows (different strategy_id), 1 active ZZG4CV row,
+        # 1 closed ZZG4CU row.
+        seed = [
+            ('__test_sp5g4c_a', 'ZZG4CU', 'active'),
+            ('__test_sp5g4c_b', 'ZZG4CU', 'active'),
+            ('__test_sp5g4c_c', 'ZZG4CV', 'active'),
+            ('__test_sp5g4c_d', 'ZZG4CU', 'closed'),
+        ]
+        for sid, und, st in seed:
+            cur.execute(
+                """INSERT INTO option_hedge_ledger
+                     (option_strategy_id, underlying, structure_legs, contracts,
+                      current_hedge_qty, target_hedge_qty, status)
+                   VALUES (%s,%s,'[]'::jsonb,1,5,-5,%s)""",
+                (sid, und, st))
+        n = deactivate_hedge_ledger_for_underlying(cur, 'ZZG4CU')
+        assert n == 2, 'exactly the 2 ACTIVE ZZG4CU rows should flip'
+        cur.execute(
+            "SELECT option_strategy_id, status, target_hedge_qty FROM option_hedge_ledger "
+            "WHERE option_strategy_id LIKE '__test_sp5g4c_%' ORDER BY option_strategy_id")
+        rows = {r[0]: (r[1], float(r[2])) for r in cur.fetchall()}
+        assert rows['__test_sp5g4c_a'][0] == 'closed' and rows['__test_sp5g4c_a'][1] == 0.0
+        assert rows['__test_sp5g4c_b'][0] == 'closed'
+        assert rows['__test_sp5g4c_c'][0] == 'active'   # ZZG4CV untouched
+        assert rows['__test_sp5g4c_d'][0] == 'closed'   # was already closed
+    finally:
+        conn.rollback()   # never persist test rows (append-only / flag-pattern discipline)
+        conn.close()
+
+
+def test_route_mleg_close_deactivates_ledger_on_success(monkeypatch):
+    """_route_mleg_close calls the guarded hedge-deactivation after the per-leg close
+    loop (success case), passing the underlying."""
+    import execution.alpaca_executor as ex
+    from strategies.base import OptionSpec
+    spec = OptionSpec(underlying='SPY', structure='straddle', right='call')
+    order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
+             'option_spec': spec, 'close_only': True}
+    monkeypatch.setattr(ex, '_held_option_legs',
+                        lambda und: ['SPY260718C00500000', 'SPY260718P00500000'])
+    monkeypatch.setattr(ex, '_run_alpaca_cli', lambda args, **kw: (True, {'status': 'accepted'}, None))
+    seen = {}
+    monkeypatch.setattr(ex, '_deactivate_hedge_for_underlying_guarded',
+                        lambda und: seen.update(und=und) or 1)
+    res = ex._route_mleg_close(order, spec, coid='mc1')
+    assert res['status'] == 'submitted'
+    assert seen.get('und') == 'SPY', 'deactivation must be called with the underlying'
+
+
+def test_route_mleg_close_deactivation_failure_does_not_abort(monkeypatch):
+    """A deactivation failure must NEVER abort the close — the result still returns.
+    Exercises the REAL guarded wrapper _deactivate_hedge_for_underlying_guarded by making
+    the underlying DB connect raise; the wrapper must swallow it (return 0) and the close
+    must return 'submitted' normally."""
+    import execution.alpaca_executor as ex
+    from strategies.base import OptionSpec
+    spec = OptionSpec(underlying='SPY', structure='straddle', right='call')
+    order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
+             'option_spec': spec, 'close_only': True}
+    monkeypatch.setattr(ex, '_held_option_legs', lambda und: ['SPY260718C00500000'])
+    monkeypatch.setattr(ex, '_run_alpaca_cli', lambda args, **kw: (True, {'status': 'accepted'}, None))
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://invalid')
+
+    def _boom(*a, **k):
+        raise RuntimeError('db down')
+    # Make the connection (inside the guarded wrapper) raise.
+    monkeypatch.setattr(ex.psycopg2, 'connect', _boom)
+    # Must not raise; close result returns normally despite the DB failure.
+    res = ex._route_mleg_close(order, spec, coid='mc2')
+    assert res['status'] == 'submitted'
