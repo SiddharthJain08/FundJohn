@@ -61,6 +61,34 @@ def close_hedge(cur, strategy_id, underlying):
                 (strategy_id, underlying))
 
 
+def _ensure_hedge_strategy_registered(cur, hedge_strategy_id, option_sid):
+    """Idempotently register the synthetic hedge strategy so the injected hedge
+    execution_signals row satisfies execution_signals.strategy_id -> strategy_registry(id).
+
+    The FK is the ONLY thing this row exists for. It must NEVER enter the engine's
+    signal-generation path, which is guaranteed two ways:
+      1. status='pending_approval' (NOT 'approved') — engine.load_approved_strategies
+         queries WHERE status='approved', so this row is never even fetched.
+      2. Even if status leaked to 'approved': strategy_id '__hedge__<sid>' is absent
+         from registry._IMPL_MAP -> load_strategy_class returns None -> clean skip
+         (no throw). implementation_path points at this module (truthful, satisfies
+         the NOT NULL) but is never imported as a strategy class.
+
+    INSERT ... ON CONFLICT (id) DO NOTHING — idempotent; only ever called from the
+    gated EOD compute step and only for sids that actually emit a non-zero hedge, so
+    the registry stays untouched until OPENCLAW_OPTION_DELTA_HEDGE activates."""
+    cur.execute(
+        """INSERT INTO strategy_registry (id, name, implementation_path, status, description)
+           VALUES (%s,%s,%s,'pending_approval',%s)
+           ON CONFLICT (id) DO NOTHING""",
+        (hedge_strategy_id,
+         f'Option delta-hedge ({option_sid})',
+         'src/execution/option_hedge.py',
+         f'Synthetic FK anchor for SP-5.1b-ii delta-hedge rows of option strategy '
+         f'{option_sid}. Not a runnable strategy — exists solely so injected APPROVED '
+         f'is_hedge execution_signals rows satisfy the strategy_id FK.'))
+
+
 def _leg_delta(occ, right, strike, expiry):
     """Live delta for one option leg, from the chain at its exact strike. Reuses
     SP-5.1b-i's _option_chain_greeks (snapshots[occ].greeks.delta). Returns the
@@ -164,6 +192,11 @@ def compute_option_hedge_targets(cur, as_of, workspace_id=None):
         })
 
         now_utc = datetime.now(timezone.utc)
+
+        # Satisfy execution_signals.strategy_id -> strategy_registry(id) FK. Idempotent,
+        # gate-gated (this fn only runs under the gated EOD step), and only registers
+        # sids that actually emit a hedge. Kept invisible to the engine (see helper).
+        _ensure_hedge_strategy_registered(cur, hedge_strategy_id, option_sid)
 
         cur.execute("""
             INSERT INTO execution_signals
