@@ -42,8 +42,10 @@ B2 is one spec with three build-phased layers. Gates are all default-OFF; **all-
 | Layer | What | When built | When it runs | Gate |
 |---|---|---|---|---|
 | **B2.1** | Live `w_hawkes=0` executor (VWAP/U-shape base curve, real paper fills) + 9:30 sizing cutover + dual brackets + completion floor + simulator-calibration stream | this week (worktree, gated OFF) | live-PAPER, after B1/B0 live + operator approval | `OPENCLAW_B2_EXECUTOR` |
-| **B2.2** | Hawkes substrate + capped-tilt curve + §28 shadow harness (Hawkes arm **simulated**; accrues the §28 `Δ` ledger) | this week (worktree) | shadow-only; `w_hawkes=0` in every live path | `OPENCLAW_B2_HAWKES_SHADOW` |
-| **B2.3** | Lift `w_hawkes` off 0 in the live executor | deferred | only after §28 pass + operator sign-off | `w_hawkes` param (default 0) |
+| **B2.2** | Hawkes substrate + capped-tilt curve + §28 shadow harness (Hawkes arm **simulated**; accrues the §28 `Δ` ledger) | this week (worktree) | shadow-only; **live** `w_hawkes=0` in every live path | `OPENCLAW_B2_HAWKES_SHADOW` + `OPENCLAW_B2_SHADOW_W_HAWKES` (candidate, nonzero) |
+| **B2.3** | Lift `OPENCLAW_B2_W_HAWKES` off 0 in the live executor | deferred | only after §28 pass + operator sign-off | `OPENCLAW_B2_W_HAWKES` (live weight, default 0) |
+
+**Two separate weight vars (load-bearing):** the shadow stream runs at `OPENCLAW_B2_SHADOW_W_HAWKES` (a **nonzero** pre-committed candidate — else `Δ = sim_hawkes − sim_base ≡ 0`, hollow accrual), while the live executor's `OPENCLAW_B2_W_HAWKES` stays **0** until §28 passes. They are deliberately distinct keys: one shared var would force a choice between a hollow shadow and a broken NON-NEGOTIABLE. The shadow driver warns loudly if its gate is on but the candidate weight is 0.
 
 **Paper-only assert:** `b2_executor` refuses to submit unless the Alpaca account is paper — independent of every gate.
 
@@ -92,6 +94,7 @@ slice(t) ∝ profile[t] · exp(−λ·sᵢ·t) · (1 + clip(w_hawkes·ĥ(t), −
 - Cap `c` (proposed `0.5`) lives in the math, so the Hawkes term reshapes but never dominates the base.
 - **`w_hawkes = 0` ⇒ the factor is 1 ⇒ collapses exactly to `b1_planner` (byte-identical).** Guarded by a regression test.
 - **Refined look-ahead guard:** `plan(t)` may depend on bars `< t` (causal/adaptive), **never** on bars `≥ t`. (B1's static guard "any post-9:30 bar leaves the plan unchanged" is replaced by this causal form.)
+- **Two known modeling questions (resolve empirically in §28 accrual, not by tuning):** (1) a *constant* `ĥ` across buckets renormalizes away entirely — the curve only reshapes on cross-bucket **variation** in `ĥ`. (2) Whether `ĥ`'s effect should **lead or lag** the "front-load to capture the move before it prices in" thesis is open: a causal momentum `ĥ` only turns positive *after* a move begins, which can back-load on a monotonic path. These are why a planted-signal test built on the real `ĥ` features may legitimately fail — that is signal about the feature form, not test flakiness. The §28 harness is tested via an injected `h_override` so the *machinery* is validated independent of the feature's lead/lag.
 
 ---
 
@@ -123,7 +126,7 @@ Gate `OPENCLAW_B2_EXECUTOR` selects the owner of opens: ON → B2; OFF → the l
 
 Two parallel, complementary data streams (different validation bars):
 - **Stream A — live real paper fills (B2.1):** the `w_hawkes=0` executor's real fills land in `alpaca_submissions` via B0's per-order ledger. Validates B1's "working beats close" thesis with paper fills and exercises the real order path.
-- **Stream B — shadow simulation (B2.2):** both curves simulated on identical realized bars → `Δ = ledger_hawkes − ledger_base` per order. **`Δ` is forced sim-vs-sim:** the NON-NEGOTIABLE forbids running the Hawkes curve on any live order before §28, so the Hawkes arm *must* be simulated. **The live `w_hawkes=0` stream's only role in §28 is calibrating the simulator** — implementers must compute `Δ = sim_hawkes − sim_base`, never `real_base − sim_hawkes`.
+- **Stream B — shadow simulation (B2.2):** both curves simulated on identical realized bars → `Δ = ledger_hawkes − ledger_base` per order, where the Hawkes arm runs at the **shadow candidate weight `OPENCLAW_B2_SHADOW_W_HAWKES`** (nonzero — distinct from the live `OPENCLAW_B2_W_HAWKES=0`). **`Δ` is forced sim-vs-sim:** the NON-NEGOTIABLE forbids running the Hawkes curve on any live order before §28, so the Hawkes arm *must* be simulated. **The live `w_hawkes=0` stream's only role in §28 is calibrating the simulator** — implementers must compute `Δ = sim_hawkes − sim_base`, never `real_base − sim_hawkes`.
 
 **Simulator calibration:** compare `real_base` (Stream A) vs `sim_base` (`b1_simulator` on the same orders) → haircut-realism report.
 
@@ -134,7 +137,8 @@ Two parallel, complementary data streams (different validation bars):
 - **Statistic:** `Σ Δ` over accrued orders, `Δ = ledger_hawkes − ledger_base` per order (same order, same realized bars; only the `w_hawkes`-tilted allocation differs — isolates the Hawkes term's contribution).
 - **Null (time-misalignment):** re-run the Hawkes curve with `ĥ(t)` circularly-shifted / block-shuffled within each session, preserving `ĥ`'s marginal distribution and autocorrelation while destroying its alignment to the realized price path. **N ≥ 1000** scrambles → null distribution of `Σ Δ`.
 - **Pass bar (all four):** real `Σ Δ` > **95th percentile** of the null **AND** positive on a **time-ordered OOS holdout** **AND** the Hawkes curve beats the `w_hawkes=0` base **AND** explicit **operator sign-off** (two-key).
-- **Anti-peeking (protects the NON-NEGOTIABLE):** re-evaluating §28 every week as data accrues inflates the false-positive rate far past 5%. So the gate adds a **min-n precondition** (§28 is not even *evaluated* before n is reached) **and** a **multiple-looks discipline** — pre-committed evaluation point and/or pass-must-hold-across-consecutive-looks (alpha-spend). **`w_hawkes` stays 0 for weeks**; accrual grows n, it does not shorten the gate.
+- **Anti-peeking, time axis (protects the NON-NEGOTIABLE):** re-evaluating §28 every week as data accrues inflates the false-positive rate far past 5%. So the gate adds a **min-n precondition** (§28 is not even *evaluated* before n is reached) **and** a **multiple-looks discipline** — pre-committed evaluation point and/or pass-must-hold-across-consecutive-looks (alpha-spend). **`w_hawkes` stays 0 for weeks**; accrual grows n, it does not shorten the gate.
+- **Anti-peeking, parameter axis:** the time-misalignment null does **not** account for a search over `(w_hawkes, cap)`. Trying several until one clears the 95th-pct bar is the same multiple-comparisons inflation. So the candidate `(w_hawkes, cap)` is **fixed before the evaluation window opens** (and equals what the shadow stream actually accrued at). If a search is unavoidable, the search itself must run *inside* the null (re-select on each scramble), not outside it.
 
 ---
 
@@ -155,15 +159,15 @@ Two parallel, complementary data streams (different validation bars):
 
 ## 11. Gates, rollout & sequencing
 
-**Gates (default-OFF):** `OPENCLAW_B2_EXECUTOR`, `OPENCLAW_B2_HAWKES_SHADOW`, `w_hawkes` (default 0). **All-off ⇒ Phase A byte-identical** (regression-proven).
+**Gates (default-OFF):** `OPENCLAW_B2_EXECUTOR`, `OPENCLAW_B2_HAWKES_SHADOW`, `OPENCLAW_B2_SHADOW_W_HAWKES` (shadow candidate, nonzero), `OPENCLAW_B2_W_HAWKES` (live, default 0). **All-off ⇒ Phase A byte-identical** (regression-proven).
 
 **Rollout (reversible, gated):**
-1. **Build** B2.1 + B2.2 this week in a worktree (`feat/sp6-phase-b2-execution-scheduler`, off `f3f366a`), subagent-TDD, gates OFF. Nothing deployed.
+1. **Build** B2.1 + B2.2 this week in a worktree (`feat/sp6-phase-b2-execution-scheduler`) **off the merged SP-6 base (after B0+B1 merge — NOT bare `f3f366a`, which has no B1 code to reuse)**, subagent-TDD, gates OFF. Nothing deployed.
 2. **Prereq:** tonight's Phase-A into-close fill verifies → B0 + B1 activated per the existing runbook (separate operator action; B2 does not perform it).
-3. **Activate B2.1 (live-PAPER, operator-present):** flip `OPENCLAW_B2_EXECUTOR` ON, `w_hawkes=0`; wire the 9:30 size-once + 9:30→close executor crons; restart johnbot. Legacy 3:55 path disabled by the gate (single owner).
-4. **Activate B2.2 (shadow):** flip `OPENCLAW_B2_HAWKES_SHADOW` ON → §28 `Δ` accrues daily on live opens. No live effect.
+3. **Activate B2.1 (live-PAPER, operator-present):** flip `OPENCLAW_B2_EXECUTOR` ON with `OPENCLAW_B2_W_HAWKES=0`; wire the 9:30 size-once + 9:30→close executor crons; restart johnbot. Legacy 3:55 path disabled by the gate (single owner).
+4. **Activate B2.2 (shadow):** flip `OPENCLAW_B2_HAWKES_SHADOW` ON **AND set `OPENCLAW_B2_SHADOW_W_HAWKES` to the pre-committed candidate (e.g. `1.0`)** → §28 `Δ` accrues daily on live opens (nonzero). No live effect. (At candidate 0 the driver warns: Δ≡0.)
 5. **Calibrate:** monitor `real_base` vs `sim_base`; confirm the order path + paper fills behave; watch the dual-bracket completion placement.
-6. **§28 (weeks out):** at the pre-committed min-n/date, run `b2_validation`; if the four-part bar clears + operator signs off → **B2.3: lift `w_hawkes`.** Otherwise B2 stops at the `w_hawkes=0` executor — a clean, successful negative result.
+6. **§28 (weeks out):** at the pre-committed min-n/date with the pre-committed `(w_hawkes, cap)`, run `b2_validation`; if the four-part bar clears across the committed looks + operator signs off → **B2.3: set `OPENCLAW_B2_W_HAWKES` to the validated weight.** Otherwise B2 stops at the live `w_hawkes=0` executor — a clean, successful negative result.
 
 **Standing constraints:** paper only; NEVER delete master data (incl. `prices_30m.parquet`); 2-core/8GB (nice -n 19, no concurrent heavy jobs); no push / no johnbot restart / no deploy without operator approval; don't disturb the live checkout's uncommitted `manifest.json` / `strategy_signatures.json` / `run_sentiment_step.py`; ABORT is never `git reset --hard`.
 
@@ -192,6 +196,7 @@ Two parallel, complementary data streams (different validation bars):
 ## 14. Open questions / operator-tunable defaults (proposed, flagged in the plan)
 
 - Cap `c = 0.5`; `ĥ` features = {signed-return momentum, volume surprise, range-vol clustering} (3); EWMA half-life ≈ 2 buckets.
+- **Shadow candidate `OPENCLAW_B2_SHADOW_W_HAWKES`** (proposed `1.0`) — the nonzero weight the §28 `Δ` is measured at. **Must be pre-committed (with `cap`) before the evaluation window opens** (parameter-axis anti-peeking, §9); the live `OPENCLAW_B2_W_HAWKES` stays 0.
 - §28: `min-n` (proposed ≥ 150–200 distinct order-day observations), first-eval date pre-committed (~4 weeks post-activation), pass must hold across 2 consecutive monthly looks, OOS split time-ordered 70/30.
 - Child marketable-limit crossing cap `k bps` + hard cap.
 - These are written into the spec as concrete defaults and surfaced in the implementation plan as operator-tunable knobs.

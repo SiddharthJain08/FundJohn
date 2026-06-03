@@ -39,7 +39,7 @@ Reused signatures B2 calls (stable across the B1/B0 merge; **line numbers will s
 - **Build base:** a worktree off the **merged SP-6 base** (after B0+B1 merge, which rides tonight's Phase-A fill verdict). B2 reuses `b1_*`/`parity_mark.finalize_execution_ledger`, which only exist post-merge. **Do not build off bare `f3f366a`** (no B1 code there).
 - **Worktree:** create via `superpowers:using-git-worktrees` at execution time; branch `feat/sp6-phase-b2-execution-scheduler`.
 - **Standing constraints:** paper only; NEVER delete master data (incl. `prices_30m.parquet`); 2-core/8GB → `nice -n 19`, never run heavy jobs concurrently; gates default-OFF + byte-identical when off; no push / no johnbot restart / no migration-apply without operator approval; don't disturb the live checkout's uncommitted `manifest.json`/`strategy_signatures.json`/`run_sentiment_step.py`; **ABORT is never `git reset --hard`** (use `git merge --abort`/`git reset --keep`; back up first).
-- **Gates:** `OPENCLAW_B2_HAWKES_SHADOW` (Part A accrual), `OPENCLAW_B2_EXECUTOR` (Part B live), `w_hawkes` param (default `0.0`, lifts only post-§28).
+- **Gates:** `OPENCLAW_B2_HAWKES_SHADOW` (Part A accrual) + `OPENCLAW_B2_SHADOW_W_HAWKES` (shadow candidate weight, nonzero — SEPARATE from the live weight); `OPENCLAW_B2_EXECUTOR` (Part B live); `OPENCLAW_B2_W_HAWKES` (live weight, default `0.0`, lifts only post-§28). The two weights are distinct vars by design (see Task 5).
 - Run tests with `cd /root/openclaw-b2-worktree && PYTHONPATH=src nice -n 19 python3 -m pytest ...`.
 
 ---
@@ -508,8 +508,12 @@ def evaluate_sec28(orders, prices_df, w_hawkes, cap, n_scrambles=N_SCRAMBLES,
             loaded = order_loader(o, prices_df)
             if loaded is None:
                 continue
-            seq, sq, s_i, prof, lam, c_t1, dsign, nf = loaded
-            h = _causal_h(seq, dsign)
+            # 8-tuple (real loader: causal ĥ from features) OR 9-tuple with an
+            # explicit h_override — harness tests use the override to validate the
+            # §28 MACHINERY independent of the b2_hawkes feature form / lead-lag.
+            seq, sq, s_i, prof, lam, c_t1, dsign, nf = loaded[:8]
+            h_override = loaded[8] if len(loaded) > 8 else None
+            h = h_override if h_override is not None else _causal_h(seq, dsign)
             if scramble_k is not None:
                 h = circular_shift_h(h, scramble_k)
             total += order_delta(seq, sq, s_i, prof, lam, c_t1, dsign,
@@ -557,17 +561,20 @@ def test_planted_signal_passes_noise_fails():
         return [{'i': i, 'planted': planted} for i in range(n)]
 
     def loader(o, _df):
-        # synthetic session: planted -> price drifts UP early (favorable for long)
-        # so front-loading (high early ĥ) fills cheaper; noise -> random walk
+        # Path RISES over the session => for a long, EARLY buckets fill cheaper.
+        # Returns a 9-tuple with an explicit h_override (decoupled from b2_hawkes):
+        #   planted -> ĥ high on early buckets => front-loads into the cheap fills => Δ>0
+        #   noise   -> random ĥ uncorrelated with the cheap buckets => Δ ≈ 0
         import random
         rnd = random.Random(o['i'])
-        if o['planted']:
-            prices = [100 + 0.8 * t for t in range(13)]
-        else:
-            prices = [100 + rnd.gauss(0, 0.5) for _ in range(13)]
+        prices = [100 + 0.6 * t for t in range(13)]
         seq = [(t, {'vwap': p, 'high': p * 1.003, 'low': p * 0.997, 'volume': 8000.0})
                for t, p in enumerate(prices)]
-        return (seq, 100.0, 0.8, PROFILE, 4.0, prices[-1], 1.0, None)
+        if o['planted']:
+            h_override = {t: (1.0 if t < 4 else -0.3) for t in range(13)}
+        else:
+            h_override = {t: rnd.uniform(-1, 1) for t in range(13)}
+        return (seq, 100.0, 0.8, PROFILE, 4.0, prices[-1], 1.0, None, h_override)
 
     planted = evaluate_sec28(make_orders(MIN_N + 20, True), prices_df=None,
                              w_hawkes=1.0, cap=0.5, n_scrambles=200, order_loader=loader)
@@ -578,7 +585,7 @@ def test_planted_signal_passes_noise_fails():
 ```
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_b2_validation.py -v`
-Expected: PASS (5 tests). If the planted case is flaky, raise the planted drift or `n` — the discriminator must be robust, not borderline.
+Expected: PASS (5 tests). The planted fixture injects `h_override`, so it validates the §28 MACHINERY (Δ computed, null run, OOS split, verdict) independent of the `b2_hawkes` feature form. **Do NOT make the harness "pass" by tuning a planted case built on the real causal features** — if such a case fails, that is REAL signal about the feature's lead/lag (spec modeling note), not test flakiness, and it belongs in the empirical §28 accrual, never a forced-green test.
 
 - [ ] **Step 6: Commit.**
 ```bash
@@ -619,7 +626,9 @@ def test_order_loader_returns_none_on_no_coverage(monkeypatch):
 Run: `PYTHONPATH=src python3 -m pytest tests/test_b2_shadow_run.py -v`
 Expected: FAIL — `ModuleNotFoundError` / attribute errors.
 
-- [ ] **Step 3: Write `b2_shadow_run.py`** (mirrors `b1_run.run`; reuses `b1_run` helpers `_by_date/_resolve_session/_trailing/expected_volume_profile`; computes per-order Δ and persists to `b2_hawkes_shadow_ledger`). `w_hawkes` comes from env (default 0.0) — at 0 the shadow Δ is structurally 0 but still recorded, which is the honest pre-lift baseline.
+- [ ] **Step 3: Write `b2_shadow_run.py`** (mirrors `b1_run.run`; reuses `b1_run` helpers `_by_date/_resolve_session/_trailing/expected_volume_profile`; computes per-order Δ and persists to `b2_hawkes_shadow_ledger`).
+
+> **CRITICAL — the shadow weight is a SEPARATE env var from the live weight.** The shadow stream reads **`OPENCLAW_B2_SHADOW_W_HAWKES`** (the pre-committed *candidate* weight, nonzero), NOT `OPENCLAW_B2_W_HAWKES` (the live-executor weight, which stays pinned at 0 until §28). They MUST be different keys: at weight 0, `plan_tilted` returns the base curve ⇒ `Δ = hk − base ≡ 0` for every order ⇒ the §28 accrual is hollow. So the shadow runs at the candidate weight while the live executor stays at 0 — this is exactly what lets us accrue §28 evidence without conditioning any live fill on the Hawkes alpha. Default `0.0` is inert; activating Part A means setting `OPENCLAW_B2_SHADOW_W_HAWKES` to the pre-committed candidate (e.g. `1.0`). The driver emits a LOUD warning if the shadow gate is on but the candidate weight is 0 (the silent-zero-accrual trap — `feedback_silent_failure_pattern`).
 
 ```python
 # src/execution/b2_shadow_run.py
@@ -651,9 +660,11 @@ def _env(key):
     return b1_order_source._env(key)
 
 
-def _w_hawkes():
+def _shadow_w_hawkes():
+    # SEPARATE from the live executor's OPENCLAW_B2_W_HAWKES (which stays 0).
+    # This is the pre-committed candidate weight the §28 Δ is measured at.
     try:
-        return float(os.environ.get('OPENCLAW_B2_W_HAWKES', '0') or '0')
+        return float(os.environ.get('OPENCLAW_B2_SHADOW_W_HAWKES', '0') or '0')
     except ValueError:
         return 0.0
 
@@ -710,7 +721,12 @@ def _persist(rows):
 def run(run_date=None, post=False):
     if os.environ.get('OPENCLAW_B2_HAWKES_SHADOW') != '1':
         return {'status': 'gate_off', 'persisted': 0}
-    w_hawkes, cap = _w_hawkes(), TILT_CAP
+    w_hawkes, cap = _shadow_w_hawkes(), TILT_CAP
+    if w_hawkes == 0.0:
+        # LOUD: gate on but candidate weight 0 => Δ≡0, accruing nothing.
+        print('[b2_shadow_run] WARNING: OPENCLAW_B2_SHADOW_W_HAWKES=0 — shadow Δ '
+              'will be identically 0 (hollow accrual). Set the pre-committed '
+              'candidate weight to measure §28.')
     df = pd.read_parquet(_PARQUET,
                          columns=['date', 'datetime', 'ticker', 'high', 'low', 'vwap', 'volume'])
     orders = b1_order_source.live_shadow_orders(run_date)
@@ -826,6 +842,9 @@ _GATE = 'OPENCLAW_B2_EXECUTOR'
 
 
 def _w_hawkes():
+    # LIVE-executor weight ONLY. Distinct from the shadow candidate
+    # (OPENCLAW_B2_SHADOW_W_HAWKES). MUST stay 0 until §28 passes + operator
+    # sign-off (the NON-NEGOTIABLE) — B2.3 lifts it by setting this var.
     try:
         return float(os.environ.get('OPENCLAW_B2_W_HAWKES', '0') or '0')
     except ValueError:
@@ -1262,7 +1281,7 @@ Expected: the Phase-A / B1 / B0 suites pass unchanged; only the new B2 tests are
 
 - [ ] **Step 2: Request whole-branch review** via `superpowers:requesting-code-review` (independent reviewer), focused on: paper-only assert un-bypassable; gate-off byte-identical; `Δ = sim_hawkes − sim_base` orientation; no Hawkes-conditioned fill path reachable at `w_hawkes=0`; the exec-ledger writes a real submission row; OPG/close paths untouched.
 
-- [ ] **Step 3: Write `docs/sp6-b2-activation-runbook.md`** — the operator-present steps: apply migrations 129/130 (idempotent, additive); flip `OPENCLAW_B2_HAWKES_SHADOW=1` (Part A accrual, no live effect); confirm paper account; flip `OPENCLAW_B2_EXECUTOR=1` with `OPENCLAW_B2_W_HAWKES=0`; wire the 9:30 size-once + schedule crons; restart johnbot; verify first-cycle: sized handoff written at 9:30, B2 child orders submitted (paper), residual swept by close, OCO placed at completion, `b2_hawkes_shadow_ledger` accruing Δ. ABORT path: set gates OFF + restart (never `git reset --hard`).
+- [ ] **Step 3: Write `docs/sp6-b2-activation-runbook.md`** — the operator-present steps: apply migrations 129/130 (idempotent, additive); flip `OPENCLAW_B2_HAWKES_SHADOW=1` **AND set `OPENCLAW_B2_SHADOW_W_HAWKES` to the pre-committed candidate (e.g. `1.0`)** — without it the shadow Δ accrues identically 0 (the driver warns); confirm paper account; flip `OPENCLAW_B2_EXECUTOR=1` with **`OPENCLAW_B2_W_HAWKES=0`** (live weight pinned 0 — the two weights are SEPARATE vars by design); wire the 9:30 size-once + schedule crons; restart johnbot; verify first-cycle: sized handoff written at 9:30, B2 child orders submitted (paper), residual swept by close, OCO placed at completion, `b2_hawkes_shadow_ledger` accruing **nonzero** Δ. ABORT path: set gates OFF + restart (never `git reset --hard`).
 
 - [ ] **Step 4: Commit.**
 ```bash
@@ -1274,7 +1293,7 @@ git commit -m "docs(sp6-b2): activation runbook (migrations, gates, crons, verif
 
 > **Do NOT run until the pre-committed min-n/date is reached** (anti-peeking). This is a config + analysis step, not a code build.
 
-- [ ] **Step 1:** At the pre-committed evaluation point (n ≥ MIN_N accrued + the committed date), run the §28 evaluation over the accrued `live_shadow_orders` window with a candidate `w_hawkes` and `cap`; persist the result to `b2_sec28_runs` (verdict + p-value + OOS).
+- [ ] **Step 1:** At the pre-committed evaluation point (n ≥ MIN_N accrued + the committed date), run the §28 evaluation over the accrued `live_shadow_orders` window; persist the result to `b2_sec28_runs` (verdict + p-value + OOS). **The candidate `(w_hawkes, cap)` MUST be fixed BEFORE the evaluation window opens** — and it must equal the `OPENCLAW_B2_SHADOW_W_HAWKES`/`cap` the shadow stream actually accrued at. Searching over `(w_hawkes, cap)` until one clears the 95th-pct bar is parameter-axis multiple-comparisons — the same false-positive inflation the min-n/consecutive-look rule blocks on the time axis. If a search is unavoidable, the search itself must go *inside* the null (re-run the whole selection on each scramble), not outside it.
 - [ ] **Step 2:** Require the pass to **hold across the committed consecutive looks** (not a single lucky window).
 - [ ] **Step 3:** If `verdict == 'pass_pending_signoff'` across the looks AND the operator signs off → set `OPENCLAW_B2_W_HAWKES` to the validated weight (the live executor already calls `b2_planner` with the config weight — **no code change**). Otherwise B2 stops at the `w_hawkes=0` executor (a clean negative result).
 
