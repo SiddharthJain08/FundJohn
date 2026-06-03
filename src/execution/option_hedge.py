@@ -44,7 +44,31 @@ def upsert_hedge_ledger_on_fill(cur, option_strategy_id, underlying, legs, contr
 
     ON CONFLICT DO UPDATE deliberately does NOT touch target_hedge_qty:
     the EOD compute step owns that column; a re-fill must not clobber an
-    already-computed target back to 0."""
+    already-computed target back to 0.
+
+    SP-5.1a (G2 residual): the ledger key is (option_strategy_id, underlying). In
+    sharpe_cadence mode option_strategy_id is the option-only composite of contributor
+    sids. If a SECOND option strategy on the same underlying ever promotes, the
+    composite changes → a NEW ledger row under a different key, leaving the old row
+    ACTIVE. Surface this to the operator with a loud warning (we do NOT modify the
+    existing row — superseding it silently would orphan the prior hedge bookkeeping)."""
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+    try:
+        cur.execute(
+            """SELECT option_strategy_id FROM option_hedge_ledger
+               WHERE underlying=%s AND status='active' AND option_strategy_id <> %s""",
+            (underlying, option_strategy_id))
+        _others = [r[0] for r in cur.fetchall()]
+        if _others:
+            _log.warning(
+                'option_hedge_ledger: underlying %s already has ACTIVE ledger row(s) under '
+                'a DIFFERENT option_strategy_id %s; writing a NEW row for %s — the prior '
+                'row is NOT modified (operator: reconcile competing option strategies on %s)',
+                underlying, _others, option_strategy_id, underlying)
+    except Exception as _e:
+        # Never let the advisory check block the fill bookkeeping.
+        _log.warning('option_hedge_ledger: conflicting-row check failed for %s (%s)', underlying, _e)
     cur.execute(
         """INSERT INTO option_hedge_ledger
              (option_strategy_id, underlying, structure_legs, contracts,
