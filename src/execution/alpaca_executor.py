@@ -789,8 +789,8 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     spec = order.get('option_spec')
     if spec is None:
         return None
-    # 5.1b: single + straddle/strangle supported. Verticals/condors = SP-5.2.
-    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle'):
+    # 5.1b: single + straddle/strangle supported. 5.2: debit verticals added.
+    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle', 'vertical'):
         return _option_skip(order, coid, equity,
             f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
@@ -801,7 +801,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
     # reads HELD legs from the book and must NOT be blocked by open-path resolution
     # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
-    if spec.structure in ('straddle', 'strangle') and order.get('close_only'):
+    if spec.structure in ('straddle', 'strangle', 'vertical') and order.get('close_only'):
         return _route_mleg_close(order, spec, coid)
 
     direction = str(order.get('direction','long')).lower()
@@ -820,7 +820,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
 
-    if spec.structure in ('straddle', 'strangle'):
+    if spec.structure in ('straddle', 'strangle', 'vertical'):
         # SP-5.1b-i envelope: long debit only, hedge='none' only. (delta-hedge =
         # the separate 5.1b-ii subsystem.) Fail-closed on out-of-envelope specs
         # rather than submit a malformed short/unhedged structure.
