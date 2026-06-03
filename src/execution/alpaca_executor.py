@@ -702,11 +702,8 @@ def _with(spec, **overrides):
 
 
 def _resolve_structure_legs(spec, as_of, expiry):
-    """Return [(right, strike)] for a straddle/strangle, mirroring
-    options_backtest._legs_for but resolved against LIVE listed strikes/greeks:
-      straddle -> ATM call + ATM put at the same strike (via _resolve_strike atm).
-      strangle -> call near +target_delta, put near -target_delta (live chain greeks).
-    Returns None if any leg cannot be resolved (fail-closed)."""
+    """Return [(right, strike, side)] for straddle/strangle/vertical, resolved
+    against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
     spot = _spot_price(spec.underlying)
     if spot is None or spot <= 0:
         return None
@@ -714,7 +711,7 @@ def _resolve_structure_legs(spec, as_of, expiry):
         k = _resolve_strike(_with(spec, strike_rule='atm', right='call'), as_of, expiry)
         if k is None:
             return None
-        return [('call', k), ('put', k)]
+        return [('call', k, 'buy'), ('put', k, 'buy')]
     if spec.structure == 'strangle':
         tgt = float(spec.target_delta)
         legs = []
@@ -723,38 +720,55 @@ def _resolve_structure_legs(spec, as_of, expiry):
             if not grk:
                 return None
             k = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
-            legs.append((right, k))
+            legs.append((right, k, 'buy'))
         return legs
+    if spec.structure == 'vertical':
+        right = str(spec.right).lower()
+        near = _resolve_strike(_with(spec, right=right), as_of, expiry)
+        if near is None:
+            return None
+        grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+        if not grk:
+            return None
+        if float(spec.spread_width_pct) <= 0:
+            return None   # non-positive width can't define a distinct OTM short leg (fail-closed)
+        sign = 1.0 if right == 'call' else -1.0
+        far_target = near + sign * float(spec.spread_width_pct) * spot
+        far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+        if far == near:
+            return None
+        return [(right, near, 'buy'), (right, far, 'sell')]
     return None
 
 
 def _structure_net_quote(spec, legs, expiry):
-    """For each (right, strike) leg: build the OCC + fetch the quote. Returns
-    (net_ask_debit, [(occ, right, ask)]) or None if any leg has no quote
-    (fail-closed — never submit a partial structure)."""
+    """For each (right, strike, side) leg: build OCC + fetch quote. Returns
+    (net_debit, [(occ, right, side)]) or None if any leg has no quote.
+    net = Σ(buy ask) − Σ(sell bid)."""
     leg_q = []
     net = 0.0
-    for right, strike in legs:
+    for right, strike, side in legs:
         occ = _build_occ_symbol(_with(spec, right=right), strike, expiry)
         q = _option_quote(occ)
         if q is None:
             return None
-        net += float(q['ask'])
-        leg_q.append((occ, right, float(q['ask'])))
+        if side == 'buy':
+            net += float(q['ask'])
+        else:
+            net -= float(q['bid'])
+        leg_q.append((occ, right, side))
     return net, leg_q
 
 
-def _build_mleg_legs_json(leg_q, direction) -> str:
-    """JSON `--legs` array for a 1:1 structure (straddle/strangle). Per leg,
-    side+intent from _options_position_intent on that leg's existing qty (avoids
-    the SP-5.0 test-5 inferred-intent 422). ratio_qty is the within-package ratio
-    "1" (a string — SP-5.0); the package COUNT is the order's top-level --qty."""
+def _build_mleg_legs_json(leg_q) -> str:
+    """JSON `--legs` array. Per leg, side+intent via _options_position_intent on the
+    leg's intended side ('buy'->long, 'sell'->short) and its existing qty. ratio_qty='1'."""
     import json
     out = []
-    for occ, _right, _ask in leg_q:
-        side, intent = _options_position_intent(direction, _options_current_qty(occ))
-        out.append({'symbol': occ, 'side': side,
-                    'ratio_qty': '1', 'position_intent': intent})
+    for occ, _right, side in leg_q:
+        d = 'long' if side == 'buy' else 'short'
+        s, intent = _options_position_intent(d, _options_current_qty(occ))
+        out.append({'symbol': occ, 'side': s, 'ratio_qty': '1', 'position_intent': intent})
     return json.dumps(out)
 
 
@@ -777,8 +791,8 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     spec = order.get('option_spec')
     if spec is None:
         return None
-    # 5.1b: single + straddle/strangle supported. Verticals/condors = SP-5.2.
-    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle'):
+    # 5.1b: single + straddle/strangle supported. 5.2: debit verticals added.
+    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle', 'vertical'):
         return _option_skip(order, coid, equity,
             f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
@@ -789,7 +803,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
     # reads HELD legs from the book and must NOT be blocked by open-path resolution
     # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
-    if spec.structure in ('straddle', 'strangle') and order.get('close_only'):
+    if spec.structure in ('straddle', 'strangle', 'vertical') and order.get('close_only'):
         return _route_mleg_close(order, spec, coid)
 
     direction = str(order.get('direction','long')).lower()
@@ -808,7 +822,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
 
-    if spec.structure in ('straddle', 'strangle'):
+    if spec.structure in ('straddle', 'strangle', 'vertical'):
         # SP-5.1b-i envelope: long debit only, hedge='none' only. (delta-hedge =
         # the separate 5.1b-ii subsystem.) Fail-closed on out-of-envelope specs
         # rather than submit a malformed short/unhedged structure.
@@ -825,6 +839,9 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         if nq is None:
             return _option_skip(order, coid, equity, 'option: no quote for a structure leg')
         net_ask, leg_q = nq
+        if net_ask <= 0:
+            return _option_skip(order, coid, equity,
+                f'option: non-positive net debit ({net_ask:.2f}) — crossed quotes or inverted spread (debit-only)')
         override = order.get('limit_price_override')
         net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
         raw_qty, qty_reason = _resolve_option_qty(
@@ -832,7 +849,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             net_limit)
         if qty_reason and raw_qty == 0:
             return _option_skip(order, coid, equity, qty_reason)
-        legs_json = _build_mleg_legs_json(leg_q, direction)
+        legs_json = _build_mleg_legs_json(leg_q)
         args = ['order','submit','--order-class','mleg','--qty', str(int(raw_qty)),
                 '--legs', legs_json,
                 '--type','limit','--limit-price', f'{net_limit:.2f}',
