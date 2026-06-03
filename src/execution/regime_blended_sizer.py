@@ -996,6 +996,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             if new_gross > 0:
                 new_scale = (lam * nav) / new_gross
                 target_usd = {t: w * new_scale for t, w in ticker_w.items()}
+                # SP-5 Phase 1a (review NIT): options size at the EFFECTIVE
+                # equity per-unit-weight rate — after a min-notional renorm the
+                # post-renorm scale is the rate equity actually trades at.
+                scale = new_scale
             logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
                         len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
 

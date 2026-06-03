@@ -11,8 +11,13 @@ import execution.alpaca_executor as ex
 from strategies.base import OptionSpec
 
 
-def test_option_route_none_when_gate_off(monkeypatch):
+def test_option_route_skips_fail_closed_when_gate_off(monkeypatch):
+    # NIT-1 contract (opus review): an OPTION order with the gate OFF returns a
+    # SKIP dict (fail-closed by construction) — it must NEVER fall through to
+    # the equity path. Genuine equity orders (no instrument_class) still get None.
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
     order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
              'option_spec': OptionSpec(underlying='SPY', structure='straddle', hedge='delta')}
-    assert ex._route_option_order(order, equity=100_000.0, coid='c') is None
+    res = ex._route_option_order(order, equity=100_000.0, coid='c')
+    assert res is not None and res.get('status') == 'skipped'
+    assert 'gate is OFF' in (res.get('reason') or '')

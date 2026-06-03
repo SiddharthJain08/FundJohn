@@ -826,13 +826,21 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     + multi-leg long straddle/strangle (--order-class mleg). Returns a result dict or
     None to fall through (equity byte-identical when None)."""
     import os as _os, datetime as _dt
-    if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
-        return None
+    # Check ordering matters (opus review NIT 1): classify the order FIRST, gate
+    # SECOND. A genuine equity order (no instrument_class) returns None and falls
+    # through to the equity path. An OPTION order with the gate OFF returns a
+    # SKIP dict — fail-closed by construction, never accidentally routed as
+    # equity shares of the underlying (the old order let gate-off option orders
+    # fall through, saved only by the equity path's missing-levels SKIP).
     if order.get('instrument_class') != 'option':
         return None
+    if _os.environ.get('OPENCLAW_OPTION_EXEC') != '1':
+        return _option_skip(order, coid, equity,
+            'option: OPENCLAW_OPTION_EXEC gate is OFF')
     spec = order.get('option_spec')
     if spec is None:
-        return None
+        return _option_skip(order, coid, equity,
+            'option: instrument_class=option but no option_spec (malformed order)')
     # 5.1b: single + straddle/strangle supported. 5.2: debit verticals + credit_vertical/iron_condor added.
     # SP-5 Phase 1b (G4a): the OPEN-envelope structure check is exempt for close_only —
     # a close reads HELD legs and is structure-agnostic, so the synthesized 'held_legs'

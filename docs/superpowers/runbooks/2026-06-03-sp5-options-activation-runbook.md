@@ -131,6 +131,10 @@ process-scoped), script-driven, candidate UNREGISTERED:
 4. Close the structure per-leg → flat-verify (long-leg re-flatten retry is load-bearing,
    per 5.2/5.2b smokes).
 5. Independent post-verify: equity book untouched, zero residuals, zero open option orders.
+5b. (opus review NIT 3) While the structure is held: run `alpaca position list` and verify
+   the held legs' symbols match `_OCC_RE` (`^[A-Z.]{1,6}\d{6}[CP]\d{8}$`) — the broker
+   OCC-filter's correctness rests on Alpaca emitting standard OCC symbols; a false negative
+   would leave a leg in the equity map (orphan-close exposure).
 6. Gates back OFF. Clean the smoke's ledger/signal rows per append-only policy
    (test rows via rollback where possible; anything persisted gets `active=false`-style
    deprecation, never DELETE from canonical tables).
