@@ -48,3 +48,21 @@ def test_unknown_hedge_value_refused(monkeypatch):
     monkeypatch.setattr(ex, '_resolve_expiry', lambda spec, today: __import__('datetime').date(2026, 7, 18))
     res = ex._route_option_order(_order('long', 'collar'), equity=100_000.0, coid='c3')
     assert res.get('status') == 'skipped'
+
+
+def test_delta_hedged_vertical_refused_fail_closed(monkeypatch):
+    """Post-5.2 merge guard: hedge='delta' admits only ALL-BUY structures
+    (straddle/strangle). A vertical has a SHORT far leg, but the ledger leg
+    schema carries no side and compute_structure_delta sums deltas unsigned —
+    a delta-hedged vertical would produce a WRONG hedge target. Refuse."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setenv('OPENCLAW_OPTION_DELTA_HEDGE', '1')
+    monkeypatch.setattr(ex, '_options_session_gate', lambda: (True, ''))
+    monkeypatch.setattr(ex, '_resolve_expiry', lambda spec, today: __import__('datetime').date(2026, 7, 18))
+    order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
+             'contracts': 1, 'notional_usd': 2000.0,
+             'option_spec': OptionSpec(underlying='SPY', structure='vertical',
+                                       hedge='delta', strike_rule='atm')}
+    res = ex._route_option_order(order, equity=100_000.0, coid='c4')
+    assert res.get('status') == 'skipped'
+    assert 'straddle/strangle' in (res.get('reason') or '')

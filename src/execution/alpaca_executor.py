@@ -891,6 +891,15 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
             # refused. Credit structures never reach here (hedge refused above).
             _hedge = getattr(spec, 'hedge', 'none') or 'none'
             if _hedge == 'delta':
+                if spec.structure not in ('straddle', 'strangle'):
+                    # Post-5.2 fail-closed: only ALL-BUY structures may delta-hedge.
+                    # A vertical's SHORT far leg has no side in the ledger leg
+                    # schema and compute_structure_delta sums deltas unsigned —
+                    # the EOD hedge target would be WRONG. Refuse until the
+                    # ledger schema carries per-leg side.
+                    return _option_skip(order, coid, equity,
+                        f"option: hedge='delta' supported on straddle/strangle only "
+                        f"(ledger legs carry no side; {spec.structure} has a short leg)")
                 if _os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') != '1':
                     return _option_skip(order, coid, equity,
                         "option: hedge='delta' requires OPENCLAW_OPTION_DELTA_HEDGE=1")
