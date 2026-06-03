@@ -105,3 +105,38 @@ def test_oue_unknown_regime_bucket_and_invariant():
     assert 'UNKNOWN' in by_regime
     assert by_regime['UNKNOWN'] == {'over':0,'under':0,'expected':1}
     assert sum(overall.values()) == len(trades)
+
+
+import json as _json
+import numpy as _np
+import backtest.backtest_panel as _bp
+
+
+def test_equity_curve_sanitizes_nonfinite_to_none_and_is_json_safe(monkeypatch):
+    """Regression: high-frequency strategies can drive cumprod(1+daily_ret) to
+    0 (a -100% day from many concurrent trades, more reachable under t+1 fills)
+    or to inf (overflow over tens of thousands of steps). Normalizing by a zero
+    first point yields NaN/inf, and a bare NaN/Infinity is INVALID JSON that
+    aborts the whole panel INSERT. Each non-finite equity point must become
+    None so the curve round-trips through json.dumps."""
+    dates = pd.date_range('2025-01-06', periods=20, freq='B')  # starts on a Monday
+
+    # daily_ret[0] = -1.0 zeroes the cumulative product at the FIRST sampled
+    # point -> normalization divides by 0 -> every strat_equity is non-finite.
+    dr = _np.zeros(len(dates)); dr[0] = -1.0
+    monkeypatch.setattr(_bp, '_portfolio_daily_returns', lambda trades: (dr, list(dates)))
+    bench = pd.Series([0.0] * 60, index=pd.date_range('2025-01-01', periods=60, freq='D'))
+    regime_for = lambda d: pd.Series(['LOW_VOL'] * len(list(d)), index=list(d))
+
+    curve = _bp.build_equity_curve([{'x': 1}], bench_daily_ret=bench,
+                                   regime_series_fn=regime_for, weekly=True)
+    assert curve, "curve should still be produced"
+    assert all(p['strat_equity'] is None for p in curve), "non-finite -> None"
+    # No NaN/Infinity slips into any float field.
+    for p in curve:
+        for k in ('strat_equity', 'spx_equity'):
+            v = p[k]
+            assert v is None or (isinstance(v, float) and _np.isfinite(v))
+    # The real bug: this must not raise / must not emit a bare NaN token.
+    dumped = _json.dumps(curve)
+    assert 'NaN' not in dumped and 'Infinity' not in dumped

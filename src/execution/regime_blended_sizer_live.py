@@ -205,16 +205,31 @@ def main():
         print('[regime_blended_sizer_live] POSTGRES_URI not set; aborting', file=sys.stderr)
         return 2
 
-    handoff = read_handoff(run_date_str, 'structured')
-    if handoff is None:
-        print(f'[regime_blended_sizer_live] no handoff for {run_date_str}; nothing to size')
-        return 1
+    eod_mode = os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+    if eod_mode:
+        # SP-6 Phase A — EOD reconcile mode. eod-signal-register persists the
+        # carried set to execution_signals (APPROVED, target_date=T+1); it does
+        # NOT write a structured handoff. size_positions self-loads that APPROVED
+        # set when OPENCLAW_EOD_RECONCILE=1 (regime_blended_sizer._sharpe_cadence_path
+        # -> _load_approved_carried_signals) and ignores the passed signals, so we
+        # pass an empty list + a minimal handoff. Regime is resolved from
+        # market_regime below (handoff regime is empty), then backfilled into the
+        # handoff so the persisted payload records the real regime.
+        handoff = {'cycle_date': run_date_str, 'regime': {}, 'signals': []}
+        signals = []
+        print(f'[regime_blended_sizer_live] EOD mode — size_positions self-loads the '
+              f'APPROVED carried set for {run_date_str}')
+    else:
+        handoff = read_handoff(run_date_str, 'structured')
+        if handoff is None:
+            print(f'[regime_blended_sizer_live] no handoff for {run_date_str}; nothing to size')
+            return 1
 
-    signals = handoff.get('signals', []) if isinstance(handoff, dict) else []
-    print(f'[regime_blended_sizer_live] loaded {len(signals)} signals from handoff for {run_date_str}')
-    if not signals:
-        print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
-        return 0
+        signals = handoff.get('signals', []) if isinstance(handoff, dict) else []
+        print(f'[regime_blended_sizer_live] loaded {len(signals)} signals from handoff for {run_date_str}')
+        if not signals:
+            print('[regime_blended_sizer_live] no signals in handoff; nothing to do')
+            return 0
 
     # Field aliasing — handoff uses entry/stop/t1; consolidator+sizer uses
     # entry_price/stop_loss/take_profit_1.  Also convert direction to numeric.
@@ -252,6 +267,12 @@ def main():
 
     regime = {'state': regime_state}
     print(f'[regime_blended_sizer_live] regime: {regime_state}')
+
+    if eod_mode:
+        # The synthetic EOD handoff carried regime={}; backfill the resolved
+        # regime so the persisted sized payload (and the trade report's
+        # sized.get('regime')) record the real state rather than '?'.
+        handoff['regime'] = regime
 
     cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state = %s", (regime_state,))
     params_row = cur.fetchone()

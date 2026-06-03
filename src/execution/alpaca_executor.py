@@ -51,6 +51,15 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.alpaca_trader import _alpaca_session, _fetch_equity, _fetch_account_state, _price_str  # noqa: E402
 from execution.handoff import read_handoff, HANDOFF_DIR  # noqa: E402
+# SP-6 Task 10: OPG dual-path for is_dropped close_only orders. Reuse the
+# poll-to-terminal loop + terminal-status set from regime_liquidator so a
+# re-introduced OPG (market-on-open) order is NEVER treated as filled on ack —
+# the 2026-05-18 paper-fill incident (214/224 OPG closes ack'd-but-expired while
+# the DB wrongly said "closed"). Imported into THIS module's namespace so tests
+# patch `execution.alpaca_executor._poll_to_terminal` (and the underlying CLI is
+# regime_liquidator._run_cli, which the import binding keeps decoupled from this
+# module's _run_alpaca_cli).
+from execution.regime_liquidator import _poll_to_terminal, _TERMINAL_ORDER_STATUSES  # noqa: E402
 
 
 # No executor-side clamps. The sizer's pure
@@ -1430,6 +1439,11 @@ def _submit_order_via_cli(*, ticker, side, qty, tif, order_class, target, stop, 
     """Submit a single order via `alpaca order submit`.
 
     Args:
+      tif: time-in-force, one of 'day', 'gtc', 'opg', 'cls', 'ioc', 'fok'.
+        'opg' (at-open / market-on-open) is accepted as of SP-6 Task 10 for the
+        9:30-reconcile OPG dual-path (is_dropped close_only orders only); it must
+        be paired with order_type='market' and is pre-open-only (Alpaca rejects
+        opg in RTH). All other callers continue to pass 'day'/'gtc'.
       order_type: 'market' (default, RTH) or 'limit' (extended hours).
       extended_hours: when True, passes the bare `--extended-hours` flag so
         Alpaca routes the order to the pre/post ECN session. Requires
@@ -1691,6 +1705,118 @@ def _recompute_bracket_from_quote(entry, stop, target, side, base):
             '; '.join(why_parts))
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# SP-6 Task 10 — OPG dual-path for is_dropped close_only orders
+# ════════════════════════════════════════════════════════════════════════════
+#
+# OPG (market-on-open) was removed 2026-05-19 after the 2026-05-18 paper-fill
+# incident (214/224 OPG closes ack'd-but-EXPIRED unfilled while the DB wrongly
+# said "closed"). Task 10 RE-INTRODUCES OPG for the SP-6 9:30 reconcile's
+# DROP/FLATTEN closes ONLY, behind OPENCLAW_OPEN_CLOSE_MODE, with the ack≠fill
+# discipline baked in: the result for an is_dropped close reflects the POLLED
+# terminal outcome, never the submit-ack.
+#
+#   rth_market   (default, safe) — the EXISTING RTH `position close` path.
+#                Gate-off / default behaviour is byte-identical to pre-Task-10.
+#                For an is_dropped close we ADDITIONALLY poll-to-terminal so the
+#                returned status is a confirmed `filled` (with the real fill
+#                price), never a bare submit-ack — the ledger-close gate in
+#                open_reconcile._resolve_fill_price now requires `filled`.
+#   opg_then_day (paper)  — submit a MARKET tif=opg order BEFORE the open; poll
+#                to terminal; if it EXPIRES/does-not-fill, cancel (if needed) +
+#                resubmit as a tif=day RTH `position close` (the 9:31 day-sweep)
+#                and report the SWEEP's polled terminal outcome.
+#   opg_live     — OPG at the open + the day-sweep retained as belt-and-suspenders
+#                (same code path as opg_then_day for Phase A).
+ENV_OPEN_CLOSE_MODE = 'OPENCLAW_OPEN_CLOSE_MODE'
+_OPEN_CLOSE_MODES = ('rth_market', 'opg_then_day', 'opg_live')
+
+
+def _open_close_mode() -> str:
+    """Resolve OPENCLAW_OPEN_CLOSE_MODE (default 'rth_market'). Read at call-time
+    so tests can monkeypatch os.environ. Unknown values fall back to the safe
+    default so a typo can never silently arm OPG."""
+    mode = os.environ.get(ENV_OPEN_CLOSE_MODE, 'rth_market')
+    return mode if mode in _OPEN_CLOSE_MODES else 'rth_market'
+
+
+def _fetch_position_qty(ticker: str) -> float:
+    """Return the ABSOLUTE current broker position qty for a ticker via
+    `alpaca position get`, or 0.0 if no position / lookup fails.
+
+    The OPG `order submit` needs an explicit qty (unlike `position close`, which
+    flattens the whole position server-side). The is_dropped close order dict
+    carries only signed USD (current_usd/notional_usd), NOT a qty or a per-share
+    price, so we read the real qty from the broker rather than dividing by a
+    guessed price. Routed through _run_alpaca_cli so tests mock it."""
+    ok, payload, _err = _run_alpaca_cli(
+        ['position', 'get', '--symbol-or-asset-id', ticker], timeout=10,
+    )
+    if not ok or not isinstance(payload, dict):
+        return 0.0
+    try:
+        return abs(float(payload.get('qty') or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _opg_terminal_filled(final: dict | None, requested_qty: float) -> bool:
+    """True iff a polled OPG/sweep order dict represents a CONFIRMED fill.
+
+    `status=='filled'` OR (requested>0 AND filled_qty>=requested). A None final
+    (all polls failed / timed out before terminal) is NEVER a fill. This is the
+    single ack≠fill gate the OPG path keys off."""
+    if not isinstance(final, dict):
+        return False
+    status = str(final.get('status') or '').lower()
+    if status == 'filled':
+        return True
+    try:
+        filled = abs(float(final.get('filled_qty') or 0.0))
+    except (TypeError, ValueError):
+        filled = 0.0
+    return bool(requested_qty and requested_qty > 0 and filled >= requested_qty)
+
+
+def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_nav):
+    """The shared RTH `alpaca position close` submission (full close or partial
+    REDUCE via --percentage). Returns (result_dict, order_id).
+
+    Extracted so BOTH the legacy non-dropped close path and the is_dropped
+    rth_market / day-sweep paths submit identically; the is_dropped paths then
+    poll the returned order_id to terminal before reporting `filled`."""
+    notional_oc = abs(float(notional_usd or 0))
+    current_oc = abs(float(current_usd or 0))
+    cli_args_oc = ['position', 'close', '--symbol-or-asset-id', ticker]
+    is_partial_reduce = (current_oc > 0 and notional_oc < current_oc * 0.999)
+    pct_oc = None
+    if is_partial_reduce:
+        pct_oc = round((notional_oc / current_oc) * 100.0, 2)
+        pct_oc = max(0.01, min(99.99, pct_oc))
+        cli_args_oc += ['--percentage', str(pct_oc)]
+    ok_co, pay_co, err_co = _run_alpaca_cli(cli_args_oc, timeout=15)
+    if not ok_co:
+        log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only RTH): {err_co.get("error","")}')
+        return ({'ticker': ticker, 'status': 'rejected',
+                 'reason': err_co.get('error') or 'position close failed',
+                 'http': err_co.get('status'), 'body': str(err_co),
+                 'tif': 'day', 'order_class': 'simple', 'client_order_id': coid},
+                None)
+    order_id = ((pay_co or {}).get('id') or (pay_co or {}).get('order_id'))
+    notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
+    qty_co_r = int((pay_co or {}).get('qty') or 0)
+    entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
+    kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
+    pct_tag = f' ({pct_oc}%)' if is_partial_reduce else ''
+    log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
+        f'  order={order_id or "?"}')
+    return ({'ticker': ticker, 'status': 'submitted',
+             'qty': qty_co_r, 'notional': notional_co, 'entry': entry_approx,
+             'order_id': order_id, 'http': 200,
+             'tif': 'day', 'order_class': 'simple', 'client_order_id': coid},
+            order_id)
+
+
 def execute_single(sess, equity, order, run_date):
     """Submit one bracket order. Returns result dict.
 
@@ -1764,6 +1890,125 @@ def execute_single(sess, equity, order, run_date):
             return {'ticker': ticker, 'status': 'SKIP',
                     'reason': 'close_only: market closed',
                     'client_order_id': coid, 'tif': 'day', 'order_class': 'simple'}
+
+        # ── SP-6 Task 10: is_dropped OPG dual-path ──────────────────────────
+        # Drop/flatten closes (run_reconcile builds these with is_dropped=True)
+        # branch on OPENCLAW_OPEN_CLOSE_MODE. The defining invariant is ack≠fill:
+        # the returned status reflects the POLLED terminal outcome, so the
+        # ledger-close in open_reconcile._resolve_fill_price fires only on a
+        # confirmed `filled`. The reason-tagged coid keeps its `_C` suffix.
+        if order.get('is_dropped'):
+            mode = _open_close_mode()
+            notional_d = abs(float(order.get('notional_usd') or 0))
+            current_d = abs(float(order.get('current_usd') or 0))
+
+            # opg_then_day / opg_live: submit a MARKET tif=opg order BEFORE the
+            # open, poll to terminal, and day-sweep on a non-fill. Only meaningful
+            # while still pre-open; once RTH the OPG window is gone, so we fall
+            # straight to the polled RTH close below.
+            if mode in ('opg_then_day', 'opg_live') and session_co == 'premarket':
+                qty_opg = int(_fetch_position_qty(ticker))
+                if qty_opg < 1:
+                    log(f'{ticker} OPG: no broker qty resolved — falling back to RTH day-sweep')
+                else:
+                    ok_opg, pay_opg, err_opg = _submit_order_via_cli(
+                        ticker=ticker, side=side, qty=qty_opg, tif='opg',
+                        order_class='simple', target=None, stop=None, coid=coid,
+                        order_type='market', extended_hours=False, limit_price=None,
+                    )
+                    if not ok_opg:
+                        # OPG submit itself failed — do NOT day-sweep blindly here;
+                        # report rejected so the reconciler counts an error (no
+                        # ledger write). The 9:31 sweep can retry on the next pass.
+                        log(f'CLI rc={err_opg.get("exit_code",1)} {ticker} (OPG submit): {err_opg.get("error","")}')
+                        return {'ticker': ticker, 'status': 'rejected',
+                                'reason': err_opg.get('error') or 'OPG submit failed',
+                                'http': err_opg.get('status'), 'body': str(err_opg),
+                                'tif': 'opg', 'order_class': 'simple', 'client_order_id': coid}
+                    opg_order_id = ((pay_opg or {}).get('id')
+                                    or (pay_opg or {}).get('order_id'))
+                    log(f'↩ {ticker} OPG (pre-open) x{qty_opg}  order={opg_order_id or "?"}')
+                    # NEVER ack=fill: poll the OPG order to a terminal status.
+                    final_opg = _poll_to_terminal(opg_order_id, timeout_s=3600, interval_s=3)
+                    if _opg_terminal_filled(final_opg, qty_opg):
+                        filled_qty = int(abs(float((final_opg or {}).get('filled_qty') or qty_opg)))
+                        fill_px = (final_opg or {}).get('filled_avg_price')
+                        try:
+                            fill_px = float(fill_px) if fill_px is not None else 0.0
+                        except (TypeError, ValueError):
+                            fill_px = 0.0
+                        notional_f = round(fill_px * filled_qty, 2) if fill_px > 0 else 0.0
+                        log(f'↩ {ticker} OPG FILLED x{filled_qty}  px={fill_px:.2f}'
+                            f'  order={opg_order_id or "?"}')
+                        return {'ticker': ticker, 'status': 'filled',
+                                'qty': filled_qty, 'notional': notional_f, 'entry': fill_px,
+                                'order_id': opg_order_id, 'http': 200,
+                                'tif': 'opg', 'order_class': 'simple', 'client_order_id': coid}
+                    # OPG did NOT fill (the 2026-05-18 case: ack'd then EXPIRED).
+                    # Cancel any non-terminal remnant, then fall through to the
+                    # tif=day RTH `position close` day-sweep below.
+                    opg_status = str((final_opg or {}).get('status') or 'unknown').lower()
+                    if opg_status not in _TERMINAL_ORDER_STATUSES and opg_order_id:
+                        _run_alpaca_cli(['order', 'cancel', '--order-id', opg_order_id], timeout=10)
+                    log(f'{ticker} OPG not filled (status={opg_status}) → firing tif=day day-sweep')
+
+            # Day-sweep / rth_market: RTH `position close` (tif=day), then POLL to
+            # terminal so we report a confirmed `filled` (never the submit-ack).
+            # If not yet RTH (e.g. opg path with OPG still resolving pre-9:30, or
+            # an is_dropped order seen in premarket under rth_market mode), report
+            # pending so no ledger-close fires until the sweep runs.
+            session_now = _alpaca_session_kind()
+            if session_now != 'rth':
+                log(f'{ticker} is_dropped close: session={session_now} (not RTH) — '
+                    f'deferring to 9:31 day-sweep, reporting pending')
+                return {'ticker': ticker, 'status': 'pending',
+                        'reason': f'is_dropped close awaiting RTH (session {session_now})',
+                        'http': 200, 'tif': 'day', 'order_class': 'simple',
+                        'client_order_id': coid}
+            res_sweep, sweep_oid = _rth_position_close(
+                ticker, coid, notional_usd=notional_d, current_usd=current_d,
+                equity=equity, pct_nav=pct_nav,
+            )
+            if res_sweep.get('status') != 'submitted':
+                return res_sweep  # CLI error already shaped as rejected
+            # Poll the close order to terminal — ack≠fill. Only report `filled`
+            # (with the real fill price) when the broker confirms a fill; an
+            # expired/canceled close reports its terminal status with NO price so
+            # _resolve_fill_price returns None and the position stays open.
+            # req_qty is the share count returned by the CLI's position-close
+            # submission. If the CLI omits 'qty' (unusual but possible), we fall
+            # back to current_d (the USD notional of the position) and then 1.0.
+            # current_d is a USD value, not a share count, so the fallback is
+            # intentionally oversized. This is SAFE: _opg_terminal_filled checks
+            # filled_qty >= req_qty, so a large USD req_qty causes that comparison
+            # to fail → the position is reported as un-filled rather than phantom-
+            # closed. The position stays open for the next sweep pass to retry.
+            req_qty = float(res_sweep.get('qty') or 0) or current_d or 1.0
+            final_sweep = _poll_to_terminal(sweep_oid, timeout_s=300, interval_s=3)
+            if _opg_terminal_filled(final_sweep, req_qty):
+                filled_qty = int(abs(float((final_sweep or {}).get('filled_qty')
+                                           or res_sweep.get('qty') or 0)))
+                fill_px = (final_sweep or {}).get('filled_avg_price')
+                try:
+                    fill_px = float(fill_px) if fill_px is not None else float(res_sweep.get('entry') or 0.0)
+                except (TypeError, ValueError):
+                    fill_px = float(res_sweep.get('entry') or 0.0)
+                notional_f = round(fill_px * filled_qty, 2) if (fill_px > 0 and filled_qty) \
+                    else res_sweep.get('notional')
+                log(f'↩ {ticker} day-sweep FILLED x{filled_qty}  px={fill_px:.4f}'
+                    f'  order={sweep_oid or "?"}')
+                res_sweep.update({'status': 'filled', 'qty': filled_qty,
+                                  'entry': fill_px, 'notional': notional_f})
+                return res_sweep
+            term_status = str((final_sweep or {}).get('status') or 'pending').lower()
+            log(f'{ticker} day-sweep NOT filled (status={term_status}) — '
+                f'no ledger-close; position remains held')
+            return {'ticker': ticker, 'status': term_status,
+                    'reason': f'is_dropped close not filled (status={term_status})',
+                    'order_id': sweep_oid, 'http': 200,
+                    'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
+
+        # ── Legacy (non-dropped) close path — UNCHANGED ─────────────────────
         if session_co == 'rth':
             # RTH: `alpaca position close` flattens by default. For a partial
             # REDUCE (ticker still in signals but target < |current|), the
@@ -1771,46 +2016,13 @@ def execute_single(sess, equity, order, run_date):
             # we pass --percentage so only the delta portion is liquidated.
             # Orphan closes (target_usd = 0 → |notional| == |current|) take
             # the full-close branch (no --percentage flag).
-            notional_oc = abs(float(order.get('notional_usd') or 0))
-            current_oc  = abs(float(order.get('current_usd') or 0))
-            cli_args_oc = ['position', 'close', '--symbol-or-asset-id', ticker]
-            is_partial_reduce = (current_oc > 0 and notional_oc < current_oc * 0.999)
-            if is_partial_reduce:
-                pct_oc = round((notional_oc / current_oc) * 100.0, 2)
-                # Alpaca only liquidates whole units of percentage on stocks;
-                # cap at 99.99 so we never accidentally request 100% via
-                # floating-point ceiling, which would defeat the reduce intent.
-                pct_oc = max(0.01, min(99.99, pct_oc))
-                cli_args_oc += ['--percentage', str(pct_oc)]
-            ok_co, pay_co, err_co = _run_alpaca_cli(cli_args_oc, timeout=15)
-            if ok_co:
-                # `alpaca position close` may return either a single order
-                # object ({id, qty, ...}) or a wrapper. Accept `id` first,
-                # `order_id` second; None when neither is present so the
-                # reconciler's NOT NULL guard flags the gap instead of
-                # silently writing the literal '?'.
-                order_id = (
-                    (pay_co or {}).get('id')
-                    or (pay_co or {}).get('order_id')
-                )
-                notional_co = abs(float((pay_co or {}).get('notional') or equity * pct_nav))
-                qty_co_r = int((pay_co or {}).get('qty') or 0)
-                # Approximate entry from notional/qty for audit record (non-null required)
-                entry_approx = round(notional_co / qty_co_r, 4) if qty_co_r > 0 else 0.0
-                kind_co = 'REDUCE' if is_partial_reduce else 'CLOSE'
-                pct_tag = f' ({pct_oc}%)' if is_partial_reduce else ''
-                log(f'↩ {ticker} {kind_co}{pct_tag}  notional≈${notional_co:,.0f}'
-                    f'  order={order_id or "?"}')
-                return {'ticker': ticker, 'status': 'submitted',
-                        'qty': qty_co_r, 'notional': notional_co, 'entry': entry_approx,
-                        'order_id': order_id, 'http': 200,
-                        'tif': 'day', 'order_class': 'simple',
-                        'client_order_id': coid}
-            log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only RTH): {err_co.get("error","")}')
-            return {'ticker': ticker, 'status': 'rejected',
-                    'reason': err_co.get('error') or 'position close failed',
-                    'http': err_co.get('status'), 'body': str(err_co),
-                    'tif': 'day', 'order_class': 'simple', 'client_order_id': coid}
+            res_oc, _oid = _rth_position_close(
+                ticker, coid,
+                notional_usd=order.get('notional_usd'),
+                current_usd=order.get('current_usd'),
+                equity=equity, pct_nav=pct_nav,
+            )
+            return res_oc
         else:
             # Pre/afterhours: limit order using quoted price, approximate qty
             skip_ext = _skip_extended_hours(ticker, side)
