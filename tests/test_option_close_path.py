@@ -268,6 +268,43 @@ def _run_sizer(monkeypatch, signals, broker=None, min_cum_sharpe=0.0):
             params=params, confirmer=None)
 
 
+def _run_sizer_eod(monkeypatch, signals, broker=None, min_cum_sharpe=0.0):
+    """Drive _sharpe_cadence_path through the PRODUCTION path (OPENCLAW_EOD_RECONCILE=1
+    ⇒ _load_approved_carried_signals) — the only path that runs in production (SP-6 EOD)."""
+    broker = broker or {}
+    account = {'equity': 100_000, 'regt_buying_power': 400_000,
+               'long_market_value': 0, 'cash': 100_000, 'buying_power': 400_000}
+    params = {'liquidity_param': 1.0, 'min_signal_notional_usd': 0,
+              'min_cumulative_sharpe': min_cum_sharpe}
+    seen = {}
+    for s in signals:
+        seen[s['strategy_id']] = (s.get('_w', 1.0), s.get('_s', 5.0))
+    weight_rows = [{'strategy_id': sid, 'daily_weight': w, 'effective_sharpe': sh,
+                    'cadence_days': 1.0} for sid, (w, sh) in seen.items()]
+    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda wbs: list(signals))
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker))
+    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.delenv('OPENCLAW_OPTION_DELTA_HEDGE', raising=False)
+    with _mock.patch('execution.strategy_weights.load_current', return_value=weight_rows):
+        return _sizer._sharpe_cadence_path(
+            signals=[], account_state=account, regime_state='LOW_VOL',
+            params=params, confirmer=None)
+
+
+def test_g4b_emits_close_in_eod_production_path(monkeypatch):
+    """PRODUCTION-PATH (OPENCLAW_EOD_RECONCILE=1): the orphan-close emission fires
+    identically — it sits AFTER the mode-specific load, so the carried-set path emits
+    the same option CLOSE order. This guards the only path that runs in SP-6 EOD."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': ['SPY260718C00500000', 'SPY260718C00515000']})
+    orders = _run_sizer_eod(monkeypatch, [_sig('S_eq', 'AAPL', direction=1)])
+    closes = [o for o in orders if o.get('strategy_id') == '__close_option_orphan__']
+    assert len(closes) == 1, f'orphan-close must emit in EOD mode, got {orders}'
+    assert closes[0]['ticker'] == 'SPY'
+    assert closes[0]['option_spec'] == {'underlying': 'SPY', 'structure': 'held_legs'}
+
+
 def test_g4b_emits_close_for_orphan_held_underlying(monkeypatch):
     """OPENCLAW_OPTION_EXEC=1 + held legs for SPY + NO option target for SPY ⇒ emit an
     option CLOSE order (the documented shape)."""
