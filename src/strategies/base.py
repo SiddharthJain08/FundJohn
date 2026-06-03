@@ -37,6 +37,18 @@ class OptionSpec:
     roll_dte:      int = 7                   # roll when remaining DTE <= this
     hold_to_expiry: bool = False             # income legs may hold to expiry instead of rolling
 
+    @classmethod
+    def from_dict(cls, d):
+        """Rebuild from a dict (e.g. signal_params['option_spec']). Fail-closed:
+        returns None for None / non-dict / missing required `underlying`."""
+        if not isinstance(d, dict):
+            return None
+        if not d.get('underlying'):
+            return None
+        import dataclasses as _dc
+        allowed = {f.name for f in _dc.fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in allowed})
+
 
 @dataclass
 class Signal:
