@@ -91,6 +91,11 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             #     because target < current) — no SHORT bracket available
             # Both need close_only=True so the executor uses `position close`
             # (RTH) or a simple limit order (ext-hours) against the snapshot.
+            # Note: this close-only fallback does NOT carry option_spec — it only
+            # runs when no finite bracket is available (orphan close or position
+            # reduce). A flip_close emitted by _sharpe_cadence_path for an option
+            # ticker WOULD carry option_spec via the shared order-build block there.
+            # Both paths are inert today (candidate-only option strategy).
             notional_oc = abs(float(o.get('notional_usd') or o.get('current_usd') or 0))
             pct_nav_oc  = round(notional_oc / nav, 6)
             sid_oc = o.get('strategy_id') or '__close_orphan__'

@@ -11,6 +11,7 @@ multiple production cycles. The historical paths and the ticker_consolidator
 module they used live in git history only.
 """
 from __future__ import annotations
+import json
 import logging
 import os
 from datetime import date
@@ -251,11 +252,10 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
             continue
         # SP-5.1c: parse signal_params (psycopg2 DictCursor may deserialize jsonb
         # to dict already; handle str defensively — mirrors trade_handoff_builder.py).
-        import json as _json
         sp = r['signal_params'] or {}
         if isinstance(sp, str):
             try:
-                sp = _json.loads(sp) if sp else {}
+                sp = json.loads(sp) if sp else {}
             except ValueError:
                 sp = {}
         out.append({'strategy_id': r['strategy_id'], 'ticker': r['ticker'],
@@ -358,11 +358,10 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
             continue
         # SP-5.1c: parse signal_params (psycopg2 DictCursor may deserialize jsonb
         # to dict already; handle str defensively — mirrors trade_handoff_builder.py).
-        import json as _json
         sp = r['signal_params'] or {}
         if isinstance(sp, str):
             try:
-                sp = _json.loads(sp) if sp else {}
+                sp = json.loads(sp) if sp else {}
             except ValueError:
                 sp = {}
         out.append({'strategy_id': sid, 'ticker': r['ticker'],
@@ -663,19 +662,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             't1':         s.get('target_1'),
             't2':         s.get('target_2'),
         })
-        # SP-5.1c: carry option_spec + instrument_class + contracts from
-        # signal_params onto ticker_meta. Attribution rule: first option-class
-        # strategy that has an option_spec wins; equity strategies do not
-        # overwrite a previously-set spec. Equity orders stay byte-identical
-        # (no option_spec in signal_params → this block is never entered).
+        # SP-5.1c: carry option_spec + instrument_class from signal_params onto
+        # ticker_meta. Attribution rule: first option-class strategy that has an
+        # option_spec wins; equity strategies do not overwrite a previously-set
+        # spec. Equity orders stay byte-identical (no option_spec in signal_params
+        # → this block is never entered).
         _sp = s.get('signal_params') or {}
         _ospec = _sp.get('option_spec')
         if _ospec and 'option_spec' not in ticker_meta[tkr]:
             ticker_meta[tkr]['option_spec'] = _ospec
             ticker_meta[tkr]['instrument_class'] = 'option'
-            _ctrs = _ospec.get('contracts') if isinstance(_ospec, dict) else None
-            if _ctrs is not None:
-                ticker_meta[tkr]['contracts'] = _ctrs
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no eligible signals after weight filter')
@@ -892,14 +888,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         }
-        # SP-5.1c: attach option_spec / instrument_class / contracts only when
-        # the ticker has an option strategy. Equity orders stay byte-identical
-        # (no new keys injected when option_spec is absent).
+        # SP-5.1c: attach option_spec / instrument_class only when the ticker has
+        # an option strategy. Equity orders stay byte-identical (no new keys
+        # injected when option_spec is absent). Contracts are set downstream by
+        # instrument_class_sizer.py when OPENCLAW_INSTRUMENT_CLASS_ROUTING=1.
         if ticker_meta[tkr].get('option_spec'):
             _order['instrument_class'] = 'option'
             _order['option_spec'] = ticker_meta[tkr]['option_spec']
-            if ticker_meta[tkr].get('contracts') is not None:
-                _order['contracts'] = ticker_meta[tkr]['contracts']
         orders.append(_order)
     return orders
 
