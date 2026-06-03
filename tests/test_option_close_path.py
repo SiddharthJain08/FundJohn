@@ -402,3 +402,51 @@ def test_e2e_option_close_reaches_mleg_close(monkeypatch):
     # Each held leg was closed per-leg.
     assert all(c[:2] == ['position', 'close'] for c in cli_calls)
     assert len(cli_calls) == 2
+
+
+# ===========================================================================
+# Phase 1b follow-up — option OPEN through the sizer must NOT be close_only
+# (the implementer-surfaced pre-promotion gap: _consolidate_option_orders emits
+# None brackets, so opens landed in the close-only branch → _route_mleg_close
+# no-op → a promoted option strategy would never open a position)
+# ===========================================================================
+
+def test_option_open_emits_open_not_close():
+    """An option order with target_usd != 0 (an OPEN) emits WITHOUT close_only:
+    spec carried, direction normalized, notional preserved — the executor sizes
+    qty from notional via _resolve_option_qty."""
+    o = _opt_open_order(spec=dict(_STRADDLE_SPEC), direction='BUY_VOL', target_usd=5000.0)
+    o['action'] = 'open_long'
+    payload = _live._build_sized_payload([o], {'cycle_date': '2026-06-03', 'regime': {}})
+    assert len(payload['orders']) == 1
+    out = payload['orders'][0]
+    assert not out.get('close_only'), 'an option OPEN must not be close_only'
+    assert out['instrument_class'] == 'option'
+    assert isinstance(out['option_spec'], OptionSpec)
+    assert out['direction'] == 'long', 'BUY_VOL must normalize to long'
+    assert out['notional_usd'] == 5000.0
+    assert out['action'] == 'open_long'
+
+
+def test_option_open_dispatches_to_open_route(monkeypatch):
+    """Dispatch-level: an open option order (no close_only) does NOT hit
+    _route_mleg_close — it proceeds into the open mleg path."""
+    import execution.alpaca_executor as ex
+    from strategies.base import OptionSpec as _OS
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(ex, '_options_session_gate', lambda: (True, ''))
+    monkeypatch.setattr(ex, '_resolve_expiry', lambda spec, today: __import__('datetime').date(2026, 7, 18))
+    called = {'close': 0}
+    monkeypatch.setattr(ex, '_route_mleg_close', lambda *a, **k: called.__setitem__('close', called['close'] + 1) or {'status': 'submitted'})
+    monkeypatch.setattr(ex, '_resolve_structure_legs', lambda s, t, e: [('call', 500.0, 'buy'), ('put', 500.0, 'buy')])
+    monkeypatch.setattr(ex, '_structure_net_quote', lambda s, l, e: (20.0, [('SPY260718C00500000', 'call', 'buy'), ('SPY260718P00500000', 'put', 'buy')]))
+    monkeypatch.setattr(ex, '_resolve_option_qty', lambda d, lim: (1, None))
+    monkeypatch.setattr(ex, '_build_mleg_legs_json', lambda lq: '[]')
+    monkeypatch.setattr(ex, '_run_alpaca_cli', lambda args: (True, {'id': 'ord-9'}, None))
+    monkeypatch.delenv('POSTGRES_URI', raising=False)
+    order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
+             'notional_usd': 5000.0,
+             'option_spec': _OS(underlying='SPY', structure='straddle', hedge='none', strike_rule='atm')}
+    res = ex._route_option_order(order, equity=100_000.0, coid='c-open')
+    assert called['close'] == 0, 'open must not dispatch to _route_mleg_close'
+    assert res is not None and res.get('status') == 'submitted'

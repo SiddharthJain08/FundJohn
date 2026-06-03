@@ -140,6 +140,45 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                         '[sp5-G3] DROPPING option order ticker=%s strategy_id=%s — %s',
                         o.get('ticker'), o.get('strategy_id'), _err_o)
                     continue
+                if not _is_close:
+                    # SP-5 Phase 1b follow-up (the pre-promotion gap): an option
+                    # OPEN (_consolidate_option_orders emits None brackets by
+                    # design, target_usd != 0) must NOT be close_only — emit an
+                    # open order; the executor sizes qty from notional via
+                    # _resolve_option_qty. Greeks-aware delta-dollar refinement
+                    # (apply_instrument_class_sizing) is deferred to a real
+                    # candidate's promotion — notional sizing is the proven path.
+                    notional_op = abs(float(o.get('notional_usd') or 0))
+                    pct_nav_op = round(notional_op / nav, 6)
+                    sid_op = o.get('strategy_id') or '__option__'
+                    order_op = {
+                        'ticker':                  o['ticker'],
+                        'strategy_id':             sid_op,
+                        'direction':               _nd_o or dir_str,
+                        'entry':                   None,
+                        'stop':                    None,
+                        't1':                      None,
+                        't2':                      None,
+                        'pct_nav':                 pct_nav_op,
+                        'shares':                  0,
+                        'notional_usd':            round(notional_op, 2),
+                        'kelly_final':             pct_nav_op,
+                        'ev':                      0.0,
+                        'p_t1':                    0.5,
+                        'source_mode':             o.get('source_mode'),
+                        'contributing_strategies': o.get('contributing_strategies') or [sid_op],
+                        'contributions':           o.get('contributions') or [
+                            {'strategy_id': sid_op, 'attribution_weight': 1.0}],
+                        'current_usd':             o.get('current_usd', 0.0),
+                        'target_usd':              o.get('target_usd', 0.0),
+                        'action':                  o.get('action') or 'open_long',
+                        'instrument_class':        _ic_o,
+                        'option_spec':             _spec_o,
+                    }
+                    if o.get('contracts') is not None:
+                        order_op['contracts'] = o['contracts']
+                    payload['orders'].append(order_op)
+                    continue
             notional_oc = abs(float(o.get('notional_usd') or o.get('current_usd') or 0))
             pct_nav_oc  = round(notional_oc / nav, 6)
             sid_oc = o.get('strategy_id') or '__close_orphan__'
