@@ -53,6 +53,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / 'src'))
 
+import json
 import logging
 import math
 import os
@@ -276,6 +277,29 @@ def _normalize_broker_symbol(t: str) -> str:
     return (t or '').strip().upper().replace('/', '-')
 
 
+def _row_is_option(row) -> bool:
+    """SP-5.1a (G1 prong 3): True iff an APPROVED row's signal_params carries an
+    option_spec (i.e. it's an option-class row). Such rows are NOT equity-book
+    targets — the option lane owns them — so they must be excluded from the reconcile
+    equity target map (else an APPROVED option row for SPY would wrongly SHIELD a
+    dropped equity SPY position from orphan-close).
+
+    NOTE: hedge rows (is_hedge=True) carry NO option_spec — they represent the EQUITY
+    offset leg and MUST stay in the target map (the gate-on conflict→0.0 sentinel logic
+    depends on them). This skip keys on option_spec presence ONLY, never is_hedge."""
+    sp = _norm_row_get(row, 'signal_params', 2)
+    if not sp:
+        return False
+    if isinstance(sp, str):
+        try:
+            sp = json.loads(sp) if sp else {}
+        except (ValueError, TypeError):
+            return False
+    if not isinstance(sp, dict):
+        return False
+    return bool(sp.get('option_spec'))
+
+
 def _load_approved_set(cur, today: date) -> dict[str, float]:
     """Sign-only carried-APPROVED targets: {ticker: +1.0 if LONG, -1.0 if SHORT, 0.0 if ambiguous}.
 
@@ -313,7 +337,7 @@ def _load_approved_set(cur, today: date) -> dict[str, float]:
 
     cur.execute(
         """
-        SELECT ticker, direction
+        SELECT ticker, direction, signal_params
         FROM execution_signals
         WHERE lifecycle_state = 'APPROVED'
           AND target_date = %s
@@ -327,6 +351,12 @@ def _load_approved_set(cur, today: date) -> dict[str, float]:
         # Gate OFF: original last-write-wins behavior (byte-identical).
         out: dict[str, float] = {}
         for row in cur.fetchall():
+            # SP-5.1a (G1 prong 3): option rows are not equity-book targets; the
+            # option lane owns them. Skip so they can't shield a dropped equity
+            # position of the same underlying from orphan-close. Byte-identical when
+            # no option rows exist (no row carries option_spec today).
+            if _row_is_option(row):
+                continue
             tkr = _norm_row_get(row, 'ticker', 0)
             direction = _norm_row_get(row, 'direction', 1)
             if not tkr:
@@ -339,6 +369,10 @@ def _load_approved_set(cur, today: date) -> dict[str, float]:
     # Two-pass: accumulate all signs per ticker, then decide.
     seen: dict[str, set[float]] = {}  # key → set of signs seen
     for row in cur.fetchall():
+        # SP-5.1a (G1 prong 3): exclude option rows from the equity target map
+        # (option lane owns them). Hedge rows have NO option_spec and stay.
+        if _row_is_option(row):
+            continue
         tkr = _norm_row_get(row, 'ticker', 0)
         direction = _norm_row_get(row, 'direction', 1)
         if not tkr:
