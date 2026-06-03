@@ -20,11 +20,16 @@ def test_long_delta_straddle_not_refused_by_hedge_guard(monkeypatch):
     monkeypatch.setenv('OPENCLAW_OPTION_DELTA_HEDGE', '1')
     monkeypatch.setattr(ex, '_options_session_gate', lambda: (True, ''))
     monkeypatch.setattr(ex, '_resolve_expiry', lambda spec, today: __import__('datetime').date(2026, 7, 18))
-    monkeypatch.setattr(ex, '_resolve_structure_legs', lambda s, t, e: [('call', 500.0), ('put', 500.0)])
-    monkeypatch.setattr(ex, '_structure_net_quote', lambda s, l, e: (20.0, [('SPY260718C00500000', 'call', 10.0), ('SPY260718P00500000', 'put', 10.0)]))
+    # 5.2 side-aware shapes: legs=(right, strike, side); leg_q=(occ, right, side);
+    # _build_mleg_legs_json takes leg_q only.
+    monkeypatch.setattr(ex, '_resolve_structure_legs', lambda s, t, e: [('call', 500.0, 'buy'), ('put', 500.0, 'buy')])
+    monkeypatch.setattr(ex, '_structure_net_quote', lambda s, l, e: (20.0, [('SPY260718C00500000', 'call', 'buy'), ('SPY260718P00500000', 'put', 'buy')]))
     monkeypatch.setattr(ex, '_resolve_option_qty', lambda d, lim: (1, None))
-    monkeypatch.setattr(ex, '_build_mleg_legs_json', lambda lq, d: '[]')
+    monkeypatch.setattr(ex, '_build_mleg_legs_json', lambda lq: '[]')
     monkeypatch.setattr(ex, '_run_alpaca_cli', lambda args: (True, {'id': 'ord-1'}, None))
+    # hedge='delta' + submit-success reaches the on-fill ledger write; make sure
+    # this unit test can never touch a real DB (the write is guarded/non-aborting).
+    monkeypatch.delenv('POSTGRES_URI', raising=False)
     res = ex._route_option_order(_order('long', 'delta'), equity=100_000.0, coid='c1')
     assert res is not None and res.get('status') == 'submitted'
 
