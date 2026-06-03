@@ -1,7 +1,22 @@
 # SP-5 Options Activation Runbook (5.1b-ii + 5.1c stack)
 
 **Date:** 2026-06-03
-**Status:** ACTIVE — Phase 0 in progress
+**Status:** ACTIVE — Phases 0/1a/1b COMPLETE (tip 5dbf3a7); Phase 2 review→merge→deploy next (operator-gated)
+
+**Phase results:**
+- Phase 0 DONE: main merged in (04ca488; one conflict, executor re-expression verified
+  2-hunks-vs-main), reviewer APPROVED, 170+ tests + real-DB round-trip PASS. Merge-widening
+  catch: hedge='delta' restricted to all-buy structures (81a4a2d) — a delta-hedged vertical
+  would have produced a WRONG hedge (ledger legs carry no side; compute_structure_delta sums
+  unsigned).
+- Phase 1a DONE (57d8a83..c85ed88): partition consolidation + broker OCC filter + reconcile
+  option-row skip + G2 ledger warning; partition moved BEFORE the orthogonalization fold
+  (implementer-flagged silent-drop hazard). 244-test surface green.
+- Phase 1b DONE (ebee95c..5dbf3a7): G3 fail-closed (malformed spec / unnormalizable direction
+  drops the order, never falls to equity), G4 close path (held_legs dispatch generalization +
+  option orphan-close emission gated on OPTION_EXEC + hedge-ledger deactivation on close,
+  status='closed' flag pattern), PLUS the implementer-surfaced pre-promotion gap: option OPENS
+  through the sizer emitted as opens, not close_only (5dbf3a7). 144-test regression green.
 **Operator decision (2026-06-03):** **Arm + smoke, no promotion.** Close G1–G4, integrate the
 stack, merge + deploy inert, run the T9 supervised hedge smoke via a temporary gates-on window
 (candidate stays UNREGISTERED), gates back OFF. A future organic candidate (Saturday-originated,
