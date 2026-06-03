@@ -702,8 +702,8 @@ def _with(spec, **overrides):
 
 
 def _resolve_structure_legs(spec, as_of, expiry):
-    """Return [(right, strike, side)] for straddle/strangle/vertical, resolved
-    against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
+    """Return [(right, strike, side)] for straddle/strangle/vertical/credit_vertical/iron_condor,
+    resolved against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
     spot = _spot_price(spec.underlying)
     if spot is None or spot <= 0:
         return None
@@ -738,6 +738,48 @@ def _resolve_structure_legs(spec, as_of, expiry):
         if far == near:
             return None
         return [(right, near, 'buy'), (right, far, 'sell')]
+    if spec.structure == 'credit_vertical':
+        right = str(spec.right).lower()
+        if float(spec.spread_width_pct) <= 0:
+            return None
+        grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+        if not grk:
+            return None
+        if spec.strike_rule == 'target_delta':
+            near = min(grk, key=lambda sdo: abs(abs(sdo[1]) - float(spec.target_delta)))[0]
+        else:
+            near = _resolve_strike(_with(spec, right=right), as_of, expiry)
+        if near is None:
+            return None
+        sign = 1.0 if right == 'call' else -1.0
+        far_target = near + sign * float(spec.spread_width_pct) * spot
+        far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+        if right == 'call' and not far > near:
+            return None
+        if right == 'put' and not far < near:
+            return None
+        return [(right, near, 'sell'), (right, far, 'buy')]
+    if spec.structure == 'iron_condor':
+        if float(spec.spread_width_pct) <= 0:
+            return None
+        tgt = float(spec.target_delta)
+        width = float(spec.spread_width_pct) * spot
+        legs, bounds = [], {}
+        for right, sign in (('call', 1.0), ('put', -1.0)):
+            grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+            if not grk:
+                return None
+            near = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
+            far_target = near + sign * width
+            far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+            if far == near:
+                return None
+            legs += [(right, near, 'sell'), (right, far, 'buy')]
+            bounds[right] = (near, far)
+        nearC, farC = bounds['call']; nearP, farP = bounds['put']
+        if not (farP < nearP < spot < nearC < farC):
+            return None   # degenerate/crossed strikes -> fail-closed
+        return legs
     return None
 
 
@@ -791,8 +833,8 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     spec = order.get('option_spec')
     if spec is None:
         return None
-    # 5.1b: single + straddle/strangle supported. 5.2: debit verticals added.
-    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle', 'vertical'):
+    # 5.1b: single + straddle/strangle supported. 5.2: debit verticals + credit_vertical/iron_condor added.
+    if getattr(spec, 'structure', 'single') not in ('single', 'straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor'):
         return _option_skip(order, coid, equity,
             f"option: structure={spec.structure!r} not in SP-5.1b (single/straddle/strangle)")
     # RTH gate
@@ -803,7 +845,7 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     # Structure CLOSE dispatch — hoisted above expiry/short-call resolution: a close
     # reads HELD legs from the book and must NOT be blocked by open-path resolution
     # (e.g. a chain hiccup making expiry unresolvable would otherwise strand the position).
-    if spec.structure in ('straddle', 'strangle', 'vertical') and order.get('close_only'):
+    if spec.structure in ('straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor') and order.get('close_only'):
         return _route_mleg_close(order, spec, coid)
 
     direction = str(order.get('direction','long')).lower()
@@ -822,14 +864,27 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
     if expiry is None:
         return _option_skip(order, coid, equity, 'option: expiry unresolved')
 
-    if spec.structure in ('straddle', 'strangle', 'vertical'):
+    if spec.structure in ('straddle', 'strangle', 'vertical', 'credit_vertical', 'iron_condor'):
         # SP-5.1b-i envelope: long debit only, hedge='none' only. (delta-hedge =
         # the separate 5.1b-ii subsystem.) Fail-closed on out-of-envelope specs
         # rather than submit a malformed short/unhedged structure.
-        if str(order.get('direction', 'long')).lower() != 'long':
+        # SP-5.2b: credit_vertical/iron_condor are short-only; handled in the _is_credit branch below.
+        _is_credit = spec.structure in ('credit_vertical', 'iron_condor')
+        _dir = str(order.get('direction', 'long')).lower()
+        if _is_credit:
+            if _dir != 'short':
+                return _option_skip(order, coid, equity,
+                    f"option: credit structures are short-only (direction={order.get('direction')!r}; use 'vertical' for debit)")
+            if (getattr(spec, 'hedge', 'none') or 'none') != 'none':
+                return _option_skip(order, coid, equity,
+                    "option: hedge not supported on credit structures (SP-5.2b)")
+            if order.get('contracts') is None:
+                return _option_skip(order, coid, equity,
+                    'option: credit structures require explicit contracts (notional sizing undefined for credits)')
+        elif _dir != 'long':
             return _option_skip(order, coid, equity,
                 f"option: structure exec is long-only in SP-5.1b-i (direction={order.get('direction')!r})")
-        if getattr(spec, 'hedge', 'none') not in (None, 'none'):
+        if not _is_credit and getattr(spec, 'hedge', 'none') not in (None, 'none'):
             return _option_skip(order, coid, equity,
                 f"option: hedge={spec.hedge!r} needs the SP-5.1b-ii delta-hedge subsystem (not in 5.1b-i)")
         legs = _resolve_structure_legs(spec, today, expiry)
@@ -839,20 +894,30 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         if nq is None:
             return _option_skip(order, coid, equity, 'option: no quote for a structure leg')
         net_ask, leg_q = nq
-        if net_ask <= 0:
+        if _is_credit:
+            if net_ask >= 0:
+                return _option_skip(order, coid, equity,
+                    f'option: non-negative net for credit structure ({net_ask:.2f}) — crossed quotes (credit-only)')
+        elif net_ask <= 0:
             return _option_skip(order, coid, equity,
                 f'option: non-positive net debit ({net_ask:.2f}) — crossed quotes or inverted spread (debit-only)')
         override = order.get('limit_price_override')
         net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
+        if _is_credit and net_limit >= 0:
+            return _option_skip(order, coid, equity,
+                f'option: credit limit not negative after pad/override ({net_limit:.2f}) — '
+                f'credit too small or bad override (must receive premium)')
         raw_qty, qty_reason = _resolve_option_qty(
             {'contracts': order.get('contracts'), 'notional_usd': order.get('notional_usd')},
             net_limit)
         if qty_reason and raw_qty == 0:
             return _option_skip(order, coid, equity, qty_reason)
         legs_json = _build_mleg_legs_json(leg_q)
+        _lp = f'{net_limit:.2f}'
+        _lp_args = ([f'--limit-price={_lp}'] if net_limit < 0 else ['--limit-price', _lp])
         args = ['order','submit','--order-class','mleg','--qty', str(int(raw_qty)),
                 '--legs', legs_json,
-                '--type','limit','--limit-price', f'{net_limit:.2f}',
+                '--type','limit', *_lp_args,
                 '--time-in-force','day','--client-order-id', coid]
         ok, payload, err = _run_alpaca_cli(args)
         if not ok or not payload:
