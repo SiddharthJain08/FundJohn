@@ -702,8 +702,8 @@ def _with(spec, **overrides):
 
 
 def _resolve_structure_legs(spec, as_of, expiry):
-    """Return [(right, strike, side)] for straddle/strangle/vertical, resolved
-    against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
+    """Return [(right, strike, side)] for straddle/strangle/vertical/credit_vertical/iron_condor,
+    resolved against LIVE listed strikes/greeks. side ∈ {'buy','sell'}. Fail-closed -> None."""
     spot = _spot_price(spec.underlying)
     if spot is None or spot <= 0:
         return None
@@ -738,6 +738,43 @@ def _resolve_structure_legs(spec, as_of, expiry):
         if far == near:
             return None
         return [(right, near, 'buy'), (right, far, 'sell')]
+    if spec.structure == 'credit_vertical':
+        right = str(spec.right).lower()
+        if float(spec.spread_width_pct) <= 0:
+            return None
+        near = _resolve_strike(_with(spec, right=right), as_of, expiry)
+        if near is None:
+            return None
+        grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+        if not grk:
+            return None
+        sign = 1.0 if right == 'call' else -1.0
+        far_target = near + sign * float(spec.spread_width_pct) * spot
+        far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+        if far == near:
+            return None
+        return [(right, near, 'sell'), (right, far, 'buy')]
+    if spec.structure == 'iron_condor':
+        if float(spec.spread_width_pct) <= 0:
+            return None
+        tgt = float(spec.target_delta)
+        width = float(spec.spread_width_pct) * spot
+        legs, bounds = [], {}
+        for right, sign in (('call', 1.0), ('put', -1.0)):
+            grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
+            if not grk:
+                return None
+            near = min(grk, key=lambda sdo: abs(abs(sdo[1]) - tgt))[0]
+            far_target = near + sign * width
+            far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
+            if far == near:
+                return None
+            legs += [(right, near, 'sell'), (right, far, 'buy')]
+            bounds[right] = (near, far)
+        nearC, farC = bounds['call']; nearP, farP = bounds['put']
+        if not (farP < nearP < spot < nearC < farC):
+            return None   # degenerate/crossed strikes -> fail-closed
+        return legs
     return None
 
 
