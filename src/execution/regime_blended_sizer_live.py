@@ -26,6 +26,37 @@ def _finite(x) -> bool:
     except (TypeError, ValueError):
         return False
 
+
+def _is_option_order(o: dict) -> bool:
+    """SP-5 Phase 1b (G3): the incoming order is option-class iff it carries either
+    marker. Both _consolidate_option_orders and the G4b orphan-close set BOTH."""
+    return o.get('instrument_class') == 'option' or bool(o.get('option_spec'))
+
+
+def _resolve_option_markers(o: dict, *, close_only: bool):
+    """SP-5 Phase 1b (G3) — fail-closed option-marker resolution.
+
+    Returns (instrument_class, OptionSpec, normalized_direction|None, error_str|None).
+    On error the order MUST be dropped (never routed) — an option order that fell
+    through WITHOUT these markers would route the UNDERLYING as equity shares.
+
+    Fail-closed when EITHER:
+      • spec reconstruction fails (OptionSpec.from_dict → None: None/non-dict/no underlying), OR
+      • the order is NOT close_only AND direction normalization returns None.
+    A close_only order is EXEMPT from the direction check — a held-legs close is
+    direction-free (it closes whatever legs are on the book).
+    """
+    from strategies.option_direction import normalize_option_direction
+    from strategies.base import OptionSpec
+    spec_in = o.get('option_spec')
+    spec = OptionSpec.from_dict(spec_in) if isinstance(spec_in, dict) else spec_in
+    if spec is None or not getattr(spec, 'underlying', None):
+        return None, None, None, 'option_spec failed OptionSpec.from_dict (malformed/missing underlying)'
+    nd = normalize_option_direction(o.get('direction'))
+    if not close_only and nd is None:
+        return None, None, None, f'direction {o.get("direction")!r} not normalizable (non-close order)'
+    return 'option', spec, nd, None
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
@@ -91,11 +122,24 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             #     because target < current) — no SHORT bracket available
             # Both need close_only=True so the executor uses `position close`
             # (RTH) or a simple limit order (ext-hours) against the snapshot.
-            # Note: this close-only fallback does NOT carry option_spec — it only
-            # runs when no finite bracket is available (orphan close or position
-            # reduce). A flip_close emitted by _sharpe_cadence_path for an option
-            # ticker WOULD carry option_spec via the shared order-build block there.
-            # Both paths are inert today (candidate-only option strategy).
+            #
+            # SP-5 Phase 1b (G3 + G4b close-carry): option-class orders with NONE
+            # brackets land here too — _consolidate_option_orders emits None brackets
+            # for opens AND the G4b orphan-close emits a None-bracket close. This branch
+            # is where the option_spec/instrument_class MUST be carried for the close to
+            # route (the equity executor would otherwise route the underlying as shares).
+            # Fail-closed: a malformed spec (or, for a non-close option order, an
+            # unnormalizable direction) drops the order entirely. `target_usd == 0`
+            # discriminates a true close (direction-exempt) from an open.
+            if _is_option_order(o):
+                _is_close = not _finite(o.get('target_usd')) or float(o.get('target_usd') or 0) == 0.0
+                _ic_o, _spec_o, _nd_o, _err_o = _resolve_option_markers(o, close_only=_is_close)
+                if _err_o is not None:
+                    import logging as _logging
+                    _logging.getLogger(__name__).error(
+                        '[sp5-G3] DROPPING option order ticker=%s strategy_id=%s — %s',
+                        o.get('ticker'), o.get('strategy_id'), _err_o)
+                    continue
             notional_oc = abs(float(o.get('notional_usd') or o.get('current_usd') or 0))
             pct_nav_oc  = round(notional_oc / nav, 6)
             sid_oc = o.get('strategy_id') or '__close_orphan__'
@@ -125,6 +169,14 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
                     o.get('current_usd', 0.0), o.get('target_usd', 0.0),
                     -1 if str(dir_str).lower() == 'short' else 1),
             }
+            # G3/G4b: carry the reconstructed option markers (the guard above already
+            # dropped malformed/unnormalizable orders). Equity close orders never enter
+            # this block → no option keys injected → byte-identical.
+            if _is_option_order(o):
+                order_oc['instrument_class'] = _ic_o
+                order_oc['option_spec'] = _spec_o
+                if _nd_o:
+                    order_oc['direction'] = _nd_o
             payload['orders'].append(order_oc)
             continue
 
@@ -186,23 +238,27 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
         if 'tradejohn_decision' in o:
             order['tradejohn_decision'] = o['tradejohn_decision']
 
-        # SP-5.1c: option orders carry spec (reconstructed to OptionSpec) +
-        # normalized direction + contracts so alpaca_executor._route_option_order
-        # can route the structure. Guarded on instrument_class=='option' ->
-        # equity orders are byte-identical (zero new keys injected).
-        if o.get('instrument_class') == 'option' and o.get('option_spec'):
-            from strategies.option_direction import normalize_option_direction
-            from strategies.base import OptionSpec
-            _spec_in = o['option_spec']
-            _spec = OptionSpec.from_dict(_spec_in) if isinstance(_spec_in, dict) else _spec_in
-            if _spec is not None:
-                order['instrument_class'] = 'option'
-                order['option_spec'] = _spec
-                _nd = normalize_option_direction(o.get('direction'))
-                if _nd:
-                    order['direction'] = _nd
-                if o.get('contracts') is not None:
-                    order['contracts'] = o['contracts']
+        # SP-5.1c/5-Phase-1b (G3): option orders carry spec (reconstructed to OptionSpec)
+        # + normalized direction + contracts so alpaca_executor._route_option_order can
+        # route the structure. This is the FINITE-bracket path → the order is an open, so
+        # direction normalization is REQUIRED (close_only=False). Fail-closed: a malformed
+        # spec OR an unnormalizable direction DROPS the order entirely (a `continue` guard)
+        # rather than letting it fall through WITHOUT markers → routed as equity shares.
+        # Guarded on the option markers → equity orders are byte-identical (untouched).
+        if _is_option_order(o):
+            _ic_f, _spec_f, _nd_f, _err_f = _resolve_option_markers(o, close_only=False)
+            if _err_f is not None:
+                import logging as _logging
+                _logging.getLogger(__name__).error(
+                    '[sp5-G3] DROPPING option order ticker=%s strategy_id=%s — %s',
+                    o.get('ticker'), o.get('strategy_id'), _err_f)
+                continue
+            order['instrument_class'] = _ic_f
+            order['option_spec'] = _spec_f
+            if _nd_f:
+                order['direction'] = _nd_f
+            if o.get('contracts') is not None:
+                order['contracts'] = o['contracts']
 
         payload['orders'].append(order)
 
