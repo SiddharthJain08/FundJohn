@@ -898,6 +898,10 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
                 f'option: non-positive net debit ({net_ask:.2f}) — crossed quotes or inverted spread (debit-only)')
         override = order.get('limit_price_override')
         net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
+        if _is_credit and net_limit >= 0:
+            return _option_skip(order, coid, equity,
+                f'option: credit limit not negative after pad/override ({net_limit:.2f}) — '
+                f'credit too small or bad override (must receive premium)')
         raw_qty, qty_reason = _resolve_option_qty(
             {'contracts': order.get('contracts'), 'notional_usd': order.get('notional_usd')},
             net_limit)

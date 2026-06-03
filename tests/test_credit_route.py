@@ -77,3 +77,24 @@ def test_credit_without_contracts_refused(monkeypatch):
 def test_credit_gate_off_none(monkeypatch):
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
     assert ex._route_option_order(_order(), equity=100_000.0, coid='c7') is None
+
+
+def test_credit_tiny_net_pad_crossover_refused(monkeypatch):
+    # net=-0.01: raw-net guard passes (<0) but pad flips limit to +0.01 -> MUST refuse, never submit
+    submitted = _stub(monkeypatch, net=-0.01)
+    res = ex._route_option_order(_order(), equity=100_000.0, coid='c8')
+    assert res.get('status') == 'skipped' and submitted == []
+
+
+def test_credit_net_exactly_pad_refused(monkeypatch):
+    # net=-0.02 -> limit 0.00 -> refuse
+    submitted = _stub(monkeypatch, net=-0.02)
+    res = ex._route_option_order(_order(), equity=100_000.0, coid='c9')
+    assert res.get('status') == 'skipped' and submitted == []
+
+
+def test_credit_positive_override_refused(monkeypatch):
+    submitted = _stub(monkeypatch, net=-4.50)
+    o = _order(); o['limit_price_override'] = 1.00   # positive override on a credit -> refuse
+    res = ex._route_option_order(o, equity=100_000.0, coid='c10')
+    assert res.get('status') == 'skipped' and submitted == []
