@@ -815,9 +815,14 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         if str(order.get('direction', 'long')).lower() != 'long':
             return _option_skip(order, coid, equity,
                 f"option: structure exec is long-only in SP-5.1b-i (direction={order.get('direction')!r})")
-        if getattr(spec, 'hedge', 'none') not in (None, 'none'):
+        _hedge = getattr(spec, 'hedge', 'none') or 'none'
+        if _hedge == 'delta':
+            if _os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') != '1':
+                return _option_skip(order, coid, equity,
+                    "option: hedge='delta' requires OPENCLAW_OPTION_DELTA_HEDGE=1")
+        elif _hedge != 'none':
             return _option_skip(order, coid, equity,
-                f"option: hedge={spec.hedge!r} needs the SP-5.1b-ii delta-hedge subsystem (not in 5.1b-i)")
+                f"option: hedge={spec.hedge!r} unsupported (only none|delta)")
         legs = _resolve_structure_legs(spec, today, expiry)
         if not legs:
             return _option_skip(order, coid, equity, 'option: structure legs unresolved')
