@@ -777,6 +777,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         else:
             logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
 
+    # SP-5.1a (G1 prong 1): partition by instrument_class at the source. Option
+    # contributors (signal_params carries an option_spec) are pulled OUT of `active`
+    # so the entire equity pipeline below runs UNCHANGED on the equity partition.
+    # When no option signals exist (production today) opt_active is empty and this is
+    # a provable no-op — `active` is identical and every equity order is byte-identical
+    # (the dead SP-5.1c attribution + emission blocks have been removed accordingly).
+    # Runs in BOTH legacy and EOD modes (it follows whichever loader populated `active`).
+    # Deliberately BEFORE the orthogonalization fold: option signals must never
+    # participate in equity strategy-similarity folding (a fold_map grouping an
+    # option sid with an equity representative would otherwise silently DROP the
+    # option contributor before it could reach the partition).
+    opt_active = [s for s in active
+                  if ((s.get('signal_params') or {}).get('option_spec'))]
+    if opt_active:
+        _opt_ids = {id(s) for s in opt_active}
+        active = [s for s in active if id(s) not in _opt_ids]
+        logger.info('regime_blended_sizer.sharpe_cadence: partitioned %d option-class '
+                    'contributor(s) out of the equity book', len(opt_active))
+
     # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
     _ortho_groups = None
     if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
@@ -795,21 +814,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         active = _og.fold_active_contributions(
             active, _ortho_groups['fold_map'], _ortho_groups['rep_map'], sharpe_by_strat)
         logger.info('orthogonalization.fold: %d -> %d contributions', before, len(active))
-
-    # SP-5.1a (G1 prong 1): partition by instrument_class at the source. Option
-    # contributors (signal_params carries an option_spec) are pulled OUT of `active`
-    # so the entire equity pipeline below runs UNCHANGED on the equity partition.
-    # When no option signals exist (production today) opt_active is empty and this is
-    # a provable no-op — `active` is identical and every equity order is byte-identical
-    # (the dead SP-5.1c attribution + emission blocks have been removed accordingly).
-    # Runs in BOTH legacy and EOD modes (it follows whichever loader populated `active`).
-    opt_active = [s for s in active
-                  if ((s.get('signal_params') or {}).get('option_spec'))]
-    if opt_active:
-        _opt_ids = {id(s) for s in opt_active}
-        active = [s for s in active if id(s) not in _opt_ids]
-        logger.info('regime_blended_sizer.sharpe_cadence: partitioned %d option-class '
-                    'contributor(s) out of the equity book', len(opt_active))
 
     # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
     # is the SIGNED sum of effective_sharpe — opposing strategies cancel
