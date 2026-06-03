@@ -30,9 +30,12 @@ def test_long_debit_vertical_routes(monkeypatch):
     assert res.get('structure') == 'vertical'
 
 
-def test_vertical_gate_off_returns_none(monkeypatch):
+def test_vertical_gate_off_skips_fail_closed(monkeypatch):
+    # NIT-1 contract: option order + gate OFF -> SKIP dict, never equity fall-through.
     monkeypatch.delenv('OPENCLAW_OPTION_EXEC', raising=False)
-    assert ex._route_option_order(_order('long', 'call'), equity=100_000.0, coid='v2') is None
+    res = ex._route_option_order(_order('long', 'call'), equity=100_000.0, coid='v2')
+    assert res is not None and res.get('status') == 'skipped'
+    assert 'gate is OFF' in (res.get('reason') or '')
 
 
 def test_vertical_non_long_refused(monkeypatch):
