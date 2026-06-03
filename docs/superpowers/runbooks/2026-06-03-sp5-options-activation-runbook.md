@@ -16,7 +16,14 @@ pre-deploy tag backup/pre-sp51c-deploy/live-2026-06-03 @07441ad → ff-merge →
 manifest regenerated → johnbot restarted (Active, NRestarts=0, cron registered, Discord
 connected). Doctor: 30 pass; option checks correctly 'gate OFF — skipped'; the 1 FAIL
 (intraday_mc_freshness, 3 stale pending proposals) + data_ledger-sync-skip boot message both
-confirmed PRE-EXISTING (identical on the Jun-01 boot).
+confirmed PRE-EXISTING (identical on the Jun-01 boot). **POST-DEPLOY PARITY PROOF (advisor-required,
+2026-06-03 ~22:15 UTC):** the two live-critical equity seams (9:28 reconcile classification:
+_load_approved_set + broker-load/normalize + _classify_position_deltas; 3:55 EOD sizer:
+size_positions in OPENCLAW_EOD_RECONCILE=1 with stubbed confirmer + fixed account_state)
+run READ-ONLY against the REAL DB + real broker book (5 positions, 71 emissions, 7 orders)
+on the deployed tree (039cca3) vs the pre-deploy tag (07441ad): output **IDENTICAL**.
+The equity path is verified unchanged on real data — tomorrow's 9:28/3:55 run proven, not
+assumed. Script: /tmp/sp5_parity_check.py (session artifact).
 
 **Phase results:**
 - Phase 0 DONE: main merged in (04ca488; one conflict, executor re-expression verified
