@@ -730,6 +730,8 @@ def _resolve_structure_legs(spec, as_of, expiry):
         grk = _option_chain_greeks(spec.underlying, expiry, right, spot)
         if not grk:
             return None
+        if float(spec.spread_width_pct) <= 0:
+            return None   # non-positive width can't define a distinct OTM short leg (fail-closed)
         sign = 1.0 if right == 'call' else -1.0
         far_target = near + sign * float(spec.spread_width_pct) * spot
         far = min((s for s, _d, _o in grk), key=lambda s: abs(s - far_target))
@@ -837,6 +839,9 @@ def _route_option_order(order: dict, equity: float, coid: str) -> dict | None:
         if nq is None:
             return _option_skip(order, coid, equity, 'option: no quote for a structure leg')
         net_ask, leg_q = nq
+        if net_ask <= 0:
+            return _option_skip(order, coid, equity,
+                f'option: non-positive net debit ({net_ask:.2f}) — crossed quotes or inverted spread (debit-only)')
         override = order.get('limit_price_override')
         net_limit = float(override) if override is not None else round(net_ask + 0.02, 2)
         raw_qty, qty_reason = _resolve_option_qty(
