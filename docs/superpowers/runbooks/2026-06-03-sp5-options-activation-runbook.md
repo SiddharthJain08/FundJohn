@@ -158,6 +158,16 @@ process-scoped), script-driven, candidate UNREGISTERED:
 - main + live disk carry the full options exec lane + hedge stack + G1–G4 closed, gates OFF.
 - Hedge loop live-proven by T9 (fill → ledger → EOD hedge row).
 - **Future organic-candidate activation procedure** (one step, operator-owned):
+  - **PRECONDITION (SP-5.3, added 2026-06-04): the SP-5.3 expiry/held-awareness stack
+    must be MERGED + DEPLOYED before any promotion.** Without it, any candidate that
+    signals persistently within its cadence window stacks a fresh mleg structure EVERY
+    trading day (confirmed by direct read 2026-06-04: the carried set re-loads the
+    signal daily, `_consolidate_option_orders` emits plain held-blind opens, and the
+    executor open path has no held check — nothing dedups). SP-5.3 also removes the
+    old burden on candidates to self-manage expiry/state: with it deployed, a candidate
+    may signal continuously; infra owns the lifecycle (suppress-while-held, force-close
+    at DTE≤7, organic reopen). Spec:
+    `docs/superpowers/specs/2026-06-04-sp5.3-option-expiry-mgmt-design.md`.
   1. Candidate passes 0.80/0.30 → register/approve in `strategy_registry` (G1 already live).
   2. Supervised candidate smoke (first EOD cycle watched: structure fill + hedge row + T+1 fill).
   3. Flip `OPENCLAW_OPTION_EXEC=1` (+ `OPENCLAW_OPTION_DELTA_HEDGE=1` if the candidate hedges)
