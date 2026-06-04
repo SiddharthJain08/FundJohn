@@ -563,11 +563,12 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 }
 
 // ── Equity / ETF price gap-fill — Alpaca daily bars (SP-1 Task 15) ────────────
-// Hits `alpaca data bars` (data.alpaca.markets/v2/stocks/{T}/bars). Matches the
-// pre-cutover yfinance `auto_adjust=True` behavior via `--adjustment all`
-// (splits + dividends), so the new bars line up with historical rows already in
-// prices.parquet. Caller (runHistoricalPrices) owns the flush via
-// store.flushPrices() — we only buffer via store.upsertPrices.
+// SP-7 A3: canonical price convention = SPLIT-ADJUSTED ONLY (matches the
+// Phase-B backfiller). Dividend adjustment restates all history on every
+// dividend — incompatible with the append-only master store. Dividends are
+// explicit in corporate_actions.parquet; see docs/sp7-adjustment-convention.md.
+// Caller (runHistoricalPrices) owns the flush via store.flushPrices() — we
+// only buffer via store.upsertPrices.
 //
 // Symbols Alpaca's stocks endpoint can't serve (indices ^X, futures =F,
 // crypto -USD, forex =X) get an HTTP 400 "invalid symbol" — those are warned
@@ -586,7 +587,7 @@ async function fillPricesAlpaca(ticker, fromDate, toDate) {
     '--start',      fromDate,
     '--end',        toDate,
     '--timeframe',  '1Day',
-    '--adjustment', 'all',
+    '--adjustment', 'split',
     '--feed',       'sip',
     '--limit',      '1000',
   ];
