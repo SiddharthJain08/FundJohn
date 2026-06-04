@@ -124,6 +124,46 @@ def _eod_signal_register_gate_on() -> bool:
     return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
 
 
+def _is_trading_session(d: date) -> bool | None:
+    """True/False via `alpaca calendar --start d --end d`; None on probe failure.
+
+    Mirrors _next_trading_day's CLI contract (5s timeout, JSON session list).
+    """
+    try:
+        result = subprocess.run(
+            [_ALPACA_BIN, 'calendar', '--start', d.isoformat(), '--end', d.isoformat()],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        sessions = json.loads(result.stdout) if result.stdout.strip() else []
+        if not isinstance(sessions, list):
+            return None
+        return any(s.get('date') == d.isoformat() for s in sessions if isinstance(s, dict))
+    except Exception:
+        return None
+
+
+def _panel_fresh_required(run_date: date) -> bool:
+    """Fix C: does THIS run require the panel to hold close[run_date]?
+
+    True only for the post-close EOD-compute shape: now is ≥16:05 ET on the
+    run_date itself AND run_date is a trading session. Intraday redeploys
+    (pre-close) and historical re-runs (run_date != today-ET) correctly use
+    the latest available session — exempt. Calendar-probe failure on the
+    post-close shape fails LOUD (required) — silently blessing a stale panel
+    is the 06-02/06-03 failure this exists to detect.
+    """
+    from zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo('America/New_York'))
+    if now_et.date() != run_date:
+        return False
+    if now_et.weekday() >= 5 or now_et.strftime('%H:%M') < '16:05':
+        return False
+    trading = _is_trading_session(run_date)
+    return trading is not False
+
+
 def get_db():
     return psycopg2.connect(DB_URI, cursor_factory=psycopg2.extras.DictCursor)
 
@@ -271,6 +311,11 @@ def load_prices(universe: list) -> pd.DataFrame:
     be swallowed into an empty frame that would orphan-close the whole book.
     """
     master_path = ROOT / 'data' / 'master' / 'prices.parquet'
+    # Fix C: record the PRE-proxy parquet panel max date for eod_compute_health
+    # (function-attribute pattern, mirrors run_strategies.last_run_stats). Must
+    # be the parquet's own max — a proxy-injected today-row would otherwise
+    # mask a failed close-capture from the freshness detector.
+    load_prices.last_parquet_max_date = None
     if not master_path.exists():
         logger.warning(f"Master prices not found at {master_path}")
         return pd.DataFrame()
@@ -282,6 +327,8 @@ def load_prices(universe: list) -> pd.DataFrame:
         cols = [c for c in universe if c in wide.columns]
         if cols:
             wide = wide[cols]
+        if len(wide.index):
+            load_prices.last_parquet_max_date = wide.index.max().date()
     except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
         return pd.DataFrame()
@@ -829,7 +876,9 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
 # ──────────────────────────────────────────────────────────
 
 def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
-                     n_strategies_total: int, regime_ok: bool, universe_size: int) -> None:
+                     n_strategies_total: int, regime_ok: bool, universe_size: int,
+                     panel_max_date: date | None = None,
+                     panel_fresh_required: bool | None = None) -> None:
     """
     INSERT one eod_compute_health row after run_strategies.
 
@@ -847,13 +896,25 @@ def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
 
     healthy = (rc == 0 AND regime_ok AND universe_size > 0 AND n_strategies_ok > 0)
     """
-    healthy = (rc == 0 and regime_ok and universe_size > 0 and n_strategies_ok > 0)
+    # Fix C (2026-06-04, sp6 diagnosis §10): a POST-CLOSE compute deciding on a
+    # close[T−1] panel must not report healthy — that exact failure ran silent
+    # on 06-02/06-03. panel_fresh_required=True only for the 16:15 EOD compute
+    # shape (intraday redeploys correctly use close[T−1] and stay exempt).
+    # Required-but-unknown panel date fails CLOSED.
+    panel_ok = True
+    if panel_fresh_required:
+        panel_ok = panel_max_date is not None and panel_max_date >= run_date
+    healthy = (rc == 0 and regime_ok and universe_size > 0 and n_strategies_ok > 0
+               and panel_ok)
     detail = {
         'rc': rc,
         'n_strategies_ok': n_strategies_ok,
         'n_strategies_total': n_strategies_total,
         'regime_ok': regime_ok,
         'universe_size': universe_size,
+        'panel_max_date': str(panel_max_date) if panel_max_date else None,
+        'panel_fresh_required': bool(panel_fresh_required),
+        'panel_ok': panel_ok,
         'healthy': healthy,
     }
 
@@ -861,17 +922,18 @@ def write_eod_health(cur, run_date: date, *, rc: int, n_strategies_ok: int,
         """
         INSERT INTO eod_compute_health
             (run_date, rc, n_strategies_ok, n_strategies_total,
-             regime_ok, universe_size, healthy, detail)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+             regime_ok, universe_size, healthy, detail, panel_max_date)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (run_date, rc, n_strategies_ok, n_strategies_total,
-         regime_ok, universe_size, healthy, json.dumps(detail)),
+         regime_ok, universe_size, healthy, json.dumps(detail), panel_max_date),
     )
 
     logger.info(
         "[engine] eod_compute_health: rc=%s ok=%s/%s regime_ok=%s "
-        "universe_size=%s healthy=%s",
-        rc, n_strategies_ok, n_strategies_total, regime_ok, universe_size, healthy,
+        "universe_size=%s panel_max_date=%s panel_ok=%s healthy=%s",
+        rc, n_strategies_ok, n_strategies_total, regime_ok, universe_size,
+        panel_max_date, panel_ok, healthy,
     )
 
 
@@ -1352,10 +1414,34 @@ def _fatal_exit_code(exc) -> int:
     return 2 if type(exc).__name__ == 'CloseProxyError' else 1
 
 
+def _parse_run_date(argv=None) -> date:
+    """Parse `--date YYYY-MM-DD` (optional; default today).
+
+    The daily-cycle orchestrators (resolve_script.js, pipeline_orchestrator.py)
+    have ALWAYS appended `--date <runDate>` to the engine invocation, but
+    main() ignored argv and used date.today() — harmless while the two
+    coincide, wrong for any historical re-run (e.g. recomputing an EOD target
+    set after a data fix; see sp6 diagnosis 2026-06-04 §10). parse_known_args
+    so orchestrator-injected flags the engine doesn't implement (--dry-run)
+    never crash the signals step.
+    """
+    import argparse
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('--date', default=None)
+    args, _unknown = p.parse_known_args(argv if argv is not None else sys.argv[1:])
+    if args.date:
+        try:
+            return datetime.strptime(args.date, '%Y-%m-%d').date()
+        except ValueError:
+            logger.error(f"--date must be YYYY-MM-DD, got {args.date!r}")
+            sys.exit(2)
+    return date.today()
+
+
 def main():
     import time
     t0       = time.time()
-    run_date = date.today()
+    run_date = _parse_run_date()
     errors   = []
 
     logger.info(f"=== Execution Engine START {run_date} ===")
@@ -1448,6 +1534,8 @@ def main():
                 n_strategies_total=n_strategies_total,
                 regime_ok=regime_ok,
                 universe_size=len(universe),
+                panel_max_date=getattr(load_prices, 'last_parquet_max_date', None),
+                panel_fresh_required=_panel_fresh_required(run_date),
             )
 
         # 5. Write signals

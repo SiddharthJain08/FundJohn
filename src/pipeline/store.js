@@ -334,17 +334,23 @@ async function getAllCoverage(dataType) {
  *     fundamentals:{ covered, needed, tickers: string[], staleDays },
  *   }
  */
-async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDate, toDate, fundStaleDays = 45 }) {
+async function getGapSummary({ priceTickers, optionsTickers, fundTickers, fromDate, toDate, fundStaleDays = 45, pricesRequiredThrough = null }) {
   const yesterday = new Date(new Date(toDate).getTime() - 86400_000).toISOString().slice(0, 10);
 
-  // ── Prices: needs update if coverage is absent or date_to < yesterday ────────
+  // ── Prices: needs update if coverage is absent or date_to < required ─────────
+  // Default requirement = yesterday (legacy 10am-cycle semantic: today's bar
+  // doesn't exist yet intraday). The 16:15 ET EOD cycle passes
+  // pricesRequiredThrough = today so the collect step itself captures the
+  // just-completed session's closes — pre-fix the EOD compute structurally
+  // ran on close[T−1] (sp6 diagnosis 2026-06-04 §10).
+  const pricesRequired = pricesRequiredThrough || yesterday;
   const priceRes = await query(
     `SELECT u.ticker,
             CASE WHEN c.date_to >= $2::date THEN 'covered' ELSE 'needed' END AS status
      FROM   unnest($1::text[]) AS u(ticker)
      LEFT JOIN data_coverage c ON c.ticker = u.ticker AND c.data_type = 'prices'
      ORDER BY u.ticker`,
-    [priceTickers, yesterday]
+    [priceTickers, pricesRequired]
   ).catch(err => { console.error('[getGapSummary:prices] SQL error:', err.message); return null; });
 
   // ── Options: needs update if no coverage record for today ────────────────────

@@ -1368,6 +1368,106 @@ async function start() {
   }, 5 * 60_000);
 }
 
+// ── EOD same-day close capture (fix B, 2026-06-04) ───────────────────────────
+// The 16:15 ET EOD cycle must run signals on close[T]. Historically the gap
+// pre-scan marked a ticker `covered` at date_to >= yesterday, so the in-cycle
+// collect could never fetch today's close — the EOD compute structurally ran
+// on close[T−1] while the 16:30 ET eod-refresh timer captured the closes four
+// minutes AFTER the compute finished (sp6 diagnosis 2026-06-04 §10).
+// Post-close on a trading day, the pre-scan now requires date_to >= today and
+// _verifyEquityFreshness blocks/aborts so signals never run on a stale panel.
+
+const _ALPACA_BIN_EOD = process.env.ALPACA_BIN || '/root/go/bin/alpaca';
+
+function _etParts(now = new Date()) {
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(now);
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    weekday: 'short', hour: '2-digit', minute: '2-digit',
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
+  return { date, weekday: parts.weekday, hhmm: `${parts.hour}:${parts.minute}` };
+}
+
+async function _alpacaCalendarProbe(dateStr) {
+  // → true (trading session) / false (market closed that date) / null (probe failed)
+  try {
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const out = await promisify(execFile)(
+      _ALPACA_BIN_EOD, ['calendar', '--start', dateStr, '--end', dateStr],
+      { timeout: 5000 },
+    );
+    const sessions = JSON.parse((out.stdout || '').trim() || '[]');
+    // Non-array (e.g. an {error: ...} object on rc=0) = probe failure → null
+    // (fail-loud), NOT false — false means "authenticated answer: market
+    // closed" and silently downgrades the freshness requirement.
+    if (!Array.isArray(sessions)) return null;
+    return sessions.some(s => s && s.date === dateStr);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function _eodFreshnessContext({ now = new Date(), calendarProbe = _alpacaCalendarProbe } = {}) {
+  const { date, weekday, hhmm } = _etParts(now);
+  const isWeekday = !['Sat', 'Sun'].includes(weekday);
+  const postClose = hhmm >= '16:05';
+  if (!isWeekday || !postClose) return { requireToday: false, todayEt: date };
+  const trading = await calendarProbe(date);
+  // trading === false → market holiday → legacy rule (latest session is the
+  // previous one; nothing new to capture). trading === null → probe FAILED →
+  // fail-loud: require today. Worst case on an undetected holiday is an abort
+  // + Discord alert; silently running signals on a stale panel is the exact
+  // bug this gate exists to prevent.
+  return { requireToday: trading !== false, todayEt: date };
+}
+
+async function _queryFreshCoverage(tickers, todayEt) {
+  const { query: dbQuery } = require('../database/postgres');
+  const res = await dbQuery(
+    `SELECT ticker FROM data_coverage
+      WHERE data_type='prices' AND date_to >= $2::date AND ticker = ANY($1::text[])`,
+    [tickers, todayEt]
+  );
+  // data_coverage is an honest oracle here: updateCoverage refuses to advance
+  // date_to on zero-row fetches, so date_to >= today ⟺ today's bar was stored.
+  return (res?.rows || []).map(r => r.ticker);
+}
+
+async function _verifyEquityFreshness(equityTickers, todayEt, {
+  queryFreshFn = _queryFreshCoverage,
+  refetchFn = null,
+  sleepFn = sleep,
+  maxAttempts = parseInt(process.env.OPENCLAW_EOD_FRESHNESS_MAX_ATTEMPTS || '3', 10),
+  minFrac = parseFloat(process.env.OPENCLAW_EOD_FRESHNESS_MIN_FRAC || '0.95'),
+  retryDelayMs = 45_000,
+} = {}) {
+  if (!equityTickers || equityTickers.length === 0) return { fresh: [], stale: [] };
+  let fresh = await queryFreshFn(equityTickers, todayEt);
+  let stale = equityTickers.filter(t => !fresh.includes(t));
+  let attempt = 1;
+  while (stale.length > 0 && attempt < maxAttempts) {
+    notify(`⏳ EOD freshness: ${stale.length}/${equityTickers.length} equity tickers missing ${todayEt} bars — retry ${attempt}/${maxAttempts - 1}`);
+    if (refetchFn) await refetchFn(stale);
+    await sleepFn(retryDelayMs);
+    fresh = await queryFreshFn(equityTickers, todayEt);
+    stale = equityTickers.filter(t => !fresh.includes(t));
+    attempt += 1;
+  }
+  const frac = equityTickers.length ? fresh.length / equityTickers.length : 1;
+  if (frac < minFrac) {
+    throw new Error(
+      `EOD freshness gate FAILED: only ${fresh.length}/${equityTickers.length} equity tickers have ` +
+      `${todayEt} bars after ${attempt} attempt(s) — refusing to let signals run on a stale panel`
+    );
+  }
+  if (stale.length > 0) {
+    notify(`⚠️ EOD freshness: proceeding with ${stale.length} stale straggler(s): ${stale.slice(0, 10).join(', ')}`);
+  }
+  return { fresh, stale };
+}
+
 async function runDailyCollection() {
   const cycleStart = Date.now();
 
@@ -1414,6 +1514,14 @@ async function runDailyCollection() {
   const today    = new Date().toISOString().slice(0, 10);
   const fromDate = new Date(Date.now() - historyDays * 86400_000).toISOString().slice(0, 10);
 
+  // Post-close on a trading day the prices requirement tightens to TODAY so
+  // this cycle's collect captures the just-completed session's closes itself
+  // (fix B — see _eodFreshnessContext above).
+  const eodCtx = await _eodFreshnessContext().catch(() => ({ requireToday: false, todayEt: today }));
+  if (eodCtx.requireToday) {
+    notify(`🕓 Post-close cycle: requiring today's (${eodCtx.todayEt}) close bars for the equity envelope`);
+  }
+
   notify('🔍 Scanning data coverage gaps...');
   const gaps = await store.getGapSummary({
     priceTickers:   [...equityTickers, ...marketTickers],
@@ -1422,6 +1530,7 @@ async function runDailyCollection() {
     fromDate,
     toDate:         today,
     fundStaleDays:  45,
+    pricesRequiredThrough: eodCtx.requireToday ? eodCtx.todayEt : null,
   }).catch(() => null);
 
   if (gaps) {
@@ -1485,6 +1594,17 @@ async function runDailyCollection() {
     await runHistoricalPrices(historyDays, priceEquityNeeded);
   } else if (priceEquityNeeded.length === 0) {
     notify('✅ Prices (equity): all current — skipped');
+  }
+
+  // Phase 2a-verify (fix B): post-close, the equity panel MUST hold today's
+  // closes before signals run. Bounded retries for bar-latency stragglers;
+  // a substantially stale panel THROWS → run_collector_once exits non-zero →
+  // the cycle aborts BEFORE the signals step (strict exit codes).
+  if (eodCtx.requireToday && cfg.collect_prices !== 'false') {
+    await _verifyEquityFreshness(equityTickers, eodCtx.todayEt, {
+      refetchFn: (stale) => runHistoricalPrices(historyDays, stale),
+    });
+    notify(`✅ EOD freshness gate passed — equity panel current through ${eodCtx.todayEt}`);
   }
 
   // Phase 2b: Market instrument prices (stub — SP-1 yfinance removed; Task 15 wires Alpaca/FMP)
@@ -1783,4 +1903,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
