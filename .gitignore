@@ -13,6 +13,8 @@ logs/
 data/*
 # SP-2 Phase B frozen artifacts — committed, exempt from blanket data/* ignore
 !data/.backfill_universe_v1.txt
+# SP-7 Phase A liquid-5k backfill artifact
+!data/.backfill_universe_v2.txt
 !data/sp500_historical_membership_v1.csv
 !data/.fmp_ipo_seeded_v1.txt
 output/
