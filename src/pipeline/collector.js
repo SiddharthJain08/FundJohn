@@ -446,11 +446,12 @@ async function runVolIndicesWide() {
   );
 }
 
-// 30-minute equity bars for the top-250 universe.
+// 30-minute equity bars — self-sustaining: universe derived from every ticker
+// already in prices_30m.parquet (append-only, Alpaca source).
 async function run30mPrices() {
   return _runIngestPhase(
-    '⏱️', '30m prices (top-250)',
-    ['src/ingestion/ingest_prices_30m.py'],
+    '⏱️', '30m prices (alpaca)',
+    ['src/ingestion/ingest_prices_30m_daily.py'],
     'prices_30m', 5 * 60_000,
   );
 }

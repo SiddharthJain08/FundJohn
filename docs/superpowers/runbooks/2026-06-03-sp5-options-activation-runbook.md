@@ -16,7 +16,14 @@ pre-deploy tag backup/pre-sp51c-deploy/live-2026-06-03 @07441ad → ff-merge →
 manifest regenerated → johnbot restarted (Active, NRestarts=0, cron registered, Discord
 connected). Doctor: 30 pass; option checks correctly 'gate OFF — skipped'; the 1 FAIL
 (intraday_mc_freshness, 3 stale pending proposals) + data_ledger-sync-skip boot message both
-confirmed PRE-EXISTING (identical on the Jun-01 boot).
+confirmed PRE-EXISTING (identical on the Jun-01 boot). **POST-DEPLOY PARITY PROOF (advisor-required,
+2026-06-03 ~22:15 UTC):** the two live-critical equity seams (9:28 reconcile classification:
+_load_approved_set + broker-load/normalize + _classify_position_deltas; 3:55 EOD sizer:
+size_positions in OPENCLAW_EOD_RECONCILE=1 with stubbed confirmer + fixed account_state)
+run READ-ONLY against the REAL DB + real broker book (5 positions, 71 emissions, 7 orders)
+on the deployed tree (039cca3) vs the pre-deploy tag (07441ad): output **IDENTICAL**.
+The equity path is verified unchanged on real data — tomorrow's 9:28/3:55 run proven, not
+assumed. Script: /tmp/sp5_parity_check.py (session artifact).
 
 **Phase results:**
 - Phase 0 DONE: main merged in (04ca488; one conflict, executor re-expression verified
@@ -158,6 +165,16 @@ process-scoped), script-driven, candidate UNREGISTERED:
 - main + live disk carry the full options exec lane + hedge stack + G1–G4 closed, gates OFF.
 - Hedge loop live-proven by T9 (fill → ledger → EOD hedge row).
 - **Future organic-candidate activation procedure** (one step, operator-owned):
+  - **PRECONDITION (SP-5.3, added 2026-06-04): the SP-5.3 expiry/held-awareness stack
+    must be MERGED + DEPLOYED before any promotion.** Without it, any candidate that
+    signals persistently within its cadence window stacks a fresh mleg structure EVERY
+    trading day (confirmed by direct read 2026-06-04: the carried set re-loads the
+    signal daily, `_consolidate_option_orders` emits plain held-blind opens, and the
+    executor open path has no held check — nothing dedups). SP-5.3 also removes the
+    old burden on candidates to self-manage expiry/state: with it deployed, a candidate
+    may signal continuously; infra owns the lifecycle (suppress-while-held, force-close
+    at DTE≤7, organic reopen). Spec:
+    `docs/superpowers/specs/2026-06-04-sp5.3-option-expiry-mgmt-design.md`.
   1. Candidate passes 0.80/0.30 → register/approve in `strategy_registry` (G1 already live).
   2. Supervised candidate smoke (first EOD cycle watched: structure fill + hedge row + T+1 fill).
   3. Flip `OPENCLAW_OPTION_EXEC=1` (+ `OPENCLAW_OPTION_DELTA_HEDGE=1` if the candidate hedges)
@@ -172,3 +189,34 @@ process-scoped), script-driven, candidate UNREGISTERED:
 - Phase 3 smoke: built-in flatten + re-flatten; on orphan → manual `position close` per leg +
   gates OFF + surface to operator. No destructive path: paper account, 1-contract sizes,
   equity book independently verified untouched.
+
+## Phase 3 record — T9 executed 2026-06-04 (RTH, operator-authorized at fire time)
+
+**Run 1 (14:25 UTC): 8/9 — H4 FAIL, book verified flat.** H1-H3, H5-H9 all PASS
+(fill 34ecb0fd → ledger active → OCC 5b ✓ → per-leg close FLAT → G4c closed → gate-off
+skip ✓ → post-verify baseline ✓). H4 produced 0 is_hedge rows: root cause was a REAL
+bug in `option_hedge._leg_delta` — underlying derived via `''.join(c for c in occ if
+c.isalpha())`, which swallows the OCC right-letter (`SPY260626C00754000` → `'SPYC'`,
+puts → `'SPYP'`) so `_spot_price` never resolved and every leg delta fail-closed to
+None. The hedge-target producer was structurally unable to emit for ANY held
+structure; never caught because dry-run H4 requires no hedge row and unit tests
+stubbed `_leg_delta` itself.
+
+**Fix (e9ffe29):** root = `occ[:-15]` (everything before the fixed 15-char OCC tail).
+Regression test pins the true root reaching `_spot_price`/`_option_chain_greeks`.
+Live-chain verify: straddle net delta +9.26 resolved pre-re-fire.
+
+**Run 2 (14:30 UTC): 9/9 PASS.** Fill e49ecc45 (1× SPY 260626 ATM 754 straddle,
+entry 19.07) → ledger active → **H4: `__hedge__SPY` SHORT 8.68 shares, APPROVED,
+36-char ws UUID, FK satisfied, rolled back** → OCC ✓ → close FLAT (no retry needed) →
+G4c closed → gate-off ✓ → post-verify: positions == baseline.
+
+**Independent post-verify (outside the script):** `alpaca position list` 4 positions /
+0 option legs; 0 open option orders; `option_hedge_ledger` SPY status='closed' 0
+active; `execution_signals` LIKE '__hedge__%' count = 0 (H4 rollback held — no DB
+residue; append-only policy satisfied, nothing to deprecate).
+
+**Exit state: ARMED.** Gates `OPENCLAW_OPTION_EXEC` / `OPENCLAW_OPTION_DELTA_HEDGE`
+remain ABSENT from `.env` (process-scoped only during the smoke). Hedge loop is now
+live-proven end-to-end: fill → ledger → EOD hedge-target row. Activation procedure
+above unchanged (SP-5.3 deploy precondition satisfied this same day).

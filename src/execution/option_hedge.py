@@ -156,7 +156,10 @@ def _leg_delta(occ, right, strike, expiry):
     matched OCC's delta, or None if unavailable (fail-closed upstream)."""
     import datetime as _dt
     from execution.alpaca_executor import _option_chain_greeks, _spot_price
-    und = ''.join(c for c in occ if c.isalpha())
+    # Root = everything before the fixed 15-char OCC tail (yymmdd + C/P + 8-digit
+    # strike). An isalpha() scan would swallow the right-letter ('SPY'->'SPYC')
+    # and break spot/chain resolution for every leg (T9 H4 root cause).
+    und = occ[:-15]
     spot = _spot_price(und)
     if spot is None or spot <= 0:
         return None
