@@ -332,3 +332,36 @@ def test_expiry_close_dispatches_to_mleg_close(monkeypatch):
     assert called.get('spec') is spec, \
         '__close_option_expiry__ must dispatch to _route_mleg_close'
     assert res['status'] == 'submitted'
+
+
+def test_already_expired_leg_closes(monkeypatch):
+    """A parseable but already-expired leg (negative DTE) must also force-close."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': [_occ('SPY', -2)]})
+    orders = _run_sizer(monkeypatch, _opt_sigs())
+    closes = [o for o in orders if o.get('strategy_id') == '__close_option_expiry__']
+    assert len(closes) == 1
+
+
+def test_expiry_close_threads_as_close_only(monkeypatch):
+    """The emitted expiry close (target_usd==0) must become close_only=True in the
+    sized payload — the discriminator the executor's close dispatch keys on."""
+    import execution.regime_blended_sizer_live as _live
+    from strategies.base import OptionSpec
+    order = {
+        'ticker': 'SPY', 'strategy_id': '__close_option_expiry__', 'direction': 'long',
+        'notional_usd': 0.0, 'pct_nav': 0.0, 'shares': 0, 'entry': None, 'stop': None,
+        't1': None, 't2': None, 'kelly_final': 0.0, 'ev': 0.0, 'p_t1': 0.5,
+        'source_mode': 'sharpe_cadence', 'target_usd': 0.0, 'current_usd': 0.0,
+        'contributing_strategies': ['__close_option_expiry__'], 'flip_action': None,
+        'action': 'CLOSE', 'instrument_class': 'option',
+        'option_spec': {'underlying': 'SPY', 'structure': 'held_legs'},
+    }
+    payload = _live._build_sized_payload([order], {'cycle_date': '2026-06-03', 'regime': {}})
+    assert len(payload['orders']) == 1
+    o = payload['orders'][0]
+    assert o['close_only'] is True
+    assert o['instrument_class'] == 'option'
+    assert isinstance(o['option_spec'], OptionSpec)
+    assert o['option_spec'].structure == 'held_legs'

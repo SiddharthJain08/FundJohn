@@ -1231,6 +1231,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             _opt_orders = []
         else:
             _opt_target_tickers = {str(o['ticker']).upper() for o in _opt_orders}
+            _expiry_threshold = _expiry_close_dte()
             for _underlying, _legs in _held.items():
                 if _underlying in _opt_target_tickers:
                     # SP-5.3 (C3): held AND still-targeted — force-close approaching
@@ -1241,10 +1242,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                     # (the organic roll). Retry-by-construction: still-held legs
                     # re-emit this close every cycle until flat.
                     _dte = min(_occ_dte(_o) for _o in _legs)
-                    if _dte <= _expiry_close_dte():
+                    if _dte <= _expiry_threshold:
                         logger.info('regime_blended_sizer.sharpe_cadence: option EXPIRY '
                                     'close for %s (min DTE=%d <= %d; %d held leg(s))',
-                                    _underlying, _dte, _expiry_close_dte(), len(_legs))
+                                    _underlying, _dte, _expiry_threshold, len(_legs))
                         orders.append({
                             'ticker':                  _underlying,
                             'strategy_id':             '__close_option_expiry__',
