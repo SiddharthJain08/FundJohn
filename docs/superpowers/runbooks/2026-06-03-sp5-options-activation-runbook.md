@@ -179,3 +179,34 @@ process-scoped), script-driven, candidate UNREGISTERED:
 - Phase 3 smoke: built-in flatten + re-flatten; on orphan → manual `position close` per leg +
   gates OFF + surface to operator. No destructive path: paper account, 1-contract sizes,
   equity book independently verified untouched.
+
+## Phase 3 record — T9 executed 2026-06-04 (RTH, operator-authorized at fire time)
+
+**Run 1 (14:25 UTC): 8/9 — H4 FAIL, book verified flat.** H1-H3, H5-H9 all PASS
+(fill 34ecb0fd → ledger active → OCC 5b ✓ → per-leg close FLAT → G4c closed → gate-off
+skip ✓ → post-verify baseline ✓). H4 produced 0 is_hedge rows: root cause was a REAL
+bug in `option_hedge._leg_delta` — underlying derived via `''.join(c for c in occ if
+c.isalpha())`, which swallows the OCC right-letter (`SPY260626C00754000` → `'SPYC'`,
+puts → `'SPYP'`) so `_spot_price` never resolved and every leg delta fail-closed to
+None. The hedge-target producer was structurally unable to emit for ANY held
+structure; never caught because dry-run H4 requires no hedge row and unit tests
+stubbed `_leg_delta` itself.
+
+**Fix (e9ffe29):** root = `occ[:-15]` (everything before the fixed 15-char OCC tail).
+Regression test pins the true root reaching `_spot_price`/`_option_chain_greeks`.
+Live-chain verify: straddle net delta +9.26 resolved pre-re-fire.
+
+**Run 2 (14:30 UTC): 9/9 PASS.** Fill e49ecc45 (1× SPY 260626 ATM 754 straddle,
+entry 19.07) → ledger active → **H4: `__hedge__SPY` SHORT 8.68 shares, APPROVED,
+36-char ws UUID, FK satisfied, rolled back** → OCC ✓ → close FLAT (no retry needed) →
+G4c closed → gate-off ✓ → post-verify: positions == baseline.
+
+**Independent post-verify (outside the script):** `alpaca position list` 4 positions /
+0 option legs; 0 open option orders; `option_hedge_ledger` SPY status='closed' 0
+active; `execution_signals` LIKE '__hedge__%' count = 0 (H4 rollback held — no DB
+residue; append-only policy satisfied, nothing to deprecate).
+
+**Exit state: ARMED.** Gates `OPENCLAW_OPTION_EXEC` / `OPENCLAW_OPTION_DELTA_HEDGE`
+remain ABSENT from `.env` (process-scoped only during the smoke). Hedge loop is now
+live-proven end-to-end: fill → ledger → EOD hedge-target row. Activation procedure
+above unchanged (SP-5.3 deploy precondition satisfied this same day).
