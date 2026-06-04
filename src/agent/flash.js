@@ -214,7 +214,7 @@ async function handleCoverage() {
   };
   const fmtNum = (n) => n ? Number(n).toLocaleString() : '0';
   return [
-    '**📡 S&P 100 — Backtest Archive**',
+    '**📡 Equity Universe — Backtest Archive**',
     `Prices:      ${bar(cov.price_coverage)}  (${fmtNum(cov.price_rows_total)} rows | ${cov.price_earliest?.toISOString?.().slice(0,10) ?? '—'} → ${cov.price_latest?.toISOString?.().slice(0,10) ?? '—'})`,
     `Options:     ${bar(cov.options_coverage)}  (${fmtNum(cov.options_rows_total)} contracts)`,
     `Technicals:  ${bar(cov.tech_coverage)}`,
@@ -390,7 +390,7 @@ async function handleHelp() {
     '',
     '**📡 Dashboard & Data**',
     '`!john /dashboard` — dashboard link',
-    '`!john /coverage` — S&P 100 pipeline coverage',
+    '`!john /coverage` — equity universe pipeline coverage',
     '`!john /prices TICKER [days]` — OHLCV table from DB',
     '`!john /chart TICKER` — price chart (PNG attachment)',
     '`!john /greeks TICKER` — options Greeks from DB',

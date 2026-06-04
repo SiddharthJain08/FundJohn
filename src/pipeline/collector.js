@@ -4,7 +4,7 @@
  * OpenClaw Background Data Collector
  *
  * Continuously collects OHLCV, snapshots, options Greeks, and fundamentals
- * for the S&P 100 universe using a rate-limited queue.
+ * for the resolved union universe (fallback: S&P 500) using a rate-limited queue.
  *
  * Rate limits (Massive/Polygon — Options Starter tier):
  *   - Unlimited API calls; burst throttle at ~300 req/min sustained
@@ -55,7 +55,7 @@ async function getActiveTickers() {
   if (tickers.length > 0) return tickers;
   // Fallback to static list
   const { getUniverse } = require('./universe');
-  return getUniverse('SP100');
+  return getUniverse('SP500');
 }
 
 // ── SP-2 Phase B Task 5: quarantine set ──────────────────────────────────────
@@ -1348,7 +1348,7 @@ async function start() {
     console.warn('[pipeline-state] Boot check failed:', err.message);
   }
 
-  notify('🚀 Data pipeline started — S&P 100 universe');
+  notify('🚀 Data pipeline started — resolved equity universe');
 
   // Phase 2 of the pipeline restructure (2026-04-22): the 10:00 AM ET
   // cron in cron-schedule.js is now the single daily trigger. The
@@ -1394,7 +1394,7 @@ async function runDailyCollection() {
   const marketTickers     = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
   const optionsTickers    = fullUniverse.filter(u => u.has_options).map(u => u.ticker);
   const fundamentalTickers = fullUniverse.filter(u => u.has_fundamentals).map(u => u.ticker);
-  const universeLabel     = `SP100 (${equityTickers.length}) + Market (${marketTickers.length})`;
+  const universeLabel     = `Equities (${equityTickers.length}) + Market (${marketTickers.length})`;
 
   // Start cycle record
   const cycleId = await store.startCycle().catch(() => null);
@@ -1476,7 +1476,7 @@ async function runDailyCollection() {
     await runVolIndicesWide();
   }
 
-  // Phase 2a: S&P 100 equity prices — only tickers with gaps (Alpaca P1; Task 15 wires bars API)
+  // Phase 2a: equity prices — only tickers with gaps (Alpaca P1; Task 15 wires bars API)
   const priceEquityNeeded = gaps?.prices.tickers.filter(t => equityTickers.includes(t)) ?? equityTickers;
   const priceMarketNeeded = gaps?.prices.tickers.filter(t => marketTickers.includes(t)) ?? marketTickers;
   if (cfg.collect_prices !== 'false' && priceEquityNeeded.length > 0) {

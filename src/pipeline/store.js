@@ -99,7 +99,7 @@ async function getActiveUniverse() {
   return res?.rows || [];
 }
 
-async function addToUniverse(tickers, indexMembership = 'SP100') {
+async function addToUniverse(tickers, indexMembership = 'SP500') {
   for (const ticker of tickers) {
     await query(
       `INSERT INTO universe_config (ticker, index_membership, active, added_at)
@@ -125,7 +125,7 @@ async function upsertUniverse(records) {
        VALUES ($1,$2,$3,$4,$5,$6,NOW())
        ON CONFLICT (ticker) DO UPDATE SET
          name=EXCLUDED.name, sector=EXCLUDED.sector, market_cap=EXCLUDED.market_cap, last_updated=NOW()`,
-      [r.ticker, r.name, r.sector, r.industry, r.market_cap, r.index_membership || ['SP100']]
+      [r.ticker, r.name, r.sector, r.industry, r.market_cap, r.index_membership || ['SP500']]
     ).catch(err => console.warn('[store] universe upsert:', err.message));
   }
 }

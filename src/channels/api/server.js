@@ -4408,7 +4408,7 @@ let currentRange  = 365;
 let currentCat    = 'all';
 let priceChart    = null;
 
-const CAT_LABELS = {equity:'S&P 100',index:'Indices',etf:'ETFs',crypto:'Crypto',commodity:'Commodities',forex:'Forex'};
+const CAT_LABELS = {equity:'US Equities',index:'Indices',etf:'ETFs',crypto:'Crypto',commodity:'Commodities',forex:'Forex'};
 const CAT_ICONS  = {equity:'📊',index:'📈',etf:'🏦',crypto:'₿',commodity:'🛢️',forex:'💱'};
 
 // ── Market data refresh ───────────────────────────────────────────────────────
