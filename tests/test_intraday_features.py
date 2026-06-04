@@ -158,9 +158,12 @@ class TestCollectFeatures:
         # Quality 0 (full populated)
         assert feat['source_quality_flag'] == 0
 
-    def test_alpaca_only_path_marks_quality_1(self):
-        """Without volume/OI columns (Alpaca CLI-only path), pcr_*
-        and zero_dte_volume_share are NaN and quality_flag=1."""
+    def test_alpaca_only_path_dead_features_do_not_bump_flag(self):
+        """Without volume/OI columns (Alpaca CLI-only path — the ONLY live
+        path since the SP-1 Polygon purge), pcr_* and zero_dte_volume_share
+        are NaN but quality_flag stays 0: permanently-dead Polygon-era
+        features must not pin the flag at 1 (they made it meaningless —
+        every live row was flag=1 regardless of actual chain health)."""
         t_now = pd.Timestamp('2026-05-08 14:00', tz='UTC')
         chain = pd.concat([
             _flat_chain(580.0, 23, 0.20, 400, 760, 2.5, t_now,
@@ -182,7 +185,25 @@ class TestCollectFeatures:
         assert math.isnan(feat['pcr_oi'])
         assert math.isnan(feat['pcr_volume'])
         assert math.isnan(feat['zero_dte_volume_share'])
-        assert feat['source_quality_flag'] >= 1
+        # delta+IV present → rr_25d computes; chain healthy → flag 0
+        assert feat['source_quality_flag'] == 0
+
+    def test_missing_rr_25d_bumps_flag_to_1(self):
+        """rr_25d is the one chain-sourced LIVE model input — a chain with
+        no usable delta must surface as flag=1 (partial)."""
+        t_now = pd.Timestamp('2026-05-08 14:00', tz='UTC')
+        chain = pd.concat([
+            _flat_chain(580.0, 23, 0.20, 400, 760, 2.5, t_now,
+                        with_delta=False, with_volume_oi=False),
+            _flat_chain(580.0, 37, 0.20, 400, 760, 2.5, t_now,
+                        with_delta=False, with_volume_oi=False),
+        ], ignore_index=True)
+        feat = collect_intraday_features(now_utc=t_now,
+                                          spy_chain_df=chain,
+                                          spy_bars=pd.DataFrame(),
+                                          spot=580.0)
+        assert math.isnan(feat['rr_25d'])
+        assert feat['source_quality_flag'] == 1
 
     def test_empty_chain_marks_quality_2(self):
         """Empty chain → vix_synth NaN → quality_flag=2."""
