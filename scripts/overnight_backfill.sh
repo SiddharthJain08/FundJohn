@@ -30,8 +30,10 @@ cov = set(pd.read_parquet('data/master/prices.parquet', columns=['ticker']).tick
 v2 = [l.strip() for l in open('data/.backfill_universe_v2.txt') if l.strip()]
 print(len([t for t in v2 if t not in cov]))
 PYEOF
-)
-if [ $rc -eq 0 ] && grep -q "\[prices\] DONE" "$LOG" && [ "$missing" -eq 0 ]; then
+) || missing=-1
+if [ "$missing" -eq -1 ]; then
+  echo "[sp7-backfill] missing-check FAILED — investigate parquet readability" | tee -a "$LOG"
+elif [ $rc -eq 0 ] && grep -q "\[prices\] DONE" "$LOG" && [ "$missing" -eq 0 ]; then
   rm -f "$ARMED"
   echo "[sp7-backfill] COMPLETE — disarmed" | tee -a "$LOG"
 elif [ $rc -eq 0 ] && grep -q "\[prices\] DONE" "$LOG" ; then
