@@ -64,7 +64,7 @@ PROVIDERS = {
     'financials':        'fmp',
     'earnings':          'yfinance',  # FMP /earnings-surprises returns 404; retargeted 2026-04-30
     'insider':           'sec_edgar',
-    'prices_30m':        'polygon',
+    'prices_30m':        'alpaca',
     'vol_indices':       'yfinance',    # FMP/Polygon return 403/NOT_AUTHORIZED on indices
     'iv_history':        'polygon',     # derived from polygon-sourced options_eod
     'earnings_calendar': 'yfinance',    # FMP earning_calendar bulk endpoint returns 403
