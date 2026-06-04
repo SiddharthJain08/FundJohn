@@ -62,6 +62,25 @@ MASTER_PRICES = ROOT / 'data' / 'master' / 'prices.parquet'
 # (dedupes on (date, contract_symbol) under a thread lock).
 MASTER_OPTIONS = ROOT / 'data' / 'master' / 'options_eod.parquet'
 
+
+# ── Atomic parquet writer ─────────────────────────────────────────────────────
+def _atomic_to_parquet(df, path: Path) -> None:
+    """Write *df* to *path* atomically using a sibling tmp file + os.replace.
+
+    A SIGTERM (or any other signal) mid-write leaves either the old file or the
+    new file intact — never a partial/truncated parquet.  os.replace() is
+    atomic at the filesystem level (POSIX rename(2)) when the source and
+    destination are on the same filesystem, which is always true for a sibling
+    tmp in the same directory.
+
+    If a stray <path>.tmp-promote exists from a prior killed run it is simply
+    overwritten by the new write — no cleanup bookkeeping needed.
+    """
+    tmp = path.with_suffix('.tmp-promote')
+    df.to_parquet(tmp, index=False)
+    os.replace(tmp, path)
+
+
 # Cache-invalidation hook. The src/data/parquet_store.py untracked file looks
 # like the consumer-side cache (see git status). Best-effort import — if not
 # wired in yet, we just skip.
@@ -393,7 +412,7 @@ def _promote_chunk(
             f'  [warn] dedupe collapsed {before - after_dedupe} duplicate rows in {symbol}:{year}\n'
         )
 
-    merged.to_parquet(master_path, index=False)
+    _atomic_to_parquet(merged, master_path)
     return len(df)
 
 
@@ -543,7 +562,7 @@ def _run_prices(args: argparse.Namespace, pg) -> None:
                         pass
                 merged = pd.concat([kept, df_stamped], ignore_index=True)
                 MASTER_PRICES.parent.mkdir(parents=True, exist_ok=True)
-                merged.to_parquet(MASTER_PRICES, index=False)
+                _atomic_to_parquet(merged, MASTER_PRICES)
                 rows_written = len(df_stamped)
             else:
                 rows_written = _promote_chunk(
@@ -667,7 +686,11 @@ def _run_metadata(args: argparse.Namespace, pg) -> None:
 
         audit_id = _audit_start(pg, 'metadata', chunk_key, source_tag)
         try:
-            df = build_month_snapshot(snapshot_date, universe, pg)
+            from src.pipeline.market_cap_lookup import build_market_cap_lookup
+            mcaps = build_market_cap_lookup(list(universe), snapshot_date)
+            df = build_month_snapshot(
+                snapshot_date, universe, pg, market_cap_lookup=mcaps,
+            )
         except Exception as e:
             err = f'build_month_snapshot failed: {e}'
             sys.stderr.write(f'  [error] {chunk_key}: {err}\n')

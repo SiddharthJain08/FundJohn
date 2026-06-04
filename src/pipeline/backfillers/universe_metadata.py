@@ -195,7 +195,8 @@ def _alpaca_status_batch(
     """Read alpaca_tradable_universe in one query for the given symbols.
 
     Filters per-row by point-in-time semantics:
-      - first_seen_at > on    → ticker not yet listed; row absent from result
+      - listed_date > on      → ticker not yet listed; row absent from result
+        (falls back to first_seen_at when listed_date IS NULL — legacy behaviour)
       - last_seen_at < on     → mark status='inactive' (still returned)
     """
     if not symbols:
@@ -205,7 +206,8 @@ def _alpaca_status_batch(
         cur.execute(
             """
             SELECT symbol, asset_class, exchange, status, tradable, shortable,
-                   fractionable, easy_to_borrow, first_seen_at, last_seen_at
+                   fractionable, easy_to_borrow, first_seen_at, last_seen_at,
+                   listed_date
               FROM alpaca_tradable_universe
              WHERE symbol = ANY(%s)
             """,
@@ -216,13 +218,17 @@ def _alpaca_status_batch(
             d = dict(zip(cols, row))
             first_seen = d.get('first_seen_at')
             last_seen = d.get('last_seen_at')
-            # Coerce TIMESTAMPTZ → date for comparison.
+            listed = d.get('listed_date')
+            # Coerce TIMESTAMPTZ / datetime → date for comparison.
             if isinstance(first_seen, datetime):
                 first_seen = first_seen.date()
             if isinstance(last_seen, datetime):
                 last_seen = last_seen.date()
-            if first_seen and first_seen > on:
-                continue  # not yet listed on this date
+            if isinstance(listed, datetime):
+                listed = listed.date()
+            effective_listing = listed or first_seen   # PIT: listed_date wins
+            if effective_listing and effective_listing > on:
+                continue  # not yet listed on the snapshot date
             if last_seen and last_seen < on:
                 d['status'] = 'inactive'
             out[d['symbol']] = d

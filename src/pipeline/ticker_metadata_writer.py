@@ -77,6 +77,7 @@ def build_metadata_rows(
     prices_parquet: dict[str, dict],
     options_cache: dict[str, bool],
     source_tag: str,
+    market_cap_lookup: dict[str, float | None] | None = None,
 ) -> list[dict]:
     """
     Compose enriched metadata rows from the four source dicts.
@@ -89,6 +90,8 @@ def build_metadata_rows(
     in_sp500 prefers the point-in-time historical CSV via
     `_sp500_membership_on(snapshot_date)`. Falls back to the hardcoded
     `SP500_SET` if the CSV is unavailable (covers fresh installs / dev envs).
+
+    market_cap priority: market_cap_lookup > FMP mktCap > None.
     """
     sp500 = _sp500_membership_on(snapshot_date)
     if not sp500:
@@ -110,7 +113,11 @@ def build_metadata_rows(
             "shortable": a.get("shortable", False),
             "fractionable": a.get("fractionable", False),
             "easy_to_borrow": a.get("easy_to_borrow", False),
-            "market_cap": p.get("mktCap"),
+            "market_cap": (
+                market_cap_lookup.get(sym)
+                if market_cap_lookup is not None and market_cap_lookup.get(sym) is not None
+                else p.get("mktCap")
+            ),
             "adv_usd_20d": pp.get("adv_usd_20d"),
             "sector": p.get("sector"),
             "industry": p.get("industry"),
