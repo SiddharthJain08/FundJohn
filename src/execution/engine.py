@@ -1407,6 +1407,11 @@ def main():
                 universe = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META']
         universe = list(dict.fromkeys(universe))  # dedupe preserving order
 
+        # SP-7 Phase A4: gated clamp — pins live equity universe while broad
+        # price backfills widen prices.parquet underneath. Removed in Phase C.
+        from execution.universe_clamp import clamp_universe
+        universe = clamp_universe(universe)
+
         # 3. Load data
         prices   = load_prices(universe)
         aux_data = load_aux_data(universe)
