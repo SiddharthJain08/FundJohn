@@ -23,6 +23,12 @@ from execution.alpaca_executor import _spot_price
 
 logger = logging.getLogger(__name__)
 
+# SP-6 per-ticker conviction cap fraction (operator formula 2026-06-04):
+# cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe| × λ × NAV.
+# Applied in EOD mode only (OPENCLAW_EOD_RECONCILE=1) inside
+# _sharpe_cadence_path — see the cap block there for full rationale.
+PER_TICKER_CAP_SHARPE_FRAC = 0.05
+
 
 def _ortho_enabled(gate: str) -> bool:
     return os.environ.get(gate) == '1'
@@ -1002,6 +1008,41 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 scale = new_scale
             logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
                         len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
+
+    # SP-6 per-ticker conviction cap (operator formula, 2026-06-04):
+    #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(t)| × λ × NAV
+    # Bounds the few-survivor concentration failure: Σ|target| = λ×NAV
+    # renormalizes onto whatever cleared the cum-sharpe gate, so a 1-survivor
+    # day would otherwise put the ENTIRE λ×NAV into one name (2026-06-03
+    # diagnosis: $224.8k = 2× equity into STX; see
+    # /root/sp6_phaseA_conviction_gate_diagnosis_2026-06-04.md §4). The cap
+    # scales with the SAME conviction measure the gate uses (deflated when
+    # OPENCLAW_STRATEGY_CORR_WEIGHT is on, raw otherwise) so high-conviction
+    # names keep proportionally more headroom. Shaved capital is deliberately
+    # NOT redistributed (no renorm-up — that would re-concentrate elsewhere);
+    # on capped days gross simply lands below λ×NAV. Applied AFTER the
+    # min-notional renorm (which pushes freed capital into high-conviction
+    # names — exactly the flow the cap must bound) and BEFORE the cap-exempt
+    # option hedge injection + broker netting. EOD-mode only: rides
+    # OPENCLAW_EOD_RECONCILE so the legacy cadence-window path stays
+    # byte-identical (its multi-day accumulation makes few-survivor days
+    # structurally rare). Missing gate value → fail-open (target untouched).
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        _capped = []
+        for _tkr, _usd in list(target_usd.items()):
+            _gs = gate_net_sharpe.get(_tkr)
+            if _gs is None:
+                continue
+            _cap = PER_TICKER_CAP_SHARPE_FRAC * abs(_gs) * lam * nav
+            if abs(_usd) > _cap:
+                target_usd[_tkr] = _cap if _usd > 0 else -_cap
+                _capped.append((_tkr, _usd, target_usd[_tkr]))
+        if _capped:
+            logger.info(
+                'regime_blended_sizer.sharpe_cadence: per-ticker cap (0.05·|sharpe|·λ·NAV) '
+                'clamped %d ticker(s): %s',
+                len(_capped),
+                [(t, round(o), round(n)) for t, o, n in _capped[:10]])
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
