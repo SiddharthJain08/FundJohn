@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import time
 import urllib.request
@@ -31,14 +30,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.data.parquet_store import append_insert_only, row_count
+
 ROOT = Path("/root/openclaw")
 SHARES_PARQUET = ROOT / "data" / "master" / "shares_outstanding.parquet"
 CIK_MAP = ROOT / "data" / "master" / "_sec_ticker_cik.json"
 PRICES_PARQUET = ROOT / "data" / "master" / "prices.parquet"
 UA = "OpenClaw research (siddharthj1908@gmail.com)"
 MIN_SHARES, MAX_SHARES = 1e6, 2e11  # unit-sanity gates (spec §7)
-
-SCHEMA_COLUMNS = ["ticker", "asof_date", "shares", "form", "filed", "fetched_at"]
 
 
 def fetch_companyfacts(cik_padded: str) -> dict:
@@ -52,6 +51,10 @@ def parse_shares_series(ticker: str, facts: dict) -> list[dict]:
     """Extract deduped shares series. Latest `filed` wins per asof_date.
 
     Returns [] when the entity reports no shares facts (funds, some ADRs).
+
+    Dedup asymmetry: within a run, latest-`filed` wins (amendments supersede);
+    across runs, append_insert_only keeps the first-persisted value (acceptable
+    for cap-tier ranking — corrections are unlikely to change tier assignment).
     """
     entries: list[dict] = []
     for taxonomy, tag in (
@@ -87,26 +90,18 @@ def merge_append_only(parquet_path, new_rows: list[dict]) -> int:
     """Append rows whose (ticker, asof_date) is not already present.
 
     Existing rows are NEVER mutated or dropped (NEVER-DELETE invariant).
-    Atomic: write tmp file then rename. Returns number of rows added.
+    Delegates to append_insert_only for fcntl flock serialization, snappy/
+    pyarrow compression, and correct empty-input handling. Returns number
+    of rows added (not total row count).
     """
+    if not new_rows:
+        return 0
     parquet_path = Path(parquet_path)
     fetched_at = datetime.now(timezone.utc).isoformat()
     new_df = pd.DataFrame([{**r, "fetched_at": fetched_at} for r in new_rows])
-    if parquet_path.exists():
-        existing = pd.read_parquet(parquet_path)
-        if not new_df.empty:
-            key = existing.ticker + "|" + existing.asof_date.astype(str)
-            new_key = new_df.ticker + "|" + new_df.asof_date.astype(str)
-            new_df = new_df[~new_key.isin(set(key))]
-        combined = pd.concat([existing, new_df], ignore_index=True)
-    else:
-        combined = new_df
-    if "fetched_at" not in combined.columns:
-        combined["fetched_at"] = fetched_at
-    tmp = parquet_path.with_suffix(".parquet.tmp")
-    combined.to_parquet(tmp, index=False)
-    os.replace(tmp, parquet_path)
-    return len(new_df)
+    before = row_count(parquet_path)
+    after = append_insert_only(parquet_path, new_df, key_cols=["ticker", "asof_date"])
+    return after - before
 
 
 def _load_universe(args) -> list[str]:

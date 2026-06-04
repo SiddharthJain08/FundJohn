@@ -57,3 +57,29 @@ def test_merge_append_only_never_drops_or_mutates(tmp_path):
     assert len(out) == 2
     jan = out[out.asof_date == "2024-01-26"].iloc[0]
     assert jan.shares == 2464000000  # original row untouched
+
+
+def test_merge_append_only_bootstrap_nonexistent_parquet(tmp_path):
+    """Bootstrap path: parquet does not exist yet — all rows land, file created."""
+    pq = tmp_path / "shares_outstanding.parquet"
+    assert not pq.exists()
+    new_rows = [
+        {"ticker": "AAPL", "asof_date": "2024-01-01", "shares": 15_000_000_000,
+         "form": "10-K", "filed": "2024-02-01"},
+        {"ticker": "AAPL", "asof_date": "2024-04-01", "shares": 15_200_000_000,
+         "form": "10-Q", "filed": "2024-05-01"},
+    ]
+    added = merge_append_only(pq, new_rows)
+    assert pq.exists()
+    out = pd.read_parquet(pq)
+    assert added == 2
+    assert len(out) == 2
+
+
+def test_merge_append_only_empty_new_rows_does_not_create_file(tmp_path):
+    """Empty new_rows: returns 0 and does NOT create a file when none exists."""
+    pq = tmp_path / "shares_outstanding.parquet"
+    assert not pq.exists()
+    added = merge_append_only(pq, [])
+    assert added == 0
+    assert not pq.exists()
