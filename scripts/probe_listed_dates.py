@@ -23,7 +23,9 @@ ALPACA_BIN = "/root/go/bin/alpaca"
 
 
 def earliest_bar_date(symbol: str) -> str | None:
-    args = [ALPACA_BIN, "data", "bars", "--symbol", symbol,
+    # Dash→dot at the API boundary (BRK-B → BRK.B): the data API 400s on the
+    # dash form for share-class/preferred symbols (SP-7 hardening 2026-06-04).
+    args = [ALPACA_BIN, "data", "bars", "--symbol", symbol.replace("-", "."),
             "--start", "2000-01-03", "--end", "2026-12-31",
             "--timeframe", "1Day", "--adjustment", "split", "--sort", "asc", "--limit", "1"]
     res = subprocess.run(args, capture_output=True, text=True, timeout=60)

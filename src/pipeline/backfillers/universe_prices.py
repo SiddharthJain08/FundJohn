@@ -76,9 +76,15 @@ def fetch_ticker_year(symbol: str, year: int) -> pd.DataFrame:
     end = min(f'{year}-12-31', yesterday)
     if start > end:
         return pd.DataFrame()  # chunk entirely in the future (e.g. Jan 1 run)
+    # SP-7 hardening (2026-06-04): share-class/preferred symbols are stored
+    # dash-form in the master parquet (BRK-B, AGM-PRI) but the Alpaca data API
+    # requires the dot form (BRK.B, AGM.PRI) — same boundary translation the
+    # collector does (collector.js fillPricesAlpaca). Dash form gets HTTP 400
+    # "invalid symbol" → chunk fails → retried every night, forever.
+    api_symbol = symbol.replace('-', '.')
     args = [
         ALPACA_BIN, 'data', 'bars',
-        '--symbol', symbol,
+        '--symbol', api_symbol,
         '--start', start,
         '--end', end,
         '--timeframe', '1Day',

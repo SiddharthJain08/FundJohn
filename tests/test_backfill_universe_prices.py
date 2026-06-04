@@ -439,3 +439,33 @@ class TestFetchEndCappedAtYesterday:
                             lambda *a, **k: called.append(1))
         df = up.fetch_ticker_year('TEST', date.today().year + 1)
         assert df.empty and not called
+
+
+class TestApiSymbolDashToDot:
+    """SP-7 hardening: dash-form class/preferred symbols must hit the API dot-form."""
+
+    def test_dash_symbol_translated_for_api_but_ticker_kept(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args, **kw):
+            captured['symbol'] = args[args.index('--symbol') + 1]
+            return mock.Mock(returncode=0, stdout=(
+                '{"bars": [{"t": "2021-01-04T05:00:00Z", "o": 1, "h": 1,'
+                ' "l": 1, "c": 1, "v": 10, "vw": 1, "n": 1}],'
+                ' "next_page_token": null}'), stderr='')
+
+        monkeypatch.setattr(up.subprocess, 'run', fake_run)
+        df = up.fetch_ticker_year('AGM-PRI', 2021)
+        assert captured['symbol'] == 'AGM.PRI'      # API gets dot form
+        assert df.iloc[0]['ticker'] == 'AGM-PRI'    # parquet keeps dash form
+
+    def test_plain_symbol_unchanged(self, monkeypatch):
+        captured = {}
+
+        def fake_run(args, **kw):
+            captured['symbol'] = args[args.index('--symbol') + 1]
+            return mock.Mock(returncode=0, stdout='{"bars": []}', stderr='')
+
+        monkeypatch.setattr(up.subprocess, 'run', fake_run)
+        up.fetch_ticker_year('DELL', 2021)
+        assert captured['symbol'] == 'DELL'
