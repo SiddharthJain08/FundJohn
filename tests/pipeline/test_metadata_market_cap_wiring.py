@@ -1,7 +1,6 @@
 from datetime import date
 
 from src.pipeline.ticker_metadata_writer import build_metadata_rows
-from src.pipeline.backfillers.universe_metadata import rank_in_r1000_r3000
 
 
 ALPACA_ROWS = [
