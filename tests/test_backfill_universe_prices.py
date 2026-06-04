@@ -408,3 +408,34 @@ def test_overlap_refused_v1(pg_conn, redis_clean, tmp_path, monkeypatch):
         assert client.get(f'backfill:5y:prices:{ticker}:2024') == 'promoted'
     finally:
         _cleanup_audit_pg(pg_conn, ticker)
+
+
+class TestFetchEndCappedAtYesterday:
+    """SP-7 hardening: daytime runs must never ingest today's in-progress bar."""
+
+    def _captured_end(self, monkeypatch, year):
+        captured = {}
+
+        def fake_run(args, **kw):
+            captured['end'] = args[args.index('--end') + 1]
+            return mock.Mock(returncode=0, stdout='{"bars": []}', stderr='')
+
+        monkeypatch.setattr(up.subprocess, 'run', fake_run)
+        up.fetch_ticker_year('TEST', year)
+        return captured.get('end')
+
+    def test_current_year_end_is_yesterday(self, monkeypatch):
+        from datetime import date, timedelta
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        assert self._captured_end(monkeypatch, date.today().year) == yesterday
+
+    def test_past_year_end_unchanged(self, monkeypatch):
+        assert self._captured_end(monkeypatch, 2021) == '2021-12-31'
+
+    def test_future_chunk_returns_empty_without_fetch(self, monkeypatch):
+        from datetime import date
+        called = []
+        monkeypatch.setattr(up.subprocess, 'run',
+                            lambda *a, **k: called.append(1))
+        df = up.fetch_ticker_year('TEST', date.today().year + 1)
+        assert df.empty and not called

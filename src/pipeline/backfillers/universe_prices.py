@@ -62,9 +62,20 @@ def fetch_ticker_year(symbol: str, year: int) -> pd.DataFrame:
     response — empty is a legitimate "this ticker has no data here" signal.
     Uses subprocess timeout=60 per task spec; the CLI's own 30s HTTP timeout
     bounds individual calls.
+
+    SP-7 hardening (2026-06-04): the fetch end is capped at YESTERDAY (UTC).
+    A daytime run during RTH would otherwise capture today's IN-PROGRESS bar
+    as the permanent close (append-only store never corrects it). Nightly
+    01:00 UTC runs are unaffected: yesterday-UTC is the just-closed session.
+    Current-year chunks re-fetched on later runs pick up the gap via the
+    driver's existing date-overlap accounting.
     """
+    from datetime import date as _date, timedelta as _timedelta
+    yesterday = (_date.today() - _timedelta(days=1)).isoformat()
     start = f'{year}-01-01'
-    end = f'{year}-12-31'
+    end = min(f'{year}-12-31', yesterday)
+    if start > end:
+        return pd.DataFrame()  # chunk entirely in the future (e.g. Jan 1 run)
     args = [
         ALPACA_BIN, 'data', 'bars',
         '--symbol', symbol,
