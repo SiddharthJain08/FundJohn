@@ -416,11 +416,16 @@ def _record_dtbp_skip(conn, run_date, order, equity: float) -> None:
         'reason':   'dtbp_budget_exhausted',
         'entry':    order.get('entry'),
     }
+    # Audit rows need UNIQUE client_order_ids: on 2026-06-04 (first live fill
+    # day) two dtbp skips both wrote coid='' → unique-key violation → the
+    # alpaca step aborted with ~30 of 48 sized orders never attempted.
+    import uuid as _uuid
+    audit_coid = f"skip-dtbp-{run_date}-{order.get('ticker', '?')}-{_uuid.uuid4().hex[:8]}"
     record_submission(
         conn, run_date, order, resp,
         order.get('tif') or 'day',
         order.get('order_class') or 'simple',
-        '',
+        audit_coid,
     )
 
 
