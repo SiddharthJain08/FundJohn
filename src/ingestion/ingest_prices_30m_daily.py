@@ -69,7 +69,8 @@ def compute_window(df: pd.DataFrame, from_override: Optional[str] = None) -> Tup
     """
     import pytz
     et_tz = pytz.timezone('America/New_York')
-    today_et = date.today()  # server may be UTC; caller is responsible for TZ awareness
+    import datetime as _dt
+    today_et = _dt.datetime.now(et_tz).date()  # ET calendar date (server runs UTC)
 
     if from_override:
         start_str = from_override
