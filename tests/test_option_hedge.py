@@ -394,3 +394,37 @@ def test_route_mleg_close_deactivation_failure_does_not_abort(monkeypatch):
     # Must not raise; close result returns normally despite the DB failure.
     res = ex._route_mleg_close(order, spec, coid='mc2')
     assert res['status'] == 'submitted'
+
+
+def test_leg_delta_extracts_true_occ_root_not_alpha_chars():
+    """H4 root cause (T9 live smoke 2026-06-04): the underlying was derived via
+    ''.join(c for c in occ if c.isalpha()), which swallows the OCC right-letter
+    ('SPY260626C00754000' -> 'SPYC', puts -> 'SPYP') so _spot_price could never
+    resolve and EVERY leg delta fail-closed to None — the hedge-target producer
+    was structurally unable to emit. The true root is everything before the
+    fixed 15-char OCC tail (yymmdd + C/P + 8-digit strike)."""
+    from execution.option_hedge import _leg_delta
+    from unittest.mock import patch
+    spot_calls, chain_calls = [], []
+
+    def _fake_spot(sym):
+        spot_calls.append(sym)
+        return 754.1
+
+    def _fake_chain(und, exp, right, spot, band_pct):
+        chain_calls.append(und)
+        # underlying-sensitive: only the TRUE root yields the leg's snapshot
+        if und != 'SPY':
+            return []
+        occ = 'SPY260626C00754000' if right == 'call' else 'SPY260626P00754000'
+        return [(754.0, 0.5123 if right == 'call' else -0.4877, occ)]
+
+    with patch('execution.alpaca_executor._spot_price', side_effect=_fake_spot), \
+         patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_chain):
+        d_call = _leg_delta('SPY260626C00754000', 'call', 754.0, '2026-06-26')
+        d_put = _leg_delta('SPY260626P00754000', 'put', 754.0, '2026-06-26')
+
+    assert spot_calls == ['SPY', 'SPY']     # NOT 'SPYC' / 'SPYP'
+    assert chain_calls == ['SPY', 'SPY']
+    assert d_call == 0.5123
+    assert d_put == -0.4877
