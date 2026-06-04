@@ -223,8 +223,13 @@ def _check_option_expiry_floor():
     from execution.regime_blended_sizer import _is_occ_symbol, _occ_dte
     try:
         positions = _run_alpaca_cli(['position', 'list'])
+        # WARN not FAIL: broker-unreachable is already FAILed by check_alpaca_auth;
+        # this check is a stray-leg/expiry backstop, not a connectivity probe.
     except Exception as e:
         return _warn('option_expiry_floor', f'broker fetch failed: {e}')
+    if not isinstance(positions, list):
+        return _warn('option_expiry_floor',
+                     f'broker returned non-list: {type(positions).__name__}')
     legs = []
     for p in positions or []:
         try:
@@ -238,8 +243,10 @@ def _check_option_expiry_floor():
         return _ok('option_expiry_floor', 'no option legs held')
     bad = [(s, d) for s, d in legs if d <= 3]
     if bad:
+        sample = bad[:10]
+        suffix = f' … and {len(bad) - 10} more' if len(bad) > 10 else ''
         return _fail('option_expiry_floor',
-                     f'{len(bad)} held leg(s) at DTE<=3 (expiry close has not landed): {bad}')
+                     f'{len(bad)} held leg(s) at DTE<=3 (expiry close has not landed): {sample}{suffix}')
     return _ok('option_expiry_floor',
                f'{len(legs)} leg(s) held, min DTE={min(d for _, d in legs)}')
 

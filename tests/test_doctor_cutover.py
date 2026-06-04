@@ -85,7 +85,8 @@ def test_option_expiry_floor_fails_at_dte_3(mock_cli):
     ]
     res = doctor._check_option_expiry_floor()
     assert res['severity'] == 'fail'
-    assert 'DTE' in res['detail']
+    assert 'DTE<=3' in res['detail']
+    assert '1 held leg(s)' in res['detail']
 
 
 @patch('src.maintenance.doctor._run_alpaca_cli')
@@ -93,3 +94,13 @@ def test_option_expiry_floor_warns_on_fetch_failure(mock_cli):
     mock_cli.side_effect = RuntimeError('alpaca cli rc=1')
     res = doctor._check_option_expiry_floor()
     assert res['severity'] == 'warn'
+    assert 'broker fetch failed' in res['detail']
+
+
+@patch('src.maintenance.doctor._run_alpaca_cli')
+def test_option_expiry_floor_warns_on_non_list_payload(mock_cli):
+    """A dict-shaped error payload (CLI exit 0 but error JSON) must WARN, not crash."""
+    mock_cli.return_value = {'error': 'internal', 'code': 500}
+    res = doctor._check_option_expiry_floor()
+    assert res['severity'] == 'warn'
+    assert 'non-list' in res['detail']
