@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # _sharpe_cadence_path — see the cap block there for full rationale.
 PER_TICKER_CAP_SHARPE_FRAC = 0.05
 
+# SP-5.3 — force-close held option structures at/below this calendar DTE
+# (operator-locked 2026-06-04: 7 calendar days, single rule for all structures).
+# Override via OPENCLAW_OPTION_EXPIRY_CLOSE_DTE (parse-guarded).
+OPTION_EXPIRY_CLOSE_DTE = 7
+
 
 def _ortho_enabled(gate: str) -> bool:
     return os.environ.get(gate) == '1'
@@ -397,6 +402,33 @@ def _is_occ_symbol(sym) -> bool:
     if not sym:
         return False
     return bool(_OCC_RE.match(str(sym).strip().upper()))
+
+
+def _expiry_close_dte() -> int:
+    """SP-5.3 threshold resolver: env override or the module default."""
+    raw = os.environ.get('OPENCLAW_OPTION_EXPIRY_CLOSE_DTE')
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning('expiry_close_dte: unparseable override %r — using default %d',
+                           raw, OPTION_EXPIRY_CLOSE_DTE)
+    return OPTION_EXPIRY_CLOSE_DTE
+
+
+def _occ_dte(occ: str, today=None):
+    """SP-5.3 (C1): calendar days to expiry from the OCC tail (yymmdd at occ[-15:-9];
+    the _OCC_RE filter upstream guarantees 6 digits there). Parse failure → DTE 0
+    + loud warning: an unreadable expiry is an unmanageable position — close it."""
+    import datetime as _dt
+    today = today or _dt.date.today()
+    try:
+        tail = occ[-15:-9]
+        exp = _dt.date(2000 + int(tail[:2]), int(tail[2:4]), int(tail[4:6]))
+        return (exp - today).days
+    except (ValueError, IndexError):
+        logger.warning('occ_dte: unparseable expiry on %r — treating as DTE 0 (expiring)', occ)
+        return 0
 
 
 def _load_broker_positions_usd():
