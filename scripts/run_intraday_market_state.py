@@ -154,11 +154,21 @@ def _carry_forward_tick(conn, features: dict) -> dict:
     """
     history = _last_n_states(conn, LOOKBACK_FOR_CONFIRMED)
     if history:
-        carried = history[0].get('state') or 'UNKNOWN'
-        try:
-            carried_conf = float(history[0].get('confidence') or 0.0)
-        except (TypeError, ValueError):
-            carried_conf = 0.0
+        # Carry the SETTLED regime (last fired row, or streak>=3 fallback),
+        # NOT the raw last state: an unconfirmed 1-tick boundary flip on the
+        # final scored tick must not own the night — its streak would grow
+        # past the settled threshold by morning and the first real ticks
+        # would fire a spurious 'transition back' + redeploy.
+        carried = (_find_settled_regime(history)
+                   or history[0].get('state') or 'UNKNOWN')
+        carried_conf = 0.0
+        for row in history:
+            if row.get('state') == carried:
+                try:
+                    carried_conf = float(row.get('confidence') or 0.0)
+                except (TypeError, ValueError):
+                    carried_conf = 0.0
+                break
     else:
         # Cold start while the market is closed — mirror bootstrap mode.
         carried, carried_conf = 'UNKNOWN', 0.0

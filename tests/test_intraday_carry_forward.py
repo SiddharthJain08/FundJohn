@@ -129,6 +129,61 @@ class TestCarryForwardTick:
         assert result['state'] == 'LOW_VOL'
         assert result['fired'] is False
 
+    def test_carries_settled_regime_not_unconfirmed_boundary_flip(self, monkeypatch):
+        """A 1-tick artifact flip on the LAST scored tick (16:15) must NOT
+        own the night: carry the SETTLED regime (fired row or streak>=3),
+        not the raw last state. Otherwise the artifact's streak grows past
+        the settled threshold overnight and triggers a spurious 'transition
+        back' + redeploy on the first real ticks next morning."""
+        history = [
+            {'state': 'TRANSITIONING', 'confidence': 0.72, 'hysteresis_streak': 1,
+             'fired_liquidation': False, 'transition_tag': None},   # 16:15 artifact
+            {'state': 'LOW_VOL', 'confidence': 0.97, 'hysteresis_streak': 9,
+             'fired_liquidation': False, 'transition_tag': None},
+            {'state': 'LOW_VOL', 'confidence': 0.96, 'hysteresis_streak': 8,
+             'fired_liquidation': False, 'transition_tag': None},
+        ]
+        persisted = {}
+
+        def _capture(conn, ts_utc, state, prior_state, confidence,
+                     hysteresis_streak, *rest):
+            persisted.update(state=state, prior=prior_state, conf=confidence,
+                             streak=hysteresis_streak)
+
+        monkeypatch.setattr(detector, '_last_n_states', lambda conn, n: history)
+        monkeypatch.setattr(detector, '_persist_state_row', _capture)
+
+        result = detector._carry_forward_tick(
+            _FakeConn(), _features(_ts('2026-06-03 20:20')))
+
+        assert persisted['state'] == 'LOW_VOL'          # settled, not artifact
+        assert persisted['conf'] == pytest.approx(0.97)  # settled regime's last conf
+        assert persisted['streak'] == 1                  # restarts vs the artifact row
+        assert result['state'] == 'LOW_VOL'
+
+    def test_carries_fired_transition_state(self, monkeypatch):
+        """A CONFIRMED transition (fired row) at the close IS the settled
+        regime — carry it, even at streak 1."""
+        history = [
+            {'state': 'HIGH_VOL', 'confidence': 0.91, 'hysteresis_streak': 2,
+             'fired_liquidation': True,
+             'transition_tag': 'INTRADAY_HMM_REDEPLOY_TRANSITIONING_HIGH_VOL'},
+            {'state': 'TRANSITIONING', 'confidence': 0.95, 'hysteresis_streak': 6,
+             'fired_liquidation': False, 'transition_tag': None},
+        ]
+        persisted = {}
+        monkeypatch.setattr(detector, '_last_n_states', lambda conn, n: history)
+        monkeypatch.setattr(
+            detector, '_persist_state_row',
+            lambda conn, ts, state, prior, conf, streak, *rest:
+                persisted.update(state=state, streak=streak))
+
+        result = detector._carry_forward_tick(
+            _FakeConn(), _features(_ts('2026-06-03 20:20')))
+        assert persisted['state'] == 'HIGH_VOL'
+        assert persisted['streak'] == 2   # continues the fired run's streak
+        assert result['state'] == 'HIGH_VOL'
+
     def test_cold_start_persists_unknown(self, monkeypatch):
         persisted = {}
 
