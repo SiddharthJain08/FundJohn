@@ -667,7 +667,11 @@ def _run_metadata(args: argparse.Namespace, pg) -> None:
 
         audit_id = _audit_start(pg, 'metadata', chunk_key, source_tag)
         try:
-            df = build_month_snapshot(snapshot_date, universe, pg)
+            from src.pipeline.market_cap_lookup import build_market_cap_lookup
+            mcaps = build_market_cap_lookup(list(universe), snapshot_date)
+            df = build_month_snapshot(
+                snapshot_date, universe, pg, market_cap_lookup=mcaps,
+            )
         except Exception as e:
             err = f'build_month_snapshot failed: {e}'
             sys.stderr.write(f'  [error] {chunk_key}: {err}\n')

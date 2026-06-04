@@ -48,9 +48,12 @@ def main():
     fmp_profile = load_json(FMP_PROFILE_CACHE)
     options_cache = load_json(OPTIONS_ELIGIBILITY_CACHE)
     prices_parquet = adv_usd_from_parquet(symbols)
+    from src.pipeline.market_cap_lookup import build_market_cap_lookup
+    market_caps = build_market_cap_lookup(symbols, today)
     rows = build_metadata_rows(
         today, alpaca_rows, fmp_profile, prices_parquet, options_cache,
         source_tag="live_daily",
+        market_cap_lookup=market_caps,
     )
     n = write_snapshots(DSN, rows)
     print(json.dumps({"date": str(today), "rows": n}))
