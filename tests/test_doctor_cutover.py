@@ -7,6 +7,7 @@ from src.maintenance.doctor import (
     _check_options_archive_freshness,
     _check_cboe_vol_indices_freshness,
 )
+from src.maintenance import doctor
 
 
 @patch('src.maintenance.doctor._run_alpaca_cli')
@@ -45,3 +46,50 @@ def test_options_archive_freshness_fails_at_4d(mock_last):
     mock_last.return_value = date.today() - timedelta(days=4)
     result = _check_options_archive_freshness()
     assert result['severity'] == 'fail'
+
+
+# ── SP-5.3: option_expiry_floor ─────────────────────────────────────────────
+
+def _occ_days_out(root, days_out, right='C'):
+    from datetime import date, timedelta
+    exp = date.today() + timedelta(days=days_out)
+    return f"{root}{exp.strftime('%y%m%d')}{right}00500000"
+
+
+@patch('src.maintenance.doctor._run_alpaca_cli')
+def test_option_expiry_floor_passes_no_legs(mock_cli):
+    mock_cli.return_value = [
+        {'symbol': 'AAPL', 'qty': '100'},
+        {'symbol': 'BTC/USD', 'qty': '0.5'},
+    ]
+    res = doctor._check_option_expiry_floor()
+    assert res['severity'] == 'pass'
+    assert 'no option legs' in res['detail']
+
+
+@patch('src.maintenance.doctor._run_alpaca_cli')
+def test_option_expiry_floor_passes_far_dated(mock_cli):
+    mock_cli.return_value = [{'symbol': _occ_days_out('SPY', 20), 'qty': '1'}]
+    res = doctor._check_option_expiry_floor()
+    assert res['severity'] == 'pass'
+    assert 'min DTE=20' in res['detail']
+
+
+@patch('src.maintenance.doctor._run_alpaca_cli')
+def test_option_expiry_floor_fails_at_dte_3(mock_cli):
+    """DTE<=3 means the sizer's T-7 daily-retry close failed 4+ sessions (or the
+    EOD cycle is dead) — FAIL loud."""
+    mock_cli.return_value = [
+        {'symbol': _occ_days_out('SPY', 3), 'qty': '1'},
+        {'symbol': _occ_days_out('SPY', 20, right='P'), 'qty': '1'},
+    ]
+    res = doctor._check_option_expiry_floor()
+    assert res['severity'] == 'fail'
+    assert 'DTE' in res['detail']
+
+
+@patch('src.maintenance.doctor._run_alpaca_cli')
+def test_option_expiry_floor_warns_on_fetch_failure(mock_cli):
+    mock_cli.side_effect = RuntimeError('alpaca cli rc=1')
+    res = doctor._check_option_expiry_floor()
+    assert res['severity'] == 'warn'
