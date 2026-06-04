@@ -230,3 +230,105 @@ def test_held_fetch_error_suppresses_all_opens(monkeypatch, caplog):
     assert [o for o in orders if o.get('instrument_class') == 'option'] == []
     assert any('suppressing all' in r.message.lower() for r in caplog.records)
     assert any(o['ticker'] == 'AAPL' for o in orders), 'equity must be unaffected'
+
+
+# ===========================================================================
+# C3 — expiry close: held + still-targeted + min DTE <= 7 → forced close
+# ===========================================================================
+
+def _opt_sigs():
+    return [
+        _sig('S_eq_aapl', 'AAPL', direction=1),
+        _sig('S_opt_spy', 'SPY', direction='BUY_VOL', option_spec=_STRADDLE_SPEC),
+    ]
+
+
+def test_expiry_close_at_dte_7(monkeypatch):
+    """min DTE == 7 (boundary, <=) → __close_option_expiry__ with the proven
+    held_legs shape; the open stays suppressed (no same-cycle close+open)."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.delenv('OPENCLAW_OPTION_EXPIRY_CLOSE_DTE', raising=False)
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': [_occ('SPY', 7), _occ('SPY', 44, right='P')]})
+    orders = _run_sizer(monkeypatch, _opt_sigs())
+    closes = [o for o in orders if o.get('strategy_id') == '__close_option_expiry__']
+    assert len(closes) == 1, f'expiry close expected at DTE 7, got {orders}'
+    c = closes[0]
+    assert c['ticker'] == 'SPY'
+    assert c['instrument_class'] == 'option'
+    assert c['option_spec'] == {'underlying': 'SPY', 'structure': 'held_legs'}
+    assert c['action'] == 'CLOSE'
+    assert c['target_usd'] == 0.0 and c['current_usd'] == 0.0
+    assert c['contributing_strategies'] == ['__close_option_expiry__']
+    opens = [o for o in orders if o.get('instrument_class') == 'option'
+             and o.get('action') != 'CLOSE']
+    assert opens == [], 'open must stay suppressed on the expiry-close day'
+
+
+def test_no_expiry_close_at_dte_8(monkeypatch):
+    """min DTE == 8 → hold: no close, open suppressed."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.delenv('OPENCLAW_OPTION_EXPIRY_CLOSE_DTE', raising=False)
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': [_occ('SPY', 8)]})
+    orders = _run_sizer(monkeypatch, _opt_sigs())
+    assert [o for o in orders if o.get('instrument_class') == 'option'] == [], \
+        'DTE 8: neither close nor open expected'
+
+
+def test_expiry_close_eod_production_path(monkeypatch):
+    """The expiry close fires through the PRODUCTION path (OPENCLAW_EOD_RECONCILE=1)."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.delenv('OPENCLAW_OPTION_EXPIRY_CLOSE_DTE', raising=False)
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': [_occ('SPY', 3)]})
+    orders = _run_sizer_eod(monkeypatch, _opt_sigs())
+    closes = [o for o in orders if o.get('strategy_id') == '__close_option_expiry__']
+    assert len(closes) == 1 and closes[0]['ticker'] == 'SPY'
+
+
+def test_not_in_targets_near_expiry_is_orphan_only(monkeypatch):
+    """Held + NOT in targets at DTE<=7 → exactly ONE close, the ORPHAN close (the
+    truth-table rows are disjoint — never a double close)."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': [_occ('SPY', 3)]})
+    # Equity-only signals — SPY has no live option target.
+    orders = _run_sizer(monkeypatch, [_sig('S_eq_aapl', 'AAPL', direction=1)])
+    closes = [o for o in orders if o.get('instrument_class') == 'option'
+              and o.get('action') == 'CLOSE']
+    assert len(closes) == 1
+    assert closes[0]['strategy_id'] == '__close_option_orphan__'
+
+
+def test_unparseable_expiry_closes(monkeypatch):
+    """A held leg with an unreadable expiry (DTE→0) is unmanageable → expiry close."""
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(_sizer, '_held_option_underlyings',
+                        lambda: {'SPY': ['SPY999999C00500000']})
+    orders = _run_sizer(monkeypatch, _opt_sigs())
+    closes = [o for o in orders if o.get('strategy_id') == '__close_option_expiry__']
+    assert len(closes) == 1
+
+
+# ===========================================================================
+# C3 — executor dispatch: __close_option_expiry__ rides _route_mleg_close
+# (dispatch keys on close_only + structure != 'single', NOT strategy_id)
+# ===========================================================================
+
+def test_expiry_close_dispatches_to_mleg_close(monkeypatch):
+    import execution.alpaca_executor as _ex
+    from strategies.base import OptionSpec
+    spec = OptionSpec.from_dict({'underlying': 'SPY', 'structure': 'held_legs'})
+    order = {'ticker': 'SPY', 'instrument_class': 'option', 'direction': 'long',
+             'strategy_id': '__close_option_expiry__', 'option_spec': spec,
+             'close_only': True}
+    monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    monkeypatch.setattr(_ex, '_options_session_gate', lambda: (True, ''))
+    called = {}
+    monkeypatch.setattr(_ex, '_route_mleg_close',
+                        lambda o, s, c: called.update(spec=s) or {'status': 'submitted'})
+    res = _ex._route_option_order(order, equity=100_000.0, coid='exp1')
+    assert called.get('spec') is spec, \
+        '__close_option_expiry__ must dispatch to _route_mleg_close'
+    assert res['status'] == 'submitted'

@@ -1230,9 +1230,44 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                              '(cannot prove underlyings flat)', len(_opt_orders))
             _opt_orders = []
         else:
-            _opt_target_tickers = {o['ticker'] for o in _opt_orders}
+            _opt_target_tickers = {str(o['ticker']).upper() for o in _opt_orders}
             for _underlying, _legs in _held.items():
                 if _underlying in _opt_target_tickers:
+                    # SP-5.3 (C3): held AND still-targeted — force-close approaching
+                    # expiry (T−7, operator-locked). The open stays suppressed below,
+                    # so a close NEVER co-emits with an open (structurally no
+                    # same-cycle flatten-the-new-legs hazard); the strategy's own
+                    # next signal reopens at fresh dte_target once the book is flat
+                    # (the organic roll). Retry-by-construction: still-held legs
+                    # re-emit this close every cycle until flat.
+                    _dte = min(_occ_dte(_o) for _o in _legs)
+                    if _dte <= _expiry_close_dte():
+                        logger.info('regime_blended_sizer.sharpe_cadence: option EXPIRY '
+                                    'close for %s (min DTE=%d <= %d; %d held leg(s))',
+                                    _underlying, _dte, _expiry_close_dte(), len(_legs))
+                        orders.append({
+                            'ticker':                  _underlying,
+                            'strategy_id':             '__close_option_expiry__',
+                            'direction':               'long',
+                            'notional_usd':            0.0,
+                            'pct_nav':                 0.0,
+                            'shares':                  0,
+                            'entry':                   None,
+                            'stop':                    None,
+                            't1':                      None,
+                            't2':                      None,
+                            'kelly_final':             0.0,
+                            'ev':                      0.0,
+                            'p_t1':                    0.5,
+                            'source_mode':             'sharpe_cadence',
+                            'target_usd':              0.0,
+                            'current_usd':             0.0,
+                            'contributing_strategies': ['__close_option_expiry__'],
+                            'flip_action':             None,
+                            'action':                  'CLOSE',
+                            'instrument_class':        'option',
+                            'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
+                        })
                     continue
                 logger.info('regime_blended_sizer.sharpe_cadence: option orphan-close for %s '
                             '(%d held leg(s), no live option target)', _underlying, len(_legs))
@@ -1260,12 +1295,12 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                     'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
                 })
             # SP-5.3 (C2): suppress opens whose underlying already has held legs.
-            _suppressed = sorted({o['ticker'] for o in _opt_orders if o['ticker'] in _held})
+            _suppressed = sorted({o['ticker'] for o in _opt_orders if str(o['ticker']).upper() in _held})
             if _suppressed:
                 logger.info('regime_blended_sizer.sharpe_cadence: option open SUPPRESSED '
                             'for %s — structure already held (SP-5.3 stacking guard)',
                             _suppressed)
-                _opt_orders = [o for o in _opt_orders if o['ticker'] not in _held]
+                _opt_orders = [o for o in _opt_orders if str(o['ticker']).upper() not in _held]
     orders.extend(_opt_orders)
     return orders
 
