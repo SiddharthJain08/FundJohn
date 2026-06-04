@@ -4,6 +4,10 @@
 Pipeline:
   1. Collect 9 features via collect_intraday_features().
   2. Append features row to data/master/intraday_features.parquet.
+  2b. If the tick is OUTSIDE option-market hours (9:30-16:15 ET), persist a
+      carry-forward row (last state, streak extended, quality_flag=3) and
+      STOP — frozen chain quotes are time-decay drift, not signal, and the
+      model is trained on RTH rows only. No scoring, no transitions.
   3. If hmm_intraday_latest.pkl exists: score → state + confidence.
      If not: log "no model — accumulating data" and write a state row
      with state=UNKNOWN, confidence=0. Detector still runs every tick;
@@ -55,6 +59,15 @@ TRANSITIONING_FALLBACK = 'TRANSITIONING'
 STATE_NAMES_BY_RANK    = {0: 'LOW_VOL', 1: 'TRANSITIONING',
                           2: 'HIGH_VOL', 3: 'CRISIS'}
 
+# SPY option market hours (ET). Outside this window chain quotes are FROZEN
+# at the prior close, so the synthetic-VIX features become a deterministic
+# time-decay ramp rather than market signal — scoring them produced artifact
+# state flips (2026-06-02: all 6 flips after-hours; 06-03: 12 of 40). Ticks
+# outside the window run the carry-forward path instead of the HMM.
+# Mirrors the dashboard's CARRY-FWD QUOTES badge (server.js, 570..975 min).
+OPTION_MKT_OPEN_MIN  = 9 * 60 + 30    # 9:30 ET
+OPTION_MKT_CLOSE_MIN = 16 * 60 + 15   # 16:15 ET
+
 # Tiered hysteresis: (required_ticks_to_fire, required_confidence_at_fire).
 # Higher-severity upward transitions get faster confirmation (fewer ticks)
 # but tighter confidence floors to counterbalance noise. Downward transitions
@@ -76,14 +89,14 @@ _STATE_RANK            = {'LOW_VOL': 0, 'TRANSITIONING': 1,
 # yesterday's last confirmed state through the overnight gap.
 LOOKBACK_FOR_CONFIRMED = 120
 
-# HMM input feature ordering — fixed for compatibility with stored pickles.
-# When new features are added later (e.g., PCR/0DTE once we wire Polygon
-# enrichment), append at the END so prior pickles still work. Order matters.
+# HMM input feature ordering — FALLBACK ONLY: used when a stored pickle
+# lacks `feature_names_` (every model since the 2026-05-20 v3 trainer sets
+# it). Kept in sync with train_intraday_hmm.HMM_INPUT_COLS (v3: dropped
+# spy_realized_vol_30m — dead since the SP-1 Polygon purge — and added the
+# two daily-derived features).
 HMM_INPUT_COLS = [
     'vix_synth_30d', 'vix_synth_90d', 'vix_term_slope',
-    'rr_25d', 'spy_realized_vol_30m',
-    # NaN-safe ordering: leave OI/volume features at the back; their
-    # NaN-imputation strategy may diverge once added to training.
+    'rr_25d', 'spy_gk_vol_daily', 'vvix_level',
 ]
 
 MODEL_DIR = ROOT / '.agents' / 'market-state'
@@ -107,6 +120,79 @@ def _is_live_intraday() -> bool:
     """Phase 1: surfaces in the Discord notification only (no broker
     action — see Phase 2 for the redeploy spawn this flag will arm)."""
     return os.environ.get('OPENCLAW_INTRADAY_HMM_LIVE') == '1'
+
+
+def _is_option_market_open(ts_utc) -> bool:
+    """True when SPY options are trading (9:30-16:15 ET, Mon-Fri).
+
+    Market holidays are NOT modelled (same as the dashboard badge) — a
+    holiday weekday scores frozen quotes exactly as it did before this
+    guard existed; acceptable, since the failure mode is one stale day,
+    not a nightly recurrence.
+    """
+    ts = pd.Timestamp(ts_utc)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize('UTC')
+    et = ts.tz_convert('America/New_York')
+    if et.weekday() >= 5:
+        return False
+    minutes = et.hour * 60 + et.minute
+    return OPTION_MKT_OPEN_MIN <= minutes <= OPTION_MKT_CLOSE_MIN
+
+
+def _carry_forward_tick(conn, features: dict) -> dict:
+    """Persist a carry-forward state row WITHOUT scoring the HMM.
+
+    Used for every tick outside option-market hours (pre-9:30 / post-16:15
+    ET): the chain quotes are frozen, so the model would classify
+    deterministic time-decay drift it was never trained on (the trainer
+    filters to RTH). Instead, carry the last persisted state forward with
+    its streak extended so hysteresis lookback and the dashboard duration
+    stay continuous across the closed window. No transition can fire and
+    `_sync_regime_to_consumers` never runs, so a frozen-quote artifact can
+    no longer overwrite market_regime / regime_latest.json overnight.
+    """
+    history = _last_n_states(conn, LOOKBACK_FOR_CONFIRMED)
+    if history:
+        # Carry the SETTLED regime (last fired row, or streak>=3 fallback),
+        # NOT the raw last state: an unconfirmed 1-tick boundary flip on the
+        # final scored tick must not own the night — its streak would grow
+        # past the settled threshold by morning and the first real ticks
+        # would fire a spurious 'transition back' + redeploy.
+        carried = (_find_settled_regime(history)
+                   or history[0].get('state') or 'UNKNOWN')
+        carried_conf = 0.0
+        for row in history:
+            if row.get('state') == carried:
+                try:
+                    carried_conf = float(row.get('confidence') or 0.0)
+                except (TypeError, ValueError):
+                    carried_conf = 0.0
+                break
+    else:
+        # Cold start while the market is closed — mirror bootstrap mode.
+        carried, carried_conf = 'UNKNOWN', 0.0
+    streak = _hysteresis_streak(history, carried)
+    try:
+        _persist_state_row(
+            conn, features['ts_utc'], carried, carried, carried_conf,
+            streak, False, None, features,
+        )
+    except Exception as e:
+        logger.warning('state persist failed: %s', e)
+    return {
+        'action':         'tick',
+        'carry_fwd':      True,
+        'ts_utc':         str(features['ts_utc']),
+        'state':          carried,
+        'prior':          carried,
+        'confidence':     round(carried_conf, 4),
+        'streak':         streak,
+        'fired':          False,
+        'transition_tag': None,
+        'model_loaded':   False,
+        'quality_flag':   features.get('source_quality_flag'),
+    }
 
 
 def _connect_postgres():
@@ -582,7 +668,23 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
 
     now = pd.Timestamp.now(tz='UTC')
     features = intraday.collect_intraday_features(now_utc=now)
+    market_open = _is_option_market_open(features['ts_utc'])
+    if not market_open:
+        # Option market closed: quotes frozen → features are carry-forward,
+        # not signal. Flag 3 marks the parquet row (trainer's <2 filter
+        # excludes it from training) and the DB row's features_json.
+        features['source_quality_flag'] = 3
     intraday.append_features_row(features)
+
+    if not market_open:
+        conn = _connect_postgres()
+        if conn is None:
+            return {'action': 'error', 'reason': 'postgres_unavailable'}
+        try:
+            return _carry_forward_tick(conn, features)
+        finally:
+            conn.close()
+
     # Enrich with daily-derived HMM inputs (spy_gk_vol_daily, vvix_level).
     # These are NOT written to the parquet — they're score-time injections
     # so the live tick matches the trained model's 6-feature schema.

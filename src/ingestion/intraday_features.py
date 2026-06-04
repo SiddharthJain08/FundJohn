@@ -6,31 +6,31 @@ parquet at `data/master/intraday_features.parquet` using the
 append+dedup+atomic-write pattern from
 `src/ingestion/ingest_prices_30m.py:200-231`.
 
-Sources (Stage 0 verified 2026-05-08):
+Sources (Alpaca-only since the SP-1 provider cutover, 2026-05-22):
   * SPY option chain (Alpaca CLI: ships bid/ask + delta + IV per contract)
-  * SPY/HYG/LQD 1-min OHLCV (Polygon equity feed)
 
 Features (column names of the master parquet):
   ts_utc                     — UTC timestamp aligned to 5-min boundary
   vix_synth_30d              — Cboe variance-swap 30-day VIX
   vix_synth_90d              — same formula at 90-day horizon
   vix_term_slope             — vix_synth_90d / vix_synth_30d
-  pcr_oi                     — sum(put_OI) / sum(call_OI) across chain
-                               (NaN under Alpaca-only path; populated
-                                  via Polygon snapshot enrichment)
-  pcr_volume                 — sum(put_vol) / sum(call_vol)
+  pcr_oi                     — DEAD (Polygon-era; always NaN since SP-1)
+  pcr_volume                 — DEAD (Polygon-era; always NaN since SP-1)
   rr_25d                     — 25-Δ put IV − 25-Δ call IV (skew)
-  spy_realized_vol_30m       — ann. stdev of last 30 min of 1-min returns
-  zero_dte_volume_share      — frac of total chain volume in 0DTE expiries
-                                 (NaN under Alpaca-only path)
-  source_quality_flag        — 0=full, 1=partial (missing sub-feature),
-                                  2=fallback (synthetic VIX NaN)
+  spy_realized_vol_30m       — DEAD (Polygon-era; always NaN since SP-1)
+  zero_dte_volume_share      — DEAD (Polygon-era; always NaN since SP-1)
+  source_quality_flag        — 0=full, 1=partial (vix fallback formula or
+                                  rr_25d missing), 2=fallback (chain pull /
+                                  synthetic VIX failed), 3=carry-forward
+                                  (option market closed — set by the
+                                  detector, not this collector)
 
-NOTE on Polygon enrichment: the live OI/volume fields require a
-per-tick Polygon snapshot pull (`fetch_polygon_chain`). When that
-fails or the env is misconfigured, those features fall back to NaN
-and `source_quality_flag=1`. The HMM impute-then-train approach in
-Stage 3 handles this cleanly.
+NOTE on the DEAD columns: they required a per-tick Polygon snapshot
+(purged in SP-1) and were dropped from the HMM's inputs by the v3
+trainer (2026-05-20). The columns are retained as NaN for parquet
+schema stability (data/master/ is append-only — see CLAUDE.md core
+invariant); they no longer influence `source_quality_flag`, which
+previously sat pinned at 1 on every row and carried no information.
 
 Public API:
     collect_intraday_features(now_utc=None) -> dict
@@ -63,8 +63,6 @@ ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PARQUET = ROOT / 'data' / 'master' / 'intraday_features.parquet'
-
-POLYGON_BASE = 'https://api.polygon.io'
 
 FEATURE_COLUMNS = [
     'ts_utc',
@@ -176,37 +174,6 @@ def _alpaca_chain_to_df(snapshots: dict) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
-
-
-def _polygon_minute_bars(ticker: str, start: str, end: str,
-                          api_key: str, limit_bars: int = 50_000,
-                          timeout: int = 15) -> pd.DataFrame:
-    """Pull 1-min Polygon aggregates for `ticker` over [start, end].
-    Mirrors `src/ingestion/ingest_prices_30m.py:_polygon_30m_bars` but
-    at 1-min cadence. Returns OHLCV DataFrame indexed by tz-aware UTC
-    datetimes."""
-    import requests
-    url = (f'{POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/minute/'
-           f'{start}/{end}')
-    params = {'adjusted': 'true', 'sort': 'asc', 'limit': limit_bars,
-              'apiKey': api_key}
-    r = requests.get(url, params=params, timeout=timeout)
-    if r.status_code == 404:
-        return pd.DataFrame()
-    if r.status_code == 429:
-        # 5-min cron — don't retry; next tick will fetch fresh data.
-        raise RuntimeError(f'Polygon 429 for {ticker}')
-    r.raise_for_status()
-    js = r.json()
-    rows = js.get('results') or []
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    df['datetime'] = pd.to_datetime(df['t'], unit='ms', utc=True)
-    return df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low',
-                               'c': 'close', 'v': 'volume'})[
-        ['datetime', 'open', 'high', 'low', 'close', 'volume']
-    ].sort_values('datetime').reset_index(drop=True)
 
 
 # ── Feature computations ─────────────────────────────────────────────────────
@@ -334,18 +301,12 @@ def collect_intraday_features(now_utc: Optional[pd.Timestamp] = None,
             spy_chain_df = pd.DataFrame()
             quality_flag = max(quality_flag, 2)
 
-    # 2) SPY 1-min bars (last 60 min for realised vol)
+    # 2) SPY 1-min bars — Polygon-era live pull REMOVED (SP-1 purged the
+    #    provider; the key was absent so this was already an empty-DataFrame
+    #    no-op on every live tick since 2026-05-22). Callers/tests may still
+    #    pass `spy_bars` explicitly and get spy_realized_vol_30m computed.
     if spy_bars is None:
-        try:
-            api_key = os.environ.get('POLYGON_API_KEY', '')
-            if api_key:
-                start = (now_utc - pd.Timedelta(minutes=90)).strftime('%Y-%m-%d')
-                end = now_utc.strftime('%Y-%m-%d')
-                spy_bars = _polygon_minute_bars('SPY', start, end, api_key)
-            else:
-                spy_bars = pd.DataFrame()
-        except Exception:
-            spy_bars = pd.DataFrame()
+        spy_bars = pd.DataFrame()
 
     # 3) Spot derivation
     if spot is None or spot <= 0:
@@ -385,10 +346,12 @@ def collect_intraday_features(now_utc: Optional[pd.Timestamp] = None,
     rv30 = _compute_realized_vol_30m(spy_bars, now_utc=now_utc) \
         if spy_bars is not None else float('nan')
 
-    # Quality bumps for missing sub-features (don't overwrite a higher flag)
-    for v in (pcr_oi, pcr_vol, zd_share, rr_25, rv30):
-        if isinstance(v, float) and math.isnan(v):
-            quality_flag = max(quality_flag, 1)
+    # Quality bump: of the per-tick features, only rr_25d remains a LIVE
+    # HMM input (v3 trainer). The Polygon-era features (pcr_*, 0DTE share,
+    # rv30) are permanently NaN since SP-1 and must NOT pin the flag at 1 —
+    # that made the flag carry zero information for two weeks.
+    if isinstance(rr_25, float) and math.isnan(rr_25):
+        quality_flag = max(quality_flag, 1)
 
     return {
         'ts_utc':                ts_floor,

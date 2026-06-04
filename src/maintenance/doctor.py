@@ -213,6 +213,44 @@ def _check_options_archive_freshness():
     return _ok('options_archive_freshness', f'last row {days} days old')
 
 
+@_check('option_expiry_floor')
+def _check_option_expiry_floor():
+    """SP-5.3 belt-and-suspenders: held OCC option legs must be > 3 calendar DTE.
+    The sizer force-closes structures at DTE<=7 with daily retry; a leg surviving
+    to DTE<=3 means repeated close failures or a dead EOD cycle → FAIL loud
+    (unmanaged expiry = exercise/assignment risk). Read-only + gate-independent:
+    with OPENCLAW_OPTION_EXEC off this doubles as a stray-option-position detector."""
+    from execution.regime_blended_sizer import _is_occ_symbol, _occ_dte
+    try:
+        positions = _run_alpaca_cli(['position', 'list'])
+        # WARN not FAIL: broker-unreachable is already FAILed by check_alpaca_auth;
+        # this check is a stray-leg/expiry backstop, not a connectivity probe.
+    except Exception as e:
+        return _warn('option_expiry_floor', f'broker fetch failed: {e}')
+    if not isinstance(positions, list):
+        return _warn('option_expiry_floor',
+                     f'broker returned non-list: {type(positions).__name__}')
+    legs = []
+    for p in positions or []:
+        try:
+            sym = str(p.get('symbol', '')).strip().upper()
+            if float(p.get('qty', 0) or 0) == 0 or not _is_occ_symbol(sym):
+                continue
+            legs.append((sym, _occ_dte(sym)))
+        except (TypeError, ValueError):
+            continue
+    if not legs:
+        return _ok('option_expiry_floor', 'no option legs held')
+    bad = [(s, d) for s, d in legs if d <= 3]
+    if bad:
+        sample = bad[:10]
+        suffix = f' … and {len(bad) - 10} more' if len(bad) > 10 else ''
+        return _fail('option_expiry_floor',
+                     f'{len(bad)} held leg(s) at DTE<=3 (expiry close has not landed): {sample}{suffix}')
+    return _ok('option_expiry_floor',
+               f'{len(legs)} leg(s) held, min DTE={min(d for _, d in legs)}')
+
+
 @_check('cboe_vol_indices_freshness')
 def _check_cboe_vol_indices_freshness():
     """vol_indices.parquet calendar-day staleness. Matches options_archive thresholds:

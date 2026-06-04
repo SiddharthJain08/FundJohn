@@ -23,6 +23,17 @@ from execution.alpaca_executor import _spot_price
 
 logger = logging.getLogger(__name__)
 
+# SP-6 per-ticker conviction cap fraction (operator formula 2026-06-04):
+# cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe| × λ × NAV.
+# Applied in EOD mode only (OPENCLAW_EOD_RECONCILE=1) inside
+# _sharpe_cadence_path — see the cap block there for full rationale.
+PER_TICKER_CAP_SHARPE_FRAC = 0.05
+
+# SP-5.3 — force-close held option structures at/below this calendar DTE
+# (operator-locked 2026-06-04: 7 calendar days, single rule for all structures).
+# Override via OPENCLAW_OPTION_EXPIRY_CLOSE_DTE (parse-guarded).
+OPTION_EXPIRY_CLOSE_DTE = 7
+
 
 def _ortho_enabled(gate: str) -> bool:
     return os.environ.get(gate) == '1'
@@ -393,6 +404,32 @@ def _is_occ_symbol(sym) -> bool:
     return bool(_OCC_RE.match(str(sym).strip().upper()))
 
 
+def _expiry_close_dte() -> int:
+    """SP-5.3 threshold resolver: env override or the module default."""
+    raw = os.environ.get('OPENCLAW_OPTION_EXPIRY_CLOSE_DTE')
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            logger.warning('expiry_close_dte: unparseable override %r — using default %d',
+                           raw, OPTION_EXPIRY_CLOSE_DTE)
+    return OPTION_EXPIRY_CLOSE_DTE
+
+
+def _occ_dte(occ: str, today: date | None = None) -> int:
+    """SP-5.3 (C1): calendar days to expiry from the OCC tail (yymmdd at occ[-15:-9];
+    the _OCC_RE filter upstream guarantees 6 digits there). Parse failure → DTE 0
+    + loud warning: an unreadable expiry is an unmanageable position — close it."""
+    today = today or date.today()
+    try:
+        tail = occ[-15:-9]
+        exp = date(2000 + int(tail[:2]), int(tail[2:4]), int(tail[4:6]))
+        return (exp - today).days
+    except (ValueError, IndexError):
+        logger.warning('occ_dte: unparseable expiry on %r — treating as DTE 0 (expiring)', occ)
+        return 0
+
+
 def _load_broker_positions_usd():
     """Read current broker positions as {ticker: signed_market_value_usd}.
 
@@ -442,19 +479,18 @@ def _load_broker_positions_usd():
         return {}
 
 
-def _held_option_underlyings() -> dict[str, list[str]]:
-    """SP-5 Phase 1b (G4b): held OCC option legs grouped by underlying root.
+def _held_option_underlyings() -> dict[str, list[str]] | None:
+    """SP-5 Phase 1b (G4b) + SP-5.3 (C4): held OCC option legs grouped by underlying root.
 
     Returns {underlying: [occ, ...]} for every held OCC option leg on the broker
-    book. Underlying root = occ[:-15] (an OCC symbol is root + 6-digit yymmdd +
-    C/P + 8-digit strike = a fixed 15-char tail). Non-OCC positions (equity, crypto)
-    and zero-qty rows are ignored.
+    book; {} for a genuinely flat book; **None on ANY fetch/parse error** — callers
+    must treat None as 'cannot prove flat' and fail-closed for option OPENS
+    (silent-failure split: error ≠ empty). Underlying root = occ[:-15] (an OCC
+    symbol is root + 6-digit yymmdd + C/P + 8-digit strike = a fixed 15-char tail).
+    Non-OCC positions (equity, crypto) and zero-qty rows are ignored.
 
     Runs the SAME `alpaca position list` CLI pattern as _load_broker_positions_usd
-    (subprocess, 15s timeout, fail-safe {} on ANY error). Used to orphan-close a held
-    option structure whose option signal has disappeared — the post-G1 equity book
-    logic is OCC-filtered and structurally blind to option legs, so nothing else
-    closes them.
+    (subprocess, 15s timeout).
     """
     import subprocess
     import json as _json
@@ -465,7 +501,7 @@ def _held_option_underlyings() -> dict[str, list[str]]:
         if proc.returncode != 0:
             logger.warning('held_option_underlyings: broker fetch failed (%s)',
                            proc.stderr.decode()[:200])
-            return {}
+            return None
         positions = _json.loads(proc.stdout)
         from collections import defaultdict
         out = defaultdict(list)
@@ -482,7 +518,7 @@ def _held_option_underlyings() -> dict[str, list[str]]:
         return dict(out)
     except Exception as e:
         logger.warning('held_option_underlyings: broker fetch error (%s)', e)
-        return {}
+        return None
 
 
 def _classify_position_deltas(
@@ -1003,6 +1039,41 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
                         len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
 
+    # SP-6 per-ticker conviction cap (operator formula, 2026-06-04):
+    #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(t)| × λ × NAV
+    # Bounds the few-survivor concentration failure: Σ|target| = λ×NAV
+    # renormalizes onto whatever cleared the cum-sharpe gate, so a 1-survivor
+    # day would otherwise put the ENTIRE λ×NAV into one name (2026-06-03
+    # diagnosis: $224.8k = 2× equity into STX; see
+    # /root/sp6_phaseA_conviction_gate_diagnosis_2026-06-04.md §4). The cap
+    # scales with the SAME conviction measure the gate uses (deflated when
+    # OPENCLAW_STRATEGY_CORR_WEIGHT is on, raw otherwise) so high-conviction
+    # names keep proportionally more headroom. Shaved capital is deliberately
+    # NOT redistributed (no renorm-up — that would re-concentrate elsewhere);
+    # on capped days gross simply lands below λ×NAV. Applied AFTER the
+    # min-notional renorm (which pushes freed capital into high-conviction
+    # names — exactly the flow the cap must bound) and BEFORE the cap-exempt
+    # option hedge injection + broker netting. EOD-mode only: rides
+    # OPENCLAW_EOD_RECONCILE so the legacy cadence-window path stays
+    # byte-identical (its multi-day accumulation makes few-survivor days
+    # structurally rare). Missing gate value → fail-open (target untouched).
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        _capped = []
+        for _tkr, _usd in list(target_usd.items()):
+            _gs = gate_net_sharpe.get(_tkr)
+            if _gs is None:
+                continue
+            _cap = PER_TICKER_CAP_SHARPE_FRAC * abs(_gs) * lam * nav
+            if abs(_usd) > _cap:
+                target_usd[_tkr] = _cap if _usd > 0 else -_cap
+                _capped.append((_tkr, _usd, target_usd[_tkr]))
+        if _capped:
+            logger.info(
+                'regime_blended_sizer.sharpe_cadence: per-ticker cap (0.05·|sharpe|·λ·NAV) '
+                'clamped %d ticker(s): %s',
+                len(_capped),
+                [(t, round(o), round(n)) for t, o, n in _capped[:10]])
+
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
     # equity target_usd is byte-identical when gate is unset.
@@ -1137,46 +1208,101 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _opt_orders = _consolidate_option_orders(
         opt_active, weight_by_strat, sharpe_by_strat, scale, nav,
         min_cum_sharpe, account_state, _equity_gross)
-    orders.extend(_opt_orders)
 
-    # SP-5 Phase 1b (G4b): option orphan-close. The equity book logic above is
-    # OCC-filtered (G1 prong 2) so it is structurally blind to held option legs —
-    # nothing closes a held STRUCTURE whose option signal has disappeared. For each
-    # held option underlying NOT among today's option targets, emit an option CLOSE
-    # order. The executor's _route_mleg_close closes the actually-held legs per-leg
-    # (structure-agnostic); the synthesized 'held_legs' spec survives OptionSpec.from_dict
-    # (underlying present). Gated on OPENCLAW_OPTION_EXEC=1 so production today (gate off)
-    # makes ZERO extra CLI calls — byte-identical inert.
+    # SP-5 Phase 1b (G4b) + SP-5.3 (C2/C4): option position lifecycle. The equity book
+    # logic above is OCC-filtered (G1 prong 2) so it is structurally blind to held
+    # option legs. Inside the gate:
+    #   • held + NOT in today's targets → orphan close (G4b, unchanged)
+    #   • held + in targets            → SUPPRESS the open (SP-5.3 C2 stacking guard:
+    #     _consolidate_option_orders emits plain opens with no held-awareness — without
+    #     suppression a persistent signal re-submits a fresh mleg structure EVERY day)
+    #   • fetch error (None ≠ flat {})  → fail-closed: suppress ALL opens this cycle
+    #     (SP-5.3 C4 — cannot prove any underlying flat; closes also skipped, they
+    #     re-emit next cycle and doctor option_expiry_floor backstops)
+    # Gated on OPENCLAW_OPTION_EXEC=1 so production today (gate off) makes ZERO extra
+    # CLI calls and emits the unmodified _opt_orders — byte-identical inert.
     if os.environ.get('OPENCLAW_OPTION_EXEC') == '1':
-        _opt_target_tickers = {o['ticker'] for o in _opt_orders}
-        for _underlying, _legs in _held_option_underlyings().items():
-            if _underlying in _opt_target_tickers:
-                continue
-            logger.info('regime_blended_sizer.sharpe_cadence: option orphan-close for %s '
-                        '(%d held leg(s), no live option target)', _underlying, len(_legs))
-            orders.append({
-                'ticker':                  _underlying,
-                'strategy_id':             '__close_option_orphan__',
-                'direction':               'long',
-                'notional_usd':            0.0,
-                'pct_nav':                 0.0,
-                'shares':                  0,
-                'entry':                   None,
-                'stop':                    None,
-                't1':                      None,
-                't2':                      None,
-                'kelly_final':             0.0,
-                'ev':                      0.0,
-                'p_t1':                    0.5,
-                'source_mode':             'sharpe_cadence',
-                'target_usd':              0.0,
-                'current_usd':             0.0,
-                'contributing_strategies': ['__close_option_orphan__'],
-                'flip_action':             None,
-                'action':                  'CLOSE',
-                'instrument_class':        'option',
-                'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
-            })
+        _held = _held_option_underlyings()
+        if _held is None:
+            if _opt_orders:
+                logger.error('regime_blended_sizer.sharpe_cadence: held-option fetch '
+                             'FAILED — suppressing ALL %d option open(s) this cycle '
+                             '(cannot prove underlyings flat)', len(_opt_orders))
+            _opt_orders = []
+        else:
+            _opt_target_tickers = {str(o['ticker']).upper() for o in _opt_orders}
+            _expiry_threshold = _expiry_close_dte()
+            for _underlying, _legs in _held.items():
+                if _underlying in _opt_target_tickers:
+                    # SP-5.3 (C3): held AND still-targeted — force-close approaching
+                    # expiry (T−7, operator-locked). The open stays suppressed below,
+                    # so a close NEVER co-emits with an open (structurally no
+                    # same-cycle flatten-the-new-legs hazard); the strategy's own
+                    # next signal reopens at fresh dte_target once the book is flat
+                    # (the organic roll). Retry-by-construction: still-held legs
+                    # re-emit this close every cycle until flat.
+                    _dte = min(_occ_dte(_o) for _o in _legs)
+                    if _dte <= _expiry_threshold:
+                        logger.info('regime_blended_sizer.sharpe_cadence: option EXPIRY '
+                                    'close for %s (min DTE=%d <= %d; %d held leg(s))',
+                                    _underlying, _dte, _expiry_threshold, len(_legs))
+                        orders.append({
+                            'ticker':                  _underlying,
+                            'strategy_id':             '__close_option_expiry__',
+                            'direction':               'long',
+                            'notional_usd':            0.0,
+                            'pct_nav':                 0.0,
+                            'shares':                  0,
+                            'entry':                   None,
+                            'stop':                    None,
+                            't1':                      None,
+                            't2':                      None,
+                            'kelly_final':             0.0,
+                            'ev':                      0.0,
+                            'p_t1':                    0.5,
+                            'source_mode':             'sharpe_cadence',
+                            'target_usd':              0.0,
+                            'current_usd':             0.0,
+                            'contributing_strategies': ['__close_option_expiry__'],
+                            'flip_action':             None,
+                            'action':                  'CLOSE',
+                            'instrument_class':        'option',
+                            'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
+                        })
+                    continue
+                logger.info('regime_blended_sizer.sharpe_cadence: option orphan-close for %s '
+                            '(%d held leg(s), no live option target)', _underlying, len(_legs))
+                orders.append({
+                    'ticker':                  _underlying,
+                    'strategy_id':             '__close_option_orphan__',
+                    'direction':               'long',
+                    'notional_usd':            0.0,
+                    'pct_nav':                 0.0,
+                    'shares':                  0,
+                    'entry':                   None,
+                    'stop':                    None,
+                    't1':                      None,
+                    't2':                      None,
+                    'kelly_final':             0.0,
+                    'ev':                      0.0,
+                    'p_t1':                    0.5,
+                    'source_mode':             'sharpe_cadence',
+                    'target_usd':              0.0,
+                    'current_usd':             0.0,
+                    'contributing_strategies': ['__close_option_orphan__'],
+                    'flip_action':             None,
+                    'action':                  'CLOSE',
+                    'instrument_class':        'option',
+                    'option_spec':             {'underlying': _underlying, 'structure': 'held_legs'},
+                })
+            # SP-5.3 (C2): suppress opens whose underlying already has held legs.
+            _suppressed = sorted({o['ticker'] for o in _opt_orders if str(o['ticker']).upper() in _held})
+            if _suppressed:
+                logger.info('regime_blended_sizer.sharpe_cadence: option open SUPPRESSED '
+                            'for %s — structure already held (SP-5.3 stacking guard)',
+                            _suppressed)
+                _opt_orders = [o for o in _opt_orders if str(o['ticker']).upper() not in _held]
+    orders.extend(_opt_orders)
     return orders
 
 

@@ -229,11 +229,12 @@ def test_g4b_held_option_underlyings_parses_fixture(monkeypatch):
 
 
 def test_g4b_held_option_underlyings_failsafe(monkeypatch):
-    """Any subprocess error → {} (fail-safe, never raise)."""
+    """Any subprocess error → None (SP-5.3 C4: distinguishable from a flat book {};
+    callers fail-closed for opens). Never raises."""
     def _boom(*a, **k):
         raise RuntimeError('cli down')
     monkeypatch.setattr('subprocess.run', _boom)
-    assert _sizer._held_option_underlyings() == {}
+    assert _sizer._held_option_underlyings() is None
 
 
 def _sig(sid, ticker, direction=1, sharpe=5.0, weight=1.0, option_spec=None):
@@ -341,10 +342,11 @@ def test_g4b_no_close_when_live_option_target(monkeypatch):
     ])
     closes = [o for o in orders if o.get('strategy_id') == '__close_option_orphan__']
     assert closes == [], f'no orphan-close when SPY has a live option target, got {orders}'
-    # The live option target IS present.
+    # SP-5.3 (C2): the open for held SPY is SUPPRESSED (stacking guard) — the
+    # held structure is simply kept; it is neither closed nor re-opened.
     opt = [o for o in orders if o.get('instrument_class') == 'option' and o['ticker'] == 'SPY'
            and o.get('strategy_id') != '__close_option_orphan__']
-    assert len(opt) == 1
+    assert opt == [], f'held SPY open must be suppressed (SP-5.3), got {opt}'
 
 
 def test_g4b_gate_off_no_cli_no_close(monkeypatch):
