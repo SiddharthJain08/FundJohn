@@ -10,8 +10,9 @@
    table_name='alpaca_tradable_universe' AND column_name='listed_date';"` → 1
 3. Add to /root/openclaw/.env:  OPENCLAW_ENGINE_UNIVERSE_CLAMP=sp500
 4. Restart johnbot:  XDG_RUNTIME_DIR=/run/user/0 systemctl --user restart johnbot.service
-5. Start the split-watcher timer (installed enabled-but-not-started):
-   XDG_RUNTIME_DIR=/run/user/0 systemctl --user start sp7-split-watcher.timer
+5. Enable + start the split-watcher timer (installed DISABLED until merge —
+   avoids reboot-activation against a not-yet-merged script path):
+   XDG_RUNTIME_DIR=/run/user/0 systemctl --user enable --now sp7-split-watcher.timer
 6. Verify the next engine run logs "universe clamp 'sp500': kept ..., dropped 29"
    (engine spawns per-cycle; no further restarts needed). The kept count must
    stay ~586 throughout the backfill (acceptance: clamp parity).
@@ -24,8 +25,9 @@
    nice -n 19 python3 scripts/probe_listed_dates.py
 
 ## The 4.5k backfill (multi-night, ONLY after steps 3-6 verified)
-9. Start the overnight timer + arm:
-   XDG_RUNTIME_DIR=/run/user/0 systemctl --user start sp7-overnight-backfill.timer
+9. Enable + start the overnight timer, then arm (timer installed DISABLED
+   until merge):
+   XDG_RUNTIME_DIR=/run/user/0 systemctl --user enable --now sp7-overnight-backfill.timer
    touch /root/openclaw/data/.sp7_backfill_armed
 10. Watch: logs/sp7_backfill_<date>.log; window = 01:00→13:00 UTC, Mon-Fri
     nights only (Saturday excluded — weekend-refresh stack owns the box).
