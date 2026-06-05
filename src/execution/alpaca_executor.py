@@ -1408,6 +1408,46 @@ def _cancel_open_crypto_stops(api_symbol: str) -> int:
     return n
 
 
+def _cancel_open_equity_orders(ticker: str) -> int:
+    """SP-6 Phase C: cancel any OPEN equity orders for `ticker` before an RTH
+    `position close`.
+
+    The OCO take-profit system (live since 2026-05-29) rests GTC OCO
+    take-profit/stop legs that reserve the FULL position qty. While they rest,
+    `alpaca position close` (DELETE /v2/positions) can never succeed — it 403s
+    "insufficient qty available for order (requested: N, available: 0)". This
+    blocked EVERY deliberate equity close on 2026-06-04: all 4 of the 3:55 PM ET
+    EOD orphan-close orders (AAPL/LEN/PTC/SPGI) were submitted FIRST by the tier
+    sort yet 403'd because their OCO legs reserved the qty. The crypto lane has
+    fixed this exact bug since 2026-05-26 (_cancel_open_crypto_stops); this is
+    the equity sibling.
+
+    Accepted trade-off: cancelling the protective legs opens a brief unprotected
+    window if the close itself then fails. That window is covered by the 16:10
+    ET stop_reattach floor + the next RTH cycle re-placing protection
+    (operator-accepted 2026-06-05).
+
+    Returns the count cancelled. Returns 0 on any CLI-error response; a CLI
+    subprocess hang can still raise TimeoutExpired, so the caller wraps this in
+    a best-effort guard (the close must proceed regardless)."""
+    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
+    if not ok or not isinstance(payload, list):
+        return 0
+    n = 0
+    for o in payload:
+        if not isinstance(o, dict):
+            continue
+        if o.get('symbol') == ticker:
+            oid = o.get('id') or o.get('order_id')
+            if oid:
+                c_ok, _p, _e = _run_alpaca_cli(['order', 'cancel', '--order-id', oid], timeout=10)
+                if c_ok:
+                    n += 1
+    if n:
+        log(f'  ↳ cancelled {n} open order(s) for {ticker} before close')
+    return n
+
+
 def _looks_like_unsupported_asset_error(err_text: str) -> bool:
     """Best-effort classifier for Alpaca 4xx errors that indicate the asset
     itself isn't tradable on this account/feed (delisted, halted, asset
@@ -1982,6 +2022,20 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
         pct_oc = round((notional_oc / current_oc) * 100.0, 2)
         pct_oc = max(0.01, min(99.99, pct_oc))
         cli_args_oc += ['--percentage', str(pct_oc)]
+    # SP-6 Phase C: resting GTC OCO take-profit/stop legs reserve the full
+    # position qty → `position close` 403s "insufficient qty available"
+    # (proven 2026-06-04: all 4 EOD orphan closes rejected). Cancel them
+    # first. Applies uniformly to full closes AND partial reduces — a REDUCE
+    # 403s identically because the full qty is reserved. Gated on
+    # OPENCLAW_EOD_RECONCILE: when OFF, ZERO new CLI calls (legacy path
+    # byte-identical). Best-effort + guarded: a CLI hang (TimeoutExpired) or a
+    # cancel failure must NEVER abort the close attempt (mirror the crypto
+    # call-site guard).
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        try:
+            _cancel_open_equity_orders(ticker)
+        except Exception as _cx:   # noqa: BLE001 — close must proceed
+            log(f'  ↳ equity order-cancel best-effort failed (continuing to close): {_cx}')
     ok_co, pay_co, err_co = _run_alpaca_cli(cli_args_oc, timeout=15)
     if not ok_co:
         log(f'CLI rc={err_co.get("exit_code",1)} {ticker} (close_only RTH): {err_co.get("error","")}')
