@@ -71,11 +71,18 @@ def weighted_percentile(values, weights, q):
     """Return the value at quantile ``q`` (0..1) under ``weights``.
 
     Convention (deliberately NON-interpolating so it always returns an actual
-    observed value and equal-weight matches per_session_median's lower-median):
-    sort (value, weight) by value, accumulate weight, return the first value
-    whose cumulative weight >= q * total_weight. None if empty / no weight.
+    observed value): sort (value, weight) by value, accumulate weight, return the
+    first value whose cumulative weight >= q * total_weight. None if empty / no
+    weight. Equal-weight = pass weights of 1.0 each.
 
-    Equal-weight = pass weights of 1.0 each.
+    NOTE on the even-n difference vs ``oracle.per_session_median``: at q=0.50
+    with equal weights and an EVEN number of observations this returns the LOWER
+    of the two straddling values (a floor/lower-median convention), whereas
+    ``per_session_median`` AVERAGES the two middle values (0.5*(a+b)). They agree
+    for odd n and differ by one observation's gap on even n. This affects only
+    the reporting headline display stats; the GO/KILL verdict uses
+    ``per_session_median`` exclusively (kill_verdict), so the kill criterion is
+    unaffected by this convention.
     """
     pairs = sorted(
         (float(v), float(w))
@@ -485,6 +492,14 @@ def format_report(agg):
              f"{dv['n_compared']}, median "
              f"{_fmt(dv['parquet_div_median_bps'], 'bps')}, "
              f">50bps flagged {dv['n_flagged_gt50bps']}")
+    L.append("- included-set definition: an intent needs >= 60 valid minute "
+             "bars (vw>0, v>0, h>=l); fewer -> excluded as 'too_few_bars' "
+             "(counted above, not silently dropped). This 60-bar floor is an "
+             "implementer-chosen liquidity gate, not a spec §5/§6 threshold.")
+    L.append("- conviction-weight 'n' counts value-present rows; rows with "
+             "Σ size_pct == 0 carry zero weight and do not contribute to the "
+             "conviction-weighted median (so a weighted median can read n/a "
+             "while n is large if size_pct is largely NULL).")
     L.append("")
 
     # DTBP/PDT context note (context, not modeled in Phase 1)
@@ -598,14 +613,22 @@ def _parse_args(argv):
 
 
 def main(argv=None, conn=None, loader=None, sessions=None, today=None,
-         closes=None):
-    """CLI entry. Injection seams (conn/loader/sessions/today/closes) keep the
-    smoke test hermetic; defaults build the real ones.
+         closes=None, closes_loader=None):
+    """CLI entry. Injection seams keep the smoke test hermetic; defaults build
+    the real ones.
+
+    Seams: ``conn``/``loader``/``sessions``/``today`` as before; ``closes`` is a
+    pre-built (worked_session,ticker)->parquet-close map; ``closes_loader`` is a
+    ``loader(pairs) -> {(session,ticker): close}`` callable used to BUILD that map
+    when ``closes`` is not supplied (default = ``order_set.load_parquet_closes``,
+    which reads the master prices.parquet). Tests inject a stub so the real
+    6M-row parquet is never read.
 
     Flow: load SPY sessions -> extract intents (selected grains) -> pre-attach
     regime -> for each needed session load bars (niced/sequential fetch) ->
-    evaluate_all -> aggregate -> write artifacts -> print report -> optional post.
-    Returns a process exit code (0 = success).
+    evaluate_all -> build the parquet-close map over the evaluated pairs ->
+    aggregate (incl. the §5/§6 parquet cross-check) -> write artifacts ->
+    print report -> optional post. Returns a process exit code (0 = success).
     """
     args = _parse_args([] if argv is None else argv)
 
@@ -655,6 +678,16 @@ def main(argv=None, conn=None, loader=None, sessions=None, today=None,
         loader = _build_default_loader(session_tickers, args.no_fetch)
 
     rows = evaluate_all(intents, loader, window=args.window)
+
+    # Build the (worked_session, ticker) -> master-parquet close map over the
+    # evaluated pairs so the §5/§6 parquet cross-check actually runs (without
+    # this the report rendered "compared 0"). Skip the read entirely when a map
+    # was injected (hermetic tests) — closes={} is a valid "no parquet read".
+    if closes is None:
+        if closes_loader is None:
+            closes_loader = order_set.load_parquet_closes
+        closes = closes_loader(pairs)
+
     agg = aggregate_report(rows, closes=closes)
     report_md = format_report(agg)
 

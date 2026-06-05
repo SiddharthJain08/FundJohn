@@ -282,6 +282,18 @@ def test_format_report_shows_kill_for_kill_dataset():
     assert "KILL" in md
 
 
+def test_format_report_documents_60_bar_minimum(monkeypatch):
+    # minor finding 2: the oracle's 60-valid-bar minimum ('too_few_bars') is an
+    # implementer-chosen included-set definition not named in the spec; the
+    # report's data-quality section must document it so reviewers know the
+    # included-set definition (exclusions are already counted, but the bar
+    # threshold itself was undocumented).
+    agg = run_phase1.aggregate_report(_go_rows())
+    md = run_phase1.format_report(agg)
+    assert "60" in md
+    assert "too_few_bars" in md
+
+
 # ==========================================================================
 # 4. evaluate_all — merges intent + oracle fields; missing bars -> no_bars
 # ==========================================================================
@@ -420,6 +432,7 @@ def test_main_smoke_writes_artifacts(tmp_path, monkeypatch):
     rc = run_phase1.main(
         ["--grain", "both", "--limit", "2", "--no-fetch"],
         conn=conn, loader=loader, sessions=sessions, today=today,
+        closes_loader=lambda pairs: {},  # hermetic: never read the real parquet
     )
     assert rc == 0
 
@@ -449,6 +462,50 @@ def test_main_no_post_by_default(tmp_path, monkeypatch):
     rc = run_phase1.main(
         ["--grain", "primary", "--no-fetch"],
         conn=conn, loader=loader, sessions=sessions, today="2026-06-05",
+        closes_loader=lambda pairs: {},  # hermetic: never read the real parquet
     )
     assert rc == 0
     assert posted == []   # --post not given -> never posts
+
+
+def test_main_builds_parquet_closes_from_loader(tmp_path, monkeypatch):
+    # REGRESSION (important finding): the real driver MUST build a
+    # (worked_session,ticker)->parquet-close map and feed it into
+    # aggregate_report so the §5/§6 parquet cross-check actually runs. Before the
+    # fix `main()` left closes=None, so the report always rendered
+    # "compared 0, median n/a". Here we inject a closes_loader (so the real
+    # prices.parquet is never read) and assert (a) it was called with the
+    # evaluated (session,ticker) pairs and (b) the report shows compared > 0.
+    monkeypatch.setenv("BFLOW_ANALYSIS_DIR", str(tmp_path))
+
+    sessions = ["2026-04-13", "2026-04-14", "2026-04-15"]
+    today = "2026-06-05"
+    primary = [
+        {"signal_date": "2026-04-10", "ticker": "AAA", "direction": "LONG",
+         "n_signals": 1, "sum_size_pct": 1.0, "regime_state": "LOW_VOL"},
+    ]
+    conn = _FakeConn(primary, [], [{"run_date": "2026-04-13",
+                                    "regime_state": "LOW_VOL"}])
+    # The included row's p_eod_close (last RTH minute close) is 100.0 from these
+    # flat-100 bars; supply a parquet close that diverges >50bps so it is also
+    # FLAGGED, proving the comparison both ran and applied the threshold.
+    loader = lambda s: {"AAA": _full_session_bars(low_at=120)}
+
+    seen = {}
+
+    def closes_loader(pairs):
+        seen["pairs"] = list(pairs)
+        return {("2026-04-13", "AAA"): 102.0}   # ~200bps vs the 100.0 close
+
+    rc = run_phase1.main(
+        ["--grain", "primary", "--no-fetch"],
+        conn=conn, loader=loader, sessions=sessions, today=today,
+        closes_loader=closes_loader,
+    )
+    assert rc == 0
+    # the loader was called with the evaluated (session, ticker) pairs
+    assert ("2026-04-13", "AAA") in seen["pairs"]
+    report = (tmp_path / "bflow_phase1_report.md").read_text()
+    # the parquet cross-check actually ran (was "compared 0" before the fix)
+    assert "compared 1" in report
+    assert ">50bps flagged 1" in report

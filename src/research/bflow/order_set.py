@@ -71,6 +71,63 @@ def load_spy_sessions(path=DEFAULT_PRICES_PATH):
     return sorted(dates)
 
 
+def load_parquet_closes(pairs, path=DEFAULT_PRICES_PATH):
+    """Map (worked_session, ticker) -> master-parquet close for the requested
+    ``pairs`` (an iterable of (session, ticker) 2-tuples).
+
+    This is the production loader for the spec §5/§6 parquet cross-check: the
+    driver builds the evaluated (worked_session, ticker) pairs and passes the
+    resulting map into ``aggregate_report`` so the report's
+    "minute-close vs prices.parquet close" divergence row reflects a real
+    comparison (without this map the driver left it ``None`` and the report
+    always rendered "compared 0, median n/a").
+
+    The parquet ``close`` is the master ``--adjustment all`` close; the minute
+    bars are RAW (Alpaca default). The divergence this surfaces — dividend /
+    adjustment / source mismatch — is exactly what §5's >50bps flag exists to
+    catch, so the close is read AS-IS (no reconciliation). Reads only
+    ``ticker``/``date``/``close`` and filters to the requested ticker+date sets,
+    mirroring ``load_spy_sessions`` (tens of MB; run ``nice -n 19``). A pair with
+    no matching row is simply absent from the map (the caller skips it). An empty
+    ``pairs`` returns ``{}`` without scanning the parquet.
+    """
+    wanted = {(str(s), str(t)) for s, t in pairs}
+    if not wanted:
+        return {}
+
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+
+    want_dates = {s for s, _ in wanted}
+    want_tickers = {t for _, t in wanted}
+
+    table = pq.read_table(path, columns=["ticker", "date", "close"])
+    mask = pc.and_(
+        pc.is_in(table["ticker"], value_set=_pa_array(want_tickers)),
+        pc.is_in(table["date"], value_set=_pa_array(want_dates)),
+    )
+    sub = table.filter(mask)
+
+    out = {}
+    tickers = sub.column("ticker").to_pylist()
+    dates = sub.column("date").to_pylist()
+    closes = sub.column("close").to_pylist()
+    for tk, dt, cl in zip(tickers, dates, closes):
+        if tk is None or dt is None or cl is None:
+            continue
+        key = (str(dt), str(tk))
+        if key in wanted:
+            out[key] = float(cl)
+    return out
+
+
+def _pa_array(values):
+    """Small helper: build a pyarrow array of strings from a set (sorted for
+    determinism). Kept module-level so the import stays inside the loader."""
+    import pyarrow as pa
+    return pa.array(sorted(values))
+
+
 def resolve_worked_session(signal_date, sessions):
     """First session STRICTLY AFTER `signal_date`, or None past the end.
 

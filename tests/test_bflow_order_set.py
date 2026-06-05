@@ -247,6 +247,58 @@ def test_load_spy_sessions_filters_crypto_and_sorts(tmp_path):
 
 
 # ==========================================================================
+# 5b. load_parquet_closes — production (worked_session,ticker)->close loader
+#     (spec §5/§6 parquet cross-check; previously the real driver never built
+#     this map so the divergence table always rendered "compared 0").
+# ==========================================================================
+def test_load_parquet_closes_keys_per_ticker_per_session(tmp_path):
+    import pandas as pd
+    p = tmp_path / "prices.parquet"
+    df = pd.DataFrame({
+        "ticker": ["SPY", "SPY", "AAPL", "AAPL", "BTC-USD"],
+        "date": ["2026-04-13", "2026-04-14", "2026-04-13", "2026-04-14",
+                 "2026-04-18"],
+        "close": [500.0, 501.0, 170.0, 171.0, 60000.0],
+    })
+    df.to_parquet(p)
+    # Request only a subset of (session, ticker) pairs — the loader must key on
+    # the PER-TICKER close (not SPY) for each requested pair, and ignore pairs
+    # not asked for.
+    pairs = [("2026-04-13", "AAPL"), ("2026-04-14", "SPY")]
+    closes = order_set.load_parquet_closes(pairs, path=str(p))
+    assert closes[("2026-04-13", "AAPL")] == 170.0
+    assert closes[("2026-04-14", "SPY")] == 501.0
+    # Unrequested pairs absent.
+    assert ("2026-04-13", "SPY") not in closes
+    assert ("2026-04-14", "AAPL") not in closes
+
+
+def test_load_parquet_closes_missing_pair_absent(tmp_path):
+    import pandas as pd
+    p = tmp_path / "prices.parquet"
+    df = pd.DataFrame({
+        "ticker": ["AAPL"],
+        "date": ["2026-04-13"],
+        "close": [170.0],
+    })
+    df.to_parquet(p)
+    # A (session,ticker) with no row in the parquet is simply absent (the
+    # caller's _divergence skips absent keys) — never a crash, never a 0.
+    closes = order_set.load_parquet_closes(
+        [("2026-04-13", "AAPL"), ("2026-04-14", "MSFT")], path=str(p))
+    assert closes == {("2026-04-13", "AAPL"): 170.0}
+
+
+def test_load_parquet_closes_empty_pairs_returns_empty(tmp_path):
+    import pandas as pd
+    p = tmp_path / "prices.parquet"
+    pd.DataFrame({"ticker": ["AAPL"], "date": ["2026-04-13"],
+                  "close": [170.0]}).to_parquet(p)
+    # No pairs requested -> empty map without reading/scanning anything.
+    assert order_set.load_parquet_closes([], path=str(p)) == {}
+
+
+# ==========================================================================
 # 6. INTEGRATION — live DB, read-only, gated on BFLOW_IT=1
 # ==========================================================================
 @pytest.mark.skipif(os.environ.get("BFLOW_IT") != "1",
