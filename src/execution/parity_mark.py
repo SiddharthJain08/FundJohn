@@ -81,6 +81,9 @@ def finalize_parity_marks(cur, closes: dict, run_date,
         Number of rows updated (marked FILLED).
     """
     from backtest.unified_backtest import _reanchor_bracket, _signal_to_long_short
+    # Hoisted out of the per-sibling loop (function-top local import — codebase
+    # idiom).  Used by the SP-6 Phase C D1 continuation-roll sibling close below.
+    from execution.open_reconcile import drop_signal_close
 
     if not closes:
         return 0
@@ -228,21 +231,43 @@ def finalize_parity_marks(cur, closes: dict, run_date,
         # target_date=NULL, so this whole finalize loop is a no-op for them and
         # no continuation/sibling ever exists.
         if row_target_date is not None and row_strategy_id is not None:
-            cur.execute("""
-                SELECT id FROM execution_signals
-                 WHERE strategy_id    = %s
-                   AND ticker         = %s
-                   AND workspace_id   = %s
-                   AND status         = 'open'
-                   AND lifecycle_state = 'FILLED'
-                   AND target_date IS NOT NULL
-                   AND target_date    < %s
-                   AND id            <> %s
-                 ORDER BY target_date ASC
-            """, (row_strategy_id, ticker, workspace_id, row_target_date, row_id))
-            sibling_rows = cur.fetchall()
-            if sibling_rows:
-                from execution.open_reconcile import drop_signal_close
+            # Savepoint-isolate the sibling-close work.  This is the FIRST
+            # raise-capable code inside the engine's parity span
+            # (engine.py:1576-1607), whose except handler only LOGS — it does
+            # NOT roll back.  Without a savepoint, a single raise here (corrupt/
+            # poisoned sibling row, or any DB error inside drop_signal_close)
+            # would leave the connection in InFailedSqlTransaction, which then
+            # aborts detect_confluence and discards the ENTIRE EOD cycle's writes
+            # at the final conn.commit().  The savepoint is established AFTER the
+            # FILLED UPDATE above (which is already committed-into-the-txn and
+            # counted in `updated`), so a rollback degrades a failed roll to
+            # "this roll skipped, loudly logged" WITHOUT unwinding the FILLED
+            # mark.  Mirrors engine.write_signals' SAVEPOINT sp_signal pattern.
+            # The savepoint spans BOTH the sibling SELECT and the
+            # drop_signal_close loop — any of them can raise on a poisoned row,
+            # and one savepoint over the whole loop means a failure on any
+            # sibling rolls back the whole roll for THIS filled row (atomic skip).
+            cur.execute("SAVEPOINT sp_roll")
+            try:
+                cur.execute("""
+                    SELECT id FROM execution_signals
+                     WHERE strategy_id    = %s
+                       AND ticker         = %s
+                       AND workspace_id   = %s
+                       AND status         = 'open'
+                       AND lifecycle_state = 'FILLED'
+                       AND target_date IS NOT NULL
+                       AND target_date    < %s
+                       AND id            <> %s
+                     ORDER BY target_date ASC
+                """, (row_strategy_id, ticker, workspace_id, row_target_date, row_id))
+                sibling_rows = cur.fetchall()
+                # Multi-sibling case: when several older spent siblings exist
+                # (e.g. a roll missed a session), the loop closes ALL of them at
+                # the CURRENT mark — pnl is realized at roll-time for each.  This
+                # is acceptable under the one-net-position-per-(strategy,ticker)
+                # invariant: there is a single live position, so the older rows
+                # are stale trackers that must all be retired at the same mark.
                 for srow in sibling_rows:
                     sib_id = srow['id'] if hasattr(srow, 'keys') else srow[0]
                     drop_signal_close(
@@ -254,6 +279,16 @@ def finalize_parity_marks(cur, closes: dict, run_date,
                         "continuation %s at mark=%.4f",
                         sib_id, ticker, row_id, mark_price,
                     )
+                cur.execute("RELEASE SAVEPOINT sp_roll")
+            except Exception as _roll_err:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_roll")
+                cur.execute("RELEASE SAVEPOINT sp_roll")
+                logger.error(
+                    "[parity_mark] D1 sibling-close FAILED for continuation %s "
+                    "(%s) at mark=%.4f — roll SKIPPED, sibling(s) left open; "
+                    "FILLED mark stands. err=%s",
+                    row_id, ticker, mark_price, _roll_err,
+                )
 
     logger.info(
         "[parity_mark] %d signal(s) marked FILLED (broker-held) for target_date=%s",

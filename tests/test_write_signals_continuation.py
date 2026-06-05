@@ -39,6 +39,7 @@ import psycopg2
 import psycopg2.extras
 
 from execution import engine
+from execution import open_reconcile
 from execution.parity_mark import finalize_parity_marks
 
 
@@ -484,6 +485,146 @@ def test_d1_unfilled_continuation_leaves_sibling_open(db_conn, _db_meta):
 
     cur.execute("SELECT status FROM execution_signals WHERE id=%s", (sibling_id,))
     assert cur.fetchone()['status'] == 'open', "sibling must stay open when no roll"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Test 6 — D1 multi-sibling roll: TWO older spent siblings both closed
+# ──────────────────────────────────────────────────────────────────
+
+def test_d1_continuation_fill_closes_all_spent_siblings(db_conn, _db_meta):
+    """Two older spent FILLED+open siblings (distinct signal/target dates, same
+    strategy/ticker) + a continuation row marked FILLED ⇒ BOTH siblings closed
+    with close_reason='rolled_continuation' at the continuation's mark."""
+    cur = db_conn.cursor()
+    strat = _db_meta['strategy_id']
+    ws_id = _db_meta['ws_id']
+    ticker = 'ZZC6MULTISIB'
+
+    older_td = date(2026, 6, 2)
+    newer_td = date(2026, 6, 4)
+    cont_td = date(2026, 6, 5)          # continuation target_date == run_date
+
+    # Two spent siblings, both held live, distinct (signal_date, target_date).
+    sib_older_id = _seed_row(
+        cur, strat=strat, ws_id=ws_id, ticker=ticker,
+        signal_date=date(2026, 6, 1), target_date=older_td,
+        lifecycle_state='FILLED',
+    )
+    sib_newer_id = _seed_row(
+        cur, strat=strat, ws_id=ws_id, ticker=ticker,
+        signal_date=date(2026, 6, 3), target_date=newer_td,
+        lifecycle_state='FILLED',
+    )
+    # Continuation row about to be filled.
+    cont_id = _seed_row(
+        cur, strat=strat, ws_id=ws_id, ticker=ticker,
+        signal_date=cont_td, target_date=cont_td,
+        lifecycle_state='APPROVED',
+    )
+
+    close_price = 104.0
+
+    def _broker_held():
+        return {ticker: 5000.0}
+
+    marked = finalize_parity_marks(
+        cur, {ticker: close_price}, cont_td, ws_id, broker_loader=_broker_held,
+    )
+    assert marked == 1, "only the continuation row should be marked FILLED"
+
+    # Continuation now FILLED, still open.
+    cur.execute("SELECT status, lifecycle_state FROM execution_signals WHERE id=%s",
+                (cont_id,))
+    cont = cur.fetchone()
+    assert cont['lifecycle_state'] == 'FILLED'
+    assert cont['status'] == 'open'
+
+    # BOTH spent siblings closed at the continuation's mark.
+    for sib_id in (sib_older_id, sib_newer_id):
+        cur.execute("SELECT status, lifecycle_state, fill_price "
+                    "FROM execution_signals WHERE id=%s", (sib_id,))
+        sib = cur.fetchone()
+        assert sib['status'] == 'closed', f"sibling {sib_id} must be closed"
+        assert sib['lifecycle_state'] == 'CLOSED_AT_OPEN'
+        assert abs(float(sib['fill_price']) - close_price) < 1e-9
+
+        cur.execute("SELECT status, close_reason, closed_at FROM signal_pnl "
+                    "WHERE signal_id=%s ORDER BY pnl_date DESC LIMIT 1", (sib_id,))
+        pnl = cur.fetchone()
+        assert pnl is not None, f"signal_pnl close row must exist for sibling {sib_id}"
+        assert pnl['status'] == 'closed'
+        assert pnl['close_reason'] == 'rolled_continuation'
+        assert pnl['closed_at'] is not None
+
+
+# ──────────────────────────────────────────────────────────────────
+# Test 7 — D1 failure path: a raising sibling-close must NOT poison the txn
+# ──────────────────────────────────────────────────────────────────
+
+def test_d1_sibling_close_failure_does_not_poison_txn(db_conn, _db_meta, monkeypatch):
+    """Savepoint-isolation pin: when drop_signal_close raises (aborting the PG
+    txn) for a sibling, finalize_parity_marks must NOT propagate the exception,
+    the continuation row must still end FILLED, the transaction must remain
+    usable (a further statement executes + commit/rollback works), and the
+    sibling must stay open (its roll degraded to a loudly-logged skip).
+
+    This test MUST fail on the pre-fix code: without the per-row savepoint the
+    aborting SQL inside drop_signal_close leaves the connection in
+    InFailedSqlTransaction, and the exception propagates out of
+    finalize_parity_marks.
+    """
+    cur = db_conn.cursor()
+    strat = _db_meta['strategy_id']
+    ws_id = _db_meta['ws_id']
+    ticker = 'ZZC7FAILSIB'
+
+    spent_td = date(2026, 6, 4)
+    cont_td = date(2026, 6, 5)
+
+    sibling_id = _seed_row(
+        cur, strat=strat, ws_id=ws_id, ticker=ticker,
+        signal_date=date(2026, 6, 3), target_date=spent_td,
+        lifecycle_state='FILLED',
+    )
+    cont_id = _seed_row(
+        cur, strat=strat, ws_id=ws_id, ticker=ticker,
+        signal_date=cont_td, target_date=cont_td,
+        lifecycle_state='APPROVED',
+    )
+
+    def _broker_held():
+        return {ticker: 5000.0}
+
+    # Make drop_signal_close raise by executing aborting SQL on the cursor —
+    # this poisons the PG transaction exactly like a corrupt-row failure would.
+    # Patch the name at its definition module (the function-top import resolves
+    # execution.open_reconcile.drop_signal_close at call time).
+    def _boom(cur, *args, **kwargs):
+        cur.execute("SELECT 1/0")
+
+    monkeypatch.setattr(open_reconcile, 'drop_signal_close', _boom)
+
+    # Must NOT raise — the savepoint contains the abort.
+    marked = finalize_parity_marks(
+        cur, {ticker: 103.0}, cont_td, ws_id, broker_loader=_broker_held,
+    )
+    assert marked == 1, "continuation should still be marked FILLED"
+
+    # Continuation row still FILLED (the FILLED UPDATE is outside the savepoint).
+    cur.execute("SELECT status, lifecycle_state FROM execution_signals WHERE id=%s",
+                (cont_id,))
+    cont = cur.fetchone()
+    assert cont['lifecycle_state'] == 'FILLED', "continuation must remain FILLED"
+    assert cont['status'] == 'open'
+
+    # Transaction is USABLE — a further statement runs and commit/rollback works.
+    cur.execute("SELECT 1")
+    assert cur.fetchone()[0] == 1, "txn must remain usable after the failed roll"
+
+    # Sibling stays OPEN — its roll degraded to a skip, not a partial close.
+    cur.execute("SELECT status FROM execution_signals WHERE id=%s", (sibling_id,))
+    assert cur.fetchone()['status'] == 'open', \
+        "sibling must stay open when its roll failed"
 
 
 if __name__ == '__main__':
