@@ -47,15 +47,35 @@ def _cmd(call):
 
 
 class _GateOnMixin:
-    """Force OPENCLAW_EOD_RECONCILE=1 for the duration of a test."""
+    """Force OPENCLAW_EOD_RECONCILE=1 for the duration of a test, and stub the
+    cancel→close settle poll permissive (returns a terminal 'canceled' dict
+    instantly). The helper now polls each successfully-cancelled order id to a
+    terminal status before returning — without this default mock the real
+    `_poll_to_terminal` would spawn live `regime_liquidator._run_cli`
+    subprocesses (~10s each, live-broker contact). Tests that care about poll
+    behavior override this with their own patch."""
     def setUp(self):
         self._env = patch.dict(os.environ, {'OPENCLAW_EOD_RECONCILE': '1'})
         self._env.start()
         self.addCleanup(self._env.stop)
+        self._poll = patch.object(
+            ae, '_poll_to_terminal', return_value={'status': 'canceled'})
+        self._poll.start()
+        self.addCleanup(self._poll.stop)
 
 
 class TestCancelHelper(unittest.TestCase):
     """_cancel_open_equity_orders unit behavior (gate-independent helper)."""
+
+    def setUp(self):
+        # The helper now settle-polls each successfully-cancelled order id to a
+        # terminal status before returning. Stub it permissive so the helper
+        # unit tests don't spawn live `_poll_to_terminal` subprocesses; tests
+        # asserting poll behavior override this locally.
+        self._poll = patch.object(
+            ae, '_poll_to_terminal', return_value={'status': 'canceled'})
+        self._poll.start()
+        self.addCleanup(self._poll.stop)
 
     def test_cancels_only_matching_symbol_orders(self):
         order_list = [
@@ -95,6 +115,31 @@ class TestCancelHelper(unittest.TestCase):
             n = ae._cancel_open_equity_orders('AAPL')
         self.assertEqual(n, 0)
         self.assertTrue(all('order cancel' not in _cmd(c) for c in mock_cli.call_args_list))
+
+    def test_order_id_only_fallback_still_cancelled(self):
+        """MINOR finding: every prior fixture carried 'id', so the
+        `o.get('id') or o.get('order_id')` fallback was unexercised. An order
+        dict with ONLY `order_id` (no `id`) must still be cancelled — and its
+        id is the one polled to terminal."""
+        order_list = [{'order_id': 'oid-NOID', 'symbol': 'AAPL'}]  # no 'id' key
+        responses = {
+            'order list': (True, order_list, None),
+            'order cancel': (True, {'status': 'canceled'}, None),
+        }
+        with patch.object(ae, '_run_alpaca_cli',
+                          side_effect=_needle_cli(responses)) as mock_cli, \
+             patch.object(ae, '_poll_to_terminal',
+                          return_value={'status': 'canceled'}) as mock_poll:
+            n = ae._cancel_open_equity_orders('AAPL')
+        self.assertEqual(n, 1)
+        cancel_ids = []
+        for c in mock_cli.call_args_list:
+            if 'order cancel' in _cmd(c):
+                cancel_ids.append(c.args[0][c.args[0].index('--order-id') + 1])
+        self.assertEqual(cancel_ids, ['oid-NOID'])
+        # the fallback id is the one settle-polled
+        mock_poll.assert_called_once()
+        self.assertEqual(mock_poll.call_args.args[0], 'oid-NOID')
 
 
 class TestGateOnFullClose(_GateOnMixin, unittest.TestCase):
@@ -254,6 +299,98 @@ class TestGateOnPartialReduce(_GateOnMixin, unittest.TestCase):
         cancel_idxs = [i for i, c in enumerate(cmds) if 'order cancel' in c]
         close_idxs = [i for i, c in enumerate(cmds) if 'position close' in c]
         self.assertEqual(len(cancel_idxs), 1)
+        self.assertLess(cancel_idxs[0], close_idxs[0])
+
+
+class TestGateOnSettlePoll(_GateOnMixin, unittest.TestCase):
+    """The cancel→close settle race: cancelled OCO legs must be polled to
+    terminal (the async pending_cancel→canceled qty-hold release) BEFORE the
+    close fires, else `position close` can still 403 'insufficient qty'."""
+
+    def test_cancelled_ids_polled_before_close(self):
+        """New test 1 (poll-order): every settle poll happens AFTER the cancels
+        and BEFORE the close. `_poll_to_terminal` and `_run_alpaca_cli` are
+        separate mocks with no shared clock, so both append to ONE shared
+        timeline and the order is asserted on that single sequence."""
+        timeline = []  # ordered ('cli'|'poll', detail) across both mocks
+
+        order_list = [
+            {'id': 'oid-A1', 'symbol': 'AAPL'},
+            {'id': 'oid-A2', 'symbol': 'AAPL'},
+        ]
+        responses = {
+            'order list': (True, order_list, None),
+            'order cancel': (True, {'status': 'canceled'}, None),
+            'position close': (True, {'id': 'close-P', 'qty': '10', 'notional': '2000'}, None),
+        }
+        base = _needle_cli(responses)
+
+        def _cli(args, timeout=30):
+            joined = ' '.join(str(a) for a in args)
+            if 'order list' in joined:
+                timeline.append(('cli', 'list'))
+            elif 'order cancel' in joined:
+                timeline.append(('cli', 'cancel'))
+            elif 'position close' in joined:
+                timeline.append(('cli', 'close'))
+            return base(args, timeout=timeout)
+
+        def _poll(order_id, timeout_s=10, interval_s=0.5):
+            timeline.append(('poll', order_id))
+            return {'status': 'canceled'}
+
+        with patch.object(ae, '_run_alpaca_cli', side_effect=_cli), \
+             patch.object(ae, '_poll_to_terminal', side_effect=_poll):
+            res, oid = ae._rth_position_close(
+                'AAPL', 'COID-SP', notional_usd=2000.0, current_usd=2000.0,
+                equity=100000.0, pct_nav=0.02)
+
+        self.assertEqual(res['status'], 'submitted')
+        self.assertEqual(oid, 'close-P')
+
+        kinds = [t[0] for t in timeline]
+        poll_idxs = [i for i, t in enumerate(timeline) if t[0] == 'poll']
+        cancel_idxs = [i for i, t in enumerate(timeline)
+                       if t == ('cli', 'cancel')]
+        close_idxs = [i for i, t in enumerate(timeline)
+                      if t == ('cli', 'close')]
+        self.assertEqual(len(poll_idxs), 2)        # both cancelled legs polled
+        self.assertEqual(len(cancel_idxs), 2)
+        self.assertEqual(len(close_idxs), 1)
+        # load-bearing relative order: cancels → polls → close
+        self.assertLess(max(cancel_idxs), min(poll_idxs))
+        self.assertLess(max(poll_idxs), close_idxs[0])
+        # exactly the two cancelled ids were polled
+        polled = {t[1] for t in timeline if t[0] == 'poll'}
+        self.assertEqual(polled, {'oid-A1', 'oid-A2'})
+        # sanity: the close is the last CLI action
+        self.assertEqual(kinds[-1], 'cli')
+
+    def test_poll_timeout_none_still_closes(self):
+        """New test 2 (best-effort preserved): a settle poll returning None
+        (timeout) must NOT block the close — degrades to the pre-change 403,
+        never aborts."""
+        order_list = [{'id': 'oid-A1', 'symbol': 'AAPL'}]
+        responses = {
+            'order list': (True, order_list, None),
+            'order cancel': (True, {'status': 'canceled'}, None),
+            'position close': (True, {'id': 'close-TO', 'qty': '7', 'notional': '1400'}, None),
+        }
+        with patch.object(ae, '_run_alpaca_cli',
+                          side_effect=_needle_cli(responses)) as mock_cli, \
+             patch.object(ae, '_poll_to_terminal',
+                          return_value=None) as mock_poll:
+            res, oid = ae._rth_position_close(
+                'AAPL', 'COID-TO', notional_usd=1400.0, current_usd=1400.0,
+                equity=70000.0, pct_nav=0.02)
+        self.assertEqual(res['status'], 'submitted')
+        self.assertEqual(oid, 'close-TO')
+        mock_poll.assert_called_once()
+        cmds = [_cmd(c) for c in mock_cli.call_args_list]
+        cancel_idxs = [i for i, c in enumerate(cmds) if 'order cancel' in c]
+        close_idxs = [i for i, c in enumerate(cmds) if 'position close' in c]
+        self.assertTrue(cancel_idxs)
+        self.assertTrue(close_idxs)
         self.assertLess(cancel_idxs[0], close_idxs[0])
 
 

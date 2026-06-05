@@ -1422,10 +1422,34 @@ def _cancel_open_equity_orders(ticker: str) -> int:
     fixed this exact bug since 2026-05-26 (_cancel_open_crypto_stops); this is
     the equity sibling.
 
-    Accepted trade-off: cancelling the protective legs opens a brief unprotected
-    window if the close itself then fails. That window is covered by the 16:10
-    ET stop_reattach floor + the next RTH cycle re-placing protection
-    (operator-accepted 2026-06-05).
+    Settle-poll (the load-bearing part): a cancel ACK does NOT immediately
+    release the reserved qty — Alpaca flips the order `pending_cancel` →
+    `canceled` asynchronously, releasing the hold only at the second transition.
+    Firing `position close` right after the cancel ACK can therefore STILL 403
+    "insufficient qty available" — the exact failure this change exists to
+    eliminate, and worse than the crypto precedent because an OCO holds the qty
+    across TWO legs (two holds to clear). So after issuing the cancels we poll
+    EACH successfully-cancelled order id to a terminal status ('canceled' is in
+    `_TERMINAL_ORDER_STATUSES`) with a SHORT bound before returning, so the
+    caller's close fires only once the holds have cleared. Bound: timeout_s=10
+    per leg (worst case N×10s; realistic N ≤ 4 OCO legs ⇒ ≤ 40s). interval_s
+    is floored to 1s inside `_poll_to_terminal` (cancels settle sub-second in
+    practice, usually on the first poll before any sleep). On poll
+    timeout/None/error we log and return anyway — best-effort degrades to the
+    pre-change 403, never blocks or aborts the close.
+
+    Reach + re-protection window (operator-accepted 2026-06-05 — stated here so
+    a future reader does not rediscover it as a surprise): the gate
+    `OPENCLAW_EOD_RECONCILE=1` is ON in production, so this cancel-then-close
+    sequence fires on ALL RTH `position close` calls — the 10 AM daily cycle and
+    partial reduces too — NOT only the 3:55 PM ET EOD dump. Cancelling the
+    protective legs opens a brief unprotected window if the close itself then
+    fails. The 10 AM daily cycle re-covers in-cycle via its own stop_reattach
+    step. The EOD execute path (`trade,alpaca,reconcile,report,health`) has NO
+    such in-cycle step — its only re-cover is the standalone 16:10 ET
+    stop_reattach timer, so a failed EOD close can leave a position naked for up
+    to ~15 min (worst case until the 16:10 floor runs). This is the accepted
+    design.
 
     Returns the count cancelled. Returns 0 on any CLI-error response; a CLI
     subprocess hang can still raise TimeoutExpired, so the caller wraps this in
@@ -1433,7 +1457,7 @@ def _cancel_open_equity_orders(ticker: str) -> int:
     ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
     if not ok or not isinstance(payload, list):
         return 0
-    n = 0
+    cancelled_ids: list[str] = []
     for o in payload:
         if not isinstance(o, dict):
             continue
@@ -1442,9 +1466,20 @@ def _cancel_open_equity_orders(ticker: str) -> int:
             if oid:
                 c_ok, _p, _e = _run_alpaca_cli(['order', 'cancel', '--order-id', oid], timeout=10)
                 if c_ok:
-                    n += 1
-    if n:
-        log(f'  ↳ cancelled {n} open order(s) for {ticker} before close')
+                    cancelled_ids.append(oid)
+    n = len(cancelled_ids)
+    if not n:
+        return 0
+    log(f'  ↳ cancelled {n} open order(s) for {ticker}; settling holds before close')
+    # Cancel-all THEN poll-all: both OCO holds clear in parallel, and the close
+    # fires only once the async pending_cancel→canceled release has settled.
+    for oid in cancelled_ids:
+        try:
+            final = _poll_to_terminal(oid, timeout_s=10, interval_s=0.5)
+            if final is None:
+                log(f'  ↳ cancel-settle poll timed out for {oid} (proceeding to close)')
+        except Exception as _px:   # noqa: BLE001 — best-effort; close must proceed
+            log(f'  ↳ cancel-settle poll errored for {oid} (proceeding to close): {_px}')
     return n
 
 
@@ -2025,12 +2060,15 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
     # SP-6 Phase C: resting GTC OCO take-profit/stop legs reserve the full
     # position qty → `position close` 403s "insufficient qty available"
     # (proven 2026-06-04: all 4 EOD orphan closes rejected). Cancel them
-    # first. Applies uniformly to full closes AND partial reduces — a REDUCE
-    # 403s identically because the full qty is reserved. Gated on
-    # OPENCLAW_EOD_RECONCILE: when OFF, ZERO new CLI calls (legacy path
-    # byte-identical). Best-effort + guarded: a CLI hang (TimeoutExpired) or a
-    # cancel failure must NEVER abort the close attempt (mirror the crypto
-    # call-site guard).
+    # first AND settle-poll each cancel to terminal (the qty-hold release is
+    # async: pending_cancel→canceled; firing the close on the bare ACK can
+    # re-403) — the helper returns only after the holds clear. Applies
+    # uniformly to full closes AND partial reduces — a REDUCE 403s identically
+    # because the full qty is reserved. Gated on OPENCLAW_EOD_RECONCILE: when
+    # OFF, ZERO new CLI calls (legacy path byte-identical). Best-effort +
+    # guarded: a CLI hang (TimeoutExpired), a cancel failure, or a settle-poll
+    # timeout must NEVER abort the close attempt (mirror the crypto call-site
+    # guard). Worst-case added latency is bounded: N legs × 10s, N ≤ 4.
     if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
         try:
             _cancel_open_equity_orders(ticker)
