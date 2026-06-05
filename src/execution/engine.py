@@ -1023,13 +1023,45 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                 # position's broker stop-leg keeps its day-0 values until
                 # natural exit + re-entry; the DB and dashboard always
                 # show the strategy's current intent.
-                cur.execute("""
-                    SELECT id FROM execution_signals
-                     WHERE strategy_id = %s AND ticker = %s AND status = 'open'
-                     LIMIT 1
-                """, (strategy_id, sig.ticker))
+                if _gate_on:
+                    # Gate ON: continuation mints create MULTIPLE open rows per
+                    # (strategy_id, ticker) over time, so the match must be
+                    # DETERMINISTIC — pick the NEWEST target_date so the spent-
+                    # check below compares against the latest intent.  Also fetch
+                    # target_date for that spent-check.
+                    cur.execute("""
+                        SELECT id, target_date FROM execution_signals
+                         WHERE strategy_id = %s AND ticker = %s AND status = 'open'
+                         ORDER BY target_date DESC NULLS LAST
+                         LIMIT 1
+                    """, (strategy_id, sig.ticker))
+                else:
+                    # Gate OFF: byte-identical legacy SELECT.
+                    cur.execute("""
+                        SELECT id FROM execution_signals
+                         WHERE strategy_id = %s AND ticker = %s AND status = 'open'
+                         LIMIT 1
+                    """, (strategy_id, sig.ticker))
                 existing_row = cur.fetchone()
-                if existing_row:
+                # SP-6 Phase C (§13 durable fix): a held position's row keeps
+                # status='open' until pnl closes it; the bracket-refresh below
+                # used to match-and-refresh that SPENT row (target_date already
+                # consumed), so re-emissions never minted a row for the NEXT
+                # target_date — held tickers were locked out of subsequent target
+                # sets ⇒ structural 1-day max-hold.  Fix: when gate ON and the
+                # matched row is spent (its target_date < _next_td computed from
+                # THIS run_date), do NOT refresh — INSERT a fresh COMPUTED row for
+                # the next target_date (new signal_date ⇒ no unique-key collision).
+                # The spent row keeps tracking the live position (pnl continuity);
+                # parity_mark.finalize_parity_marks closes it as the CONTINUATION
+                # fills (D1: close_reason='rolled_continuation').
+                _continuation_mint = False
+                if existing_row and _gate_on:
+                    _existing_td = existing_row[1]
+                    if _existing_td is not None and _next_td is not None \
+                            and _existing_td < _next_td:
+                        _continuation_mint = True
+                if existing_row and not _continuation_mint:
                     cur.execute("""
                         UPDATE execution_signals
                            SET stop_loss        = %s,
@@ -1078,6 +1110,9 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                             continue
                     rows_inserted = 0   # not a new emit; bracket refresh only
                 else:
+                    # Reached when EITHER no open row matched (first emit) OR the
+                    # matched row is spent and we are minting a CONTINUATION row
+                    # for the next target_date (_continuation_mint, gate-ON only).
                     if _gate_on:
                         # Gate ON: include lifecycle_state, computed_at, target_date
                         cur.execute("""

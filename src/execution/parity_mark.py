@@ -91,8 +91,11 @@ def finalize_parity_marks(cur, closes: dict, run_date,
     # lifecycle_state was never advanced past APPROVED before the 4 PM mark.
     # We filter by closes dict in Python — allows a simple equality predicate
     # without a Postgres IN clause that varies in length.
+    # strategy_id + target_date are fetched for the SP-6 Phase C D1
+    # continuation-roll sibling close (see end of the marked-FILLED block).
     cur.execute("""
-        SELECT id, ticker, direction, entry_price, stop_loss, target_1
+        SELECT id, ticker, direction, entry_price, stop_loss, target_1,
+               strategy_id, target_date
           FROM execution_signals
          WHERE lifecycle_state IN ('APPROVED', 'EXECUTING', 'FILLED')
            AND target_date = %s
@@ -130,8 +133,11 @@ def finalize_parity_marks(cur, closes: dict, run_date,
             entry_price_raw = row['entry_price']
             stop_raw = row['stop_loss']
             target_raw = row['target_1']
+            row_strategy_id = row['strategy_id']
+            row_target_date = row['target_date']
         else:
-            row_id, ticker, direction_raw, entry_price_raw, stop_raw, target_raw = row
+            (row_id, ticker, direction_raw, entry_price_raw, stop_raw,
+             target_raw, row_strategy_id, row_target_date) = row
 
         # Skip if ticker not in today's closes
         if ticker not in closes:
@@ -202,6 +208,52 @@ def finalize_parity_marks(cur, closes: dict, run_date,
             entry_price, mark_price,
             stop_loss, new_stop, target_1, new_target,
         )
+
+        # ── SP-6 Phase C — D1 double-pnl mitigation ──────────────────────
+        # When THIS row is a CONTINUATION (engine.write_signals minted it for a
+        # later target_date because an older row was still tracking the live
+        # position), the older spent sibling must be CLOSED at the same official
+        # close mark so pnl is realized at the roll point — no gap, no double-
+        # count.  We detect the continuation purely by the presence of an OLDER
+        # sibling that is actually tracking a live position:
+        #   lifecycle_state='FILLED', status='open',
+        #   target_date < this row's target_date,
+        #   same strategy_id + ticker + workspace_id, different id.
+        # A first-time fill has no such sibling → nothing is closed.  Closing
+        # uses the existing signal-close semantics (open_reconcile.drop_signal_close):
+        # signal_pnl gets status='closed', close_reason='rolled_continuation',
+        # closed_at + realized_pnl_pct off the sibling's mark; execution_signals
+        # gets status='closed', lifecycle_state='CLOSED_AT_OPEN', fill_price=mark.
+        # NEVER DELETE.  Self-gating: gate-off rows have lifecycle_state=NULL and
+        # target_date=NULL, so this whole finalize loop is a no-op for them and
+        # no continuation/sibling ever exists.
+        if row_target_date is not None and row_strategy_id is not None:
+            cur.execute("""
+                SELECT id FROM execution_signals
+                 WHERE strategy_id    = %s
+                   AND ticker         = %s
+                   AND workspace_id   = %s
+                   AND status         = 'open'
+                   AND lifecycle_state = 'FILLED'
+                   AND target_date IS NOT NULL
+                   AND target_date    < %s
+                   AND id            <> %s
+                 ORDER BY target_date ASC
+            """, (row_strategy_id, ticker, workspace_id, row_target_date, row_id))
+            sibling_rows = cur.fetchall()
+            if sibling_rows:
+                from execution.open_reconcile import drop_signal_close
+                for srow in sibling_rows:
+                    sib_id = srow['id'] if hasattr(srow, 'keys') else srow[0]
+                    drop_signal_close(
+                        cur, sib_id, ticker, mark_price,
+                        reason='rolled_continuation',
+                    )
+                    logger.info(
+                        "[parity_mark] D1: rolled spent sibling %s (%s) into "
+                        "continuation %s at mark=%.4f",
+                        sib_id, ticker, row_id, mark_price,
+                    )
 
     logger.info(
         "[parity_mark] %d signal(s) marked FILLED (broker-held) for target_date=%s",
