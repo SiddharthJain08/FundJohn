@@ -171,8 +171,8 @@ as its explicit prior.
 ## 4. Candidate architectures, RANKED
 
 Ranked by parameter count, which **is** the robustness axis at this n. Per-session IC sd ≈ 0.07 ⇒
-SE(mean IC) = 0.07/√n; the Phase-1b/amendment full-sample bar |t| ≥ 3 needs mean IC ≥ 0.038 at
-n = 34; detection edge n ≈ (0.21/μ)². Every form is a HYPOTHESIS; none is in-sample-validated.
+SE(mean IC) = 0.07/√n; the Phase-1b/amendment full-sample bar |t| ≥ 3 needs mean IC ≥ 0.036 at
+n = 34 (≈ 0.038 at n = 31); detection edge n ≈ (0.21/μ)². Every form is a HYPOTHESIS; none is in-sample-validated.
 
 ### (i) 1-parameter residual displacement — global β  ⟵ RECOMMENDED HEADLINE (§5)
 - **Form:** `resid_disp = vwap_disp_30 − β·ofi_15`, a continuous single feature. Reversion sign
@@ -268,8 +268,12 @@ economically relevant deadline horizon) — then across-session mean IC and t = 
 
 **GO/NO-GO (MIRRORS the 1b amendment — do NOT invent a stricter OOS bar):**
 - **GO-confirmed** when BOTH hold:
-  - (i) the **FULL-sample** IC grid for `resid_disp` meets the Phase-1b §5-style bar:
-    **|t| ≥ 3** on the primary target (the same full-sample threshold Phase-1b used); AND
+  - (i) the **FULL-sample** IC grid for `resid_disp` meets the Phase-1b §5-style bar, including the
+    **coherence clause** — `resid_disp` reversion-signed with **|t| ≥ 3** on the primary target
+    (`ret_to_dump`) AND reversion-signed with **|t| ≥ 2** on **≥ 2 of** the secondary horizons
+    {`ret_fwd_15`, `ret_fwd_30`}. (Phase-1b's "a lone max-t survivor does not GO" rule, adapted to
+    the single-feature case: a single |t| ≥ 3 on one horizon is precisely the lone-survivor pattern
+    the coherence clause exists to block.); AND
   - (ii) the **OOS-only** slice with **n_oos_sessions ≥ 20** shows `resid_disp` reversion-signed
     with **|t| ≥ 2**.
 - The OOS leg uses **|t| ≥ 2, not |t| ≥ 3** — identical to the 1b amendment and the only value
@@ -322,8 +326,11 @@ freedom. This memo proposes; only pre-registered OOS accrual disposes.**
 1. **Bless or amend the DRAFT prereg (§5).** It is NOT locked by this commit. Specifically:
    confirm the single feature (`resid_disp`, global β), the single horizon (`ret_to_dump`), the
    IC-only/no-policy-number stance, and that the OOS leg uses |t| ≥ 2 (mirroring 1b) not |t| ≥ 3.
-   Alternative on the menu if a *joint gate* is preferred over a continuous residual: architecture
-   (ii) — but it has more knobs and an adverse in-sample prior.
+   **Confirm the full-sample coherence clause** — §5 adapts Phase-1b's "lone max-t survivor does not
+   GO" rule to the single-feature case (primary |t| ≥ 3 AND |t| ≥ 2 on ≥ 2 secondary horizons).
+   This is a *harder* bar than a lone primary |t| ≥ 3; operator may keep it (recommended,
+   anti-overfitting) or drop it. Alternative on the menu if a *joint gate* is preferred over a
+   continuous residual: architecture (ii) — but it has more knobs and an adverse in-sample prior.
 2. **Merge `feat/sp6-bflow-phase1-oracle` to harden the timers.** The four systemd units
    (`bflow-minbar-accrual.{service,timer}`, `bflow-weekly-rerun.{service,timer}`) currently point at
    THIS worktree path (`/root/.config/superpowers/worktrees/sp6-bflow-phase1-oracle`) via
