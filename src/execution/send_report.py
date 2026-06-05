@@ -436,11 +436,17 @@ def _load_closed_positions(run_date: str) -> list[dict]:
                            sub.notional_usd
                       FROM execution_signals es
                       JOIN LATERAL (
+                          -- rolled_continuation rows are roll segments of an
+                          -- ongoing position (SP-6 D1), not trades; excluded
+                          -- from report stats (NULL-safe). Filtering here drops
+                          -- rolls uniformly from both by-ticker stats and the
+                          -- close_reason buckets downstream.
                           SELECT realized_pnl_pct, days_held, close_reason, pnl_date
                             FROM signal_pnl
                            WHERE signal_id = es.id
                              AND status = 'closed'
                              AND realized_pnl_pct IS NOT NULL
+                             AND close_reason IS DISTINCT FROM 'rolled_continuation'
                              AND pnl_date::date = %s
                            ORDER BY pnl_date DESC
                            LIMIT 1

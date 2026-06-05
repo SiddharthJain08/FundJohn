@@ -418,11 +418,15 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
 
     // Daily combined PnL on this ticker — drives both ticker_sharpe and
     // the shared sigma denominator used for every strategy's alpha.
+    // signal_performance is a view over signal_pnl (carries close_reason).
+    // rolled_continuation rows are roll segments of an ongoing position
+    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     const combinedRes = await dbQuery(`
       SELECT sp.closed_at AS d, SUM(sp.pnl_pct) AS day_pnl
       FROM signal_performance sp
       JOIN execution_signals es ON es.id = sp.signal_id
       WHERE sp.status = 'closed' AND es.ticker = $1
+        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
       GROUP BY sp.closed_at
       ORDER BY sp.closed_at
     `, [ticker]);
@@ -467,6 +471,8 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
     // didn't filter by lifecycle state. The live sizer skips deprecated
     // strategies via strategy_weights_by_regime; the dashboard alpha
     // display should reflect the same truth.
+    // rolled_continuation rows are roll segments of an ongoing position
+    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     const stratRes = await dbQuery(`
       SELECT es.strategy_id,
              es.direction,
@@ -477,15 +483,19 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
       JOIN execution_signals es ON es.id = sp.signal_id
       JOIN strategy_registry sr ON sr.id = es.strategy_id
       WHERE sp.status = 'closed' AND es.ticker = $1
+        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
         AND sr.status != 'deprecated'
       GROUP BY es.strategy_id, es.direction
     `, [ticker]);
     // Ticker-level reference: mean(pnl_pct) over every closed trade.
+    // rolled_continuation rows are roll segments of an ongoing position
+    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     const tickerStatsRes = await dbQuery(`
       SELECT AVG(sp.pnl_pct)::float AS mean_pct, COUNT(*)::int AS n
       FROM signal_performance sp
       JOIN execution_signals es ON es.id = sp.signal_id
       WHERE sp.status = 'closed' AND es.ticker = $1
+        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
     `, [ticker]);
     const ticker_mean_pct = parseFloat(tickerStatsRes.rows[0]?.mean_pct ?? 0);
     const ticker_n        = parseInt(tickerStatsRes.rows[0]?.n ?? 0);
@@ -823,16 +833,20 @@ app.get('/api/portfolio/summary', async (req, res) => {
     // averaged out) and mark the source field so the operator sees it.
     const threshold30Td = await _last30TradingDayThreshold();
     const fallback30TdInterval = "CURRENT_DATE - INTERVAL '42 days'";
+    // rolled_continuation rows are roll segments of an ongoing position
+    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     const win30dSql = threshold30Td
       ? `SELECT COUNT(*) AS closed_count,
                 COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
            FROM signal_pnl
           WHERE status='closed' AND realized_pnl_pct IS NOT NULL
+            AND close_reason IS DISTINCT FROM 'rolled_continuation'
             AND closed_at >= $1::date`
       : `SELECT COUNT(*) AS closed_count,
                 COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
            FROM signal_pnl
           WHERE status='closed' AND realized_pnl_pct IS NOT NULL
+            AND close_reason IS DISTINCT FROM 'rolled_continuation'
             AND closed_at >= ${fallback30TdInterval}`;
     const win30dArgs = threshold30Td ? [threshold30Td] : [];
     // Broker-truth open position count via Alpaca. The previous DB-only
@@ -854,17 +868,23 @@ app.get('/api/portfolio/summary', async (req, res) => {
         ? Promise.resolve({ rows: [{ open_count: openCountAlpaca }] })
         : dbQuery(`SELECT COUNT(DISTINCT ticker) AS open_count FROM execution_signals WHERE status = 'open' AND signal_date >= CURRENT_DATE - INTERVAL '90 days'`),
       dbQuery(`
+        -- rolled_continuation rows are roll segments of an ongoing position
+        -- (SP-6 D1), not trades; excluded from stats (NULL-safe).
         SELECT ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
                ROUND(MAX(realized_pnl_pct)::numeric, 4) AS best,
                ROUND(MIN(realized_pnl_pct)::numeric, 4) AS worst,
                ROUND(AVG(NULLIF(days_held, 0))::numeric, 2) AS avg_days_held
           FROM signal_pnl WHERE status = 'closed'
+            AND close_reason IS DISTINCT FROM 'rolled_continuation'
       `),
       dbQuery(`
+        -- rolled_continuation rows are roll segments of an ongoing position
+        -- (SP-6 D1), not trades; excluded from stats (NULL-safe).
         SELECT COUNT(*) AS closed_count,
                COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins
           FROM signal_pnl
          WHERE status = 'closed' AND realized_pnl_pct IS NOT NULL
+           AND close_reason IS DISTINCT FROM 'rolled_continuation'
       `),
       dbQuery(win30dSql, win30dArgs),
     ]);

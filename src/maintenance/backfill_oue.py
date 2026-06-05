@@ -52,11 +52,15 @@ def main(uri: str, dry_run: bool = False):
                sp.realized_pnl_pct, sp.days_held, sp.pnl_date
           FROM execution_signals es
           JOIN LATERAL (
+              -- rolled_continuation rows are roll segments of an ongoing
+              -- position (SP-6 D1), not trades; a 1-day GBM OUE on a roll
+              -- segment is meaningless, so skip them (NULL-safe).
               SELECT realized_pnl_pct, days_held, pnl_date
                 FROM signal_pnl
                WHERE signal_id = es.id
                  AND status = 'closed'
                  AND realized_pnl_pct IS NOT NULL
+                 AND close_reason IS DISTINCT FROM 'rolled_continuation'
                ORDER BY pnl_date DESC
                LIMIT 1
           ) sp ON TRUE

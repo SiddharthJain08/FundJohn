@@ -119,8 +119,11 @@ async function _buildTradePack(strategyId) {
 }
 
 function _counterfactuals(pnl) {
-  // Closed trades only.
-  const closed = pnl.filter(r => r.status === 'closed' && r.unrealized_pnl_pct != null);
+  // Closed trades only. rolled_continuation rows are roll segments of an
+  // ongoing position (SP-6 D1), not trades; excluded from stats. NULL-safe:
+  // in JS `null !== 'rolled_continuation'` is true, so NULL-reason closes stay.
+  const closed = pnl.filter(r => r.status === 'closed' && r.unrealized_pnl_pct != null
+                                 && r.close_reason !== 'rolled_continuation');
   if (closed.length < 3) {
     return { n_closed: closed.length, note: 'too few closed trades for counterfactuals' };
   }
@@ -575,4 +578,4 @@ async function run({ dryRun = false, strategyIds = null, notify = () => {} } = {
   };
 }
 
-module.exports = { run, buildStrategyPrompt };
+module.exports = { run, buildStrategyPrompt, _counterfactuals };

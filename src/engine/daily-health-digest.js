@@ -53,10 +53,13 @@ async function buildDigest(date = new Date(), failureCtx = null) {
     dbQuery(`SELECT COUNT(*) FILTER (WHERE status='open')   AS open_count,
                     COUNT(*) FILTER (WHERE status='closed') AS closed_count
              FROM execution_signals`),
+    // rolled_continuation rows are roll segments of an ongoing position
+    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
     dbQuery(`SELECT ROUND(AVG(realized_pnl_pct)::numeric, 4) AS avg_pnl,
                     COUNT(*) FILTER (WHERE realized_pnl_pct > 0) AS wins,
                     COUNT(*) AS total
-             FROM signal_pnl WHERE status='closed' AND closed_at > NOW() - INTERVAL '7 days'`),
+             FROM signal_pnl WHERE status='closed' AND closed_at > NOW() - INTERVAL '7 days'
+               AND close_reason IS DISTINCT FROM 'rolled_continuation'`),
     getDataFreshness().catch(() => []),
     dbQuery(`SELECT run_id, started_at, input_count, output_count, total_cost_usd
              FROM curator_runs ORDER BY started_at DESC LIMIT 1`).catch(() => ({ rows: [] })),

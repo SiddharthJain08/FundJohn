@@ -85,10 +85,12 @@ def build_dossier(strategy_id: str, days: int = 30) -> dict:
         # Aggregate realised P&L summary
         pnl_summary = _row(
             cur,
+            # rolled_continuation rows are roll segments of an ongoing position
+            # (SP-6 D1), not trades; excluded from stats (NULL-safe).
             """SELECT COUNT(*)::int AS n_rows,
-                      COUNT(*) FILTER (WHERE status='closed')::int AS n_closed,
-                      AVG(realized_pnl_pct) FILTER (WHERE status='closed') AS avg_closed_pct,
-                      AVG(days_held) FILTER (WHERE status='closed') AS avg_hold_days,
+                      COUNT(*) FILTER (WHERE status='closed' AND close_reason IS DISTINCT FROM 'rolled_continuation')::int AS n_closed,
+                      AVG(realized_pnl_pct) FILTER (WHERE status='closed' AND close_reason IS DISTINCT FROM 'rolled_continuation') AS avg_closed_pct,
+                      AVG(days_held) FILTER (WHERE status='closed' AND close_reason IS DISTINCT FROM 'rolled_continuation') AS avg_hold_days,
                       COUNT(*) FILTER (WHERE close_reason='stop_loss')::int AS stops_hit
                  FROM signal_pnl
                 WHERE strategy_id = %s
