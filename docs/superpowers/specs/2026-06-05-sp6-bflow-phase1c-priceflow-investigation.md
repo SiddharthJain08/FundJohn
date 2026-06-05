@@ -1,8 +1,10 @@
 # SP-6 B-flow Phase 1c — Flow+Price Joint-Model Investigation & DRAFT Pre-Registration
 
-Date: 2026-06-05. Status: **DESIGN MEMO + DRAFT PRE-REGISTRATION (NOT LOCKED).**
-The Phase-1c pre-registration in §5 is a **DRAFT** awaiting operator blessing; it is not
-committed/frozen by this memo. Everything else here is hypothesis-generation synthesis.
+Date: 2026-06-05. Status: **PARKED — operator decision 2026-06-05 (see §8 closure addendum).**
+The §5 DRAFT pre-registration was **WITHDRAWN before locking**: the E1–E5 energy deep-dive
+(`analysis/bflow_phase1c_energy_report.md`) adjudicated the energy construction in-sample as
+**dominated** (not merely null) by the raw displacement object already accruing on the Phase-1b
+OOS clock. §§1–4 and 6 remain valid hypothesis-generation synthesis; §5 is of record only.
 
 > **EPISTEMIC STATUS (read first).** This investigation GENERATES hypotheses; it cannot TEST
 > them. n ≈ 31 in-sample sessions on a calm tape, ~2-3 effective independent feature/horizon
@@ -338,6 +340,48 @@ freedom. This memo proposes; only pre-registered OOS accrual disposes.**
    scripts, no live-path changes). Merging it into the live branch and repointing the units at
    `/root/openclaw` removes the dependency on this worktree continuing to exist on disk. Until then,
    deleting the worktree breaks nightly minute-bar accrual and the weekly re-run.
+
+---
+
+## 8. CLOSURE ADDENDUM (2026-06-05, operator decision: PARK)
+
+The §5 DRAFT pre-registration is **withdrawn, not locked**. Basis — the pre-enumerated E1–E5
+energy deep-dive (`/root/openclaw/analysis/bflow_phase1c_energy_{report.md,grid.parquet,m3.parquet}`,
+worktree commits `104d396..b2fc140`, adversarial spec-compliance review APPROVED, anchors
+reproduce Phase-1b exactly):
+
+1. **The registered decisive comparison returned DOMINATED, not null.** Paired per-session
+   IC(r) − IC(raw disp_15) on the causal global-β residual = +0.014 / +0.016 / +0.021
+   (paired t = +2.16 / +2.73 / +3.08 across the three targets): residualizing displacement on
+   OFI strictly *removes* reversion signal. The DRAFT's premise was "register a live question
+   with a null prior"; the in-sample answer is "an object dominated by a simpler one already
+   accruing." Registering it would spend the OOS clock on an answered question.
+2. **Object-mismatch note (integrity):** the deep-dive's residual uses `disp_W` = trailing
+   close-return (the pre-enumeration's literal definition); the §5 DRAFT registers the
+   `vwap_disp_30` residual — different objects, an internal inconsistency between the two
+   docs. The withdrawal does not rest on either alone: the vwap_disp_30-residual collapsed in
+   the exploratory (|t| ≤ 1.94 with the *optimistic* per-session β) AND the disp_15-residual
+   is dominated under the causal β. Both definitions point the same way.
+3. **E5 discriminator — both registered hypotheses rejected.** Reversion concentrates in the
+   UNDERSHOOT leg (ret_to_dump IC=−0.073, t=−3.28: undershoots catch up); the OVERSHOOT leg
+   is NOT negative (+0.037, t=+1.91: overshoots do not pull back). H_energy fails
+   (both-subsets-negative violated); H_absorption fails in reverse (it predicted the
+   undershoot leg as the non-reverting one). **The asymmetry is recorded as a
+   hypothesis-generation SEED only** — an order statistic over a ~60-cell grid at n=34
+   calm-tape sessions; pursuable only via a FRESH pre-registration adjudicated on fresh OOS
+   sessions, never by promoting this grid's cell.
+4. **M3 discipline validated:** no z-threshold passes the both-legs-individually-positive
+   bar; buy +37 bps / sell −36 bps at every z is the textbook session-drift signature — the
+   bar caught exactly the sum-mirage that discredited Phase-1b Test-B.
+5. **E2 caveat of record:** the fitted propagator amplitude (~1.2e-8) makes its residual
+   numerically ≈ raw cumulative session return; its |t|≈2 forward-horizon cells read as plain
+   intraday reversal, not a flow-ledger effect.
+
+**Standing disposition:** the only dispositive test remains the Phase-1b OOS amendment —
+unconditional `ofi_15` / `vwap_disp_30` reversion ICs on sessions ≥ 2026-06-08 (accrual timer
+21:40 UTC nightly, weekly re-run Sat 13:00 UTC; n_oos ≥ 20 ≈ early July 2026). No new object
+goes on the clock. §7.2 (merge the worktree branch to harden the timer units) remains an open
+operator decision.
 
 ---
 
