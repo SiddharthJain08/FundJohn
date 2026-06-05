@@ -20,7 +20,8 @@ Cells = every (feature ∈ {ofi_5, ofi_15, vwap_disp_30}) × (target ∈
 {ret_to_dump, ret_fwd_5, ret_fwd_15, ret_fwd_30, ret_fwd_60}) = 15 cells, in a
 fixed deterministic order so the IC grid / summary are byte-stable run-to-run.
 
-Three independent inclusion gates, kept separate:
+Two independent inclusion gates, kept separate (spec §3 fixes NO third
+per-cell minimum-observation gate — every finite pair counts):
   1. ticker-level — a (ticker, session) pair participates only if it passes the
      Phase-1 60-valid-bar floor (``oracle.valid_bar`` count ≥ 60). Fail ⇒ the
      ticker contributes to NO cell.
@@ -28,8 +29,10 @@ Three independent inclusion gates, kept separate:
      feature AND target are finite at that (ticker, minute). (Per cell, because
      the targets have different valid minute ranges: ret_to_dump∈[30,330],
      ret_fwd_60∈[30,329], …)
-  3. cell-level — a session-cell with fewer than ``MIN_OBS_PER_SESSION_CELL``
-     pooled observations is NaN.
+
+The only NaN a session-cell ever gets beyond an empty pool is the intrinsic
+zero-variance one (a constant ranked vector ⇒ undefined correlation, which also
+covers n=0 / n=1); there is no observation-count threshold.
 
 A NaN/None dump price for a ticker only NaNs that ticker's ``ret_to_dump``
 column (handled inside ``flow_features.compute_targets``); its ``ret_fwd_*``
@@ -43,15 +46,15 @@ import pandas as pd
 from src.research.bflow import flow_features as ff
 from src.research.bflow import oracle
 
-# Implementer robustness floor — a session-cell pooled over fewer than this many
-# valid (feature, target) pairs is reported NaN. This is a DATA-QUALITY floor
-# (it keeps a 3-observation IC out of the across-session mean), NOT a spec
-# threshold; the spec fixes none. Reported in the data-quality table, not the
-# verdict.
-MIN_OBS_PER_SESSION_CELL = 30
-
 # Minimum valid bars for a (ticker, session) to participate at all (the Phase-1
 # floor reused verbatim — see oracle.evaluate_intent's 'too_few_bars' guard).
+# This IS a spec floor (§2/§3: the Test-A universe is the cached pairs passing
+# the Phase-1 60-valid-bar floor). There is deliberately NO per-session-cell
+# minimum-observation gate: spec §3 says "all valid (ticker, minute)
+# observations in the session -> one IC per session per cell" and fixes no
+# minimum, so a cell computes its IC from every finite (feature, target) pair —
+# the only NaN paths are the intrinsically-undefined ones (n<2 or a constant
+# ranked vector ⇒ zero-variance correlation).
 MIN_VALID_BARS = 60
 
 _FEATURES = ("ofi_5", "ofi_15", "vwap_disp_30")
@@ -79,17 +82,17 @@ CELLS = tuple(cell_name(f, t) for f in _FEATURES for t in _TARGETS)
 def _spearman_ic(x, y):
     """Spearman rank IC between two aligned Series: drop pairs where either side
     is NaN, then Pearson correlation of the ranks (``method='average'`` ties,
-    pandas default). Returns NaN if fewer than ``MIN_OBS_PER_SESSION_CELL`` pairs
-    survive OR either ranked vector is constant (zero variance ⇒ correlation
-    undefined; we guard explicitly so numpy never emits a RuntimeWarning)."""
+    pandas default). Per spec §3 there is NO minimum-observation floor — every
+    finite (feature, target) pair counts. Returns NaN ONLY for the
+    intrinsically-undefined cases: either ranked vector is constant (zero
+    variance ⇒ correlation undefined) or the denominator is zero, which also
+    captures the degenerate n=0 (empty ⇒ NaN std) and n=1 (single point ⇒ zero
+    std) pools. The guards are explicit so numpy never emits a RuntimeWarning."""
     x = pd.Series(x).reset_index(drop=True)
     y = pd.Series(y).reset_index(drop=True)
     both = pd.concat([x, y], axis=1)
     both.columns = ["x", "y"]
     both = both.dropna()
-    n = len(both)
-    if n < MIN_OBS_PER_SESSION_CELL:
-        return float("nan")
     rx = both["x"].rank()              # average-rank ties
     ry = both["y"].rank()
     # zero-variance guard: a constant input (or all-tied ranks) -> undefined.
@@ -156,7 +159,8 @@ def session_ics(session_bars, dump_prices):
     Pooling is across BOTH ticker and minute within the session. A (ticker,
     session) participates only if it passes the Phase-1 60-valid-bar floor; an
     observation enters a cell only if both that cell's feature and target are
-    finite there; a cell with < MIN_OBS_PER_SESSION_CELL pooled pairs is NaN.
+    finite there. There is no per-cell observation floor (spec §3): a cell is
+    NaN only when its pool is empty or its ranked feature/target is constant.
     """
     feat_cols = {f: [] for f in _FEATURES}
     tgt_cols = {t: [] for t in _TARGETS}

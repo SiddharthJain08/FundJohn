@@ -27,8 +27,13 @@ from src.research.bflow import predictability as pr
 # --------------------------------------------------------------------------
 # module-level constants / cell taxonomy
 # --------------------------------------------------------------------------
-def test_min_obs_constant_is_30():
-    assert pr.MIN_OBS_PER_SESSION_CELL == 30
+def test_no_spec_absent_cell_observation_floor():
+    # Spec §3 fixes NO per-session-cell minimum-observation gate — it says
+    # "all valid (ticker, minute) observations in the session -> one IC per
+    # session per cell". A spec-absent floor would drop thin cells from the
+    # non-NaN n_sessions count and thereby perturb the GATING across-session t,
+    # so it MUST NOT exist. Regression guard: the constant is gone.
+    assert not hasattr(pr, "MIN_OBS_PER_SESSION_CELL")
 
 
 def test_cells_are_the_15_feature_x_target_product():
@@ -84,15 +89,28 @@ def test_spearman_drops_nan_pairs_then_correlates():
     assert ic == pytest.approx(1.0)
 
 
-def test_spearman_below_min_obs_is_nan():
-    # 29 valid pairs (< MIN_OBS_PER_SESSION_CELL=30) -> NaN.
-    x = pd.Series(np.arange(29, dtype=float))
-    y = pd.Series(np.arange(29, dtype=float))
-    assert math.isnan(pr._spearman_ic(x, y))
-    # exactly 30 -> defined
-    x30 = pd.Series(np.arange(30, dtype=float))
-    y30 = pd.Series(np.arange(30, dtype=float))
-    assert pr._spearman_ic(x30, y30) == pytest.approx(1.0)
+def test_spearman_small_sample_no_floor():
+    # No spec-absent observation floor: a thin-but-valid sample (well under the
+    # removed 30-obs gate) MUST compute its IC, not return NaN. 5 clean monotone
+    # pairs -> +1.0; 3 -> +1.0. Only the intrinsic guards (n<2 / zero-variance /
+    # zero-denominator) may NaN a cell.
+    x5 = pd.Series(np.arange(5, dtype=float))
+    y5 = pd.Series(np.arange(5, dtype=float))
+    assert pr._spearman_ic(x5, y5) == pytest.approx(1.0)
+    x3 = pd.Series([0.0, 1.0, 2.0])
+    y3 = pd.Series([10.0, 20.0, 30.0])
+    assert pr._spearman_ic(x3, y3) == pytest.approx(1.0)
+
+
+def test_spearman_intrinsic_guards_nan_below_two_obs():
+    # The ONLY intrinsically-required guards survive the floor removal: a single
+    # pair (n=1, zero-variance ranks) and an empty pair set (n=0) are undefined
+    # correlations -> NaN, never inf / never a RuntimeWarning.
+    one_x = pd.Series([3.0])
+    one_y = pd.Series([7.0])
+    assert math.isnan(pr._spearman_ic(one_x, one_y))
+    empty = pd.Series(dtype=float)
+    assert math.isnan(pr._spearman_ic(empty, empty))
 
 
 def test_spearman_constant_vector_is_nan():
@@ -286,12 +304,13 @@ def test_session_ics_thin_ticker_does_not_pool_with_good():
         assert (math.isnan(a) and math.isnan(b)) or a == pytest.approx(b)
 
 
-def test_session_ics_cell_below_30_obs_is_nan():
+def test_session_ics_all_nan_target_cell_is_nan():
     # A single full ticker: ret_to_dump pools minutes 30..330 (301 obs) -> a
     # vwap_disp_30 x ret_to_dump cell is defined. But construct a scenario where
-    # a target pools < 30 obs by making the dump price NaN for the ONLY ticker:
-    # ret_to_dump becomes all-NaN -> every *xret_to_dump cell NaN, while
-    # ret_fwd_* cells stay defined.
+    # a target pools ZERO finite pairs by making the dump price NaN for the ONLY
+    # ticker: ret_to_dump becomes all-NaN -> every *xret_to_dump cell NaN (the
+    # intrinsic zero-pairs/zero-variance guard), while ret_fwd_* cells stay
+    # defined. (This is the empty-pool path, NOT a removed observation floor.)
     df = _full_session_df(11)
     ics = pr.session_ics({"AAA": df}, {"AAA": float("nan")})
     rtd_cells = [pr.cell_name(f, "ret_to_dump")

@@ -639,11 +639,11 @@ def format_report(result, reasons, primary_summary, secondary_summary,
     L.append(f"- Test-B missing cache sessions: {len(dataq['missing_b'])}"
              + (" (" + ", ".join(dataq['missing_b']) + ")"
                 if dataq['missing_b'] else ""))
-    L.append(f"- MIN_OBS floor (per session-cell): "
-             f"{pr.MIN_OBS_PER_SESSION_CELL} pooled (feature,target) pairs; a "
-             "thinner session-cell is NaN and excluded from the across-session "
-             "mean/t. This is an implementer data-quality floor, NOT a spec "
-             "threshold.")
+    L.append("- per-session-cell observation floor: NONE (spec §3 fixes no "
+             "per-cell minimum; every finite (feature,target) pair in the "
+             "session counts toward its cell's IC). A cell is NaN only when its "
+             "pool is empty or its ranked feature/target is constant "
+             "(intrinsically-undefined correlation).")
     L.append(f"- 60-valid-bar floor: a (ticker, session) participates in Test A "
              "only with >= 60 valid bars (vw>0, v>0, h>=l); the Phase-1 floor "
              "reused verbatim.")
