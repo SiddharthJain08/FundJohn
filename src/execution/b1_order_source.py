@@ -51,7 +51,12 @@ def live_shadow_orders(run_date):
             """SELECT ticker, direction, qty, pct_nav, filled_avg_price,
                       official_close, strategy_id
                FROM alpaca_submissions
-               WHERE run_date = %s AND instrument_class = 'equity'
+               WHERE run_date = %s
+                 -- equity rows carry NO instrument_class by design (SP-5.1a:
+                 -- only option/crypto orders set the marker) ⇒ NULL == equity.
+                 -- A bare = 'equity' matches ZERO live rows (found 2026-06-05
+                 -- first live-shadow run: traded_tickers=0 on a 12-open day).
+                 AND (instrument_class IS NULL OR instrument_class = 'equity')
                  AND qty IS NOT NULL AND qty <> 0""", (run_date,))
         for r in cur.fetchall():
             out.append({
@@ -76,6 +81,10 @@ def case_study_orders(n_losers=25, n_movers=25):
         FROM signal_pnl sp JOIN execution_signals es ON es.id = sp.signal_id
         WHERE sp.status = 'closed' AND sp.realized_pnl_pct IS NOT NULL
               AND es.signal_date IS NOT NULL
+              -- rolled_continuation rows are roll segments of an ongoing
+              -- position (SP-6 D1), not trades; excluded from case studies
+              -- (NULL-safe — historical rows have NULL close_reason).
+              AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
         ORDER BY {order} LIMIT %s"""
     rows = []
     with _conn() as c:
