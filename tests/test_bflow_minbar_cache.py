@@ -286,6 +286,72 @@ def test_cache_only_fetches_missing_tickers(tmp_path):
 
 
 # ==========================================================================
+# 7. dash-class symbols: dot-normalize at the boundary + surgical ejection
+# ==========================================================================
+def test_dash_symbol_dot_normalized_in_request_but_dash_keyed_result():
+    # DB-form symbol is BRK-B; the Alpaca data API wants BRK.B. The request
+    # params must carry the DOTTED form, but the returned dict must be keyed by
+    # the ORIGINAL dash form (oracle/cache consume dash-form tickers).
+    seen = {}
+
+    def http_get(url, headers=None, params=None, timeout=None):
+        seen["symbols"] = params["symbols"]
+        # API echoes the dotted symbol it accepted
+        return _Resp(200, {
+            "bars": {"BRK.B": [_bar("2026-06-05T13:30:00Z", vw=42.0)]},
+            "next_page_token": None,
+        })
+
+    os.environ["ALPACA_API_KEY"] = "k"
+    os.environ["ALPACA_SECRET_KEY"] = "s"
+    out = minbar_cache.fetch_session_bars(
+        ["BRK-B"], "2026-06-05", http_get=http_get, sleep_s=0)
+    # request carried the DOTTED form
+    assert seen["symbols"] == "BRK.B"
+    # result keyed by the ORIGINAL dash form, with the bar attached
+    assert "BRK-B" in out
+    assert "BRK.B" not in out
+    assert [b["vw"] for b in out["BRK-B"]] == [42.0]
+
+
+def test_invalid_symbol_400_ejects_then_succeeds_for_the_rest():
+    # Chunk of 3 (AAA, BBB-B, CCC). The API 400s the WHOLE request with
+    # 'invalid symbol: BBB.B' (the dotted form we sent) until BBB.B is absent,
+    # then 200s with bars for the other two. BBB-B (dash form) -> [].
+    def http_get(url, headers=None, params=None, timeout=None):
+        syms = params["symbols"].split(",")
+        if "BBB.B" in syms:
+            return _Resp(400, {"message": "invalid symbol: BBB.B"})
+        return _Resp(200, {
+            "bars": {s: [_bar("2026-06-05T13:30:00Z", vw=1.0)] for s in syms},
+            "next_page_token": None,
+        })
+
+    os.environ["ALPACA_API_KEY"] = "k"
+    os.environ["ALPACA_SECRET_KEY"] = "s"
+    out = minbar_cache.fetch_session_bars(
+        ["AAA", "BBB-B", "CCC"], "2026-06-05", http_get=http_get, sleep_s=0)
+    assert len(out["AAA"]) == 1
+    assert len(out["CCC"]) == 1
+    # the truly-invalid symbol stays empty under its ORIGINAL dash form
+    assert out["BBB-B"] == []
+
+
+def test_non_2xx_other_than_invalid_symbol_raises():
+    # A 403 (or any non-2xx that is not a parseable invalid-symbol 400) must
+    # NEVER produce silent empties — it raises with the status in the message.
+    def http_get(url, headers=None, params=None, timeout=None):
+        return _Resp(403, {"message": "forbidden"})
+
+    os.environ["ALPACA_API_KEY"] = "k"
+    os.environ["ALPACA_SECRET_KEY"] = "s"
+    with pytest.raises(RuntimeError) as ei:
+        minbar_cache.fetch_session_bars(
+            ["AAA"], "2026-06-05", http_get=http_get, sleep_s=0)
+    assert "403" in str(ei.value)
+
+
+# ==========================================================================
 # estimate_requests helper
 # ==========================================================================
 def test_estimate_requests_groups_by_session():

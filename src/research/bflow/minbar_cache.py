@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -46,6 +47,16 @@ _DEFAULT_CACHE = "/root/openclaw/data/cache/min_bars"
 _CACHE_COLUMNS = ["ticker", "minute", "o", "h", "l", "c", "v", "vw"]
 _SENTINEL_MINUTE = -1
 _MAX_ATTEMPTS = 4   # 1 initial + 3 retries
+# Alpaca's 400 body for a bad symbol: {"message": "invalid symbol: BRK.B"}.
+_INVALID_SYMBOL_RE = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/]+)")
+
+
+def _to_alpaca_symbol(t):
+    """Translate a DB-form ticker (dash share-class, e.g. ``BRK-B``) to the
+    Alpaca data API form (dotted, ``BRK.B``). Mirrors the boundary translation
+    in collector.js fillPricesAlpaca and backfillers/universe_prices.py:84 —
+    the data API 400s the ENTIRE multi-symbol request on a dash-class ticker."""
+    return t.replace("-", ".")
 
 
 # --------------------------------------------------------------------------
@@ -119,11 +130,23 @@ def _default_http_get(url, headers=None, params=None, timeout=None):
     return requests.get(url, headers=headers, params=params, timeout=timeout)
 
 
+def _safe_json(resp):
+    """Best-effort ``.json()`` — a real error body may not be JSON, and we must
+    not crash the body-snippet path on it. Returns {} on any decode failure."""
+    try:
+        return resp.json() or {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def _get_with_retry(http_get, url, headers, params, sleep_s):
     """Call ``http_get`` up to _MAX_ATTEMPTS times (1 initial + 3 retries),
-    retrying on status 429 or >=500 with doubling backoff. Returns the parsed
-    JSON of the first acceptable response; raises RuntimeError after the budget
-    is exhausted on a retryable status."""
+    retrying ONLY on status 429 or >=500 with doubling backoff. Returns
+    ``(status, json)`` for the first non-retryable response so the caller can
+    branch (200 -> consume; 400 -> surgical invalid-symbol ejection; any other
+    non-2xx -> fail loud). Raises RuntimeError only after the retry budget is
+    exhausted on a retryable status — non-2xx that is NOT 429/5xx is the
+    CALLER's to handle (never produces a silent empty)."""
     backoff = max(sleep_s, 0.0) or 0.2
     last_status = None
     for attempt in range(_MAX_ATTEMPTS):
@@ -136,7 +159,7 @@ def _get_with_retry(http_get, url, headers, params, sleep_s):
                 backoff *= 2
                 continue
             break
-        return resp.json()
+        return status, _safe_json(resp)
     raise RuntimeError(
         f"Alpaca bars request failed after {_MAX_ATTEMPTS} attempts "
         f"(last status {last_status})")
@@ -166,28 +189,67 @@ def fetch_session_bars(symbols, session, http_get=None, feed="sip",
     out = {s: [] for s in symbols}
     first_call = True
     for group in _chunked(list(symbols), chunk):
-        page_token = None
-        while True:
-            if not first_call and sleep_s:
-                time.sleep(sleep_s)
-            first_call = False
-            params = {
-                "symbols": ",".join(group),
-                "timeframe": "1Min",
-                "feed": feed,
-                "limit": 10000,
-                "sort": "asc",
-                "start": start,
-                "end": end,
-            }
-            if page_token:
-                params["page_token"] = page_token
-            js = _get_with_retry(http_get, _BARS_URL, headers, params, sleep_s)
-            bars_map = js.get("bars") or {}
-            for sym, blist in bars_map.items():
-                out.setdefault(sym, []).extend(blist or [])
-            page_token = js.get("next_page_token")
-            if not page_token:
+        # ``work`` holds the ORIGINAL (DB / dash) forms still to fetch in this
+        # chunk. A 400 "invalid symbol" surgically ejects the offending symbol
+        # and re-requests the remainder; bounded by len(work) (every restart
+        # removes exactly one member, else we raise).
+        work = list(group)
+        while work:
+            # dotted forms go on the wire; reverse map keys results back to the
+            # original dash form. Rebuilt each pass (work shrinks on ejection).
+            reverse = {_to_alpaca_symbol(s): s for s in work}
+            page_token = None
+            restart = False
+            while True:
+                if not first_call and sleep_s:
+                    time.sleep(sleep_s)
+                first_call = False
+                params = {
+                    "symbols": ",".join(reverse.keys()),
+                    "timeframe": "1Min",
+                    "feed": feed,
+                    "limit": 10000,
+                    "sort": "asc",
+                    "start": start,
+                    "end": end,
+                }
+                if page_token:
+                    params["page_token"] = page_token
+                status, js = _get_with_retry(
+                    http_get, _BARS_URL, headers, params, sleep_s)
+
+                if status == 400:
+                    # Identify the one bad symbol, eject it, re-request the rest.
+                    msg = str(js.get("message") or "")
+                    m = _INVALID_SYMBOL_RE.search(msg)
+                    bad_orig = None
+                    if m:
+                        parsed = m.group(1)
+                        # message echoes the form we SENT (dotted); map it back.
+                        bad_orig = reverse.get(parsed) or parsed.replace(".", "-")
+                    if bad_orig is None or bad_orig not in work:
+                        # unparseable, or names a symbol not in this group ->
+                        # cannot make progress; fail loud (never a silent empty).
+                        raise RuntimeError(
+                            f"Alpaca bars 400 (status 400): {str(js)[:200]}")
+                    work.remove(bad_orig)
+                    # bad_orig stays [] in out -> recorded as truly-invalid.
+                    restart = True
+                    break
+                if status != 200:
+                    raise RuntimeError(
+                        f"Alpaca bars request failed (status {status}): "
+                        f"{str(js)[:200]}")
+
+                # 200: accumulate, keyed back to the original dash form.
+                bars_map = js.get("bars") or {}
+                for sym, blist in bars_map.items():
+                    orig = reverse.get(sym) or sym.replace(".", "-")
+                    out.setdefault(orig, []).extend(blist or [])
+                page_token = js.get("next_page_token")
+                if not page_token:
+                    break
+            if not restart:
                 break
     return out
 
