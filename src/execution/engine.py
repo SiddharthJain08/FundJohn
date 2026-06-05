@@ -1585,7 +1585,8 @@ def main():
         parity_mark_count = 0
         if _eod_signal_register_gate_on():
             try:
-                from execution.parity_mark import finalize_parity_marks
+                from execution.parity_mark import (
+                    finalize_parity_marks, finalize_execution_ledger)
                 _closes: dict = {}
                 if not prices.empty:
                     for _tk in prices.columns:
@@ -1594,6 +1595,8 @@ def main():
                             _closes[_tk] = float(_ts.iloc[-1])
                 parity_mark_count = finalize_parity_marks(cur, _closes, run_date, WORKSPACE)
                 logger.info(f"Parity marks finalized: {parity_mark_count}")
+                ledger_count = finalize_execution_ledger(cur, _closes, run_date)
+                logger.info(f"Execution ledger finalized: {ledger_count}")
             except Exception as _pm_err:
                 logger.error(f"[engine] parity_mark failed: {_pm_err}")
                 errors.append(f"parity_mark: {_pm_err}")
