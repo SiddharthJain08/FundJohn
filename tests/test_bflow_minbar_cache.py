@@ -337,6 +337,30 @@ def test_invalid_symbol_400_ejects_then_succeeds_for_the_rest():
     assert out["BBB-B"] == []
 
 
+def test_invalid_symbol_with_punctuation_ejects_futures_and_caret_forms():
+    # Regression (live 2026-06-05, first full eval): the historical order set
+    # carries futures-style symbols (CL=F) and index carets (^GSPC). The old
+    # [A-Za-z0-9.\-/]+ char class truncated 'CL=F' to 'CL' -> not in group ->
+    # spurious RuntimeError instead of ejection. Both must now eject cleanly.
+    def http_get(url, headers=None, params=None, timeout=None):
+        syms = params["symbols"].split(",")
+        for bad in ("CL=F", "^GSPC"):
+            if bad in syms:
+                return _Resp(400, {"message": f"invalid symbol: {bad}"})
+        return _Resp(200, {
+            "bars": {s: [_bar("2026-06-05T13:30:00Z", vw=1.0)] for s in syms},
+            "next_page_token": None,
+        })
+
+    os.environ["ALPACA_API_KEY"] = "k"
+    os.environ["ALPACA_SECRET_KEY"] = "s"
+    out = minbar_cache.fetch_session_bars(
+        ["AAA", "CL=F", "^GSPC"], "2026-06-05", http_get=http_get, sleep_s=0)
+    assert len(out["AAA"]) == 1
+    assert out["CL=F"] == []
+    assert out["^GSPC"] == []
+
+
 def test_non_2xx_other_than_invalid_symbol_raises():
     # A 403 (or any non-2xx that is not a parseable invalid-symbol 400) must
     # NEVER produce silent empties — it raises with the status in the message.

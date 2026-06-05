@@ -48,7 +48,11 @@ _CACHE_COLUMNS = ["ticker", "minute", "o", "h", "l", "c", "v", "vw"]
 _SENTINEL_MINUTE = -1
 _MAX_ATTEMPTS = 4   # 1 initial + 3 retries
 # Alpaca's 400 body for a bad symbol: {"message": "invalid symbol: BRK.B"}.
-_INVALID_SYMBOL_RE = re.compile(r"invalid symbol:\s*([A-Za-z0-9.\-/]+)")
+# Char class is open-ended (anything up to whitespace/comma): the historical
+# order set carries futures-style symbols (CL=F) and index carets (^GSPC); a
+# [A-Za-z0-9.\-/]+ class truncated 'CL=F' to 'CL', which is not in the group
+# -> spurious fail-loud raise (observed live 2026-06-05, first full eval run).
+_INVALID_SYMBOL_RE = re.compile(r"invalid symbol:\s*([^\s,]+)")
 
 
 def _to_alpaca_symbol(t):
