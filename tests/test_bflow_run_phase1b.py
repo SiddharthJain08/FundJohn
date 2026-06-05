@@ -332,3 +332,179 @@ def test_main_smoke_limit_caps_sessions(tmp_path):
     grid = pd.read_parquet(analysis_dir + "/bflow_phase1b_ic_grid.parquet")
     # only the first session in the IC grid
     assert list(grid.index) == ["2026-04-13"] or len(grid) == 1
+
+
+# ==========================================================================
+# partition_sessions — pre-registered OOS slicing (spec AMENDMENT 2026-06-05)
+# ==========================================================================
+def _psi(*sessions):
+    """Build a per_session_ics list with a single trivial cell per session (the
+    partition function never inspects the IC dict — only the session string)."""
+    return [(s, {"ofi_5|ret_to_dump": 0.0}) for s in sessions]
+
+
+def test_partition_is_a_true_partition():
+    # Every session lands in EXACTLY one bucket (in-sample / supplement / oos);
+    # the buckets are disjoint and their union is the full input.
+    sessions = ["2026-05-30", "2026-06-02", "2026-06-03", "2026-06-05",
+                "2026-06-08", "2026-06-09"]
+    per = _psi(*sessions)
+    insample, supp, oos = rp.partition_sessions(per, oos_start="2026-06-08")
+    iss = [s for s, _ in insample]
+    sps = [s for s, _ in supp]
+    oss = [s for s, _ in oos]
+    # default insample_end = 2026-06-02
+    assert iss == ["2026-05-30", "2026-06-02"]
+    assert sps == ["2026-06-03", "2026-06-05"]
+    assert oss == ["2026-06-08", "2026-06-09"]
+    # disjoint + exhaustive (a true partition)
+    union = iss + sps + oss
+    assert sorted(union) == sorted(sessions)
+    assert len(union) == len(sessions)               # no session duplicated/lost
+    assert len(set(iss) & set(sps)) == 0
+    assert len(set(sps) & set(oss)) == 0
+    assert len(set(iss) & set(oss)) == 0
+
+
+def test_partition_boundaries_inclusive_exclusive():
+    # insample_end is INCLUSIVE (2026-06-02 -> in_sample); oos_start is INCLUSIVE
+    # (2026-06-08 -> oos); the strictly-between band is the supplement.
+    per = _psi("2026-06-02", "2026-06-07", "2026-06-08")
+    insample, supp, oos = rp.partition_sessions(per, oos_start="2026-06-08")
+    assert [s for s, _ in insample] == ["2026-06-02"]
+    assert [s for s, _ in supp] == ["2026-06-07"]
+    assert [s for s, _ in oos] == ["2026-06-08"]
+
+
+def test_partition_empty_oos_and_supplement_by_default():
+    # The real-cache reality at default oos-start: all sessions are early -> OOS
+    # and supplement are BOTH empty; in_sample holds everything.
+    per = _psi("2026-04-13", "2026-04-14", "2026-06-02")
+    insample, supp, oos = rp.partition_sessions(per)   # default oos_start
+    assert len(insample) == 3
+    assert supp == []
+    assert oos == []
+
+
+def test_partition_shifting_oos_start_moves_supplement_into_oos():
+    # A later oos_start shrinks OOS and grows the supplement (still a partition).
+    per = _psi("2026-06-03", "2026-06-08", "2026-06-09")
+    _, supp_a, oos_a = rp.partition_sessions(per, oos_start="2026-06-08")
+    _, supp_b, oos_b = rp.partition_sessions(per, oos_start="2026-06-09")
+    assert [s for s, _ in oos_a] == ["2026-06-08", "2026-06-09"]
+    assert [s for s, _ in supp_a] == ["2026-06-03"]
+    # bump oos_start by one day: 06-08 drops out of OOS into supplement
+    assert [s for s, _ in oos_b] == ["2026-06-09"]
+    assert [s for s, _ in supp_b] == ["2026-06-03", "2026-06-08"]
+
+
+# ==========================================================================
+# OOS report sections — empty rendering + exact pre-registered strings
+# ==========================================================================
+def test_oos_sections_empty_renders_pre_registered_strings():
+    # No session >= default oos_start and none in the supplement band ->
+    # both sections render their empty messages with the exact frozen text.
+    per = _psi("2026-04-13", "2026-04-14", "2026-06-02")
+    lines = rp.format_oos_sections(per, rp._DEFAULT_OOS_START)
+    text = "\n".join(lines)
+    # (a) headline OOS empty message interpolates the arg verbatim
+    assert "OOS confirmation grid (sessions >= 2026-06-08)" in text
+    assert "no OOS sessions yet (first expected 2026-06-08)" in text
+    assert "n_oos_sessions = 0" in text
+    # (b) supplement section is EXPLICITLY labeled non-headline / not leak-proof
+    assert ("Contemporaneous supplement (sessions after 2026-06-02 and before "
+            "2026-06-08)") in text
+    assert ("supplement, not headline OOS: harness was built 2026-06-05, these "
+            "sessions cannot claim leak-proof status") in text
+
+
+def test_oos_sections_nonempty_supplement_and_oos_render_grids():
+    # A cache straddling the boundaries -> both slices non-empty -> each renders
+    # the PRIMARY/SECONDARY IC tables (sign-vs-prereg column proves it's the grid).
+    per = _psi("2026-06-01",  # in_sample
+               "2026-06-04",  # supplement
+               "2026-06-09")  # oos
+    # give the cells real ICs so summarize produces finite rows
+    for s, ics in per:
+        for cell in rp.pr.CELLS:
+            ics[cell] = 0.1
+    lines = rp.format_oos_sections(per, "2026-06-08")
+    text = "\n".join(lines)
+    assert "n_oos_sessions = 1" in text
+    assert "n_supplement_sessions = 1" in text
+    # grids rendered (not the empty message) for BOTH sections
+    assert "no OOS sessions yet" not in text
+    assert text.count("sign-vs-prereg") == 2     # one PRIMARY table per section
+
+
+# ==========================================================================
+# full-sample invariance to --oos-start (the load-bearing guarantee)
+# ==========================================================================
+def _run_main(cache_dir, orders_path, analysis_dir, oos_start=None):
+    argv = ["--cache-dir", cache_dir, "--orders-path", orders_path,
+            "--analysis-dir", analysis_dir]
+    if oos_start is not None:
+        argv += ["--oos-start", oos_start]
+    assert rp.main(argv) == 0
+
+
+def test_full_sample_grid_invariant_to_oos_start(tmp_path):
+    # The full-sample ic_grid parquet + the §5 verdict block + the headline
+    # PRIMARY/SECONDARY grid must be byte-identical regardless of --oos-start.
+    cache_dir = str(tmp_path / "cache")
+    orders_path = str(tmp_path / "orders.parquet")
+
+    tickers = ["AAA", "BBB", "CCC"]
+    # sessions straddling the supplement / OOS boundaries so different oos-starts
+    # actually re-bucket sessions (the strongest invariance test).
+    for i, s in enumerate(("2026-06-01", "2026-06-04", "2026-06-09")):
+        _write_session_parquet(cache_dir, s, tickers, seed0=1 + 100 * i)
+    intents = [{"worked_session": s, "ticker": tk, "direction": "LONG",
+                "p_eod_dump": 100.5}
+               for s in ("2026-06-01", "2026-06-04", "2026-06-09")
+               for tk in tickers]
+    _write_orders_parquet(orders_path, intents)
+
+    import os
+    dir_a = str(tmp_path / "a")
+    dir_b = str(tmp_path / "b")
+    _run_main(cache_dir, orders_path, dir_a, oos_start="2026-06-08")
+    _run_main(cache_dir, orders_path, dir_b, oos_start="2099-01-01")
+
+    # the full-sample ic_grid parquet is identical (all 3 sessions, every cell)
+    grid_a = pd.read_parquet(os.path.join(dir_a, "bflow_phase1b_ic_grid.parquet"))
+    grid_b = pd.read_parquet(os.path.join(dir_b, "bflow_phase1b_ic_grid.parquet"))
+    pd.testing.assert_frame_equal(grid_a, grid_b)
+
+    # the policy parquet (Test B is NOT sliced) is identical too
+    pol_a = pd.read_parquet(os.path.join(dir_a, "bflow_phase1b_policy.parquet"))
+    pol_b = pd.read_parquet(os.path.join(dir_b, "bflow_phase1b_policy.parquet"))
+    pd.testing.assert_frame_equal(pol_a, pol_b)
+
+    # the VERDICT + headline grid block (everything up to the first OOS section)
+    # is byte-identical; only the OOS/supplement sections downstream may differ.
+    rpt_a = open(os.path.join(dir_a, "bflow_phase1b_report.md")).read()
+    rpt_b = open(os.path.join(dir_b, "bflow_phase1b_report.md")).read()
+    head_a = rpt_a.split("## OOS confirmation grid")[0]
+    head_b = rpt_b.split("## OOS confirmation grid")[0]
+    assert head_a == head_b
+    # and the two runs genuinely differ in the OOS section (re-bucketing happened)
+    assert rpt_a != rpt_b
+
+
+def test_main_report_includes_oos_sections(tmp_path):
+    # End-to-end: the rendered report carries both new section headers.
+    cache_dir = str(tmp_path / "cache")
+    orders_path = str(tmp_path / "orders.parquet")
+    analysis_dir = str(tmp_path / "analysis")
+    tickers = ["AAA", "BBB"]
+    _write_session_parquet(cache_dir, "2026-04-13", tickers, seed0=1)
+    intents = [{"worked_session": "2026-04-13", "ticker": tk,
+                "direction": "LONG", "p_eod_dump": 100.5} for tk in tickers]
+    _write_orders_parquet(orders_path, intents)
+    _run_main(cache_dir, orders_path, analysis_dir)   # default oos-start
+    import os
+    text = open(os.path.join(analysis_dir, "bflow_phase1b_report.md")).read()
+    assert "## OOS confirmation grid (sessions >= 2026-06-08)" in text
+    assert "## Contemporaneous supplement" in text
+    assert "no OOS sessions yet (first expected 2026-06-08)" in text

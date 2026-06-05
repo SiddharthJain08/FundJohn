@@ -97,3 +97,23 @@ gating, pre-registered as such.
 `flow_policy.py` (Test B), `run_phase1b.py` (runner + report). Reuses `oracle.dump_benchmark`,
 spread/cost machinery, `minbar_cache.get_session_bars` (no-fetch mode), `order_set` modules.
 TDD; suite runs sequential `nice -n 19` (2-core box).
+
+## AMENDMENT 2026-06-05 — OOS confirmation bar (pre-registered before any OOS session exists)
+
+This amendment is itself legitimate pre-registration: at the time of writing, the cache ends
+2026-06-02 and **no session on or after 2026-06-08 exists yet**, so the bar below is committed
+strictly before any data it governs can be observed.
+
+- **Headline OOS = sessions >= 2026-06-08** (post-arming, physically leak-proof: the Phase-1b
+  harness was built 2026-06-05, so any session dated on or after the arming horizon could not
+  have leaked into the harness design).
+- **GO-confirmed** when BOTH hold:
+  - (i) the FULL-sample IC grid meets the original §5 GO bar; AND
+  - (ii) the OOS-only slice with `n_oos_sessions >= 20` shows `>= 2 of 3` primary features
+    reversion-signed with `|t| >= 2`.
+- **Sessions 2026-06-03..06-05 are a labeled supplement, never headline.** They post-date the
+  pre-registered 2026-06-02 cache but pre-date the leak-proof arming horizon; they are reported
+  for completeness only and can never satisfy the headline OOS bar.
+- **The bar itself is frozen as written.** Weekly re-runs of the harness may be inspected freely
+  (the OOS slice grows as sessions accrue), but the GO-confirmed criteria above are not to be
+  re-tuned after the fact.

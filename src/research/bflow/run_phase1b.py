@@ -61,6 +61,15 @@ _DEFAULT_CACHE_DIR = "/root/openclaw/data/cache/min_bars"
 _DEFAULT_ORDERS_PATH = "/root/openclaw/analysis/bflow_phase1_oracle_orders.parquet"
 _DEFAULT_ANALYSIS_DIR = "/root/openclaw/analysis"
 
+# Pre-registered OOS bar (spec AMENDMENT 2026-06-05). Sessions on/after this date
+# are post-arming and physically leak-proof (the harness was built 2026-06-05).
+_DEFAULT_OOS_START = "2026-06-08"
+# Last in-sample session of the Phase-1b pre-registered cache (spec §2: 34
+# sessions 2026-04-13..2026-06-02). Sessions after this but before --oos-start
+# are the labeled SUPPLEMENT (built after data accrued -> cannot claim leak-proof
+# status; never headline OOS).
+_INSAMPLE_END = "2026-06-02"
+
 # Expected Phase-1 primary-grain included-intent count on real data (spec §2/§4).
 EXPECTED_TESTB_INTENTS = 3867
 
@@ -355,6 +364,40 @@ def _summary_to_dicts(summary):
 
 
 # --------------------------------------------------------------------------
+# Pre-registered OOS slicing (spec AMENDMENT 2026-06-05) — PURE
+# --------------------------------------------------------------------------
+def partition_sessions(per_session_ics, oos_start=_DEFAULT_OOS_START,
+                       insample_end=_INSAMPLE_END):
+    """Partition ``per_session_ics`` (list of (session_label, {cell: ic})) into
+    three disjoint, exhaustive buckets by the session DATE STRING — every session
+    lands in EXACTLY one bucket for any ``oos_start`` (a true partition):
+
+      * in_sample  — session <= ``insample_end`` (default 2026-06-02; the
+        Phase-1b pre-registered 34-session cache).
+      * supplement — ``insample_end`` < session < ``oos_start`` (built after the
+        2026-06-05 harness existed -> cannot claim leak-proof status; never
+        headline OOS, only a labeled supplement).
+      * oos        — session >= ``oos_start`` (post-arming, physically
+        leak-proof; the HEADLINE OOS slice).
+
+    ISO 'YYYY-MM-DD' strings sort chronologically, so a plain string compare is
+    correct — no datetime parsing (and no ``os``/``time`` import contamination).
+    Per-session ICs are independent across sessions, so a slice of the built list
+    is statistically identical to recomputing on that session subset; nothing is
+    re-derived. Input row order is preserved within each bucket.
+    """
+    in_sample, supplement, oos = [], [], []
+    for s, ics in per_session_ics:
+        if s <= insample_end:
+            in_sample.append((s, ics))
+        elif s < oos_start:
+            supplement.append((s, ics))
+        else:
+            oos.append((s, ics))
+    return in_sample, supplement, oos
+
+
+# --------------------------------------------------------------------------
 # Test B — causal proxy policy over the Phase-1 primary-grain intents
 # --------------------------------------------------------------------------
 def load_testb_intents(orders_path):
@@ -546,8 +589,99 @@ def _sign_vs_prereg(t):
     return "flat"
 
 
+def _render_grids(summary, secondary_summary):
+    """Render the PRIMARY (feature vs ret_to_dump) + SECONDARY (4 horizons x 3
+    features) IC tables from ONE ``summarize`` frame, as a list of markdown lines.
+
+    Pure-additive and shared by the full-sample headline grid AND the OOS /
+    supplement slices, so every grid renders byte-identically (the full-sample
+    section is guaranteed unchanged because it goes through the SAME helper).
+    ``secondary_summary`` is the {feature: {horizon: t}} dict derived from the
+    SAME ``summary`` via ``_summary_to_dicts`` (passed in so the slices reuse it
+    without re-deriving)."""
+    L = []
+    # PRIMARY grid table
+    L.append("| feature | mean IC | t | n_sessions | sign-vs-prereg |")
+    L.append("|---|---|---|---|---|")
+    for f in _FEATURES:
+        cell = pr.cell_name(f, "ret_to_dump")
+        mean_ic = summary.loc[cell, "mean_ic"]
+        t = summary.loc[cell, "t"]
+        n = summary.loc[cell, "n_sessions"]
+        L.append(f"| {f} | {_fmt(mean_ic)} | {_fmt(t)} | "
+                 f"{int(n) if pd.notna(n) else 0} | {_sign_vs_prereg(t)} |")
+    L.append("")
+    # SECONDARY grid (4 horizons x 3 features)
+    L.append("| feature | " + " | ".join(_HORIZONS) + " |")
+    L.append("|---|" + "|".join(["---"] * len(_HORIZONS)) + "|")
+    for f in _FEATURES:
+        cells = [_fmt(secondary_summary[f][h]) for h in _HORIZONS]
+        L.append(f"| {f} | " + " | ".join(cells) + " |")
+    return L
+
+
+def _render_slice_section(slice_ics):
+    """Build (summary, secondary_summary, grid_lines) for a session SLICE (a list
+    of (session, {cell: ic})). Returns None when the slice is empty (the caller
+    renders the appropriate empty message). Reuses ``pr.ic_grid`` /
+    ``pr.summarize`` / ``_summary_to_dicts`` / ``_render_grids`` exactly so the
+    sliced grids are byte-identical in shape to the full-sample grid."""
+    if not slice_ics:
+        return None
+    grid = pr.ic_grid(slice_ics)
+    summary = pr.summarize(grid)
+    _, secondary_summary = _summary_to_dicts(summary)
+    return _render_grids(summary, secondary_summary)
+
+
+def format_oos_sections(per_session_ics, oos_start, insample_end=_INSAMPLE_END):
+    """Render the two pre-registered Test-A slice sections (spec AMENDMENT
+    2026-06-05) as a list of markdown lines:
+
+      (a) OOS confirmation grid — sessions >= ``oos_start`` (HEADLINE OOS:
+          post-arming, physically leak-proof). States n_oos_sessions; renders
+          "no OOS sessions yet (first expected <oos_start>)" when empty.
+      (b) Contemporaneous supplement — ``insample_end`` < sessions < ``oos_start``
+          (built after the 2026-06-05 harness -> EXPLICITLY labeled supplement,
+          NOT headline OOS, cannot claim leak-proof status).
+
+    Test-A IC objects ONLY (rank-correlation), deliberately: these are immune to
+    the direction-drift confound that discredited the Test-B policy delta. Test B
+    is NOT sliced. The full-sample grid + §5 verdict above are UNCHANGED."""
+    _, supplement, oos = partition_sessions(
+        per_session_ics, oos_start=oos_start, insample_end=insample_end)
+    L = []
+
+    # ---- (a) OOS confirmation grid (HEADLINE) ----
+    L.append(f"## OOS confirmation grid (sessions >= {oos_start})")
+    L.append(f"Headline OOS — post-arming, physically leak-proof (spec AMENDMENT "
+             f"2026-06-05). n_oos_sessions = {len(oos)}.")
+    oos_lines = _render_slice_section(oos)
+    if oos_lines is None:
+        L.append(f"no OOS sessions yet (first expected {oos_start})")
+    else:
+        L.extend(oos_lines)
+    L.append("")
+
+    # ---- (b) Contemporaneous supplement (NOT headline OOS) ----
+    L.append(f"## Contemporaneous supplement (sessions after {insample_end} and "
+             f"before {oos_start})")
+    L.append("supplement, not headline OOS: harness was built 2026-06-05, these "
+             "sessions cannot claim leak-proof status. "
+             f"n_supplement_sessions = {len(supplement)}.")
+    supp_lines = _render_slice_section(supplement)
+    if supp_lines is None:
+        L.append(f"no supplement sessions (none after {insample_end} and before "
+                 f"{oos_start})")
+    else:
+        L.extend(supp_lines)
+    L.append("")
+    return L
+
+
 def format_report(result, reasons, primary_summary, secondary_summary,
-                  summary, testb, dataq):
+                  summary, testb, dataq, per_session_ics=None,
+                  oos_start=_DEFAULT_OOS_START):
     """Render the spec §6 markdown report. Load-bearing strings (asserted by the
     tests / reviewers): 'VERDICT', the pre-registration framing quote, the
     PRIMARY grid table, the SECONDARY grid, the Test-B reversion headline +
@@ -574,27 +708,23 @@ def format_report(result, reasons, primary_summary, secondary_summary,
              "across-session mean delta <= 0).")
     L.append("")
 
-    # PRIMARY grid table
+    # PRIMARY + SECONDARY grid tables (full-sample HEADLINE; via the shared
+    # _render_grids helper so the slice sections render byte-identically).
+    grid_lines = _render_grids(summary, secondary_summary)
+    # grid_lines = [PRIMARY table, "", SECONDARY table]; re-attach the headers.
+    primary_table = grid_lines[:grid_lines.index("")]
+    secondary_table = grid_lines[grid_lines.index("") + 1:]
     L.append("## PRIMARY grid — feature vs ret_to_dump (GATING)")
-    L.append("| feature | mean IC | t | n_sessions | sign-vs-prereg |")
-    L.append("|---|---|---|---|---|")
-    for f in _FEATURES:
-        cell = pr.cell_name(f, "ret_to_dump")
-        mean_ic = summary.loc[cell, "mean_ic"]
-        t = summary.loc[cell, "t"]
-        n = summary.loc[cell, "n_sessions"]
-        L.append(f"| {f} | {_fmt(mean_ic)} | {_fmt(t)} | "
-                 f"{int(n) if pd.notna(n) else 0} | {_sign_vs_prereg(t)} |")
+    L.extend(primary_table)
+    L.append("")
+    L.append("## SECONDARY grid — t at 4 forward horizons x 3 features")
+    L.extend(secondary_table)
     L.append("")
 
-    # SECONDARY grid (4 horizons x 3 features)
-    L.append("## SECONDARY grid — t at 4 forward horizons x 3 features")
-    L.append("| feature | " + " | ".join(_HORIZONS) + " |")
-    L.append("|---|" + "|".join(["---"] * len(_HORIZONS)) + "|")
-    for f in _FEATURES:
-        cells = [_fmt(secondary_summary[f][h]) for h in _HORIZONS]
-        L.append(f"| {f} | " + " | ".join(cells) + " |")
-    L.append("")
+    # Pre-registered OOS slices (spec AMENDMENT 2026-06-05) — Test-A IC ONLY.
+    # Additive: the full-sample grid above + the §5 verdict are UNCHANGED.
+    if per_session_ics is not None:
+        L.extend(format_oos_sections(per_session_ics, oos_start))
 
     # Test-B economics
     L.append("## Test-B economics (causal proxy policy; SUPPORTIVE, NOT GATING)")
@@ -709,6 +839,11 @@ def _parse_args(argv):
                    help="output dir for the report + parquets")
     p.add_argument("--limit", type=int, default=None,
                    help="cap to the first N cache sessions (debug)")
+    p.add_argument("--oos-start", default=_DEFAULT_OOS_START,
+                   help="first HEADLINE out-of-sample session (inclusive); "
+                        "sessions >= this are post-arming / leak-proof. Sessions "
+                        f"after {_INSAMPLE_END} and before this are the labeled "
+                        "supplement (spec AMENDMENT 2026-06-05)")
     return p.parse_args(argv)
 
 
@@ -781,7 +916,9 @@ def main(argv=None):
     }
 
     report_md = format_report(result, reasons, primary_summary,
-                              secondary_summary, summary, testb, dataq)
+                              secondary_summary, summary, testb, dataq,
+                              per_session_ics=per_session_ics,
+                              oos_start=args.oos_start)
 
     report_path, ic_grid_path, policy_path = write_artifacts(
         report_md, grid, policy_rows, args.analysis_dir)
