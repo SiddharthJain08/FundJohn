@@ -37,7 +37,7 @@ def delta_vectors(df, p_eod_dump):
     work, _ = _reindex_valid_frame(df)
     G = np.full(390, np.nan)
     C = np.full(390, np.nan)
-    p = oracle._f(p_eod_dump) if p_eod_dump is not None else float("nan")
+    p = oracle._f(p_eod_dump)
     if not np.isfinite(p):
         return G, C
     dump_spread = oracle.eod_dump_window_spread_bps(df.to_dict("records"))
@@ -63,16 +63,17 @@ def net_legs(G, C):
     return G - C, -G - C
 
 
-def simulate_pair(df, p_eod_dump, leg, zeta):
-    """One (ticker, session, leg, zeta) entry. Spec §1: scan decision minutes
-    [30, 383]; trigger = first t with z<=-zeta (LONG) / z>=+zeta (SHORT) AND a
-    valid fill bar at t+1 (else VOID -> keep scanning); fill vw_{t+1}; never
-    triggered -> forced dump fallback (delta = 0 BY CONSTRUCTION)."""
-    z = trigger_z(df)
-    G, C = delta_vectors(df, p_eod_dump)
-    nl, ns = net_legs(G, C)
-    net = nl if leg == "LONG" else ns
-    zv = z.reindex(range(390)).to_numpy()
+def _scan(zv, net, G, C, leg, zeta):
+    """Scan decision minutes [SCAN_START, SCAN_END] for the first trigger.
+
+    NaN z never triggers. LONG hits at z<=-zeta; SHORT hits at z>=+zeta.
+    Non-finite net at t = VOID (invalid fill bar) — continue scanning.
+    Returns the triggered row or the fallback row dict.
+
+    NOTE: `entry_minute` is the DECISION minute t (the fill occurs at bar t+1).
+    This is distinct from energy_counterfactual.simulate_leg's fill-minute
+    convention, where the recorded minute is the bar where the fill executes.
+    """
     for t in range(SCAN_START, SCAN_END + 1):
         ztv = zv[t]
         if not np.isfinite(ztv):
@@ -90,3 +91,64 @@ def simulate_pair(df, p_eod_dump, leg, zeta):
             "entry_minute": None, "delta_net_bps": 0.0,
             "gross_at_entry": float("nan"), "cost_at_entry": float("nan"),
             "fallback": True}
+
+
+def simulate_pair(df, p_eod_dump, leg, zeta):
+    """One (ticker, session, leg, zeta) entry. Spec §1: scan decision minutes
+    [30, 383]; trigger = first t with z<=-zeta (LONG) / z>=+zeta (SHORT) AND a
+    valid fill bar at t+1 (else VOID -> keep scanning); fill vw_{t+1}; never
+    triggered -> forced dump fallback (delta = 0 BY CONSTRUCTION).
+
+    Thin wrapper over _scan — z/G/C computed once here; simulate_session_rows
+    hoists them for the 6x (leg x zeta) reuse per (ticker, session)."""
+    zv = trigger_z(df).to_numpy()
+    G, C = delta_vectors(df, p_eod_dump)
+    nl, ns = net_legs(G, C)
+    net = nl if leg == "LONG" else ns
+    return _scan(zv, net, G, C, leg, zeta)
+
+
+def _eligible_pair(tdf, dump):
+    from src.research.bflow import predictability as pr
+    if dump is None or not np.isfinite(oracle._f(dump)):
+        return False
+    return pr._valid_bar_count(tdf) >= pr.MIN_VALID_BARS
+
+
+def simulate_session_rows(frames, session):
+    """Pass-1 worker: all eligible tickers x LEGS x ZETAS for one session.
+    Eligibility (spec §2): dump exists + registered 60-valid-bar floor.
+    HOISTED HOT PATH (Task-1 quality-review finding): z/G/C are computed ONCE
+    per (ticker, session) — 6x redundancy removed. Semantics identical to
+    simulate_pair (locked by test_simulate_session_rows_matches_simulate_pair)."""
+    rows = []
+    for ticker, tdf in frames.items():
+        dump = oracle.dump_benchmark(tdf.to_dict("records"))
+        if not _eligible_pair(tdf, dump):
+            continue
+        zv = trigger_z(tdf).to_numpy()
+        G, C = delta_vectors(tdf, dump)
+        nl, ns = net_legs(G, C)
+        for leg in LEGS:
+            net = nl if leg == "LONG" else ns
+            for zeta in ZETAS:
+                row = _scan(zv, net, G, C, leg, zeta)
+                row.update({"session": session, "ticker": ticker})
+                rows.append(row)
+    return rows
+
+
+def session_delta_records(frames, session):
+    """Pass-2 worker: per-(ticker, minute) unconditional entry economics for
+    the LOSO null — one record per minute with a finite G (valid fill bar)."""
+    recs = []
+    for ticker, tdf in frames.items():
+        dump = oracle.dump_benchmark(tdf.to_dict("records"))
+        if not _eligible_pair(tdf, dump):
+            continue
+        G, C = delta_vectors(tdf, dump)
+        for m in np.flatnonzero(np.isfinite(G)):
+            recs.append({"session": session, "ticker": ticker,
+                         "minute": int(m), "G": float(G[m]),
+                         "C": float(C[m])})
+    return recs
