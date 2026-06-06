@@ -25,8 +25,9 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 _SRC = os.path.join(_ROOT, "src")
-if _SRC not in sys.path:
-    sys.path.insert(0, _SRC)
+for _p in (_SRC, _ROOT):   # predictability imports via the `src.` prefix
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 DEFAULT_IC_GRID = os.path.join(
     _ROOT, "analysis", "bflow_phase1b_hist", "bflow_phase1b_ic_grid.parquet")
