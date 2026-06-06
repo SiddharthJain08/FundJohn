@@ -112,11 +112,14 @@ def test_simulate_pair_fallback_on_flat():
 
 def test_simulate_pair_void_trigger_continues_scanning():
     df = _flat_session()
-    # LONG dip extended through minute 150: an invalid bar inside the trailing
-    # 30-min window NaNs vwap_disp_30 for the next 30 minutes, so the re-trigger
-    # lands ~31 minutes later — the dip must still be deep there.
-    for m in range(60, 151):
+    # First dip ONSET at 60 (95.0); a SECOND deeper drop at minute 120 (90.0).
+    # vwap_disp_30 is onset-sensitive (a sustained plateau converges to 0) and
+    # an invalid bar NaNs the feature for the next 30 minutes — so the
+    # re-trigger needs a FRESH negative-displacement onset after the blackout.
+    for m in range(60, 120):
         df.loc[df["minute"] == m, ["o", "h", "l", "c", "vw"]] = 95.0
+    for m in range(120, 151):
+        df.loc[df["minute"] == m, ["o", "h", "l", "c", "vw"]] = 90.0
     # invalidate the bar right after the first would-be trigger minute
     first = mp.simulate_pair(
         df, oracle.dump_benchmark(df.to_dict("records")), leg="LONG", zeta=1.0
@@ -345,18 +348,39 @@ def _eligible_pair(tdf, dump):
 
 def simulate_session_rows(frames, session):
     """Pass-1 worker: all eligible tickers x LEGS x ZETAS for one session.
-    Eligibility (spec §2): dump exists + registered 60-valid-bar floor."""
+    Eligibility (spec §2): dump exists + registered 60-valid-bar floor.
+    HOISTED HOT PATH (quality-review finding, Task-1 review): z/G/C are
+    computed ONCE per (ticker, session) — 6x redundancy removed (~10.5h ->
+    ~2.75h at full scale). Semantics identical to simulate_pair."""
     rows = []
     for ticker, tdf in frames.items():
         dump = oracle.dump_benchmark(tdf.to_dict("records"))
         if not _eligible_pair(tdf, dump):
             continue
+        zv = trigger_z(tdf).to_numpy()
+        G, C = delta_vectors(tdf, dump)
+        nl, ns = net_legs(G, C)
         for leg in LEGS:
+            net = nl if leg == "LONG" else ns
             for zeta in ZETAS:
-                row = simulate_pair(tdf, dump, leg=leg, zeta=zeta)
+                row = _scan(zv, net, G, C, leg, zeta)
                 row.update({"session": session, "ticker": ticker})
                 rows.append(row)
     return rows
+```
+
+**Also in Step 3 (refactor, Task-1 tests must stay green):** extract the scan loop
+out of `simulate_pair` into `_scan(zv, net, G, C, leg, zeta)` (same body, takes
+precomputed numpy arrays; docstring notes `entry_minute` = DECISION minute t,
+fill at bar t+1 — distinct from energy_counterfactual's fill-minute convention).
+`simulate_pair` becomes a thin wrapper: compute `zv = trigger_z(df).to_numpy()`,
+`G, C = delta_vectors(df, p_eod_dump)`, pick the leg's net via `net_legs`, and
+delegate to `_scan`. Two micro-cleanups from the Task-1 quality review while
+touching these lines: `p = oracle._f(p_eod_dump)` directly (the `is not None`
+ternary is redundant — `_f` handles None), and drop the no-op
+`z.reindex(range(390))` (compute_features always returns the full 0..389 axis).
+
+```python
 
 
 def session_delta_records(frames, session):
@@ -919,3 +943,31 @@ cd /root/openclaw && git add scripts/run_bflow_phase1d.py tests/test_bflow_phase
 1. All 4 task suites green sequentially.
 2. Runner smoke on the 37-session LIVE cache is FORBIDDEN (it would peek at in-sample policy economics not previously observed — synthetic temp caches only).
 3. After the kill-test evaluator has run: `PYTHONPATH=src:. nice -n 19 python3 scripts/run_bflow_phase1d.py --cache-dir data/cache/min_bars_hist --analysis-dir analysis/bflow_phase1d`.
+
+---
+
+## AMENDMENT A1 (post-Task-2 quality review) — Task 3/4 memory redesign
+
+The original Task-3 `NullAccumulator` stored per-(ticker,minute) VALUE LISTS
+(G/C/session per record). At full scale (~143M floats + 143M session strings)
+that OOMs this box. SUPERSEDED design — spec §3 semantics unchanged:
+
+- Accumulator stores ONLY per-(ticker,minute) running ΣG, ΣC, n (~179k keys)
+  + per-cell weighted HISTOGRAMS for the guardrail pool (0.1bps bins,
+  [−2000,+2000]bps clamped; weight = the cell's triggered-entry count at
+  (ticker,minute), built from pass-1 rows BEFORE pass 2 via
+  `build_cell_weights(rows)`).
+- LOSO mean null per entry stays EXACT: ((ΣG−own_G)−(ΣC−own_C))/(n−1),
+  leg-signed; floor MIN_NULL_OBS unchanged.
+- Guardrail pool p95 read from the histogram AFTER subtracting 1 count at each
+  triggered entry's own-value bin (own-session exclusion — algebra: weight
+  contribution w·n minus one per entry = w·(n−1), exactly the spec pool).
+  Quantization ≤ 0.1bps vs a pre-registered 10bps margin — accepted
+  approximation, stated in the report.
+- API deltas vs original Task-3 text: `NullAccumulator(cell_weights)`;
+  `pool_p95_adverse(cell, own_values_bps)` replaces `pool_values()`;
+  `guardrail_stats(scored, acc)` reads histograms; new `build_cell_weights`.
+- Task-4 runner order: pass 1 (convert each session's rows to a compact
+  DataFrame immediately; concat at end ≈ 200MB, never 2.4M live dicts) →
+  `build_cell_weights` → pass 2 (`add_records` per session, transient dicts
+  freed per iteration) → score → stats → guardrail → verdicts → report.
