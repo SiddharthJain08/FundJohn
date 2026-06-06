@@ -1119,7 +1119,7 @@ class ResearchOrchestrator {
       role:          'implement_strategy',
       STRATEGY_SPEC: JSON.stringify(strategySpec),
       instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
-      INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 12 CANDIDATE_PREDICATES
+      INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 16 CANDIDATE_PREDICATES (12 legacy + 4 SP-7 tier ladder)
       INFERRED_INSTRUMENT_CLASS: validClass,     // equity (default/gate-off) | option | etp | crypto | futures
     };
     const result = await this._runSubagent('strategycoder', strategySpec.strategy_id || 'strategy', ctx);
