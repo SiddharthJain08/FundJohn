@@ -1685,6 +1685,52 @@ def test_consecutive_error_policy():
     assert drv.should_fail_strategy(['error', 'error']) is False
 
 
+def test_finalize_payload_winner_change():
+    W = ('2021-07-01', '2026-06-05')
+    cells = {
+        'sp500':       {'status': 'done', 'metrics': {'sharpe': 1.0, 'trades_n': 100}, 'w': W},
+        'tier_r1000':  {'status': 'done', 'metrics': {'sharpe': 1.2, 'trades_n': 100}, 'w': W},
+        'tier_r3000':  {'status': 'timeout', 'metrics': None, 'w': W},
+        'tier_liquid': {'status': 'done', 'metrics': {'sharpe': 1.1, 'trades_n': 100}, 'w': W},
+    }
+    p = drv.finalize_payload(cells, current='sp500')
+    assert p['verdict_name'] == 'change' and p['choice'] == 'tier_r1000'
+    assert p['summary']['grid'][0]['name'] == 'sp500'
+    assert p['summary']['cell_statuses']['tier_r3000'] == 'timeout'
+
+
+def test_finalize_payload_degenerate():
+    W = ('2021-07-01', '2026-06-05')
+    cells = {
+        'sp500':       {'status': 'done', 'metrics': {'sharpe': 1.0, 'trades_n': 100}, 'w': W},
+        'tier_r1000':  {'status': 'skipped_degenerate', 'metrics': None, 'w': W},
+        'tier_r3000':  {'status': 'skipped_degenerate', 'metrics': None, 'w': W},
+        'tier_liquid': {'status': 'done', 'metrics': {'sharpe': 1.0, 'trades_n': 100}, 'w': W},
+    }
+    p = drv.finalize_payload(cells, current='sp500')
+    assert p['verdict_name'] == 'universe-independent' and p['choice'] == 'sp500'
+
+
+def test_finalize_payload_no_signal():
+    W = ('2021-07-01', '2026-06-05')
+    cells = {t: {'status': 'error', 'metrics': None, 'w': W}
+             for t in drv.LADDER_TIERS}
+    p = drv.finalize_payload(cells, current='sp500')
+    assert p['verdict_name'] == 'no_signal' and p['choice'] == 'sp500'
+
+
+def test_finalize_payload_no_change():
+    W = ('2021-07-01', '2026-06-05')
+    cells = {
+        'sp500':       {'status': 'done', 'metrics': {'sharpe': 1.5, 'trades_n': 100}, 'w': W},
+        'tier_r1000':  {'status': 'done', 'metrics': {'sharpe': 1.55, 'trades_n': 100}, 'w': W},
+        'tier_r3000':  {'status': 'done', 'metrics': {'sharpe': 1.2, 'trades_n': 100}, 'w': W},
+        'tier_liquid': {'status': 'done', 'metrics': {'sharpe': 0.9, 'trades_n': 100}, 'w': W},
+    }
+    p = drv.finalize_payload(cells, current='sp500')
+    assert p['verdict_name'] == 'no_change' and p['choice'] == 'sp500'
+
+
 def test_metrics_to_grid_row():
     m = {'sharpe': 1.2, 'max_dd_pct': 10.0, 'win_rate': 0.5, 'trades_n': 50,
          'sortino': 1.5, 'calmar': 1.0, 'mean_holding_days': 3.0,
@@ -1954,9 +2000,42 @@ def _pre_skip(pg, cell) -> bool:
     return False
 
 
+def finalize_payload(cells: dict, current: str) -> dict:
+    """PURE verdict→rec-row mapping (unit-tested; the DB glue below stays
+    thin). cells: tier -> {'status', 'metrics', 'w': (start, end)}."""
+    from backtest.universe_ladder_selection import select_tier
+    from backtest import universe_ladder_recs as recs
+
+    window = next(iter(cells.values()))['w']
+    metrics_by_tier = {t: (c['metrics'] if c['status'] == 'done' else None)
+                       for t, c in cells.items()}
+    degenerate = (
+        cells.get('sp500', {}).get('status') == 'done'
+        and cells.get('tier_liquid', {}).get('status') == 'done'
+        and all(cells.get(t, {}).get('status') == 'skipped_degenerate'
+                for t in ('tier_r1000', 'tier_r3000')))
+    if degenerate:
+        choice, verdict_name = current, 'universe-independent'
+        rationale = 'sp7b ladder: extremes trade-identical → universe-independent'
+    else:
+        verdict = select_tier(metrics_by_tier)
+        if verdict['verdict'] == 'no_signal':
+            choice, verdict_name = current, 'no_signal'
+        else:
+            choice = verdict['choice']
+            verdict_name = 'no_change' if choice == current else 'change'
+        rationale = recs.build_rationale(verdict, window=window)
+    summary = {'grid': [grid_row(t, metrics_by_tier.get(t))
+                        for t in LADDER_TIERS],
+               'window': list(window), 'verdict': verdict_name,
+               'cell_statuses': {t: c['status'] for t, c in cells.items()},
+               'candidate_set': list(LADDER_TIERS)}
+    return {'choice': choice, 'verdict_name': verdict_name,
+            'rationale': rationale, 'summary': summary}
+
+
 def _maybe_finalize_strategy(pg, run_id: str, strategy_id: str) -> None:
-    """When all 4 cells are terminal → select, persist rec, post Discord."""
-    from backtest.universe_ladder_selection import select_tier, LADDER_TIERS as LT
+    """When all 4 cells are terminal → finalize_payload → persist rec, post."""
     from backtest import universe_ladder_recs as recs
 
     with pg.cursor() as cur:
@@ -1975,43 +2054,21 @@ def _maybe_finalize_strategy(pg, run_id: str, strategy_id: str) -> None:
     if len(cells) < 4 or any(
             c['status'] in ('queued', 'running') for c in cells.values()):
         return
-    window = next(iter(cells.values()))['w']
-    degenerate = all(c['status'] == 'skipped_degenerate'
-                     for t, c in cells.items()
-                     if t in ('tier_r1000', 'tier_r3000')) and \
-        cells['sp500']['status'] == 'done' and \
-        cells['tier_liquid']['status'] == 'done' and \
-        len([1 for c in cells.values() if c['status'] == 'skipped_degenerate']) > 0
-    metrics_by_tier = {t: (c['metrics'] if c['status'] == 'done' else None)
-                       for t, c in cells.items()}
     current = _current_predicate(strategy_id)
-    if degenerate:
-        choice, verdict_name = current, 'universe-independent'
-        rationale = f'sp7b ladder: extremes trade-identical → universe-independent'
-    else:
-        verdict = select_tier(metrics_by_tier)
-        if verdict['verdict'] == 'no_signal':
-            choice, verdict_name = current, 'no_signal'
-        else:
-            choice = verdict['choice']
-            verdict_name = 'no_change' if choice == current else 'change'
-        rationale = recs.build_rationale(verdict, window=window)
-    summary = {'grid': [grid_row(t, metrics_by_tier.get(t)) for t in LT],
-               'window': list(window), 'verdict': verdict_name,
-               'cell_statuses': {t: c['status'] for t, c in cells.items()},
-               'candidate_set': list(LT)}
+    p = finalize_payload(cells, current)
     rec_id = recs.insert_recommendation(
         pg, strategy_id=strategy_id, current_predicate=current,
-        candidate_predicate=choice, candidate_set_id=f'sp7b-1-{run_id}',
-        backtest_summary=summary, rationale=rationale)
-    if verdict_name == 'change':
-        msg = recs.format_change_message(strategy_id, current, choice,
-                                         rationale, summary['grid'],
+        candidate_predicate=p['choice'],
+        candidate_set_id=f'sp7b-1-{run_id}',
+        backtest_summary=p['summary'], rationale=p['rationale'])
+    if p['verdict_name'] == 'change':
+        msg = recs.format_change_message(strategy_id, current, p['choice'],
+                                         p['rationale'], p['summary']['grid'],
                                          rec_id=rec_id)
         recs.post_discord(pg, msg)
     else:
-        _queue_summary_line(pg, strategy_id, verdict_name)
-    print(f'[ladder] finalized {strategy_id}: {verdict_name} → rec {rec_id}')
+        _queue_summary_line(pg, strategy_id, p['verdict_name'])
+    print(f"[ladder] finalized {strategy_id}: {p['verdict_name']} → rec {rec_id}")
 
 
 def _current_predicate(strategy_id: str) -> str:
@@ -2100,7 +2157,7 @@ if __name__ == '__main__':
 - [ ] **Step 4: Run tests**
 
 Run: `python3 -m pytest tests/test_sp7_ladder_driver.py -v`
-Expected: 5 PASS.
+Expected: 9 PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -2414,13 +2471,31 @@ if __name__ == '__main__':
 
 ```python
     # SP-7 Phase B B3: adoption changes the union breadth → refresh proposals.
-    # Best-effort: a B3 failure must never un-adopt.
+    # DETACHED, fire-and-forget: BOTH adoption entrypoints run this module
+    # inside a 30s execFileSync window (Discord ✅ → bot.js → :7870 → adopt;
+    # dashboard button → :7870 → adopt). A synchronous union-resolve over all
+    # 67 approved strategies (~67 fresh psycopg2 conns + fetches + coverage
+    # load) can cross 30s under load — try/except does NOT protect against
+    # the EXTERNAL timeout kill, which would make every adoption look failed
+    # to the operator even though it committed. Popen + return immediately.
     try:
-        from src.execution.universe_threshold_proposals import compute_and_write
-        compute_and_write(trigger=f'adoption:{rec_id}')
+        import subprocess as _sp
+        _sp.Popen(
+            [sys.executable, '-m', 'src.execution.universe_threshold_proposals',
+             f'adoption:{rec_id}'],
+            cwd=str(Path(__file__).resolve().parents[2]),
+            start_new_session=True,
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
     except Exception as e:  # pragma: no cover
-        print(f'[adopt] B3 proposal refresh failed (non-fatal): {e}')
+        print(f'[adopt] B3 refresh spawn failed (non-fatal): {e}')
 ```
+
+(Verify `sys` and `Path` are already imported in lifecycle_universe_adoption.py — grounding says the module uses both; add imports if not. The module's `__main__` already takes the trigger as argv[1].)
+
+- [ ] **Step 4b: Time the union-resolve on the live box** (informational guard):
+
+Run: `set -a; . <(grep -E '^POSTGRES_URI' .env); set +a; time python3 -m src.execution.universe_threshold_proposals manual-timing-check`
+Record the wall time in the task report. (Detached spawn means this no longer gates adoption, but if it exceeds ~120s flag it for the reviewer — the :7870 recompute button seeding path shares some of this machinery.)
 
 - [ ] **Step 5: Run tests + the adoption module's existing tests**
 
@@ -2801,13 +2876,24 @@ Pre-flight: weekend stack NOT running (check `systemctl list-timers`),
    - `systemctl --user daemon-reload && systemctl --user enable --now sp7-ladder.timer`
    - VERIFY: `systemctl --user list-timers | grep sp7-ladder` → next Mon-Fri 01:00 UTC
 
-6. SEED + ARM (after B0 acceptance ONLY)
+6. SINGLE-STRATEGY SMOKE (before trusting the unattended loop)
+   - pick a fast fixed-ticker strategy (e.g. S_fomc_presell_spy_long):
+     `python3 scripts/run_universe_ladder.py seed --strategy <sid> --arm`
+     `nice -n 19 python3 scripts/run_universe_ladder.py drain`  (foreground;
+      minutes — extremes run, middles skip degenerate)
+   - VERIFY before proceeding: rec row exists with candidate_set_id
+     `sp7b-1-<run_id>` and verdict universe-independent/no_change;
+     `[ladder] DONE` printed; no stuck running cells
+     (single-strategy seeds never set sp7:ladder:full_run_id, so this does
+      NOT mark the 12-week cadence as satisfied)
+
+7. FULL SEED + ARM (after B0 acceptance AND smoke ONLY)
    - `python3 scripts/run_universe_ladder.py seed --arm`
      (builds membership artifact ~minutes; seeds 67×4 cells; arms sentinel)
    - sanity: artifact JSON sidecar n_series — sp500≈350–500, tier_liquid≈3300–5100 per month
    - first cells run tonight 01:00 UTC; watch `logs/sp7_ladder_<date>.log`
 
-7. NIGHTLY WATCH (3–10 nights)
+8. NIGHTLY WATCH (3–10 nights)
    - recs appear in #universe-recs as strategies finalize (changes only;
      no-change verdicts batch at drain end)
    - adopt via ✅ reaction or :7870 buttons; each adoption refreshes
