@@ -56,6 +56,24 @@ def test_simulate_session_rows_skips_thin_ticker():
     assert rows == []
 
 
+def test_simulate_session_rows_fallback_parity():
+    """Flat tape: z is NaN everywhere (zero trailing sd) -> all 6 rows are
+    FALLBACK; the hoisted driver must match simulate_pair on that path too."""
+    flat = pd.DataFrame([_bar(m, 100.0) for m in range(390)])
+    rows = mp.simulate_session_rows({"AAA": flat}, session="2024-01-05")
+    assert len(rows) == 6
+    assert all(r["fallback"] for r in rows)
+    from research.bflow import oracle
+    dump = oracle.dump_benchmark(flat.to_dict("records"))
+    for r in rows:
+        expected = mp.simulate_pair(flat, dump, leg=r["leg"], zeta=r["zeta"])
+        for k, v in expected.items():
+            if isinstance(v, float) and np.isnan(v):
+                assert np.isnan(r[k])
+            else:
+                assert r[k] == v
+
+
 def test_session_delta_records_shape():
     frames = {"AAA": _dippy()}
     recs = mp.session_delta_records(frames, session="2024-01-05")

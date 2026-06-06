@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src.research.bflow import oracle
+from src.research.bflow import predictability as pr
 from src.research.bflow.flow_features import compute_features, _reindex_valid_frame
 from src.research.bflow.energy_counterfactual import running_z
 
@@ -109,7 +110,6 @@ def simulate_pair(df, p_eod_dump, leg, zeta):
 
 
 def _eligible_pair(tdf, dump):
-    from src.research.bflow import predictability as pr
     if dump is None or not np.isfinite(oracle._f(dump)):
         return False
     return pr._valid_bar_count(tdf) >= pr.MIN_VALID_BARS
@@ -140,7 +140,10 @@ def simulate_session_rows(frames, session):
 
 def session_delta_records(frames, session):
     """Pass-2 worker: per-(ticker, minute) unconditional entry economics for
-    the LOSO null — one record per minute with a finite G (valid fill bar)."""
+    the LOSO null — one record per minute with a finite G (valid fill bar).
+    Emits ALL valid fill minutes m in [0, 388] — intentionally WIDER than the
+    [SCAN_START, SCAN_END] trigger window (the unconditional null covers every
+    minute a policy entry could be matched against)."""
     recs = []
     for ticker, tdf in frames.items():
         dump = oracle.dump_benchmark(tdf.to_dict("records"))
