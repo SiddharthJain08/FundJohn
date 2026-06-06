@@ -292,7 +292,8 @@ def cell_stats(scored_rows):
 
 def guardrail_stats(scored_rows, acc):
     """Per (leg, zeta): EXACT p95 adverse of triggered policy deltas vs the
-    HISTOGRAM p95 adverse of the matched pool (own sessions excluded)."""
+    HISTOGRAM p95 adverse of the matched pool (own sessions excluded).
+    Call with the FULL pass-1 row set (all triggered entries), NOT the thin-null-filtered scored rows — the spec §3 floor applies to scoring only, and the histogram weights were built from all triggered entries."""
     df = pd.DataFrame([r for r in scored_rows if r["triggered"]])
     out = {}
     if not len(df):

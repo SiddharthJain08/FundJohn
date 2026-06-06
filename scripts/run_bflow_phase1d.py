@@ -76,7 +76,8 @@ def main(argv=None):
     # ---- scoring + stats + guardrail + verdicts ----
     scored, excluded = mp.score_rows(all_rows, acc)
     stats = mp.cell_stats(scored)
-    guard = mp.guardrail_stats(scored, acc)
+    # Guardrail over ALL triggered entries (spec §3: the thin-null floor excludes from SCORING only) — matches build_cell_weights' histogram weights so own-subtraction algebra w·(n−1) holds exactly.
+    guard = mp.guardrail_stats(all_rows, acc)
     verdicts = mp.leg_verdicts(stats, guard)
     diag = mp.diagnostics(scored)
     print(f"[bflow-p1d] excluded_thin_null={excluded}", flush=True)

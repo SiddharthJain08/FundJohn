@@ -148,6 +148,38 @@ def test_verdict_rules():
     assert mp.leg_verdicts(stats, guard)["LONG"] == "PASS"
 
 
+def test_guardrail_uses_all_triggered_including_thin_null():
+    """Spec §3: the >=30-obs floor excludes entries from SCORING only — the
+    guardrail must run on ALL triggered entries. A thin-null ticker's entries
+    must appear in both guardrail sides (this was the final-review blocker)."""
+    cell = ("LONG", 1.0)
+    # AAA: thick null (40 sessions @ minute 100, delta -10)
+    rows = _mk_rows(40, delta=-10.0, gross=-10.0, minute=100)
+    # BBB: thin null (10 sessions @ minute 200, delta -50) -> excluded from scoring
+    for d in range(1, 11):
+        rows.append({"session": f"2024-03-{d:02d}", "ticker": "BBB",
+                     "leg": "LONG", "zeta": 1.0, "triggered": True,
+                     "entry_minute": 200, "delta_net_bps": -50.0,
+                     "gross_at_entry": -50.0, "cost_at_entry": 0.0,
+                     "fallback": False})
+    weights = mp.build_cell_weights(rows)
+    assert weights[cell][("BBB", 200)] == 10
+    acc = mp.NullAccumulator(cell_weights=weights)
+    acc.add_records(_mk_recs(40, G=-10.0, minute=100))                 # AAA
+    acc.add_records([{"session": f"2024-03-{d:02d}", "ticker": "BBB",
+                      "minute": 200, "G": -50.0, "C": 0.0}
+                     for d in range(1, 11)])                           # BBB
+    scored, excluded = mp.score_rows(rows, acc)
+    assert excluded == 10                      # BBB thin -> out of scoring
+    g_all = mp.guardrail_stats(rows, acc)      # the CORRECT call (all rows)
+    g_scored = mp.guardrail_stats(scored, acc) # the buggy pre-fix call
+    # policy tail must reflect BBB's -50s: 10/50 triggered entries at -50
+    # -> 5th percentile of all-triggered deltas = -50 -> p95_adverse = 50
+    assert np.isclose(g_all[cell]["policy_p95_adverse"], 50.0)
+    # the scored-only set has no BBB -> tail collapses to the -10s
+    assert np.isclose(g_scored[cell]["policy_p95_adverse"], 10.0)
+
+
 def test_diagnostics_shapes():
     rows = _mk_rows(40, delta=-20.0, gross=-20.0)
     for r in rows:
