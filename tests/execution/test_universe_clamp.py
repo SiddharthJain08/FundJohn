@@ -46,6 +46,24 @@ def test_unknown_predicate_fails_open(monkeypatch, capsys):
     assert clamp_universe(u, fake_meta_fetch, fake_category_fetch) == u
 
 
+def test_dash_form_resolves_via_dot_metadata(monkeypatch):
+    """SP-7 §11 acceptance leak: parquet/universe_config store dash form
+    ('ALB-PRA') while ticker_metadata_snapshots stores dot form ('ALB.PRA').
+    The clamp must resolve metadata via the dot form so non-SP500 preferreds
+    are clamped — and SP500 share classes (BRK-B → BRK.B) stay kept."""
+    monkeypatch.setenv("OPENCLAW_ENGINE_UNIVERSE_CLAMP", "sp500")
+    meta = {
+        "ALB.PRA": ("us_equity", False),  # preferred, not SP500 → clamp out
+        "BRK.B":   ("us_equity", True),   # SP500 share class → keep
+    }
+    cats = {"ALB-PRA": "equity", "BRK-B": "equity"}
+    u = ["ALB-PRA", "BRK-B", "BTC-USD"]
+    out = clamp_universe(u, lambda: meta, lambda: cats)
+    assert "ALB-PRA" not in out   # leak closed: dot-form metadata found, in_sp500=False
+    assert "BRK-B" in out         # dot-form metadata found, in_sp500=True
+    assert "BTC-USD" in out       # 'BTC.USD' not in metadata → still pass-through
+
+
 def test_meta_fetch_exception_fails_open(monkeypatch):
     """meta_fetch raising an exception must fail-open and return input unchanged."""
     monkeypatch.setenv("OPENCLAW_ENGINE_UNIVERSE_CLAMP", "sp500")

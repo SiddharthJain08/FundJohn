@@ -97,19 +97,24 @@ def clamp_universe(
     kept: list[str] = []
     dropped = 0
     for sym in universe:
-        in_meta = sym in meta
+        # Symbol-form bridge (SP-7 §11 acceptance finding): parquet/universe_config
+        # store dash form ('ALB-PRA', 'BRK-B') while ticker_metadata_snapshots
+        # stores Alpaca's dot form ('ALB.PRA', 'BRK.B'). Fall back to the dot
+        # form so preferreds/share classes resolve instead of failing open.
+        meta_sym = sym if sym in meta else sym.replace("-", ".")
+        in_meta = meta_sym in meta
         # Determine category: explicit from universe_config, else infer.
         # Tickers absent from metadata are non-equity by convention (pass through).
         category = categories.get(sym, "equity" if in_meta else None)
         is_clampable_equity = (
             in_meta
-            and meta[sym][0] == "us_equity"
+            and meta[meta_sym][0] == "us_equity"
             and category == "equity"
         )
         if not is_clampable_equity:
             # Non-equity (etf, index, crypto, screener_candidate, absent) — pass through
             kept.append(sym)
-        elif meta[sym][1]:
+        elif meta[meta_sym][1]:
             # is_clampable_equity AND in_sp500 — pass through
             kept.append(sym)
         else:
