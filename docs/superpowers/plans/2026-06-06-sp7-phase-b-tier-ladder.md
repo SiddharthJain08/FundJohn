@@ -633,6 +633,24 @@ git add scripts/sp7_b0_repair_metadata.py tests/test_sp7_b0_repair.py
 git commit -m "feat(sp7-phase-b): B0 metadata coherence repair (months + degenerate dailies, UPDATE supersede)"
 ```
 
+#### Task 3 amendment (review fix — 2026-06-06)
+
+**Problem found in review:** `repair_month` passed `universe = existing symbols` to `build_month_snapshot` and used UPDATE-only logic. But ~123 SP500 members per historical month have NO rows at all in `ticker_metadata_snapshots` — they entered the tracked universe in 2026-05 (first_seen_at=2026-05-14). UPDATE-only can never satisfy B0 acceptance criterion 2 (in_sp500 ≈ 500±15 per month). Investigation at 2023-06-30 confirmed: 483 CSV members → 123 missing from DB → 116 buildable via `listed_date` PIT filter (6 genuinely delisted tickers not in `alpaca_tradable_universe`: ANSS/ATVI/CTLT/DFS/HOLX/JNPR; PSKY listed_date=2025-08-07 → PIT drops it). 3 spot-checked missing symbols (A/ADP/ADSK) all have 1780 price bars ≤ 2023-06-30.
+
+**Fix implemented:**
+1. `repair_month` now expands `universe := sorted(set(existing.symbol) ∪ _sp500_membership_on(snap))` so CSV SP500 members are included in the `build_month_snapshot` call even if they have no existing rows. `build_market_cap_lookup` is also called over the expanded universe so mega-caps get market_cap values for ranking.
+2. New pure helper `missing_rows(existing, rebuilt) -> list[dict]`: returns full-row dicts for symbols in `rebuilt` absent from `existing` — directly INSERT-ready.
+3. After the UPDATE batch: `INSERT ... ON CONFLICT (snapshot_date, symbol) DO NOTHING` for missing rows, including `source_tag='backfill_5y_v3'` (table column is NOT NULL with no default; `created_at` has `now()` default and is omitted). INSERT columns aligned explicitly to `rebuilt.columns + ['source_tag']` from `information_schema`.
+4. The dry-run guard restructured: compute both `updates` and `missing` BEFORE the guard; guard is now `if dry_run: return len(updates)` only. UPDATE and INSERT are independent blocks so a month with zero value-changes but missing rows still gets inserted.
+5. `hashlib` and `json` imports removed (flagged as unused by review).
+6. Dry-run output extended: `changed=N inserted_missing=M in_sp500_total=K` per month.
+
+**Dry-run result (2023-06-30):** `rows=4397 changed=2288 inserted_missing=116 in_sp500_total=476`
+
+**Criterion-2 note:** even with a perfect fix, 2023-06-30 achieves in_sp500=476, below the 485 floor. Root cause: the CSV reconstruction yields only 483 members for this date (S&P historical reconstruction ~20 short vs. the real 503), and 7 are unbuildable (6 delisted + PSKY late-listed). The fix materially improves in_sp500 from ~360 (pre-fix) to 476 (post-fix). Acceptance criterion can be re-evaluated by the operator with this ceiling understood: max achievable via this path ≈ 476 for 2023-06, not 500.
+
+**Tests added (8 total, all pass):** `test_missing_rows_returns_absent_symbols_only`, `test_missing_rows_contains_all_rebuilt_columns`, `test_missing_rows_empty_when_all_present`, `test_dry_run_never_writes_to_db`.
+
 ---
 
 ### Task 4: B0 acceptance probe — `universe_tier_coherence` system_check

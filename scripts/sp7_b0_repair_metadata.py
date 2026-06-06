@@ -7,7 +7,11 @@ r1000/r3000; in_sp500 undercount) and the degenerate live_daily snapshots
 
 UPDATE-based supersede: recompute derived columns (in_sp500, in_r1000,
 in_r3000, market_cap) per (snapshot_date, symbol) and UPDATE rows whose
-values differ, flipping source_tag to 'backfill_5y_v3'. NEVER deletes.
+values differ, flipping source_tag to 'backfill_5y_v3'.  Also INSERTs
+missing rows for SP500 members that were never written (e.g. ~123 symbols
+per historical month whose first_seen_at > snapshot_date — they were not
+in the universe when the original backfill ran, but are buildable via
+listed_date PIT filter).  NEVER deletes.
 
 Usage:
   OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1 python3 scripts/sp7_b0_repair_metadata.py \
@@ -21,8 +25,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import hashlib
-import json
 import os
 import sys
 from datetime import date, timedelta
@@ -91,6 +93,20 @@ def diff_derived(existing, rebuilt) -> list[dict]:
     return updates
 
 
+def missing_rows(existing, rebuilt) -> list[dict]:
+    """Rows in `rebuilt` whose symbol is absent from `existing`.
+
+    Returns full row dicts (all columns from rebuilt) ready for INSERT.
+    `existing` is the DataFrame of rows already in the DB for this snapshot.
+    """
+    ex_syms = set(existing['symbol'])
+    result = []
+    for row in rebuilt.itertuples():
+        if row.symbol not in ex_syms:
+            result.append({col: getattr(row, col) for col in rebuilt.columns})
+    return result
+
+
 def _audit(cur, chunk_key: str, status: str, rows: int = 0, err: str | None = None):
     cur.execute(
         """INSERT INTO backfill_audit
@@ -102,7 +118,9 @@ def _audit(cur, chunk_key: str, status: str, rows: int = 0, err: str | None = No
 
 def repair_month(pg, snap: date, *, dry_run: bool) -> int:
     import pandas as pd
-    from src.pipeline.backfillers.universe_metadata import build_month_snapshot
+    from src.pipeline.backfillers.universe_metadata import (
+        build_month_snapshot, _sp500_membership_on,
+    )
     from src.pipeline.market_cap_lookup import build_market_cap_lookup
 
     with pg.cursor() as cur:
@@ -115,25 +133,56 @@ def repair_month(pg, snap: date, *, dry_run: bool) -> int:
     if existing.empty:
         print(f'[b0] {snap} no rows — skip')
         return 0
-    universe = sorted(existing.symbol)
+
+    # Expand universe: existing symbols UNION CSV SP500 members on this date.
+    # This ensures historical SP500 members (first_seen_at > snap) get INSERTed.
+    csv_sp500 = _sp500_membership_on(snap)
+    universe = sorted(set(existing['symbol']) | csv_sp500)
+
+    # Build caps over the FULL expanded universe so mega-caps get market_cap values.
     caps = build_market_cap_lookup(universe, snap)
     rebuilt = build_month_snapshot(snap, universe, pg, market_cap_lookup=caps)
+
     updates = diff_derived(existing, rebuilt)
-    print(f'[b0] {snap} rows={len(existing)} changed={len(updates)}')
-    if dry_run or not updates:
+    missing = missing_rows(existing, rebuilt)
+    in_sp500_total = int(rebuilt['in_sp500'].sum()) if not rebuilt.empty else 0
+
+    print(f'[b0] {snap} rows={len(existing)} changed={len(updates)} '
+          f'inserted_missing={len(missing)} in_sp500_total={in_sp500_total}')
+
+    if dry_run:
+        # Dry-run: print but do not write
         return len(updates)
+
     with pg.cursor() as cur:
         from psycopg2.extras import execute_batch
-        execute_batch(cur, f"""
-            UPDATE ticker_metadata_snapshots
-               SET in_sp500=%(in_sp500)s, in_r1000=%(in_r1000)s,
-                   in_r3000=%(in_r3000)s, market_cap=%(market_cap)s,
-                   source_tag='{SOURCE_TAG}'
-             WHERE snapshot_date=%(snap)s AND symbol=%(symbol)s""",
-            [{**u, 'snap': snap} for u in updates], page_size=500)
-        _audit(cur, f'{snap.isoformat()}:metadata:repair_v3', 'promoted', len(updates))
+        if updates:
+            execute_batch(cur, f"""
+                UPDATE ticker_metadata_snapshots
+                   SET in_sp500=%(in_sp500)s, in_r1000=%(in_r1000)s,
+                       in_r3000=%(in_r3000)s, market_cap=%(market_cap)s,
+                       source_tag='{SOURCE_TAG}'
+                 WHERE snapshot_date=%(snap)s AND symbol=%(symbol)s""",
+                [{**u, 'snap': snap} for u in updates], page_size=500)
+        if missing:
+            # INSERT all columns that build_month_snapshot emits, plus source_tag.
+            # ON CONFLICT DO NOTHING: PK is (snapshot_date, symbol) — safety net.
+            insert_cols = list(rebuilt.columns) + ['source_tag']
+            placeholders = ', '.join(f'%({c})s' for c in insert_cols)
+            col_list = ', '.join(insert_cols)
+            execute_batch(
+                cur,
+                f"""INSERT INTO ticker_metadata_snapshots ({col_list})
+                    VALUES ({placeholders})
+                    ON CONFLICT (snapshot_date, symbol) DO NOTHING""",
+                [{**{c: _norm(r[c]) for c in rebuilt.columns}, 'source_tag': SOURCE_TAG}
+                 for r in missing],
+                page_size=500,
+            )
+        _audit(cur, f'{snap.isoformat()}:metadata:repair_v3', 'promoted',
+               len(updates) + len(missing))
     pg.commit()
-    return len(updates)
+    return len(updates) + len(missing)
 
 
 def repair_dailies(pg, *, dry_run: bool) -> int:
