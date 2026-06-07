@@ -448,6 +448,51 @@ app.post('/api/universe-recs/:id/:action', async (req, res) => {
   }
 });
 
+// ─────────────────────────── Universe Ladder (SP-7 Phase B) ─────────────────
+// GET  /api/universe-ladder               — latest run's cells + status counts
+// POST /api/universe-ladder/:sid/recompute — seed cells + arm for one strategy
+
+app.get('/api/universe-ladder', async (_req, res) => {
+  try {
+    const latest = await query(
+      `SELECT run_id FROM universe_ladder_runs
+        ORDER BY queued_at DESC LIMIT 1`);
+    if (latest.rows.length === 0) return res.json({ run_id: null, cells: [] });
+    const runId = latest.rows[0].run_id;
+    const cells = await query(
+      `SELECT strategy_id, tier, status, duration_s,
+              metrics->>'sharpe' AS sharpe, finished_at
+         FROM universe_ladder_runs WHERE run_id = $1
+        ORDER BY strategy_id, CASE tier WHEN 'sp500' THEN 0
+                 WHEN 'tier_r1000' THEN 1 WHEN 'tier_r3000' THEN 2
+                 ELSE 3 END`, [runId]);
+    const counts = await query(
+      `SELECT status, count(*)::int AS n FROM universe_ladder_runs
+        WHERE run_id = $1 GROUP BY status`, [runId]);
+    res.json({ run_id: runId, counts: counts.rows, cells: cells.rows });
+  } catch (err) {
+    if (err.code === '42P01') return res.json({ run_id: null, cells: [], note: 'universe_ladder_runs not migrated yet' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/universe-ladder/:strategyId/recompute', async (req, res) => {
+  const sid = String(req.params.strategyId || '');
+  if (!/^[A-Za-z0-9_]+$/.test(sid)) return res.status(400).json({ error: 'bad strategy id' });
+  try {
+    const known = await query(
+      `SELECT 1 FROM strategy_registry WHERE id = $1 AND status = 'approved'`, [sid]);
+    if (known.rows.length === 0) return res.status(404).json({ error: `${sid} is not a registry-approved strategy` });
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const { execFileSync } = require('node:child_process');
+    execFileSync('python3',
+      ['scripts/run_universe_ladder.py', 'seed', '--strategy', sid, '--arm'],
+      { cwd: repoRoot, stdio: 'pipe', timeout: 120000 });
+    res.status(202).json({ ok: true, strategy_id: sid,
+      note: 'cells enqueued + window armed; runs in the next nightly window (01:00–13:00 UTC Mon–Fri)' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ──────────────────── Papermint Predicate Coverage (SP-2 Phase D) ────────────
 // GET /api/papermint-recent — recent research_candidates (last 30 days) with
 //   inferred predicate + adoption lag where a strategy was staged.
