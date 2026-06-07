@@ -82,6 +82,10 @@ def main(argv=None):
     from research.bflow.predictability import summarize
 
     grid = pd.read_parquet(args.ic_grid)
+    # run_phase1b.write_artifacts stores session labels as a COLUMN; restore
+    # the session index (pure I/O shape — verdict rules untouched).
+    if "session" in grid.columns:
+        grid = grid.set_index("session")
     elig = _eligible(grid)
     n_elig = len(elig)
     out = [f"# Phase-1b historical kill-test verdict",
