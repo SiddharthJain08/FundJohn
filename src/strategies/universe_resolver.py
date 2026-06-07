@@ -115,7 +115,8 @@ class MockResolver(UniverseResolver):
 if __name__ == "__main__":
     import argparse, json, os, sys
     from datetime import date as _d
-    from src.strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
+    from src.strategies._db_adapters import PostgresMetadataDB
+    from src.strategies.coverage_index import CoverageIndex
     ap = argparse.ArgumentParser()
     ap.add_argument("--as-of", required=True)
     ap.add_argument("--states", default="live")
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     as_of = _d.fromisoformat(args.as_of)
     states = tuple(args.states.split(","))
     db = PostgresMetadataDB(os.environ["POSTGRES_URI"])
-    cov = ParquetCoverage()
+    cov = CoverageIndex.from_parquet("/root/openclaw/data/master/prices.parquet")
     def manifest_loader():
         with open("/root/openclaw/src/strategies/manifest.json") as f:
             return json.load(f)
