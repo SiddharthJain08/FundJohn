@@ -10,6 +10,7 @@ from . import storage     # noqa: F401
 from . import universe    # noqa: F401
 from . import maintenance # noqa: F401
 from . import universe_resolution          # noqa: F401
+from . import universe_shadow_parity       # noqa: F401
 from . import metadata_snapshot_freshness  # noqa: F401
 from . import backfill_progress            # noqa: F401
 from . import ticker_metadata_history_depth  # noqa: F401
