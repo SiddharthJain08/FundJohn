@@ -60,6 +60,7 @@ Spec: docs/superpowers/specs/2026-06-07-sp7-phase-c-live-wiring-design.md
 
 ## 7. C3 FLIPS (individually, any time after C2; each independently revertible)
 - `OPENCLAW_SENTIMENT_RESOLVER_UNIVERSE=1` → next sentiment cycle: log `sentiment: resolver universe +N`
+  Memory note: the sentiment step builds its own CoverageIndex on flip (~1.65 GB transient, ~5 s) inside the daily cycle — same §2 OOM watch applies to the first gated sentiment run.
 - `OPENCLAW_OPTIONS_ARCHIVE_RESOLVER_UNIVERSE`: **DO NOT FLIP YET** — options_eligible is FALSE for all metadata rows (the chain-probe producer was never built; Phase D backlog). The gate-ON path logs 'gate ON but 0 options-eligible' and falls back to universe_config — flipping it today is a no-op plus one warning per run. Flip only after the Phase D eligibility producer ships.
 - fundamentals/insider scoping rides the C2 gate (already ON)
 

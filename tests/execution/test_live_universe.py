@@ -123,6 +123,16 @@ class _Conn:
     def commit(self): self.committed = True
 
 
+def test_string_as_of_normalized(refs):
+    """as_of passed as ISO string must not TypeError in resolve()/has_floor()
+    and must not fail-open every strategy to the shared fallback (inert C1)."""
+    resolver = FakeResolver({"S_default": ["AAPL", "BRK.B"]})
+    out = refs.build_strategy_universes(
+        ["S_default"], "2026-06-08", list(FALLBACK), resolver=resolver,
+        meta_fetch=lambda: META, category_fetch=lambda: CATS)
+    assert out["S_default"]["error"] is None   # not a fail-open
+
+
 def test_shadow_writer_diffs_and_upserts(refs):
     resolver = FakeResolver({"S_default": ["AAPL", "BRK.B"],
                              "S_adopted": ["AAPL", "BRK.B", "RDDT"]})

@@ -99,6 +99,10 @@ def build_strategy_universes(strategy_ids, as_of, fallback_universe,
                              category_fetch=_default_category_fetch):
     """{strategy_id: {'universe': [...], 'predicate': str, 'adopted': bool,
                       'error': str | None}}"""
+    # Single normalization chokepoint: callers may pass date or ISO string;
+    # a str as_of would TypeError in resolve()/has_floor() and silently
+    # fail-open EVERY strategy to the shared fallback (inert C1).
+    as_of = as_of if isinstance(as_of, date) else date.fromisoformat(str(as_of))
     refs = _manifest_universe_refs()
     if resolver is None:
         resolver = build_resolver()
