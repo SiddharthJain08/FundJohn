@@ -7,6 +7,11 @@ Test plan:
      under 'close' exits later.
   d. ValueError on fill_model="banana".
   e. Driver unit: --single monkeypatched; --summarize gates + verdict strings.
+     e1. summarize on a synthetic results.jsonl missing 2 of a fake 5-strategy book
+         → INCOMPLETE-COVERAGE verdict, bar not evaluated.
+     e2. same with --allow-partial → verdict computed + PARTIAL BOOK headline.
+     e3. timeout row schema countable + retried-on-resume logic (a sid with
+         status:timeout is NOT treated as done).
 """
 from __future__ import annotations
 
@@ -392,11 +397,11 @@ class TestDriverUnit:
         """With sufficient median ΔSharpe + majority positive → CONSIDERATION-BAR-MET."""
         driver = self._import_driver()
 
-        # Build a synthetic results.jsonl where all strategies have high ΔSharpe.
+        sids = [f'S_{i:03d}' for i in range(10)]
         fake_rows = []
-        for i in range(10):
+        for sid in sids:
             fake_rows.append({
-                'sid': f'S_{i:03d}',
+                'sid': sid,
                 'close': {'sharpe': 1.0, 'total_trades': 100},
                 'open': {'sharpe': 1.2, 'total_trades': 100},
                 'delta_sharpe': 0.2,
@@ -409,10 +414,11 @@ class TestDriverUnit:
             rf = Path(td) / 'results.jsonl'
             rf.write_text('\n'.join(json.dumps(r) for r in fake_rows))
             rep_f = Path(td) / 'report.md'
-            # Patch the module-level paths.
+            # Patch both the file paths AND _live_strategies so coverage == completed.
             with patch.object(driver, 'RESULTS_FILE', rf), \
                  patch.object(driver, 'REPORT_FILE', rep_f), \
-                 patch.object(driver, 'RESULTS_DIR', Path(td)):
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=sids):
                 verdict = driver._summarize()
         assert verdict == 'CONSIDERATION-BAR-MET'
 
@@ -420,10 +426,11 @@ class TestDriverUnit:
         """With ΔSharpe < threshold → CLOSE-FILL-STANDS."""
         driver = self._import_driver()
 
+        sids = [f'S_{i:03d}' for i in range(10)]
         fake_rows = []
-        for i in range(10):
+        for sid in sids:
             fake_rows.append({
-                'sid': f'S_{i:03d}',
+                'sid': sid,
                 'close': {'sharpe': 1.0, 'total_trades': 100},
                 'open': {'sharpe': 1.05, 'total_trades': 100},
                 'delta_sharpe': 0.05,
@@ -438,7 +445,8 @@ class TestDriverUnit:
             rep_f = Path(td) / 'report.md'
             with patch.object(driver, 'RESULTS_FILE', rf), \
                  patch.object(driver, 'REPORT_FILE', rep_f), \
-                 patch.object(driver, 'RESULTS_DIR', Path(td)):
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=sids):
                 verdict = driver._summarize()
         assert verdict == 'CLOSE-FILL-STANDS'
 
@@ -446,10 +454,11 @@ class TestDriverUnit:
         """More than 5 SIM-SUSPECT strategies → INVALID-SIM."""
         driver = self._import_driver()
 
+        sids = [f'S_{i:03d}' for i in range(8)]
         fake_rows = []
-        for i in range(8):
+        for sid in sids:
             fake_rows.append({
-                'sid': f'S_{i:03d}',
+                'sid': sid,
                 'close': {'sharpe': 1.0, 'total_trades': 100},
                 'open': {'sharpe': 1.2, 'total_trades': 120},  # 20% breach
                 'delta_sharpe': 0.2,
@@ -464,6 +473,167 @@ class TestDriverUnit:
             rep_f = Path(td) / 'report.md'
             with patch.object(driver, 'RESULTS_FILE', rf), \
                  patch.object(driver, 'REPORT_FILE', rep_f), \
-                 patch.object(driver, 'RESULTS_DIR', Path(td)):
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=sids):
                 verdict = driver._summarize()
         assert verdict == 'INVALID-SIM'
+
+    # ── (e1) INCOMPLETE-COVERAGE: 3 of 5 complete, bar not evaluated ─────────
+
+    def test_summarize_incomplete_coverage_no_allow_partial(self):
+        """Synthetic 5-strategy book with only 3 complete rows (2 missing) →
+        INCOMPLETE-COVERAGE verdict; the consideration bar is NOT evaluated
+        (even though the 3 complete rows would clear it)."""
+        driver = self._import_driver()
+
+        all_sids = [f'S_{i:03d}' for i in range(5)]
+        complete_sids = all_sids[:3]   # 3 complete
+        # 3 complete rows — all high ΔSharpe (would pass consideration bar).
+        fake_rows = []
+        for sid in complete_sids:
+            fake_rows.append({
+                'sid': sid,
+                'close': {'sharpe': 1.0, 'total_trades': 100},
+                'open': {'sharpe': 1.2, 'total_trades': 100},
+                'delta_sharpe': 0.2,
+                'trades_parity_pct': 0.0,
+                'sim_suspect': False,
+                'ts': '2026-06-07T00:00:00',
+            })
+
+        with tempfile.TemporaryDirectory() as td:
+            rf = Path(td) / 'results.jsonl'
+            rf.write_text('\n'.join(json.dumps(r) for r in fake_rows))
+            rep_f = Path(td) / 'report.md'
+            with patch.object(driver, 'RESULTS_FILE', rf), \
+                 patch.object(driver, 'REPORT_FILE', rep_f), \
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=all_sids):
+                verdict = driver._summarize(allow_partial=False)
+
+            # Must be INCOMPLETE-COVERAGE, NOT CONSIDERATION-BAR-MET.
+            assert verdict.startswith('INCOMPLETE-COVERAGE'), \
+                f'expected INCOMPLETE-COVERAGE, got: {verdict}'
+            assert '3/5' in verdict, f'expected 3/5 in verdict, got: {verdict}'
+            # Report must exist and have the Coverage section.
+            report_text = rep_f.read_text()
+            assert 'Coverage' in report_text
+            # The missing sids should appear.
+            for sid in all_sids[3:]:
+                assert sid in report_text, f'missing sid {sid} not listed in report'
+
+    # ── (e2) allow-partial: verdict computed, headline prefixed ──────────────
+
+    def test_summarize_allow_partial_computes_verdict_and_prefixes(self):
+        """Same 3-of-5 book but with --allow-partial → verdict is computed
+        (CONSIDERATION-BAR-MET for high-ΔSharpe rows) AND the verdict string
+        is prefixed with 'PARTIAL BOOK — 3/5'."""
+        driver = self._import_driver()
+
+        all_sids = [f'S_{i:03d}' for i in range(5)]
+        complete_sids = all_sids[:3]
+        fake_rows = []
+        for sid in complete_sids:
+            fake_rows.append({
+                'sid': sid,
+                'close': {'sharpe': 1.0, 'total_trades': 100},
+                'open': {'sharpe': 1.2, 'total_trades': 100},
+                'delta_sharpe': 0.2,
+                'trades_parity_pct': 0.0,
+                'sim_suspect': False,
+                'ts': '2026-06-07T00:00:00',
+            })
+
+        with tempfile.TemporaryDirectory() as td:
+            rf = Path(td) / 'results.jsonl'
+            rf.write_text('\n'.join(json.dumps(r) for r in fake_rows))
+            rep_f = Path(td) / 'report.md'
+            with patch.object(driver, 'RESULTS_FILE', rf), \
+                 patch.object(driver, 'REPORT_FILE', rep_f), \
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=all_sids):
+                verdict = driver._summarize(allow_partial=True)
+
+        assert 'PARTIAL BOOK' in verdict, \
+            f'expected PARTIAL BOOK prefix, got: {verdict}'
+        assert '3/5' in verdict, f'expected 3/5 in verdict, got: {verdict}'
+        assert 'CONSIDERATION-BAR-MET' in verdict, \
+            f'expected CONSIDERATION-BAR-MET embedded in verdict, got: {verdict}'
+
+    # ── (e3) timeout row schema + retry-on-resume logic ─────────────────────
+
+    def test_timeout_row_not_treated_as_done(self):
+        """A row with status='timeout' must NOT be counted as done by _already_done();
+        a subsequent complete row for the same sid IS done."""
+        driver = self._import_driver()
+
+        timeout_row = {
+            'sid': 'S_slow',
+            'status': 'timeout',
+            'ts': '2026-06-07T00:00:00',
+        }
+        complete_row = {
+            'sid': 'S_fast',
+            'close': {'sharpe': 1.0, 'total_trades': 50},
+            'open': {'sharpe': 1.1, 'total_trades': 50},
+            'delta_sharpe': 0.1,
+            'trades_parity_pct': 0.0,
+            'sim_suspect': False,
+            'ts': '2026-06-07T00:00:00',
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            rf = Path(td) / 'results.jsonl'
+            rf.write_text(
+                json.dumps(timeout_row) + '\n' + json.dumps(complete_row) + '\n'
+            )
+            with patch.object(driver, 'RESULTS_FILE', rf):
+                done = driver._already_done()
+
+        # S_slow (timeout) must NOT be in done — it will be retried.
+        assert 'S_slow' not in done, \
+            'timeout row should not mark sid as done (must be retried)'
+        # S_fast (complete) MUST be in done — it will be skipped.
+        assert 'S_fast' in done, \
+            'complete row should mark sid as done (skip on resume)'
+
+    def test_timeout_row_counted_in_coverage_errored(self):
+        """A timeout row's sid must appear in the missing_sids list and n_errored
+        count in the coverage section of the report."""
+        driver = self._import_driver()
+
+        all_sids = ['S_fast', 'S_slow']
+        complete_row = {
+            'sid': 'S_fast',
+            'close': {'sharpe': 1.0, 'total_trades': 50},
+            'open': {'sharpe': 1.1, 'total_trades': 50},
+            'delta_sharpe': 0.1,
+            'trades_parity_pct': 0.0,
+            'sim_suspect': False,
+            'ts': '2026-06-07T00:00:00',
+        }
+        timeout_row = {
+            'sid': 'S_slow',
+            'status': 'timeout',
+            'ts': '2026-06-07T00:00:00',
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            rf = Path(td) / 'results.jsonl'
+            rf.write_text(
+                json.dumps(complete_row) + '\n' + json.dumps(timeout_row) + '\n'
+            )
+            rep_f = Path(td) / 'report.md'
+            with patch.object(driver, 'RESULTS_FILE', rf), \
+                 patch.object(driver, 'REPORT_FILE', rep_f), \
+                 patch.object(driver, 'RESULTS_DIR', Path(td)), \
+                 patch.object(driver, '_live_strategies', return_value=all_sids):
+                verdict = driver._summarize(allow_partial=False)
+
+            # 1 of 2 complete → INCOMPLETE-COVERAGE.
+            assert 'INCOMPLETE-COVERAGE' in verdict
+            report_text = rep_f.read_text()
+            # S_slow must be called out as missing.
+            assert 'S_slow' in report_text
+            # Coverage section must show 1 timeout.
+            assert 'timeout' in report_text

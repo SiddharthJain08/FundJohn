@@ -16,6 +16,9 @@ Usage:
   # Summarize after the sweep completes (or partially):
   python3 scripts/backtest_fill_model_study.py --summarize
 
+  # Summarize with partial results (compute verdict but prefix PARTIAL BOOK):
+  python3 scripts/backtest_fill_model_study.py --summarize --allow-partial
+
 The driver is COUNTERFACTUAL-ONLY: run_backtest is called with commit=False
 everywhere; zero writes to strategy_backtest_* tables.
 """
@@ -38,6 +41,9 @@ RESULTS_DIR = ROOT / 'analysis' / 'fill_model_study'
 RESULTS_FILE = RESULTS_DIR / 'results.jsonl'
 REPORT_FILE = RESULTS_DIR / 'report.md'
 
+# Per-strategy subprocess timeout: bocpd ~3.5h/variant × 2 variants + buffer.
+SUBPROCESS_TIMEOUT_S = 8 * 3600
+
 # Spec §3 thresholds.
 PARITY_THRESHOLD_PCT = 0.02       # 2 %
 MAX_SUSPECT_BEFORE_INVALID = 5    # >5 SIM-SUSPECT → INVALID
@@ -56,7 +62,12 @@ def _live_strategies() -> list[str]:
 
 
 def _already_done() -> set[str]:
-    """Return sids already present in results.jsonl."""
+    """Return sids that have a complete result row in results.jsonl.
+
+    A row is complete when it has both 'close' and 'open' as dicts AND neither
+    contains an 'error' key.  Rows with status='timeout' or status='failed'
+    are NOT complete → they will be retried on the next sweep run.
+    """
     if not RESULTS_FILE.exists():
         return set()
     done: set[str] = set()
@@ -66,8 +77,15 @@ def _already_done() -> set[str]:
             continue
         try:
             row = json.loads(line)
-            if 'sid' in row:
-                done.add(row['sid'])
+            sid = row.get('sid')
+            if not sid:
+                continue
+            cl = row.get('close')
+            op = row.get('open')
+            # Complete iff both variants present as dicts without 'error'.
+            if (isinstance(cl, dict) and 'error' not in cl
+                    and isinstance(op, dict) and 'error' not in op):
+                done.add(sid)
         except Exception:
             pass
     return done
@@ -127,11 +145,21 @@ def _run_single(sid: str) -> dict:
     return results
 
 
+def _append_error_row(sid: str, status: str) -> None:
+    """Append a timeout/failed sentinel row to results.jsonl and print a loud warning."""
+    row = {
+        'sid': sid,
+        'status': status,
+        'ts': datetime.datetime.utcnow().isoformat(),
+    }
+    with RESULTS_FILE.open('a') as fh:
+        fh.write(json.dumps(row) + '\n')
+    print(f'[fill-study] WARN {sid} {status}', flush=True)
 
 
 # ── Summarize ────────────────────────────────────────────────────────────────
 
-def _summarize() -> str:
+def _summarize(allow_partial: bool = False) -> str:
     """Read results.jsonl and produce report.md + return VERDICT string."""
     if not RESULTS_FILE.exists():
         print('[fill-study] No results file found; run the sweep first.')
@@ -151,23 +179,77 @@ def _summarize() -> str:
         print('[fill-study] results.jsonl is empty.')
         return 'NO_RESULTS'
 
-    n_total = len(rows)
-    suspects = [r for r in rows if r.get('sim_suspect')]
+    # ── Coverage gate ────────────────────────────────────────────────────────
+    live_book = _live_strategies()
+    eligible = len(live_book)
+
+    # Rows that carry a finite delta_sharpe count as completed.
+    completed_rows = [r for r in rows if r.get('delta_sharpe') is not None
+                      and math.isfinite(r['delta_sharpe'])]
+    completed = len(completed_rows)
+
+    # Error/timeout accounting.
+    n_timeout = sum(1 for r in rows if r.get('status') == 'timeout')
+    n_failed  = sum(1 for r in rows if r.get('status') == 'failed')
+    n_errored = n_timeout + n_failed  # total non-complete
+
+    # Missing sids: live strategies with no complete row.
+    completed_sids = {r['sid'] for r in completed_rows if 'sid' in r}
+    missing_sids = [s for s in live_book if s not in completed_sids]
+
+    if completed < eligible:
+        if not allow_partial:
+            verdict = f'INCOMPLETE-COVERAGE ({completed}/{eligible})'
+            _write_report(
+                rows, suspects=[], verdict=verdict,
+                n_total=len(rows), eligible=eligible,
+                completed=completed, n_errored=n_errored,
+                n_timeout=n_timeout, n_failed=n_failed,
+                missing_sids=missing_sids,
+            )
+            print(f'[fill-study] VERDICT: {verdict}')
+            return verdict
+        # allow_partial: fall through but we'll prefix report headline.
+
+    partial_prefix = (
+        f'PARTIAL BOOK — {completed}/{eligible}'
+        if (allow_partial and completed < eligible) else None
+    )
+
+    # ── Verdict computation (full or allow-partial) ──────────────────────────
+    suspects = [r for r in completed_rows if r.get('sim_suspect')]
     n_suspect = len(suspects)
 
     if n_suspect > MAX_SUSPECT_BEFORE_INVALID:
         verdict = 'INVALID-SIM'
-        _write_report(rows, suspects, verdict)
+        if partial_prefix:
+            verdict = f'{partial_prefix} | {verdict}'
+        _write_report(
+            completed_rows, suspects, verdict,
+            n_total=len(rows), eligible=eligible,
+            completed=completed, n_errored=n_errored,
+            n_timeout=n_timeout, n_failed=n_failed,
+            missing_sids=missing_sids,
+        )
         print(f'[fill-study] VERDICT: {verdict}')
         return verdict
 
     # Headline set: SIM-SUSPECT excluded.
-    headline = [r for r in rows if not r.get('sim_suspect') and r.get('delta_sharpe') is not None]
+    headline = [r for r in completed_rows
+                if not r.get('sim_suspect') and r.get('delta_sharpe') is not None]
     n_headline = len(headline)
 
     if n_headline == 0:
         verdict = 'CLOSE-FILL-STANDS'
-        _write_report(rows, suspects, verdict)
+        if partial_prefix:
+            verdict = f'{partial_prefix} | {verdict}'
+        _write_report(
+            completed_rows, suspects, verdict,
+            n_total=len(rows), eligible=eligible,
+            completed=completed, n_errored=n_errored,
+            n_timeout=n_timeout, n_failed=n_failed,
+            missing_sids=missing_sids,
+        )
         print(f'[fill-study] VERDICT: {verdict}')
         return verdict
 
@@ -184,11 +266,19 @@ def _summarize() -> str:
     else:
         verdict = 'CLOSE-FILL-STANDS'
 
-    _write_report(rows, suspects, verdict,
-                  n_headline=n_headline, n_total=n_total,
-                  n_suspect=n_suspect, median_ds=median_ds,
-                  n_positive=n_positive, n_negative=n_negative,
-                  pct_positive_ds=pct_positive_ds)
+    if partial_prefix:
+        verdict = f'{partial_prefix} | {verdict}'
+
+    _write_report(
+        completed_rows, suspects, verdict,
+        n_headline=n_headline, n_total=len(rows),
+        n_suspect=n_suspect, median_ds=median_ds,
+        n_positive=n_positive, n_negative=n_negative,
+        pct_positive_ds=pct_positive_ds,
+        eligible=eligible, completed=completed,
+        n_errored=n_errored, n_timeout=n_timeout,
+        n_failed=n_failed, missing_sids=missing_sids,
+    )
     print(f'[fill-study] VERDICT: {verdict}')
     return verdict
 
@@ -208,7 +298,11 @@ def _write_report(rows: list[dict], suspects: list[dict], verdict: str, *,
                   n_headline: int = 0, n_total: int = 0, n_suspect: int = 0,
                   median_ds: float | None = None,
                   n_positive: int = 0, n_negative: int = 0,
-                  pct_positive_ds: float = 0.0) -> None:
+                  pct_positive_ds: float = 0.0,
+                  eligible: int = 0, completed: int = 0,
+                  n_errored: int = 0, n_timeout: int = 0,
+                  n_failed: int = 0,
+                  missing_sids: list[str] | None = None) -> None:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
     lines: list[str] = [
@@ -223,6 +317,15 @@ def _write_report(rows: list[dict], suspects: list[dict], verdict: str, *,
         '> Consideration bar: median ΔSharpe ≥ +0.10 AND ≥60% strategies positive AND '
         'trades-parity clean. Anything less → close-fill stands.',
         f'',
+        f'## Coverage',
+        f'',
+        f'| Metric | Value |',
+        f'|--------|-------|',
+        f'| Eligible (live book) | {eligible} |',
+        f'| Completed (finite ΔSharpe) | {completed} |',
+        f'| Errored / timeout | {n_errored} ({n_timeout} timeout, {n_failed} failed) |',
+        f'| Missing sids | {", ".join(missing_sids) if missing_sids else "none"} |',
+        f'',
         f'## Summary',
         f'',
         f'| Metric | Value |',
@@ -235,12 +338,24 @@ def _write_report(rows: list[dict], suspects: list[dict], verdict: str, *,
         f'| ΔSharpe ≤ −0.10 count | {n_negative} |',
         f'| % strategies with positive ΔSharpe | {round(pct_positive_ds * 100, 1) if n_headline else "N/A"}% |',
         f'',
+        f'## Interpretation',
+        f'',
+        'Trades-parity breaches may be LEGITIMATE fill effects, not sim bugs: earlier '
+        'open-fill stops feed run_stop_history\'s per-ticker cooldown and can suppress '
+        're-fires (>2% divergence possible on low-trade strategies). An INVALID-SIM verdict '
+        'triggers investigation, not automatic rerun.',
+        f'',
         f'## Per-Strategy Results',
         f'',
         f'| SID | Sharpe (close) | Sharpe (open) | ΔSharpe | n_trades (close) | n_trades (open) | Parity% | SIM-SUSPECT |',
         f'|-----|----------------|---------------|---------|-----------------|-----------------|---------|-------------|',
     ]
-    for r in sorted(rows, key=lambda x: (x.get('sim_suspect', False), -(x.get('delta_sharpe') or -999))):
+    # Only show complete rows in the per-strategy table.
+    complete_rows = [r for r in rows
+                     if isinstance(r.get('close'), dict) and isinstance(r.get('open'), dict)]
+    for r in sorted(complete_rows,
+                    key=lambda x: (x.get('sim_suspect', False),
+                                   -(x.get('delta_sharpe') or -999))):
         sid = r.get('sid', '?')
         cl = r.get('close') or {}
         op = r.get('open') or {}
@@ -292,6 +407,9 @@ def main() -> int:
                     help='Run one strategy in-process and print JSON to stdout')
     ap.add_argument('--summarize', action='store_true',
                     help='Read results.jsonl and write report.md + print VERDICT')
+    ap.add_argument('--allow-partial', action='store_true',
+                    help='With --summarize: compute verdict even if coverage is incomplete '
+                         '(prefixes report headline with PARTIAL BOOK — N/M)')
     args = ap.parse_args()
 
     if args.single:
@@ -300,7 +418,7 @@ def main() -> int:
         return 0
 
     if args.summarize:
-        verdict = _summarize()
+        verdict = _summarize(allow_partial=args.allow_partial)
         return 0 if verdict != 'NO_RESULTS' else 1
 
     # Full sweep: one subprocess per strategy, resumable.
@@ -320,12 +438,13 @@ def main() -> int:
             result = subprocess.run(
                 ['nice', '-n', '19',
                  sys.executable, str(Path(__file__).resolve()), '--single', sid],
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_S,
             )
             stdout = result.stdout.strip()
             if result.returncode != 0 or not stdout:
                 print(f'[fill-study] FAIL {sid}: exit={result.returncode} '
                       f'stderr={result.stderr[:200]}')
+                _append_error_row(sid, 'failed')
                 fail += 1
                 continue
             # Take the last non-empty line (logging might precede the JSON).
@@ -337,19 +456,27 @@ def main() -> int:
                     break
             if json_line is None:
                 print(f'[fill-study] FAIL {sid}: no JSON line in stdout')
+                _append_error_row(sid, 'failed')
                 fail += 1
                 continue
             # Validate it parses.
-            json.loads(json_line)
+            try:
+                json.loads(json_line)
+            except Exception:
+                print(f'[fill-study] FAIL {sid}: unparseable JSON')
+                _append_error_row(sid, 'failed')
+                fail += 1
+                continue
             with RESULTS_FILE.open('a') as fh:
                 fh.write(json_line + '\n')
             ok += 1
             print(f'[fill-study] OK {sid}')
         except subprocess.TimeoutExpired:
-            print(f'[fill-study] TIMEOUT {sid}')
+            _append_error_row(sid, 'timeout')
             fail += 1
         except Exception as exc:
             print(f'[fill-study] ERROR {sid}: {exc}')
+            _append_error_row(sid, 'failed')
             fail += 1
 
     print(f'[fill-study] sweep done: ok={ok} fail={fail}')
