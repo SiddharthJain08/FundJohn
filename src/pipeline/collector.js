@@ -186,8 +186,8 @@ async function applyResolverEnvelope(equityTickers, dateStr) {
       console.warn('[collector] envelope unavailable — keeping universe_config list');
       return equityTickers;
     }
-    // resolver emits metadata dot-form (BRK.B); parquet/universe_config use dash
-    const envDash = envelope.map(t => t.replace(/\./g, '-'));
+    // anchored share-class bridge (BRK.B→BRK-B) — mirrors :619; never touches .WS/.RT/.U forms
+    const envDash = envelope.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
     const inactive = new Set(await store.getInactiveTickers());
     const merged = [...new Set([...equityTickers, ...envDash])]
       .filter(t => !inactive.has(t)).sort();
@@ -200,6 +200,27 @@ async function applyResolverEnvelope(equityTickers, dateStr) {
   } catch (e) {
     console.warn(`[collector] envelope merge failed — keeping universe_config list: ${e.message}`);
     return equityTickers;
+  }
+}
+
+// SP-7 Phase C (C3 / parent decision 4): expensive per-ticker fetchers
+// (fundamentals FMP, insider EDGAR) scope to the FLOORED adopted-union —
+// what strategies actually resolve — not the wide fetch envelope.
+// Expansion-only: union with the config list, so never-shrink holds.
+async function adoptedUnionScope(configTickers, dateStr) {
+  if (process.env.OPENCLAW_COLLECTOR_RESOLVER_ENVELOPE !== '1') return configTickers;
+  try {
+    const { getClient } = require('../database/redis');
+    const union = await readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'union');
+    if (!union || union.length === 0) return configTickers;
+    // anchored share-class bridge (BRK.B→BRK-B) — mirrors :619; never touches .WS/.RT/.U forms
+    const unionDash = union.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
+    const inactive = new Set(await store.getInactiveTickers());
+    return [...new Set([...configTickers, ...unionDash])]
+      .filter(t => !inactive.has(t)).sort();
+  } catch (e) {
+    console.warn(`[collector] adopted-union scope failed — config scope kept: ${e.message}`);
+    return configTickers;
   }
 }
 
@@ -1680,8 +1701,14 @@ async function runDailyCollection() {
     await runIvHistory();
   }
 
+  // SP-7 C2/C3: fundamentals + insider follow the adopted-union (spec §5
+  // envelope hierarchy). News stays config-scoped (not in parent decision 4).
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const fundamentalScope = await adoptedUnionScope(fundamentalTickers, todayStr);
+  const insiderScope     = await adoptedUnionScope(equityTickers, todayStr);
+
   // Phase 4: Fundamentals — only stale tickers, budget-aware
-  const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalTickers;
+  const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalScope;
   if (cfg.collect_fundamentals !== 'false' && !budgetConstraints.skipFundamentals && fundNeeded.length > 0) {
     await runFundamentals(fundNeeded);
   } else if (budgetConstraints.skipFundamentals) {
@@ -1705,7 +1732,7 @@ async function runDailyCollection() {
 
   // Phase 7: Form 4 Insider Transactions
   if (cfg.collect_insider !== 'false') {
-    await runInsiderTransactions(equityTickers);
+    await runInsiderTransactions(insiderScope);
   }
 
   // Prune pipeline_runs audit log — market data tables are never deleted
@@ -1947,4 +1974,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };

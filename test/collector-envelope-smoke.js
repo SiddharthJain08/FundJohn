@@ -86,6 +86,21 @@ const collector = require(path.join(ROOT, 'src/pipeline/collector.js'));
   delete redisStore['universe:envelope:2026-06-08:live'];
   assert.deepStrictEqual(await collector.applyResolverEnvelope(base, '2026-06-08'), base);
 
+  // 4. Adopted-union scope helper (fundamentals/insider — spec §5)
+  execThrows = false;
+  execCalls = [];
+  execResult = JSON.stringify(['AAPL', 'BRK.B', 'ADOPTED1']);
+  const scoped = await collector.adoptedUnionScope(['AAPL'], '2026-06-08');
+  assert.ok(scoped.includes('ADOPTED1'), 'adopted name in scope');
+  assert.ok(scoped.includes('AAPL'), 'config name kept (expansion-only)');
+  assert.ok(!scoped.includes('BADCO'), 'active=false excluded');
+  assert.ok(!execCalls[0].includes('--envelope'), 'fundamentals use the FLOORED union');
+
+  // 5. Union failure → config scope unchanged
+  execThrows = true;
+  delete redisStore['universe:union:2026-06-08:live'];
+  assert.deepStrictEqual(await collector.adoptedUnionScope(['AAPL'], '2026-06-08'), ['AAPL']);
+
   console.log('collector-envelope-smoke: ALL PASS');
   process.exit(0);
 })().catch((e) => {
