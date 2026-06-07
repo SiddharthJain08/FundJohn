@@ -28,10 +28,21 @@ for _p in (os.path.join(_ROOT, "src"), _ROOT):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="run_bflow_phase1f")
-    p.add_argument("--cache-dir", required=True)
+    p.add_argument("--cache-dir", default=None,
+                   help="Cache directory (required unless --from-parquet is given)")
     p.add_argument("--analysis-dir", required=True)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--from-parquet", default=None, metavar="PATH",
+                   help="Skip cache pass; load a long-format curves.parquet "
+                        "(columns: session, minute, gross, net, cost, dev) "
+                        "and regenerate report.md with the fixed writer.")
     args = p.parse_args([] if argv is None else argv)
+
+    # Validate mutual-exclusion of --cache-dir / --from-parquet
+    if args.from_parquet is None and args.cache_dir is None:
+        p.error("one of --cache-dir or --from-parquet is required")
+    if args.from_parquet is not None and args.cache_dir is not None:
+        p.error("--cache-dir and --from-parquet are mutually exclusive")
 
     import numpy as np
     import pandas as pd
@@ -40,35 +51,74 @@ def main(argv=None):
         bucket_curves, TEST_MINUTES, N_XS_MIN, MIN_VALID_MINUTES,
         MIN_SESSIONS, T_PASS,
     )
-    from research.bflow.run_phase1b import (enumerate_cache_sessions,
-                                            load_session_frame,
-                                            _ticker_frames)
-
-    sessions = enumerate_cache_sessions(args.cache_dir)
-    if args.limit is not None:
-        sessions = sessions[:args.limit]
-    print(f"[bflow-p1f] cache {args.cache_dir}: {len(sessions)} sessions "
-          f"(limit={args.limit})", flush=True)
 
     rows = []
     skipped = 0
-    for i, session in enumerate(sessions, 1):
-        sdf = load_session_frame(args.cache_dir, session)
-        if sdf is None or not len(sdf):
-            skipped += 1
-            continue
-        frames = _ticker_frames(sdf)
-        row = session_curves(frames, session)
-        if row is None:
-            skipped += 1
-            # no-peek: structural counts only, no curve values
-            print(f"[bflow-p1f] {session}: skipped (ineligible) ({i}/{len(sessions)})",
-                  flush=True)
-            continue
-        rows.append(row)
-        # no-peek: only structural counts — never print curve values
-        print(f"[bflow-p1f] {session}: n_valid_minutes={row['n_valid_minutes']} "
-              f"({i}/{len(sessions)})", flush=True)
+
+    if args.from_parquet is not None:
+        # ---- --from-parquet mode: skip cache pass entirely ----
+        print(f"[bflow-p1f] --from-parquet mode: loading {args.from_parquet}",
+              flush=True)
+        df_long = pd.read_parquet(args.from_parquet)
+        df_long = df_long.sort_values(["session", "minute"])
+        sessions_in_parquet = df_long["session"].unique().tolist()
+        print(f"[bflow-p1f] parquet sessions: {len(sessions_in_parquet)}", flush=True)
+
+        for session, grp in df_long.groupby("session", sort=False):
+            grp = grp.sort_values("minute")
+            n_rows = len(grp)
+            # Reconstruct 389-length lists (NaN-fill missing minutes)
+            buf_gross = np.full(389, np.nan)
+            buf_net = np.full(389, np.nan)
+            buf_cost = np.full(389, np.nan)
+            buf_dev = np.full(389, np.nan)
+            for _, r in grp.iterrows():
+                m = int(r["minute"])
+                if 0 <= m < 389:
+                    buf_gross[m] = r["gross"]
+                    buf_net[m] = r["net"]
+                    buf_cost[m] = r["cost"]
+                    buf_dev[m] = r["dev"]
+            n_valid_minutes = int(np.sum(np.isfinite(buf_gross)))
+            rows.append({
+                "session": session,
+                "n_valid_minutes": n_valid_minutes,
+                "curve_gross": buf_gross.tolist(),
+                "curve_net": buf_net.tolist(),
+                "cost_curve": buf_cost.tolist(),
+                "dev": buf_dev.tolist(),
+                "mean_n_xs": float("nan"),  # not recoverable from parquet
+            })
+        print(f"[bflow-p1f] loaded {len(rows)} sessions from parquet", flush=True)
+    else:
+        # ---- cache pass mode ----
+        from research.bflow.run_phase1b import (enumerate_cache_sessions,
+                                                load_session_frame,
+                                                _ticker_frames)
+
+        sessions = enumerate_cache_sessions(args.cache_dir)
+        if args.limit is not None:
+            sessions = sessions[:args.limit]
+        print(f"[bflow-p1f] cache {args.cache_dir}: {len(sessions)} sessions "
+              f"(limit={args.limit})", flush=True)
+
+        for i, session in enumerate(sessions, 1):
+            sdf = load_session_frame(args.cache_dir, session)
+            if sdf is None or not len(sdf):
+                skipped += 1
+                continue
+            frames = _ticker_frames(sdf)
+            row = session_curves(frames, session)
+            if row is None:
+                skipped += 1
+                # no-peek: structural counts only, no curve values
+                print(f"[bflow-p1f] {session}: skipped (ineligible) ({i}/{len(sessions)})",
+                      flush=True)
+                continue
+            rows.append(row)
+            # no-peek: only structural counts — never print curve values
+            print(f"[bflow-p1f] {session}: n_valid_minutes={row['n_valid_minutes']} "
+                  f"({i}/{len(sessions)})", flush=True)
 
     n_sessions = len(rows)
     print(f"[bflow-p1f] eligible sessions: {n_sessions} "
@@ -96,25 +146,28 @@ def main(argv=None):
     os.makedirs(out_dir, exist_ok=True)
 
     # curves.parquet: long format (session × minute)
+    # In --from-parquet mode, do NOT rewrite the source parquet.
     parquet_path = os.path.join(out_dir, "curves.parquet")
-    if rows:
-        long_rows = []
-        for r in rows:
-            sess = r["session"]
-            for m in range(389):
-                long_rows.append({
-                    "session": sess,
-                    "minute": m,
-                    "gross": r["curve_gross"][m],
-                    "net": r["curve_net"][m],
-                    "cost": r["cost_curve"][m],
-                    "dev": r["dev"][m],
-                })
-        df_long = pd.DataFrame(long_rows)
-    else:
-        df_long = pd.DataFrame(columns=["session", "minute",
-                                         "gross", "net", "cost", "dev"])
-    df_long.to_parquet(parquet_path, index=False)
+    if args.from_parquet is None:
+        if rows:
+            long_rows = []
+            for r in rows:
+                sess = r["session"]
+                for m in range(389):
+                    long_rows.append({
+                        "session": sess,
+                        "minute": m,
+                        "gross": r["curve_gross"][m],
+                        "net": r["curve_net"][m],
+                        "cost": r["cost_curve"][m],
+                        "dev": r["dev"][m],
+                    })
+            df_long = pd.DataFrame(long_rows)
+        else:
+            df_long = pd.DataFrame(columns=["session", "minute",
+                                             "gross", "net", "cost", "dev"])
+        df_long.to_parquet(parquet_path, index=False)
+        print(f"[bflow-p1f] wrote {parquet_path}", flush=True)
 
     # ---- report ----
     def _fmt(x, decimals=4):
@@ -133,10 +186,19 @@ def main(argv=None):
     cost_s = stats["cost_curve"]
     dev_s = stats["dev"]
 
-    # TEST_MINUTES table
+    # Analytic dev_sys ramp: dev_sys(m) = −(3/389)·m·b, b = curve_gross(0)/386
+    _g0 = gross_s["mean"][0]
+    _b = (float(_g0) / 386.0) if np.isfinite(float(_g0) if _g0 is not None else float("nan")) else float("nan")
+
+    def _dev_sys(m):
+        if not np.isfinite(_b):
+            return float("nan")
+        return -(3.0 / 389.0) * m * _b
+
+    # TEST_MINUTES table (includes dev_sys column)
     tm_header = ("| minute | mean gross (bps) | t(gross) | mean net (bps) "
-                 "| mean cost (bps) | mean dev (bps) | t(dev) |")
-    tm_sep = "|---|---|---|---|---|---|---|"
+                 "| mean cost (bps) | mean dev (bps) | t(dev) | dev_sys (bps) |")
+    tm_sep = "|---|---|---|---|---|---|---|---|"
     tm_rows = []
     for m in TEST_MINUTES:
         tm_rows.append(
@@ -146,7 +208,8 @@ def main(argv=None):
             f"| {_fmt(net_s['mean'][m])} "
             f"| {_fmt(cost_s['mean'][m])} "
             f"| {_fmt(dev_s['mean'][m])} "
-            f"| {_fmt(dev_s['t'][m])} |"
+            f"| {_fmt(dev_s['t'][m])} "
+            f"| {_fmt(_dev_sys(m))} |"
         )
 
     # bucket table
@@ -203,11 +266,12 @@ def main(argv=None):
         f"N_XS_MIN: {N_XS_MIN}  |  "
         f"MIN_SESSIONS: {MIN_SESSIONS}",
         "",
-        "**Note on the uniform-accrual null**: under a strictly linear price path "
-        "the dump window centers near m=387, not m=389. This induces a known "
-        "systematic dev(m) ≈ −3m/389 × curve_gross(0)/dump, a monotone ramp of "
-        "order 3 bps peak. FLAT requires the pre-named test-minute dev t-values "
-        "to be insignificant; it does NOT require dev ≡ 0.",
+        "**Note on the uniform-accrual null**: "
+        "Uniform-accrual systematic: dev_sys(m) ≈ −(3/389)·m·b, "
+        "b = pooled curve_gross(0)/386 — a monotone ramp, typically sub-0.1bps, "
+        "but its t-significance is INDEPENDENT of magnitude (dev is collinear in m "
+        "across sessions), so FLAT/TIMING-STRUCTURE must be read against the printed "
+        "dev_sys column, not against dev≡0.",
         "",
         "## Pre-named test minutes",
         "",
@@ -246,7 +310,6 @@ def main(argv=None):
     print(report, flush=True)
     print(f"[bflow-p1f] VERDICT: {verd}", flush=True)
     print(f"[bflow-p1f] wrote {report_path}", flush=True)
-    print(f"[bflow-p1f] wrote {parquet_path}", flush=True)
     return 0
 
 

@@ -426,3 +426,66 @@ def test_runner_end_to_end(tmp_path):
         assert "dev=" not in line, f"found 'dev=' in progress line: {line!r}"
         assert "n_valid_minutes=" in line, (
             f"expected 'n_valid_minutes=' in progress line: {line!r}")
+
+
+# ---------------------------------------------------------------------------
+# Test 8: --from-parquet mode — synthetic curves.parquet → regen report.md
+#   5 sessions × 389 minutes; INVALID-DATA at n=5; report contains dev_sys
+#   and a VERDICT line.
+# ---------------------------------------------------------------------------
+def test_from_parquet_mode(tmp_path):
+    """--from-parquet skips cache pass; loads long-format curves.parquet;
+    regenerates report.md with the fixed writer (dev_sys column + correct note).
+    n=5 sessions → INVALID-DATA verdict.
+    """
+    # Build a 5-session × 389-minute long-format parquet with known values
+    rng = np.random.default_rng(99)
+    sessions_list = [f"2024-0{i+1}-02" for i in range(5)]
+    long_rows = []
+    for sess in sessions_list:
+        anchor = 5.0 + rng.normal(0, 0.1)
+        for m in range(389):
+            g = anchor * (389 - m) / 389 + rng.normal(0, 0.05)
+            net = g - 0.5
+            cost = 0.5
+            dev = g - anchor * (389 - m) / 389
+            long_rows.append({
+                "session": sess,
+                "minute": m,
+                "gross": g,
+                "net": net,
+                "cost": cost,
+                "dev": dev,
+            })
+
+    parquet_path = str(tmp_path / "curves.parquet")
+    pd.DataFrame(long_rows).to_parquet(parquet_path, index=False)
+
+    analysis = str(tmp_path / "analysis")
+
+    env = dict(os.environ, PYTHONPATH="src:.")
+    proc = subprocess.run(
+        [sys.executable, "scripts/run_bflow_phase1f.py",
+         "--from-parquet", parquet_path,
+         "--analysis-dir", analysis],
+        capture_output=True, text=True, env=env, cwd="/root/openclaw")
+
+    assert proc.returncode == 0, (
+        f"runner failed:\nstdout:\n{proc.stdout[-2000:]}\nstderr:\n{proc.stderr[-2000:]}")
+
+    report_path = os.path.join(analysis, "bflow_phase1f", "report.md")
+    assert os.path.exists(report_path), f"report.md missing at {report_path}"
+
+    with open(report_path) as fh:
+        report_text = fh.read()
+
+    # report must contain the dev_sys column header
+    assert "dev_sys" in report_text, (
+        f"expected 'dev_sys' in report.md; snippet:\n{report_text[:1000]}")
+
+    # report must contain a VERDICT line (INVALID-DATA at n=5)
+    assert "VERDICT:" in report_text, (
+        f"expected 'VERDICT:' in report.md; snippet:\n{report_text[:1000]}")
+    assert "INVALID-DATA" in report_text, (
+        f"expected 'INVALID-DATA' in report.md (n=5 < 700); "
+        f"snippet:\n{report_text[:1000]}")
