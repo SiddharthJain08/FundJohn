@@ -486,6 +486,9 @@ app.post('/api/universe-ladder/:strategyId/recompute', async (req, res) => {
     const repoRoot = path.resolve(__dirname, '../../..');
     const { execFileSync } = require('node:child_process');
     execFileSync('python3',
+      // NOTE: first-ever seed builds the membership artifact (minutes) and
+      // can exceed the 120s timeout — runbook step 7 (full seed) must run
+      // before this button is used; with the artifact present this is fast.
       ['scripts/run_universe_ladder.py', 'seed', '--strategy', sid, '--arm'],
       { cwd: repoRoot, stdio: 'pipe', timeout: 120000 });
     res.status(202).json({ ok: true, strategy_id: sid,

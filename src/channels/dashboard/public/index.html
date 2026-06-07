@@ -613,7 +613,7 @@ async function refreshUniverseLadder() {
     return;
   }
   // Status counts pills
-  const STATUS_CLS = { done: 'ok', pending: 'muted', running: 'warn', error: 'err' };
+  const STATUS_CLS = { queued: 'muted', done: 'ok', running: 'warn', timeout: 'warn', error: 'err', skipped_degenerate: 'muted' };
   const pillsHtml = counts.map(c => {
     const cls = STATUS_CLS[c.status] || 'muted';
     return pill(c.status + ' ' + c.n, cls);
