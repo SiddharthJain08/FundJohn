@@ -41,6 +41,14 @@ DEGENERATE_DAILIES = [
 ]
 DERIVED = ('in_sp500', 'in_r1000', 'in_r3000', 'market_cap')
 
+# Columns that must be plain Python bool/float for psycopg2 adaptation.
+# Prevents numpy bool_/float64 from reaching the adapter (pandas<3 itertuples).
+_BOOL_COLS = frozenset({
+    'tradable', 'shortable', 'fractionable', 'easy_to_borrow',
+    'options_eligible', 'in_sp500', 'in_r1000', 'in_r3000',
+})
+_FLOAT_COLS = frozenset({'market_cap', 'adv_usd_20d'})
+
 
 def check_overwrite_gate() -> None:
     if os.environ.get('OPENCLAW_BACKFILL_ALLOW_OVERWRITE') != '1':
@@ -64,6 +72,22 @@ def _norm(v):
         return None
     if isinstance(v, float) and v != v:
         return None
+    return v
+
+
+def _cast_col(col: str, v):
+    """Apply NaN-guard then explicit Python-type cast for psycopg2 adaptation.
+
+    Mirrors the dailies path's `bool(r.in_r1000)` style so the INSERT dicts
+    contain plain Python bool/float regardless of pandas version or numpy type.
+    """
+    v = _norm(v)
+    if v is None:
+        return None
+    if col in _BOOL_COLS:
+        return bool(v)
+    if col in _FLOAT_COLS:
+        return float(v)
     return v
 
 
@@ -175,7 +199,7 @@ def repair_month(pg, snap: date, *, dry_run: bool) -> int:
                 f"""INSERT INTO ticker_metadata_snapshots ({col_list})
                     VALUES ({placeholders})
                     ON CONFLICT (snapshot_date, symbol) DO NOTHING""",
-                [{**{c: _norm(r[c]) for c in rebuilt.columns}, 'source_tag': SOURCE_TAG}
+                [{**{c: _cast_col(c, r[c]) for c in rebuilt.columns}, 'source_tag': SOURCE_TAG}
                  for r in missing],
                 page_size=500,
             )
