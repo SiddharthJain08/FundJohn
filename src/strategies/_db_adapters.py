@@ -8,11 +8,27 @@ from src.strategies.universe_meta import TickerMetadata
 
 
 class PostgresMetadataDB:
-    def __init__(self, dsn):
+    def __init__(self, dsn, conn=None):
         self._dsn = dsn
+        self._conn = conn      # optional long-lived connection (SP-7 C1: one per cycle)
+        # {as_of: rows} — ticker_metadata_snapshots is append-only daily, so a
+        # process-lifetime memo per as_of is correct and collapses the live
+        # resolver's 67 identical queries per cycle into one.
+        self._memo: dict = {}
 
     def fetch_metadata_as_of(self, as_of):
-        with psycopg2.connect(self._dsn) as c, c.cursor() as cur:
+        if as_of in self._memo:
+            return self._memo[as_of]
+        if self._conn is not None:
+            rows = self._fetch(self._conn, as_of)
+        else:
+            with psycopg2.connect(self._dsn) as c:
+                rows = self._fetch(c, as_of)
+        self._memo[as_of] = rows
+        return rows
+
+    def _fetch(self, c, as_of):
+        with c.cursor() as cur:
             cur.execute("""
                 SELECT DISTINCT ON (symbol)
                     snapshot_date, symbol, asset_class, exchange, status, tradable,
