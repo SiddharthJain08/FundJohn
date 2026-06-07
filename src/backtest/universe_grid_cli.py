@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""universe_grid_cli.py — SP-2 Phase C Task 0.5.
+"""universe_grid_cli.py — SP-2 Phase C Task 0.5 / SP-7 Phase B Task 7.
 
 Runs a resolver→regime-blended 8-metric backtest grid for a given strategy +
 candidate universe predicate. Designed to be consumed by the Opus curator.
 
-Usage:
+Usage (legacy mode):
   python3 -m backtest.universe_grid_cli \\
     --strategy momentum_12_1 \\
     --start 2023-01-01 \\
@@ -13,14 +13,24 @@ Usage:
     --metrics-json \\
     --seed 42
 
+Usage (tier mode, SP-7 Phase B):
+  python3 -m backtest.universe_grid_cli \\
+    --strategy momentum_12_1 \\
+    --start 2023-01-01 \\
+    --end 2023-12-31 \\
+    --membership-artifact data/universe_tier_membership_<run_id>.parquet \\
+    --tier sp500 \\
+    --metrics-json
+
 Exit codes:
   0  success (JSON printed to stdout)
   1  backtest error
-  2  unknown --resolver-override candidate
+  2  bad arguments (unknown candidate / missing args / mixed modes)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -33,6 +43,15 @@ sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT))
 
 from strategies.universe_default import CANDIDATE_PREDICATES
+
+
+def trade_sha(trades: list[dict]) -> str:
+    """Deterministic SHA-256 over the trade list (order-independent).
+    Used by the ladder driver's extremes-first degenerate detection."""
+    lines = sorted(
+        f"{t['ticker']}|{t['entry_date']}|{t['direction']}|{t.get('exit_date')}"
+        for t in trades)
+    return hashlib.sha256('\n'.join(lines).encode()).hexdigest()
 from strategies.universe_resolver import MockResolver
 from strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
 from strategies.base import CANONICAL_REGIMES
@@ -142,8 +161,8 @@ def _simulate_grid(
     start_date: str,
     end_date: str,
     resolver,
-) -> tuple[dict, Optional[float]]:
-    """Run the simulation core (no DB writes) and return (per_regime, mean_universe_size).
+) -> tuple[dict, Optional[float], str]:
+    """Run the simulation core (no DB writes) and return (per_regime, mean_universe_size, trade_sha).
 
     Delegates to ``_per_bar_simulate`` from ``backtest.unified_backtest`` —
     the single source of truth for the per-bar loop. Grid runs never write
@@ -191,61 +210,65 @@ def _simulate_grid(
     if universe_sizes:
         mean_universe_size = round(float(sum(universe_sizes) / len(universe_sizes)), 2)
 
-    return per_regime, mean_universe_size
+    return per_regime, mean_universe_size, trade_sha(trades)
 
 
-def main() -> int:
+def main_with_args(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description='SP-2 Phase C: resolver→regime-blended 8-metric grid'
-    )
-    ap.add_argument('--strategy', required=True,
-                    help='strategy_id to backtest (must exist in manifest)')
-    ap.add_argument('--start', required=True, help='start date (YYYY-MM-DD)')
-    ap.add_argument('--end', required=True, help='end date (YYYY-MM-DD)')
-    ap.add_argument('--resolver-override', required=True,
-                    help=f'candidate predicate name; one of: {sorted(CANDIDATE_PREDICATES)}')
-    ap.add_argument('--metrics-json', action='store_true',
-                    help='print metrics as JSON to stdout (default: on)')
-    ap.add_argument('--seed', type=int, default=42,
-                    help='RNG seed (accepted for forward-compat; unified_backtest has no RNG)')
-    args = ap.parse_args()
+        description='SP-2 Phase C grid / SP-7 Phase B tier-ladder cell')
+    ap.add_argument('--strategy', required=True)
+    ap.add_argument('--start', required=True)
+    ap.add_argument('--end', required=True)
+    ap.add_argument('--resolver-override',
+                    help=f'legacy mode; one of: {sorted(CANDIDATE_PREDICATES)}')
+    ap.add_argument('--membership-artifact',
+                    help='SP-7 tier mode: path to the frozen membership parquet')
+    ap.add_argument('--tier', help='SP-7 tier mode: tier name inside the artifact')
+    ap.add_argument('--metrics-json', action='store_true')
+    ap.add_argument('--seed', type=int, default=42)
+    args = ap.parse_args(argv)
 
-    candidate = args.resolver_override
-    if candidate not in CANDIDATE_PREDICATES:
-        print(
-            f'[universe_grid_cli] ERROR: unknown candidate "{candidate}". '
-            f'Valid choices: {sorted(CANDIDATE_PREDICATES)}',
-            file=sys.stderr,
-        )
+    legacy = args.resolver_override is not None
+    tiermode = args.membership_artifact is not None or args.tier is not None
+    if legacy == tiermode:  # both or neither
+        print('[universe_grid_cli] ERROR: pass EITHER --resolver-override '
+              'OR (--membership-artifact AND --tier)', file=sys.stderr)
+        return 2
+    if tiermode and not (args.membership_artifact and args.tier):
+        print('[universe_grid_cli] ERROR: tier mode needs BOTH '
+              '--membership-artifact and --tier', file=sys.stderr)
         return 2
 
     try:
-        predicate = CANDIDATE_PREDICATES[candidate]
-        uri = os.environ.get('POSTGRES_URI')
-        if not uri:
-            raise RuntimeError('POSTGRES_URI not set')
+        if legacy:
+            candidate = args.resolver_override
+            if candidate not in CANDIDATE_PREDICATES:
+                print(f'[universe_grid_cli] ERROR: unknown candidate "{candidate}". '
+                      f'Valid choices: {sorted(CANDIDATE_PREDICATES)}', file=sys.stderr)
+                return 2
+            uri = os.environ.get('POSTGRES_URI')
+            if not uri:
+                raise RuntimeError('POSTGRES_URI not set')
+            db = PostgresMetadataDB(uri)
+            cov = ParquetCoverage()
+            resolver = MockResolver(db=db, coverage=cov,
+                                    predicate=CANDIDATE_PREDICATES[candidate],
+                                    manifest_loader=_manifest_loader)
+            label = candidate
+        else:
+            from backtest.precomputed_resolver import PrecomputedResolver
+            resolver = PrecomputedResolver(args.membership_artifact, args.tier)
+            label = args.tier
 
-        db = PostgresMetadataDB(uri)
-        cov = ParquetCoverage()
-        resolver = MockResolver(
-            db=db,
-            coverage=cov,
-            predicate=predicate,
-            manifest_loader=_manifest_loader,
-        )
-
-        per_regime, mus = _simulate_grid(
-            args.strategy,
-            args.start,
-            args.end,
-            resolver,
-        )
+        per_regime, mus, tsha = _simulate_grid(args.strategy, args.start,
+                                               args.end, resolver)
         day_freq = regime_day_frequency(REGIMES_PARQUET)
         metrics = blend_metrics(per_regime, day_freq, mean_universe_size=mus)
-
+        metrics['trade_sha'] = tsha
+        metrics['mode'] = 'tier' if tiermode else 'legacy'
+        metrics['candidate'] = label
         print(json.dumps(metrics, sort_keys=True))
         return 0
-
     except FileNotFoundError as e:
         print(f'[universe_grid_cli] FAIL: {e}', file=sys.stderr)
         return 1
@@ -254,6 +277,10 @@ def main() -> int:
         import traceback
         traceback.print_exc(file=sys.stderr)
         return 1
+
+
+def main() -> int:
+    return main_with_args()
 
 
 if __name__ == '__main__':
