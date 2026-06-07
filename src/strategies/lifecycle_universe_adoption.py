@@ -248,16 +248,21 @@ def adopt_universe_recommendation(
     # load) can cross 30s under load — try/except does NOT protect against
     # the EXTERNAL timeout kill, which would make every adoption look failed
     # to the operator even though it committed. Popen + return immediately.
-    try:
-        import subprocess as _sp
-        _sp.Popen(
-            [sys.executable, '-m', 'src.execution.universe_threshold_proposals',
-             f'adoption:{rec_id}'],
-            cwd=str(Path(__file__).resolve().parents[2]),
-            start_new_session=True,
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-    except Exception as e:  # pragma: no cover
-        print(f'[adopt] B3 refresh spawn failed (non-fatal): {e}')
+    # Test-hygiene guard: the live-DB integration tests (test_universe_adoption)
+    # exercise this exact code path with fixture recs — without the guard each
+    # test run leaks a REAL detached B3 child against the live DB (observed
+    # 2026-06-07: two ~360MB children from fixture ids 475/476).
+    if 'PYTEST_CURRENT_TEST' not in os.environ:
+        try:
+            import subprocess as _sp
+            _sp.Popen(
+                [sys.executable, '-m', 'src.execution.universe_threshold_proposals',
+                 f'adoption:{rec_id}'],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                start_new_session=True,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception as e:  # pragma: no cover
+            print(f'[adopt] B3 refresh spawn failed (non-fatal): {e}')
 
     return {
         "rec_id": rec_id,
