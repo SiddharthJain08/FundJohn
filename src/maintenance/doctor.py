@@ -329,6 +329,35 @@ def check_redis_reachable():
         return _fail('redis_reachable', f'{type(exc).__name__}: {exc}'[:80])
 
 
+@_check('collector_envelope_freshness', slow=True)
+def check_collector_envelope_freshness():
+    """SP-7 Phase C C2: today's no-floor envelope is cached in Redis and sane.
+
+    TZ note: the key date here is date.today() (process-local TZ) while the
+    collector writes with JS toISOString() (UTC). The VPS runs UTC so they
+    agree; if the box TZ ever changes, a spurious 'no key' WARN near midnight
+    is the symptom."""
+    if os.environ.get('OPENCLAW_COLLECTOR_RESOLVER_ENVELOPE') != '1':
+        return _ok('collector_envelope_freshness', 'gate off — universe_config envelope')
+    try:
+        import json as _json
+        from datetime import date as _date
+        import redis as _redis
+        r = _redis.from_url(os.environ.get('REDIS_URL', 'redis://localhost:6379'),
+                            socket_connect_timeout=3)
+        key = f'universe:envelope:{_date.today().isoformat()}:live'
+        raw = r.get(key)
+    except Exception as exc:
+        return _warn('collector_envelope_freshness', f'{type(exc).__name__}: {exc}'[:80])
+    if not raw:
+        return _warn('collector_envelope_freshness',
+                     f'no {key} — collector may not have run yet today')
+    n = len(_json.loads(raw))
+    if n < 200:
+        return _fail('collector_envelope_freshness', f'envelope suspiciously small: {n}')
+    return _ok('collector_envelope_freshness', f'envelope {n} tickers cached')
+
+
 @_check('data_master_writable')
 def check_data_master_writable():
     """Verify data/master is being written to. Pre-2026-05-01 this checked
