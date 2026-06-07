@@ -1174,11 +1174,16 @@ PASS  = last ≤3 shadow run-dates have ZERO universe-diff and zero
         resolve_error for every is_adopted=FALSE strategy.
 WARN  = un-adopted drift found (data semantics — diagnose via
         added/removed tickers; remedies: widen default predicate, adopt
-        the strategy, or fix category metadata). Blocks the C1 flip.
+        the strategy, or fix category metadata). Blocks the C1 flip,
+        EXCEPT the documented sub-floor case: removed names that have
+        <60 bars in prices.parquet (clamp keeps them, the resolver floor
+        excludes them; they can't fill strategy lookbacks so the spec's
+        zero-SIGNAL-delta still holds). Classification SQL + decision
+        rule: docs/sp7-phase-c-runbook.md §3. Verified-empty 2026-06-07.
 FAIL  = resolve_error rows present (the builder failed-open — code bug).
 SKIP  = gate off / no DB.
 
-Flip prereq (runbook §5): this check must report PASS with 3 day(s) clean.
+Flip prereq (runbook §5): PASS, or WARN classified all-sub-floor per §3.
 """
 import os
 
@@ -2095,7 +2100,11 @@ Spec: docs/superpowers/specs/2026-06-07-sp7-phase-c-live-wiring-design.md
 
 ## 3. SHADOW WATCH (≥3 trading days)
 - daily: `python3 -m src.system_checks --check universe_shadow_parity`
-- target: PASS "3 day(s) clean". WARN = drift (diagnose per-ticker via added/removed columns; remedies: widen default predicate / adopt the strategy / fix universe_config category; KNOWN possible diff: a brand-new SP500 entrant under the 60-bar floor — resolver excludes, clamp keeps). FAIL = resolve_error → code bug, fix before proceeding.
+- target: PASS "3 day(s) clean". WARN = drift (diagnose per-ticker via added/removed columns; remedies: widen default predicate / adopt the strategy / fix universe_config category). FAIL = resolve_error → code bug, fix before proceeding.
+- DECISION RULE for the one known systematic diff (clamp keeps in_sp500 names with <60 bars; resolver's floor excludes them — verified EMPTY at plan time 2026-06-07, but a reconstitution adding a recent IPO can create it mid-shadow): a WARN is ACCEPTABLE FOR FLIP iff every removed ticker across all un-adopted rows is sub-floor. Classify with:
+  `python3 -c "import pandas as pd; c=pd.read_parquet('data/master/prices.parquet',columns=['ticker']).groupby('ticker').size(); print(sorted(c[c<60].index))"`
+  vs `SELECT DISTINCT jsonb_array_elements_text(removed_tickers) FROM universe_shadow_parity WHERE NOT is_adopted AND run_date >= current_date - 3;`
+  Rationale: <60-bar names cannot fill strategy lookback windows, so zero-SIGNAL-delta (the spec's criterion) still holds. Record the classification in the flip-prereq notes. Any removed name NOT sub-floor = real drift, no flip.
 - adoptions landing mid-window (ladder auto-adopt) do NOT reset the clock — adopted rows never gate.
 
 ## 4. C2 FLIP (collector envelope) — AFTER ladder drained + adoptions decided, ≥1 trading day BEFORE C1
@@ -2113,6 +2122,7 @@ Spec: docs/superpowers/specs/2026-06-07-sp7-phase-c-live-wiring-design.md
 
 ## 6. CLAMP DELETION (immediately after a clean flipped cycle — DELETE, not gate-off)
 - `git rm src/execution/universe_clamp.py tests/execution/test_universe_clamp.py`
+- adapt `tests/execution/test_live_universe.py::test_unadopted_equals_clamp_output` — it imports `clamp_universe` for the differential check and would orphan post-deletion; by deletion time it has served its purpose: replace the clamp call with the expected literal set (or delete the test, keeping the other 6)
 - engine.py: remove the two clamp lines (`from execution.universe_clamp import clamp_universe` / `universe = clamp_universe(universe)`) and the now-dead OPENCLAW_LIVE_UNIVERSE_SHADOW sidecar block (shadow has nothing to diff post-clamp)
 - .env: remove OPENCLAW_ENGINE_UNIVERSE_CLAMP + OPENCLAW_LIVE_UNIVERSE_SHADOW
 - grep-verify: `grep -rn "universe_clamp\|ENGINE_UNIVERSE_CLAMP" src/ tests/ scripts/` → only historical docs
