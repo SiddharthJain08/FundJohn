@@ -1592,6 +1592,18 @@ def main():
                              f"clamped universe: {e}")
                 strategy_universes = None
 
+        # SP-7 Phase C shadow parity (spec §3.5): resolver-vs-clamp diff rows,
+        # written by a non-fatal sidecar. Only meaningful while the live
+        # resolver gate is OFF — once it flips, there is no clamp to diff.
+        if (os.environ.get('OPENCLAW_LIVE_UNIVERSE_SHADOW') == '1'
+                and os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') != '1'):
+            try:
+                from execution.live_universe import write_shadow_parity
+                write_shadow_parity(run_date, [s.id for s in strategies],
+                                    list(universe))
+            except Exception as e:  # noqa: BLE001 — non-fatal sidecar
+                logger.warning(f"universe shadow parity failed (non-fatal): {e}")
+
         # 3. Load data
         prices   = load_prices(universe)
         aux_data = load_aux_data(universe)
