@@ -101,6 +101,16 @@ const collector = require(path.join(ROOT, 'src/pipeline/collector.js'));
   delete redisStore['universe:union:2026-06-08:live'];
   assert.deepStrictEqual(await collector.adoptedUnionScope(['AAPL'], '2026-06-08'), ['AAPL']);
 
+  // 6. Wiring pins: fundamentals scope must feed the gap scan (static source check)
+  const fs = require('node:fs');
+  const src = fs.readFileSync(path.join(ROOT, 'src/pipeline/collector.js'), 'utf8');
+  assert.ok(src.includes('fundTickers:    fundamentalScope,'),
+    'getGapSummary must receive the adopted-union fundamentalScope');
+  const scopeDecl = src.indexOf('const fundamentalScope');
+  const gapCall = src.indexOf('getGapSummary');
+  assert.ok(scopeDecl > -1 && gapCall > -1 && scopeDecl < gapCall,
+    'fundamentalScope must be computed BEFORE the gap scan');
+
   console.log('collector-envelope-smoke: ALL PASS');
   process.exit(0);
 })().catch((e) => {

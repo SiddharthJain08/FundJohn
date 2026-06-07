@@ -186,7 +186,7 @@ async function applyResolverEnvelope(equityTickers, dateStr) {
       console.warn('[collector] envelope unavailable — keeping universe_config list');
       return equityTickers;
     }
-    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :619; never touches multi-letter .WS/.RT/.NYB forms
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :637; never touches multi-letter .WS/.RT/.NYB forms
     const envDash = envelope.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
     const inactive = new Set(await store.getInactiveTickers());
     const merged = [...new Set([...equityTickers, ...envDash])]
@@ -213,7 +213,7 @@ async function adoptedUnionScope(configTickers, dateStr) {
     const { getClient } = require('../database/redis');
     const union = await readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'union');
     if (!union || union.length === 0) return configTickers;
-    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :619; never touches multi-letter .WS/.RT/.NYB forms
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :637; never touches multi-letter .WS/.RT/.NYB forms
     const unionDash = union.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
     const inactive = new Set(await store.getInactiveTickers());
     return [...new Set([...configTickers, ...unionDash])]
@@ -1557,6 +1557,12 @@ async function runDailyCollection() {
   // decided separately (Task 11 / spec §5 envelope hierarchy).
   const priceEquityTickers = await applyResolverEnvelope(
     equityTickers, new Date().toISOString().slice(0, 10));
+  // SP-7 C2/C3: fundamentals + insider follow the adopted-union (spec §5
+  // envelope hierarchy). Computed here alongside priceEquityTickers so the
+  // adopted-union scope feeds the gap scan — else adopted names never surface
+  // in gaps (mirror of priceEquityTickers pattern).
+  const fundamentalScope = await adoptedUnionScope(fundamentalTickers, new Date().toISOString().slice(0, 10));
+  const insiderScope     = await adoptedUnionScope(equityTickers,      new Date().toISOString().slice(0, 10));
   // Use priceEquityTickers (post-envelope) so the banner reflects what's
   // actually price-fetched, not the wider universe_config envelope.
   const universeLabel     = `Equities (${priceEquityTickers.length}) + Market (${marketTickers.length})`;
@@ -1589,7 +1595,7 @@ async function runDailyCollection() {
   const gaps = await store.getGapSummary({
     priceTickers:   [...priceEquityTickers, ...marketTickers],
     optionsTickers,
-    fundTickers:    fundamentalTickers,
+    fundTickers:    fundamentalScope, // adopted-union scope feeds the gap scan (mirror of priceEquityTickers) — else adopted names never surface in gaps
     fromDate,
     toDate:         today,
     fundStaleDays:  45,
@@ -1700,12 +1706,6 @@ async function runDailyCollection() {
   if (cfg.collect_iv_history !== 'false') {
     await runIvHistory();
   }
-
-  // SP-7 C2/C3: fundamentals + insider follow the adopted-union (spec §5
-  // envelope hierarchy). News stays config-scoped (not in parent decision 4).
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const fundamentalScope = await adoptedUnionScope(fundamentalTickers, todayStr);
-  const insiderScope     = await adoptedUnionScope(equityTickers, todayStr);
 
   // Phase 4: Fundamentals — only stale tickers, budget-aware
   const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalScope;
