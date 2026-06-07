@@ -37,18 +37,14 @@ def _dip_prices(dip_start=60, dip_end=120, dip_val=95.0):
 
 
 # ---------------------------------------------------------------------------
-# 1. common-drift world — gross == 0, net != 0 (cost drag)
+# 1. common-drift world — gross == 0, net pays double cost
 #
-# NOTE (BLOCKED finding): The spec asserts spread_net == 0 in this world.
-# Numerically it is -2·C_mean ≈ -0.36 bps because the differential cost
-# C = spread(fill_bar) - dump_spread is ~1.05bps inside the dip window;
-# both legs pay it, so net = -2·C per minute, while gross = 0.
-# This test asserts the spec expectation for gross (correct) and net (incorrect
-# per the frozen cost model). The net assertion WILL FAIL on a correct
-# implementation. Diagnosis: spec error — net ≈ -0.36bps, not 0. Do not
-# tune the module; report BLOCKED.
+# Common drift: L/S differences out G exactly; the cost C is paid by BOTH
+# legs and never differenced — net = -2*mean(C). The prereg's NULL/discriminator
+# gate is GROSS-based for exactly this reason.
 # ---------------------------------------------------------------------------
-def test_common_drift_world_spread_zero():
+def test_common_drift_world_gross_cancels_net_pays_double_cost():
+    from research.bflow import mr_policy, oracle
     from research.bflow.xsec_discriminator import session_spreads
 
     prices = _dip_prices(60, 120)
@@ -62,13 +58,19 @@ def test_common_drift_world_spread_zero():
     assert np.isclose(row["spread_gross"], 0.0, atol=1e-9), (
         f"spread_gross should be 0 for identical tickers, got {row['spread_gross']}")
 
-    # net == 0: SPEC ASSERTION — will fail on a correct implementation because
-    # net = -2·C_mean ≈ -0.36 bps (cost drag; both legs pay differential spread).
-    # BLOCKED: this assertion is incorrect per the frozen cost model.
-    assert np.isclose(row["spread_net"], 0.0, atol=1e-9), (
-        f"BLOCKED: spread_net expected 0 per spec but got {row['spread_net']:.6f}; "
-        "for identical tickers net = -2·C ≈ -0.36bps (both legs pay diff spread); "
-        "spec assertion appears to be an error in the prereg")
+    # net = -2*mean(C): compute analytically from one representative ticker
+    tdf = _make_frame(prices)
+    dump = oracle.dump_benchmark(tdf.to_dict("records"))
+    G_arr, C_arr = mr_policy.delta_vectors(tdf, dump)
+    # For identical full sessions all minutes in [SCAN_START, SCAN_END] are
+    # eligible (finite disp AND finite G), so a simple finite-C mean is exact.
+    scan = slice(mr_policy.SCAN_START, mr_policy.SCAN_END + 1)
+    expected_net = -2.0 * C_arr[scan].mean()
+    assert np.isclose(row["spread_net"], expected_net, atol=1e-9), (
+        f"spread_net={row['spread_net']:.9f} expected {expected_net:.9f} "
+        f"(= -2*mean(C) over eligible scan minutes)")
+    assert row["spread_net"] < 0, (
+        f"spread_net should be negative (cost drag), got {row['spread_net']}")
 
 
 # ---------------------------------------------------------------------------
