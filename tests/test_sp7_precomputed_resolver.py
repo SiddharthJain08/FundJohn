@@ -31,6 +31,12 @@ def test_bisect_most_recent_snapshot_leq(artifact):
     r = PrecomputedResolver(artifact, 'sp500', today_fn=lambda: date(2026, 1, 1))
     assert r.resolve('any_strategy', date(2024, 2, 15)) == ['AAPL', 'MSFT']
     assert r.resolve('any_strategy', date(2024, 3, 15)) == ['AAPL', 'MSFT', 'NVDA']
+    # equality case: as_of == snapshot date resolves to THAT snapshot (<= semantics)
+    assert r.resolve('any_strategy', date(2024, 1, 31)) == ['AAPL', 'MSFT']
+    # defensive copy: mutating the returned list must not poison later calls
+    got = r.resolve('any_strategy', date(2024, 2, 15))
+    got.append('HACK')
+    assert r.resolve('any_strategy', date(2024, 2, 15)) == ['AAPL', 'MSFT']
 
 
 def test_pre_window_is_empty(artifact):

@@ -37,4 +37,6 @@ class PrecomputedResolver:
         i = bisect_right(self._dates, as_of) - 1
         if i < 0:
             return []
-        return self._members[self._dates[i]]
+        # Defensive copy: callers must not be able to mutate the stored
+        # membership and poison subsequent bars (review hardening, Task 6).
+        return list(self._members[self._dates[i]])
