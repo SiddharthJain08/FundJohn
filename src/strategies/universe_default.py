@@ -90,3 +90,11 @@ CANDIDATE_PREDICATES = {
     "tier_r3000": tier_r3000,
     "tier_liquid": tier_liquid,
 }
+
+# SP-7 Phase B: ladder tiers are ADOPTION-ONLY predicates (universe ladder +
+# operator adoption). They are deliberately NOT in the PaperHunter mint menu —
+# exposing them at mint is a Phase D decision. Consumers that enumerate the
+# mint menu should exclude this set.
+LADDER_TIER_PREDICATES = frozenset({
+    "liquid_tradable", "tier_r1000", "tier_r3000", "tier_liquid",
+})

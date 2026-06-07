@@ -40,6 +40,9 @@ d. ACCEPTANCE (spec §3, criterion 2 as re-bounded 2026-06-07):
      investigate BEFORE ladder GO
    - clamp live-parity: next engine compute logs kept≈591 (B0 must not move it —
      the clamp reads the latest snapshot, untouched except 05-25..06-04 dailies)
+   - REMOVE the pre-B0 exemption in tests/test_sp2_smoke.py::test_system_checks_pass
+     (the `universe_tier_coherence` skip) — post-B0 the probe must PASS and the
+     smoke must assert it like every other check
 
 ## 3. DASHBOARD RESTARTS (both adoption paths currently 404)
 
