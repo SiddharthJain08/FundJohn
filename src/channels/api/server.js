@@ -823,7 +823,7 @@ app.post('/api/universe-threshold-proposals/:id/apply', async (req, res) => {
           SET status = 'approved', decided_at = NOW(),
               decided_by = 'operator:dashboard',
               applied_row = $2::jsonb
-        WHERE id = $1`, [id, JSON.stringify(upd.rows[0])]);
+        WHERE id = $1 AND status = 'pending'`, [id, JSON.stringify(upd.rows[0])]);
     res.json({ ok: true, regime, applied: v });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
