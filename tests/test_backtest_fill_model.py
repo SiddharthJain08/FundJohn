@@ -355,12 +355,9 @@ class TestDriverUnit:
             return 'fake-run-id', m
 
         with patch('backtest.unified_backtest.run_backtest', side_effect=fake_run_backtest):
-            # Patch within driver module namespace.
-            with patch.object(
-                sys.modules.get('backtest_fill_model_study', driver),
-                '_make_mock_conn', return_value=_make_mock_conn(),
-            ):
-                row = driver._run_single('S_test')
+            # run_backtest is fully mocked, so no real DB connection is opened
+            # (the driver itself passes conn=None and relies on commit=False).
+            row = driver._run_single('S_test')
 
         assert 'sid' in row, 'sid field missing'
         assert row['sid'] == 'S_test'

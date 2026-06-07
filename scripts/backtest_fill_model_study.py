@@ -83,7 +83,6 @@ def _run_single(sid: str) -> dict:
 
     ic = _resolve_instrument_class(sid)
     results: dict = {'sid': sid}
-    mock_conn = _make_mock_conn()
 
     for fm in ('close', 'open'):
         try:
@@ -93,7 +92,9 @@ def _run_single(sid: str) -> dict:
                 commit=False,
                 return_metrics=True,
                 instrument_class=ic,
-                conn=mock_conn,
+                # conn=None -> run_backtest opens its OWN real connection and
+                # commit=False rolls it back (backtest_coupled_recs precedent).
+                # A mocked conn would silently corrupt any DB READ in the run.
             )
         except Exception as exc:
             metrics = {'error': str(exc)}
@@ -126,15 +127,6 @@ def _run_single(sid: str) -> dict:
     return results
 
 
-def _make_mock_conn():
-    """Return a no-op DB connection for commit=False runs."""
-    from unittest.mock import MagicMock
-    mock_conn = MagicMock()
-    mock_cur = MagicMock()
-    mock_conn.cursor.return_value = mock_cur
-    mock_conn.__enter__ = lambda s: s
-    mock_conn.__exit__ = MagicMock(return_value=False)
-    return mock_conn
 
 
 # ── Summarize ────────────────────────────────────────────────────────────────
