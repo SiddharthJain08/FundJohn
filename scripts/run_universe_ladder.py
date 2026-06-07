@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -26,6 +27,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
+
+
+def _on_term(signum, frame):
+    # Raise so a blocked subprocess.run aborts and reaps its child
+    # (timeout --signal=TERM at 13:00 UTC must not orphan a running cell
+    # into the EDGAR/premarket band on the 2-core box).
+    raise SystemExit(143)
 
 LADDER_TIERS = ('sp500', 'tier_r1000', 'tier_r3000', 'tier_liquid')
 TIER_PRIORITY = {'sp500': 0, 'tier_liquid': 1, 'tier_r1000': 2, 'tier_r3000': 3}
@@ -64,9 +72,10 @@ def grid_row(tier: str, metrics: dict | None) -> dict:
 
 
 def mem_available_mb() -> int:
-    for line in open('/proc/meminfo'):
-        if line.startswith('MemAvailable:'):
-            return int(line.split()[1]) // 1024
+    with open('/proc/meminfo') as f:
+        for line in f:
+            if line.startswith('MemAvailable:'):
+                return int(line.split()[1]) // 1024
     return 0
 
 
@@ -166,6 +175,7 @@ def run_cell(cell: dict) -> dict:
 
 
 def cmd_drain(args) -> int:
+    signal.signal(signal.SIGTERM, _on_term)
     pg = _pg()
     with pg.cursor() as cur:  # mid-kill recovery
         cur.execute("UPDATE universe_ladder_runs SET status='queued' "
@@ -173,6 +183,19 @@ def cmd_drain(args) -> int:
         if cur.rowcount:
             print(f'[ladder] reset {cur.rowcount} stuck running cells')
     pg.commit()
+
+    # Liveness sweep: a prior crash may have left strategies with all cells
+    # terminal but no rec row (died between cell-commit and finalize).
+    # _maybe_finalize_strategy dedups via candidate_set_id, so this is idempotent.
+    with pg.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT run_id, strategy_id FROM universe_ladder_runs r
+             WHERE NOT EXISTS (SELECT 1 FROM universe_ladder_runs q
+                               WHERE q.run_id=r.run_id AND q.strategy_id=r.strategy_id
+                                 AND q.status IN ('queued','running'))""")
+        stranded = cur.fetchall()
+    for _run_id, _sid in stranded:
+        _maybe_finalize_strategy(pg, _run_id, _sid)
 
     while True:
         if mem_available_mb() < RAM_FLOOR_MB:
@@ -184,7 +207,9 @@ def cmd_drain(args) -> int:
                 SELECT id, run_id, strategy_id, tier, window_start,
                        window_end, artifact_path
                   FROM universe_ladder_runs WHERE status='queued'
-                 ORDER BY queued_at,
+                 ORDER BY queued_at, strategy_id,
+                          -- tier-major within each strategy so all 4 cells finish
+                          -- together; queued_at is constant (single-txn NOW() seed)
                           CASE tier WHEN 'sp500' THEN 0
                                     WHEN 'tier_liquid' THEN 1
                                     WHEN 'tier_r1000' THEN 2

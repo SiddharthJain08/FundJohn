@@ -1,5 +1,6 @@
 """SP-7 Phase B Task 10 — ladder driver queue logic (fake runner)."""
 from __future__ import annotations
+import signal
 import sys
 from pathlib import Path
 
@@ -91,3 +92,29 @@ def test_metrics_to_grid_row():
     row = drv.grid_row('tier_r1000', m)
     assert row['name'] == 'tier_r1000' and row['sharpe'] == 1.2
     assert drv.grid_row('sp500', None)['sharpe'] is None
+
+
+# ── opus review fix regression tests ─────────────────────────────────────
+
+def test_strategy_major_ordering_in_sql():
+    """Fix 3: strategy-major ordering lock — drain SELECT must contain
+    'ORDER BY queued_at, strategy_id,' so night-1 finishes strategies not
+    just tiers (seed uses single-txn NOW(), making queued_at constant)."""
+    src = (ROOT / 'scripts' / 'run_universe_ladder.py').read_text()
+    assert 'ORDER BY queued_at, strategy_id,' in src
+
+
+def test_sigterm_handler_not_installed_at_import():
+    """Fix 2: importing the module must NOT install the SIGTERM handler —
+    only cmd_drain registers it, so tests and other importers are unaffected."""
+    assert signal.getsignal(signal.SIGTERM) in (
+        signal.SIG_DFL, signal.default_int_handler)
+
+
+def test_on_term_raises_systemexit_143():
+    """Fix 2: _on_term must raise SystemExit(143) so subprocess.run reaps
+    its child process on SIGTERM (PEP 475 flag-based approach would NOT work)."""
+    import pytest
+    with pytest.raises(SystemExit) as exc_info:
+        drv._on_term(signal.SIGTERM, None)
+    assert exc_info.value.code == 143
