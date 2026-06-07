@@ -186,7 +186,7 @@ async function applyResolverEnvelope(equityTickers, dateStr) {
       console.warn('[collector] envelope unavailable — keeping universe_config list');
       return equityTickers;
     }
-    // anchored share-class bridge (BRK.B→BRK-B) — mirrors :619; never touches .WS/.RT/.U forms
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :619; never touches multi-letter .WS/.RT/.NYB forms
     const envDash = envelope.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
     const inactive = new Set(await store.getInactiveTickers());
     const merged = [...new Set([...equityTickers, ...envDash])]
@@ -213,7 +213,7 @@ async function adoptedUnionScope(configTickers, dateStr) {
     const { getClient } = require('../database/redis');
     const union = await readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'union');
     if (!union || union.length === 0) return configTickers;
-    // anchored share-class bridge (BRK.B→BRK-B) — mirrors :619; never touches .WS/.RT/.U forms
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :619; never touches multi-letter .WS/.RT/.NYB forms
     const unionDash = union.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
     const inactive = new Set(await store.getInactiveTickers());
     return [...new Set([...configTickers, ...unionDash])]
