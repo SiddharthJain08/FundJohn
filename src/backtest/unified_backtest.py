@@ -219,8 +219,10 @@ def _signal_to_long_short(direction: str) -> int:
 def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
                    direction: int, entry_price: float,
                    stop_loss: float, target_1: float,
-                   max_hold_days: int) -> dict:
-    """Walk forward from entry_date+1, returning the exit dict:
+                   max_hold_days: int, *,
+                   include_entry_bar: bool = False) -> dict:
+    """Walk forward from entry_date+1 (or entry_date if include_entry_bar=True),
+    returning the exit dict:
        {exit_date, exit_price, exit_reason, holding_days, pnl_pct}.
 
     Long: target hit when high >= target_1; stop when low <= stop_loss.
@@ -233,8 +235,15 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     If neither fires within max_hold_days → exit at the final day's close.
     If price data ends before max_hold → exit at the last available close
     with reason='end_of_data'.
+
+    include_entry_bar: when True (fill_model='open'), the fill bar itself is
+    included in the exit walk (H/L occur after an open fill so bracket exits on
+    that bar are legitimate). Default False keeps existing '>'-only behavior.
     """
-    bars_future = bars.loc[bars.index > entry_date]
+    if include_entry_bar:
+        bars_future = bars.loc[bars.index >= entry_date]
+    else:
+        bars_future = bars.loc[bars.index > entry_date]
     if bars_future.empty:
         return {'exit_date': entry_date, 'exit_price': entry_price,
                 'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0}
@@ -461,6 +470,7 @@ def _per_bar_simulate(
     resolver=None,
     param_override=None,
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+    fill_model: str = 'close',
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
 
@@ -468,6 +478,12 @@ def _per_bar_simulate(
     generate_signals 4-arg→3-arg fallback, entry_regime tagging,
     stop/target sanity skips, simulate_trade, and per-bar universe-size
     tracking.
+
+    fill_model: 'close' (default, byte-identical to prior behavior) fills
+    entry at close[t+1]; 'open' fills entry at open[t+1] and includes the
+    fill bar in the exit walk (H/L of the fill bar are eligible for bracket
+    exits, since they occur after the open fill). Raises ValueError on any
+    other value.
 
     Returns a dict with keys:
       - trades: list[dict]
@@ -481,6 +497,11 @@ def _per_bar_simulate(
     regimes (discovery mode); callers are responsible for this.
     ``strategy_id`` is only required when ``resolver`` is not None.
     """
+    if fill_model not in ('close', 'open'):
+        raise ValueError(f'fill_model must be "close" or "open", got {fill_model!r}')
+    _price_col = 'open' if fill_model == 'open' else 'close'
+    _include_fill_bar = fill_model == 'open'
+
     # Static universe: equity tickers only (no indices, crypto, futures).
     static_universe = [c for c in close_wide.columns
                        if not c.startswith('^') and '-USD' not in c and '=F' not in c]
@@ -588,7 +609,7 @@ def _per_bar_simulate(
             if len(_future_idx) == 0:
                 continue  # signal on the last available bar — cannot fill
             fill_date = _future_idx[0]
-            entry_price = float(ticker_bars.loc[fill_date, 'close'])
+            entry_price = float(ticker_bars.loc[fill_date, _price_col])
             stop_loss, target_1 = _reanchor_bracket(
                 ref=ref, entry_price=entry_price, direction=direction,
                 stop_ref=stop_ref, target_ref=target_ref)
@@ -606,7 +627,8 @@ def _per_bar_simulate(
             if direction < 0 and (stop_loss <= entry_price or target_1 >= entry_price):
                 continue
             exit_info = simulate_trade(ticker_bars, fill_date, direction,
-                                       entry_price, stop_loss, target_1, max_hold_days)
+                                       entry_price, stop_loss, target_1, max_hold_days,
+                                       include_entry_bar=_include_fill_bar)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
             # the LATEST stop date per ticker.
@@ -688,7 +710,8 @@ def run_backtest(strategy_id: str, *,
                  resolver=None,
                  param_override=None,
                  return_metrics: bool = False,
-                 instrument_class: str = 'equity') -> str:
+                 instrument_class: str = 'equity',
+                 fill_model: str = 'close') -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
@@ -726,12 +749,20 @@ def run_backtest(strategy_id: str, *,
     start_dt = pd.Timestamp(start_date)
     end_dt   = pd.Timestamp(end_date) if end_date else close_wide.index.max()
 
-    sim = _simulate_for(instrument_class)(
-        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+    _sim_fn = _simulate_for(instrument_class)
+    _sim_kwargs: dict = dict(
         strategy_id=strategy_id,
         resolver=resolver,
         param_override=param_override,
         max_hold_days=max_hold_days,
+    )
+    # fill_model is threaded to _per_bar_simulate ONLY — options_backtest.simulate
+    # does not accept it (option brackets are priced contracts, not open/close fills).
+    if _sim_fn is _per_bar_simulate:
+        _sim_kwargs['fill_model'] = fill_model
+    sim = _sim_fn(
+        instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
+        **_sim_kwargs,
     )
     trades         = sim['trades']
     universe_sizes = sim['universe_sizes']
