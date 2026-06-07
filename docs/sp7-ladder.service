@@ -1,0 +1,7 @@
+[Unit]
+Description=SP-7 Phase B tier-ladder overnight window (armed via data/.sp7_ladder_armed)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/overnight_ladder.sh
