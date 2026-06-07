@@ -686,7 +686,9 @@ class TestCLIIntegration:
         data = self._parse_json_line(result.stdout)
         expected_keys = {"sharpe", "max_dd_pct", "win_rate", "mean_universe_size",
                          "trades_n", "sortino", "calmar", "mean_holding_days"}
-        assert set(data.keys()) == expected_keys
+        # SP-7 Phase B adds additive envelope keys (trade_sha/mode/candidate);
+        # the 8 base metrics must always be present.
+        assert expected_keys.issubset(set(data.keys()))
 
     def test_cli_3_candidates_distinct_outputs(self):
         """sp500, no_adr, and no_otc each produce distinct metric objects.

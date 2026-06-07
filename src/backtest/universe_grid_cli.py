@@ -43,6 +43,13 @@ sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT))
 
 from strategies.universe_default import CANDIDATE_PREDICATES
+from strategies.universe_resolver import MockResolver
+from strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
+from strategies.base import CANONICAL_REGIMES
+from backtest.regime_blended_backtest import regime_day_frequency
+
+REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
+MANIFEST_PATH = ROOT / 'src' / 'strategies' / 'manifest.json'
 
 
 def trade_sha(trades: list[dict]) -> str:
@@ -52,13 +59,6 @@ def trade_sha(trades: list[dict]) -> str:
         f"{t['ticker']}|{t['entry_date']}|{t['direction']}|{t.get('exit_date')}"
         for t in trades)
     return hashlib.sha256('\n'.join(lines).encode()).hexdigest()
-from strategies.universe_resolver import MockResolver
-from strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
-from strategies.base import CANONICAL_REGIMES
-from backtest.regime_blended_backtest import regime_day_frequency
-
-REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
-MANIFEST_PATH = ROOT / 'src' / 'strategies' / 'manifest.json'
 
 
 def _manifest_loader():
