@@ -18,3 +18,4 @@ from . import papermint_predicate_coverage   # noqa: F401
 from . import option_routing                 # noqa: F401
 from . import option_hedge                   # noqa: F401
 from . import index_integrity  # noqa: F401
+from . import universe_tier_coherence  # noqa: F401
