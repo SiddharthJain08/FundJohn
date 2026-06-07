@@ -69,6 +69,42 @@ def _select_archive_universe(as_of, resolver, meta_lookup):
     return [s for s in union if meta_lookup(s, as_of).options_eligible]
 
 
+def _resolver_archive_universe(date_str: str, resolver=None) -> list[str] | None:
+    """SP-7 Phase C (C3): gated archive universe = options-eligible ∩ live
+    adopted-union, via the Phase-A helper _select_archive_universe.
+    Returns None on gate-off or ANY failure → caller falls back to
+    _load_universe() (fail-open; the archive must keep accruing).
+
+    Symbol-form note: the archive hits the Alpaca API directly and metadata
+    is already stored in Alpaca dot-form (e.g. BRK.B).  We do NOT apply a
+    dash-bridge here — deliberate.  Contrast with sentiment/collector, which
+    feed dash-form parquet/universe_config consumers and need the bridge.
+    """
+    if os.environ.get('OPENCLAW_OPTIONS_ARCHIVE_RESOLVER_UNIVERSE') != '1':
+        return None
+    try:
+        from datetime import date as _d
+        as_of = _d.fromisoformat(date_str)
+        if resolver is None:
+            from src.execution.live_universe import build_resolver
+            resolver = build_resolver()
+        # Reuse the resolver's (memoized) adapter for the eligibility lookup.
+        meta_rows = resolver._db.fetch_metadata_as_of(as_of)
+        meta_map = {r.symbol: r.metadata for r in meta_rows}
+
+        class _NoMeta:           # absent from metadata → not options-eligible
+            options_eligible = False
+
+        def meta_lookup(sym, _as_of):
+            return meta_map.get(sym, _NoMeta)
+
+        out = _select_archive_universe(as_of, resolver, meta_lookup)
+        return out or None
+    except Exception as e:  # noqa: BLE001 — fail-open to universe_config
+        log.warning('archive resolver-universe failed (fail-open): %s', e)
+        return None
+
+
 def _redis_checkpoint_done(ticker: str, date: str) -> bool:
     return bool(_redis().get(f'options_archive:done:{date}:{ticker}'))
 
@@ -244,7 +280,7 @@ def _load_universe() -> list[str]:
 
 def main(date_str: str | None = None) -> int:
     date = date_str or _date.today().isoformat()
-    universe = _load_universe()
+    universe = _resolver_archive_universe(date) or _load_universe()
     log.info('options-archive start date=%s tickers=%d', date, len(universe))
 
     deadline = time.time() + SOFT_BUDGET_S
