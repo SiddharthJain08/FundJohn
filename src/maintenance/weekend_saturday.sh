@@ -54,7 +54,7 @@ stale=cur.fetchone()[0]
 print(f'[weekend_saturday] panel staleness check: {stale} panels older than their run')
 PY
 
-step "8/8 universe-recs (gated)"
-node src/agent/curators/run_mastermind.js --mode universe-recs 2>&1 | tee -a "$LOG" || step "WARN universe-recs rc=$?"
+step "8/8 universe-ladder sentinel (SP-7 Phase B — replaced legacy universe-recs 2026-06-06)"
+nice -n 19 python3 scripts/check_ladder_saturday.py 2>&1 | tee -a "$LOG" || step "WARN ladder-sentinel rc=$?"
 
 step "DONE log=$LOG"
