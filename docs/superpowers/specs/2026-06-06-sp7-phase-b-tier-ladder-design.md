@@ -137,7 +137,15 @@ Observed-that-day columns (status/tradable/easy_to_borrow/exchange) untouched.
 **B0 acceptance (all SQL, recorded in the spec's runbook):**
 1. Mega-cap spot-check: AAPL/MSFT/NVDA/JPM in_r1000=true for every month ≥2021-07
    via the resolver's exact DISTINCT-ON query.
-2. in_sp500 per month ≈ 500±15 (CSV-driven; today ~350).
+2. in_sp500 per month ≥ 460 AND ≥ 95% of CSV-reconstructable members present
+   (operator re-bound 2026-06-07: the Wikipedia-scraped membership CSV yields
+   ~483 members for mid-history dates — ~20 short of true ~503 — and ~7 of
+   those are unbuildable: 6 delisted [no Alpaca history; same accepted class
+   as Phase A's 94] + 1 late-listed. Structural max ≈476 at 2023-06 vs ~360
+   pre-repair. The repair also INSERTs missing historical rows for SP-2-era
+   SP500 members — see plan Task 3 amendment. BACKLOG: source a fuller SP500
+   membership history, regenerate the CSV, re-run B0 months (idempotent).
+   Original target was ≈500±15.)
 3. r1000 = 1000 and r3000 = min(3000, ranked-pool) per month, ranked-pool reported.
    NOTE: the v2 build produced r3000=2389 at 2021-06-30 despite a 3,631-name cap
    pool — mechanics unexplained; any post-rebuild month with r3000 < 2,800 is
