@@ -52,3 +52,10 @@ def test_all_ineligible_is_no_signal():
 def test_missing_tier_keys_treated_ineligible():
     v = select_tier({'sp500': _m(1.4)})
     assert v['choice'] == 'sp500'
+
+
+def test_chained_through_r3000_float_boundary():
+    """r3000 at exactly winner+0.10 must displace despite IEEE754 (1.1+0.1>1.2)."""
+    v = select_tier({'sp500': _m(1.0), 'tier_r1000': _m(1.10),
+                     'tier_r3000': _m(1.20), 'tier_liquid': _m(0.5)})
+    assert v['choice'] == 'tier_r3000'

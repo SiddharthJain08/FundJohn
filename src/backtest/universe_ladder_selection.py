@@ -28,7 +28,10 @@ def select_tier(metrics_by_tier: dict) -> dict:
     for t in eligible[1:]:
         w_s = float(metrics_by_tier[winner]['sharpe'])
         t_s = float(metrics_by_tier[t]['sharpe'])
-        displaced = t_s >= w_s + DELTA_SHARPE
+        # epsilon guard: 1.1 + 0.10 = 1.2000000000000002 in IEEE754 —
+        # without it, exact-threshold displacements are silently denied
+        # while the audit log shows delta=0.10 (review catch, Task 8).
+        displaced = (t_s - w_s) >= DELTA_SHARPE - 1e-9
         comparisons.append({'challenger': t, 'incumbent': winner,
                             'delta': round(t_s - w_s, 4),
                             'displaced': displaced})
