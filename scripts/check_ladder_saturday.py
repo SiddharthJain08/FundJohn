@@ -11,6 +11,7 @@ Usage: python3 scripts/check_ladder_saturday.py [--dry-run]
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -32,6 +33,45 @@ def is_due(last_iso: str | None, *, today: date) -> bool:
     return (today - last).days >= WEEKS_12_DAYS
 
 
+def _coherence_green() -> bool:
+    """Return True only when universe_tier_coherence check reports PASS.
+
+    Runs the check in a subprocess so the gate works even when this script is
+    invoked without PYTHONPATH set in the caller.  Passes the full parent
+    environment plus PYTHONPATH=src so POSTGRES_URI (and other secrets already
+    in os.environ) flow through to the check's DB dependency.
+
+    Any failure mode (timeout, non-JSON output, missing key, SKIP, FAIL,
+    ERROR) is treated as not-green — safe to block the seed.
+    """
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'system_checks',
+             '--check', 'universe_tier_coherence', '--json'],
+            cwd=str(ROOT),
+            env={**os.environ, 'PYTHONPATH': 'src'},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        payload = json.loads(result.stdout)
+        for item in payload.get('results', []):
+            if item.get('name') == 'universe_tier_coherence':
+                status = item.get('status', 'ERROR')
+                if status == 'PASS':
+                    return True
+                print(f'[ladder-saturday] B0 coherence gate not green '
+                      f'({status}) — not seeding')
+                return False
+        print('[ladder-saturday] B0 coherence gate not green '
+              '(universe_tier_coherence result not found) — not seeding')
+        return False
+    except Exception as exc:
+        print(f'[ladder-saturday] B0 coherence gate not green '
+              f'(error: {exc}) — not seeding')
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true')
@@ -48,6 +88,8 @@ def main() -> int:
     due = is_due(last, today=date.today())
     print(f'[ladder-saturday] last_full_run={last} due={due}')
     if not due or args.dry_run:
+        return 0
+    if not _coherence_green():
         return 0
     rc = subprocess.run(
         ['python3', 'scripts/run_universe_ladder.py', 'seed', '--arm'],
