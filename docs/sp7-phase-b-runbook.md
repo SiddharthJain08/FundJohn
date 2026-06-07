@@ -108,7 +108,12 @@ python3 scripts/run_universe_ladder.py seed --arm
   verdicts batch into one summary at drain end)
 - adopt via ✅ reaction or :7870 buttons; each adoption fires a DETACHED B3
   refresh → proposals appear next to the Conviction Gates sliders on :3000
-  (Apply/✗ buttons; [1,10] clamp enforced server-side + DB CHECK)
+  (Apply/✗ buttons; [1,10] clamp enforced in propose_values + the apply
+  endpoint; the APPLIED value also hits regime_sizer_params' own DB CHECK —
+  the proposals table itself has no CHECK by design)
+- :7870 Recompute button note: the per-strategy seed uses a per-DAY run_id;
+  the FIRST click of a new day rebuilds the membership artifact and can
+  exceed the 120 s timeout (clean no-op; re-click succeeds once built).
 - `[sp7-ladder] COMPLETE — disarmed` in the log = full run done; redis
   `sp7:ladder:last_full_run` set → the 12th-Saturday cadence starts (the
   weekend step-8 sentinel ALSO self-gates on the coherence probe, so it can

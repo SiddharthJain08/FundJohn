@@ -36,6 +36,8 @@ def _on_term(signum, frame):
     raise SystemExit(143)
 
 LADDER_TIERS = ('sp500', 'tier_r1000', 'tier_r3000', 'tier_liquid')
+# Documentation constant (test-locked): the drain query's SQL CASE mirrors
+# this ordering — keep the two in sync (extremes first for degenerate-skip).
 TIER_PRIORITY = {'sp500': 0, 'tier_liquid': 1, 'tier_r1000': 2, 'tier_r3000': 3}
 SLOW_BUDGETS = {
     'S_tr_03_bocpd_change_point': 21600,            # ~3.5h on 591 names
