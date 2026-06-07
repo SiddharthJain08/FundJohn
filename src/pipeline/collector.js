@@ -1532,11 +1532,13 @@ async function runDailyCollection() {
   const marketTickers     = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
   const optionsTickers    = fullUniverse.filter(u => u.has_options).map(u => u.ticker);
   const fundamentalTickers = fullUniverse.filter(u => u.has_fundamentals).map(u => u.ticker);
-  const universeLabel     = `Equities (${equityTickers.length}) + Market (${marketTickers.length})`;
   // SP-7 C2: PRICES fetch on the wide no-floor envelope; news/insider scope
   // decided separately (Task 11 / spec §5 envelope hierarchy).
   const priceEquityTickers = await applyResolverEnvelope(
     equityTickers, new Date().toISOString().slice(0, 10));
+  // Use priceEquityTickers (post-envelope) so the banner reflects what's
+  // actually price-fetched, not the wider universe_config envelope.
+  const universeLabel     = `Equities (${priceEquityTickers.length}) + Market (${marketTickers.length})`;
 
   // Start cycle record
   const cycleId = await store.startCycle().catch(() => null);
@@ -1924,7 +1926,7 @@ async function runEodRefresh() {
     elapsed_s:        elapsed,
     today:            new Date().toISOString().slice(0, 10),
     total_tickers:    tickerSet.size,
-    equity_tickers:   equityTickers,
+    equity_tickers:   priceEquityTickers,
     market_tickers:   marketTickers,
     advanced_count:   advancedCount,
     advanced_by_date: advancedByDateObj,
