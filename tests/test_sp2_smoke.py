@@ -91,12 +91,6 @@ def test_system_checks_pass():
         # system_checks --json emits {"summary": {...}, "results": [...]}
         # status values are uppercase enum strings: "PASS", "WARN", "FAIL", "SKIP", "ERROR"
         for check in payload.get("results", []):
-            # SP-7 Phase B: universe_tier_coherence FAILs BY DESIGN until the
-            # B0 metadata repair runs (it is the B0 acceptance instrument).
-            # REMOVE this exemption after the B0 runbook executes — post-B0
-            # the probe must PASS and stay green (see docs/sp7-phase-b-runbook.md §2d).
-            if check.get("name") == "universe_tier_coherence":
-                continue
             assert check.get("status") != "FAIL", (
                 f"{tag}: {check.get('name')} failed: {check.get('detail')}"
             )

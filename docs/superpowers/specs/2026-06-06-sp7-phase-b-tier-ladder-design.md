@@ -145,7 +145,13 @@ Observed-that-day columns (status/tradable/easy_to_borrow/exchange) untouched.
    pre-repair. The repair also INSERTs missing historical rows for SP-2-era
    SP500 members — see plan Task 3 amendment. BACKLOG: source a fuller SP500
    membership history, regenerate the CSV, re-run B0 months (idempotent).
-   Original target was ≈500±15.)
+   Original target was ≈500±15. ACCEPTANCE CLOSED 2026-06-07: operator
+   ratified the early-window structural floor — 2021-07=454 (91.5% of
+   reconstructable), 2021-12=460 (92.9%), ≥95% from mid-2022; deficit =
+   members delisted before today (unbuildable from Alpaca, same class as
+   Phase A's 94). All other criteria green: probe PASS, r1000=1000 every
+   month, r3000=min(3000,pool) with zero months <2800, ladder window stays
+   2021-07→now.)
 3. r1000 = 1000 and r3000 = min(3000, ranked-pool) per month, ranked-pool reported.
    NOTE: the v2 build produced r3000=2389 at 2021-06-30 despite a 3,631-name cap
    pool — mechanics unexplained; any post-rebuild month with r3000 < 2,800 is
