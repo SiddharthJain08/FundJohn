@@ -61,10 +61,14 @@ def test_inferred_universe_filter_field_present():
 def test_all_12_candidate_predicates_present():
     """All 12 real CANDIDATE_PREDICATES names must appear in the prompt."""
     sys.path.insert(0, WORKTREE)
-    from src.strategies.universe_default import CANDIDATE_PREDICATES
+    from src.strategies.universe_default import (
+        CANDIDATE_PREDICATES, LADDER_TIER_PREDICATES)
 
     content = _load_prompt()
-    missing = [name for name in CANDIDATE_PREDICATES if name not in content]
+    # SP-7 ladder tiers are adoption-only — not in the mint menu (Phase D
+    # decides mint exposure), so the prompt deliberately omits them.
+    mint_menu = [n for n in CANDIDATE_PREDICATES if n not in LADDER_TIER_PREDICATES]
+    missing = [name for name in mint_menu if name not in content]
     assert not missing, (
         f'strategist-ideator.md is missing predicate name(s): {missing}'
     )

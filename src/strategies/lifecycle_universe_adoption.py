@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import psycopg2
@@ -238,6 +239,30 @@ def adopt_universe_recommendation(
         raise
     finally:
         conn.close()
+
+    # SP-7 Phase B B3: adoption changes the union breadth → refresh proposals.
+    # DETACHED, fire-and-forget: BOTH adoption entrypoints run this module
+    # inside a 30s execFileSync window (Discord ✅ → bot.js → :7870 → adopt;
+    # dashboard button → :7870 → adopt). A synchronous union-resolve over all
+    # 67 approved strategies (~67 fresh psycopg2 conns + fetches + coverage
+    # load) can cross 30s under load — try/except does NOT protect against
+    # the EXTERNAL timeout kill, which would make every adoption look failed
+    # to the operator even though it committed. Popen + return immediately.
+    # Test-hygiene guard: the live-DB integration tests (test_universe_adoption)
+    # exercise this exact code path with fixture recs — without the guard each
+    # test run leaks a REAL detached B3 child against the live DB (observed
+    # 2026-06-07: two ~360MB children from fixture ids 475/476).
+    if 'PYTEST_CURRENT_TEST' not in os.environ:
+        try:
+            import subprocess as _sp
+            _sp.Popen(
+                [sys.executable, '-m', 'src.execution.universe_threshold_proposals',
+                 f'adoption:{rec_id}'],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                start_new_session=True,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        except Exception as e:  # pragma: no cover
+            print(f'[adopt] B3 refresh spawn failed (non-fatal): {e}')
 
     return {
         "rec_id": rec_id,

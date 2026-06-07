@@ -144,6 +144,21 @@
     </header>
     <div class="body" id="papermint"></div>
   </section>
+
+  <section class="card span-12">
+    <header>
+      <h2>Universe Ladder (SP-7 Phase B)</h2>
+      <span class="count" id="uni-ladder-count"></span>
+    </header>
+    <div class="body" id="uni-ladder"></div>
+    <div style="padding:8px 12px 10px;border-top:1px solid var(--border)">
+      <span style="font-family:var(--mono);font-size:12px;color:var(--muted)">Recompute strategy: </span>
+      <input id="uni-ladder-sid" type="text" placeholder="strategy_id"
+        style="font-family:var(--mono);font-size:12px;background:var(--panel2);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 8px;width:200px" />
+      <button class="refresh" id="uni-ladder-btn" style="margin-left:6px">Recompute</button>
+      <span id="uni-ladder-result" style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:10px"></span>
+    </div>
+  </section>
 </main>
 
 <footer>
@@ -579,12 +594,79 @@ async function refreshPapermint() {
   ], rows);
 }
 
+async function refreshUniverseLadder() {
+  const { run_id, counts = [], cells = [], note, error } = await fetchJSON('/api/universe-ladder');
+  const el = $('uni-ladder');
+  const count = $('uni-ladder-count');
+  if (error) {
+    el.innerHTML = `<div class="muted" style="color:var(--err)">error: ${esc(error)}</div>`;
+    return;
+  }
+  if (note) {
+    el.innerHTML = `<div class="muted">${esc(note)}</div>`;
+    count.textContent = '— not migrated —';
+    return;
+  }
+  if (!run_id) {
+    el.innerHTML = '<div class="muted">— no ladder runs yet —</div>';
+    count.textContent = '0 cells';
+    return;
+  }
+  // Status counts pills
+  const STATUS_CLS = { queued: 'muted', done: 'ok', running: 'warn', timeout: 'warn', error: 'err', skipped_degenerate: 'muted' };
+  const pillsHtml = counts.map(c => {
+    const cls = STATUS_CLS[c.status] || 'muted';
+    return pill(c.status + ' ' + c.n, cls);
+  }).join(' ');
+  count.textContent = `run ${String(run_id).slice(0, 10)} · ${cells.length} cells`;
+  el.innerHTML = `
+    <div style="margin-bottom:8px">${pillsHtml || '<span class="muted">no status rows</span>'}</div>
+    ${table([
+      { key: 'strategy_id', label: 'strategy' },
+      { key: 'tier', label: 'tier' },
+      { key: 'status', label: 'status', html: true,
+        get: r => { const cls = STATUS_CLS[r.status] || 'muted'; return pill(r.status, cls); } },
+      { key: 'sharpe', label: 'sharpe', get: r => r.sharpe != null ? Number(r.sharpe).toFixed(3) : '—' },
+      { key: 'duration_s', label: 'dur(s)', get: r => r.duration_s != null ? r.duration_s : '—' },
+      { key: 'finished_at', label: 'finished',
+        get: r => r.finished_at ? new Date(r.finished_at).toLocaleString() : '—' },
+    ], cells)}
+  `;
+}
+
+$('uni-ladder-btn').addEventListener('click', async () => {
+  const sid = ($('uni-ladder-sid').value || '').trim();
+  const result = $('uni-ladder-result');
+  if (!sid) { result.textContent = 'enter a strategy id'; result.style.color = 'var(--warn)'; return; }
+  $('uni-ladder-btn').disabled = true;
+  result.textContent = 'submitting…';
+  result.style.color = 'var(--muted)';
+  try {
+    const r = await fetch('/api/universe-ladder/' + encodeURIComponent(sid) + '/recompute', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) {
+      result.textContent = 'error: ' + (data.error || r.statusText);
+      result.style.color = 'var(--err)';
+    } else {
+      result.textContent = data.note || 'queued';
+      result.style.color = 'var(--ok)';
+      await refreshUniverseLadder();
+    }
+  } catch (e) {
+    result.textContent = 'network error: ' + e.message;
+    result.style.color = 'var(--err)';
+  } finally {
+    $('uni-ladder-btn').disabled = false;
+  }
+});
+
 async function refreshAll() {
   await Promise.all([
     refreshBots(), refreshSubagents(), refreshTrades(), refreshVerdicts(),
     refreshAnalyses(), refreshWorkspaces(), refreshRuns(), refreshTraces(),
     refreshGraphs(), refreshHealth(), refreshDataHealth(), refreshUniverseSlice(),
     refreshBackfillProgress(), refreshUniverseRecs(), refreshPapermint(),
+    refreshUniverseLadder(),
   ]);
 }
 

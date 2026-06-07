@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly 01:00 UTC SP-7 tier-ladder window
+
+[Timer]
+# Mon-Fri 01:00 UTC; window closes 13:00 UTC (mirrors sp7-overnight-backfill).
+# Saturday EXCLUDED: the Sat 12:00 UTC weekend stack owns the box (OOM lesson).
+OnCalendar=Mon-Fri 01:00 UTC
+Persistent=false
+
+[Install]
+WantedBy=timers.target
