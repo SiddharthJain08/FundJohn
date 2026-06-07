@@ -46,3 +46,17 @@ def test_injected_conn_skips_connect(monkeypatch):
     db = _db_adapters.PostgresMetadataDB("postgresql://fake", conn=_FakeConn())
     rows = db.fetch_metadata_as_of(date(2026, 6, 5))
     assert rows[0].symbol == "AAPL"
+
+
+def test_memo_is_single_slot(monkeypatch):
+    """Batch callers iterating many as_of values must not accumulate snapshots."""
+    from src.strategies import _db_adapters
+    calls = []
+    monkeypatch.setattr(_db_adapters.psycopg2, "connect",
+                        lambda dsn: calls.append(dsn) or _FakeConn())
+    db = _db_adapters.PostgresMetadataDB("postgresql://fake")
+    db.fetch_metadata_as_of(date(2026, 6, 5))
+    db.fetch_metadata_as_of(date(2026, 6, 6))
+    assert len(db._memo) == 1                      # old entry evicted
+    db.fetch_metadata_as_of(date(2026, 6, 6))      # still memo-hit
+    assert len(calls) == 2
