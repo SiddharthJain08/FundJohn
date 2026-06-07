@@ -109,8 +109,16 @@ python3 scripts/run_universe_ladder.py seed --arm
 
 - recs post to #universe-recs as strategies finalize (changes only; no-change
   verdicts batch into one summary at drain end)
-- adopt via ✅ reaction or :7870 buttons; each adoption fires a DETACHED B3
-  refresh → proposals appear next to the Conviction Gates sliders on :3000
+- **AUTO-ADOPTION (operator directive 2026-06-07, gate
+  OPENCLAW_UNIVERSE_AUTOADOPT=1)**: change verdicts with ΔSharpe ≥ 0.10 vs the
+  CURRENT tier auto-adopt during the drain (actor auto:sp7b-ladder) and post
+  with an AUTO-ADOPTED banner (no reaction footer). Narrowing/parsimony moves,
+  non-comparable currents, and adopt-failures still post as pending recs with
+  ✅/❌/⏸. One inline B3 refresh runs at drain end (per-adoption children
+  suppressed via OPENCLAW_B3_HOOK_SUPPRESS for OOM headroom)
+- manual adopt still works via ✅ reaction or :7870 buttons; each manual
+  adoption fires a DETACHED B3 refresh → proposals appear next to the
+  Conviction Gates sliders on :3000
   (Apply/✗ buttons; [1,10] clamp enforced in propose_values + the apply
   endpoint; the APPLIED value also hits regime_sizer_params' own DB CHECK —
   the proposals table itself has no CHECK by design)

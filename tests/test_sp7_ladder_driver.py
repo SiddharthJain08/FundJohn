@@ -118,3 +118,41 @@ def test_on_term_raises_systemexit_143():
     with pytest.raises(SystemExit) as exc_info:
         drv._on_term(signal.SIGTERM, None)
     assert exc_info.value.code == 143
+
+
+# ── auto-adoption (operator directive 2026-06-07) ────────────────────────
+
+def test_should_autoadopt_requires_delta_vs_current():
+    m = {'sp500': {'sharpe': 1.0, 'trades_n': 100},
+         'tier_r3000': {'sharpe': 1.15, 'trades_n': 100}}
+    assert drv.should_autoadopt(m, current='sp500', choice='tier_r3000') is True
+    m['tier_r3000']['sharpe'] = 1.05  # +0.05 < 0.10
+    assert drv.should_autoadopt(m, current='sp500', choice='tier_r3000') is False
+
+
+def test_should_autoadopt_narrowing_or_unknown_current_declines():
+    # narrowing parsimony move: winner BELOW current tier's sharpe
+    m = {'sp500': {'sharpe': 1.0, 'trades_n': 100},
+         'tier_liquid': {'sharpe': 1.4, 'trades_n': 100}}
+    assert drv.should_autoadopt(m, current='tier_liquid', choice='sp500') is False
+    # current predicate not in the grid (e.g. legacy 'no_adr') → cannot compare
+    assert drv.should_autoadopt(m, current='no_adr', choice='tier_liquid') is False
+    # current tier errored (None metrics) → cannot compare
+    m2 = {'sp500': None, 'tier_liquid': {'sharpe': 2.0, 'trades_n': 100}}
+    assert drv.should_autoadopt(m2, current='sp500', choice='tier_liquid') is False
+
+
+def test_should_autoadopt_float_boundary():
+    m = {'sp500': {'sharpe': 1.10, 'trades_n': 100},
+         'tier_liquid': {'sharpe': 1.20, 'trades_n': 100}}
+    assert drv.should_autoadopt(m, current='sp500', choice='tier_liquid') is True
+
+
+def test_autoadopt_gate_env():
+    import os
+    from unittest.mock import patch
+    with patch.dict(os.environ, {'OPENCLAW_UNIVERSE_AUTOADOPT': '1'}):
+        assert drv.autoadopt_enabled() is True
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop('OPENCLAW_UNIVERSE_AUTOADOPT', None)
+        assert drv.autoadopt_enabled() is False

@@ -13,7 +13,7 @@ LOG=logs/sp7_ladder_$(date -u +%F).log
 [ -f data/.sp7_backfill_armed ] && {
   echo "[sp7-ladder] backfill armed — yielding tonight" | tee -a "$LOG"; exit 0; }
 
-set -a; . <(grep -E '^(POSTGRES_URI|REDIS_URL)' .env | sed 's/\r$//'); set +a
+set -a; . <(grep -E '^(POSTGRES_URI|REDIS_URL|OPENCLAW_UNIVERSE_AUTOADOPT)' .env | sed 's/\r$//'); set +a
 
 # Seconds until 13:00 UTC — the window close (clears the EDGAR/premarket band).
 now=$(date -u +%s); close=$(date -u -d "13:00" +%s)

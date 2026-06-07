@@ -68,6 +68,31 @@ def format_change_message(strategy_id: str, current: str, choice: str,
     return '\n'.join(lines)[:1900]
 
 
+def format_autoadopted_message(strategy_id: str, current: str, choice: str,
+                               rationale: str, grid: list[dict], *,
+                               rec_id: int) -> str:
+    """Same grid/info as a change rec, but the adoption already happened
+    (OPENCLAW_UNIVERSE_AUTOADOPT, ΔSharpe >= 0.10 vs the current tier,
+    trades_n >= 30 structural). Deliberately NO `universe-rec:` footer —
+    there is nothing to approve, and the reaction parser must not fire."""
+    lines = [
+        f'**Universe Rec — {strategy_id}** · **AUTO-ADOPTED**',
+        f'Current: `{current}` → Adopted: `{choice}`',
+        'Criteria: ΔSharpe ≥ 0.10 vs current tier · trades ≥ 30 '
+        '(gate OPENCLAW_UNIVERSE_AUTOADOPT)',
+        f'Rationale: {rationale[:400]}', '', '**Grid:**',
+        '| Candidate | Sharpe | MaxDD% | WinRate | Trades | Sortino | Calmar |',
+        '|---|---|---|---|---|---|---|',
+    ]
+    for row in grid:
+        lines.append('| `' + row['name'] + '` | '
+                     + ' | '.join(_fmt(row.get(c)) for c in GRID_COLS) + ' |')
+    lines.append('')
+    lines.append(f'_rec {rec_id} adopted by auto:sp7b-ladder; '
+                 'revert via operator CLI if needed_')
+    return '\n'.join(lines)[:1900]
+
+
 def format_summary_message(non_changes: list[tuple[str, str]]) -> str:
     """Batched no-change/no-signal/universe-independent verdicts — NOT
     adoptable, so NO universe-rec footer (the reaction parser must not fire)."""

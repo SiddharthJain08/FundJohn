@@ -252,7 +252,11 @@ def adopt_universe_recommendation(
     # exercise this exact code path with fixture recs — without the guard each
     # test run leaks a REAL detached B3 child against the live DB (observed
     # 2026-06-07: two ~360MB children from fixture ids 475/476).
-    if 'PYTEST_CURRENT_TEST' not in os.environ:
+    # OPENCLAW_B3_HOOK_SUPPRESS: the ladder driver auto-adopts during a
+    # nightly drain and runs ONE inline B3 refresh at drain end instead of
+    # spawning a ~360MB child per adoption (OOM headroom on the 8GB box).
+    if ('PYTEST_CURRENT_TEST' not in os.environ
+            and os.environ.get('OPENCLAW_B3_HOOK_SUPPRESS') != '1'):
         try:
             import subprocess as _sp
             _sp.Popen(

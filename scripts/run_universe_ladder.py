@@ -73,6 +73,25 @@ def grid_row(tier: str, metrics: dict | None) -> dict:
     return row
 
 
+def autoadopt_enabled() -> bool:
+    """Operator directive 2026-06-07: auto-adopt change verdicts like the
+    weekend strategy-adjustments coupling. Gate in .env; wrapper sources it."""
+    return os.environ.get('OPENCLAW_UNIVERSE_AUTOADOPT') == '1'
+
+
+def should_autoadopt(metrics_by_tier: dict, current: str, choice: str) -> bool:
+    """ΔSharpe(choice − current tier) >= 0.10 (epsilon-guarded). Narrowing
+    parsimony moves (negative Δ) and non-ladder current predicates do NOT
+    auto-adopt — they post as normal pending recs for the operator."""
+    cur_m, new_m = metrics_by_tier.get(current), metrics_by_tier.get(choice)
+    if not cur_m or not new_m:
+        return False
+    cs, ns = cur_m.get('sharpe'), new_m.get('sharpe')
+    if cs is None or ns is None:
+        return False
+    return (float(ns) - float(cs)) >= 0.10 - 1e-9
+
+
 def mem_available_mb() -> int:
     with open('/proc/meminfo') as f:
         for line in f:
@@ -178,6 +197,9 @@ def run_cell(cell: dict) -> dict:
 
 def cmd_drain(args) -> int:
     signal.signal(signal.SIGTERM, _on_term)
+    # Batch B3: suppress the per-adoption detached refresh (hook env);
+    # _maybe_record_full_run runs ONE inline refresh if anything adopted.
+    os.environ['OPENCLAW_B3_HOOK_SUPPRESS'] = '1'
     pg = _pg()
     with pg.cursor() as cur:  # mid-kill recovery
         cur.execute("UPDATE universe_ladder_runs SET status='queued' "
@@ -350,14 +372,34 @@ def _maybe_finalize_strategy(pg, run_id: str, strategy_id: str) -> None:
         candidate_predicate=p['choice'],
         candidate_set_id=f'sp7b-1-{run_id}',
         backtest_summary=p['summary'], rationale=p['rationale'])
+    adopted_auto = False
     if p['verdict_name'] == 'change':
-        msg = recs.format_change_message(strategy_id, current, p['choice'],
-                                         p['rationale'], p['summary']['grid'],
-                                         rec_id=rec_id)
+        metrics_by_tier = {t: (c['metrics'] if c['status'] == 'done' else None)
+                           for t, c in cells.items()}
+        if autoadopt_enabled() and should_autoadopt(metrics_by_tier, current,
+                                                    p['choice']):
+            try:
+                from src.strategies.lifecycle_universe_adoption import (
+                    adopt_universe_recommendation)
+                adopt_universe_recommendation(rec_id, actor='auto:sp7b-ladder')
+                adopted_auto = True
+                _redis_set('sp7:ladder:autoadopted_this_drain', '1')
+            except Exception as e:
+                print(f'[ladder] auto-adopt failed for rec {rec_id} ({e}) — '
+                      'falling back to pending rec')
+        if adopted_auto:
+            msg = recs.format_autoadopted_message(
+                strategy_id, current, p['choice'], p['rationale'],
+                p['summary']['grid'], rec_id=rec_id)
+        else:
+            msg = recs.format_change_message(strategy_id, current, p['choice'],
+                                             p['rationale'], p['summary']['grid'],
+                                             rec_id=rec_id)
         recs.post_discord(pg, msg)
     else:
         _queue_summary_line(pg, strategy_id, p['verdict_name'])
-    print(f"[ladder] finalized {strategy_id}: {p['verdict_name']} → rec {rec_id}")
+    print(f"[ladder] finalized {strategy_id}: {p['verdict_name']}"
+          + (' AUTO-ADOPTED' if adopted_auto else '') + f" → rec {rec_id}")
 
 
 def _current_predicate(strategy_id: str) -> str:
@@ -394,6 +436,13 @@ def _maybe_record_full_run(pg) -> None:
     if items:
         from backtest import universe_ladder_recs as recs
         recs.post_discord(pg, recs.format_summary_message(items))
+    if r.get('sp7:ladder:autoadopted_this_drain'):
+        r.delete('sp7:ladder:autoadopted_this_drain')
+        try:
+            from src.execution.universe_threshold_proposals import compute_and_write
+            compute_and_write(trigger='ladder-drain-autoadopt')
+        except Exception as e:
+            print(f'[ladder] drain-end B3 refresh failed (non-fatal): {e}')
     full_run = r.get('sp7:ladder:full_run_id')
     if full_run:
         with pg.cursor() as cur:

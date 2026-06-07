@@ -45,3 +45,14 @@ def test_rationale_is_deterministic():
     r1 = recs.build_rationale(v, window=('2021-07-01', '2026-06-05'))
     r2 = recs.build_rationale(v, window=('2021-07-01', '2026-06-05'))
     assert r1 == r2 and 'tier_r3000' in r1 and '0.15' in r1
+
+
+def test_autoadopted_message_has_banner_and_no_reaction_footer():
+    msg = recs.format_autoadopted_message(
+        'momentum_12_1', 'sp500', 'tier_liquid',
+        'displaced: Δ=+0.20', GRID, rec_id=987)
+    assert 'AUTO-ADOPTED' in msg
+    assert 'universe-rec:' not in msg          # reaction parser must NOT fire
+    assert 'React ✅' not in msg
+    assert '| `sp500` |' in msg and len(msg) <= 1900
+    assert 'rec 987' in msg                    # id still visible for audit
