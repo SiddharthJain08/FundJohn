@@ -99,7 +99,13 @@ def _resolver_archive_universe(date_str: str, resolver=None) -> list[str] | None
             return meta_map.get(sym, _NoMeta)
 
         out = _select_archive_universe(as_of, resolver, meta_lookup)
-        return out or None
+        if not out:
+            # options_eligible is all-FALSE until the chain-probe producer ships
+            # (Phase D backlog) — make the dead-gate state visible, then fall back.
+            log.warning('archive resolver-universe: gate ON but 0 options-eligible '
+                        'names in metadata — falling back to universe_config')
+            return None
+        return out
     except Exception as e:  # noqa: BLE001 — fail-open to universe_config
         log.warning('archive resolver-universe failed (fail-open): %s', e)
         return None
