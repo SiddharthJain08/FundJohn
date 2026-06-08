@@ -1681,6 +1681,22 @@ def main():
         pnl_updates, newly_closed_ids = update_pnl(cur, prices, run_date)
         logger.info(f"P&L rows updated: {pnl_updates}")
 
+        # 7b. Broker-close reconcile (2026-06-08): close still-open signals for
+        # tickers the cycle liquidated / circuit-breaker'd that are now flat at
+        # the broker — closes update_pnl's price-based path can't see, so
+        # #trade-reports + the dashboard count them. Scoped to this cycle's
+        # close events; best-effort + fail-safe (empty broker ⇒ skip). Folds
+        # into newly_closed_ids so they get OUE-classified below.
+        try:
+            from execution.open_reconcile import reconcile_broker_closes
+            _bc = reconcile_broker_closes(cur, run_date)
+            if _bc:
+                _by = {r: list(_bc.values()).count(r) for r in set(_bc.values())}
+                logger.info(f"Broker-close reconcile closed {len(_bc)} signal(s): {_by}")
+                newly_closed_ids = list(set(newly_closed_ids) | set(_bc.keys()))
+        except Exception as e:
+            logger.warning(f"reconcile_broker_closes failed (non-fatal): {e}")
+
         # 8. Report triggers
         report_triggers = fire_report_triggers(cur, prices, run_date)
         logger.info(f"Report triggers fired: {report_triggers}")
