@@ -134,7 +134,7 @@ CACHE_PATH = Path(os.environ.get(
     '/root/openclaw/data/.cache/options_eligibility.json'))
 PAGE_LIMIT = int(os.environ.get('OPTIONS_ELIGIBILITY_PAGE_LIMIT', '10000'))
 SOFT_BUDGET_S = int(os.environ.get('OPTIONS_ELIGIBILITY_BUDGET_S', '1800'))
-ABS_FLOOR = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '1000'))
+ABS_FLOOR = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '400'))  # ~676 Alpaca-tradable observed 2026-06-08
 WEBHOOK_URL = os.environ.get('OPENCLAW_OPTIONS_ELIGIBILITY_WEBHOOK', '')
 
 
@@ -684,7 +684,7 @@ _CACHE = Path(os.environ.get(
     'OPTIONS_ELIGIBILITY_CACHE',
     '/root/openclaw/data/.cache/options_eligibility.json'))
 _MAX_AGE_DAYS = 10
-_MIN_ELIGIBLE = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '1000'))
+_MIN_ELIGIBLE = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '400'))  # ~676 observed 2026-06-08
 
 
 @check(name='options_eligibility_freshness', tags=['strategies'], requires=[])
@@ -814,7 +814,7 @@ Expected: no NEW failures vs the branch baseline (record any pre-existing reds; 
 
 Run (with `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` exported from `.env`):
 `python3 -m src.pipeline.options_eligibility --dry-run 2>&1 | tail -5`
-Expected: a summary line with `eligible=<thousands> / universe=~13845 · pages=<~130> · WROTE` and `/tmp/options_eligibility_dryrun.json` populated. Verify: `python3 -c "import json;d=json.load(open('/tmp/options_eligibility_dryrun.json'));print('AAPL',d.get('AAPL'),'count',sum(d.values()))"` → `AAPL True count <thousands>`.
+Expected: a summary line with `eligible=676 / universe=13845 · pages=10 · WROTE · 5s` and `/tmp/options_eligibility_dryrun.json` populated (`option contracts` returns Alpaca's ~682 TRADABLE underlyings — §11 of the spec). Verify: `python3 -c "import json;d=json.load(open('/tmp/options_eligibility_dryrun.json'));print('AAPL',d.get('AAPL'),'count',sum(d.values()))"` → `AAPL True count 676`.
 
 - [ ] **Step 4: End-to-end — metadata writer consumes it (manual)**
 

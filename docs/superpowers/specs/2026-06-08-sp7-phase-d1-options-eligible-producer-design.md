@@ -37,15 +37,21 @@ have listed options and writes the `{symbol: bool}` cache the writer already rea
 |---|---|---|
 | D1.a | What `options_eligible=true` means | **Listed-existence**: Alpaca lists ≥1 *active* option contract for the underlying. Liquidity is handled downstream (cap-tier predicates; the `options_eligible_only` predicate already ANDs `tradable` + `status='active'`). |
 | D1.b | Refresh cadence | **Weekly**, standalone script + its own systemd timer, decoupled from the daily cycle. |
-| D1.c | Probe mechanism | **Bulk enumeration**: page `alpaca option contracts --status active` (no underlying filter), collect the distinct set of `underlying_symbol`. ~130 sequential paged calls vs ~13.8k per-name probes. |
+| D1.c | Probe mechanism | **Bulk enumeration**: page `alpaca option contracts --status active` (no underlying filter), collect the distinct set of `underlying_symbol`. **~10 sequential paged calls** (live: 682 underlyings / 10 pages / ~5 s — §11) vs ~13.8k per-name probes. |
 
 **Why bulk over per-name** (rescoped after grounding): the probe universe is
 **13,845** active `us_equity` names (not the ~5k first assumed). Per-name probing
 is ~13.8k trading-API calls/run (~70–90 min, 429-burst risk, multi-week initial
-fill). Bulk enumeration is ~130 sequential pages (~10–15 min, complete in one run,
+fill). Bulk enumeration is ~10 sequential pages (~5 s, complete in one run,
 rate-limit-gentle). The bulk path's only real risk — a broken sweep wiping the
 cache — is fully closed by a **completion-gate + sanity-floor + preserve-prior**
-(§5).
+(§5). **Live-sweep correction (2026-06-08, §11):** `option contracts --status active`
+returns Alpaca's **tradable** options universe — a curated **~682 underlyings**
+(~676 ∩ our equity universe), NOT all OPRA-listed optionable names (thousands). The
+real sweep is therefore **~10 pages / ~95k contracts / ~5 s** (not the ~130-page /
+10–15-min pre-build estimate). `options_eligible` = "Alpaca offers tradable options on
+this name" — the operator-intended meaning (you can only trade what Alpaca offers; the
+synthetic engine + live options exec are Alpaca-bound), consistent with D1.a's wording.
 
 ## 3. The contract D1 must satisfy (grounded)
 
@@ -64,7 +70,7 @@ cache — is fully closed by a **completion-gate + sanity-floor + preserve-prior
 ## 4. Architecture & components
 
 ```
-docs/options-eligibility.{service,timer}   (systemd, weekly Sun 06:00 UTC, SHIPPED DISABLED)
+docs/openclaw-options-eligibility.{service,timer}  (systemd, weekly Sat 06:00 UTC, SHIPPED DISABLED)
         │  ExecStart
         ▼
 python3 -m src.pipeline.options_eligibility        ← NEW module
@@ -112,9 +118,12 @@ python3 -m src.pipeline.options_eligibility        ← NEW module
    replace** with only the eligible names (absent ⇒ False at read time, per §3), so a
    name that lost its listing simply drops out of the fresh snapshot. `n_eligible = len(new)`.
 3. **Sanity floor:** require `n_eligible >= max(ABS_FLOOR, 0.5 * prior_eligible_count)`
-   where `ABS_FLOOR` defaults to `1000` (env `OPTIONS_ELIGIBILITY_MIN_FLOOR`). This
-   catches both a degenerate empty/tiny result and a sweep that completed but returned
-   implausibly few names. On failure → **keep prior**, log `WARN sanity floor`, exit 1.
+   where `ABS_FLOOR` defaults to `400` (env `OPTIONS_ELIGIBILITY_MIN_FLOOR`). **Calibrated
+   to the observed ~676** (live sweep 2026-06-08, §11) — 400 sits comfortably below 676
+   yet catches a degenerate near-empty sweep. It's a *secondary* guard (the primary is
+   `completed=False`→keep-prior); the relative `0.5*prior` term is inert until the
+   tradable set grows past ~800, which is fine. On failure → **keep prior**, log
+   `WARN sanity floor`, exit 1.
 4. **Atomic write:** serialize `new` to a temp file in the same dir, then `os.replace`
    onto `options_eligibility.json` (atomic on one filesystem; a crash never leaves a
    partial/corrupt cache).
@@ -193,8 +202,9 @@ is additive and under `data/.cache/` (not master data); never deleted.
 **Live smoke (manual, not CI):**
 - Run against a tiny synthetic universe `[AAPL, MSFT, <known-non-optionable e.g. ZVZZT>]`
   → AAPL/MSFT `true`, ZVZZT `false`.
-- Full `python3 -m src.pipeline.options_eligibility --dry-run` → confirm ~thousands
-  eligible, completion-gate passes, summary sane.
+- Full `python3 -m src.pipeline.options_eligibility --dry-run` → confirm ~676
+  eligible, completion-gate passes, summary sane. (Verified 2026-06-08: `eligible=676
+  / universe=13845 · pages=10 · WROTE · 5s`; AAPL/NVDA/TSLA/ZM/SPY/BRK.B all True.)
 - Then run `run_ticker_metadata_step` and confirm `ticker_metadata_snapshots.options_eligible`
   flips to `true` for AAPL on today's snapshot.
 
@@ -219,6 +229,14 @@ is additive and under `data/.cache/` (not master data); never deleted.
   market closed (market-closed-safe). `--limit` max 10000.
 - Universe: `alpaca_tradable_universe WHERE status='active'` → 13,845 rows, all
   `asset_class='us_equity'`.
+- **Live sweep (2026-06-08, post-build):** `option contracts --status active` paginated
+  a clean alphabetical `AA → ZSL` to a natural end in **10 pages** (final page 5,040 <
+  10,000, `next_page_token` null) → **682 distinct underlyings / ~95k contracts / ~5 s**.
+  This is Alpaca's full **tradable** options set (a curated subset, NOT all OPRA-listed
+  names). `682 ∩ alpaca_tradable_universe(us_equity)` = **676** eligible. End-to-end
+  smoke WROTE 676 entries, exit 0; AAPL/NVDA/TSLA/ZM/MSFT/SPY/BRK.B all present and
+  `BRK.B` is in correct Alpaca dot-form (matches `alpaca_tradable_universe.symbol`).
+  Floor recalibrated 1000→**400** as a result.
 - Auth: CLI env `ALPACA_API_KEY` + `ALPACA_SECRET_KEY` (present in `.env`; the
   systemd unit injects `.env` via `EnvironmentFile`).
 - Cache contract: `ticker_metadata_writer.py:124` `options_cache.get(sym, False)`.
