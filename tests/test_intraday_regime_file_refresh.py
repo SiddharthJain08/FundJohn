@@ -137,6 +137,56 @@ class _StubIntradayModule:
         pass
 
 
+class TestSyncRegimeToConsumers:
+    """The non-cooldown confirmed-transition path: writes the market_regime
+    row AND regime_latest.json (now delegated to _refresh_regime_file) before
+    the redeploy spawns. This is the live regime-of-record writer — cover it
+    directly since the run_one_tick tests mock _sync out."""
+
+    class _Cur:
+        def __init__(self):
+            self.calls = []
+        def execute(self, sql, params=None):
+            self.calls.append((sql, params))
+        def close(self):
+            pass
+
+    class _Conn:
+        def __init__(self):
+            self.cur = TestSyncRegimeToConsumers._Cur()
+            self.commits = 0
+        def cursor(self):
+            return self.cur
+        def commit(self):
+            self.commits += 1
+        def close(self):
+            pass
+
+    def test_transition_writes_market_regime_row_and_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path)
+        conn = self._Conn()
+        detector._sync_regime_to_consumers(
+            conn=conn, new_state='HIGH_VOL', prior_state='LOW_VOL',
+            confidence=0.95, state_probs=None,
+            features={'vix_synth_30d': 22.0},
+            ts_utc=_ts('2026-06-08 15:00'),
+            transition_tag='INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL',
+        )
+        # (a) market_regime INSERT with the new state + vix
+        inserts = [c for c in conn.cur.calls if 'INSERT INTO market_regime' in c[0]]
+        assert len(inserts) == 1
+        params = inserts[0][1]
+        assert params[0] == 'HIGH_VOL'        # state
+        assert float(params[1]) == 22.0       # vix_level
+        assert conn.commits >= 1
+        # (b) regime_latest.json written with the new state + transition tag
+        j = json.loads((tmp_path / 'regime_latest.json').read_text())
+        assert j['state'] == 'HIGH_VOL'
+        assert j['state_raw'] == 'HIGH_VOL'
+        assert j['vix_level'] == pytest.approx(22.0)
+        assert j['intraday_transition'] == 'INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL'
+
+
 class TestRunOneTickRefreshesFile:
     def test_rth_tick_refreshes_regime_file(self, monkeypatch, tmp_path):
         """Every RTH tick (even the bootstrap no-model UNKNOWN case) must call
