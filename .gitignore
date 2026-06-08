@@ -52,3 +52,4 @@ src/agent/config/skill-allowlist.json
 *.swp
 .DS_Store
 .incoming/
+analysis/deep_dip_buy_feasibility/rows.parquet
