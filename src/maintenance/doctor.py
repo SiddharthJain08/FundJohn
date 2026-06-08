@@ -464,16 +464,22 @@ def check_eod_gate_consistency():
 
 @_check('regime_freshness')
 def check_regime_freshness():
-    """Detect drift between `regime_latest.json` (daily-cron output) and
-    `market_regime` Postgres table (what engine.py reads). They MUST agree
-    on `state` and both must be fresh; otherwise signal generation runs
-    under stale regime context.
+    """Detect drift between `regime_latest.json` (engine's source, refreshed
+    every intraday tick) and `market_regime` (breaker/sizer source). They MUST
+    agree on `state`, and the FILE must be fresh; otherwise signal generation
+    runs under stale/divergent regime context.
+
+    2026-06-08: the intraday HMM is the sole regime authority. The daily
+    detector no longer writes the regime-of-record, so market_regime row-age
+    stopped being a freshness signal (it only updates on a confirmed
+    transition). Freshness is therefore measured on the file; the db row drives
+    only the state-agreement guard.
 
     Failure modes this catches:
-      - DB write silently fails (e.g. type-cast bug in run_market_state.py
-        — caused the 2026-04-28 LOW_VOL miss for 7 days).
-      - Cron schedule fails to fire (json file goes stale too).
-      - Manual override of one source without the other.
+      - regime_latest.json missing/stale (intraday producer died) → engine
+        hard-fails.
+      - file/db STATE divergence (the 2026-04-28 silent-DB-write-fail
+        signature; also a desync between engine and breaker/sizer sources).
     """
     uri = os.environ.get('POSTGRES_URI', '')
     if not uri:
@@ -513,28 +519,32 @@ def check_regime_freshness():
         except Exception:
             pass
 
-    # Worst severity wins.
+    # Worst severity wins. 2026-06-08: market_regime row-age is no longer a
+    # freshness signal — the daily detector stopped writing the regime-of-record
+    # and the intraday HMM (sole authority) only appends a market_regime row on a
+    # confirmed transition. The engine reads regime_latest.json, refreshed every
+    # intraday tick, so the FILE drives freshness; the db row is retained only
+    # for the state-agreement guard (engine reads the file; the breaker + sizer
+    # read market_regime.state — they MUST agree).
     severity = PASS
-    notes = [f'db={db_state} ({db_age_h:.0f}h)']
-    if file_state is not None:
-        notes.append(f'file={file_state} ({file_age_h:.0f}h)')
+    notes = [f'db={db_state} ({db_age_h:.0f}h, informational)']
 
-    if db_age_h > REGIME_FAIL_HOURS:
+    if file_state is None:
+        # The engine's source is gone — engine.load_regime() hard-fails (exit 2).
         severity = FAIL
-    elif db_age_h > REGIME_WARN_HOURS and severity != FAIL:
-        severity = WARN
-
-    if file_age_h is not None:
+        notes.append('regime_latest.json missing/unreadable — engine will hard-fail')
+    else:
+        notes.append(f'file={file_state} ({file_age_h:.0f}h)')
         if file_age_h > REGIME_FAIL_HOURS:
             severity = FAIL
-        elif file_age_h > REGIME_WARN_HOURS and severity != FAIL:
+        elif file_age_h > REGIME_WARN_HOURS:
             severity = WARN
-
-    if file_state is not None and file_state != db_state:
-        # State disagreement is more dangerous than staleness alone — engine
-        # might generate the wrong signal basket all day.
-        severity = FAIL
-        notes.append(f'STATE MISMATCH (file={file_state} ≠ db={db_state})')
+        if file_state != db_state:
+            # State disagreement between the engine source (file) and the
+            # breaker/sizer source (db) — this is how the 2026-04-28
+            # silent-DB-write-fail now manifests.
+            severity = FAIL
+            notes.append(f'STATE MISMATCH (file={file_state} ≠ db={db_state})')
 
     detail = '; '.join(notes)
     if severity == FAIL: return _fail('regime_freshness', detail)

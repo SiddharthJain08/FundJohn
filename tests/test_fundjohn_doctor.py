@@ -284,25 +284,40 @@ class TestRegimeFreshness(unittest.TestCase):
         self.assertEqual(res['severity'], doctor.FAIL)
         self.assertIn('STATE MISMATCH', res['detail'])
 
-    def test_regime_freshness_fails_on_db_stale_beyond_fail_hours(self):
-        """DB hasn't updated in 100h (>REGIME_FAIL_HOURS=80). engine.py
-        would silently use stale state. Catch this even if file is fresh."""
+    def test_regime_freshness_ignores_db_age_when_file_fresh_and_agreeing(self):
+        """2026-06-08: market_regime now only gets a row on a confirmed intraday
+        transition (the daily detector no longer writes it), so a stale db row
+        with a fresh, AGREEING regime_latest.json is healthy — db row-age is no
+        longer a staleness signal. engine.py reads the file; the file is fresh."""
         with patch.dict('os.environ',
                         {'POSTGRES_URI': 'postgres://x'}, clear=False), \
              self._patch_pg('LOW_VOL', db_age_hours=100):
             file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=2)
             with file_p1, file_p2:
                 res = doctor.check_regime_freshness()
-        self.assertEqual(res['severity'], doctor.FAIL)
+        self.assertEqual(res['severity'], doctor.PASS)
 
-    def test_regime_freshness_warns_when_only_warn_window_breached(self):
+    def test_regime_freshness_warns_on_file_age_in_warn_window(self):
+        """Freshness is now driven by the FILE (engine's source), not the db."""
         with patch.dict('os.environ',
                         {'POSTGRES_URI': 'postgres://x'}, clear=False), \
-             self._patch_pg('LOW_VOL', db_age_hours=40):    # > 30h, < 80h
-            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=2)
+             self._patch_pg('LOW_VOL', db_age_hours=2):
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=40)  # >30h, <80h
             with file_p1, file_p2:
                 res = doctor.check_regime_freshness()
         self.assertEqual(res['severity'], doctor.WARN)
+
+    def test_regime_freshness_fails_when_file_missing(self):
+        """regime_latest.json is the engine's source now — if it's gone the
+        engine hard-fails, so the doctor must FAIL even when the db row is
+        fresh (old logic let db-age mask a missing file)."""
+        with patch.dict('os.environ',
+                        {'POSTGRES_URI': 'postgres://x'}, clear=False), \
+             self._patch_pg('LOW_VOL', db_age_hours=2):
+            file_p1, file_p2 = self._patch_file('LOW_VOL', file_age_hours=2, exists=False)
+            with file_p1, file_p2:
+                res = doctor.check_regime_freshness()
+        self.assertEqual(res['severity'], doctor.FAIL)
 
 
 class TestEngineStalenessGate(unittest.TestCase):
