@@ -138,7 +138,7 @@ def main():
                   json.dumps(payload)))
             conn.commit()
             try:
-                _post_to_discord('trade-reports', msg + ('\n• Closed live' if ok else f'\n• Close FAILED: {payload}'))
+                _post_to_discord('circuit-breaker', msg + ('\n• Closed live' if ok else f'\n• Close FAILED: {payload}'))
             except Exception as e:
                 print(f'[circuit_breaker] Discord post failed: {e}')
             fired += 1

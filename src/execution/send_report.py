@@ -130,23 +130,41 @@ def _fmt_greenlist(run_date: str, sized: dict) -> str:
     if not orders:
         return (f'✅ **{run_date}** — no actionable signals today '
                 f'(regime={regime}). All signals failed the Kelly/EV gate.')
-    lines = [f'🟢 **Greenlist — {run_date}** (regime={regime}, {len(orders)} orders)', '']
-    header = f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Entry":>9} {"Size%":>6} {"EV%":>7} {"p(T1)":>7}'
-    lines.append('```')
-    lines.append(header)
-    lines.append('-' * len(header))
+
+    # One boxed card per signal. Contributing strategies are the LAST piece of
+    # information on each card, listed vertically (one bullet per line) so a
+    # consolidated multi-strategy bet reads clearly instead of being truncated
+    # into a fixed-width column.
+    n = len(orders)
+    gross = sum(abs(o.get('pct_nav') or 0) for o in orders)
+    order_word = 'order' if n == 1 else 'orders'
+    lines = [
+        f'🟢 **Greenlist — {run_date}**',
+        f'{regime} · {n} {order_word} · gross {gross:.2f}× NAV',
+        '```',
+    ]
+    RULE = '━' * 27
     for o in orders:
-        ev = o.get('ev')
-        p  = o.get('p_t1')
-        lines.append(
-            f"{(o.get('ticker') or '?'):<8} "
-            f"{(o.get('strategy_id') or '?')[:28]:<28} "
-            f"{(o.get('direction') or 'long')[:5]:<5} "
-            f"{o.get('entry', 0) or 0:>9.2f} "
-            f"{(o.get('pct_nav') or 0)*100:>6.2f} "
-            f"{(ev*100) if ev is not None else 0:>+7.2f} "
-            f"{(p*100) if p is not None else 0:>7.1f}"
-        )
+        ticker    = o.get('ticker') or '?'
+        direction = str(o.get('direction') or 'long')
+        is_short  = direction.lower().startswith('s')
+        arrow     = '▼' if is_short else '▲'
+        dir_label = 'SHORT' if is_short else 'LONG'
+        entry     = o.get('entry', 0) or 0
+        pct       = (o.get('pct_nav') or 0) * 100
+        ev, p     = o.get('ev'), o.get('p_t1')
+        ev_s      = f'{ev * 100:+.2f}' if ev is not None else 'n/a'
+        p_s       = f'{p * 100:.0f}'   if p  is not None else 'n/a'
+        strats    = (o.get('contributing_strategies')
+                     or ([o.get('strategy_id')] if o.get('strategy_id') else []))
+
+        lines.append(RULE)
+        lines.append(f' {ticker:<6} {arrow} {dir_label:<5}   ${entry:,.2f}')
+        lines.append(f' size {pct:.2f}%   EV {ev_s}%   p(T1) {p_s}%')
+        lines.append(f' contributing strategies ({len(strats)}):')
+        for s in strats:
+            lines.append(f'   • {s}')
+    lines.append(RULE)
     lines.append('```')
     return '\n'.join(lines)
 
