@@ -79,7 +79,9 @@ def prep_prices(prices: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_regime_bucket(df: pd.DataFrame, regimes: pd.DataFrame) -> pd.DataFrame:
-    out = df.merge(regimes[["date", "regime"]], on="date", how="left")
+    reg = regimes[["date", "regime"]].copy()
+    reg["date"] = reg["date"].astype(str)   # datetime.date -> 'YYYY-MM-DD'
+    out = df.merge(reg, on="date", how="left")
     out["bucket"] = out["date"].map(half_year_bucket)
     return out
 
@@ -94,10 +96,12 @@ def bucket_stats(df: pd.DataFrame, bucket_col: str) -> pd.DataFrame:
     with columns mean,t,n, sorted by bucket label."""
     rows = []
     for b, sub in df.groupby(bucket_col):
-        if str(b) == "nan":
+        if pd.isna(b):
             continue
         mean, t, n = clustered_t(sub, "intraday_return", "date")
         rows.append({bucket_col: b, "mean": mean, "t": t, "n": n})
+    if not rows:
+        return pd.DataFrame(columns=[bucket_col, "mean", "t", "n"])
     out = pd.DataFrame(rows).sort_values(bucket_col).reset_index(drop=True)
     return out
 

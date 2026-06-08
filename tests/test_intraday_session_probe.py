@@ -141,6 +141,20 @@ def test_compute_probe_m2_isolates_name_effect():
     assert res["m2_relative"]["mean"] < 0
 
 
+import datetime
+
+
+def test_attach_regime_bucket_coerces_datetime_date_keys():
+    # historical_regimes.parquet stores date as datetime.date objects (object dtype);
+    # prices/primary date is string. The merge must still match.
+    df = pd.DataFrame({"ticker": ["AAA"], "date": ["2024-07-03"],
+                       "intraday_return": [-0.005]})
+    regimes = pd.DataFrame({"date": [datetime.date(2024, 7, 3)], "regime": ["HIGH_VOL"]})
+    out = p.attach_regime_bucket(df, regimes)
+    assert out.iloc[0]["regime"] == "HIGH_VOL"   # NOT NaN
+    assert out.iloc[0]["bucket"] == "2024H2"
+
+
 import importlib.util, pathlib
 
 def _load_runner():
