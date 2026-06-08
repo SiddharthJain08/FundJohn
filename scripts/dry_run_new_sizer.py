@@ -79,7 +79,7 @@ def main():
     print(f'[dry_run] regime: {regime["state"]}')
 
     cur.execute("SELECT * FROM regime_sizer_params WHERE regime_state=%s", (regime['state'],))
-    params = dict(cur.fetchone() or {'liquidity_param': 1.0, 'min_signal_notional_usd': 100,
+    params = dict(cur.fetchone() or {'liquidity_param': 1.0,
                                        'position_circuit_breaker_pct': 0.02})
 
     cur.execute("SELECT * FROM strategy_state")

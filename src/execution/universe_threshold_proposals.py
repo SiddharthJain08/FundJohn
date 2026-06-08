@@ -79,11 +79,10 @@ def compute_and_write(trigger: str) -> int:
         factor = breadth_factor(n_union, n_sp500)
         with pg.cursor() as cur:
             cur.execute("""SELECT regime_state, min_cumulative_sharpe,
-                                  liquidity_param, min_signal_notional_usd
+                                  liquidity_param
                              FROM regime_sizer_params""")
             rows = {r[0]: {'min_cumulative_sharpe': float(r[1]),
-                           'liquidity_param': float(r[2]) if r[2] is not None else None,
-                           'min_signal_notional_usd': float(r[3]) if r[3] is not None else None}
+                           'liquidity_param': float(r[2]) if r[2] is not None else None}
                     for r in cur.fetchall()}
             bases = {r: v['min_cumulative_sharpe'] for r, v in rows.items()}
             proposed = propose_values(bases, factor=factor)
