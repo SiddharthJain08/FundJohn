@@ -160,3 +160,37 @@ def test_post_summary_failopen(monkeypatch):
         raise OSError('network down')
     monkeypatch.setattr(urllib.request, 'urlopen', boom)
     oe._post_summary('hi', webhook_url='https://example/wh')   # must not raise
+
+
+def test_main_writes_cache_on_complete_sweep(tmp_path, monkeypatch):
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings',
+                        lambda **k: ({f'S{i}' for i in range(2000)} | {'AAPL'}, True, 5))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {f'S{i}' for i in range(2000)} | {'AAPL', 'KO'})
+    rc = oe.main([])
+    assert rc == 0
+    data = oe._load_prior_cache(tmp_path / 'cache.json')
+    assert data.get('AAPL') is True and 'KO' not in data
+    assert sum(1 for v in data.values() if v) == 2001
+
+
+def test_main_keeps_prior_on_incomplete_sweep(tmp_path, monkeypatch):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'PRIOR': True}, p)
+    monkeypatch.setattr(oe, 'CACHE_PATH', p)
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: (set(), False, 1))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {'PRIOR', 'X'})
+    rc = oe.main([])
+    assert rc == 1
+    assert oe._load_prior_cache(p) == {'PRIOR': True}   # untouched
+
+
+def test_main_keeps_prior_below_floor(tmp_path, monkeypatch):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'PRIOR': True}, p)
+    monkeypatch.setattr(oe, 'CACHE_PATH', p)
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: ({'AAPL'}, True, 3))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {'AAPL', 'PRIOR'})
+    rc = oe.main([])
+    assert rc == 1
+    assert oe._load_prior_cache(p) == {'PRIOR': True}   # below abs_floor → kept
