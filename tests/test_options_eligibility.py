@@ -51,3 +51,40 @@ def test_enumerate_incomplete_on_budget():
     optionable, completed, n = oe.enumerate_optionable_underlyings(
         fetch_page=_pager(pages), budget_s=10, clock=lambda: next(ticks))
     assert completed is False
+
+
+def test_fetch_contracts_page_parses_stdout(monkeypatch):
+    class _R:
+        returncode = 0
+        stdout = '{"option_contracts": [{"underlying_symbol": "AAPL"}], "next_page_token": null}'
+        stderr = ''
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    page = oe._fetch_contracts_page()
+    assert oe._parse_underlyings(page) == {'AAPL'}
+
+
+def test_fetch_contracts_page_raises_on_nonzero(monkeypatch):
+    class _R:
+        returncode = 1
+        stdout = ''
+        stderr = 'unauthorized'
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    import pytest
+    with pytest.raises(RuntimeError):
+        oe._fetch_contracts_page()
+
+
+def test_fetch_contracts_page_builds_pagetoken_args(monkeypatch):
+    seen = {}
+    class _R:
+        returncode = 0
+        stdout = '{"option_contracts": []}'
+        stderr = ''
+    def fake_run(args, **k):
+        seen['args'] = args
+        return _R()
+    monkeypatch.setattr(oe.subprocess, 'run', fake_run)
+    oe._fetch_contracts_page(page_token='abc', limit=500)
+    assert '--page-token' in seen['args'] and 'abc' in seen['args']
+    assert '--status' in seen['args'] and 'active' in seen['args']
+    assert '500' in seen['args']
