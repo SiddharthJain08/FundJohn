@@ -138,3 +138,25 @@ def test_decide_write_relative_floor_blocks_implausible_shrink():
     new = {f'S{i}': True for i in range(2000)}        # 2000 < 0.5*5000=2500
     ok, reason = oe.decide_write(new, prior, completed=True, abs_floor=1000)
     assert ok is False and 'floor' in reason
+
+
+def test_format_summary_contains_counts():
+    s = oe._format_summary({'eligible': 4200, 'universe': 13845, 'pages': 132,
+                            'added': 10, 'removed': 3, 'secs': 640.0, 'action': 'WROTE'})
+    assert '4200' in s and '13845' in s and '132' in s and 'WROTE' in s
+
+
+def test_post_summary_noop_when_no_url(monkeypatch):
+    called = {'n': 0}
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', lambda *a, **k: called.__setitem__('n', called['n'] + 1))
+    oe._post_summary('hi', webhook_url='')
+    assert called['n'] == 0
+
+
+def test_post_summary_failopen(monkeypatch):
+    import urllib.request
+    def boom(*a, **k):
+        raise OSError('network down')
+    monkeypatch.setattr(urllib.request, 'urlopen', boom)
+    oe._post_summary('hi', webhook_url='https://example/wh')   # must not raise
