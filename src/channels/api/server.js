@@ -529,8 +529,24 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
         if (n > cur._domN) { cur.dir = r.direction; cur._domN = n; }
       }
     }
+    // Restrict to the sizer's correlation-gate contributing strategies for this
+    // ticker (latest cycle): the alpha breakdown should reflect the strategies
+    // that actually drove the gate-passing cum_sharpe (migration 130), not every
+    // strategy that ever traded the ticker. Graceful fallback: when no cycle row
+    // exists yet (pre-accrual), keep the full set.
+    let contribSet = null;
+    try {
+      const cr = await dbQuery(
+        `SELECT strategies FROM cycle_contributing_strategies
+          WHERE ticker = $1 ORDER BY run_date DESC LIMIT 1`, [ticker]);
+      const arr = cr.rows[0] && cr.rows[0].strategies;
+      if (Array.isArray(arr) && arr.length) contribSet = new Set(arr);
+    } catch (_) { /* table absent / query failure → no filter (show all) */ }
+
     const baseline = ticker_mean_pct;
-    const strategies = [...byStrat.values()].map(s => {
+    const strategies = [...byStrat.values()]
+      .filter(s => (contribSet ? contribSet.has(s.strategy_id) : true))
+      .map(s => {
       const mean = s._sumX / s.n_trades;
       // Sample variance from rolled-up moments: σ² = (Σx² − n·μ²) / (n − 1)
       const variance = s.n_trades > 1
@@ -569,6 +585,7 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
       ticker, live_sharpe, days,
       ticker_mean_pct, ticker_n,
       strategies,
+      contributing_only: contribSet != null,   // filtered to corr-gate set?
       computed_at: new Date().toISOString(),
     };
     if (_tickerAlphaCache.size >= _TICKER_ALPHA_CAP) {

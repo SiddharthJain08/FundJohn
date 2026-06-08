@@ -304,6 +304,58 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
     return payload
 
 
+def _collapse_contributing(orders) -> dict:
+    """Collapse sized orders → {ticker: sorted unique contributing strategies}.
+    Drops synthetic close pseudo-strategies (e.g. __close_option_expiry__) and
+    orders with no ticker / no real strategies. Falls back to [strategy_id] when
+    contributing_strategies is absent. Pure — the DB upsert is separate."""
+    by_ticker: dict = {}
+    for o in orders:
+        tk = o.get('ticker')
+        strats = (o.get('contributing_strategies')
+                  or ([o.get('strategy_id')] if o.get('strategy_id') else []))
+        strats = [s for s in strats if s and not str(s).startswith('__')]
+        if not tk or not strats:
+            continue
+        by_ticker.setdefault(tk, set()).update(strats)
+    return {tk: sorted(s) for tk, s in by_ticker.items()}
+
+
+def _persist_contributing_strategies(run_date_str, orders) -> int:
+    """Upsert this cycle's per-ticker corr-gate contributing strategies into
+    cycle_contributing_strategies (read by the dashboard ticker-alpha). Best-
+    effort: never fails the cycle. Returns rows upserted."""
+    by_ticker = _collapse_contributing(orders)
+    if not by_ticker:
+        return 0
+    uri = os.environ.get('POSTGRES_URI')
+    if not uri:
+        return 0
+    n = 0
+    try:
+        conn = psycopg2.connect(uri)
+        cur = conn.cursor()
+        for tk, strats in by_ticker.items():
+            cur.execute(
+                """
+                INSERT INTO cycle_contributing_strategies
+                    (run_date, ticker, strategies, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (run_date, ticker) DO UPDATE SET
+                    strategies = EXCLUDED.strategies, updated_at = NOW()
+                """,
+                (run_date_str, tk, list(strats)),
+            )
+            n += 1
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f'[regime_blended_sizer_live] persist contributing_strategies '
+              f'failed (non-fatal): {e}')
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Phase 3 LIVE sizer — use regime_blended_sizer with real LLM confirmer',
@@ -444,6 +496,12 @@ def main():
     if not orders:
         print('[regime_blended_sizer_live] no orders after sizing; nothing to submit')
         return 0
+
+    # Persist the corr-gate contributing strategies per ticker so the dashboard
+    # ticker-alpha shows only contributing strategies (best-effort, non-fatal).
+    _ncs = _persist_contributing_strategies(run_date_str, orders)
+    if _ncs:
+        print(f'[regime_blended_sizer_live] persisted contributing strategies for {_ncs} ticker(s)')
 
     payload = _build_sized_payload(orders, handoff, equity=equity)
     ok = finalize_sized_payload(run_date_str, payload, source='regime_blended_sizer_live')
