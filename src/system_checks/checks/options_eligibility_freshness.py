@@ -13,7 +13,7 @@ _CACHE = Path(os.environ.get(
     'OPTIONS_ELIGIBILITY_CACHE',
     '/root/openclaw/data/.cache/options_eligibility.json'))
 _MAX_AGE_DAYS = 10
-_MIN_ELIGIBLE = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '1000'))
+_MIN_ELIGIBLE = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '400'))  # ~676 observed 2026-06-08
 
 
 @check(name='options_eligibility_freshness', tags=['strategies'], requires=[])

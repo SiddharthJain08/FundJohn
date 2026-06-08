@@ -31,7 +31,11 @@ CACHE_PATH = Path(os.environ.get(
     '/root/openclaw/data/.cache/options_eligibility.json'))
 PAGE_LIMIT = int(os.environ.get('OPTIONS_ELIGIBILITY_PAGE_LIMIT', '10000'))
 SOFT_BUDGET_S = int(os.environ.get('OPTIONS_ELIGIBILITY_BUDGET_S', '1800'))
-ABS_FLOOR = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '1000'))
+# Sanity floor: secondary guard (the primary guard is completed=False -> keep-prior).
+# Observed ~676 Alpaca-tradable underlyings on 2026-06-08 (option contracts --status
+# active is Alpaca's TRADABLE options set, a curated ~682 names, NOT all OPRA-listed).
+# 400 sits comfortably below 676 yet catches a degenerate near-empty sweep.
+ABS_FLOOR = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '400'))
 WEBHOOK_URL = os.environ.get('OPENCLAW_OPTIONS_ELIGIBILITY_WEBHOOK', '')
 
 
@@ -191,25 +195,29 @@ def main(argv=None) -> int:
     optionable, completed, pages = enumerate_optionable_underlyings(
         fetch_page=lambda tok: _fetch_contracts_page(tok, args.limit),
         budget_s=args.budget_s)
-    universe = _load_universe()
-    prior = _load_prior_cache(cache_path)
-    new = build_eligibility(optionable, universe)
-    should, reason = decide_write(new, prior, completed)
+    try:
+        universe = _load_universe()
+        prior = _load_prior_cache(cache_path)
+        new = build_eligibility(optionable, universe)
+        should, reason = decide_write(new, prior, completed)
 
-    prior_keys = {k for k, v in prior.items() if v}
-    stats = {
-        'eligible': len(new), 'universe': len(universe), 'pages': pages,
-        'added': len(set(new) - prior_keys), 'removed': len(prior_keys - set(new)),
-        'secs': time.time() - t0,
-        'action': 'WROTE' if should else f'KEPT-PRIOR ({reason})',
-    }
-    if should:
-        _atomic_write_cache(new, cache_path)
-    summary = _format_summary(stats)
-    log.info('options-eligibility %s', summary)
-    if not args.dry_run:
-        _post_summary(summary)
-    return 0 if should else 1
+        prior_keys = {k for k, v in prior.items() if v}
+        stats = {
+            'eligible': len(new), 'universe': len(universe), 'pages': pages,
+            'added': len(set(new) - prior_keys), 'removed': len(prior_keys - set(new)),
+            'secs': time.time() - t0,
+            'action': 'WROTE' if should else f'KEPT-PRIOR ({reason})',
+        }
+        if should:
+            _atomic_write_cache(new, cache_path)
+        summary = _format_summary(stats)
+        log.info('options-eligibility %s', summary)
+        if not args.dry_run:
+            _post_summary(summary)
+        return 0 if should else 1
+    except Exception as e:  # noqa: BLE001 — producer must return 0/1, never raise (spec §7)
+        log.error('options-eligibility failed (prior cache retained): %s', e)
+        return 1
 
 
 if __name__ == '__main__':

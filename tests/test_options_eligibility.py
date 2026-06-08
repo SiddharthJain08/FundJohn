@@ -224,3 +224,24 @@ def test_enumerate_aborts_on_repeating_token():
         return {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 'SAME'}
     optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
     assert completed is False          # repeated token -> abort, not infinite loop
+
+
+def test_main_writes_at_alpaca_tradable_scale(tmp_path, monkeypatch):
+    # ~676 Alpaca-tradable underlyings must clear the recalibrated floor (400);
+    # this would have FAILED under the old 1000 floor.
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings',
+                        lambda **k: ({f'U{i}' for i in range(676)}, True, 10))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {f'U{i}' for i in range(676)})
+    assert oe.main([]) == 0
+    assert sum(oe._load_prior_cache(tmp_path / 'cache.json').values()) == 676
+
+
+def test_main_returns_1_on_load_universe_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: ({'AAPL'}, True, 5))
+    def boom():
+        raise KeyError('POSTGRES_URI')
+    monkeypatch.setattr(oe, '_load_universe', boom)
+    assert oe.main([]) == 1                              # never raises; returns 1
+    assert not (tmp_path / 'cache.json').exists()        # nothing written
