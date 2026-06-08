@@ -1,0 +1,10 @@
+[Unit]
+Description=Sunday research code+backtest — Sun 14:00 America/New_York
+
+[Timer]
+OnCalendar=Sun *-*-* 14:00:00 America/New_York
+Persistent=true
+Unit=openclaw-sunday-research-code.service
+
+[Install]
+WantedBy=timers.target

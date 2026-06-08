@@ -1,0 +1,36 @@
+[Unit]
+Description=Sunday research INGEST — saturday-brain phases 0-4 (expand→sweep→rate→recurate→hunt)
+After=network-online.target postgresql.service
+Wants=network-online.target
+PartOf=johnbot.service
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+
+# Phases 0-4 of the consolidated research pipeline: source-expansion (Opus) →
+# arxiv/openalex/expanded_sources ingest → corpus rate → recurate → paperhunter
+# fan-out. Each candidate's hunter_result_json is persisted to
+# research_candidates, then the run stops with status='ingest_complete'. The
+# 14:00 ET "code" run (openclaw-sunday-research-code) re-loads those candidates
+# and runs Phases 5-8 (tier→code→backtest→stage→vault).
+#
+# Replaces the duplicate full-pipeline run that previously fired on BOTH Sat
+# 10:00 (openclaw-saturday-brain) and Sun 08:00 (openclaw-weekend-sunday).
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode saturday-brain --phase ingest
+
+StandardOutput=journal
+StandardError=journal
+
+# Ingest is market-independent and every child spawn is now bounded by a
+# kill-timeout (OPENCLAW_SUBAGENT_TIMEOUT_S / OPENCLAW_INGEST_TIMEOUT_S), so the
+# Phase-4 hunt hang that killed the 6h runs on 2026-06-06/07 cannot recur.
+# 10800 = 3 hours.
+TimeoutStartSec=10800
+
+[Install]
+WantedBy=multi-user.target

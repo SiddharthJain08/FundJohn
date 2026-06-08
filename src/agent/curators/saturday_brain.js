@@ -781,6 +781,28 @@ async function run(opts = {}) {
       cost_usd:         totalCost,
     });
 
+    // ── Ingest/Code split (Sunday 08:00 ET ingest vs 14:00 ET code) ──────────
+    // An 8AM "ingest" run stops here. Phase 4 (_hunt) has already persisted each
+    // candidate's hunter_result_json to research_candidates, so the 2PM "code"
+    // run (saturday_brain_finisher) re-loads them and runs the remaining
+    // Phases 5-8 (tier→code→stage→vault) idempotently. Splitting the heavy
+    // synchronous code+backtest phase off the ingest phase keeps each service
+    // well under its systemd ceiling and lets coding start after the market-
+    // independent ingest has fully settled. See docs/sunday-research-*.{service,timer}.
+    if (opts.stopAfter === 'hunt') {
+      await _query(
+        `UPDATE saturday_runs
+            SET status='ingest_complete', finished_at=NOW(), cost_usd=$2
+          WHERE run_id=$1`,
+        [runId, totalCost]
+      ).catch(() => {});
+      notify(`saturday_run ${runId.slice(0, 8)} INGEST complete (phases 0-4); `
+           + `${huntData.run} paperhunters → handoff to 2PM code run. $${totalCost.toFixed(2)}`);
+      return { run_id: runId, costUsd: totalCost, stopped_after: 'hunt',
+               paperhunters_run: huntData.run,
+               implementable_n: rateData.implementableN + recurateData.implementableN };
+    }
+
     // Phase 5
     tierData = await _tier(huntData.results, preflightData.capabilityMap, notify);
     await updatePhase('code', {

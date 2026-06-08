@@ -222,6 +222,21 @@ function strategyIdsByState(states, manifest = _loadManifest()) {
   return Object.keys(s).filter(sid => states.includes(s[sid].state));
 }
 
+/**
+ * Filter ids to those whose manifest state_since is within `days` of `nowMs`.
+ * Used by the weekly 2PM candidate review to scope to "recent additions" so the
+ * Opus spend stays bounded (vs auditing every candidate every week).
+ */
+function recentWithinDays(ids, days, manifest, nowMs) {
+  if (!days) return ids;
+  const s = manifest.strategies || {};
+  const cutoff = nowMs - days * 86400 * 1000;
+  return ids.filter(sid => {
+    const t = Date.parse((s[sid] && s[sid].state_since) || '');
+    return Number.isFinite(t) && t >= cutoff;
+  });
+}
+
 async function runReview({ strategyIds, mode = 'report', concurrency = 3,
                            query = _query, runOpus, notify = () => {}, manifest } = {}) {
   manifest = manifest || _loadManifest();
@@ -289,6 +304,7 @@ function renderReport(result) {
 module.exports = {
   selectConcerns, validateVerdict, resolveImplPath, fetchBacktest,
   buildPrompt, auditStrategy, runReview, renderReport, strategyIdsByState,
+  recentWithinDays,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────--
@@ -316,9 +332,11 @@ if (require.main === module) {
     const dryRun = !!arg('--dry-run', false);
 
     const manifest = _loadManifest();
+    const recentDays = arg('--recent-days') ? parseInt(arg('--recent-days'), 10) : null;
     let ids;
     if (idsArg && idsArg !== true) ids = String(idsArg).split(',').map(s => s.trim()).filter(Boolean);
     else ids = strategyIdsByState(String(stateArg).split(','), manifest);
+    if (recentDays) ids = recentWithinDays(ids, recentDays, manifest, Date.now());
     if (limit) ids = ids.slice(0, limit);
 
     console.error(`[code-review] auditing ${ids.length} strategies (state=${stateArg}, concurrency=${concurrency}, dryRun=${dryRun})`);

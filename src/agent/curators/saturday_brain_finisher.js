@@ -55,6 +55,25 @@ function getArg(name, fallback = null) {
   return next;
 }
 
+// 2PM "code" run closeout: flip today's paused 8AM ingest row
+// (status='ingest_complete') to 'completed' now that Phases 5-8 have run.
+// Gated on --mark-run-complete so ad-hoc finisher invocations don't touch it.
+async function _markRunComplete(dryRun, log) {
+  if (!getArg('--mark-run-complete') || dryRun) return;
+  try {
+    const r = await _query(
+      `UPDATE saturday_runs
+          SET status='completed', finished_at=NOW(), current_phase='done'
+        WHERE run_id = (SELECT run_id FROM saturday_runs
+                         WHERE status='ingest_complete'
+                         ORDER BY started_at DESC LIMIT 1)`
+    );
+    log(`mark-run-complete: ${r.rowCount} ingest_complete run → completed`);
+  } catch (e) {
+    log(`mark-run-complete: ${e.message}`);
+  }
+}
+
 async function main() {
   const dryRun       = !!getArg('--dry-run', false);
   const sinceIsoArg  = getArg('--since-iso');
@@ -92,7 +111,7 @@ async function main() {
     params,
   );
   log(`Found ${candidates.length} candidates with extracted hunter specs.`);
-  if (candidates.length === 0) { process.exit(0); }
+  if (candidates.length === 0) { await _markRunComplete(dryRun, log); process.exit(0); }
 
   // Filter out already-manifested strategies (idempotency).
   const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8'));
@@ -107,7 +126,7 @@ async function main() {
   });
   log(`After idempotency check: ${fresh.length} fresh.`);
 
-  if (fresh.length === 0) { process.exit(0); }
+  if (fresh.length === 0) { await _markRunComplete(dryRun, log); process.exit(0); }
 
   // Phase 5 — data tier filter.
   const capabilityMap = await dataTierFilter.buildCapabilityMap(_query);
@@ -232,6 +251,8 @@ async function main() {
     }
   }
   log(`Vault: ${paperNotes} paper, ${deferred} deferred, ${strategyNotes} strategy notes.`);
+
+  await _markRunComplete(dryRun, log);
 
   console.log(JSON.stringify({
     candidates_processed: fresh.length,
