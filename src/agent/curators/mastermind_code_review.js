@@ -36,6 +36,9 @@ const WORKSPACE     = path.join(OPENCLAW_DIR, 'workspaces/default');
 const VERDICTS        = new Set(['ok', 'fix_suggested', 'broken']);
 const DIAGNOSES       = new Set(['bug', 'genuine', 'n/a']);
 const DEFAULT_LOW_TRADE = parseInt(process.env.OPENCLAW_CODE_REVIEW_MIN_TRADES || '30', 10) || 30;
+const PYTHON          = process.env.PYTHON_BIN || 'python3';
+const BT_METRICS      = path.join(OPENCLAW_DIR, 'scripts/strategy_backtest_metrics.py');
+const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 
 // ── Pure decision logic (unit-tested) ───────────────────────────────────────
 
@@ -66,6 +69,30 @@ function validateVerdict(obj) {
     proposed_fix:           typeof obj.proposed_fix === 'string' ? obj.proposed_fix : null,
     confidence:             typeof obj.confidence === 'number' ? obj.confidence : null,
   };
+}
+
+/**
+ * Non-regression gate for the candidate gated-apply loop. Keep a re-backtested
+ * fix only if it is statistically valid (finite Sharpe, >= minTrades trades) AND
+ * does not regress Sharpe vs a HEALTHY baseline. A broken/no-trade `before`
+ * (trades < minTrades or non-finite Sharpe) → baseline -Infinity, so any valid
+ * fix counts as an improvement. Mirrors the weekend-coupling discipline
+ * (ΔSharpe gate + >=30-trade floor). Returns {keep, reason}.
+ */
+function decideKeep(before, after, opts = {}) {
+  const minTrades = opts.minTrades ?? DEFAULT_LOW_TRADE;
+  const eps = opts.epsilon ?? 0;
+  const aS = after ? after.sharpe : null;
+  const aT = (after && after.trades != null) ? Number(after.trades) : 0;
+  if (aS == null || !Number.isFinite(Number(aS))) return { keep: false, reason: 'after_invalid_sharpe' };
+  if (aT < minTrades) return { keep: false, reason: `after_trades ${aT}<${minTrades}` };
+  const beforeHealthy = before && before.trades != null && Number(before.trades) >= minTrades
+                        && before.sharpe != null && Number.isFinite(Number(before.sharpe));
+  const baseline = beforeHealthy ? Number(before.sharpe) : -Infinity;
+  if (Number(aS) + 1e-9 >= baseline - eps) {
+    return { keep: true, reason: beforeHealthy ? `Δsharpe=${(Number(aS) - baseline).toFixed(3)}` : 'before_unhealthy_baseline' };
+  }
+  return { keep: false, reason: `regresses sharpe ${baseline.toFixed(3)}→${Number(aS).toFixed(3)}` };
 }
 
 // ── IO helpers ──────────────────────────────────────────────────────────────
@@ -215,6 +242,94 @@ async function auditStrategy(strategyId, opts = {}) {
   };
 }
 
+// ── Gated auto-apply (candidates only) ───────────────────────────────────────
+
+async function proposeFix({ strategyId, code, verdict, runOpus }) {
+  runOpus = runOpus || require('./_opus_oneshot').runOneShot;
+  const issues = ((verdict && verdict.issues) || [])
+    .map(i => `[${i.severity}] ${i.kind}: ${i.detail}`).join('\n');
+  const prompt = [
+    `You are MasterMindJohn fixing a quant strategy's Python implementation.`,
+    `Strategy id: ${strategyId}`,
+    `Identified issue(s) to fix:`,
+    issues || (verdict && verdict.proposed_fix) || '(see code)',
+    verdict && verdict.proposed_fix ? `Proposed fix: ${verdict.proposed_fix}` : '',
+    ``,
+    `Current implementation:`, '```python', code, '```',
+    ``,
+    `Return the COMPLETE corrected file in ONE \`\`\`python fenced block and nothing`,
+    `else. Make the MINIMAL change that fixes the identified issue(s) — do NOT`,
+    `refactor unrelated code, rename anything, or alter parameters/thresholds`,
+    `beyond what the fix requires. Preserve the class name, \`id\`, and public API.`,
+  ].join('\n');
+  const res = await runOpus({
+    prompt, cwd: WORKSPACE,
+    disallowedTools: ['Bash', 'Write', 'Edit', 'NotebookEdit'], timeoutMs: 300_000,
+  });
+  const m = /```(?:python)?\s*([\s\S]*?)```/i.exec(res.text || '');
+  return {
+    code: m ? m[1].replace(/^\n/, '') : null,
+    costUsd: res.costUsd || 0,
+    error: res.error || (m ? null : 'no_python_block'),
+  };
+}
+
+async function backtestMetrics(implPath, { commit = false } = {}) {
+  const timeoutMs = (parseInt(process.env.OPENCLAW_BACKTEST_TIMEOUT_S || '5400', 10) || 5400) * 1000;
+  const res = await spawnWithTimeout(
+    PYTHON, [BT_METRICS, '--strategy-file', implPath, ...(commit ? ['--commit'] : [])],
+    { cwd: OPENCLAW_DIR, env: { ...process.env, OPENCLAW_DIR }, stdio: ['ignore', 'pipe', 'pipe'] },
+    { timeoutMs }
+  );
+  if (res.timedOut) return { error: 'backtest_timeout' };
+  if (res.code !== 0) return { error: `backtest_exit_${res.code}: ${(res.stderr || '').slice(-300)}` };
+  const line = (res.stdout || '').trim().split('\n').filter(Boolean).pop();
+  try { return JSON.parse(line); } catch { return { error: 'metrics_parse_failed', raw: (res.stdout || '').slice(-200) }; }
+}
+
+/**
+ * Gated auto-apply for ONE candidate: propose fix → write → EPHEMERAL backtest →
+ * decideKeep → keep (persist backtest + leave new code) or revert (restore .py).
+ * HARD-refuses live strategies. dryRun previews (propose+backtest+decide, no keep).
+ */
+async function applyAndValidate(finding, opts = {}) {
+  const manifest = opts.manifest || _loadManifest();
+  const dryRun   = !!opts.dryRun;
+  const sid = finding.strategy_id;
+  const entry = (manifest.strategies || {})[sid];
+  if (!entry) return { strategy_id: sid, applied: false, error: 'not_in_manifest' };
+  if (entry.state === 'live') return { strategy_id: sid, applied: false, error: 'refuse_live' };
+  const implPath = resolveImplPath(sid, manifest);
+  if (!implPath) return { strategy_id: sid, applied: false, error: 'impl_not_found' };
+
+  const original = fs.readFileSync(implPath, 'utf8');
+  const before = { trades: finding.total_trades, sharpe: finding.sharpe };
+  const prop = await proposeFix({ strategyId: sid, code: original, verdict: finding.verdict, runOpus: opts.runOpus });
+  if (!prop.code) return { strategy_id: sid, applied: false, error: prop.error || 'no_fix', costUsd: prop.costUsd };
+
+  let after = null, decision = null, kept = false, err = null;
+  try {
+    fs.writeFileSync(implPath, prop.code);
+    after = await backtestMetrics(implPath, { commit: false });
+    if (after.error) { err = after.error; }
+    else {
+      decision = decideKeep(before, after);
+      if (decision.keep && !dryRun) {
+        const persisted = await backtestMetrics(implPath, { commit: true });   // → panel rebuild
+        kept = !persisted.error;
+        if (persisted.error) err = `persist_failed:${persisted.error}`;
+      }
+    }
+  } finally {
+    if (!kept) { try { fs.writeFileSync(implPath, original); } catch (_) {} }  // revert
+  }
+  return {
+    strategy_id: sid, applied: kept, dryRun,
+    before, after: (after && !after.error) ? { trades: after.trades, sharpe: after.sharpe } : null,
+    decision, error: err, costUsd: prop.costUsd || 0,
+  };
+}
+
 // ── Driver ──────────────────────────────────────────────────────────────────
 
 function strategyIdsByState(states, manifest = _loadManifest()) {
@@ -323,6 +438,7 @@ module.exports = {
   selectConcerns, validateVerdict, resolveImplPath, fetchBacktest,
   buildPrompt, auditStrategy, runReview, renderReport, strategyIdsByState,
   recentWithinDays, lowTradeCandidateIds,
+  decideKeep, proposeFix, backtestMetrics, applyAndValidate,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────--
@@ -375,6 +491,24 @@ if (require.main === module) {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, report);
     console.error(`[code-review] wrote ${abs}  (cost $${result.totalCost.toFixed(2)})`);
+
+    // Gated auto-apply (CANDIDATES ONLY — applyAndValidate hard-refuses live).
+    // --apply persists kept fixes (+ dashboard panel); --apply --dry-run previews.
+    const applyResults = [];
+    if (arg('--apply', false)) {
+      const applyDry = !!arg('--dry-run', false);
+      const fixables = result.findings.filter(f => f.verdict
+        && (f.verdict.verdict === 'fix_suggested' || f.verdict.verdict === 'broken'));
+      console.error(`[code-review] --apply: ${fixables.length} fixable candidate(s)`
+        + `${applyDry ? ' (DRY RUN — no persist)' : ''} — backtests run SEQUENTIALLY`);
+      for (const f of fixables) {                       // sequential: backtests are CPU-heavy (2-core box)
+        if (f.state === 'live') { console.error(`[code-review]   skip ${f.strategy_id} (live — never auto-edited)`); continue; }
+        const r = await applyAndValidate(f, { manifest, dryRun: applyDry });
+        applyResults.push(r);
+        console.error(`[code-review]   ${f.strategy_id}: applied=${r.applied}`
+          + ` ${r.decision ? `(${r.decision.reason})` : `[${r.error || '?'}]`}`);
+      }
+    }
     console.log(JSON.stringify({
       reviewed: result.findings.length,
       out: abs,
@@ -383,6 +517,10 @@ if (require.main === module) {
         const k = f.verdict ? f.verdict.verdict : 'unparsed';
         a[k] = (a[k] || 0) + 1; return a;
       }, {}),
+      applied: applyResults.length ? {
+        kept:    applyResults.filter(r => r.applied).map(r => r.strategy_id),
+        rejected: applyResults.filter(r => !r.applied).map(r => ({ id: r.strategy_id, why: r.decision ? r.decision.reason : r.error })),
+      } : undefined,
     }, null, 2));
     process.exit(0);
   })().catch((e) => { console.error('[code-review] FATAL:', e.message, e.stack); process.exit(1); });
