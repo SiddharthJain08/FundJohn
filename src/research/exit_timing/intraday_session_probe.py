@@ -59,3 +59,31 @@ def verdict(primary_mean: float, primary_t: float,
     if primary_mean > 0:
         return "CLEAR-WITH-CAUTION"
     return "CLEAR-TO-SHIP-GATED"
+
+
+def _is_equity(ticker: str) -> bool:
+    """Exclude indices (^...), crypto (-USD), fx (=X), pairs (/) from the
+    equity universe used for SECONDARY and the M2 same-day baseline."""
+    t = str(ticker)
+    return not (t.startswith("^") or "-USD" in t or "=" in t or "/" in t)
+
+
+def prep_prices(prices: pd.DataFrame) -> pd.DataFrame:
+    """Equity-only rows with a finite intraday_return = (close-open)/open."""
+    df = prices[["ticker", "date", "open", "close"]].copy()
+    df = df[df["ticker"].map(_is_equity)]
+    df = df[df["open"] > 0]
+    df["intraday_return"] = (df["close"] - df["open"]) / df["open"]
+    df = df[df["intraday_return"].notna()]
+    return df[["ticker", "date", "intraday_return"]].reset_index(drop=True)
+
+
+def attach_regime_bucket(df: pd.DataFrame, regimes: pd.DataFrame) -> pd.DataFrame:
+    out = df.merge(regimes[["date", "regime"]], on="date", how="left")
+    out["bucket"] = out["date"].map(half_year_bucket)
+    return out
+
+
+def attach_primary(primary: pd.DataFrame, prices_prepped: pd.DataFrame) -> pd.DataFrame:
+    """Inner-join PRIMARY (ticker,date) to its intraday_return."""
+    return primary.merge(prices_prepped, on=["ticker", "date"], how="inner")
