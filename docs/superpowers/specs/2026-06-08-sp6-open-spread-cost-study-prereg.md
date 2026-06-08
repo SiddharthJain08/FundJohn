@@ -41,9 +41,17 @@ the marginal cost of moving to the open is the **incremental half-spread**:
   default sip; paced + 429-retry; counts-only progress, no spread values).
 - Per quote: `half_spread_bps = ((ap − bp)/2) / ((ap + bp)/2) · 1e4`. Drop
   crossed/locked/non-positive quotes (`ap ≤ bp` or `ap≤0` or `bp≤0`).
-- Per (ticker, exit_date, window): **median** half_spread over the window's
-  quotes (robust to transient wide first prints). Require **≥3 valid quotes**
-  in the window, else that window is VOID for that event.
+- Per (ticker, exit_date, window): **median** half_spread over the **first
+  K=20 VALID quotes at/after the window-start time** (pull `--limit 50`; the
+  09:31:00 / 15:55:00 start with the +1min end as an upper bound). A FIXED
+  COUNT (not "all quotes in 60s") is required for comparability: `--limit 1000`
+  over a full minute truncates the two windows to *different physical
+  durations* (liquid open ~19s vs close ~1.3s) because quote density differs,
+  biasing `incr` by ~the size of the verdict gates. Same K both windows
+  measures "the spread right at submit time" comparably and avoids pagination.
+  Require **≥3 valid quotes** (after dropping crossed/locked), else VOID.
+  [AMENDMENT 2026-06-08, pre-pull: was "median over the window's quotes";
+  corrected after quality review found the limit-1000 time-truncation bias.]
 - Keep only events with BOTH windows valid → `incr = open − close`.
 
 ## 3. Pre-committed readout & verdict
