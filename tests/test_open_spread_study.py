@@ -99,6 +99,43 @@ def test_window_median_all_invalid_returns_none():
     assert m.window_median_half_spread(quotes) is None
 
 
+def test_window_median_first_k_valid_not_all():
+    """30 valid quotes; first K=20 median (10.5) != all-30 median (15.5).
+
+    Quote i (1-indexed) has half_spread = exactly i bps:
+      ap = 10000+i, bp = 10000-i -> mid=10000, spread=2i, half=i, half_bps=i/10000*1e4=i
+
+    first-20 valid: i=1..20, sorted -> [1,2,...,20], median = (10+11)/2 = 10.5
+    all-30 valid:   i=1..30, sorted -> [1,2,...,30], median = (15+16)/2 = 15.5
+
+    The test asserts 10.5, confirming K-truncation is active and discriminating.
+    """
+    quotes = [{"ap": 10000 + i, "bp": 10000 - i} for i in range(1, 31)]
+    result = m.window_median_half_spread(quotes)
+    assert result is not None
+    # first-K=20 valid: median of [1..20] = 10.5
+    assert abs(result - 10.5) < 1e-9, (
+        f"Expected 10.5 (first-20 median), got {result}. "
+        f"If got 15.5, K-truncation is NOT working."
+    )
+
+
+def test_window_median_first_k_valid_25_quotes():
+    """25 valid quotes; first K=20 median is 10.5, all-25 median would be 13.
+
+    Same quote construction: quote i -> half_spread = i bps.
+    first-20 valid: i=1..20 -> median = 10.5
+    all-25 valid:   i=1..25 -> median = 13.0
+    Assert 10.5 (first-K semantics).
+    """
+    quotes = [{"ap": 10000 + i, "bp": 10000 - i} for i in range(1, 26)]
+    result = m.window_median_half_spread(quotes)
+    assert result is not None
+    assert abs(result - 10.5) < 1e-9, (
+        f"Expected 10.5 (first-20 median), got {result}."
+    )
+
+
 # ── deterministic_sample ──────────────────────────────────────────────────────
 
 def test_deterministic_sample_len_le_n_returns_all():
@@ -355,6 +392,44 @@ def test_pull_quotes_nonzero_exit_returns_none():
             result = runner._pull_quotes("AAPL", "2025-07-01T13:31:00Z", "2025-07-01T13:32:00Z")
 
     assert result is None
+
+
+def test_pull_quotes_null_stdout_returns_empty_list():
+    """CLI emits the literal string 'null' (most common empty-window response) -> [].
+
+    The Alpaca CLI writes 'null' on exit 0 when no quotes exist in the window.
+    The runner must return [] (not None, not crash) so the caller can distinguish
+    'empty window' from 'fetch failure'.
+    """
+    runner = _load_runner()
+    mock_result = _mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "null"
+
+    with _mock.patch("subprocess.run", return_value=mock_result):
+        result = runner._pull_quotes("AAPL", "2025-07-01T13:31:00Z", "2025-07-01T13:32:00Z")
+
+    assert result == [], f"Expected [], got {result!r}"
+
+
+def test_pull_quotes_nonzero_exit_retries_exactly_4_times():
+    """Persistent nonzero exit triggers exactly 4 subprocess calls (1 + 3 retries).
+
+    backoffs = [1, 2, 4] -> 3 retries after the initial attempt -> 4 total calls.
+    """
+    runner = _load_runner()
+    mock_result = _mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+
+    with _mock.patch("subprocess.run", return_value=mock_result) as mock_run:
+        with _mock.patch("time.sleep"):
+            result = runner._pull_quotes("AAPL", "2025-07-01T13:31:00Z", "2025-07-01T13:32:00Z")
+
+    assert result is None
+    assert mock_run.call_count == 4, (
+        f"Expected 4 subprocess calls (1 initial + 3 retries), got {mock_run.call_count}"
+    )
 
 
 def test_compute_event_valid_event_from_mocked_quotes():

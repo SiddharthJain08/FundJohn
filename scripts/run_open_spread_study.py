@@ -69,10 +69,12 @@ def _load_exits(uri: str, start_date: str, end_date: str) -> dict[str, list]:
 # ── CLI quote pull ────────────────────────────────────────────────────────────
 
 def _pull_quotes(symbol: str, start_iso: str, end_iso: str,
-                 limit: int = 1000) -> list[dict] | None:
+                 limit: int = 50) -> list[dict] | None:
     """Pull SIP NBBO quotes via Alpaca CLI. Returns list of quote dicts or None on failure.
 
-    CLI: alpaca data quotes --symbol T --start S --end E --limit 1000 --jq .quotes --quiet
+    CLI: alpaca data quotes --symbol T --start S --end E --limit 50 --jq .quotes --quiet
+    limit=50 raw quotes is enough to yield >=20 valid after dropping crossed/locked;
+    stays on 1 page (no pagination). 50 raw >> K_QUOTES=20 valid needed.
     Returns a list (may be empty); None on any parse/exec failure after retries.
     """
     cmd = [

@@ -21,6 +21,7 @@ import numpy as np
 LONG_GROSS_EDGE_BPS: float = 0.098
 SHORT_GROSS_EDGE_BPS: float = 1.940
 MIN_QUOTES_PER_WINDOW: int = 3
+K_QUOTES: int = 20
 SAMPLE_PER_DIR: int = 2000
 MIN_VALID_EVENTS: int = 300
 SHIP_SHORT_BPS: float = 0.5
@@ -44,14 +45,20 @@ def half_spread_bps(ap: float, bp: float) -> Optional[float]:
     return ((ap - bp) / 2.0) / mid * 1e4
 
 
-def window_median_half_spread(quotes: list[dict]) -> Optional[float]:
-    """Median half-spread across a window's quotes.
+def window_median_half_spread(quotes: list[dict], k: int = K_QUOTES) -> Optional[float]:
+    """Median half-spread across the first k valid quotes in a window.
 
-    quotes: list of dicts with 'ap' (ask price) and 'bp' (bid price).
-    Returns None if fewer than MIN_QUOTES_PER_WINDOW valid quotes.
+    quotes: list of dicts with 'ap' (ask price) and 'bp' (bid price),
+            in arrival order.
+    k: maximum number of valid quotes to consume (default K_QUOTES=20).
+       Processes quotes IN ORDER, dropping crossed/locked/invalid, and
+       collects the first k valid half-spreads.
+    Returns None if fewer than MIN_QUOTES_PER_WINDOW valid quotes found.
     """
     valids = []
     for q in quotes:
+        if len(valids) >= k:
+            break
         hs = half_spread_bps(q.get("ap", 0), q.get("bp", 0))
         if hs is not None:
             valids.append(hs)
