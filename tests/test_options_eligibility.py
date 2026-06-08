@@ -194,3 +194,33 @@ def test_main_keeps_prior_below_floor(tmp_path, monkeypatch):
     rc = oe.main([])
     assert rc == 1
     assert oe._load_prior_cache(p) == {'PRIOR': True}   # below abs_floor → kept
+
+
+def test_fetch_contracts_page_raises_on_rc0_error_envelope(monkeypatch):
+    class _R:
+        returncode = 0
+        stdout = '{"code":0,"error":"authentication required","hint":"","status":0}'
+        stderr = ''
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    import pytest
+    with pytest.raises(RuntimeError):
+        oe._fetch_contracts_page()
+
+
+def test_enumerate_incomplete_on_midsweep_error_keeps_partial():
+    calls = {'n': 0}
+    def fetch(_token):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 't1'}
+        raise RuntimeError('envelope error')
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
+    assert completed is False          # mid-sweep failure -> prior kept by caller
+    assert 'AA' in optionable          # partial accumulation, but not committed
+
+
+def test_enumerate_aborts_on_repeating_token():
+    def fetch(_token):
+        return {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 'SAME'}
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
+    assert completed is False          # repeated token -> abort, not infinite loop

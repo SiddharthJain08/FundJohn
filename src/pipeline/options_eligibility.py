@@ -50,12 +50,20 @@ def _fetch_contracts_page(page_token: str | None = None, limit: int = PAGE_LIMIT
             '--limit', str(limit)]
     if page_token:
         args.extend(['--page-token', page_token])
-    res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    try:
+        res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        _record_call(False, f'subprocess: {e}')
+        raise
     if res.returncode != 0:
         _record_call(False, f'rc={res.returncode}: {res.stderr.strip()[:160]}')
         raise RuntimeError(f'alpaca option contracts rc={res.returncode}: {res.stderr.strip()}')
+    page = json.loads(res.stdout)
+    if page.get('error'):            # rc=0 error envelope -> treat as failure
+        _record_call(False, str(page.get('error'))[:160])
+        raise RuntimeError(f'alpaca option contracts envelope error: {page.get("error")}')
     _record_call(True)
-    return json.loads(res.stdout)
+    return page
 
 
 def _parse_underlyings(page: dict) -> set[str]:
@@ -78,6 +86,7 @@ def enumerate_optionable_underlyings(fetch_page=_fetch_contracts_page,
     token = None
     deadline = clock() + budget_s
     pages = 0
+    seen: set[str] = set()
     while True:
         if clock() > deadline:
             log.warning('sweep budget exceeded after %d pages', pages)
@@ -92,6 +101,10 @@ def enumerate_optionable_underlyings(fetch_page=_fetch_contracts_page,
         token = page.get('next_page_token')
         if not token:
             return optionable, True, pages
+        if token in seen:
+            log.warning('repeating page token %r — aborting sweep', token)
+            return optionable, False, pages
+        seen.add(token)
 
 
 def _load_universe() -> set[str]:
