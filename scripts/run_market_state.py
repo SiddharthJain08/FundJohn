@@ -415,12 +415,30 @@ output = {
     'notes':                     f'Confidence override → TRANSITIONING' if effective_state != current_state else '',
 }
 
+# Dated archive — always written (the daily diagnostic of record).
 with open(MODEL_DIR / f'regime_{TODAY}.json', 'w') as f:
     json.dump(output, f, indent=2)
-with open(MODEL_DIR / 'regime_latest.json', 'w') as f:
-    json.dump(output, f, indent=2)
-with open(MODEL_DIR / 'latest.json', 'w') as f:
-    json.dump(output, f, indent=2)
+
+# 2026-06-08: the intraday HMM is the SOLE regime authority. By default the
+# daily detector is diagnostic-only — it no longer writes the regime-of-record
+# (regime_latest.json / market_regime) that the circuit breaker, sizer, engine
+# and dashboard consume. It had emitted a false CRISIS off a stale Friday VIX
+# close (21.51) while the intraday primary read LOW_VOL conf~1.0 at the same
+# vol, false-firing the breaker and threatening to size the book at 15%.
+# The dated archive above + regime_log.csv below remain the daily record.
+# Set OPENCLAW_DAILY_REGIME_AUTHORITY=1 to restore legacy authoritative
+# behavior (emergency rollback only).
+_DAILY_REGIME_AUTHORITY = os.environ.get('OPENCLAW_DAILY_REGIME_AUTHORITY', '0') == '1'
+if _DAILY_REGIME_AUTHORITY:
+    with open(MODEL_DIR / 'regime_latest.json', 'w') as f:
+        json.dump(output, f, indent=2)
+    with open(MODEL_DIR / 'latest.json', 'w') as f:
+        json.dump(output, f, indent=2)
+    print(f'  regime_latest.json written (DAILY-AUTHORITY override) → {effective_state}')
+else:
+    print(f'  [diagnostic-only] daily computed state={effective_state} '
+          f'(VIX={today_features["vix"]:.2f}) — NOT written to regime_latest.json; '
+          f'intraday HMM owns the regime-of-record (archive+log only)')
 
 log_row = f"{TODAY},{effective_state},{stress_score},{round(roro_score,1)},{confidence:.3f},{len(candidates)},{regime_change_alert}\n"
 with open(MODEL_DIR / 'regime_log.csv', 'a') as f:
@@ -434,7 +452,7 @@ import psycopg2 as _psycopg2
 import psycopg2.extras as _psycopg2_extras
 
 _db_uri = os.environ.get('POSTGRES_URI')
-if _db_uri:
+if _db_uri and _DAILY_REGIME_AUTHORITY:
     try:
         # CAST every numpy scalar to a native Python float before handing
         # it to psycopg2 — np.float64 reprs as "np.float64(18.02)" which
@@ -474,6 +492,9 @@ if _db_uri:
         print(f'  DB appended: market_regime → {effective_state} (VIX={_vix_curr:.2f}, pct={_vix_pct_file:.1f}%)')
     except Exception as e:
         print(f'  [WARN] DB write failed: {e}')
+elif _db_uri:
+    print('  [diagnostic-only] skipping market_regime DB write — intraday HMM '
+          'owns the regime-of-record (set OPENCLAW_DAILY_REGIME_AUTHORITY=1 to override)')
 else:
     print('  [WARN] POSTGRES_URI not set — skipping DB sync')
 

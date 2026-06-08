@@ -281,12 +281,58 @@ def _close_symbol(symbol: str, qty: float,
     invocation on `_market_is_open()` already). Behaviour no longer
     depends on it — there is only one (RTH) close path. New callers
     should omit it.
+
+    Cancel-then-close (2026-06-08): a position whose qty is fully reserved
+    by a resting protective order (e.g. a GTC OCO take-profit on a short)
+    makes `position close` 403 with code 40310000 "insufficient qty
+    available". We try the close first and only on THAT error cancel the
+    symbol's open orders and retry once — so a position that closes cleanly
+    keeps its brackets, and we strip protection only when it actually
+    blocks the flatten (which is the deliberate intent of a flatten).
     """
     _ = market_open  # intentionally unused; see docstring
     ok, payload, err = _run_cli(
         ['position', 'close', '--symbol-or-asset-id', symbol], timeout=15,
     )
-    return ok, (payload if ok else (err or {}))
+    if ok:
+        return True, payload
+
+    detail = err or {}
+    if _is_insufficient_qty(detail) and _cancel_symbol_orders(symbol) > 0:
+        ok2, payload2, err2 = _run_cli(
+            ['position', 'close', '--symbol-or-asset-id', symbol], timeout=15,
+        )
+        return ok2, (payload2 if ok2 else (err2 or {}))
+    return False, detail
+
+
+def _is_insufficient_qty(detail: dict) -> bool:
+    """True if a close failure means the position qty is held by resting
+    orders (Alpaca code 40310000 / "insufficient qty available")."""
+    if not isinstance(detail, dict):
+        return False
+    if detail.get('code') == 40310000:
+        return True
+    return 'insufficient qty' in str(detail.get('error') or '').lower()
+
+
+def _cancel_symbol_orders(symbol: str) -> int:
+    """Cancel every OPEN order resting on `symbol`, releasing qty held by a
+    protective GTC/OCO so a subsequent `position close` isn't 403'd. Returns
+    the count successfully cancelled. Best-effort: per-order CLI failures are
+    counted out, not raised — the close attempt + its audit are the real
+    outcome signal."""
+    n = 0
+    for o in _load_open_orders():
+        if not isinstance(o, dict) or o.get('symbol') != symbol:
+            continue
+        oid = o.get('id')
+        if not oid:
+            continue
+        ok, _res = _cancel_order(oid)
+        if ok:
+            n += 1
+    return n
 
 
 # Alpaca order statuses considered terminal for polling purposes. Note that

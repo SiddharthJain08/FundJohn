@@ -61,16 +61,26 @@ def _regime_params_seeded():
 
 @check(name='regime_freshness_db', tags=['regime'], requires=['db'])
 def _regime_freshness_db():
-    """market_regime table updated within last 26h."""
+    """Intraday regime producer liveness.
+
+    2026-06-08: the intraday HMM is the sole regime authority and writes
+    intraday_regime_states every 5 min during RTH (9:00-19:55 ET Mon-Fri,
+    including carry-forward ticks). market_regime now only gets a row on a
+    confirmed transition, so its row-age is no longer a freshness signal —
+    this check measures the intraday producer instead. Thresholds sit above
+    the max expected gap (a weekend, Fri 19:55 ET -> Mon 09:00 ET ~= 61h) and
+    below the engine's 80h stale-gate: WARN >66h, FAIL >72h."""
     with _pg() as conn, conn.cursor() as cur:
-        cur.execute("SELECT state, updated_at FROM market_regime ORDER BY updated_at DESC LIMIT 1")
+        cur.execute("SELECT state, ts_utc FROM intraday_regime_states ORDER BY ts_utc DESC LIMIT 1")
         row = cur.fetchone()
         if not row:
-            return Status.FAIL, 'no market_regime rows'
-        state, updated_at = row
-    age_h = (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600
+            return Status.FAIL, 'no intraday_regime_states rows'
+        state, ts_utc = row
+    if ts_utc.tzinfo is None:
+        ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - ts_utc).total_seconds() / 3600
     if age_h > 72:
-        return Status.FAIL, f'last regime update was {age_h:.1f}h ago ({state})'
-    if age_h > 26:
-        return Status.WARN, f'last regime update {age_h:.1f}h ago ({state})'
-    return Status.PASS, f'{state}, updated {age_h:.1f}h ago'
+        return Status.FAIL, f'intraday regime producer stalled — last tick {age_h:.1f}h ago ({state})'
+    if age_h > 66:
+        return Status.WARN, f'intraday regime producer last tick {age_h:.1f}h ago ({state})'
+    return Status.PASS, f'{state}, last intraday tick {age_h:.1f}h ago'

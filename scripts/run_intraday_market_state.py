@@ -149,8 +149,11 @@ def _carry_forward_tick(conn, features: dict) -> dict:
     filters to RTH). Instead, carry the last persisted state forward with
     its streak extended so hysteresis lookback and the dashboard duration
     stay continuous across the closed window. No transition can fire and
-    `_sync_regime_to_consumers` never runs, so a frozen-quote artifact can
-    no longer overwrite market_regime / regime_latest.json overnight.
+    no market_regime row is appended, so a frozen-quote artifact can never
+    overwrite the regime-of-record overnight. regime_latest.json IS still
+    refreshed each tick — but with the SETTLED carried state, not the
+    artifact — so the engine's staleness gate stays satisfied across the
+    weekend now that the daily detector no longer writes it.
     """
     history = _last_n_states(conn, LOOKBACK_FOR_CONFIRMED)
     if history:
@@ -180,6 +183,14 @@ def _carry_forward_tick(conn, features: dict) -> dict:
         )
     except Exception as e:
         logger.warning('state persist failed: %s', e)
+    # Keep regime_latest.json fresh (intraday is the sole authority). The
+    # carried state is a settled regime, so no artifact reaches the file.
+    _refresh_regime_file(
+        state=carried, confidence=carried_conf,
+        vix=features.get('vix_synth_30d'),
+        prior_state=carried, state_probs=None,
+        ts_utc=features['ts_utc'], transition_tag=None,
+    )
     return {
         'action':         'tick',
         'carry_fwd':      True,
@@ -313,6 +324,74 @@ def _enrich_with_daily_derived(features: dict) -> dict:
     return features
 
 
+def _refresh_regime_file(
+    *,
+    state: str,
+    confidence: float,
+    vix,
+    prior_state: str | None,
+    state_probs=None,
+    ts_utc,
+    transition_tag: str | None = None,
+) -> None:
+    """Merge-write regime_latest.json so engine.load_regime()'s 80h staleness
+    gate stays satisfied with the intraday detector as the SOLE regime
+    authority (2026-06-08: daily run_market_state.py no longer writes the
+    regime-of-record — it had emitted a false CRISIS off a stale Friday VIX
+    close while the intraday primary read LOW_VOL conf~1.0).
+
+    Called on EVERY tick — scored, carry-forward, and transition — to keep
+    the file's mtime fresh across the option-closed window (Fri 19:55 ET →
+    Mon 09:00 ET ~= 61h < 80h). A tick whose `state` is not one of the four
+    real regimes (UNKNOWN bootstrap, NaN-VIX skip) advances the freshness
+    marker but PRESERVES the file's last good `state`: engine.load_regime()
+    does `state = j.get('state') or 'HIGH_VOL'`, so writing UNKNOWN would
+    mis-route eligibility and risk the empty-signals orphan-close blowout.
+    """
+    regime_file = MODEL_DIR / 'regime_latest.json'
+    try:
+        existing = {}
+        if regime_file.exists():
+            try:
+                existing = json.loads(regime_file.read_text())
+            except json.JSONDecodeError:
+                existing = {}
+
+        updated = dict(existing)
+        if state in _STATE_RANK:                       # one of the four real regimes
+            updated['state']     = state
+            updated['state_raw'] = state
+            updated['confidence'] = round(float(confidence), 4)
+            updated['prior_state'] = prior_state
+            if state_probs is not None:
+                pm = {}
+                try:
+                    for i, p in enumerate(state_probs):
+                        pm[STATE_NAMES_BY_RANK.get(i, f's{i}')] = round(float(p), 4)
+                except Exception:
+                    pm = {}
+                if pm:
+                    updated['state_probabilities'] = pm
+            if vix is not None:
+                try:
+                    updated['vix_level'] = round(float(vix), 2)
+                except (TypeError, ValueError):
+                    pass
+
+        # Freshness markers advance on EVERY call (even UNKNOWN) so the
+        # engine's mtime-based stale-gate is satisfied across closed windows.
+        updated['intraday_source']     = 'intraday_hmm'
+        updated['intraday_updated_at'] = str(ts_utc)
+        updated['intraday_transition'] = transition_tag
+
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = regime_file.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(updated, indent=2))
+        os.replace(tmp, regime_file)
+    except Exception as e:
+        logger.warning('regime file refresh failed: %s', e)
+
+
 def _sync_regime_to_consumers(
     *,
     conn,
@@ -375,35 +454,14 @@ def _sync_regime_to_consumers(
     except Exception as e:
         logger.warning('regime sync: market_regime write failed: %s', e)
 
-    regime_file = MODEL_DIR / 'regime_latest.json'
-    try:
-        existing = {}
-        if regime_file.exists():
-            try:
-                existing = json.loads(regime_file.read_text())
-            except json.JSONDecodeError:
-                existing = {}
-
-        updated = dict(existing)
-        updated['state']                = new_state
-        updated['state_raw']            = new_state
-        updated['confidence']           = round(float(confidence), 4)
-        updated['prior_state']          = prior_state
-        if state_probs_map:
-            updated['state_probabilities'] = state_probs_map
-        if vix_curr is not None:
-            updated['vix_level'] = vix_curr
-        updated['intraday_source']      = 'intraday_hmm'
-        updated['intraday_updated_at']  = str(ts_utc)
-        updated['intraday_transition']  = transition_tag
-
-        MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = regime_file.with_suffix('.json.tmp')
-        tmp.write_text(json.dumps(updated, indent=2))
-        os.replace(tmp, regime_file)
-        logger.info('regime sync: regime_latest.json updated → %s', new_state)
-    except Exception as e:
-        logger.warning('regime sync: regime_latest.json write failed: %s', e)
+    # The file half of the sync is the shared per-tick refresh: it merge-writes
+    # regime_latest.json from the (raw) state_probs + vix this transition saw.
+    _refresh_regime_file(
+        state=new_state, confidence=confidence, vix=vix_curr,
+        prior_state=prior_state, state_probs=state_probs,
+        ts_utc=ts_utc, transition_tag=transition_tag,
+    )
+    logger.info('regime sync: regime_latest.json updated → %s', new_state)
 
 
 def _state_from_hmm(model, features: dict) -> tuple[str, float, np.ndarray]:
@@ -807,6 +865,28 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         )
     except Exception as e:
         logger.warning('state persist failed: %s', e)
+
+    # Intraday is the sole regime authority: refresh regime_latest.json every
+    # tick so engine.load_regime()'s staleness gate stays satisfied (the daily
+    # detector no longer writes it). On a confirmed transition _sync already
+    # wrote the same content above; this idempotent re-write also guards
+    # freshness if that write failed. The helper preserves the last good state
+    # when state_name is UNKNOWN (bootstrap / NaN-VIX skip).
+    #
+    # COOLDOWN: a confirmed transition blocked by the redeploy cooldown wrote
+    # NO market_regime row (the regime-of-record stays frozen). The file must
+    # not advance its state either, or it would lead the db and trip the
+    # doctor's state-agreement check. Pass a non-regime sentinel so the helper
+    # refreshes freshness but keeps the file's last good state.
+    _file_state = state_name
+    if transition_tag and transition_tag.endswith('_COOLDOWN'):
+        _file_state = '_COOLDOWN_HOLD'   # not in _STATE_RANK → state preserved
+    _refresh_regime_file(
+        state=_file_state, confidence=confidence,
+        vix=features.get('vix_synth_30d'),
+        prior_state=last_row_state, state_probs=state_probs,
+        ts_utc=features['ts_utc'], transition_tag=transition_tag,
+    )
 
     conn.close()
 
