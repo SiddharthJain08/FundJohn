@@ -754,6 +754,10 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
       case 'pipeline': {
         const sub = args[0]?.toLowerCase();
+        // Hoisted (2026-06-08): `store` was only require'd in the Status `else`
+        // branch below, so `/pipeline pause|resume` crashed with
+        // "ReferenceError: store is not defined" at the setConfig calls.
+        const store = require('../../pipeline/store');
         if (!collector) { await notify('⚠️ Pipeline module unavailable'); break; }
         if (sub === 'cycles') {
           const flashResult = await flash.dispatch(`cycles ${args[1] || ''}`.trim(), threadId);
@@ -769,7 +773,6 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
         } else {
           // Status
           const stats = collector.getStats();
-          const store = require('../../pipeline/store');
           const [cov, cfgRows, apiStats] = await Promise.all([
             store.getCoverageStats().catch(() => null),
             store.getAllConfig().catch(() => []),
