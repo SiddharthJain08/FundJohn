@@ -38,3 +38,24 @@ def half_year_bucket(date_str: str) -> str:
     year = date_str[:4]
     month = int(date_str[5:7])
     return f"{year}H1" if month <= 6 else f"{year}H2"
+
+
+def verdict(primary_mean: float, primary_t: float,
+            recent_ts: list[float], n_clusters: int) -> str:
+    """Asymmetric veto (spec §1.4). NaN t's are treated as non-significant."""
+    if n_clusters < MIN_CLUSTERS:
+        return "INVALID-DATA"
+
+    def _sig_pos(t):
+        return (t == t) and t >= T_VETO  # t==t filters NaN
+
+    def _sig_pos_recent(t):
+        return (t == t) and t >= T_RECENT
+
+    if _sig_pos(primary_t):
+        return "NO-GO"
+    if any(_sig_pos_recent(t) for t in recent_ts):
+        return "NO-GO"
+    if primary_mean > 0:
+        return "CLEAR-WITH-CAUTION"
+    return "CLEAR-TO-SHIP-GATED"
