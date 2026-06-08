@@ -16,7 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
-from execution.send_report import _fmt_greenlist  # noqa: E402
+from execution.send_report import (  # noqa: E402
+    _fmt_greenlist, _greenlist_messages, _GREENLIST_MSG_LIMIT,
+)
 
 
 def _order(ticker, direction, entry, pct_nav, ev, p, strats, strategy_id=None):
@@ -101,3 +103,32 @@ class TestGreenlistCards:
         out = _fmt_greenlist('2026-06-08', _sized(orders))
         for s in ['S_a', 'S_b', 'S_c']:
             assert s in out
+
+
+class TestGreenlistChunking:
+    def test_small_greenlist_single_message(self):
+        orders = [_order('AMZN', 'long', 185.2, 0.042, 0.018, 0.62, ['S_a', 'S_b'])]
+        msgs = _greenlist_messages('2026-06-08', _sized(orders))
+        assert len(msgs) == 1
+        assert msgs[0].count('```') == 2          # one self-contained code block
+
+    def test_large_greenlist_chunks_cleanly(self):
+        # 40 multi-strategy orders → well over the 1900-char cap
+        orders = [
+            _order(f'TKR{i:02d}', 'long' if i % 2 else 'short', 100 + i, 0.03,
+                   0.01, 0.6, [f'S_strategy_number_{i}_alpha', f'S_strategy_number_{i}_beta'])
+            for i in range(40)
+        ]
+        msgs = _greenlist_messages('2026-06-08', _sized(orders))
+        assert len(msgs) > 1, 'large greenlist should split into multiple messages'
+        for m in msgs:
+            assert len(m) <= _GREENLIST_MSG_LIMIT, 'each message under the webhook cap'
+            assert m.count('```') == 2, 'each message is a SELF-CONTAINED code block'
+        assert msgs[0].startswith('🟢')           # banner on the first only
+        joined = '\n'.join(msgs)
+        for i in range(40):
+            assert f'TKR{i:02d}' in joined
+
+    def test_empty_greenlist_single_no_signal_message(self):
+        msgs = _greenlist_messages('2026-06-08', _sized([]))
+        assert len(msgs) == 1 and 'no actionable signals' in msgs[0]
