@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 # _sharpe_cadence_path — see the cap block there for full rationale.
 PER_TICKER_CAP_SHARPE_FRAC = 0.05
 
+# Hard dust floor (2026-06-08). Replaces the removed per-regime min-notional
+# PARAMETER. Fixed at Alpaca's ~$1 fractional-order minimum — NOT a tunable and
+# NOT regime-varying, so it never concentrates the book or caps diversification;
+# it only stops the sizer emitting an order the broker would reject.
+DUST_FLOOR_USD = 1.0
+
+
+def _dust_tickers(target_usd: dict, dust_floor_usd: float = DUST_FLOOR_USD) -> list:
+    """Tickers whose absolute target notional is below the hard dust floor.
+    Pure (does not mutate its input). The caller drops these WITHOUT
+    renormalizing the survivors, so removing dust never shifts capital into
+    larger names — diversification is preserved."""
+    return [t for t, v in target_usd.items() if abs(v) < dust_floor_usd]
+
 # SP-5.3 — force-close held option structures at/below this calendar DTE
 # (operator-locked 2026-06-04: 7 calendar days, single rule for all structures).
 # Override via OPENCLAW_OPTION_EXPIRY_CLOSE_DTE (parse-guarded).
@@ -1011,33 +1025,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # exchange for honest expression of conviction.
     target_usd: dict[str, float] = {tkr: w * scale for tkr, w in ticker_w.items()}
 
-    # Per-regime min-notional gate (2026-05-16). Drop tickers whose target
-    # falls below NAV × min_signal_notional_pct, then renormalize the
-    # survivors so total gross still equals λ × NAV. This pushes the
-    # freed capital into higher-conviction names — matches operator's
-    # "fewer, larger positions" goal. Falls back to the legacy USD column
-    # if the new pct column isn't present yet (pre-migration safety).
-    min_notional_pct = float(params.get('min_signal_notional_pct') or 0.0) if params else 0.0
-    if min_notional_pct <= 0 and params and params.get('min_signal_notional_usd'):
-        min_notional_pct = float(params['min_signal_notional_usd']) / max(nav, 1.0)
-    min_notional_dollars = nav * min_notional_pct
-    if min_notional_dollars > 0:
-        dropped_small = [t for t, v in target_usd.items() if abs(v) < min_notional_dollars]
-        for tkr in dropped_small:
-            target_usd.pop(tkr, None)
-            ticker_w.pop(tkr, None)
-            ticker_meta.pop(tkr, None)
-        if dropped_small:
-            new_gross = sum(abs(w) for w in ticker_w.values())
-            if new_gross > 0:
-                new_scale = (lam * nav) / new_gross
-                target_usd = {t: w * new_scale for t, w in ticker_w.items()}
-                # SP-5 Phase 1a (review NIT): options size at the EFFECTIVE
-                # equity per-unit-weight rate — after a min-notional renorm the
-                # post-renorm scale is the rate equity actually trades at.
-                scale = new_scale
-            logger.info('regime_blended_sizer.sharpe_cadence: min-notional gate dropped %d (<$%.0f = %.3f%% NAV); renormalized %d survivors',
-                        len(dropped_small), min_notional_dollars, min_notional_pct * 100, len(target_usd))
+    # Hard dust floor (2026-06-08). The per-regime min-notional PARAMETER
+    # (regime_sizer_params.min_signal_notional_*, $100-500, regime-varying) was
+    # removed: it dropped sub-threshold tickers and RENORMALIZED the survivors,
+    # concentrating into fewer/larger names and capping diversification. We keep
+    # only a single fixed floor at Alpaca's ~$1 fractional minimum and do NOT
+    # renormalize — dropping true dust must not push capital into larger names,
+    # so every meaningful small position survives. The skip exists purely so we
+    # never emit an order the broker would reject.
+    for tkr in _dust_tickers(target_usd, DUST_FLOOR_USD):
+        target_usd.pop(tkr, None)
+        ticker_w.pop(tkr, None)
+        ticker_meta.pop(tkr, None)
 
     # SP-6 per-ticker conviction cap (operator formula, 2026-06-04):
     #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(t)| × λ × NAV
@@ -1050,10 +1049,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # OPENCLAW_STRATEGY_CORR_WEIGHT is on, raw otherwise) so high-conviction
     # names keep proportionally more headroom. Shaved capital is deliberately
     # NOT redistributed (no renorm-up — that would re-concentrate elsewhere);
-    # on capped days gross simply lands below λ×NAV. Applied AFTER the
-    # min-notional renorm (which pushes freed capital into high-conviction
-    # names — exactly the flow the cap must bound) and BEFORE the cap-exempt
-    # option hedge injection + broker netting. EOD-mode only: rides
+    # on capped days gross simply lands below λ×NAV. The concentration the cap
+    # bounds comes from the conviction weighting itself on few-survivor days
+    # (the old min-notional drop+renorm that used to feed it was removed
+    # 2026-06-08). Applied BEFORE the cap-exempt option hedge injection +
+    # broker netting. EOD-mode only: rides
     # OPENCLAW_EOD_RECONCILE so the legacy cadence-window path stays
     # byte-identical (its multi-day accumulation makes few-survivor days
     # structurally rare). Missing gate value → fail-open (target untouched).

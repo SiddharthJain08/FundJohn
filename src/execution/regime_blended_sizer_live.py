@@ -396,7 +396,6 @@ def main():
     params_row = cur.fetchone()
     params = dict(params_row) if params_row else {
         'liquidity_param': 1.0,
-        'min_signal_notional_usd': 100,
         'position_circuit_breaker_pct': 0.02,
     }
 
