@@ -305,3 +305,102 @@ def test_runner_render_report_contains_verdict_and_tables():
     assert "open_hs" in md or "open" in md.lower()
     assert "incr" in md
     assert "long_net" in md or "long" in md
+
+
+# ── mocked subprocess tests (pin _pull_quotes contract) ──────────────────────
+
+import json as _json
+import unittest.mock as _mock
+
+
+def test_pull_quotes_success_parses_list():
+    """Mock a successful CLI response: stdout is a JSON array of quote dicts."""
+    runner = _load_runner()
+    # Realistic .quotes output: a JSON list of quote objects with ap/bp
+    quotes_payload = [
+        {"ap": 150.02, "bp": 149.98, "t": "2025-07-01T13:31:05Z"},
+        {"ap": 150.04, "bp": 149.96, "t": "2025-07-01T13:31:15Z"},
+        {"ap": 150.03, "bp": 149.97, "t": "2025-07-01T13:31:30Z"},
+    ]
+    mock_result = _mock.MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = _json.dumps(quotes_payload)
+
+    with _mock.patch("subprocess.run", return_value=mock_result) as mock_run:
+        result = runner._pull_quotes("AAPL", "2025-07-01T13:31:00Z", "2025-07-01T13:32:00Z")
+
+    assert result is not None
+    assert len(result) == 3
+    assert result[0]["ap"] == 150.02
+    # Verify the CLI command shape
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == runner._ALPACA_BIN
+    assert "--symbol" in cmd
+    assert "AAPL" in cmd
+    assert "--jq" in cmd
+    assert ".quotes" in cmd
+    assert "--quiet" in cmd
+    assert "--limit" in cmd
+
+
+def test_pull_quotes_nonzero_exit_returns_none():
+    """Non-zero exit code triggers retries then returns None."""
+    runner = _load_runner()
+    mock_result = _mock.MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+
+    with _mock.patch("subprocess.run", return_value=mock_result):
+        with _mock.patch("time.sleep"):  # skip actual sleeps in test
+            result = runner._pull_quotes("AAPL", "2025-07-01T13:31:00Z", "2025-07-01T13:32:00Z")
+
+    assert result is None
+
+
+def test_compute_event_valid_event_from_mocked_quotes():
+    """_compute_event with mocked subprocess produces a valid event with correct incr.
+
+    Quote math check:
+      ap=10.02, bp=9.98 -> half=(0.04/2)/10.00 * 1e4 = 20 bps
+      ap=10.01, bp=9.99 -> half=(0.02/2)/10.00 * 1e4 = 10 bps
+      incr = 20 - 10 = 10 bps
+    """
+    runner = _load_runner()
+    # Open quotes: ap/bp -> 20 bps half-spread (3 quotes)
+    open_quotes = [
+        {"ap": 10.02, "bp": 9.98},  # half=(0.02/10)*1e4 = 20 bps
+        {"ap": 10.02, "bp": 9.98},
+        {"ap": 10.02, "bp": 9.98},
+    ]
+    # Close quotes: 10 bps half-spread (3 quotes)
+    close_quotes = [
+        {"ap": 10.01, "bp": 9.99},  # half=(0.01/10)*1e4 = 10 bps
+        {"ap": 10.01, "bp": 9.99},
+        {"ap": 10.01, "bp": 9.99},
+    ]
+    # alternating responses: first call = open, second call = close
+    call_count = {"n": 0}
+
+    def _fake_run(*args, **kwargs):
+        r = _mock.MagicMock()
+        r.returncode = 0
+        if call_count["n"] == 0:
+            r.stdout = _json.dumps(open_quotes)
+        else:
+            r.stdout = _json.dumps(close_quotes)
+        call_count["n"] += 1
+        return r
+
+    with _mock.patch("subprocess.run", side_effect=_fake_run):
+        with _mock.patch("time.sleep"):
+            event = runner._compute_event("AAPL", "2025-07-01", "long")
+
+    assert event["valid"] is True
+    assert event["ticker"] == "AAPL"
+    assert event["direction"] == "long"
+    assert event["open_hs"] is not None
+    assert event["close_hs"] is not None
+    assert abs(event["incr"] - (event["open_hs"] - event["close_hs"])) < 1e-9
+    assert abs(event["open_hs"] - 20.0) < 1e-6
+    assert abs(event["close_hs"] - 10.0) < 1e-6
+    assert abs(event["incr"] - 10.0) < 1e-6
