@@ -107,3 +107,34 @@ def test_atomic_write_replaces_existing(tmp_path):
     oe._atomic_write_cache({'OLD': True}, p)
     oe._atomic_write_cache({'NEW': True}, p)
     assert oe._load_prior_cache(p) == {'NEW': True}
+
+
+def test_build_eligibility_intersects_and_trues_only():
+    optionable = {'AAPL', 'MSFT', 'SPX', 'TSLA'}     # SPX not in our universe
+    universe = {'AAPL', 'MSFT', 'TSLA', 'KO'}        # KO not optionable
+    out = oe.build_eligibility(optionable, universe)
+    assert out == {'AAPL': True, 'MSFT': True, 'TSLA': True}   # KO absent, SPX dropped
+
+
+def test_decide_write_incomplete_never_writes():
+    ok, reason = oe.decide_write({'AAPL': True}, {}, completed=False)
+    assert ok is False and 'incomplete' in reason
+
+
+def test_decide_write_first_run_above_abs_floor():
+    new = {f'S{i}': True for i in range(1500)}        # 1500 >= 1000
+    ok, _ = oe.decide_write(new, {}, completed=True, abs_floor=1000)
+    assert ok is True
+
+
+def test_decide_write_below_abs_floor_keeps_prior():
+    new = {f'S{i}': True for i in range(500)}         # 500 < 1000
+    ok, reason = oe.decide_write(new, {}, completed=True, abs_floor=1000)
+    assert ok is False and 'floor' in reason
+
+
+def test_decide_write_relative_floor_blocks_implausible_shrink():
+    prior = {f'S{i}': True for i in range(5000)}
+    new = {f'S{i}': True for i in range(2000)}        # 2000 < 0.5*5000=2500
+    ok, reason = oe.decide_write(new, prior, completed=True, abs_floor=1000)
+    assert ok is False and 'floor' in reason
