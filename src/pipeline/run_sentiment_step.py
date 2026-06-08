@@ -47,6 +47,7 @@ from typing import Dict, List
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pandas as pd
 from src.ingestion.alpaca_news import ingest_alpaca_news
 from src.ingestion.resolve_sentiment_universe import current_universe
 from src.ingestion.reddit_client import fetch_multiple_subreddits
@@ -56,11 +57,44 @@ from src.ingestion.social_sentiment_aggregator import (
     select_sparse_tickers,
 )
 from src.ingestion.news_finbert_scorer import score_news_rows
-from src.ingestion.sentiment_storage import append_parquet, upsert_postgres
+from src.ingestion.sentiment_storage import upsert_postgres, _to_row, DEFAULT_PARQUET
 
 logger = logging.getLogger(__name__)
 
 SUBREDDITS = ('wallstreetbets', 'stocks', 'investing')
+
+_SENTIMENT_PARQUET = DEFAULT_PARQUET
+
+
+def _append_parquet(rows: List[Dict], run_date: str,
+                    parquet_path: Path = _SENTIMENT_PARQUET) -> int:
+    """Append rows to the master parquet (creates if missing). Returns count.
+
+    NOTE: This is a local shadow of sentiment_storage.append_parquet that
+    fixes a type mismatch bug: the original used .dt.date which produces
+    Python datetime.date objects (pandas object dtype).  The existing
+    sentiment.parquet stores 'date' as timestamp[us], so pyarrow raises
+    ArrowTypeError when trying to append rows whose 'date' column is object
+    dtype containing datetime.date instances.  Using pd.to_datetime() keeps
+    the column as datetime64 (compatible with timestamp[us]).
+    """
+    if not rows:
+        return 0
+    df_new = pd.DataFrame([_to_row(r, run_date) for r in rows])
+    # Keep date as datetime64 so it stays compatible with the existing
+    # timestamp[us] parquet schema.  .dt.date was producing object dtype
+    # (Python datetime.date) which pyarrow cannot cast to timestamp[us].
+    df_new['date'] = pd.to_datetime(df_new['date'])
+
+    if parquet_path.exists():
+        df_old = pd.read_parquet(parquet_path)
+        combined = pd.concat([df_old, df_new], ignore_index=True)
+    else:
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        combined = df_new
+    combined.to_parquet(parquet_path, index=False)
+    logger.info('sentiment_storage: parquet now %d rows', len(combined))
+    return len(df_new)
 
 
 # SP-2 Phase A: sentiment ingestion union (LIVE + CANDIDATE so we can
@@ -232,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.info('sentiment: dry-run, skipping persist (would write %d rows)', len(merged))
         return 0
     upsert_postgres(merged, run_date, pg_uri)
-    append_parquet(merged, run_date)
+    _append_parquet(merged, run_date)
 
     # Discord post — daily summary to #pre-market-alerts (or configured channel).
     # Counts only; ticker-level detail stays in the DB to avoid wall-of-text.
