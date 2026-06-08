@@ -139,3 +139,26 @@ def test_compute_probe_m2_isolates_name_effect():
     primary, prices, regimes = _synth_world(sign=-1)
     res = p.compute_probe(primary, prices, regimes)
     assert res["m2_relative"]["mean"] < 0
+
+
+import importlib.util, pathlib
+
+def _load_runner():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "run_intraday_session_probe", root / "scripts" / "run_intraday_session_probe.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_runner_render_report_contains_verdict_and_tables(tmp_path):
+    runner = _load_runner()
+    primary, prices, regimes = _synth_world(sign=-1)
+    res = p.compute_probe(primary, prices, regimes)
+    md = runner.render_report(res)
+    assert "VERDICT:" in md
+    assert "CLEAR-TO-SHIP-GATED" in md
+    assert "PRIMARY (max_hold-long)" in md
+    assert "By regime" in md
+    assert "By half-year" in md
