@@ -92,3 +92,50 @@ def test_attach_primary_inner_joins_returns():
     # ZZZ has no price row -> dropped
     assert list(out["ticker"]) == ["AAA"]
     assert abs(out.iloc[0]["intraday_return"] - (-0.01)) < 1e-12
+
+
+import numpy as np
+
+
+def _synth_world(sign, n_days=600, n_names=10, seed_base=7):
+    """Build (primary, prices, regimes) where primary names move `sign`
+    intraday by ~0.002 with small noise; universe is flat-ish."""
+    dates = pd.bdate_range("2022-01-03", periods=n_days).strftime("%Y-%m-%d")
+    prim_rows, price_rows = [], []
+    for di, d in enumerate(dates):
+        for ni in range(n_names):
+            tk = f"P{ni}"
+            # deterministic pseudo-noise (no Math.random / Date)
+            noise = (((di * 31 + ni * 17 + seed_base) % 100) - 50) / 50.0 * 0.0005
+            ret = sign * 0.002 + noise
+            op = 100.0
+            cl = op * (1 + ret)
+            price_rows.append({"ticker": tk, "date": d, "open": op, "close": cl})
+            prim_rows.append({"ticker": tk, "date": d})
+        # a flat "other" universe name each day (baseline for M2)
+        price_rows.append({"ticker": "U0", "date": d, "open": 100.0, "close": 100.0})
+    regimes = pd.DataFrame({"date": list(dates), "regime": ["LOW_VOL"] * len(dates)})
+    return pd.DataFrame(prim_rows), pd.DataFrame(price_rows), regimes
+
+
+def test_compute_probe_negative_world_clears():
+    primary, prices, regimes = _synth_world(sign=-1)
+    res = p.compute_probe(primary, prices, regimes)
+    assert res["primary_m1"]["mean"] < 0
+    assert res["primary_m1"]["n"] >= p.MIN_CLUSTERS
+    assert res["verdict"] == "CLEAR-TO-SHIP-GATED"
+
+
+def test_compute_probe_positive_world_vetoes():
+    primary, prices, regimes = _synth_world(sign=+1)
+    res = p.compute_probe(primary, prices, regimes)
+    assert res["primary_m1"]["mean"] > 0
+    assert res["primary_m1"]["t"] >= p.T_VETO
+    assert res["verdict"] == "NO-GO"
+
+
+def test_compute_probe_m2_isolates_name_effect():
+    # primary names move -0.002 vs a flat universe -> M2 (relative) negative
+    primary, prices, regimes = _synth_world(sign=-1)
+    res = p.compute_probe(primary, prices, regimes)
+    assert res["m2_relative"]["mean"] < 0

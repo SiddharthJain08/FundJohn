@@ -87,3 +87,56 @@ def attach_regime_bucket(df: pd.DataFrame, regimes: pd.DataFrame) -> pd.DataFram
 def attach_primary(primary: pd.DataFrame, prices_prepped: pd.DataFrame) -> pd.DataFrame:
     """Inner-join PRIMARY (ticker,date) to its intraday_return."""
     return primary.merge(prices_prepped, on=["ticker", "date"], how="inner")
+
+
+def bucket_stats(df: pd.DataFrame, bucket_col: str) -> pd.DataFrame:
+    """Per-bucket clustered-t (cluster=date). Returns df indexed by bucket
+    with columns mean,t,n, sorted by bucket label."""
+    rows = []
+    for b, sub in df.groupby(bucket_col):
+        if str(b) == "nan":
+            continue
+        mean, t, n = clustered_t(sub, "intraday_return", "date")
+        rows.append({bucket_col: b, "mean": mean, "t": t, "n": n})
+    out = pd.DataFrame(rows).sort_values(bucket_col).reset_index(drop=True)
+    return out
+
+
+def _m1(df: pd.DataFrame) -> dict:
+    mean, t, n = clustered_t(df, "intraday_return", "date")
+    return {"mean": mean, "t": t, "n": n}
+
+
+def compute_probe(primary: pd.DataFrame, prices: pd.DataFrame,
+                  regimes: pd.DataFrame) -> dict:
+    """Pure core. Returns all stats + the pre-registered verdict."""
+    prepped = prep_prices(prices)
+
+    # PRIMARY (max_hold-long exit days) with returns + regime + bucket
+    prim = attach_primary(primary, prepped)
+    prim = attach_regime_bucket(prim, regimes)
+
+    # SECONDARY: full equity universe day-by-day
+    sec = attach_regime_bucket(prepped, regimes)
+
+    # M2: PRIMARY return minus the same-day equity-universe mean
+    uni_day_mean = prepped.groupby("date")["intraday_return"].mean()
+    rel = prim.copy()
+    rel["intraday_return"] = rel["intraday_return"] - rel["date"].map(uni_day_mean)
+
+    halfyear = bucket_stats(prim, "bucket")
+    recent_ts = list(halfyear.sort_values("bucket")["t"].tail(2)) if len(halfyear) else []
+
+    primary_m1 = _m1(prim)
+    v = verdict(primary_m1["mean"], primary_m1["t"], recent_ts, primary_m1["n"])
+
+    return {
+        "primary_m1": primary_m1,
+        "secondary_m1": _m1(sec),
+        "m2_relative": _m1(rel),
+        "by_regime": bucket_stats(prim, "regime").to_dict("records"),
+        "by_halfyear": halfyear.to_dict("records"),
+        "recent_ts": recent_ts,
+        "verdict": v,
+        "n_primary_rows": int(len(prim)),
+    }
