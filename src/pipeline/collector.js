@@ -141,10 +141,10 @@ function apiQuotaRemaining(api, dailyLimit) {
 }
 
 // SP-2 Phase A: read the resolved union from Redis (populated by the daily
-// cycle) or shell out to the resolver CLI as a fallback. Legacy SP500 path
-// kicks in if both fail.
-async function readUnionUniverseFromRedis(redis, dateStr, states = 'live') {
-  const key = `universe:union:${dateStr}:${states}`;
+// cycle) or shell out to the resolver CLI as a fallback.
+// SP-7 Phase C: generalized to support kind='envelope' (no-floor fetch list).
+async function readUnionUniverseFromRedis(redis, dateStr, states = 'live', kind = 'union') {
+  const key = `universe:${kind}:${dateStr}:${states}`;
   try {
     const cached = await redis.get(key);
     if (cached) return JSON.parse(cached);
@@ -153,17 +153,74 @@ async function readUnionUniverseFromRedis(redis, dateStr, states = 'live') {
   }
   try {
     const { execSync } = require('child_process');
+    const envelopeFlag = kind === 'envelope' ? ' --envelope' : '';
     const out = execSync(
-      `python3 -m src.strategies.universe_resolver --as-of ${dateStr} --states ${states} --json`,
-      { encoding: 'utf8', timeout: 30000, cwd: '/root/openclaw' },
+      `python3 -m src.strategies.universe_resolver --as-of ${dateStr} --states ${states} --json${envelopeFlag}`,
+      { encoding: 'utf8', timeout: 120000, cwd: '/root/openclaw' },
     );
     const tickers = JSON.parse(out);
-    try { await redis.set(key, JSON.stringify(tickers), { EX: 14400 }); } catch {}
+    // ioredis takes positional EX args; the old `{ EX: 14400 }` object form is
+    // node-redis-v4 syntax that ioredis ignores (latent bug — this function
+    // had zero callers until SP-7 Phase C).
+    try { await redis.set(key, JSON.stringify(tickers), 'EX', 14400); } catch {}
     return tickers;
   } catch (e) {
-    console.warn(`[collector] union_universe resolution failed, falling back to SP500: ${e.message}`);
-    const { getUniverse } = require('./universe');
-    return getUniverse('SP500');
+    console.warn(`[collector] universe ${kind} resolution failed: ${e.message}`);
+    // Caller decides the fallback. NEVER substitute a narrower set here —
+    // the previous getUniverse('SP500') fallback was a silent-shrink risk.
+    return null;
+  }
+}
+
+// SP-7 Phase C (C2): widen the PRICE fetch list to the resolver's no-floor
+// envelope (spec §4). universe_config demotes to operator overlay: its
+// active=true equities stay in (union); active=false rows are a HARD
+// exclusion applied after the union. Fail-open = keep the config list; the
+// fetch envelope must never silently shrink.
+async function applyResolverEnvelope(equityTickers, dateStr) {
+  if (process.env.OPENCLAW_COLLECTOR_RESOLVER_ENVELOPE !== '1') return equityTickers;
+  try {
+    const { getClient } = require('../database/redis');
+    const envelope = await readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'envelope');
+    if (!envelope || envelope.length === 0) {
+      console.warn('[collector] envelope unavailable — keeping universe_config list');
+      return equityTickers;
+    }
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :637; never touches multi-letter .WS/.RT/.NYB forms
+    const envDash = envelope.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
+    const inactive = new Set(await store.getInactiveTickers());
+    const merged = [...new Set([...equityTickers, ...envDash])]
+      .filter(t => !inactive.has(t)).sort();
+    if (merged.length < equityTickers.length) {
+      console.warn(`[collector] envelope would SHRINK ${equityTickers.length}→${merged.length} — keeping universe_config list`);
+      return equityTickers;
+    }
+    console.log(`[collector] envelope: resolver=${envelope.length} config=${equityTickers.length} excluded=${inactive.size} final=${merged.length}`);
+    return merged;
+  } catch (e) {
+    console.warn(`[collector] envelope merge failed — keeping universe_config list: ${e.message}`);
+    return equityTickers;
+  }
+}
+
+// SP-7 Phase C (C3 / parent decision 4): expensive per-ticker fetchers
+// (fundamentals FMP, insider EDGAR) scope to the FLOORED adopted-union —
+// what strategies actually resolve — not the wide fetch envelope.
+// Expansion-only: union with the config list, so never-shrink holds.
+async function adoptedUnionScope(configTickers, dateStr) {
+  if (process.env.OPENCLAW_COLLECTOR_RESOLVER_ENVELOPE !== '1') return configTickers;
+  try {
+    const { getClient } = require('../database/redis');
+    const union = await readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'union');
+    if (!union || union.length === 0) return configTickers;
+    // anchored single-letter bridge (BRK.B→BRK-B; also .U units) — mirrors :637; never touches multi-letter .WS/.RT/.NYB forms
+    const unionDash = union.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2'));
+    const inactive = new Set(await store.getInactiveTickers());
+    return [...new Set([...configTickers, ...unionDash])]
+      .filter(t => !inactive.has(t)).sort();
+  } catch (e) {
+    console.warn(`[collector] adopted-union scope failed — config scope kept: ${e.message}`);
+    return configTickers;
   }
 }
 
@@ -1496,7 +1553,19 @@ async function runDailyCollection() {
   const marketTickers     = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
   const optionsTickers    = fullUniverse.filter(u => u.has_options).map(u => u.ticker);
   const fundamentalTickers = fullUniverse.filter(u => u.has_fundamentals).map(u => u.ticker);
-  const universeLabel     = `Equities (${equityTickers.length}) + Market (${marketTickers.length})`;
+  // SP-7 C2: PRICES fetch on the wide no-floor envelope; news/insider scope
+  // decided separately (Task 11 / spec §5 envelope hierarchy).
+  const priceEquityTickers = await applyResolverEnvelope(
+    equityTickers, new Date().toISOString().slice(0, 10));
+  // SP-7 C2/C3: fundamentals + insider follow the adopted-union (spec §5
+  // envelope hierarchy). Computed here alongside priceEquityTickers so the
+  // adopted-union scope feeds the gap scan — else adopted names never surface
+  // in gaps (mirror of priceEquityTickers pattern).
+  const fundamentalScope = await adoptedUnionScope(fundamentalTickers, new Date().toISOString().slice(0, 10));
+  const insiderScope     = await adoptedUnionScope(equityTickers,      new Date().toISOString().slice(0, 10));
+  // Use priceEquityTickers (post-envelope) so the banner reflects what's
+  // actually price-fetched, not the wider universe_config envelope.
+  const universeLabel     = `Equities (${priceEquityTickers.length}) + Market (${marketTickers.length})`;
 
   // Start cycle record
   const cycleId = await store.startCycle().catch(() => null);
@@ -1524,9 +1593,9 @@ async function runDailyCollection() {
 
   notify('🔍 Scanning data coverage gaps...');
   const gaps = await store.getGapSummary({
-    priceTickers:   [...equityTickers, ...marketTickers],
+    priceTickers:   [...priceEquityTickers, ...marketTickers],
     optionsTickers,
-    fundTickers:    fundamentalTickers,
+    fundTickers:    fundamentalScope, // adopted-union scope feeds the gap scan (mirror of priceEquityTickers) — else adopted names never surface in gaps
     fromDate,
     toDate:         today,
     fundStaleDays:  45,
@@ -1588,7 +1657,7 @@ async function runDailyCollection() {
   }
 
   // Phase 2a: equity prices — only tickers with gaps (Alpaca P1; Task 15 wires bars API)
-  const priceEquityNeeded = gaps?.prices.tickers.filter(t => equityTickers.includes(t)) ?? equityTickers;
+  const priceEquityNeeded = gaps?.prices.tickers.filter(t => priceEquityTickers.includes(t)) ?? priceEquityTickers;
   const priceMarketNeeded = gaps?.prices.tickers.filter(t => marketTickers.includes(t)) ?? marketTickers;
   if (cfg.collect_prices !== 'false' && priceEquityNeeded.length > 0) {
     await runHistoricalPrices(historyDays, priceEquityNeeded);
@@ -1601,7 +1670,7 @@ async function runDailyCollection() {
   // a substantially stale panel THROWS → run_collector_once exits non-zero →
   // the cycle aborts BEFORE the signals step (strict exit codes).
   if (eodCtx.requireToday && cfg.collect_prices !== 'false') {
-    await _verifyEquityFreshness(equityTickers, eodCtx.todayEt, {
+    await _verifyEquityFreshness(priceEquityTickers, eodCtx.todayEt, {
       refetchFn: (stale) => runHistoricalPrices(historyDays, stale),
     });
     notify(`✅ EOD freshness gate passed — equity panel current through ${eodCtx.todayEt}`);
@@ -1639,7 +1708,7 @@ async function runDailyCollection() {
   }
 
   // Phase 4: Fundamentals — only stale tickers, budget-aware
-  const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalTickers;
+  const fundNeeded = gaps?.fundamentals.tickers ?? fundamentalScope;
   if (cfg.collect_fundamentals !== 'false' && !budgetConstraints.skipFundamentals && fundNeeded.length > 0) {
     await runFundamentals(fundNeeded);
   } else if (budgetConstraints.skipFundamentals) {
@@ -1663,7 +1732,7 @@ async function runDailyCollection() {
 
   // Phase 7: Form 4 Insider Transactions
   if (cfg.collect_insider !== 'false') {
-    await runInsiderTransactions(equityTickers);
+    await runInsiderTransactions(insiderScope);
   }
 
   // Prune pipeline_runs audit log — market data tables are never deleted
@@ -1825,7 +1894,9 @@ async function runEodRefresh() {
   const fullUniverse  = await store.getActiveUniverse();
   const equityTickers = fullUniverse.filter(u => u.category === 'equity').map(u => u.ticker);
   const marketTickers = fullUniverse.filter(u => u.category !== 'equity').map(u => u.ticker);
-  const tickerSet     = new Set([...equityTickers, ...marketTickers]);
+  const priceEquityTickers = await applyResolverEnvelope(
+    equityTickers, new Date().toISOString().slice(0, 10));
+  const tickerSet     = new Set([...priceEquityTickers, ...marketTickers]);
   const historyDays   = 7;  // small lookback for EOD gap detection
 
   // Snapshot coverage state BEFORE the run so we can diff per-ticker after
@@ -1842,7 +1913,7 @@ async function runEodRefresh() {
     if (tickerSet.has(r.ticker)) before.set(r.ticker, toIso(r.date_to));
   }
 
-  await runHistoricalPrices(historyDays, equityTickers);
+  await runHistoricalPrices(historyDays, priceEquityTickers);
   await runMarketPricesNonEquity(marketTickers, historyDays);
 
   // Diff coverage AFTER the run.
@@ -1882,7 +1953,7 @@ async function runEodRefresh() {
     elapsed_s:        elapsed,
     today:            new Date().toISOString().slice(0, 10),
     total_tickers:    tickerSet.size,
-    equity_tickers:   equityTickers,
+    equity_tickers:   priceEquityTickers,
     market_tickers:   marketTickers,
     advanced_count:   advancedCount,
     advanced_by_date: advancedByDateObj,
@@ -1903,4 +1974,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +102,29 @@ def _append_parquet(rows: List[Dict], run_date: str,
 # pre-warm sentiment for candidates entering rotation).
 def _select_sentiment_universe(as_of, resolver):
     return resolver.union_universe(as_of, states=("live", "candidate"))
+
+
+def _widen_with_resolver(universe, today=None, resolver=None):
+    """SP-7 Phase C (C3): widen the 3-source sentiment universe with the
+    adopted-union (live+candidate) resolver universe. Gated; fail-open —
+    sentiment must never die on resolver issues."""
+    if os.environ.get('OPENCLAW_SENTIMENT_RESOLVER_UNIVERSE') != '1':
+        return list(universe)
+    try:
+        if resolver is None:
+            from src.execution.live_universe import build_resolver
+            resolver = build_resolver()
+        as_of = today or date.today()
+        extra = _select_sentiment_universe(as_of, resolver)
+        # anchored single-letter bridge (BRK.B→BRK-B; also .U units) — multi-letter .WS/.RT forms untouched
+        extra_dash = {re.sub(r'^([A-Z]+)\.([A-Z])$', r'\1-\2', t) for t in extra}
+        widened = sorted(set(universe) | extra_dash)
+        logger.info('sentiment: resolver universe +%d (%d→%d)',
+                    len(widened) - len(universe), len(universe), len(widened))
+        return widened
+    except Exception as e:  # noqa: BLE001 — fail-open
+        logger.warning('sentiment resolver-universe failed (fail-open): %s', e)
+        return list(universe)
 
 
 def _load_todays_news(postgres_uri: str, run_date: str,
@@ -209,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error('universe lookup failed: %s', e)
         return 2
     logger.info('sentiment: universe %d tickers', len(universe))
+    universe = _widen_with_resolver(universe)
     universe_set = set(universe)
 
     # Stage 2: Reddit (24h window)

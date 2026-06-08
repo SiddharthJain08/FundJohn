@@ -25,7 +25,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'src'))
 
 LADDER_TIERS = ('sp500', 'tier_r1000', 'tier_r3000', 'tier_liquid')
-MIN_BARS = 60  # mirrors ParquetCoverage min_bars (src/strategies/_db_adapters.py:45)
+
+from src.strategies.coverage_index import CoverageIndex, MIN_BARS  # noqa: E402
 
 
 def snapshot_dates(start: date, end: date) -> list[date]:
@@ -36,38 +37,6 @@ def snapshot_dates(start: date, end: date) -> list[date]:
         out.append(min(last, end))
         cur = last + timedelta(days=1)
     return out
-
-
-class CoverageIndex:
-    """(ticker × month) cumulative bar counts from ONE parquet read."""
-
-    def __init__(self, prices_df, min_bars: int = MIN_BARS):
-        import pandas as pd
-        df = prices_df.copy()
-        df['month'] = df['date'].astype(str).str[:7]
-        counts = (df.groupby(['ticker', 'month']).size()
-                    .unstack(fill_value=0).sort_index(axis=1)
-                    .cumsum(axis=1))
-        self._counts = counts
-        self._min = min_bars
-
-    @classmethod
-    def from_parquet(cls, path='data/master/prices.parquet', min_bars=MIN_BARS):
-        import pandas as pd
-        df = pd.read_parquet(path, columns=['ticker', 'date'])
-        from src.pipeline.quarantine_filter import filter_quarantined
-        df = filter_quarantined(df, 'prices.parquet')
-        return cls(df, min_bars)
-
-    def has_floor(self, symbol: str, as_of: date) -> bool:
-        m = as_of.isoformat()[:7]
-        if symbol not in self._counts.index:
-            return False
-        row = self._counts.loc[symbol]
-        cols = [c for c in row.index if c <= m]
-        if not cols:
-            return False
-        return int(row[cols[-1]]) >= self._min
 
 
 def tiers_for_rows(rows, as_of: date, coverage) -> dict[str, list[str]]:

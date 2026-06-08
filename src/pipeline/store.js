@@ -99,6 +99,14 @@ async function getActiveUniverse() {
   return res?.rows || [];
 }
 
+// SP-7 Phase C: operator hard-exclusion overlay for the resolver envelope
+async function getInactiveTickers() {
+  const res = await query(
+    `SELECT ticker FROM universe_config WHERE active = false`
+  ).catch(() => null);
+  return (res?.rows || []).map(r => r.ticker);
+}
+
 async function addToUniverse(tickers, indexMembership = 'SP500') {
   for (const ticker of tickers) {
     await query(
@@ -594,7 +602,7 @@ async function getNews({ ticker, tickers, q, limit = 30, since } = {}) {
 
 module.exports = {
   getConfig, setConfig, getAllConfig,
-  getUniverseTickers, getActiveUniverse, addToUniverse,
+  getUniverseTickers, getActiveUniverse, getInactiveTickers, addToUniverse,
   upsertUniverse,
   upsertPrices, upsertOptions, upsertFundamentals,
   bufferInsider,

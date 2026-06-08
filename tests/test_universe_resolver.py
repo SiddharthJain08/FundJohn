@@ -52,7 +52,7 @@ def test_resolve_cache_hit(db, monkeypatch):
     monkeypatch.setattr(resolver, "_load_predicate", lambda sid: sp500)
     resolver.resolve("S5", date(2026, 6, 1))
     resolver.resolve("S5", date(2026, 6, 1))
-    assert ("S5", date(2026, 6, 1)) in resolver._cache
+    assert ("S5", date(2026, 6, 1), True) in resolver._cache
 
 def test_resolve_refuses_future(db, monkeypatch):
     resolver = UniverseResolver(db=db, coverage=FakeCoverage({}))

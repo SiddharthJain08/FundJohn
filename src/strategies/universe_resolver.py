@@ -26,7 +26,7 @@ class UniverseResolver:
                  audit_writer: Callable[[dict], None] | None = None):
         self._db = db
         self._coverage = coverage
-        self._cache: dict[tuple[str, _date], list[str]] = {}
+        self._cache: dict[tuple[str, _date, bool], list[str]] = {}
         self._manifest_loader = manifest_loader
         self._today_fn = today_fn
         self._audit_writer = audit_writer
@@ -44,9 +44,12 @@ class UniverseResolver:
         return getattr(module, attr)
 
     def resolve(self, strategy_id: str, as_of: _date) -> list[str]:
+        return self._resolve(strategy_id, as_of, apply_floor=True)
+
+    def _resolve(self, strategy_id: str, as_of: _date, apply_floor: bool = True) -> list[str]:
         if as_of > self._today_fn():
             raise AsOfInFutureError(f"as_of {as_of} > today {self._today_fn()}")
-        key = (strategy_id, as_of)
+        key = (strategy_id, as_of, apply_floor)
         if key in self._cache:
             return self._cache[key]
         predicate = self._load_predicate(strategy_id)
@@ -55,7 +58,8 @@ class UniverseResolver:
         for row in rows:
             meta = row.metadata if hasattr(row, "metadata") else TickerMetadata.from_row(row)
             try:
-                if predicate(meta, as_of) and self._coverage.has_floor(meta.symbol, as_of):
+                if predicate(meta, as_of) and (
+                        not apply_floor or self._coverage.has_floor(meta.symbol, as_of)):
                     out.append(meta.symbol)
             except Exception:
                 # Defensive: a broken predicate skips the ticker; lifecycle
@@ -64,6 +68,16 @@ class UniverseResolver:
         out.sort()
         self._cache[key] = out
         return out
+
+    def envelope_universe(self, as_of: _date, states: tuple[str, ...] = ("live",)) -> list[str]:
+        """SP-7 Phase C C2 fetch envelope: predicate-only union, NO coverage
+        floor (spec §4). The floor gates strategy resolve; the fetch envelope
+        must include newly adopted tiers so their data accrues — otherwise the
+        coverage-floor chicken-and-egg never dies."""
+        seen: set[str] = set()
+        for sid in self._live_strategy_ids(states):
+            seen.update(self._resolve(sid, as_of, apply_floor=False))
+        return sorted(seen)
 
     def _live_strategy_ids(self, states: tuple[str, ...]) -> list[str]:
         if self._manifest_loader is None:
@@ -115,23 +129,28 @@ class MockResolver(UniverseResolver):
 if __name__ == "__main__":
     import argparse, json, os, sys
     from datetime import date as _d
-    from src.strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
+    from src.strategies._db_adapters import PostgresMetadataDB
+    from src.strategies.coverage_index import CoverageIndex
     ap = argparse.ArgumentParser()
     ap.add_argument("--as-of", required=True)
     ap.add_argument("--states", default="live")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--strategy", help="Resolve a single strategy instead of union")
+    ap.add_argument("--envelope", action="store_true",
+                    help="No-floor fetch envelope (SP-7 C2) instead of the floored union")
     args = ap.parse_args()
     as_of = _d.fromisoformat(args.as_of)
     states = tuple(args.states.split(","))
     db = PostgresMetadataDB(os.environ["POSTGRES_URI"])
-    cov = ParquetCoverage()
+    cov = CoverageIndex.from_parquet("/root/openclaw/data/master/prices.parquet")
     def manifest_loader():
         with open("/root/openclaw/src/strategies/manifest.json") as f:
             return json.load(f)
     resolver = UniverseResolver(db=db, coverage=cov, manifest_loader=manifest_loader)
     if args.strategy:
         out = resolver.resolve(args.strategy, as_of=as_of)
+    elif args.envelope:
+        out = resolver.envelope_universe(as_of=as_of, states=states)
     else:
         out = resolver.union_universe(as_of=as_of, states=states)
     print(json.dumps(out))

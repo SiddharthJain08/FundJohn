@@ -33,7 +33,8 @@ def propose_values(bases: dict[str, float], *, factor: float) -> dict[str, float
 
 
 def _resolver():
-    from src.strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
+    from src.strategies._db_adapters import PostgresMetadataDB
+    from src.strategies.coverage_index import CoverageIndex
     from src.strategies.universe_resolver import UniverseResolver
 
     def manifest_loader():
@@ -42,7 +43,8 @@ def _resolver():
 
     return UniverseResolver(
         db=PostgresMetadataDB(os.environ['POSTGRES_URI']),
-        coverage=ParquetCoverage(), manifest_loader=manifest_loader)
+        coverage=CoverageIndex.from_parquet('/root/openclaw/data/master/prices.parquet'),
+        manifest_loader=manifest_loader)
 
 
 def compute_union_n(pg, as_of: date | None = None) -> tuple[int, int]:

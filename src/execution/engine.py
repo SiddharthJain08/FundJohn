@@ -818,7 +818,33 @@ def _apply_regime_overrides_to_signals(strategy_id, signals, regime_state):
             override=ov)
 
 
-def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
+_TICKER_KEYED_AUX = ('financials', 'insider_txns', 'options', 'sentiment')
+
+
+def _slice_aux(aux_data: dict, universe_set: set) -> dict:
+    """SP-7 C1: per-strategy aux slice. Ticker-keyed dicts are filtered;
+    prices_30m (long DataFrame with a ticker column) is row-filtered; macro
+    (series-name keyed) passes through whole. Slicing aux alongside the price
+    panel makes identical-universe ⇒ identical-signals airtight even for
+    strategies that iterate aux keys instead of the universe param.
+
+    NOTE (latent no-op, do NOT fix here): the last_price inject at engine.py
+    ~line 1546-1552 calls prices.groupby('ticker') on the WIDE pivoted frame
+    (no ticker column) → its except swallows it → the inject is already a
+    silent no-op live. _slice_aux neither worsens nor masks this."""
+    out = dict(aux_data)
+    for k in _TICKER_KEYED_AUX:
+        v = aux_data.get(k)
+        if isinstance(v, dict):
+            out[k] = {t: d for t, d in v.items() if t in universe_set}
+    p30 = aux_data.get('prices_30m')
+    if p30 is not None and hasattr(p30, 'columns') and 'ticker' in p30.columns:
+        out['prices_30m'] = p30[p30['ticker'].isin(universe_set)]
+    return out
+
+
+def run_strategies(strategies, prices, regime, universe, aux_data,
+                   strategy_universes=None) -> dict:
     """
     Returns: {strategy_id: [Signal, ...]}
 
@@ -854,7 +880,17 @@ def run_strategies(strategies, prices, regime, universe, aux_data) -> dict:
             if not is_eligible(strat.id, strat_regime_str):
                 logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, strat_regime_str)
                 continue
-            signals = strat.generate_signals(prices, strat_regime, universe, aux_data)
+            # SP-7 Phase C (C1): per-strategy universe slice. None (gate OFF)
+            # → byte-identical legacy behavior: shared panel/universe/aux.
+            if strategy_universes is not None and strat.id in strategy_universes:
+                _su = strategy_universes[strat.id]
+                _su_set = set(_su)
+                strat_prices = prices[[c for c in prices.columns if c in _su_set]]
+                strat_aux = _slice_aux(aux_data, _su_set)
+                strat_universe = _su
+            else:
+                strat_prices, strat_aux, strat_universe = prices, aux_data, universe
+            signals = strat.generate_signals(strat_prices, strat_regime, strat_universe, strat_aux)
             _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
             results[strat.id] = signals or []
             logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
@@ -1533,6 +1569,41 @@ def main():
         from execution.universe_clamp import clamp_universe
         universe = clamp_universe(universe)
 
+        # SP-7 Phase C (C1): per-strategy universes via UniverseResolver.
+        # Gate default-OFF. When ON: the union of per-strategy sets replaces
+        # the clamped universe for the ONE panel load (memory invariant), and
+        # run_strategies slices prices/aux per strategy. Whole-build failure
+        # fails open to the legacy shared universe.
+        strategy_universes = None
+        if os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') == '1':
+            try:
+                from execution.live_universe import build_strategy_universes
+                _built = build_strategy_universes(
+                    [s.id for s in strategies], run_date, list(universe))
+                strategy_universes = {sid: info['universe']
+                                      for sid, info in _built.items()}
+                universe = sorted(set().union(
+                    *[set(u) for u in strategy_universes.values()]))
+                _n_err = sum(1 for i in _built.values() if i['error'])
+                logger.info(f"live-universe ON: union {len(universe)} tickers, "
+                            f"{len(strategy_universes)} strategies, {_n_err} fail-open")
+            except Exception as e:
+                logger.error(f"live-universe build failed — fail-open to shared "
+                             f"clamped universe: {e}")
+                strategy_universes = None
+
+        # SP-7 Phase C shadow parity (spec §3.5): resolver-vs-clamp diff rows,
+        # written by a non-fatal sidecar. Only meaningful while the live
+        # resolver gate is OFF — once it flips, there is no clamp to diff.
+        if (os.environ.get('OPENCLAW_LIVE_UNIVERSE_SHADOW') == '1'
+                and os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') != '1'):
+            try:
+                from execution.live_universe import write_shadow_parity
+                write_shadow_parity(run_date, [s.id for s in strategies],
+                                    list(universe))
+            except Exception as e:  # noqa: BLE001 — non-fatal sidecar
+                logger.warning(f"universe shadow parity failed (non-fatal): {e}")
+
         # 3. Load data
         prices   = load_prices(universe)
         aux_data = load_aux_data(universe)
@@ -1550,7 +1621,8 @@ def main():
                     _opts['last_price'] = latest_px.get(_tk)
             except Exception as _e:
                 logger.warning(f'last_price inject failed: {_e}')
-        strategy_results = run_strategies(strategies, prices, regime, universe, aux_data)
+        strategy_results = run_strategies(strategies, prices, regime, universe,
+                                          aux_data, strategy_universes=strategy_universes)
 
         # 4.5 Write eod_compute_health sentinel (gated: OPENCLAW_EOD_SIGNAL_REGISTER==1)
         if _eod_signal_register_gate_on():
