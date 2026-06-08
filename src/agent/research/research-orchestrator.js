@@ -1275,7 +1275,10 @@ class ResearchOrchestrator {
     // hunt fan-out (Promise.all over workers) until systemd's 6h ceiling. On
     // timeout the child is SIGKILLed and this rejects → the worker's per-
     // candidate catch degrades it to `fetch_failed` and the batch continues.
-    const timeoutMs = (parseInt(process.env.OPENCLAW_SUBAGENT_TIMEOUT_S || '600', 10) || 600) * 1000;
+    // Backstop against an INFINITE hang, not a tight SLA — set well above the
+    // longest legitimate paperhunter/strategycoder run (a complex strategycoder
+    // can take many minutes). 20min default; override via env.
+    const timeoutMs = (parseInt(process.env.OPENCLAW_SUBAGENT_TIMEOUT_S || '1200', 10) || 1200) * 1000;
 
     return spawnWithTimeout('node', [
       NODE_CLI,

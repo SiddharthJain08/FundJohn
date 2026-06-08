@@ -237,6 +237,24 @@ function recentWithinDays(ids, days, manifest, nowMs) {
   });
 }
 
+/**
+ * From a candidate-id pool, the ones whose latest backtest has < threshold
+ * trades (or 0/null). Lets the weekly review honour "candidates with fewer than
+ * 30 trades should ALSO be re-evaluated" regardless of how old they are — they
+ * are unioned with the recent-additions set so a 40-day-old 12-trade candidate
+ * is not skipped. Cheap (one query, no Opus).
+ */
+async function lowTradeCandidateIds(poolIds, query = _query, threshold = DEFAULT_LOW_TRADE) {
+  if (!poolIds || !poolIds.length) return [];
+  const { rows } = await query(
+    `SELECT strategy_id FROM strategy_backtest_runs
+      WHERE primary_window = TRUE AND strategy_id = ANY($1::text[])
+        AND (total_trades IS NULL OR total_trades < $2)`,
+    [poolIds, threshold]
+  );
+  return rows.map(r => r.strategy_id);
+}
+
 async function runReview({ strategyIds, mode = 'report', concurrency = 3,
                            query = _query, runOpus, notify = () => {}, manifest } = {}) {
   manifest = manifest || _loadManifest();
@@ -304,7 +322,7 @@ function renderReport(result) {
 module.exports = {
   selectConcerns, validateVerdict, resolveImplPath, fetchBacktest,
   buildPrompt, auditStrategy, runReview, renderReport, strategyIdsByState,
-  recentWithinDays,
+  recentWithinDays, lowTradeCandidateIds,
 };
 
 // ── CLI ───────────────────────────────────────────────────────────────────--
@@ -333,10 +351,16 @@ if (require.main === module) {
 
     const manifest = _loadManifest();
     const recentDays = arg('--recent-days') ? parseInt(arg('--recent-days'), 10) : null;
-    let ids;
-    if (idsArg && idsArg !== true) ids = String(idsArg).split(',').map(s => s.trim()).filter(Boolean);
-    else ids = strategyIdsByState(String(stateArg).split(','), manifest);
-    if (recentDays) ids = recentWithinDays(ids, recentDays, manifest, Date.now());
+    const includeLowTrade = !!arg('--include-low-trade', false);
+    let baseIds;
+    if (idsArg && idsArg !== true) baseIds = String(idsArg).split(',').map(s => s.trim()).filter(Boolean);
+    else baseIds = strategyIdsByState(String(stateArg).split(','), manifest);
+    let ids = recentDays ? recentWithinDays(baseIds, recentDays, manifest, Date.now()) : baseIds;
+    if (includeLowTrade) {
+      // Union the recency-scoped set with EVERY <30-trade candidate (any age).
+      const lows = await lowTradeCandidateIds(baseIds);
+      ids = Array.from(new Set([...ids, ...lows]));
+    }
     if (limit) ids = ids.slice(0, limit);
 
     console.error(`[code-review] auditing ${ids.length} strategies (state=${stateArg}, concurrency=${concurrency}, dryRun=${dryRun})`);

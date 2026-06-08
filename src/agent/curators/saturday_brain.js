@@ -108,7 +108,11 @@ function _runPython(scriptRelPath, args, notify) {
   // Cap each ingestor (arxiv/openalex/expanded_sources). A stuck network read
   // in one of these stalled the whole sweep on quiet weeks; bound it so the
   // ingestor is treated as "failed" (non-fatal) and the sweep continues.
-  const timeoutMs = (parseInt(process.env.OPENCLAW_INGEST_TIMEOUT_S || '1200', 10) || 1200) * 1000;
+  // Backstop only — must exceed the longest legit ingest, incl. the first-
+  // Saturday-of-month --all-time arxiv/openalex backfill (the long pole). 60min
+  // default; override via env. Below a legit duration would turn "slow but
+  // succeeds" into "killed and fails" on the monthly refresh.
+  const timeoutMs = (parseInt(process.env.OPENCLAW_INGEST_TIMEOUT_S || '3600', 10) || 3600) * 1000;
   return spawnWithTimeout(PYTHON, [full, ...args], {
     cwd: OPENCLAW_DIR,
     env: { ...process.env },
