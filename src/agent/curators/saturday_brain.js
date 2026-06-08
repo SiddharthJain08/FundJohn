@@ -29,6 +29,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
 const PYTHON       = process.env.PYTHON_BIN || 'python3';
@@ -103,25 +104,27 @@ async function _expand(opts, notify) {
 
 // ── Phase 2: historical / incremental sweep ─────────────────────────────────
 function _runPython(scriptRelPath, args, notify) {
-  return new Promise((resolve) => {
-    const full = path.join(OPENCLAW_DIR, scriptRelPath);
-    const child = spawn(PYTHON, [full, ...args], {
-      cwd: OPENCLAW_DIR,
-      env: { ...process.env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', d => { stdout += d.toString(); });
-    child.stderr.on('data', d => { stderr += d.toString(); });
-    child.on('close', (code) => {
-      const tail = (stdout + stderr).split('\n').filter(Boolean).slice(-3).join(' | ');
-      notify(`  ${path.basename(scriptRelPath)}: exit=${code} ${tail.slice(0, 200)}`);
-      resolve({ code, stdout, stderr });
-    });
-    child.on('error', (err) => {
-      notify(`  ${scriptRelPath}: spawn error ${err.message}`);
-      resolve({ code: -1, stdout: '', stderr: err.message });
-    });
+  const full = path.join(OPENCLAW_DIR, scriptRelPath);
+  // Cap each ingestor (arxiv/openalex/expanded_sources). A stuck network read
+  // in one of these stalled the whole sweep on quiet weeks; bound it so the
+  // ingestor is treated as "failed" (non-fatal) and the sweep continues.
+  const timeoutMs = (parseInt(process.env.OPENCLAW_INGEST_TIMEOUT_S || '1200', 10) || 1200) * 1000;
+  return spawnWithTimeout(PYTHON, [full, ...args], {
+    cwd: OPENCLAW_DIR,
+    env: { ...process.env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }, {
+    timeoutMs,
+    onTimeout: () => notify(`  ${path.basename(scriptRelPath)}: TIMEOUT after ${timeoutMs / 1000}s — SIGKILLed`),
+  }).then(({ code, stdout, stderr, timedOut, error }) => {
+    if (error && code === -1 && !timedOut) {
+      notify(`  ${scriptRelPath}: spawn error ${error}`);
+      return { code: -1, stdout: '', stderr: error };
+    }
+    const tail = (stdout + stderr).split('\n').filter(Boolean).slice(-3).join(' | ');
+    notify(`  ${path.basename(scriptRelPath)}: exit=${code}${timedOut ? ' (TIMEOUT)' : ''} ${tail.slice(0, 200)}`);
+    // Normalise a timeout to a non-zero code so callers' `code === 0` gate fails.
+    return { code: timedOut ? -2 : code, stdout, stderr };
   });
 }
 
