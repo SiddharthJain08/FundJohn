@@ -88,3 +88,22 @@ def test_fetch_contracts_page_builds_pagetoken_args(monkeypatch):
     assert '--page-token' in seen['args'] and 'abc' in seen['args']
     assert '--status' in seen['args'] and 'active' in seen['args']
     assert '500' in seen['args']
+
+
+def test_load_prior_cache_missing_returns_empty(tmp_path):
+    assert oe._load_prior_cache(tmp_path / 'nope.json') == {}
+
+
+def test_atomic_write_and_reload_roundtrip(tmp_path):
+    p = tmp_path / 'sub' / 'cache.json'      # parent dir does not exist yet
+    oe._atomic_write_cache({'AAPL': True, 'MSFT': True}, p)
+    assert oe._load_prior_cache(p) == {'AAPL': True, 'MSFT': True}
+    # no leftover temp file
+    assert list(p.parent.glob('*.tmp')) == []
+
+
+def test_atomic_write_replaces_existing(tmp_path):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'OLD': True}, p)
+    oe._atomic_write_cache({'NEW': True}, p)
+    assert oe._load_prior_cache(p) == {'NEW': True}
