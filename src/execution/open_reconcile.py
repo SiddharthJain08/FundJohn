@@ -870,5 +870,132 @@ def main() -> None:
     logger.info('run_reconcile result: %s', res)
 
 
+# ── Part ②: broker-close reconcile (2026-06-08) ──────────────────────────────
+# engine.update_pnl only closes signals on price-crossing stop/target. Broker-
+# side closes — regime/operator liquidations, circuit-breaker fires, orphan
+# closes — leave signal_pnl 'open', so #trade-reports + the dashboard undercount
+# them. This pass closes every still-open signal whose ticker is FLAT at the
+# broker, deriving the real close_reason, reusing drop_signal_close (which
+# computes realized_pnl_pct off entry + flips execution_signals to stop phantom
+# re-marking). Report + dashboard read signal_pnl, so both auto-correct.
+
+_FLAT_BROKER_EPS_USD = 1.0   # |market value| <= this => not a real position
+
+
+def _derive_close_reason(cur, ticker: str, run_date) -> str:
+    """Why a position closed when it wasn't a price-based stop/target.
+    Priority: circuit-breaker > regime/operator liquidation > generic manual."""
+    cur.execute(
+        "SELECT 1 FROM circuit_breaker_fires WHERE ticker = %s "
+        "AND ts_utc::date = %s LIMIT 1",
+        (ticker, run_date),
+    )
+    if cur.fetchone():
+        return 'circuit_breaker'
+    cur.execute(
+        "SELECT 1 FROM alpaca_liquidations WHERE symbol = %s "
+        "AND run_date::date = %s LIMIT 1",
+        (ticker, run_date),
+    )
+    if cur.fetchone():
+        return 'liquidation'
+    return 'manual_close'
+
+
+def _closed_today_tickers(cur, run_date) -> set:
+    """Tickers with an explicit non-price close EVENT on run_date — the cycle's
+    manual closes that update_pnl's stop/target path can't see: circuit-breaker
+    fires + regime/operator liquidations. Scoping to these (vs every open
+    signal) is what keeps the daily report honest — it closes only what closed
+    THIS cycle, never dumps the historical phantom-open backlog onto one day.
+    (Stops/targets already flow through engine.update_pnl; orphan drops through
+    run_reconcile.)"""
+    out: set = set()
+    cur.execute(
+        "SELECT DISTINCT ticker FROM circuit_breaker_fires WHERE ts_utc::date = %s",
+        (run_date,),
+    )
+    out |= {r[0] for r in (cur.fetchall() or []) if r and r[0]}
+    cur.execute(
+        "SELECT DISTINCT symbol FROM alpaca_liquidations WHERE run_date::date = %s",
+        (run_date,),
+    )
+    out |= {r[0] for r in (cur.fetchall() or []) if r and r[0]}
+    return out
+
+
+def _open_signals_for_close_check(cur, run_date, scope_tickers) -> list:
+    """Signals whose LATEST signal_pnl mark (<= run_date) is still status='open'
+    AND whose ticker is in `scope_tickers` — candidates for a broker-side close.
+    Returns [{signal_id, ticker, close_price}] (DictCursor row access)."""
+    if not scope_tickers:
+        return []
+    cur.execute(
+        """
+        SELECT signal_id, ticker, close_price FROM (
+            SELECT DISTINCT ON (sp.signal_id)
+                   sp.signal_id, es.ticker, sp.close_price, sp.status
+              FROM signal_pnl sp
+              JOIN execution_signals es ON es.id = sp.signal_id
+             WHERE sp.pnl_date <= %s AND es.ticker = ANY(%s)
+             ORDER BY sp.signal_id, sp.pnl_date DESC
+        ) latest
+        WHERE status = 'open'
+        """,
+        (run_date, list(scope_tickers)),
+    )
+    return list(cur.fetchall() or [])
+
+
+def reconcile_broker_closes(cur, run_date, broker_loader=None) -> dict:
+    """Close still-open signals for tickers the cycle closed (liquidation /
+    circuit-breaker) that are now flat at the broker. Returns
+    {signal_id: close_reason} for the rows closed.
+
+    Scoped to THIS cycle's close events (never the historical phantom backlog).
+    SAFETY: if there ARE closes today but the broker returns NO positions we
+    treat it as a fetch glitch and skip — never mass-close on an empty book
+    (the 2026-05-22 empty-signals blowout class). A position whose close FAILED
+    (still held at the broker, e.g. an OCO-blocked liquidation) stays open."""
+    closed_today = _closed_today_tickers(cur, run_date)
+    if not closed_today:
+        return {}   # nothing the price path missed closed this cycle
+
+    if broker_loader is None:
+        from execution.regime_blended_sizer import _load_broker_positions_usd
+        broker_loader = _load_broker_positions_usd
+    from execution.parity_mark import _norm_ticker
+
+    broker_raw = broker_loader() or {}
+    if not broker_raw:
+        logger.warning('[reconcile_broker_closes] %d ticker(s) closed this cycle '
+                       'but broker positions empty — skipping (fail-safe)',
+                       len(closed_today))
+        return {}
+    held = {
+        _norm_ticker(t) for t, v in broker_raw.items()
+        if v is not None and abs(float(v)) > _FLAT_BROKER_EPS_USD
+    }
+
+    closed: dict = {}
+    for s in _open_signals_for_close_check(cur, run_date, closed_today):
+        sid = s['signal_id']
+        ticker = s['ticker']
+        if _norm_ticker(ticker) in held:
+            continue  # close FAILED — still held at the broker; leave open
+        price = s.get('close_price')
+        if price is None:
+            continue  # no mark to close at; retry next cycle
+        reason = _derive_close_reason(cur, ticker, run_date)
+        drop_signal_close(cur, sid, ticker, float(price), reason=reason)
+        closed[sid] = reason
+
+    if closed:
+        by_reason = {r: list(closed.values()).count(r) for r in set(closed.values())}
+        logger.info('[reconcile_broker_closes] closed %d broker-flat signal(s): %s',
+                    len(closed), by_reason)
+    return closed
+
+
 if __name__ == '__main__':
     main()

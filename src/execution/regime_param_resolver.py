@@ -16,6 +16,7 @@ Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -146,3 +147,35 @@ def max_hold_days_override(strategy_id: str, regime_state: str) -> Optional[int]
     if row is None or row['max_hold_days'] is None:
         return None
     return int(row['max_hold_days'])
+
+
+def _fetch_size_scalars(regime_state: str) -> list:
+    """Raw (strategy_id, size_scalar) rows for a regime where size_scalar is set."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT strategy_id, size_scalar
+                  FROM strategy_regime_params
+                 WHERE regime_state = %s AND size_scalar IS NOT NULL
+            """, (regime_state,))
+            return cur.fetchall()
+
+
+def size_scalars_for_regime(regime_state: str, _fetch=None) -> dict:
+    """Batch-load RAW per-strategy size_scalar for a regime → {strategy_id: float}.
+
+    Distinct from size_scalar(): NO PHASE1_REGIME_SCALARS fallback. A strategy
+    absent here is treated by the caller as 1.0 (no change). Only finite,
+    non-negative values are kept; nan/inf/negative are dropped (caller → 1.0).
+    An explicit 0.0 is kept (deliberate mute). Not cached — called once/cycle.
+    """
+    fetch = _fetch or _fetch_size_scalars
+    out: dict = {}
+    for sid, val in fetch(regime_state):
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(v) and v >= 0.0:
+            out[sid] = v
+    return out

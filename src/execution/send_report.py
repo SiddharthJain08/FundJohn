@@ -121,34 +121,77 @@ def _post_webhook_with_file(webhook_url: str, content: str, file_name: str, file
     return False
 
 
-def _fmt_greenlist(run_date: str, sized: dict) -> str:
+_GREENLIST_RULE = '━' * 27
+_GREENLIST_MSG_LIMIT = 1900   # Discord webhook content cap is 2000; leave margin
+
+
+def _greenlist_card(o: dict) -> str:
+    """One signal's card body (no fence/RULE). Contributing strategies are the
+    LAST piece of information, listed vertically (one bullet per line) so a
+    consolidated multi-strategy bet reads clearly instead of being truncated."""
+    ticker    = o.get('ticker') or '?'
+    direction = str(o.get('direction') or 'long')
+    is_short  = direction.lower().startswith('s')
+    arrow     = '▼' if is_short else '▲'
+    dir_label = 'SHORT' if is_short else 'LONG'
+    entry     = o.get('entry', 0) or 0
+    pct       = (o.get('pct_nav') or 0) * 100
+    ev, p     = o.get('ev'), o.get('p_t1')
+    ev_s      = f'{ev * 100:+.2f}' if ev is not None else 'n/a'
+    p_s       = f'{p * 100:.0f}'   if p  is not None else 'n/a'
+    strats    = (o.get('contributing_strategies')
+                 or ([o.get('strategy_id')] if o.get('strategy_id') else []))
+    lines = [
+        f' {ticker:<6} {arrow} {dir_label:<5}   ${entry:,.2f}',
+        f' size {pct:.2f}%   EV {ev_s}%   p(T1) {p_s}%',
+        f' contributing strategies ({len(strats)}):',
+    ]
+    lines += [f'   • {s}' for s in strats]
+    return '\n'.join(lines)
+
+
+def _greenlist_messages(run_date: str, sized: dict) -> list:
+    """Greenlist as a LIST of Discord messages, each a SELF-CONTAINED code block
+    under the webhook char cap. Packs boxed cards at card boundaries so a large
+    greenlist splits cleanly across messages instead of _post_webhook's naive
+    1900-char split breaking ``` fences mid-card. Banner is on the first message."""
     orders = sized.get('orders') or []
-    # `regime` in sized handoff is the full dict {state, stress, scale, vix_level, ...}
-    # but the Discord message only wants the state string.
     regime_raw = sized.get('regime') or '?'
     regime = regime_raw.get('state', '?') if isinstance(regime_raw, dict) else regime_raw
     if not orders:
-        return (f'✅ **{run_date}** — no actionable signals today '
-                f'(regime={regime}). All signals failed the Kelly/EV gate.')
-    lines = [f'🟢 **Greenlist — {run_date}** (regime={regime}, {len(orders)} orders)', '']
-    header = f'{"Ticker":<8} {"Strategy":<28} {"Dir":<5} {"Entry":>9} {"Size%":>6} {"EV%":>7} {"p(T1)":>7}'
-    lines.append('```')
-    lines.append(header)
-    lines.append('-' * len(header))
-    for o in orders:
-        ev = o.get('ev')
-        p  = o.get('p_t1')
-        lines.append(
-            f"{(o.get('ticker') or '?'):<8} "
-            f"{(o.get('strategy_id') or '?')[:28]:<28} "
-            f"{(o.get('direction') or 'long')[:5]:<5} "
-            f"{o.get('entry', 0) or 0:>9.2f} "
-            f"{(o.get('pct_nav') or 0)*100:>6.2f} "
-            f"{(ev*100) if ev is not None else 0:>+7.2f} "
-            f"{(p*100) if p is not None else 0:>7.1f}"
-        )
-    lines.append('```')
-    return '\n'.join(lines)
+        return [f'✅ **{run_date}** — no actionable signals today '
+                f'(regime={regime}). All signals failed the Kelly/EV gate.']
+
+    n = len(orders)
+    gross = sum(abs(o.get('pct_nav') or 0) for o in orders)
+    order_word = 'order' if n == 1 else 'orders'
+    banner = (f'🟢 **Greenlist — {run_date}**\n'
+              f'{regime} · {n} {order_word} · gross {gross:.2f}× NAV')
+    cards = [_greenlist_card(o) for o in orders]
+    R = _GREENLIST_RULE
+
+    def _block(card_subset):
+        body = '\n'.join([x for c in card_subset for x in (R, c)] + [R])
+        return f'```\n{body}\n```'
+
+    msgs, idx, first = [], 0, True
+    while idx < len(cards):
+        head = (banner + '\n') if first else ''
+        chosen = []
+        while idx < len(cards):
+            if chosen and len(head + _block(chosen + [cards[idx]])) > _GREENLIST_MSG_LIMIT:
+                break
+            chosen.append(cards[idx])
+            idx += 1
+        msgs.append(head + _block(chosen))
+        first = False
+    return msgs
+
+
+def _fmt_greenlist(run_date: str, sized: dict) -> str:
+    """Single-string greenlist (dry-run print + small posts). The webhook post
+    path uses _greenlist_messages so large greenlists chunk cleanly."""
+    return '\n'.join(_greenlist_messages(run_date, sized))
 
 
 # Shared 9-column schema for under-/over-performance digests. Both come
@@ -598,7 +641,12 @@ def main() -> int:
             print(file_text)
         return 0
 
-    ok1 = _post_webhook(wh_signals, _fmt_greenlist(run_date, sized)) if wh_signals else False
+    if wh_signals:
+        _gl_msgs = _greenlist_messages(run_date, sized)
+        _gl_results = [_post_webhook(wh_signals, m) for m in _gl_msgs]
+        ok1 = bool(_gl_results) and all(_gl_results)
+    else:
+        ok1 = False
 
     if wh_reports:
         if file_text:

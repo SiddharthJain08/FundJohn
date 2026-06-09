@@ -32,6 +32,9 @@ const AGENTS = {
       // data-pipeline alert surface (freshness, collector summaries,
       // pipeline-feed step boundaries, strategy memos, pre-market alerts).
       'data-alerts', 'pipeline-feed', 'strategy-memos', 'pre-market-alerts',
+      // Risk-control surface: position circuit-breaker fires post here
+      // (routed off #trade-reports 2026-06-08).
+      'circuit-breaker',
     ],
   },
   // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below

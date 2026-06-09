@@ -92,6 +92,10 @@ const STRUCTURE = [
         topic: 'Final trade reports. Use !john /approve or /reject to act on pending trades.',
       },
       {
+        name: 'circuit-breaker', key: 'circuit-breaker', operatorWrite: false,
+        topic: 'Position circuit-breaker fires — intraday NAV-loss backstop closes (live/dry), separate from trade reports.',
+      },
+      {
         name: 'position-recommendations', key: 'position-recommendations', operatorWrite: false,
         topic: 'TradeDesk position recommendations. Click Approve to execute immediately on Alpaca paper. Click Reject to dismiss.',
       },

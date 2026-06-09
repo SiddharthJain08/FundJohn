@@ -71,7 +71,9 @@ class StrategyWeightRow:
     # + comprehensive review + operator audit. oue_multiplier /
     # oue_adjusted_sharpe are retained as columns but are now always NULL —
     # the OUE multiplier was removed from sizing 2026-05-29 (weight =
-    # effective_sharpe; corroboration + position-recs govern sizing).
+    # effective_sharpe; corroboration governs gating; the per-(strategy,regime)
+    # size_scalar governs allocation when OPENCLAW_STRATEGY_SIZE_SCALAR=1
+    # (applied downstream in the sizer, not baked here)).
     oue_over: int | None = None
     oue_under: int | None = None
     oue_expected: int | None = None
@@ -96,10 +98,11 @@ def _regime_weight(effective_sharpe: float, cadence_days: float) -> tuple[float,
                    w/sqrt(T)). cadence is floored at 1 day.
 
     The OUE multiplier was removed here 2026-05-29 (operator decision):
-    strategy sizing is governed by cross-sector corroboration + the weekly
-    position-recommendations (own multiplier + stop changes), so an
-    additional OUE-derived scaling was redundant. OUE classification is
-    still loaded for the audit columns — it just no longer scales size."""
+    strategy sizing is governed by cross-sector corroboration + the
+    approved per-(strategy,regime) size_scalar (applied in the sizer when
+    its gate is ON), so an additional OUE-derived scaling here was
+    redundant. OUE classification is still loaded for the audit columns —
+    it just no longer scales size."""
     w = effective_sharpe
     w_daily = w / math.sqrt(max(1, cadence_days))
     return w, w_daily
