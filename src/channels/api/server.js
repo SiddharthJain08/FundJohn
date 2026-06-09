@@ -6808,17 +6808,9 @@ function _pnlColor(pct) {
   return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
 }
 
-// Vertical stack of horizontal alpha-contribution bars — one per strategy
-// that holds the ticker. Bar value = strategy_sharpe / portfolio_sharpe
-// (the ratio "how risk-efficient is this strategy vs the consolidated
-// book"). Bars are centered on a zero-line and extend right when ratio
-// > 0, left when ratio < 0; length scaled to max |ratio| in this group.
-// Ratios can exceed 1.0 when a strategy's standalone Sharpe is higher
-// than the consolidated portfolio (common when other strategies drag
-// down the pooled denominator).
-// On-demand fetcher for per-ticker Sharpe decomposition. De-dupes
-// concurrent clicks; caches indefinitely (session-level) so a re-expand
-// is instant.
+// On-demand fetcher for a ticker's signed alpha contributions
+// (/api/portfolio/ticker-alpha). De-dupes concurrent clicks; caches per
+// session so a re-expand is instant. Rendered by _buildAlphaBarsHtml.
 function _fetchTickerAlpha(ticker, onReady) {
   if (_alphaCache[ticker]) { onReady(_alphaCache[ticker]); return; }
   if (_alphaInflight[ticker]) { _alphaInflight[ticker].then(onReady); return; }

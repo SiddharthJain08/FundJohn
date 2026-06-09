@@ -346,7 +346,6 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
     uri = os.environ.get('POSTGRES_URI')
     if not uri:
         return 0
-    import json as _json
     n = 0
     try:
         conn = psycopg2.connect(uri)
@@ -364,7 +363,7 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
                     updated_at = NOW()
                 """,
                 (run_date_str, tk, list(strats),
-                 _json.dumps(contribs) if contribs is not None else None),
+                 json.dumps(contribs) if contribs is not None else None),
             )
             n += 1
         conn.commit()
