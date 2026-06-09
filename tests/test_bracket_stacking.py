@@ -127,3 +127,60 @@ def test_t2_never_inverts_past_stacked_t1():
     out2 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=None)], 1,
                               block_map={'A': 1}, eff_sharpe={'A': 1.0})
     assert out2['t2'] is None
+
+
+class TestDailyNormalizedLevels:
+    def test_long_scales_gap_by_inv_sqrt_cadence(self):
+        # cadence 4 -> f = 1/2. long: entry 100, stop 95, t1 110
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, 95.0, 110.0, None, 4.0)
+        assert math.isclose(stop, 97.5)
+        assert math.isclose(t1, 105.0)
+        assert t2 is None
+
+    def test_short_scales_gap_by_inv_sqrt_cadence(self):
+        # cadence 9 -> f = 1/3. short: entry 100, stop 106 (above), t1 90 (below)
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, 106.0, 90.0, None, 9.0)
+        assert math.isclose(stop, 100.0 + (106.0 - 100.0) / 3.0)   # 102.0
+        assert math.isclose(t1, 100.0 + (90.0 - 100.0) / 3.0)      # 96.6667
+
+    def test_cadence_one_is_noop(self):
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, 115.0, 1.0) == (95.0, 110.0, 115.0)
+
+    def test_monthly_cadence_shrinks_gap(self):
+        stop, _, _ = bs.daily_normalized_levels(100.0, 90.0, 110.0, None, 21.0)
+        assert math.isclose(stop, 100.0 - 10.0 / math.sqrt(21.0))
+
+    def test_pct_identity_matches_weight_scaling(self):
+        # normalized stop_pct == raw stop_pct / sqrt(cadence)
+        e, raw_stop, c = 200.0, 180.0, 16.0
+        stop, _, _ = bs.daily_normalized_levels(e, raw_stop, None, None, c)
+        raw_pct = (e - raw_stop) / e
+        norm_pct = (e - stop) / e
+        assert math.isclose(norm_pct, raw_pct / math.sqrt(c))
+
+    def test_bad_entry_passes_all_levels_through(self):
+        assert bs.daily_normalized_levels(None, 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(0.0, 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(float('nan'), 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+
+    def test_per_level_finite_guard(self):
+        # None/NaN levels pass through; finite levels still normalize (cadence 4 -> f=0.5)
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, None, float('nan'), 120.0, 4.0)
+        assert stop is None
+        assert math.isnan(t1)
+        assert math.isclose(t2, 110.0)   # 100 + (120-100)*0.5
+
+    def test_cadence_floored_at_one(self):
+        # cadence 0 or None -> treated as 1 -> no-op
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, 0.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, None) == (95.0, 110.0, None)
+
+    def test_decimal_nan_passthrough_and_finite_decimal_normalizes(self):
+        from decimal import Decimal
+        # Decimal('NaN') entry -> all levels pass through unchanged, no crash
+        assert bs.daily_normalized_levels(Decimal('NaN'), 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        # Decimal('NaN') stop passes through; finite Decimal levels still normalize (cadence 4 -> f=0.5)
+        stop, t1, t2 = bs.daily_normalized_levels(Decimal('100'), Decimal('NaN'), Decimal('110'), None, 4.0)
+        assert isinstance(stop, Decimal) and stop.is_nan()
+        assert abs(float(t1) - 105.0) < 1e-9
+        assert t2 is None
