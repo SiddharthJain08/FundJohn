@@ -884,6 +884,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # the cum-sharpe gate (sharpe_by_strat) + fold representative stay raw.
     # The bracket-leader pick also stays on raw conviction.
     _size_scalar_on = os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1'
+    _cadence_stop_norm_on = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')
+    if _cadence_stop_norm_on:
+        from execution import bracket_stacking as _bs
     try:
         from execution import regime_param_resolver as _rpr
         # Always load (raw): the ON path applies them; the OFF path logs a shadow diff.
@@ -997,14 +1000,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         # contribution in the *winning* direction wins. We keep every
         # (direction, weight, bracket) tuple here; final selection happens
         # after ticker_w sign is known.
+        _b_entry = s.get('entry_price')
+        _b_stop  = s.get('stop_loss')
+        _b_t1    = s.get('target_1')
+        _b_t2    = s.get('target_2')
+        if _cadence_stop_norm_on:
+            # Normalize each bracket gap-from-entry to a single-day equivalent
+            # (÷√cadence), mirroring daily_weight = sharpe/√cadence, so corroborated
+            # stops/TPs share the horizon of the daily-rebalanced book. Entry (the
+            # fill anchor) is never scaled. Combine logic downstream is unchanged.
+            _b_stop, _b_t1, _b_t2 = _bs.daily_normalized_levels(
+                _b_entry, _b_stop, _b_t1, _b_t2, cadence_by_strat.get(sid, 1.0))
         ticker_meta[tkr]['brackets'].append({
             'sid':        sid,
             'direction':  d,
             'weight':     weight_by_strat[sid],   # raw conviction: bracket-leader by sharpe, NOT size_scalar
-            'entry':      s.get('entry_price'),
-            'stop':       s.get('stop_loss'),
-            't1':         s.get('target_1'),
-            't2':         s.get('target_2'),
+            'entry':      _b_entry,
+            'stop':       _b_stop,
+            't1':         _b_t1,
+            't2':         _b_t2,
         })
         # SP-5.1a (G1 prong 1): option contributors are partitioned out of `active`
         # above, so they never reach this equity loop. The former SP-5.1c per-ticker
