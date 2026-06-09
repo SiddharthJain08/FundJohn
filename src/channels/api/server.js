@@ -416,176 +416,37 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
     const hit = _tickerAlphaCache.get(ticker);
     if (hit && now - hit.ts < _TICKER_ALPHA_TTL_MS) return res.json(hit.payload);
 
-    // Daily combined PnL on this ticker — drives both ticker_sharpe and
-    // the shared sigma denominator used for every strategy's alpha.
-    // signal_performance is a view over signal_pnl (carries close_reason).
-    // rolled_continuation rows are roll segments of an ongoing position
-    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
-    const combinedRes = await dbQuery(`
-      SELECT sp.closed_at AS d, SUM(sp.pnl_pct) AS day_pnl
-      FROM signal_performance sp
-      JOIN execution_signals es ON es.id = sp.signal_id
-      WHERE sp.status = 'closed' AND es.ticker = $1
-        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
-      GROUP BY sp.closed_at
-      ORDER BY sp.closed_at
-    `, [ticker]);
-    const series = combinedRes.rows.map(r => parseFloat(r.day_pnl));
-    const days   = series.length;
-    if (days < 2) {
-      const payload = {
-        ticker, live_sharpe: null, days, reason: 'insufficient_days',
-        strategies: [], computed_at: new Date().toISOString(),
-      };
-      _tickerAlphaCache.set(ticker, { ts: now, payload });
-      return res.json(payload);
+    // Read the latest cycle's SIGNED per-representative contributions for this
+    // ticker (migration 134). Open positions → latest run_date; closed → the
+    // last run_date that sized the ticker (same row, most-recent). Each entry:
+    // {strategy_id, contribution = daily_weight × size_scalar × direction,
+    //  direction}. Graceful fallback to the legacy strategies[] list (no values).
+    const cr = await dbQuery(
+      `SELECT strategies, contributions, run_date
+         FROM cycle_contributing_strategies
+        WHERE ticker = $1 ORDER BY run_date DESC LIMIT 1`, [ticker]);
+    const row = cr.rows[0] || null;
+    let contributions = [];
+    if (row && Array.isArray(row.contributions)) {
+      contributions = row.contributions
+        .map(c => ({
+          strategy_id: c.strategy_id,
+          contribution: Number(c.contribution),
+          direction: Number(c.direction),
+        }))
+        .filter(c => isFinite(c.contribution))
+        .sort((a, b) => b.contribution - a.contribution);   // longs (green) top, shorts (red) bottom
+    } else if (row && Array.isArray(row.strategies)) {
+      // Back-compat: pre-migration-134 row with names only, no signed values.
+      contributions = row.strategies.map(s => ({ strategy_id: s, contribution: null, direction: null }));
     }
-    const mu_combined = series.reduce((s, x) => s + x, 0) / days;
-    const variance    = series.reduce((s, x) => s + (x - mu_combined) ** 2, 0) / (days - 1);
-    const sigma       = Math.sqrt(variance);
-    if (!(sigma > 0)) {
-      const payload = {
-        ticker, live_sharpe: null, days, reason: 'zero_variance',
-        strategies: [], computed_at: new Date().toISOString(),
-      };
-      _tickerAlphaCache.set(ticker, { ts: now, payload });
-      return res.json(payload);
-    }
-    const live_sharpe = mu_combined / sigma;
-
-    // Per-strategy pct-return + RATIO alpha:
-    //   alpha(s) = mean_pnl_pct(s on ticker) / mean_pnl_pct(ticker)
-    // Bigger than 1 when the strategy's average return on this ticker
-    // beats the ticker's own average across all strategies; less than 1
-    // when it lags. Per operator: this replaces the Sharpe-decomposition
-    // alpha for the active-positions matrix. live_sharpe is still
-    // returned in the payload as reference but not used by the bar
-    // renderer.
-    // Pull mean + stddev + count per (strategy, direction). The stddev
-    // is the strategy's volatility of pnl_pct on this ticker — used as
-    // the IR denominator. We compute IR per-strategy after rolling up
-    // LONG/SHORT direction groups.
-    // 2026-05-19: exclude deprecated/archived strategies from alpha-bars.
-    // Pre-fix, S5_max_pain (deprecated 2026-05-12) still showed as a
-    // contributor on every ticker it had ever traded because the JOIN
-    // didn't filter by lifecycle state. The live sizer skips deprecated
-    // strategies via strategy_weights_by_regime; the dashboard alpha
-    // display should reflect the same truth.
-    // rolled_continuation rows are roll segments of an ongoing position
-    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
-    const stratRes = await dbQuery(`
-      SELECT es.strategy_id,
-             es.direction,
-             AVG(sp.pnl_pct)::float           AS mean_pct,
-             STDDEV_SAMP(sp.pnl_pct)::float   AS std_pct,
-             COUNT(*)::int                    AS n_trades
-      FROM signal_performance sp
-      JOIN execution_signals es ON es.id = sp.signal_id
-      JOIN strategy_registry sr ON sr.id = es.strategy_id
-      WHERE sp.status = 'closed' AND es.ticker = $1
-        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
-        AND sr.status != 'deprecated'
-      GROUP BY es.strategy_id, es.direction
-    `, [ticker]);
-    // Ticker-level reference: mean(pnl_pct) over every closed trade.
-    // rolled_continuation rows are roll segments of an ongoing position
-    // (SP-6 D1), not trades; excluded from stats (NULL-safe).
-    const tickerStatsRes = await dbQuery(`
-      SELECT AVG(sp.pnl_pct)::float AS mean_pct, COUNT(*)::int AS n
-      FROM signal_performance sp
-      JOIN execution_signals es ON es.id = sp.signal_id
-      WHERE sp.status = 'closed' AND es.ticker = $1
-        AND sp.close_reason IS DISTINCT FROM 'rolled_continuation'
-    `, [ticker]);
-    const ticker_mean_pct = parseFloat(tickerStatsRes.rows[0]?.mean_pct ?? 0);
-    const ticker_n        = parseInt(tickerStatsRes.rows[0]?.n ?? 0);
-
-    // A strategy can hold both LONG and SHORT on the same ticker. Roll up
-    // both groups before computing IR:
-    //   - mean_pct = trade-count-weighted average of group means
-    //   - var_pct  = pooled variance across groups (E[X²] − E[X]²) using
-    //                Σx² recovered from per-group n×(std² + mean²)
-    //   - n_trades = sum of group counts
-    //   - dir      = the direction with the larger count (display only)
-    const byStrat = new Map();
-    for (const r of stratRes.rows) {
-      const meanPct = parseFloat(r.mean_pct);
-      const stdPct  = parseFloat(r.std_pct);  // may be NaN if group n=1
-      const n       = parseInt(r.n_trades);
-      // Σ x for this group; Σ x² recoverable from (n−1)·std² + n·mean²
-      const sumX  = meanPct * n;
-      const sumX2 = (isFinite(stdPct) ? (n - 1) * stdPct * stdPct : 0) + n * meanPct * meanPct;
-      const cur = byStrat.get(r.strategy_id);
-      if (!cur) {
-        byStrat.set(r.strategy_id, {
-          strategy_id: r.strategy_id,
-          n_trades: n, dir: r.direction,
-          _sumX: sumX, _sumX2: sumX2, _domN: n,
-        });
-      } else {
-        cur.n_trades += n;
-        cur._sumX    += sumX;
-        cur._sumX2   += sumX2;
-        if (n > cur._domN) { cur.dir = r.direction; cur._domN = n; }
-      }
-    }
-    // Restrict to the sizer's correlation-gate contributing strategies for this
-    // ticker (latest cycle): the alpha breakdown should reflect the strategies
-    // that actually drove the gate-passing cum_sharpe (migration 130), not every
-    // strategy that ever traded the ticker. Graceful fallback: when no cycle row
-    // exists yet (pre-accrual), keep the full set.
-    let contribSet = null;
-    try {
-      const cr = await dbQuery(
-        `SELECT strategies FROM cycle_contributing_strategies
-          WHERE ticker = $1 ORDER BY run_date DESC LIMIT 1`, [ticker]);
-      const arr = cr.rows[0] && cr.rows[0].strategies;
-      if (Array.isArray(arr) && arr.length) contribSet = new Set(arr);
-    } catch (_) { /* table absent / query failure → no filter (show all) */ }
-
-    const baseline = ticker_mean_pct;
-    const strategies = [...byStrat.values()]
-      .filter(s => (contribSet ? contribSet.has(s.strategy_id) : true))
-      .map(s => {
-      const mean = s._sumX / s.n_trades;
-      // Sample variance from rolled-up moments: σ² = (Σx² − n·μ²) / (n − 1)
-      const variance = s.n_trades > 1
-        ? Math.max(0, (s._sumX2 - s.n_trades * mean * mean) / (s.n_trades - 1))
-        : 0;
-      const std = Math.sqrt(variance);
-
-      // Information Ratio with sample-size confidence.
-      const haveStd = std > 0;
-      const haveBaseline = baseline != null && isFinite(baseline);
-      const ir_raw = (haveStd && haveBaseline) ? (mean - baseline) / std : null;
-      const confidence = Math.sqrt(Math.min(s.n_trades, 30) / 30);
-      const ir = (ir_raw == null) ? null : ir_raw * confidence;
-
-      // pct-ratio kept for back-compat with any cached older clients.
-      const alpha = (baseline !== 0 && haveBaseline) ? mean / baseline : null;
-
-      return {
-        strategy_id: s.strategy_id,
-        mean_pct:    mean,
-        std_pct:     haveStd ? std : null,
-        n_trades:    s.n_trades,
-        ir_raw:      ir_raw,
-        ir:          ir,
-        alpha:       alpha,
-        dir:         s.dir,
-      };
-    }).sort((a, b) => {
-      // Sort by IR desc, with nulls (insufficient data) at the bottom.
-      const ai = a.ir == null ? -Infinity : a.ir;
-      const bi = b.ir == null ? -Infinity : b.ir;
-      return bi - ai;
-    });
-
+    const net = contributions.reduce((s, c) => s + (c.contribution || 0), 0);
     const payload = {
-      ticker, live_sharpe, days,
-      ticker_mean_pct, ticker_n,
-      strategies,
-      contributing_only: contribSet != null,   // filtered to corr-gate set?
+      ticker,
+      contributions,
+      net,
+      run_date: row ? row.run_date : null,
+      has_values: contributions.some(c => c.contribution != null),
       computed_at: new Date().toISOString(),
     };
     if (_tickerAlphaCache.size >= _TICKER_ALPHA_CAP) {
@@ -593,7 +454,7 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
       _tickerAlphaCache.delete(oldestKey);
     }
     _tickerAlphaCache.set(ticker, { ts: now, payload });
-    res.json(payload);
+    return res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
