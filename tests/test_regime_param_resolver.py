@@ -117,3 +117,21 @@ def test_size_scalar_non_null_overrides(monkeypatch):
     monkeypatch.setattr(rpr, '_connect', lambda: FakeConn(rows=[row]))
     rpr._cache.clear()
     assert rpr.size_scalar('s1', 'HIGH_VOL') == 0.5
+
+
+def test_size_scalars_for_regime_raw_only_no_phase1_fallback():
+    from execution import regime_param_resolver as rpr
+    # Injected fetch returns rows for LOW_VOL: one real scalar, one explicit 0.0.
+    rows = [('momentum_12_1', 1.5), ('S_muted', 0.0)]
+    out = rpr.size_scalars_for_regime('LOW_VOL', _fetch=lambda regime: rows)
+    assert out == {'momentum_12_1': 1.5, 'S_muted': 0.0}   # explicit 0.0 honored
+    # A strategy ABSENT from the dict must NOT get a PHASE1 dampener — the
+    # caller defaults it to 1.0; the loader simply omits it.
+    assert 'absent' not in out
+
+
+def test_size_scalars_for_regime_coerces_bad_values_to_one():
+    from execution import regime_param_resolver as rpr
+    rows = [('a', float('nan')), ('b', -0.5), ('c', float('inf')), ('d', 1.25)]
+    out = rpr.size_scalars_for_regime('LOW_VOL', _fetch=lambda regime: rows)
+    assert out == {'d': 1.25}   # nan/inf/negative dropped → caller defaults them to 1.0
