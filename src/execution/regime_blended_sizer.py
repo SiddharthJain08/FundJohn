@@ -879,6 +879,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: float(r['cadence_days']) for r in rows}
+    # size_scalar wiring (default-OFF). Approved per-(strategy,regime) scalars
+    # (raw; missing → 1.0) multiply daily_weight = the ALLOCATION term only;
+    # the cum-sharpe gate (sharpe_by_strat) + fold representative stay raw.
+    _size_scalar_on = os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1'
+    try:
+        from execution import regime_param_resolver as _rpr
+        # Always load (raw): the ON path applies them; the OFF path logs a shadow diff.
+        _size_scalars = _rpr.size_scalars_for_regime(regime_state)
+    except Exception as e:
+        logger.warning('size_scalar: load failed (%s); treating all as 1.0', e)
+        _size_scalars = {}
+    eff_weight_by_strat = _apply_size_scalars(weight_by_strat, _size_scalars, _size_scalar_on)
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
@@ -976,7 +988,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         d = _dir_to_int(s.get('direction'))
         if d == 0:
             continue
-        ticker_w[tkr] += weight_by_strat[sid] * d
+        ticker_w[tkr] += eff_weight_by_strat[sid] * d
         ticker_net_sharpe[tkr] += sharpe_by_strat.get(sid, 0.0) * d
         ticker_meta[tkr]['strategies'].append(sid)
         ticker_meta[tkr]['directions'].append(d)
@@ -987,7 +999,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         ticker_meta[tkr]['brackets'].append({
             'sid':        sid,
             'direction':  d,
-            'weight':     weight_by_strat[sid],
+            'weight':     eff_weight_by_strat[sid],
             'entry':      s.get('entry_price'),
             'stop':       s.get('stop_loss'),
             't1':         s.get('target_1'),
@@ -1088,6 +1100,21 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         target_usd.pop(tkr, None)
         ticker_w.pop(tkr, None)
         ticker_meta.pop(tkr, None)
+
+    # SHADOW: when the gate is OFF, log what size_scalars WOULD do to per-ticker
+    # dollar targets without moving money (mirrors OPENCLAW_STRATEGY_ORTHO_SHADOW).
+    if not _size_scalar_on and _size_scalars:
+        try:
+            survivors = {tkr: list(zip(meta['strategies'], meta['directions']))
+                         for tkr, meta in ticker_meta.items()}
+            diff = _scaled_target_diff(survivors, weight_by_strat, _size_scalars,
+                                       target_usd, lam_nav=lam * nav)
+            moved = {t: round(v['delta_usd'], 2) for t, v in diff.items()
+                     if abs(v['delta_usd']) >= 1.0}
+            logger.info('size_scalar.shadow: %d scalars active; per-ticker Δusd=%s',
+                        len(_size_scalars), dict(sorted(moved.items())))
+        except Exception as e:
+            logger.warning('size_scalar.shadow failed (%s)', e)
 
     # SP-6 per-ticker conviction cap (operator formula, 2026-06-04):
     #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(t)| × λ × NAV
@@ -1239,6 +1266,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             'target_usd':              out_target,
             'current_usd':             out_current,
             'contributing_strategies': ticker_meta[tkr]['strategies'],
+            'contributions':           _build_contributions(
+                                           ticker_meta[tkr]['strategies'],
+                                           ticker_meta[tkr]['directions'],
+                                           eff_weight_by_strat),
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         }
