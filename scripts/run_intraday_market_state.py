@@ -613,6 +613,14 @@ def _cooldown_active(kv: dict, date_str: str) -> bool:
     return any(kv.get(k) for k in keys)
 
 
+def make_episode(ts, state: str) -> str:
+    """Per-transition-episode key shared by tick-1 (candidate) and tick-3 (gate).
+    `ts` MUST be the streak-start (first new-state) tick. Correctness of the
+    gate depends ONLY on tick-1 and tick-3 producing the SAME string for the
+    same streak-start tick; the reconstruction is best-effort."""
+    return f"{ts.strftime('%Y-%m-%d')}:{state}:{ts.floor('15min').isoformat()}"
+
+
 def _is_candidate_transition(settled, state, streak, confidence, market_open) -> bool:
     """First-tick signal of a (not-yet-confirmed) transition — the trigger to
     warm a prices-only refetch so data is fresh by the 3rd-tick confirmation."""
@@ -651,7 +659,7 @@ def _spawn_refetch_prices(date_str: str) -> str:
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
 
 def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
-                    *, dry_run: bool) -> str:
+                    *, dry_run: bool, episode: str | None = None) -> str:
     """Spawn scripts/redeploy_pipeline.py DETACHED. Returns 'spawned' or
     'dry-run' for the Discord-summary tag, or 'spawn_error' on Popen failure.
 
@@ -659,6 +667,11 @@ def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
     redirected to a per-date log file, parent does not wait. The 5-min
     intraday cron tick must return in <2s; the orchestrator itself runs up
     to 30 min inside the detached child.
+
+    `episode` (the tick-3 expected episode) episode-binds the redeploy's
+    data-ready gate so it can ONLY proceed on a sentinel stamped to THIS
+    transition's episode — closing the stale-`done` freshness hole. None
+    (legacy/flag-OFF path) leaves the gate's episode-matching a no-op.
     """
     reason = f'INTRADAY_HMM_{prior_state}_{new_state}'
     log_dir = ROOT / 'logs'
@@ -673,6 +686,8 @@ def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
         '--reason', reason,
         '--date', date_str,
     ]
+    if episode is not None:
+        cmd += ['--episode', episode]
     if dry_run:
         cmd.append('--dry-run')
 
@@ -848,7 +863,7 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         settled = _find_settled_regime(history)
         _cand_date = features['ts_utc'].strftime('%Y-%m-%d')
         if _is_candidate_transition(settled, state_name, streak, confidence, market_open):
-            episode = f"{_cand_date}:{state_name}:{features['ts_utc'].floor('15min').isoformat()}"
+            episode = make_episode(features['ts_utc'], state_name)
             rcli = _redis()
             if _pf.should_prefetch(rcli, _cand_date, episode=episode):
                 _pf.set_prefetch_running(rcli, _cand_date, target_state=state_name,
@@ -908,8 +923,31 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
                     transition_tag=transition_tag,
                 )
                 is_live = _is_live_intraday()
+                # Episode-bind the tick-3 data-ready gate. CORRECTNESS comes
+                # from "redeploy_pipeline only proceeds on episode-match";
+                # this streak-start reconstruction is a best-effort FAST-PATH
+                # to reuse the tick-1 prefetch. If it's slightly off, the gate
+                # simply sync-refetches fresh data (correct, slightly slower) —
+                # it must NEVER let the gate proceed on a non-matching episode.
+                #
+                # streak-start tick = oldest consecutive history row matching state_name.
+                # history is newest-first; the current tick isn't in it. With streak==N,
+                # the streak-start is history[N-2] (history[0]=prev tick). Fail-safe: if
+                # we can't recover it, fall back to the current ts (the gate will then
+                # sync-refetch on episode mismatch — correct, just not the fast path).
+                try:
+                    if streak >= 2 and len(history) >= (streak - 1):
+                        _start_ts = pd.Timestamp(history[streak - 2]['ts_utc'])
+                        if _start_ts.tzinfo is None:
+                            _start_ts = _start_ts.tz_localize('UTC')
+                    else:
+                        _start_ts = features['ts_utc']
+                except Exception:
+                    _start_ts = features['ts_utc']
+                expected_episode = make_episode(_start_ts, state_name)
                 spawn_kind = _spawn_redeploy(
                     prior_state, state_name, date_str, dry_run=(not is_live),
+                    episode=expected_episode,
                 )
                 fired_liquidation = True
                 logger.info(

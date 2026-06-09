@@ -51,8 +51,10 @@ def _run_main_flag_on(argv, *, monkeypatch, redis_kv=None,
     # again inside the finally block for release_inflight).
     monkeypatch.setattr(rd, '_redis', lambda: r)
 
-    # gate mocked at the rd module level
-    monkeypatch.setattr(rd, '_data_ready_gate', lambda date: gate_result)
+    # gate mocked at the rd module level. main() now passes args.episode
+    # (None when --episode is absent), so the mock accepts it as a no-op kwarg.
+    monkeypatch.setattr(rd, '_data_ready_gate',
+                        lambda date, expected_episode=None: gate_result)
 
     # clock: always RTH so the extended-hours block passes through
     monkeypatch.setattr(rd, '_alpaca_clock_is_rth', lambda: (True, True))

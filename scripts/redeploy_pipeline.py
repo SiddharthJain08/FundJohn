@@ -75,25 +75,35 @@ def _freshness_ok(date: str) -> bool:
     return ok
 
 
-def _sync_refetch(date: str) -> int:
+def _sync_refetch(date: str, episode: str | None = None) -> int:
     from scripts.refetch_prices import run as _run
-    return _run(date)
+    return _run(date, episode=episode)
 
 
-def _data_ready_gate(date: str) -> str:
-    """'proceed' or 'abort'. Bounded wait on the tick-1 prefetch sentinel;
-    synchronous refetch if no sentinel; abort on failure/timeout/stale."""
+def _data_ready_gate(date, expected_episode=None):
+    """'proceed'|'abort'. Proceeds ONLY on a done+fresh sentinel for THIS
+    episode; otherwise sync-refetches fresh (stamped to this episode). When
+    expected_episode is None (legacy/tests), episode-matching is a no-op.
+
+    CORRECTNESS lives here: a stale `done` sentinel from a PRIOR intraday
+    episode (still within the 6h sentinel TTL) must NOT satisfy this gate.
+    Binding proceed/abort to `episode == expected_episode` closes that hole;
+    the tick-3 streak-start reconstruction is only a fast-path to reuse the
+    tick-1 prefetch — a mismatch here just sync-refetches fresh, never
+    proceeds on the wrong episode."""
     r = _redis()
+    def _matches(s):
+        return bool(s) and (expected_episode is None or s.get('episode') == expected_episode)
     s = _pf.read_prefetch(r, date)
-    if s is None:
-        _sync_refetch(date)
+    # No in-flight or done prefetch for THIS episode → fetch fresh now.
+    if not (_matches(s) and s.get('status') in ('running', 'done')):
+        _sync_refetch(date, expected_episode)
     waited = 0
     while True:
-        s = _pf.read_prefetch(r, date) or s
-        status = (s or {}).get('status')
-        if status == 'done' and _freshness_ok(date):
+        s = _pf.read_prefetch(r, date)
+        if _matches(s) and s.get('status') == 'done' and _freshness_ok(date):
             return 'proceed'
-        if status == 'failed':
+        if _matches(s) and s.get('status') == 'failed':
             return 'abort'
         if waited >= GATE_TIMEOUT_S:
             return 'abort'
@@ -325,6 +335,13 @@ def main(argv=None) -> int:
         help='Propagate PIPELINE_DRY_RUN=1 to the orchestrator (no broker '
              'submission). Cooldown/sentinel keys still get set on success.',
     )
+    ap.add_argument(
+        '--episode', default=None,
+        help='Tick-3 expected transition-episode key. When set, the data-ready '
+             'gate proceeds ONLY on a prefetch sentinel stamped to THIS episode '
+             '(else it sync-refetches fresh) — closes the stale-`done` hole. '
+             'Absent (legacy/flag-OFF) leaves episode-matching a no-op.',
+    )
     args = ap.parse_args(argv)
 
     # Single source of truth for clamped reason — used in keys + webhook.
@@ -410,7 +427,7 @@ def main(argv=None) -> int:
         # abort, success, and orchestrator failure. Cooldown is NOT set on
         # success (dropped under this flag); sentinel still is.
         try:
-            if _data_ready_gate(run_date) == 'abort':
+            if _data_ready_gate(run_date, args.episode) == 'abort':
                 _print_action({
                     'action': 'aborted',
                     'reason': reason,

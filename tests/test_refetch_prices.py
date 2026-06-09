@@ -53,3 +53,23 @@ def test_refetch_timeout_writes_failed(monkeypatch):
 def test_freshness_cutoff_is_today():
     import scripts.refetch_prices as rp
     assert rp._freshness_cutoff('2026-06-09') == '2026-06-09'
+
+
+def test_run_with_episode_force_sets_running(monkeypatch):
+    """An episode-bound refetch FORCE-overwrites a stale sentinel (even a prior
+    `done`) so the final done sentinel carries THIS episode."""
+    r = FakeRedis()
+    import src.execution.intraday_prefetch as p
+    # Pre-seed a stale done sentinel from a prior episode.
+    p.set_prefetch_running(r, '2026-06-09', target_state='(t)', episode='OLD')
+    p.set_prefetch_done(r, '2026-06-09', n_tickers=111)
+    assert p.read_prefetch(r, '2026-06-09')['episode'] == 'OLD'
+
+    monkeypatch.setattr(rp, '_redis', lambda: r)
+    monkeypatch.setattr(rp, '_run_price_fill', lambda date: 0)
+    monkeypatch.setattr(rp, '_freshness_ok', lambda date: (True, 5))
+    rc = rp.run('2026-06-09', episode='E1')
+    assert rc == 0
+    s = p.read_prefetch(r, '2026-06-09')
+    assert s['status'] == 'done'
+    assert s['episode'] == 'E1', f"episode-bound refetch must stamp E1; got {s.get('episode')}"

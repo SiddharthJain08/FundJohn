@@ -94,11 +94,18 @@ def _freshness_ok(date: str) -> tuple[bool, int]:
         return (False, 0)
 
 
-def run(date: str) -> int:
+def run(date: str, episode: str | None = None) -> int:
     try:
         r = _redis()
         now = dt.datetime.now(dt.timezone.utc).isoformat()
-        if p.should_prefetch(r, date, episode=f'{date}:refetch'):
+        if episode is not None:
+            # Episode-bound (tick-3 gate) refetch: FORCE-overwrite any stale
+            # sentinel so the gate's done/freshness check binds to THIS
+            # transition's episode. set_prefetch_done/failed below preserve it.
+            p.set_prefetch_running(r, date, target_state='(refetch)',
+                                   episode=episode, started_at=now)
+        elif p.should_prefetch(r, date, episode=f'{date}:refetch'):
+            # Legacy/standalone refetch: only set running if no sentinel exists.
             p.set_prefetch_running(r, date, target_state='(refetch)',
                                    episode=f'{date}:refetch', started_at=now)
         rc = _run_price_fill(date)
@@ -124,8 +131,9 @@ def run(date: str) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=dt.date.today().isoformat())
+    ap.add_argument('--episode', default=None)
     args = ap.parse_args(argv)
-    return run(args.date)
+    return run(args.date, episode=args.episode)
 
 
 if __name__ == '__main__':
