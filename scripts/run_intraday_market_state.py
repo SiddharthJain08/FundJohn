@@ -613,6 +613,41 @@ def _cooldown_active(kv: dict, date_str: str) -> bool:
     return any(kv.get(k) for k in keys)
 
 
+def _is_candidate_transition(settled, state, streak, confidence, market_open) -> bool:
+    """First-tick signal of a (not-yet-confirmed) transition — the trigger to
+    warm a prices-only refetch so data is fresh by the 3rd-tick confirmation."""
+    return (
+        market_open
+        and settled is not None
+        and state != settled
+        and streak == 1
+        and confidence >= CONFIDENCE_FLOOR
+    )
+
+
+# ── Refetch prices spawner (tick-1 candidate prefetch) ───────────────────────
+
+def _spawn_refetch_prices(date_str: str) -> str:
+    """Spawn scripts/refetch_prices.py DETACHED (fire-and-forget)."""
+    log_path = ROOT / 'logs' / f'refetch_prices_{date_str}.log'
+    cmd = [sys.executable, str(ROOT / 'scripts' / 'refetch_prices.py'), '--date', date_str]
+    try:
+        fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    except Exception:
+        fd = subprocess.DEVNULL
+    try:
+        subprocess.Popen(cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                         stdout=fd, stderr=fd, start_new_session=True, close_fds=True)
+    except Exception as e:
+        logger.error('refetch spawn failed: %s', e)
+        return 'spawn_error'
+    finally:
+        if isinstance(fd, int) and fd != subprocess.DEVNULL:
+            try: os.close(fd)
+            except Exception: pass
+    return 'spawned'
+
+
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
 
 def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
@@ -802,6 +837,27 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
 
     transition_tag = None
     fired_liquidation = False
+
+    # 4a) Tick-1 candidate prefetch (OPENCLAW_INTRADAY_15MIN_PREFETCH)
+    # On the FIRST tick of a candidate transition (streak==1, market open,
+    # conf≥floor, state differs from settled), spawn a prices-only refetch
+    # so data is fresh by the time the 3rd tick confirms.  Debounced per
+    # episode so it fires at most once per candidate episode.
+    from src.execution import intraday_prefetch as _pf
+    if _pf.prefetch_enabled() and not force_dry_run:
+        settled = _find_settled_regime(history)
+        _cand_date = features['ts_utc'].strftime('%Y-%m-%d')
+        if _is_candidate_transition(settled, state_name, streak, confidence, market_open):
+            episode = f"{_cand_date}:{state_name}:{features['ts_utc'].isoformat()}"
+            rcli = _redis()
+            if _pf.should_prefetch(rcli, _cand_date, episode=episode):
+                _pf.set_prefetch_running(rcli, _cand_date, target_state=state_name,
+                                         episode=episode,
+                                         started_at=features['ts_utc'].isoformat())
+                _spawn_refetch_prices(_cand_date)
+                _post_to_discord('intraday-regime',
+                    f':arrows_counterclockwise: candidate {settled} → {state_name} '
+                    f'(tick 1/3, conf={confidence:.2f}) — prefetching prices')
 
     # 4) Cooldown + transition audit gates
     # Phase 2 (2026-05-19): confirmed transitions spawn scripts/redeploy_pipeline.py
