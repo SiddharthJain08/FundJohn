@@ -174,3 +174,13 @@ class TestDailyNormalizedLevels:
         # cadence 0 or None -> treated as 1 -> no-op
         assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, 0.0) == (95.0, 110.0, None)
         assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, None) == (95.0, 110.0, None)
+
+    def test_decimal_nan_passthrough_and_finite_decimal_normalizes(self):
+        from decimal import Decimal
+        # Decimal('NaN') entry -> all levels pass through unchanged, no crash
+        assert bs.daily_normalized_levels(Decimal('NaN'), 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        # Decimal('NaN') stop passes through; finite Decimal levels still normalize (cadence 4 -> f=0.5)
+        stop, t1, t2 = bs.daily_normalized_levels(Decimal('100'), Decimal('NaN'), Decimal('110'), None, 4.0)
+        assert isinstance(stop, Decimal) and stop.is_nan()
+        assert abs(float(t1) - 105.0) < 1e-9
+        assert t2 is None

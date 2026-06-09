@@ -73,7 +73,10 @@ def daily_normalized_levels(entry, stop, t1, t2, cadence_days):
     if not _finite(entry) or float(entry) <= 0:
         return stop, t1, t2
     e = float(entry)
-    f = 1.0 / math.sqrt(max(1.0, float(cadence_days or 1.0)))
+    c = float(cadence_days or 1.0)
+    if not _finite(c):
+        c = 1.0
+    f = 1.0 / math.sqrt(max(1.0, c))
     def _norm(x):
         return e + (float(x) - e) * f if _finite(x) else x
     return _norm(stop), _norm(t1), _norm(t2)

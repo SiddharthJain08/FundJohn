@@ -92,3 +92,78 @@ def test_gate_on_daily_cadence_is_noop(monkeypatch):
     o = _order_for(orders)
     assert o['stop'] == 95.0
     assert o['t1'] == 110.0
+
+
+# ---------------------------------------------------------------------------
+# Multi-strategy mixed-cadence stacked-combine test (Item 1)
+# ---------------------------------------------------------------------------
+# Strategy A: cadence 1  (daily),   entry=100, stop=95  (5% gap),  t1=110
+# Strategy B: cadence 21 (monthly), entry=100, stop=90  (10% gap), t1=110
+#
+# Gate OFF: stacked min(stop_pct) = min(5%, 10%) = 5% → combined stop = 95.0 (A wins)
+#           stacked tp sum = 10% + 10% = 20% (< 3× cap of 30%) → t1 = 120.0
+#
+# Gate ON:  A stop_pct unchanged (cadence 1 no-op) → 5%
+#           B stop_pct: 10% / √21 ≈ 2.182% → TIGHTER → min = 2.182%
+#           combined stop = 100 * (1 - 10/100/√21) = 100 - 10/√21 ≈ 97.8178 (B wins)
+#           Normalization flips which strategy's stop wins.
+
+def _weights_row_for(sid, cadence, daily_weight=5.0, effective_sharpe=5.0):
+    return {'strategy_id': sid, 'daily_weight': daily_weight,
+            'effective_sharpe': effective_sharpe, 'cadence_days': cadence}
+
+
+def _drive_two(monkeypatch, gate_on: bool):
+    """Drive size_positions with two same-ticker same-direction strategies,
+    different cadence, through the STACKED min-stop combine."""
+    monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+    monkeypatch.delenv('OPENCLAW_STRATEGY_FOLD', raising=False)
+    monkeypatch.setenv('OPENCLAW_STRATEGY_BRACKET_STACK', '1')
+    if gate_on:
+        monkeypatch.setenv('OPENCLAW_STRATEGY_CADENCE_STOP_NORM', '1')
+    else:
+        monkeypatch.delenv('OPENCLAW_STRATEGY_CADENCE_STOP_NORM', raising=False)
+
+    monkeypatch.setattr(_sizer, '_load_active_window_signals', lambda *a, **k: [])
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
+
+    weights = [
+        _weights_row_for('A', cadence=1.0),   # daily
+        _weights_row_for('B', cadence=21.0),  # monthly
+    ]
+    signals = [
+        _sig(sid='A', ticker='AAPL', direction=1, entry=100.0, stop=95.0,  t1=110.0),
+        _sig(sid='B', ticker='AAPL', direction=1, entry=100.0, stop=90.0,  t1=110.0),
+    ]
+    with _mock.patch('execution.strategy_weights.load_current', return_value=weights), \
+         _mock.patch('execution.strategy_similarity.load_groups',
+                     return_value={'fold_map': {}, 'rep_map': {}, 'block_map': {}, 'matrix': {}}):
+        return _sizer.size_positions(
+            signals=signals, account_state=_account(),
+            regime={'state': 'LOW_VOL'}, run_date=date(2026, 5, 12),
+            strategy_state={}, regime_params=_params(), confirmer=None,
+        )
+
+
+def test_stacked_combine_picks_tighter_normalized_stop(monkeypatch):
+    import math
+
+    # Gate OFF: A's stop wins (5% < 10%); stacked tp sums to 20% -> t1=120.0 proves stacking fired
+    o_off = _order_for(_drive_two(monkeypatch, gate_on=False))
+    assert abs(o_off['stop'] - 95.0) < 1e-6, f"gate-OFF stop should be 95.0, got {o_off['stop']}"
+    assert abs(o_off['t1'] - 120.0) < 1e-6, (
+        f"gate-OFF t1 should be 120.0 (stacked sum 10%+10%), got {o_off['t1']} — "
+        "if 110.0 then stacking didn't fire (check BRACKET_STACK env or load_groups patch)"
+    )
+
+    # Gate ON: B's 10% gap normalizes to 10%/√21 ≈ 2.182% (tighter) → B wins the stop combine
+    o_on = _order_for(_drive_two(monkeypatch, gate_on=True))
+    expected_stop_on = 100.0 - 10.0 / math.sqrt(21.0)  # ≈ 97.8178
+    assert abs(o_on['stop'] - expected_stop_on) < 1e-6, (
+        f"gate-ON stop should be {expected_stop_on:.6f}, got {o_on['stop']}"
+    )
+
+    # Normalization changed the combine outcome (the flip)
+    assert o_on['stop'] != o_off['stop'], (
+        f"gate-ON and gate-OFF should differ; both gave {o_off['stop']}"
+    )
