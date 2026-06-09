@@ -794,13 +794,17 @@ async function run(opts = {}) {
     // well under its systemd ceiling and lets coding start after the market-
     // independent ingest has fully settled. See docs/sunday-research-*.{service,timer}.
     if (opts.stopAfter === 'hunt') {
+      // A dry run must NOT leave a real 'ingest_complete' handoff row — the 2PM
+      // finisher would never claim it and the research-pipeline audit would
+      // misread it as a stuck run. Mark dry runs 'completed (dry run)' instead.
+      const ingestStatus = opts.dryRun ? 'completed (dry run)' : 'ingest_complete';
       await _query(
         `UPDATE saturday_runs
-            SET status='ingest_complete', finished_at=NOW(), cost_usd=$2
+            SET status=$3, finished_at=NOW(), cost_usd=$2
           WHERE run_id=$1`,
-        [runId, totalCost]
+        [runId, totalCost, ingestStatus]
       ).catch(() => {});
-      notify(`saturday_run ${runId.slice(0, 8)} INGEST complete (phases 0-4); `
+      notify(`saturday_run ${runId.slice(0, 8)} INGEST complete (phases 0-4)${opts.dryRun ? ' (DRY RUN)' : ''}; `
            + `${huntData.run} paperhunters → handoff to 2PM code run. $${totalCost.toFixed(2)}`);
       return { run_id: runId, costUsd: totalCost, stopped_after: 'hunt',
                paperhunters_run: huntData.run,
