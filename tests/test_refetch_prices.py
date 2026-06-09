@@ -39,3 +39,13 @@ def test_refetch_stale_after_success_writes_failed(monkeypatch):
     assert rc == 1
     import src.execution.intraday_prefetch as p
     assert p.read_prefetch(r, '2026-06-09')['status'] == 'failed'
+
+def test_refetch_timeout_writes_failed(monkeypatch):
+    r = FakeRedis()
+    monkeypatch.setattr(rp, '_redis', lambda: r)
+    monkeypatch.setattr(rp, '_run_price_fill', lambda date: 124)
+    monkeypatch.setattr(rp, '_freshness_ok', lambda date: (False, 0))
+    rc = rp.run('2026-06-09')
+    assert rc == 1
+    import src.execution.intraday_prefetch as p
+    assert p.read_prefetch(r, '2026-06-09')['status'] == 'failed'
