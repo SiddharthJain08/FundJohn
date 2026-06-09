@@ -848,7 +848,7 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
         settled = _find_settled_regime(history)
         _cand_date = features['ts_utc'].strftime('%Y-%m-%d')
         if _is_candidate_transition(settled, state_name, streak, confidence, market_open):
-            episode = f"{_cand_date}:{state_name}:{features['ts_utc'].isoformat()}"
+            episode = f"{_cand_date}:{state_name}:{features['ts_utc'].floor('15min').isoformat()}"
             rcli = _redis()
             if _pf.should_prefetch(rcli, _cand_date, episode=episode):
                 _pf.set_prefetch_running(rcli, _cand_date, target_state=state_name,
