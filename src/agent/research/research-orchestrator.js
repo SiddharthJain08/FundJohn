@@ -18,6 +18,7 @@
 const fs   = require('fs');
 const path = require('path');
 const { spawn, execSync, spawnSync } = require('child_process');
+const { spawnWithTimeout } = require('../../lib/spawn_timeout');
 const { emitGateDecision, paperIdForCandidate } = require('./gate-decisions');
 
 const OPENCLAW_DIR      = process.env.OPENCLAW_DIR || path.join(__dirname, '../../..');
@@ -1261,60 +1262,61 @@ class ResearchOrchestrator {
   // ── Core subagent runner ────────────────────────────────────────────────────
 
   _runSubagent(type, ticker, contextObj) {
-    return new Promise((resolve, reject) => {
-      const tmpFile = `/tmp/research-ctx-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
-      const ctxStr  = typeof contextObj === 'string' ? contextObj : JSON.stringify(contextObj, null, 2);
+    const tmpFile = `/tmp/research-ctx-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+    const ctxStr  = typeof contextObj === 'string' ? contextObj : JSON.stringify(contextObj, null, 2);
 
-      try {
-        fs.writeFileSync(tmpFile, ctxStr);
-      } catch (e) {
-        return reject(new Error(`Failed to write context file: ${e.message}`));
+    try {
+      fs.writeFileSync(tmpFile, ctxStr);
+    } catch (e) {
+      return Promise.reject(new Error(`Failed to write context file: ${e.message}`));
+    }
+
+    // Hard wall-clock cap so a single wedged claude-bin child can't block the
+    // hunt fan-out (Promise.all over workers) until systemd's 6h ceiling. On
+    // timeout the child is SIGKILLed and this rejects → the worker's per-
+    // candidate catch degrades it to `fetch_failed` and the batch continues.
+    // Backstop against an INFINITE hang, not a tight SLA — set well above the
+    // longest legitimate paperhunter/strategycoder run (a complex strategycoder
+    // can take many minutes). 20min default; override via env.
+    const timeoutMs = (parseInt(process.env.OPENCLAW_SUBAGENT_TIMEOUT_S || '1200', 10) || 1200) * 1000;
+
+    return spawnWithTimeout('node', [
+      NODE_CLI,
+      '--type',         type,
+      '--ticker',       String(ticker),
+      '--workspace',    DEFAULT_WORKSPACE,
+      '--context-file', tmpFile,
+    ], {
+      cwd:   OPENCLAW_DIR,
+      env:   { ...process.env, OPENCLAW_DIR },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }, { timeoutMs }).then(({ code, stdout, stderr, timedOut, error }) => {
+      fs.unlink(tmpFile, () => {});
+      if (timedOut) {
+        throw new Error(`${type} timed out after ${timeoutMs / 1000}s (SIGKILLed)`);
       }
-
-      const child = spawn('node', [
-        NODE_CLI,
-        '--type',         type,
-        '--ticker',       String(ticker),
-        '--workspace',    DEFAULT_WORKSPACE,
-        '--context-file', tmpFile,
-      ], {
-        cwd:   OPENCLAW_DIR,
-        env:   { ...process.env, OPENCLAW_DIR },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-      child.stdout.on('data', (d) => { stdout += d; });
-      child.stderr.on('data', (d) => { stderr += d; process.stderr.write(d); });
-
-      child.on('exit', (code) => {
-        fs.unlink(tmpFile, () => {});
-        if (code !== 0) {
-          // claude-bin sometimes exits non-zero with all useful detail on
-          // stdout (the Anthropic CLI dumps its error JSON there in --print
-          // mode). Capture both streams so the operator sees the actual cause
-          // — auth failure, rate limit, prompt parse error — instead of just
-          // the spawn-line preamble.
-          const combined = [
-            stderr ? `stderr: ${stderr.trim()}` : '',
-            stdout ? `stdout: ${stdout.trim()}` : '',
-          ].filter(Boolean).join(' | ').slice(0, 1500);
-          return reject(new Error(`${type} exited ${code}: ${combined || '(no output captured)'}`));
-        }
-        try {
-          const parsed = JSON.parse(stdout);
-          this._sessionCost += parsed.total_cost_usd ?? 0;
-          resolve(parsed.result ?? stdout);
-        } catch {
-          resolve(stdout);
-        }
-      });
-
-      child.on('error', (err) => {
-        fs.unlink(tmpFile, () => {});
-        reject(err);
-      });
+      if (error && code === -1) {
+        throw new Error(`${type} spawn error: ${error}`);
+      }
+      if (code !== 0) {
+        // claude-bin sometimes exits non-zero with all useful detail on
+        // stdout (the Anthropic CLI dumps its error JSON there in --print
+        // mode). Capture both streams so the operator sees the actual cause
+        // — auth failure, rate limit, prompt parse error — instead of just
+        // the spawn-line preamble.
+        const combined = [
+          stderr ? `stderr: ${stderr.trim()}` : '',
+          stdout ? `stdout: ${stdout.trim()}` : '',
+        ].filter(Boolean).join(' | ').slice(0, 1500);
+        throw new Error(`${type} exited ${code}: ${combined || '(no output captured)'}`);
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        this._sessionCost += parsed.total_cost_usd ?? 0;
+        return parsed.result ?? stdout;
+      } catch {
+        return stdout;
+      }
     });
   }
 

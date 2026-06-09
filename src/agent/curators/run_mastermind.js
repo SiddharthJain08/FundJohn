@@ -279,14 +279,21 @@ async function runSaturdayBrain() {
   const allTime    = !!getArg('--all-time', false);
   const budgetArg  = getArg('--max-budget-usd');
   const maxBudget  = budgetArg && budgetArg !== true ? parseFloat(budgetArg) : null;
+  // --phase ingest → run Phases 0-4 only (8AM Sunday ingest), stop after hunt.
+  // Omitted / 'all' → the full monolithic pipeline (back-compat). The 2PM
+  // 'code' half runs via saturday_brain_finisher.js, not this entry point.
+  const phaseArg   = getArg('--phase');
+  const stopAfter  = (phaseArg === 'ingest') ? 'hunt' : null;
 
-  console.error(`[mastermind:brain] Starting Saturday brain${dryRun ? ' (DRY RUN)' : ''}...`);
+  console.error(`[mastermind:brain] Starting Saturday brain`
+    + `${stopAfter ? ' (INGEST phase 0-4)' : ''}${dryRun ? ' (DRY RUN)' : ''}...`);
   const t0 = Date.now();
   const result = await run({
     dryRun,
     sinceIso: (typeof sinceIso === 'string' && sinceIso !== 'true') ? sinceIso : null,
     allTime,
     maxBudgetUsd: maxBudget,
+    stopAfter,
     notify: (m) => console.error(`[mastermind:brain] ${m}`),
   });
   const elapsed = ((Date.now() - t0) / 1000).toFixed(1);

@@ -50,11 +50,22 @@ class GEXRegime(BaseStrategy):
             scale = min(score, 2.0)
             size = min(0.015 + 0.01 * (abs(gex) / 2000.0) * scale, 0.045)
             confidence = "HIGH" if abs(gex) >= 1500 and iv_rank > 55 else "MED"
-            stop_pct = 0.05 if direction == "BUY_VOL" else 0.04
+            # Direction-aware brackets. Downstream maps BUY_VOL→+1 (long) and
+            # SELL_VOL→-1 (short) uniformly (regime_blended_sizer_live._DIR_MAP,
+            # engine, unified_backtest). A short profits when price FALLS, so
+            # SELL_VOL targets must sit BELOW entry and its stop ABOVE — the old
+            # code put long-side targets (×1.08/1.14/1.20) + a downside stop on
+            # SELL_VOL, i.e. an unreachable target and a wrong-side stop.
+            if direction == "BUY_VOL":          # long the underlying
+                stop_loss = round(price * (1 - 0.05), 2)
+                t1, t2, t3 = round(price*1.08, 2), round(price*1.14, 2), round(price*1.20, 2)
+            else:                               # SELL_VOL — short the underlying
+                stop_loss = round(price * (1 + 0.04), 2)
+                t1, t2, t3 = round(price*0.92, 2), round(price*0.86, 2), round(price*0.80, 2)
             signals.append(Signal(
                 ticker=ticker, direction=direction, entry_price=price,
-                stop_loss=round(price*(1-stop_pct),2),
-                target_1=round(price*1.08,2), target_2=round(price*1.14,2), target_3=round(price*1.20,2),
+                stop_loss=stop_loss,
+                target_1=t1, target_2=t2, target_3=t3,
                 position_size_pct=round(size,4), confidence=confidence,
                 signal_params={"strategy_id":self.id,"gex":round(gex,2),"iv_rank":round(iv_rank,2),"vrp":round(vrp,4),"score":round(score,4)},
             ))

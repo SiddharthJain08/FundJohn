@@ -1,0 +1,10 @@
+[Unit]
+Description=Sunday research ingest — Sun 08:00 America/New_York
+
+[Timer]
+OnCalendar=Sun *-*-* 08:00:00 America/New_York
+Persistent=true
+Unit=openclaw-sunday-research-ingest.service
+
+[Install]
+WantedBy=timers.target
