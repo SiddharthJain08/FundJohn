@@ -527,7 +527,12 @@ def _is_upward(prior_state: str | None, new_state: str) -> bool:
 
 def _tier_for_transition(prior_state: str | None, new_state: str) -> tuple[int, float]:
     """Return (required_ticks, required_confidence) for transition into new_state.
-    Upward transitions use HYSTERESIS_TIERS; downward/same use _DOWNWARD_TIER."""
+    With OPENCLAW_INTRADAY_15MIN_PREFETCH=1, ALL transitions require a uniform
+    3-tick (45-min) confirmation at the 0.70 floor — the 15-min cadence already
+    filters noise, so we drop the faster upward tiers. Flag OFF = legacy tiers."""
+    import os
+    if os.environ.get('OPENCLAW_INTRADAY_15MIN_PREFETCH') == '1':
+        return (3, CONFIDENCE_FLOOR)
     if _is_upward(prior_state, new_state):
         return HYSTERESIS_TIERS.get(new_state, _DOWNWARD_TIER)
     return _DOWNWARD_TIER
