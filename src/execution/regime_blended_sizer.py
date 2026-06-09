@@ -793,6 +793,57 @@ def _consolidate_option_orders(opt_active, weight_by_strat, sharpe_by_strat, sca
     return orders
 
 
+def _apply_size_scalars(weight_by_strat: dict, size_scalars: dict, gate_on: bool) -> dict:
+    """Allocation-only size_scalar application. When gate_on, multiply each
+    strategy's daily_weight by its approved size_scalar (missing → 1.0, so a
+    strategy absent from `size_scalars` is unchanged; an explicit 0.0 mutes).
+    When OFF, return weights untouched (byte-identical routing)."""
+    if not gate_on:
+        return dict(weight_by_strat)
+    out = {}
+    for sid, w in weight_by_strat.items():
+        s = size_scalars.get(sid, 1.0)
+        out[sid] = w * s
+    return out
+
+
+def _build_contributions(strategies: list, directions: list, eff_weight_by_strat: dict) -> list:
+    """Signed per-representative allocation terms for one ticker:
+    contribution = eff_weight × direction (the exact value summed into ticker_w).
+    Skips synthetic markers / strategies absent from eff_weight_by_strat."""
+    out = []
+    for sid, d in zip(strategies, directions):
+        if sid not in eff_weight_by_strat:
+            continue
+        out.append({'strategy_id': sid,
+                    'contribution': eff_weight_by_strat[sid] * d,
+                    'direction': d})
+    return out
+
+
+def _scaled_target_diff(survivors: dict, weight_by_strat: dict, size_scalars: dict,
+                        raw_targets: dict, lam_nav: float) -> dict:
+    """SHADOW: what the per-ticker dollar targets WOULD be with size_scalars
+    applied (allocation-only), vs the raw targets actually routed this cycle.
+    `survivors` = {ticker: [(strategy_id, direction_int), ...]} (post-gate).
+    Returns {ticker: {raw_usd, scaled_usd, delta_usd}}. Renormalises the scaled
+    weights to the same lam_nav gross (mirrors the live scale = lam·NAV/Σ|w|)."""
+    scaled_w = {tkr: sum(weight_by_strat.get(sid, 0.0) * size_scalars.get(sid, 1.0) * d
+                         for sid, d in members)
+                for tkr, members in survivors.items()}
+    gross = sum(abs(w) for w in scaled_w.values())
+    if gross <= 0:
+        return {}
+    scale = lam_nav / gross
+    out = {}
+    for tkr, w in scaled_w.items():
+        scaled_usd = w * scale
+        raw_usd = raw_targets.get(tkr, 0.0)
+        out[tkr] = {'raw_usd': raw_usd, 'scaled_usd': scaled_usd,
+                    'delta_usd': scaled_usd - raw_usd}
+    return out
+
+
 def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
