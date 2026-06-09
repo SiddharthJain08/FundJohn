@@ -253,6 +253,51 @@ brackets compute on the live price, **for all asset classes**.
 **Plan delta:** insert Task 3.5 (intraday-snapshot collector mode + repoint refetch + tighten
 freshness) after Task 3; Task 7's gate consumes the tightened freshness automatically.
 
+## OWED before activation (flag-ON only — does NOT affect the live flag-off system)
+
+Final holistic review (2026-06-09) found one **activation-blocker** in the tick-3 freshness
+check. `refetch_prices._freshness_ok` was implemented as `data_coverage.date_to >= today`
+only — the spec's `finished_at`-recency half (Component 5: "done with a recent finished_at AND
+today-coverage") was dropped. Because `date_to` is monotonic and the gate keys the sentinel by
+**date only** (not the confirmed transition's episode) and never clears it, a **stale `done`
+from a prior intraday episode can let the gate proceed on intra-day-stale prices** — reachable
+only when (a) the confirmed target is TRANSITIONING (sub-floor ticks fall back to TRANSITIONING
+so no `streak==1` candidate prefetch fires for that episode) AND (b) a prior episode's `done` is
+still within the 6h sentinel TTL. Impact is bounded: same-day-but-1–2h-stale prices on a
+TRANSITIONING redeploy (NOT prior-day stale — `date_to>=today` still holds), paper-only,
+self-corrected by the 16:30 EOD collect.
+
+**A naive `finished_at`-recency window does NOT work** — the legitimate tick-1 prefetch finishes
+~30 min before the tick-3 gate (at 15-min cadence), so any recency window tight enough to reject
+a stale prior-episode `done` would also reject the legitimate prefetch. **Robust fix = episode-bind
+the gate:** the detector passes the confirmed transition's episode (`{date}:{state}:{streak_start_floor}`)
+to `redeploy_pipeline.py`; the gate proceeds only when `sentinel.status=='done' AND
+sentinel.episode == expected_episode AND date_to>=today`, else runs `_sync_refetch`. (Alternative:
+clear the sentinel after the gate consumes it — but that leaves a fired-but-unconfirmed episode's
+`done` lingering, so episode-binding is preferred.)
+
+Two test gaps to close alongside: `done`-but-stale→abort/refetch, and `running`→poll-wait→proceed.
+
+## Already-live caveat (rides this branch, NOT part of this feature)
+
+`cron-schedule.js:416` OPG open-reconcile retime `28 9 → 25 9` (operator's pre-existing
+uncommitted change, swept into the first feature commit `c0d2bca`). It is **not** gated by
+`OPENCLAW_INTRADAY_15MIN_PREFETCH` — it's gated by `OPENCLAW_EOD_RECONCILE` (=1 in prod), so it
+is **active on the live system now**. The change is correct (Alpaca OPG window closes 9:28;
+firing at 9:28 lands at the deadline and is rejected). Operator is aware (flagged in-session).
+
+## Activation runbook (operator-gated)
+
+1. (Optional but recommended) land the episode-binding freshness fix above.
+2. Dry-run validate the tick1→tick3 lifecycle (`redeploy_pipeline.py --dry-run`) and a live
+   `refetch_prices.py --date <ET-today>` smoke (confirm it writes today's rows + advances
+   `data_coverage`, and `prices.parquet` row count does not shrink).
+3. NOTE: `OPENCLAW_INTRADAY_HMM_LIVE=1` is already set in prod → flipping
+   `OPENCLAW_INTRADAY_15MIN_PREFETCH=1` makes redeploys spawn LIVE (not dry-run). Do step 2 first.
+4. Flip `OPENCLAW_INTRADAY_15MIN_PREFETCH=1` in prod `.env` and restart johnbot
+   (`systemctl --user` — operator-approved). The cron re-registers at `*/15`.
+5. Watch the first 15-min ticks + first candidate→confirm lifecycle in `#intraday-regime`.
+
 ## Files touched
 
 - `src/engine/cron-schedule.js` — tick cadence.
