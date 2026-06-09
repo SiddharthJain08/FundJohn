@@ -59,6 +59,26 @@ def _pick_top_sharpe(members: list[dict], eff_sharpe: dict[str, float]) -> dict:
                key=lambda m: eff_sharpe.get(m['sid'], float('-inf')))
 
 
+def daily_normalized_levels(entry, stop, t1, t2, cadence_days):
+    """Shrink each finite bracket gap-from-entry to its single-day equivalent by
+    1/sqrt(max(1, cadence_days)) — the bracket analogue of strategy_weights'
+    daily_weight = effective_sharpe / sqrt(cadence_days).
+
+    Direction-agnostic: the signed gap (level - entry) is scaled, so both longs
+    and shorts shrink toward entry. Returns (stop, t1, t2). A level that is
+    None/non-finite passes through unchanged; ALL levels pass through unchanged
+    when `entry` is None/non-finite/<= 0 (no valid anchor to scale around).
+    cadence_days is floored at 1 (a daily strategy is a no-op).
+    """
+    if not _finite(entry) or float(entry) <= 0:
+        return stop, t1, t2
+    e = float(entry)
+    f = 1.0 / math.sqrt(max(1.0, float(cadence_days or 1.0)))
+    def _norm(x):
+        return e + (float(x) - e) * f if _finite(x) else x
+    return _norm(stop), _norm(t1), _norm(t2)
+
+
 def stacked_bracket(brackets: list[dict], dir_sign: int,
                     block_map: dict[str, int], eff_sharpe: dict[str, float],
                     tp_cap_mult: float | None = None) -> dict:
