@@ -474,6 +474,93 @@ git commit -m "feat(intraday): prices-only refetch entrypoint + sentinel writes"
 
 ---
 
+## Task 3.5: Intraday-snapshot price fetch (all-asset) + repoint refetch + tighten freshness
+
+**Why:** Re-running the daily collect intraday writes 0 rows for today (Alpaca daily bars finalize post-close), so it can't deliver today's price. Per operator decision (spec Addendum 2026-06-09), the prefetch must fetch today's INTRADAY snapshot for ALL asset classes so signals/brackets use the live price.
+
+**Files:**
+- Modify: `src/pipeline/collector.js` (add `runIntradaySnapshotPrices`)
+- Modify: `src/pipeline/run_collector_once.js` (add `--intraday-snapshot` flag)
+- Modify: `scripts/refetch_prices.py` (`_run_price_fill` → `--intraday-snapshot`; `_freshness_ok` → require today)
+- Test: `tests/test_intraday_snapshot_parse.py`, extend `tests/test_refetch_prices.py`
+
+- [ ] **Step 1: Failing test for the snapshot→row parser** (`tests/test_intraday_snapshot_parse.py`)
+
+Add a pure exported parser to collector.js is hard to unit-test from Python; instead implement the parser as a small pure JS function and test it with a node assertion script. Create `tests/test_intraday_snapshot_parse.py` that shells out:
+
+```python
+import subprocess, pathlib
+ROOT = pathlib.Path('/root/openclaw')
+
+def test_snapshot_dailybar_to_row_via_node():
+    # Exercise the pure parser exported from collector.js
+    script = r'''
+      const { _snapshotToPriceRow } = require('./src/pipeline/collector.js');
+      const snap = { dailyBar: { o:743.63, h:746.9, l:722.59, c:733.96, v:63273993 } };
+      const row = _snapshotToPriceRow('SPY', snap, '2026-06-09');
+      const ok = row && row.ticker==='SPY' && row.date==='2026-06-09'
+                 && row.close===733.96 && row.open===743.63 && row.high===746.9
+                 && row.low===722.59 && row.volume===63273993;
+      const none = _snapshotToPriceRow('NODAILY', { dailyBar: null }, '2026-06-09');
+      if (!ok) { console.error('row mismatch', JSON.stringify(row)); process.exit(1); }
+      if (none !== null) { console.error('expected null for missing dailyBar'); process.exit(1); }
+      console.log('OK');
+    '''
+    r = subprocess.run(['node','-e',script], cwd=str(ROOT), capture_output=True, text=True)
+    assert 'OK' in r.stdout, r.stdout + r.stderr
+```
+
+- [ ] **Step 2: Run → FAIL** (`_snapshotToPriceRow` not exported). `cd /root/openclaw && python3 -m pytest tests/test_intraday_snapshot_parse.py -v`
+
+- [ ] **Step 3: Implement `runIntradaySnapshotPrices` + parser in `collector.js`**
+
+Add a pure, exported helper and the fetch function. The parser maps one Alpaca snapshot's `dailyBar` to a price row (returns null if no dailyBar):
+
+```js
+// Pure: snapshot.dailyBar (today's partial OHLCV) → prices.parquet row, or null.
+function _snapshotToPriceRow(ticker, snap, dateStr) {
+  const db = snap && snap.dailyBar;
+  if (!db || db.c == null) return null;
+  return { ticker, date: dateStr, open: db.o, high: db.h, low: db.l, close: db.c, volume: db.v };
+}
+```
+
+`runIntradaySnapshotPrices(tickers)`:
+- Resolve the union universe like `runHistoricalPrices` (reuse the same envelope/tickers source).
+- **Equity + ETF:** batch `alpaca data multi-snapshots --symbols <chunk>` (~150/chunk); for each symbol map `_snapshotToPriceRow(sym, snap, todayET)`; collect non-null rows.
+- **Crypto:** mirror `fillPricesAlpacaCrypto`'s symbol mapping (BTC-USD→BTC/USD) using Alpaca crypto latest/snapshot bars; map today's bar to a row.
+- **Indices/forex:** mirror `runMarketPricesNonEquity`/`fillPricesFmpHistorical` using FMP real-time quote for `^GSPC/^VIX/…`/`EURUSD`; if unavailable for a class, log and skip that class (non-fatal).
+- Write all rows via the SAME flush/dedup path `runHistoricalPrices` uses (append-dedup keep-last on `(ticker,date)`, then `store.flushPrices()`), and update `data_coverage` so `date_to=today` for written tickers.
+- Return a count of rows written. Log a one-line summary. No Discord post.
+- Export both `runIntradaySnapshotPrices` and `_snapshotToPriceRow`.
+
+Today's ET date: derive the trading date in ET (reuse the collector's existing ET-date helper if present; else `new Date()` → America/New_York `YYYY-MM-DD`).
+
+- [ ] **Step 4: Run parser test → PASS.** `cd /root/openclaw && python3 -m pytest tests/test_intraday_snapshot_parse.py -v`
+
+- [ ] **Step 5: Add `--intraday-snapshot` flag to `run_collector_once.js`**
+
+Mirror the `--prices-only` early-return branch, but call `collector.runIntradaySnapshotPrices()` (NOT `runEodRefresh`). `process.exit(0)` on success, `1` on error. No Discord. Default behavior unchanged. Verify `node --check src/pipeline/run_collector_once.js && echo OK`.
+
+- [ ] **Step 6: Repoint `refetch_prices.py` + tighten freshness**
+
+- `_run_price_fill`: change the node arg `--prices-only` → `--intraday-snapshot`.
+- `_freshness_ok`: change the cutoff so it requires TODAY's coverage — `cutoff = date` (i.e., `WHERE data_type='prices' AND date_to >= %s` with `%s = date`), and update the module comment (the snapshot fetch now writes today's row, so the date−1 lag rationale no longer applies). Keep the `(bool, int)` return shape.
+- Update/extend `tests/test_refetch_prices.py`: the existing monkeypatched tests still pass (they patch `_freshness_ok`). Add `test_freshness_requires_today` that monkeypatches `psycopg2`? — simpler: assert the SQL cutoff equals `date` by refactoring the cutoff into a tiny pure helper `_freshness_cutoff(date)` returning `date` and test `rp._freshness_cutoff('2026-06-09') == '2026-06-09'`.
+
+- [ ] **Step 7: Run the refetch suite → PASS.** `cd /root/openclaw && python3 -m pytest tests/test_refetch_prices.py tests/test_intraday_snapshot_parse.py -v`
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/pipeline/collector.js src/pipeline/run_collector_once.js scripts/refetch_prices.py tests/test_intraday_snapshot_parse.py tests/test_refetch_prices.py
+git commit -m "feat(intraday): all-asset intraday-snapshot price fetch + require-today freshness"
+```
+
+**Note:** A live smoke (does `runIntradaySnapshotPrices` actually write today's rows + advance data_coverage?) is deferred to the operator-gated post-implementation step — unit tests here cover the pure parser + freshness contract; the live CLI calls are not exercised in unit tests.
+
+---
+
 ## Task 4: Uniform 3-tick confirmation (flag-gated)
 
 **Files:**

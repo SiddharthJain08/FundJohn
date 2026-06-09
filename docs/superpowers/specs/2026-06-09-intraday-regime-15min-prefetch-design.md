@@ -215,6 +215,44 @@ T+30  tick-3: TRANSITIONING, streak=3, conf≥0.70 → CONFIRMED
 - `refetch_prices.py` live smoke: writes fresh today rows + sentinel `done`, dedup keep-last,
   master parquet not shrunk.
 
+## Addendum 2026-06-09 — Prefetch fetches today's INTRADAY snapshot (Option B, all-asset)
+
+**Finding (verified live, 15:16 ET):** re-running the daily `collect` intraday does NOT
+produce today's bar — Alpaca delivers a *complete* daily bar only post-close, and the
+collector's `updateCoverage` advances `date_to` only when `rowsAdded > 0`, so an intraday
+daily-bar fetch writes 0 rows for today (`prices.parquet`/`data_coverage` topped out at the
+prior session while the market was open). A daily-bar prefetch would therefore only heal gaps
+in the *prior* close, leaving signals anchored on stale data (the 7% drift stays).
+
+**Operator decision:** the prefetch must fetch **today's intraday snapshot** so signals +
+brackets compute on the live price, **for all asset classes**.
+
+**Mechanism (supersedes Component 6's daily `--prices-only` path):**
+- New collector mode `runIntradaySnapshotPrices(universe)`:
+  - **Equity + ETF:** `alpaca data multi-snapshots --symbols <chunk>` (batched ~100–200/call);
+    take each symbol's `dailyBar` (today's partial OHLCV; `c` = current price). Verified
+    available on this tier (SPY dailyBar returned live; the "Options Starter only" collector
+    comment is stale for stocks).
+  - **Crypto:** Alpaca crypto snapshot/latest bars (mirror `fillPricesAlpacaCrypto`).
+  - **Indices / forex:** FMP real-time quote (mirror `fillPricesFmpHistorical` /
+    `runMarketPricesNonEquity`); if a class's intraday source is unavailable, fall back to its
+    last close for that class and log (non-fatal — graceful degradation).
+  - Write each as a **partial today row** `{ticker, date=today_ET, o/h/l/c/v}` via the existing
+    append-dedup (keep-last on `ticker,date`) + flush; advance `data_coverage.date_to=today`.
+- `scripts/run_collector_once.js --intraday-snapshot` invokes it; `refetch_prices.py`
+  `_run_price_fill` calls `--intraday-snapshot` (NOT `--prices-only`).
+- **Freshness check tightens** (Component 5 / `refetch_prices._freshness_ok`): require
+  `data_coverage.date_to >= today` (now achievable — the snapshot writes today's row). A refetch
+  that fails to advance to today → sentinel `failed` → tick-3 gate aborts.
+- **EOD finalization:** the 16:30 collect's `runHistoricalPrices` overwrites today's partial
+  with the FINAL daily bar via the same dedup keep-last — the master series self-corrects post-close.
+- **Accepted risk:** today's `dailyBar` is in-progress — `close` = current price (what signals/
+  brackets need), but `high/low/volume` are partial; strategies keying off intraday high/low get
+  partial mid-day values. Operator accepted this (Option B).
+
+**Plan delta:** insert Task 3.5 (intraday-snapshot collector mode + repoint refetch + tighten
+freshness) after Task 3; Task 7's gate consumes the tightened freshness automatically.
+
 ## Files touched
 
 - `src/engine/cron-schedule.js` — tick cadence.
