@@ -68,6 +68,13 @@ console.log = (...args) => {
 // the 10am ET cycle structurally cannot. Skips options/fundamentals/news/
 // insider/orchestrator-spawn — pure data hygiene.
 const eodOnly = process.argv.includes('--eod-only');
+// `--prices-only` runs ONLY the price-fill stage for the union universe
+// (equity + market bars via runHistoricalPrices + runMarketPricesNonEquity).
+// Skips options, fundamentals, macro, news, insider, and snapshots.
+// Used by the intraday 15-min regime prefetch (scripts/refetch_prices.py) to
+// pull fresh prices before a tick-3 redeploy without running the full cycle.
+// Exits 0 on success, 1 on error — no Discord post (intraday hot path).
+const pricesOnly = process.argv.includes('--prices-only');
 // `--dry-run` propagates to collector.js — API calls still happen so we
 // can validate auth/quota, but parquet writes (store.upsert*) and DB
 // updates (store.updateCoverage) are SKIPPED. Set OPENCLAW_DRY_RUN=1
@@ -153,6 +160,23 @@ function formatEodAlert(summary, ok) {
 }
 
 async function main() {
+  // --prices-only: fast intraday price refetch — no Discord post, no snapshot,
+  // no options/fundamentals/news/insider. Reuses runEodRefresh which already
+  // isolates prices (runHistoricalPrices + runMarketPricesNonEquity) for the
+  // full union universe. Exits immediately when done.
+  if (pricesOnly) {
+    console.log('[collector-once] --prices-only: running price-fill for union universe');
+    try {
+      await collector.runEodRefresh();
+      console.log('[collector-once] --prices-only: price-fill complete');
+      process.exit(0);
+    } catch (err) {
+      console.error('[collector-once] --prices-only: price-fill failed:', err && err.stack || err);
+      process.exit(1);
+    }
+    return; // unreachable; explicit for linters
+  }
+
   const mode = eodOnly ? 'EOD refresh' : 'full daily collection';
   console.log(`[collector-once] starting single-shot ${mode} cycle`);
   let ok = true;
