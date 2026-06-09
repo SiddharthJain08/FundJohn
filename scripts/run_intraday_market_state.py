@@ -602,6 +602,18 @@ def _confirmed_transition(history: list[dict], current_state: str,
     return True, settled
 
 
+def _cooldown_active(kv: dict, date_str: str) -> bool:
+    """Which cooldown keys block a confirmed-transition redeploy.
+    Flag ON: only a manual liquidate cooldown blocks (the 60-min redeploy
+    cooldown is dropped — 45-min 3-tick persistence is the throttle).
+    Flag OFF: legacy — both redeploy and liquidate cooldowns block."""
+    import os
+    keys = [f'liquidate:cooldown:{date_str}']
+    if os.environ.get('OPENCLAW_INTRADAY_15MIN_PREFETCH') != '1':
+        keys.append(f'redeploy:cooldown:{date_str}')
+    return any(kv.get(k) for k in keys)
+
+
 # ── Redeploy spawner (Phase 2) ───────────────────────────────────────────────
 
 def _spawn_redeploy(prior_state: str, new_state: str, date_str: str,
@@ -801,65 +813,61 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     # `fired_action` or split into `fired_redeploy`.
     if fired and prior_state and not force_dry_run:
         rcli = _redis()
-        cooldown_active = False
         date_str = features['ts_utc'].strftime('%Y-%m-%d')
-        # Cooldown gate honors BOTH keys:
-        #   redeploy:cooldown:{date}  — written by scripts/redeploy_pipeline.py
-        #     after a successful intraday redeploy; suppresses thrash on
-        #     whipsaw transitions.
-        #   liquidate:cooldown:{date} — written by regime_liquidator.py on a
-        #     successful manual --force flatten. Suppressing intraday
-        #     redeploys during this window keeps the operator's flatten
-        #     intent from being immediately undone by a re-detection.
+        kv = {}
         if rcli is not None:
             try:
                 for k in (f'redeploy:cooldown:{date_str}',
                           f'liquidate:cooldown:{date_str}'):
-                    if rcli.get(k):
-                        cooldown_active = True
-                        break
+                    v = rcli.get(k)
+                    if v:
+                        kv[k] = v
             except Exception:
                 pass
 
-        if cooldown_active:
+        if _cooldown_active(kv, date_str):
             logger.info('confirmed transition %s→%s blocked by cooldown gate',
                         prior_state, state_name)
             transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_COOLDOWN'
         else:
-            transition_tag = (
-                f'INTRADAY_HMM_REDEPLOY_{prior_state}_{state_name}'
-            )
-            # Propagate the new regime to canonical consumer surfaces BEFORE
-            # spawning the redeploy — the redeploy's engine reads
-            # regime_latest.json (file-primary) and the sizer falls back to
-            # market_regime DB. Without this sync, the redeploy would size
-            # against the stale daily-HMM regime.
-            _sync_regime_to_consumers(
-                conn=conn,
-                new_state=state_name,
-                prior_state=prior_state,
-                confidence=confidence,
-                state_probs=state_probs,
-                features=features,
-                ts_utc=features['ts_utc'],
-                transition_tag=transition_tag,
-            )
-            is_live = _is_live_intraday()
-            spawn_kind = _spawn_redeploy(
-                prior_state, state_name, date_str, dry_run=(not is_live),
-            )
-            fired_liquidation = True
-            logger.info(
-                'confirmed transition %s→%s — redeploy spawned (%s)',
-                prior_state, state_name, spawn_kind,
-            )
-            _post_to_discord(
-                'intraday-regime',
-                f':zap: **Intraday HMM** confirmed '
-                f'{prior_state} → {state_name} '
-                f'(streak={streak}, conf={confidence:.2f}, '
-                f'redeploy={spawn_kind})',
-            )
+            from src.execution.intraday_prefetch import acquire_inflight, prefetch_enabled
+            if prefetch_enabled() and not acquire_inflight(rcli):
+                logger.info('confirmed transition %s→%s skipped — redeploy already in flight',
+                            prior_state, state_name)
+                transition_tag = f'INTRADAY_HMM_{prior_state}_{state_name}_INFLIGHT'
+            else:
+                transition_tag = f'INTRADAY_HMM_REDEPLOY_{prior_state}_{state_name}'
+                # Propagate the new regime to canonical consumer surfaces BEFORE
+                # spawning the redeploy — the redeploy's engine reads
+                # regime_latest.json (file-primary) and the sizer falls back to
+                # market_regime DB. Without this sync, the redeploy would size
+                # against the stale daily-HMM regime.
+                _sync_regime_to_consumers(
+                    conn=conn,
+                    new_state=state_name,
+                    prior_state=prior_state,
+                    confidence=confidence,
+                    state_probs=state_probs,
+                    features=features,
+                    ts_utc=features['ts_utc'],
+                    transition_tag=transition_tag,
+                )
+                is_live = _is_live_intraday()
+                spawn_kind = _spawn_redeploy(
+                    prior_state, state_name, date_str, dry_run=(not is_live),
+                )
+                fired_liquidation = True
+                logger.info(
+                    'confirmed transition %s→%s — redeploy spawned (%s)',
+                    prior_state, state_name, spawn_kind,
+                )
+                _post_to_discord(
+                    'intraday-regime',
+                    f':zap: **Intraday HMM** confirmed '
+                    f'{prior_state} → {state_name} '
+                    f'(streak={streak}, conf={confidence:.2f}, '
+                    f'redeploy={spawn_kind})',
+                )
 
     # 5) Persist state row
     last_row_state = history[0]['state'] if history else None
