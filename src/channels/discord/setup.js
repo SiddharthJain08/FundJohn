@@ -8,9 +8,10 @@
  *
  * Channel layout:
  *   📌 OPENCLAW — INFO   : #server-map, #botjohn-log
- *   📡 DATA PIPELINE     : #pipeline-feed, #data-alerts
- *   🔬 RESEARCH DESK     : #research-feed, #strategy-memos
- *   📈 TRADING DESK      : #trade-signals, #trade-reports
+ *   📡 DATA PIPELINE     : #pipeline-feed, #data-flow (key 'data-alerts')
+ *   🧠 MASTERMIND        : #research-feed, #strategy-memos
+ *   📈 TRADING DESK      : #trade-signals, #trade-reports, #position-recommendations
+ *   🚨 ALERTS            : #intraday-regime, #circuit-breaker, #pre-market-alerts
  *   💬 COMMAND CENTER    : #general (existing), #agent-chat
  */
 
@@ -61,10 +62,6 @@ const STRUCTURE = [
         name: 'data-flow', key: 'data-alerts', operatorWrite: false,
         topic: 'API errors, rate limit warnings, missing data gaps, and coverage drops.',
       },
-      {
-        name: 'pre-market-alerts', key: 'pre-market-alerts', operatorWrite: false,
-        topic: 'Pre-market data alerts — panic scanner, EDGAR 8-K filings, overnight sentiment spikes.',
-      },
     ],
   },
   {
@@ -92,12 +89,29 @@ const STRUCTURE = [
         topic: 'Final trade reports. Use !john /approve or /reject to act on pending trades.',
       },
       {
+        name: 'position-recommendations', key: 'position-recommendations', operatorWrite: false,
+        topic: 'TradeDesk position recommendations. Click Approve to execute immediately on Alpaca paper. Click Reject to dismiss.',
+      },
+    ],
+  },
+  {
+    // 🚨 ALERTS — consolidated risk/regime/pre-market alert surface
+    // (operator regrouped these three channels here 2026-06-08/09; keep them
+    // in this category so setup.js's setParent reconciliation doesn't pull
+    // circuit-breaker back to TRADING DESK / pre-market back to DATA PIPELINE).
+    category: '🚨 ALERTS',
+    channels: [
+      {
+        name: 'intraday-regime', key: 'intraday-regime', operatorWrite: false,
+        topic: 'Intraday HMM confirmed regime transitions + delta-redeploy summaries (LOW_VOL/TRANSITIONING/HIGH_VOL/CRISIS).',
+      },
+      {
         name: 'circuit-breaker', key: 'circuit-breaker', operatorWrite: false,
         topic: 'Position circuit-breaker fires — intraday NAV-loss backstop closes (live/dry), separate from trade reports.',
       },
       {
-        name: 'position-recommendations', key: 'position-recommendations', operatorWrite: false,
-        topic: 'TradeDesk position recommendations. Click Approve to execute immediately on Alpaca paper. Click Reject to dismiss.',
+        name: 'pre-market-alerts', key: 'pre-market-alerts', operatorWrite: false,
+        topic: 'Pre-market data alerts — panic scanner, EDGAR 8-K filings, overnight sentiment spikes.',
       },
     ],
   },

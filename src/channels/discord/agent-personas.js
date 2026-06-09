@@ -32,9 +32,11 @@ const AGENTS = {
       // data-pipeline alert surface (freshness, collector summaries,
       // pipeline-feed step boundaries, strategy memos, pre-market alerts).
       'data-alerts', 'pipeline-feed', 'strategy-memos', 'pre-market-alerts',
-      // Risk-control surface: position circuit-breaker fires post here
-      // (routed off #trade-reports 2026-06-08).
-      'circuit-breaker',
+      // Risk-control / regime surface (🚨 ALERTS category): position
+      // circuit-breaker fires (routed off #trade-reports 2026-06-08) and
+      // intraday-HMM confirmed-transition + redeploy-summary posts
+      // (registered 2026-06-09 — see scripts/{run_intraday_market_state,redeploy_pipeline}.py).
+      'circuit-breaker', 'intraday-regime',
     ],
   },
   // ResearchDesk persona retired 2026-05-02. Replaced by mastermind below
