@@ -64,11 +64,12 @@ Consequences:
 
 ### Cadence source
 
-Build `cadence_by_strat = {r['strategy_id']: float(r['cadence_days']) for r in rows}`
-from the **same `strategy_weights.load_current(regime)` rows** that produced
-`daily_weight` (`load_current` already SELECTs `cadence_days`). This guarantees the
-stop normalization uses the identical cadence value as the weight normalization —
-no new query, no drift. Default to `1.0` (no-op) if a sid is somehow absent.
+`_sharpe_cadence_path` **already builds** `cadence_by_strat = {r['strategy_id']:
+float(r['cadence_days']) for r in rows}` (currently ~line 881) from the
+`strategy_weights.load_current(regime)` rows that also produced `daily_weight`.
+Reuse it directly — no new map, no new query. This guarantees the stop
+normalization uses the identical cadence value as the weight normalization, with
+zero drift. Default to `1.0` (no-op) for any sid somehow absent from the map.
 
 ### Gating / rollout
 
@@ -105,15 +106,15 @@ no new query, no drift. Default to `1.0` (no-op) if a sid is somehow absent.
 
 2. **Sizer wiring** in `src/execution/regime_blended_sizer.py`
    (`_sharpe_cadence_path`):
-   - Near where `weight_by_strat` is built from `rows` (~line 879): add
-     `cadence_by_strat`.
-   - Near the top of the function (with the other gate reads, ~line 886): add
+   - `cadence_by_strat` already exists (~line 881) — reuse it.
+   - With the other gate reads (~line 886, next to `_size_scalar_on`): add
      `_cadence_stop_norm_on = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')`.
-   - In the candidate-construction block (~line 1000): when `_cadence_stop_norm_on`,
-     compute `(n_stop, n_t1, n_t2) = bracket_stacking.daily_normalized_levels(
-     entry_price, stop_loss, target_1, target_2, cadence_by_strat.get(sid, 1.0))`
-     and store the normalized values in the candidate dict; otherwise store raw
-     (unchanged) values.
+   - In the candidate-construction block (~line 1000): read raw `entry_price`,
+     `stop_loss`, `target_1`, `target_2` from the signal; when
+     `_cadence_stop_norm_on`, recompute `(stop, t1, t2) =
+     bracket_stacking.daily_normalized_levels(entry, stop, t1, t2,
+     cadence_by_strat.get(sid, 1.0))`; store entry (always raw) + (possibly
+     normalized) stop/t1/t2 in the candidate dict.
 
 ## Consequence flagged & accepted
 
