@@ -49,3 +49,7 @@ def test_refetch_timeout_writes_failed(monkeypatch):
     assert rc == 1
     import src.execution.intraday_prefetch as p
     assert p.read_prefetch(r, '2026-06-09')['status'] == 'failed'
+
+def test_freshness_cutoff_is_today():
+    import scripts.refetch_prices as rp
+    assert rp._freshness_cutoff('2026-06-09') == '2026-06-09'

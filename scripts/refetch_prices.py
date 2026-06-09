@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""scripts/refetch_prices.py — prices-only intraday refetch for the regime
-prefetch (OPENCLAW_INTRADAY_15MIN_PREFETCH). Sets the prefetch sentinel,
-delegates the actual fetch to the JS collector's price-fill stage, then
+"""scripts/refetch_prices.py — all-asset intraday-snapshot price refetch for
+the regime prefetch (OPENCLAW_INTRADAY_15MIN_PREFETCH). Sets the prefetch
+sentinel, delegates the actual fetch to the JS collector's intraday-snapshot
+stage (today's partial daily bar across equity/ETF/crypto/index/forex), then
 verifies freshness. Never deletes master rows (collector is append-dedup).
 
 Exit 0 = fresh prices written + sentinel 'done'. Exit 1 = sentinel 'failed'.
@@ -18,25 +19,21 @@ sys.path.insert(0, str(ROOT))
 
 from src.execution import intraday_prefetch as p   # noqa: E402
 
-# Freshness cutoff: date_to >= date − 1 day.
+# Freshness cutoff: date_to >= date (TODAY).
 #
-# Intraday investigation (2026-06-09): the collector calls `--end today` but
-# Alpaca only delivers a complete daily bar after market close, so
-# `updateCoverage` sees 0 rows written for today's bar and — by design —
-# refuses to advance date_to (store.js line 310: "Only advance coverage when
-# we actually wrote rows").  Empirically, max(date_to) == yesterday even after
-# a successful mid-session run (5027 tickers, none with date_to >= today).
-# `last_updated` also does not advance on zero-row fetches, so a recency check
-# would always fail intraday.
-#
-# Consequence: we cannot distinguish "the refetch ran and correctly found
-# nothing new" from "the data is genuinely stale" using date_to or
-# last_updated alone.  The correct primary gate is `rc == 0` from the
-# collector.  We keep `date_to >= date − 1` as a secondary guard — it catches
-# multi-day gaps or a totally blank coverage table — and lean on rc==0 as the
-# real signal.  If/when Alpaca begins delivering same-session bars intraday,
-# change cutoff to `date` and remove this comment.
-FRESHNESS_DAYS_LAG = 1
+# Task 3.5 (2026-06-09): the fetch now runs the all-asset INTRADAY SNAPSHOT
+# stage (`--intraday-snapshot` → runIntradaySnapshotPrices), whose `dailyBar`
+# carries today's partial bar mid-session.  Because that fetch writes a row for
+# TODAY, `updateCoverage` advances date_to to today (rows > 0).  The old
+# date−1 lag rationale — that Alpaca's daily-bar endpoint only finalized after
+# close, so date_to never reached today — no longer applies on the snapshot
+# path.  We therefore require date_to >= today: a fresh snapshot must show up
+# as today-coverage, and a run that didn't reach today is genuinely stale.
+# rc == 0 from the collector remains the primary gate; this is the secondary
+# data-coverage guard.
+def _freshness_cutoff(date: str) -> str:
+    """Coverage cutoff for the freshness guard: require TODAY's row."""
+    return date
 
 
 def _redis():
@@ -51,12 +48,13 @@ def _redis():
 
 
 def _run_price_fill(date: str) -> int:
-    """Invoke the JS collector's prices-only stage. Returns its exit code.
+    """Invoke the JS collector's all-asset intraday-snapshot stage. Returns
+    its exit code.
 
     124 = timeout (20 min), 125 = spawn error (node not on PATH / OSError),
     any other non-zero = collector reported failure.
     """
-    cmd = ['node', str(ROOT / 'src' / 'pipeline' / 'run_collector_once.js'), '--prices-only']
+    cmd = ['node', str(ROOT / 'src' / 'pipeline' / 'run_collector_once.js'), '--intraday-snapshot']
     try:
         proc = subprocess.run(cmd, cwd=str(ROOT), timeout=20 * 60,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -72,17 +70,17 @@ def _run_price_fill(date: str) -> int:
 
 def _freshness_ok(date: str) -> tuple[bool, int]:
     """True + covered-ticker-count if data_coverage shows union prices whose
-    date_to is within FRESHNESS_DAYS_LAG of `date`.
+    date_to is at or past `_freshness_cutoff(date)` (TODAY).
 
-    The cutoff is date − FRESHNESS_DAYS_LAG days (currently yesterday) because
-    intraday fetches do not advance date_to to today (see module comment).
+    The intraday-snapshot fetch writes today's partial bar, so date_to should
+    advance to today on a successful run (see module comment).
     """
     try:
         import psycopg2
         uri = os.environ.get('POSTGRES_URI')
         if not uri:
             return (False, 0)
-        cutoff = (dt.date.fromisoformat(date) - dt.timedelta(days=FRESHNESS_DAYS_LAG)).isoformat()
+        cutoff = _freshness_cutoff(date)
         conn = psycopg2.connect(uri, connect_timeout=5)
         cur = conn.cursor()
         cur.execute(

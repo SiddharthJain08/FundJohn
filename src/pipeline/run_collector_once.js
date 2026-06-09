@@ -75,6 +75,16 @@ const eodOnly = process.argv.includes('--eod-only');
 // pull fresh prices before a tick-3 redeploy without running the full cycle.
 // Exits 0 on success, 1 on error — no Discord post (intraday hot path).
 const pricesOnly = process.argv.includes('--prices-only');
+// `--intraday-snapshot` runs ONLY the all-asset-class intraday snapshot
+// price-fill (collector.runIntradaySnapshotPrices): today's partial daily bar
+// for equity/ETF (Alpaca multi-snapshots), crypto (Alpaca crypto snapshots),
+// and indices/forex (FMP real-time quote), written through the append-dedup
+// keep-last path. Used by the intraday 15-min regime prefetch
+// (scripts/refetch_prices.py) to capture TODAY's live price before a tick-3
+// redeploy — unlike --prices-only's EOD-bar refetch, this gets the in-session
+// bar Alpaca won't finalize until after close. Exits 0 success / 1 error — no
+// Discord post (intraday hot path).
+const intradaySnapshot = process.argv.includes('--intraday-snapshot');
 // `--dry-run` propagates to collector.js — API calls still happen so we
 // can validate auth/quota, but parquet writes (store.upsert*) and DB
 // updates (store.updateCoverage) are SKIPPED. Set OPENCLAW_DRY_RUN=1
@@ -172,6 +182,23 @@ async function main() {
       process.exit(0);
     } catch (err) {
       console.error('[collector-once] --prices-only: price-fill failed:', err && err.stack || err);
+      process.exit(1);
+    }
+    return; // unreachable; explicit for linters
+  }
+
+  // --intraday-snapshot: fast all-asset intraday snapshot price-fill — no
+  // Discord post, no options/fundamentals/news/insider. Captures TODAY's
+  // partial daily bar for every asset class so a regime-transition redeploy
+  // sizes on today's live price. Exits immediately when done.
+  if (intradaySnapshot) {
+    console.log('[collector-once] --intraday-snapshot: running all-asset intraday snapshot price-fill');
+    try {
+      const written = await collector.runIntradaySnapshotPrices();
+      console.log(`[collector-once] --intraday-snapshot: complete (${written} rows)`);
+      process.exit(0);
+    } catch (err) {
+      console.error('[collector-once] --intraday-snapshot: failed:', err && err.stack || err);
       process.exit(1);
     }
     return; // unreachable; explicit for linters

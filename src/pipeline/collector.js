@@ -836,6 +836,185 @@ async function fillPricesFmpHistorical(ticker, fromDate, toDate) {
 }
 
 
+// ── Intraday snapshot prices (Task 3.5) — TODAY's partial bar, all classes ───
+// On a candidate 15-min regime transition the redeploy needs TODAY's live
+// price, but re-running the daily collect can't get it (Alpaca finalizes the
+// daily bar post-close). So we fetch each asset class's INTRADAY snapshot,
+// whose `dailyBar` is today's partial OHLCV (`c` = current price), and write
+// it through the SAME append-dedup keep-last path runHistoricalPrices uses
+// (store.upsertPrices → store.flushPrices; updateCoverage advances date_to to
+// today because rows>0). NEVER deletes — the (ticker,date) keep-last dedup in
+// writePrices overwrites today's partial row on a later snapshot/EOD fetch.
+
+// Pure: snapshot.dailyBar (today's partial OHLCV) → prices.parquet row, or null.
+function _snapshotToPriceRow(ticker, snap, dateStr) {
+  const db = snap && snap.dailyBar;
+  if (!db || db.c == null) return null;
+  return { ticker, date: dateStr, open: db.o, high: db.h, low: db.l, close: db.c, volume: db.v };
+}
+
+// FMP real-time quote (stable/quote) → today's price row for indices/forex.
+// Distinct from fillPricesFmpHistorical (EOD bars): the quote carries the
+// live intraday print (`price`) plus today's open/dayHigh/dayLow/volume.
+async function _fmpIntradayRow(ticker, dateStr) {
+  if (!_FMP_KEY) {
+    console.warn(`[collector] _fmpIntradayRow: FMP_API_KEY unset; skip ${ticker}`);
+    return null;
+  }
+  const apiSymbol = _fmpSymbol(ticker);
+  const url = `https://financialmodelingprep.com/stable/quote`
+    + `?symbol=${encodeURIComponent(apiSymbol)}`
+    + `&apikey=${encodeURIComponent(_FMP_KEY)}`;
+  const r = await _httpsGetJson(url);
+  if (r.tierGated) {
+    console.warn(`[collector] _fmpIntradayRow: skip ${ticker}→${apiSymbol} (tier-gated)`);
+    return null;
+  }
+  if (!r.ok || r.status !== 200) {
+    console.warn(`[collector] _fmpIntradayRow: skip ${ticker}→${apiSymbol} (${r.error || 'HTTP ' + r.status})`);
+    return null;
+  }
+  const q = Array.isArray(r.json) ? r.json[0] : null;
+  if (!q || q.price == null) return null;
+  return {
+    ticker,
+    date:   dateStr,
+    open:   q.open    ?? null,
+    high:   q.dayHigh ?? null,
+    low:    q.dayLow  ?? null,
+    close:  q.price,
+    volume: q.volume  ?? null,
+  };
+}
+
+// Fetch TODAY's intraday snapshot for ALL asset classes and write it through
+// the collector's append-dedup keep-last path. Mirrors runHistoricalPrices for
+// universe resolution (getActiveTickers) + flush/dedup; _classifyMarketTicker
+// for per-class routing. Each class is wrapped so an unavailable/erroring
+// source logs a warning and skips THAT class (non-fatal). Returns rows written.
+async function runIntradaySnapshotPrices(tickers = null) {
+  // Universe resolution — identical to runHistoricalPrices (caller may pass a
+  // subset; default is the full active universe). The resolver envelope is the
+  // daily-cycle caller's concern, not this hot-path prefetch.
+  if (!tickers) tickers = await getActiveTickers();
+  const dateStr = _etParts().date; // today's ET trading date
+
+  // Bucket by class. Equities fall through _classifyMarketTicker's `etf` branch
+  // (same as the equity/ETF multi-snapshots path below), so 'etf' = equity+ETF.
+  const buckets = { etf: [], crypto: [], index: [], forex: [], futures: [] };
+  for (const t of tickers) buckets[_classifyMarketTicker(t)].push(t);
+
+  if (buckets.futures.length > 0) {
+    console.warn(`[collector] runIntradaySnapshotPrices: ${buckets.futures.length} futures deferred — no intraday provider`);
+  }
+
+  const rows = [];
+
+  // ── Equity + ETF: alpaca data multi-snapshots, ~150 symbols/chunk ──────────
+  // Response is a bare {API_SYMBOL: {dailyBar,...}} map keyed by the API symbol
+  // (BRK.B), so we build a universe→api forward map per chunk and invert it to
+  // re-key rows back to the universe ticker (BRK-B) — else no consumer reads
+  // them and coverage never advances for share-class names.
+  if (buckets.etf.length > 0) {
+    try {
+      const CHUNK = 150;
+      for (let i = 0; i < buckets.etf.length; i += CHUNK) {
+        const chunk = buckets.etf.slice(i, i + CHUNK);
+        // Mirror fillPricesAlpaca's share-class normalization (BRK-B → BRK.B).
+        const fwd = new Map(); // apiSymbol → universe ticker
+        for (const t of chunk) {
+          const api = /^[A-Z]+-[A-Z]$/.test(t) ? t.replace('-', '.') : t;
+          fwd.set(api, t);
+        }
+        const symbolsArg = [...fwd.keys()].join(',');
+        const r = await runAlpaca(
+          ['data', 'multi-snapshots', '--symbols', symbolsArg],
+          { timeout: 30_000 },
+        );
+        if (!r.ok || !r.payload || typeof r.payload !== 'object') {
+          const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+          console.warn(`[collector] runIntradaySnapshotPrices: equity chunk ${i / CHUNK} failed (${errMsg}) — skipping chunk`);
+          continue;
+        }
+        for (const [apiSym, snap] of Object.entries(r.payload)) {
+          const ticker = fwd.get(apiSym) || apiSym;
+          const row = _snapshotToPriceRow(ticker, snap, dateStr);
+          if (row) rows.push(row);
+        }
+      }
+    } catch (err) {
+      console.warn(`[collector] runIntradaySnapshotPrices: equity/ETF class skipped (${err.message})`);
+    }
+  }
+
+  // ── Crypto: alpaca data crypto snapshots (BTC-USD → BTC/USD) ───────────────
+  // Response nests under `snapshots` keyed by the API symbol (BTC/USD); same
+  // dailyBar shape so _snapshotToPriceRow is reused. Re-key back to BTC-USD.
+  if (buckets.crypto.length > 0) {
+    try {
+      const fwd = new Map(); // apiSymbol (BTC/USD) → universe ticker (BTC-USD)
+      for (const t of buckets.crypto) fwd.set(_alpacaCryptoSymbol(t), t);
+      const r = await runAlpaca(
+        ['data', 'crypto', 'snapshots', '--symbols', [...fwd.keys()].join(',')],
+        { timeout: 30_000 },
+      );
+      const snaps = r.ok && r.payload ? r.payload.snapshots : null;
+      if (!snaps || typeof snaps !== 'object') {
+        const errMsg = r.error?.error || r.stderr?.slice(0, 200) || `exit ${r.exit_code}`;
+        console.warn(`[collector] runIntradaySnapshotPrices: crypto class skipped (${errMsg})`);
+      } else {
+        for (const [apiSym, snap] of Object.entries(snaps)) {
+          const ticker = fwd.get(apiSym) || apiSym.replace(/\//g, '-');
+          const row = _snapshotToPriceRow(ticker, snap, dateStr);
+          if (row) rows.push(row);
+        }
+      }
+    } catch (err) {
+      console.warn(`[collector] runIntradaySnapshotPrices: crypto class skipped (${err.message})`);
+    }
+  }
+
+  // ── Indices + forex: FMP real-time quote (mirrors fillPricesFmpHistorical's
+  // provider + _fmpSymbol normalization, but quote endpoint for today's print).
+  for (const cls of ['index', 'forex']) {
+    for (const ticker of buckets[cls]) {
+      try {
+        const row = await _fmpIntradayRow(ticker, dateStr);
+        if (row) rows.push(row);
+      } catch (err) {
+        console.warn(`[collector] runIntradaySnapshotPrices: ${ticker} (${cls}) skipped (${err.message})`);
+      }
+    }
+  }
+
+  // ── Write through the SAME flush/dedup path runHistoricalPrices uses ───────
+  let written = 0;
+  for (const row of rows) {
+    try {
+      const n = await store.upsertPrices(row.ticker, [row], 'alpaca-snapshot');
+      await store.updateCoverage(row.ticker, 'prices', row.date, row.date, n);
+      written += n;
+    } catch (err) {
+      _stats.errors++;
+      console.warn(`[collector] runIntradaySnapshotPrices: buffer ${row.ticker} failed (${err.message})`);
+    }
+  }
+  try {
+    const flushed = await store.flushPrices();
+    if (flushed && flushed.flushed) {
+      console.log(`[collector] Intraday-snapshot flush: ${flushed.flushed} rows → prices.parquet (total ${flushed.total_after})`);
+    }
+  } catch (err) {
+    console.error(`[collector] Intraday-snapshot flush FAILED: ${err.message}`);
+    throw err;
+  }
+
+  console.log(`[collector] ✅ Intraday snapshot prices: ${written} rows written for ${dateStr} `
+    + `(${buckets.etf.length} equity/ETF, ${buckets.crypto.length} crypto, ${buckets.index.length} index, ${buckets.forex.length} forex)`);
+  return written;
+}
+
+
 // ── Phase 3: Options chains — direct Alpaca CLI with greeks-validity filter ─
 
 // Per-phase soft budget (default 30 min) — when exceeded, the options
@@ -1974,4 +2153,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
