@@ -391,19 +391,11 @@ app.get('/api/portfolio/history', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Per-ticker Sharpe decomposition. Returns the ticker's live Sharpe and
-// each strategy's signed alpha contribution. By construction the alphas
-// sum to the ticker Sharpe — see
-// docs/superpowers/specs/2026-05-14-dashboard-heatmap-sharpe-design.md.
-//
-//   alpha(s) = mean_d(strategy_s_daily_pnl_on_ticker)
-//            / std_d(combined_ticker_daily_pnl)
-//   ticker_sharpe = mean_d(combined) / std_d(combined)
-//   Σ alpha(s) = mean(Σ strats) / std(combined) = ticker_sharpe ✓
-//
-// Tickers with fewer than 2 distinct closed-trade days return
-// live_sharpe=null + reason='insufficient_days' — the client renders a
-// fallback message in the alpha-bars panel. Soft 5-min LRU cache.
+// Per-ticker SIGNED alpha contributions for the position modal. Reads the
+// latest cycle's corr-gate representative contributions (daily_weight ×
+// size_scalar × direction) from cycle_contributing_strategies via
+// /api/portfolio/ticker-alpha; rendered as signed bars by _buildAlphaBarsHtml.
+// Session-cached (TTL + LRU cap below).
 const _tickerAlphaCache = new Map();   // ticker → { ts, payload }
 const _TICKER_ALPHA_TTL_MS = 5 * 60 * 1000;
 const _TICKER_ALPHA_CAP    = 256;
@@ -6750,6 +6742,7 @@ function _groupByTicker(rows, mode) {
       : (pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null);
     if (g.broker && g.broker.market_value != null) g.market_value = g.broker.market_value;
     g.avg_days = daysN > 0 ? daysSum / daysN : null;
+    g.is_open = isOpen;
     g.wins = wins;
     g.losses = isOpen ? null : (g.n - wins);
     g.last_closed = lastClosed;
@@ -6832,90 +6825,78 @@ function _fetchTickerAlpha(ticker, onReady) {
   _alphaInflight[ticker] = fetch('/api/portfolio/ticker-alpha/' + encodeURIComponent(ticker))
     .then(r => r.json())
     .then(p => { _alphaCache[ticker] = p; delete _alphaInflight[ticker]; return p; })
-    .catch(_ => { delete _alphaInflight[ticker]; return { live_sharpe: null, strategies: [], reason: 'fetch_error' }; });
+    .catch(_ => { delete _alphaInflight[ticker]; return { contributions: [], reason: 'fetch_error' }; });
   _alphaInflight[ticker].then(onReady);
 }
 
-// Vertical stack of horizontal alpha-contribution bars — one per strategy
-// that's traded the ticker. Bar value = Information Ratio (IR):
-//   IR(s) = (mean_strat_pct - ticker_avg_pct) / std_strat_pct
-//           × √min(n_trades, 30) / √30
-// IR > 0 = strategy's predictions extract excess return over the ticker
-// baseline (predictions are informative). IR > 1 = strong, low-noise
-// edge. IR < 0 = predictions are destructive. Single-trade strategies
-// have std=0 → IR=null → rendered as muted "n/a" at the bottom.
+// Vertical stack of signed contribution bars — one per strategy recorded
+// in cycle_contributing_strategies for this ticker. Bar value = signed
+// allocation contribution (daily_weight × size_scalar × direction).
+// Positive (green) = long-side contribution; negative (red) = short-side.
+// Bars are centered on a zero-line, scaled to max |contribution|.
+// Entry + current/close prices come from the already-loaded group object.
 function _buildAlphaBarsHtml(group) {
   const alpha = _alphaCache[group.ticker];
   if (!alpha) {
-    return \`<div class="alpha-bars empty">Loading alpha for <b>\${group.ticker}</b>…</div>\`;
+    return \`<div class="alpha-bars empty">Loading contributions for <b>\${group.ticker}</b>…</div>\`;
   }
-  const strategies = alpha.strategies || [];
-  if (!strategies.length) {
-    const reason = alpha.reason === 'insufficient_days'
-      ? \`<b>\${group.ticker}</b> has only \${alpha.days} closed-trade day(s) — need ≥ 2 closed trades to compute Information Ratio.\`
-      : \`No closed trades on <b>\${group.ticker}</b> yet.\`;
-    return \`<div class="alpha-bars empty">\${reason}</div>\`;
+  const contributions = alpha.contributions || [];
+  // Price header (entry + current/close) — from the already-loaded position.
+  const isOpen = group.is_open !== false;
+  const entry  = group.avg_entry != null ? parseFloat(group.avg_entry) : null;
+  const nowPx  = group.price != null ? parseFloat(group.price) : null;  // already resolved: current if open, close if closed
+  const pxFmt  = (v) => v == null || !isFinite(v) ? '—' : '$' + v.toFixed(2);
+  const priceHdr = \`<div class="ab-prices">
+      <span class="ab-px">entry <b>\${pxFmt(entry)}</b></span>
+      <span class="ab-px">\${isOpen ? 'current' : 'close'} <b>\${pxFmt(nowPx)}</b></span>
+    </div>\`;
+
+  if (!contributions.length) {
+    return \`<div class="alpha-bars">\${priceHdr}
+      <div class="alpha-bars empty">No corr-gate contributors recorded for <b>\${group.ticker}</b> yet.</div>
+    </div>\`;
   }
-  const ticker_pct = alpha.ticker_mean_pct;
-
-  // Back-compat: prefer s.ir from the new endpoint, fall back to s.alpha
-  // if a stale cache from the prior deploy is hit.
-  const irOf = (s) => (s.ir != null && isFinite(s.ir)) ? s.ir : null;
-  const ranked   = strategies.filter(s => irOf(s) != null);
-  const unranked = strategies.filter(s => irOf(s) == null);
-
-  const maxAbs = ranked.length
-    ? (Math.max(...ranked.map(s => Math.abs(irOf(s)))) || 1)
+  const haveValues = contributions.some(c => c.contribution != null && isFinite(c.contribution));
+  const maxAbs = haveValues
+    ? (Math.max(...contributions.map(c => Math.abs(c.contribution || 0))) || 1)
     : 1;
 
-  const rankedRows = ranked.map(s => {
-    const ir       = irOf(s);
-    const widthPct = (Math.abs(ir) / maxAbs) * 50;
-    const sign     = ir >= 0 ? 'pos' : 'neg';
-    const valCls   = ir >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    const dirNorm  = _normalizeDir(s.dir);
-    const sPct     = (s.mean_pct * 100).toFixed(2) + '%';
-    const irTxt    = (ir >= 0 ? '+' : '') + ir.toFixed(2);
-    const title    = \`\${s.strategy_id} · avg \${sPct} · std \${s.std_pct != null ? (s.std_pct * 100).toFixed(2) + '%' : 'n/a'} · \${s.n_trades} closed trade\${s.n_trades === 1 ? '' : 's'}\`;
+  const rows = contributions.map(c => {
+    const val   = (c.contribution != null && isFinite(c.contribution)) ? c.contribution : null;
+    if (val == null) {
+      return \`<div class="ab-row ab-unranked">
+        <div class="ab-label">\${c.strategy_id}</div>
+        <div class="ab-track muted"><div class="ab-zero"></div></div>
+        <div class="ab-value muted">n/a</div>
+      </div>\`;
+    }
+    const widthPct = (Math.abs(val) / maxAbs) * 50;
+    const sign     = val >= 0 ? 'pos' : 'neg';
+    const valCls   = val >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+    const dirNorm  = c.direction > 0 ? 'LONG' : (c.direction < 0 ? 'SHORT' : '');
+    const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2);
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${title}">\${s.strategy_id}</div>
-      <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm || ''}</div>
+      <div class="ab-label" title="\${c.strategy_id} · signed sharpe contribution">\${c.strategy_id}</div>
+      <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm}</div>
       <div class="ab-track">
         <div class="ab-zero"></div>
         <div class="ab-fill \${sign}" style="width:\${widthPct.toFixed(2)}%"></div>
       </div>
-      <div class="ab-value \${valCls}">\${irTxt}</div>
+      <div class="ab-value \${valCls}">\${valTxt}</div>
     </div>\`;
   }).join('');
 
-  const unrankedRows = unranked.map(s => {
-    const dirNorm = _normalizeDir(s.dir);
-    const why = s.n_trades < 2 ? 'single trade'
-              : (s.std_pct === 0) ? 'zero variance'
-              : 'insufficient data';
-    return \`<div class="ab-row ab-unranked">
-      <div class="ab-label" title="\${s.strategy_id} · \${s.n_trades} closed trade\${s.n_trades === 1 ? '' : 's'} — \${why}">\${s.strategy_id}</div>
-      <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm || ''}</div>
-      <div class="ab-track muted"><div class="ab-zero"></div></div>
-      <div class="ab-value muted" title="\${why}">n/a</div>
-    </div>\`;
-  }).join('');
-
-  // Ticker baseline reference badge.
+  const net = alpha.net;
   let badge = '';
-  if (ticker_pct != null && isFinite(ticker_pct)) {
-    const tickerPctTxt = (ticker_pct >= 0 ? '+' : '') + (ticker_pct * 100).toFixed(2) + '%';
-    const tickerPctCls = ticker_pct >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    badge = \`<span class="ab-badge">ticker avg = <span class="\${tickerPctCls}">\${tickerPctTxt}</span></span>\`;
+  if (net != null && isFinite(net)) {
+    const netTxt = (net >= 0 ? '+' : '') + Number(net).toFixed(2);
+    const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+    badge = \`<span class="ab-badge">net = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
-
-  const stratCount = ranked.length + unranked.length;
   return \`<div class="alpha-bars">
-    <div class="ab-title">
-      <span class="ab-ticker">\${group.ticker}</span>
-      <span class="ab-meta">\${stratCount} strateg\${stratCount === 1 ? 'y' : 'ies'} · IR = (strat avg − ticker avg) / strat std · \${badge}</span>
-    </div>
-    <div class="ab-bars">\${rankedRows}\${unrankedRows}</div>
+    \${priceHdr}
+    <div class="ab-title"><span class="ab-ticker">\${group.ticker}</span>\${badge}</div>
+    \${rows}
   </div>\`;
 }
 
