@@ -607,7 +607,6 @@ def _cooldown_active(kv: dict, date_str: str) -> bool:
     Flag ON: only a manual liquidate cooldown blocks (the 60-min redeploy
     cooldown is dropped — 45-min 3-tick persistence is the throttle).
     Flag OFF: legacy — both redeploy and liquidate cooldowns block."""
-    import os
     keys = [f'liquidate:cooldown:{date_str}']
     if os.environ.get('OPENCLAW_INTRADAY_15MIN_PREFETCH') != '1':
         keys.append(f'redeploy:cooldown:{date_str}')
@@ -892,7 +891,8 @@ def run_one_tick(force_dry_run: bool = False) -> dict:
     # doctor's state-agreement check. Pass a non-regime sentinel so the helper
     # refreshes freshness but keeps the file's last good state.
     _file_state = state_name
-    if transition_tag and transition_tag.endswith('_COOLDOWN'):
+    if transition_tag and (transition_tag.endswith('_COOLDOWN')
+                           or transition_tag.endswith('_INFLIGHT')):
         _file_state = '_COOLDOWN_HOLD'   # not in _STATE_RANK → state preserved
     _refresh_regime_file(
         state=_file_state, confidence=confidence,

@@ -258,3 +258,66 @@ class TestRunOneTickRefreshesFile:
         assert captured, '_refresh_regime_file not called on cooldown tick'
         # state passed must NOT be a real regime → helper preserves file state
         assert captured.get('state') not in detector._STATE_RANK
+
+    def test_inflight_blocked_transition_does_not_advance_file_state(
+            self, monkeypatch, tmp_path):
+        """A confirmed transition blocked because a redeploy is already in-flight
+        writes NO market_regime row (regime-of-record stays frozen), so the file
+        must NOT advance its state to the new regime either — otherwise the file
+        leads the db and the doctor's state-agreement check FAILs.
+
+        Mirror of test_cooldown_blocked_transition_does_not_advance_file_state:
+        the only difference is that cooldown returns False (so execution reaches
+        the prefetch branch) while prefetch_enabled()+acquire_inflight() together
+        make the lock busy, causing the _INFLIGHT tag.
+        """
+        import pickle
+        model_file = tmp_path / 'm.pkl'
+        model_file.write_bytes(pickle.dumps({'dummy': 1}))
+        stub = _StubIntradayModule(_ts('2026-06-08 15:00'), flag=1)  # 11:00 ET RTH
+        history = [{'state': 'HIGH_VOL', 'confidence': 0.95, 'hysteresis_streak': 5,
+                    'fired_liquidation': False, 'transition_tag': None}]
+
+        class _FakeRedis:
+            def get(self, k):
+                return None  # cooldown inactive — must reach the prefetch branch
+
+        monkeypatch.setattr(detector, '_load_intraday_features_module', lambda: stub)
+        monkeypatch.setattr(detector, '_connect_postgres', lambda: _FakeConn())
+        monkeypatch.setattr(detector, '_last_n_states', lambda conn, n: history)
+        monkeypatch.setattr(detector, '_enrich_with_daily_derived', lambda f: f)
+        monkeypatch.setattr(detector, 'MODEL_PATH', model_file)
+        monkeypatch.setattr(detector, '_state_from_hmm',
+                            lambda model, feats: ('HIGH_VOL', 0.95, None))
+        monkeypatch.setattr(detector, '_maybe_apply_confidence_floor', lambda s, c: s)
+        monkeypatch.setattr(detector, '_hysteresis_streak', lambda hist, s: 5)
+        monkeypatch.setattr(detector, '_confirmed_transition',
+                            lambda hist, s, streak, conf: (True, 'LOW_VOL'))
+        monkeypatch.setattr(detector, '_redis', lambda: _FakeRedis())
+        monkeypatch.setattr(detector, '_persist_state_row', lambda *a, **k: None)
+        monkeypatch.setattr(detector, '_post_to_discord', lambda *a, **k: None)
+        # inflight must suppress BOTH the regime-of-record sync and the redeploy
+        monkeypatch.setattr(detector, '_sync_regime_to_consumers',
+                            lambda **k: (_ for _ in ()).throw(
+                                AssertionError('sync ran during inflight block')))
+        monkeypatch.setattr(detector, '_spawn_redeploy',
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError('redeploy spawned during inflight block')))
+        # The _INFLIGHT branch is reached via a function-local import inside
+        # run_one_tick; patch the source module directly (not detector.*) so the
+        # local `from src.execution.intraday_prefetch import ...` rebind picks them up.
+        monkeypatch.setattr('src.execution.intraday_prefetch.prefetch_enabled',
+                            lambda: True)
+        monkeypatch.setattr('src.execution.intraday_prefetch.acquire_inflight',
+                            lambda rcli: False)   # lock is busy → _INFLIGHT path
+        captured = {}
+        monkeypatch.setattr(detector, '_refresh_regime_file',
+                            lambda **kw: captured.update(kw))
+
+        detector.run_one_tick()
+
+        assert captured, '_refresh_regime_file not called on inflight-blocked tick'
+        # state passed must NOT be a real regime → helper preserves file state
+        assert captured.get('state') not in detector._STATE_RANK
+        # confirm the sentinel is specifically '_COOLDOWN_HOLD' (shared sentinel)
+        assert captured.get('state') == '_COOLDOWN_HOLD'
