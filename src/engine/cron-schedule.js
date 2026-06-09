@@ -404,17 +404,17 @@ function start(swarm, generateId, notifyDiscord) {
             }, { timezone: 'America/New_York' });
         }
 
-        // (c) 09:28 ET Mon–Fri — open-window reconcile: drops/flatten only, via OPG.
-        // MUST fire PRE-9:30: OPG orders only participate in the opening auction
-        // during the premarket session; at/after 9:30 ET OPG degrades to an RTH
-        // market order (per Task 10 / §7 of the design). 09:28 gives ~2 min for
-        // order submission before the auction. Gated by OPENCLAW_EOD_RECONCILE.
+        // (c) 09:25 ET Mon–Fri — open-window reconcile: drops/flatten only, via OPG.
+        // MUST fire PRE-9:28: Alpaca OPG window closes at 9:28 AM (not 9:30 AM);
+        // firing at 9:28 lands AT the deadline and gets rejected (confirmed 2026-06-08).
+        // 09:25 gives ~3 min buffer for order submission before the OPG cutoff.
+        // Gated by OPENCLAW_EOD_RECONCILE.
         // open_reconcile.run_reconcile: diffs APPROVED set vs broker book →
         // close dropped/flattened positions at the open (OPG dual-path) +
         // strategy-ledger close; does NOT size or submit opens.
         if (process.env.OPENCLAW_EOD_RECONCILE === '1') {
-            cron.schedule('28 9 * * 1-5', () => {
-                log('EOD open-window reconcile (9:28am ET — premarket, OPG required)');
+            cron.schedule('25 9 * * 1-5', () => {
+                log('EOD open-window reconcile (9:25am ET — premarket, OPG required)');
                 try {
                     const fs    = require('fs');
                     const today = new Date().toISOString().slice(0, 10);
@@ -502,12 +502,17 @@ function start(swarm, generateId, notifyDiscord) {
     }, { timezone: 'America/New_York' });
 
 
-    // 9:00-19:55 ET, every 5 min, Mon-Fri — intraday HMM regime detector.
+    // 9:00-19:55 ET, every 5 min (legacy) or 15 min (OPENCLAW_INTRADAY_15MIN_PREFETCH=1),
+    // Mon-Fri — intraday HMM regime detector.
     // Fire-and-forget detached spawn (matches the 10am pipeline pattern).
     // Each tick: collects 6 live features → appends parquet → scores HMM →
     // hysteresis(3)/confidence(<70%)/cooldown(60min) gates. Phase 2
     // (2026-05-19) wires confirmed transitions to scripts/redeploy_pipeline.py
     // (detached subprocess.Popen, never blocks this cron tick).
+    //
+    // When OPENCLAW_INTRADAY_15MIN_PREFETCH=1: cadence switches to */15 (uniform
+    // 3-tick confirmation window aligns to the prefetch buffer), and the Python
+    // feature collector floors ts_utc to the 15-min boundary instead of 5-min.
     //
     // Window rationale: SPY option market trades 9:30-16:15 ET. We start
     // the cron at 9:00 to score the open transition and extend through
@@ -520,7 +525,10 @@ function start(swarm, generateId, notifyDiscord) {
     // After-hours redeploys (16:00-20:00) are gated by
     // OPENCLAW_REDEPLOY_EXTENDED_HOURS (default OFF). When ON, Phase 3
     // alpaca_executor submits limit orders w/ extended-hours flag.
-    cron.schedule('*/5 9-19 * * 1-5', () => {
+    const _intradaySchedule = process.env.OPENCLAW_INTRADAY_15MIN_PREFETCH === '1'
+        ? '*/15 9-19 * * 1-5'   // 15-min cadence (uniform 3-tick confirmation + prefetch)
+        : '*/5 9-19 * * 1-5';   // legacy 5-min cadence
+    cron.schedule(_intradaySchedule, () => {
         try {
             const fs = require('fs');
             const path = require('path');

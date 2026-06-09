@@ -1,4 +1,4 @@
-"""src/ingestion/intraday_features.py — 5-min intraday feature collector.
+"""src/ingestion/intraday_features.py — intraday feature collector (5-min legacy / 15-min when OPENCLAW_INTRADAY_15MIN_PREFETCH=1).
 
 Pulls a snapshot of every input the intraday HMM regime detector needs
 and returns a single 9-feature dict. Optionally appends to the master
@@ -82,6 +82,13 @@ def _utc_now() -> pd.Timestamp:
 def _floor_to_5min(ts: pd.Timestamp) -> pd.Timestamp:
     """Snap to nearest 5-min boundary (truncating)."""
     return ts.floor('5min')
+
+
+def _floor_ts(ts: pd.Timestamp) -> pd.Timestamp:
+    """Bucket the feature timestamp. 15-min when the 15min-prefetch flag is
+    ON (so 15-min ticks dedup cleanly), else legacy 5-min."""
+    freq = '15min' if os.environ.get('OPENCLAW_INTRADAY_15MIN_PREFETCH') == '1' else '5min'
+    return ts.floor(freq)
 
 
 def _alpaca_chain_pull(symbol: str, expiry_lo: str, expiry_hi: str,
@@ -284,7 +291,7 @@ def collect_intraday_features(now_utc: Optional[pd.Timestamp] = None,
         now_utc = pd.Timestamp(now_utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.tz_localize('UTC')
-    ts_floor = _floor_to_5min(now_utc)
+    ts_floor = _floor_ts(now_utc)
 
     quality_flag = 0
 
