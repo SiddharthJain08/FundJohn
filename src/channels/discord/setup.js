@@ -54,7 +54,11 @@ const STRUCTURE = [
         topic: 'Live background collection progress — S&P 500 prices, options Greeks, technicals, fundamentals.',
       },
       {
-        name: 'data-alerts', key: 'data-alerts', operatorWrite: false,
+        // Operator renamed the channel #data-alerts → #data-flow (2026-06-08).
+        // Display name follows the rename; the logical KEY stays 'data-alerts'
+        // so the collector / pipeline_logging / personas references keep working
+        // and setup matches the existing channel by name instead of recreating it.
+        name: 'data-flow', key: 'data-alerts', operatorWrite: false,
         topic: 'API errors, rate limit warnings, missing data gaps, and coverage drops.',
       },
       {
