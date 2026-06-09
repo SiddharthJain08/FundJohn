@@ -6880,7 +6880,7 @@ function _buildAlphaBarsHtml(group) {
 
   const net = alpha.net;
   let badge = '';
-  if (net != null && isFinite(net)) {
+  if (haveValues && net != null && isFinite(net)) {
     const netTxt = (net >= 0 ? '+' : '') + Number(net).toFixed(2);
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge = \`<span class="ab-badge">net = <span class="\${netCls}">\${netTxt}</span></span>\`;
