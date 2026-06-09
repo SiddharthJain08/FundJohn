@@ -334,10 +334,13 @@ Insert:
     eff_weight_by_strat = _apply_size_scalars(weight_by_strat, _size_scalars, _size_scalar_on)
 ```
 
-- [ ] **Step 2: Use `eff_weight_by_strat` in the ticker_w sum + bracket weight**
+- [ ] **Step 2: Use `eff_weight_by_strat` in the ticker_w sum ONLY**
 
-At line 928 change `weight_by_strat[sid] * d` → `eff_weight_by_strat[sid] * d`.
-At line 939 change `'weight': weight_by_strat[sid],` → `'weight': eff_weight_by_strat[sid],`.
+At line 928 change `weight_by_strat[sid] * d` → `eff_weight_by_strat[sid] * d` (the allocation sum).
+**Leave the bracket `'weight': weight_by_strat[sid],` tuple on RAW `weight_by_strat`** — the bracket-leader
+(whose entry/stop/targets anchor the order) is chosen by raw conviction, not the dollar adjustment; scaling
+it would silently change which strategy's technical levels are used. *(Revised post-review 2026-06-09: an
+earlier draft scaled the bracket weight too; reverted.)*
 (Leave line 929 `ticker_net_sharpe[tkr] += sharpe_by_strat.get(sid, 0.0) * d` UNCHANGED — gate stays raw.)
 The membership guard at line 923 (`sid not in weight_by_strat`) stays keyed on `weight_by_strat` (eff has identical keys).
 

@@ -78,9 +78,11 @@ nowhere since `7bf5392`) **and** corrupted by a 100× producer unit bug
 
 1. **Wire `size_scalar`** (not `recommended_size_pct`).
 2. **Allocation-only.** The scalar multiplies `weight_by_strat` (daily_weight → `ticker_w` → dollars).
-   The cum-sharpe **gate** (`sharpe_by_strat` = effective_sharpe) and the **fold representative
-   selection** stay on **raw** effective_sharpe — so an approved scalar resizes a position but never
-   changes which tickers trade or which strategy represents a clump.
+   The cum-sharpe **gate** (`sharpe_by_strat` = effective_sharpe), the **fold representative
+   selection**, AND the **bracket-leader pick** (which strategy's entry/stop/targets anchor the order)
+   all stay on **raw** effective_sharpe/`weight_by_strat` — so an approved scalar resizes a position
+   but never changes which tickers trade, which strategy represents a clump, or whose technical levels
+   are used.
 3. **No clamp.** `size_scalar` is human-approved, Opus-bounded `0..2`, with an existing magnitude
    rail in `proposal_manager` ("Rail 2"). NULL / missing / non-finite / negative → **1.0** (no
    change, fail-safe); an explicit finite `0.0` is honored as a deliberate mute.
@@ -109,9 +111,11 @@ nowhere since `7bf5392`) **and** corrupted by a 100× producer unit bug
   (fail-safe). An explicit finite **0.0 is honored** (deliberate mute — contributes 0 to the
   allocation sum but still to the gate, consistent with allocation-only).
 - Define `eff_weight_by_strat[sid] = weight_by_strat[sid] × scalar(sid)`.
-  - Gate **ON**  → use `eff_weight_by_strat` everywhere `weight_by_strat` currently feeds the path:
-    the `ticker_w[tkr] += … × d` sum (line 928) **and** the bracket-leader `weight` tuple (line 939),
-    so the direction-leader pick is consistent with the applied size.
+  - Gate **ON**  → use `eff_weight_by_strat` for the **allocation** only: the `ticker_w[tkr] += … × d`
+    sum. The **bracket-leader pick stays on RAW `weight_by_strat`** — the direction-leader (whose
+    entry/stop/targets anchor the order) is chosen by raw conviction, NOT by the operator's dollar
+    adjustment (a size_scalar must not silently change which strategy's technical levels are used).
+    *(Revised post-review 2026-06-09: an earlier draft scaled the bracket weight too; reverted — see §4.2.)*
   - Gate **OFF** → use raw `weight_by_strat` for routing (unchanged), but compute the shadow
     `ticker_w'`/`target_usd'` from `eff_weight_by_strat` and `log.info` the per-strategy scalar set
     and the per-ticker `Δusd = target_usd' − target_usd` (no money moves).
