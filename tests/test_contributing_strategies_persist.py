@@ -59,3 +59,22 @@ class TestCollapseContributing:
 
     def test_empty(self):
         assert _collapse_contributing([]) == {}
+
+
+class TestCollapseContributions:
+    def test_collapse_contributions_keeps_signed_terms_per_ticker(self):
+        from execution import regime_blended_sizer_live as live
+        orders = [
+            {'ticker': 'AAPL', 'contributions': [
+                {'strategy_id': 'A', 'contribution': 3.0, 'direction': 1},
+                {'strategy_id': 'B', 'contribution': -1.0, 'direction': -1}]},
+            {'ticker': 'MSFT', 'contributions': [
+                {'strategy_id': 'C', 'contribution': 2.0, 'direction': 1}]},
+            {'ticker': 'NVDA', 'contributions': []},          # orphan close → skipped
+        ]
+        out = live._collapse_contributions(orders)
+        assert out['AAPL'] == [
+            {'strategy_id': 'A', 'contribution': 3.0, 'direction': 1},
+            {'strategy_id': 'B', 'contribution': -1.0, 'direction': -1}]
+        assert out['MSFT'] == [{'strategy_id': 'C', 'contribution': 2.0, 'direction': 1}]
+        assert 'NVDA' not in out

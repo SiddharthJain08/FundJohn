@@ -321,30 +321,50 @@ def _collapse_contributing(orders) -> dict:
     return {tk: sorted(s) for tk, s in by_ticker.items()}
 
 
+def _collapse_contributions(orders) -> dict:
+    """Collapse sized orders → {ticker: [{strategy_id, contribution, direction}]}.
+    Keeps only orders that carry a non-empty `contributions` list (sizing
+    emissions; orphan/flip closes have none). Pure — DB upsert is separate."""
+    by_ticker: dict = {}
+    for o in orders:
+        tk = o.get('ticker')
+        contribs = o.get('contributions') or []
+        if not tk or not contribs:
+            continue
+        by_ticker[tk] = contribs
+    return by_ticker
+
+
 def _persist_contributing_strategies(run_date_str, orders) -> int:
     """Upsert this cycle's per-ticker corr-gate contributing strategies into
     cycle_contributing_strategies (read by the dashboard ticker-alpha). Best-
     effort: never fails the cycle. Returns rows upserted."""
     by_ticker = _collapse_contributing(orders)
+    contribs_by_ticker = _collapse_contributions(orders)
     if not by_ticker:
         return 0
     uri = os.environ.get('POSTGRES_URI')
     if not uri:
         return 0
+    import json as _json
     n = 0
     try:
         conn = psycopg2.connect(uri)
         cur = conn.cursor()
         for tk, strats in by_ticker.items():
+            contribs = contribs_by_ticker.get(tk)
             cur.execute(
                 """
                 INSERT INTO cycle_contributing_strategies
-                    (run_date, ticker, strategies, updated_at)
-                VALUES (%s, %s, %s, NOW())
+                    (run_date, ticker, strategies, contributions, updated_at)
+                VALUES (%s, %s, %s, %s, NOW())
                 ON CONFLICT (run_date, ticker) DO UPDATE SET
-                    strategies = EXCLUDED.strategies, updated_at = NOW()
+                    strategies = EXCLUDED.strategies,
+                    contributions = EXCLUDED.contributions,
+                    updated_at = NOW()
                 """,
-                (run_date_str, tk, list(strats)),
+                (run_date_str, tk, list(strats),
+                 _json.dumps(contribs) if contribs is not None else None),
             )
             n += 1
         conn.commit()
