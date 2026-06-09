@@ -48,6 +48,13 @@ logging.basicConfig(
 logger = logging.getLogger('redeploy_pipeline')
 
 ROOT = Path(__file__).resolve().parents[1]
+# This script is spawned BY PATH from scripts/run_intraday_market_state.py
+# (sys.executable scripts/redeploy_pipeline.py), so sys.path[0] is scripts/,
+# not the repo root. Mirror scripts/refetch_prices.py and put ROOT on the
+# path before the first project import.
+sys.path.insert(0, str(ROOT))
+
+from src.execution import intraday_prefetch as _pf   # noqa: E402
 
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
@@ -56,6 +63,42 @@ COOLDOWN_TTL_S = 3600     # 60 min — blocks back-to-back redeploys
 SENTINEL_TTL_S = 86400    # 24h — same-transition idempotency
 REASON_MAX_LEN = 80
 ORCHESTRATOR_TIMEOUT_S = 1800   # 30 min
+
+# ── tick-3 data-ready gate (OPENCLAW_INTRADAY_15MIN_PREFETCH) ─────────────────
+GATE_TIMEOUT_S = 1200   # 20 min — bounded wait for the tick-1 prefetch
+GATE_POLL_S = 30
+
+
+def _freshness_ok(date: str) -> bool:
+    from scripts.refetch_prices import _freshness_ok as _f
+    ok, _ = _f(date)
+    return ok
+
+
+def _sync_refetch(date: str) -> int:
+    from scripts.refetch_prices import run as _run
+    return _run(date)
+
+
+def _data_ready_gate(date: str) -> str:
+    """'proceed' or 'abort'. Bounded wait on the tick-1 prefetch sentinel;
+    synchronous refetch if no sentinel; abort on failure/timeout/stale."""
+    r = _redis()
+    s = _pf.read_prefetch(r, date)
+    if s is None:
+        _sync_refetch(date)
+    waited = 0
+    while True:
+        s = _pf.read_prefetch(r, date) or s
+        status = (s or {}).get('status')
+        if status == 'done' and _freshness_ok(date):
+            return 'proceed'
+        if status == 'failed':
+            return 'abort'
+        if waited >= GATE_TIMEOUT_S:
+            return 'abort'
+        time.sleep(GATE_POLL_S)
+        waited += GATE_POLL_S
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -165,6 +208,42 @@ def _print_action(payload: dict) -> None:
     print(json.dumps(payload, default=str))
 
 
+def _report_completed(reason: str, duration_s: float, dry_run: bool) -> None:
+    """Shared success reporting — byte-identical for the flag-ON and
+    flag-OFF paths so both emit the same action JSON + Discord post."""
+    _print_action({
+        'action':       'completed',
+        'reason':       reason,
+        'duration_s':   duration_s,
+        'exit_code':    0,
+    })
+    dry_tag = ' [DRY-RUN]' if dry_run else ''
+    _post_webhook(
+        'intraday-regime',
+        f':rocket: **Pipeline redeploy complete**{dry_tag} | '
+        f'reason={reason} | duration={duration_s}s | '
+        f'steps={REDEPLOY_STEPS}',
+    )
+
+
+def _report_failed(reason: str, rc: int, duration_s: float,
+                   run_date: str, dry_run: bool) -> None:
+    """Shared failure reporting — byte-identical for both paths."""
+    log_hint = f'logs/redeploy_pipeline_{run_date}.log'
+    _print_action({
+        'action':    'failed',
+        'reason':    reason,
+        'exit_code': rc,
+    })
+    dry_tag = ' [DRY-RUN]' if dry_run else ''
+    _post_webhook(
+        'intraday-regime',
+        f':warning: **Pipeline redeploy FAILED**{dry_tag} | '
+        f'reason={reason} | exit_code={rc} | duration={duration_s}s | '
+        f'see {log_hint}',
+    )
+
+
 # ── Steps ────────────────────────────────────────────────────────────────────
 
 REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile'
@@ -269,10 +348,17 @@ def main(argv=None) -> int:
     sentinel_key = f'redeploy:fired:{run_date}:{reason}'
 
     # ── Cooldown / sentinel gate ─────────────────────────────────────────
+    # Flag ON: the 60-min `redeploy:cooldown` is DROPPED (the in-flight lock,
+    # acquired by the detector and released by this script, is the only
+    # back-to-back guard). The sentinel + close-execute-inflight blocks stay.
+    # Flag OFF: all three checks unchanged. On the flag-ON path the detector
+    # already holds `intraday:redeploy:inflight`, so any early-return here
+    # must RELEASE it (release is an idempotent delete — safe; deferring SHOULD
+    # let the next attempt re-acquire rather than block for the full TTL).
     r = _redis()
     if r is not None:
         try:
-            if r.get(cooldown_key):
+            if not _pf.prefetch_enabled() and r.get(cooldown_key):
                 ttl = r.ttl(cooldown_key)
                 _print_action({
                     'action': 'blocked',
@@ -281,12 +367,16 @@ def main(argv=None) -> int:
                 })
                 return 0
             if r.get(sentinel_key):
+                if _pf.prefetch_enabled():
+                    _pf.release_inflight(r)
                 _print_action({
                     'action': 'blocked',
                     'reason': 'same_transition_already_fired',
                 })
                 return 0
             if _close_execute_inflight(r, run_date):
+                if _pf.prefetch_enabled():
+                    _pf.release_inflight(r)
                 _print_action({
                     'action': 'blocked',
                     'reason': 'close_execute_inflight',
@@ -303,6 +393,8 @@ def main(argv=None) -> int:
     ext_enabled = os.environ.get('OPENCLAW_REDEPLOY_EXTENDED_HOURS') == '1'
     if not ok or not is_open:
         if not ext_enabled:
+            if _pf.prefetch_enabled():
+                _pf.release_inflight(r)
             _print_action({
                 'action': 'blocked',
                 'reason': 'extended_hours_disabled_until_phase3',
@@ -310,6 +402,49 @@ def main(argv=None) -> int:
             return 0
 
     # ── Spawn the orchestrator subset ────────────────────────────────────
+    if _pf.prefetch_enabled():
+        # Flag ON: WAIT for the tick-1 prices-only prefetch (data-ready gate)
+        # BEFORE running any trading steps; ABORT (no signals/orders) if it
+        # failed/timed-out/stale. The in-flight lock (held by the detector) is
+        # RELEASED in `finally` so it never outlives this redeploy — covers
+        # abort, success, and orchestrator failure. Cooldown is NOT set on
+        # success (dropped under this flag); sentinel still is.
+        try:
+            if _data_ready_gate(run_date) == 'abort':
+                _print_action({
+                    'action': 'aborted',
+                    'reason': reason,
+                    'detail': 'ingestion_not_ready',
+                })
+                _post_webhook(
+                    'intraday-regime',
+                    f'⛔ redeploy aborted | reason={reason} — price '
+                    f'ingestion failed/timeout; regime row updated, no '
+                    f'signals/orders submitted',
+                )
+                return 0
+
+            started = time.time()
+            rc = _spawn_orchestrator(reason, run_date, dry_run=args.dry_run)
+            duration_s = round(time.time() - started, 1)
+
+            if rc == 0:
+                # Success — set sentinel ONLY (no cooldown under this flag).
+                if r is not None:
+                    try:
+                        r.set(sentinel_key, '1', ex=SENTINEL_TTL_S)
+                    except Exception as e:
+                        logger.warning('failed to set sentinel key: %s', e)
+                _report_completed(reason, duration_s, args.dry_run)
+                return 0
+
+            # Failure: do NOT set sentinel; let the caller retry.
+            _report_failed(reason, rc, duration_s, run_date, args.dry_run)
+            return rc
+        finally:
+            _pf.release_inflight(_redis())
+
+    # ── Legacy path (flag OFF): byte-identical to pre-Task-7 behavior ─────
     started = time.time()
     rc = _spawn_orchestrator(reason, run_date, dry_run=args.dry_run)
     duration_s = round(time.time() - started, 1)
@@ -323,35 +458,11 @@ def main(argv=None) -> int:
             except Exception as e:
                 logger.warning('failed to set cooldown/sentinel keys: %s', e)
 
-        _print_action({
-            'action':       'completed',
-            'reason':       reason,
-            'duration_s':   duration_s,
-            'exit_code':    0,
-        })
-        dry_tag = ' [DRY-RUN]' if args.dry_run else ''
-        _post_webhook(
-            'intraday-regime',
-            f':rocket: **Pipeline redeploy complete**{dry_tag} | '
-            f'reason={reason} | duration={duration_s}s | '
-            f'steps={REDEPLOY_STEPS}',
-        )
+        _report_completed(reason, duration_s, args.dry_run)
         return 0
 
     # ── Failure: do NOT set cooldown/sentinel; let caller retry ──────────
-    log_hint = f'logs/redeploy_pipeline_{run_date}.log'
-    _print_action({
-        'action':    'failed',
-        'reason':    reason,
-        'exit_code': rc,
-    })
-    dry_tag = ' [DRY-RUN]' if args.dry_run else ''
-    _post_webhook(
-        'intraday-regime',
-        f':warning: **Pipeline redeploy FAILED**{dry_tag} | '
-        f'reason={reason} | exit_code={rc} | duration={duration_s}s | '
-        f'see {log_hint}',
-    )
+    _report_failed(reason, rc, duration_s, run_date, args.dry_run)
     return rc
 
 

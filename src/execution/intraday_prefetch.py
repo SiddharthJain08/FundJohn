@@ -11,7 +11,15 @@ import os
 PREFETCH_KEY = 'intraday:prefetch:{date}'
 INFLIGHT_KEY = 'intraday:redeploy:inflight'
 PREFETCH_TTL_S = 6 * 3600        # sentinel lives the trading day
-INFLIGHT_TTL_S = 900             # 15 min backstop
+# Sized to cover redeploy_pipeline GATE_TIMEOUT_S (1200s) + a TYPICAL
+# orchestrator runtime (~3 min) so the lock doesn't expire mid-redeploy under
+# normal conditions. The real guarantee is the explicit release in
+# redeploy_pipeline.main()'s `finally`; this TTL is only a crash backstop.
+# NOTE: gate + orchestrator are sequential, so a pathologically-hung
+# orchestrator (full ORCHESTRATOR_TIMEOUT_S=1800s) gives a worst-case
+# lock-held lifetime of 1200+1800=3000s > 1800s — i.e. on a HUNG orchestrator
+# the backstop can still expire early and let a second redeploy overlap.
+INFLIGHT_TTL_S = 1800            # 30 min crash backstop (see note above)
 
 
 def prefetch_enabled() -> bool:
