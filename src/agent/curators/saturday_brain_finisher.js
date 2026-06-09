@@ -58,17 +58,24 @@ function getArg(name, fallback = null) {
 // 2PM "code" run closeout: flip today's paused 8AM ingest row
 // (status='ingest_complete') to 'completed' now that Phases 5-8 have run.
 // Gated on --mark-run-complete so ad-hoc finisher invocations don't touch it.
-async function _markRunComplete(dryRun, log) {
+async function _markRunComplete(dryRun, log, stats = {}) {
   if (!getArg('--mark-run-complete') || dryRun) return;
+  // Stamp the coding outcome onto the 8AM ingest row (which has coded_synchronous=0
+  // because ingest stops before Phase 6). Without this the Sunday-evening research
+  // audit's green-light check (coded_synchronous>=1) false-flags every healthy week.
+  const { coded = 0, codedFailed = 0, tierA = 0, tierB = 0, tierC = 0 } = stats;
   try {
     const r = await _query(
       `UPDATE saturday_runs
-          SET status='completed', finished_at=NOW(), current_phase='done'
+          SET status='completed', finished_at=NOW(), current_phase='done',
+              coded_synchronous=$1, coded_failed=$2,
+              tier_a_count=$3, tier_b_count=$4, tier_c_count=$5
         WHERE run_id = (SELECT run_id FROM saturday_runs
                          WHERE status='ingest_complete'
-                         ORDER BY started_at DESC LIMIT 1)`
+                         ORDER BY started_at DESC LIMIT 1)`,
+      [coded, codedFailed, tierA, tierB, tierC]
     );
-    log(`mark-run-complete: ${r.rowCount} ingest_complete run → completed`);
+    log(`mark-run-complete: ${r.rowCount} ingest_complete run → completed (coded=${coded})`);
   } catch (e) {
     log(`mark-run-complete: ${e.message}`);
   }
@@ -252,7 +259,10 @@ async function main() {
   }
   log(`Vault: ${paperNotes} paper, ${deferred} deferred, ${strategyNotes} strategy notes.`);
 
-  await _markRunComplete(dryRun, log);
+  await _markRunComplete(dryRun, log, {
+    coded, codedFailed: failed,
+    tierA: tiers.A.length, tierB: tiers.B.length, tierC: tiers.C.length,
+  });
 
   console.log(JSON.stringify({
     candidates_processed: fresh.length,
