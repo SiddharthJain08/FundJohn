@@ -882,6 +882,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # size_scalar wiring (default-OFF). Approved per-(strategy,regime) scalars
     # (raw; missing → 1.0) multiply daily_weight = the ALLOCATION term only;
     # the cum-sharpe gate (sharpe_by_strat) + fold representative stay raw.
+    # The bracket-leader pick also stays on raw conviction.
     _size_scalar_on = os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1'
     try:
         from execution import regime_param_resolver as _rpr
@@ -999,7 +1000,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         ticker_meta[tkr]['brackets'].append({
             'sid':        sid,
             'direction':  d,
-            'weight':     eff_weight_by_strat[sid],
+            'weight':     weight_by_strat[sid],   # raw conviction: bracket-leader by sharpe, NOT size_scalar
             'entry':      s.get('entry_price'),
             'stop':       s.get('stop_loss'),
             't1':         s.get('target_1'),
@@ -1108,7 +1109,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             survivors = {tkr: list(zip(meta['strategies'], meta['directions']))
                          for tkr, meta in ticker_meta.items()}
             diff = _scaled_target_diff(survivors, weight_by_strat, _size_scalars,
-                                       target_usd, lam_nav=lam * nav)
+                                       target_usd,
+                                       lam_nav=sum(abs(v) for v in target_usd.values()))  # normalize to the post-dust gross so the diff isolates the scalar effect, not the renorm gap
             moved = {t: round(v['delta_usd'], 2) for t, v in diff.items()
                      if abs(v['delta_usd']) >= 1.0}
             logger.info('size_scalar.shadow: %d scalars active; per-ticker Δusd=%s',
