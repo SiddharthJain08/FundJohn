@@ -6694,19 +6694,18 @@ function _groupByTicker(rows, mode) {
       let pn = s[pnlKey] != null ? parseFloat(s[pnlKey]) : null;
       const dh = s.days_held != null ? parseFloat(s.days_held) : null;
       const dn = _normalizeDir(s.direction);
-      // Open intraday: unrealized_pnl_pct marks are only written at the 16:15
-      // EOD compute, so they're null/stale during the session. Fall back to the
-      // live directional return — each strategy's own entry vs the broker's
-      // live current price — so the per-strategy bars reflect actual ticker
-      // movement (a long that's underwater shows red; a short on a rising
-      // ticker shows red). Closed keeps the authoritative realized_pnl_pct.
-      if (isOpen && (pn == null || !isFinite(pn)) && en != null && isFinite(en) && en !== 0) {
+      // Open: compute the live directional return from each strategy's own
+      // entry vs the broker's live current price. The DB mark (unrealized_pnl_pct)
+      // is null OR stale (=entry/0 at open) intraday until the 16:15 compute, so
+      // the live broker price is the freshest basis and keeps the bars consistent
+      // with the price header — a long that's underwater shows red, a short on a
+      // rising ticker shows red. Fall back to the DB mark only when the broker
+      // leg is absent. Closed keeps the authoritative realized_pnl_pct.
+      if (isOpen && en != null && isFinite(en) && en !== 0) {
         const bp = s.broker_position || null;
         const bpx = bp && bp.current_price != null ? parseFloat(bp.current_price) : null;
-        const live = (bpx != null && isFinite(bpx)) ? bpx
-                   : (px != null && isFinite(px) ? px : null);
         const dirSign = dn === 'LONG' ? 1 : (dn === 'SHORT' ? -1 : 0);
-        if (live != null && dirSign !== 0) pn = dirSign * (live - en) / en;
+        if (bpx != null && isFinite(bpx) && dirSign !== 0) pn = dirSign * (bpx - en) / en;
       }
       if (dn) dirs.add(dn);
       s.dir_norm = dn;
@@ -6734,7 +6733,17 @@ function _groupByTicker(rows, mode) {
     g.n = g.signals.length;
     g.net_dir = dirs.size === 0 ? '—' : (dirs.size === 1 ? [...dirs][0] : 'MIXED');
     g.avg_entry = wEntryDen > 0 ? wEntrySum / wEntryDen : null;
-    g.price = priceN > 0 ? priceSum / priceN : null;
+    // Open prefers the broker's live current price: the DB mark (close_price)
+    // is null OR stale (=entry, written at open) intraday until the 16:15
+    // compute, which would make the header read no movement while the bars
+    // (computed off the live broker price) show plenty. Closed has no broker
+    // leg and uses the DB closed_price mean.
+    const _brokerCur = (g.signals[0] && g.signals[0].broker_position
+                        && g.signals[0].broker_position.current_price != null)
+      ? parseFloat(g.signals[0].broker_position.current_price) : null;
+    g.price = (isOpen && _brokerCur != null && isFinite(_brokerCur))
+      ? _brokerCur
+      : (priceN > 0 ? priceSum / priceN : null);
     // Broker truth (2026-05-19): if any strategy-intent row carries a
     // broker_position block, the broker holds this ticker — use its size +
     // entry + return for the parent row, overriding the intent-rollup. All
@@ -6897,7 +6906,7 @@ function _buildAlphaBarsHtml(group) {
   if (net != null && isFinite(net)) {
     const netTxt = (net >= 0 ? '+' : '') + net.toFixed(2) + '%';
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    badge = \`<span class="ab-badge">net = <span class="\${netCls}">\${netTxt}</span></span>\`;
+    badge = \`<span class="ab-badge">net contrib = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
   return \`<div class="alpha-bars">
     \${priceHdr}
