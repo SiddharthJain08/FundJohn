@@ -15,23 +15,25 @@ LOG=logs/sp7_ladder_$(date -u +%F).log
 
 set -a; . <(grep -E '^(POSTGRES_URI|REDIS_URL|OPENCLAW_UNIVERSE_AUTOADOPT)' .env | sed 's/\r$//'); set +a
 
-# Seconds until 13:00 UTC — the window close (clears the EDGAR/premarket band).
-now=$(date -u +%s); close=$(date -u -d "13:00" +%s)
-[ "$close" -le "$now" ] && close=$(date -u -d "tomorrow 13:00" +%s)
-budget=$(( close - now ))
-echo "[sp7-ladder] window budget ${budget}s" | tee -a "$LOG"
+# CONTINUOUS MODE (operator directive 2026-06-10): no 13:00 UTC window cap —
+# the drain runs through the trading day as well. Memory-safety on the 8 GB
+# no-swap box is via oom_score_adj=1000 (the kernel evicts a DRAIN cell first
+# under memory pressure, NEVER the live trading cycle) + the unit's MemoryMax.
+# nice -19 still yields the CPU to live/intraday processes.
+if echo 1000 > /proc/self/oom_score_adj 2>/dev/null; then
+  echo "[sp7-ladder] continuous mode — oom_score_adj=1000 (drain is first OOM victim)" | tee -a "$LOG"
+else
+  echo "[sp7-ladder] continuous mode — WARN oom_score_adj unset; relying on unit OOMScoreAdjust" | tee -a "$LOG"
+fi
 
 set +e
-timeout --signal=TERM "$budget" nice -n 19 \
-    python3 scripts/run_universe_ladder.py drain >> "$LOG" 2>&1
+nice -n 19 python3 scripts/run_universe_ladder.py drain >> "$LOG" 2>&1
 rc=$?
 set -e
 
 if [ $rc -eq 0 ] && grep -q "\[ladder\] DONE" "$LOG"; then
   rm -f "$ARMED"
   echo "[sp7-ladder] COMPLETE — disarmed" | tee -a "$LOG"
-elif [ $rc -eq 124 ]; then
-  echo "[sp7-ladder] window closed (SIGTERM at 13:00 UTC) — resumes next night" | tee -a "$LOG"
 else
-  echo "[sp7-ladder] driver rc=$rc — investigate $LOG" | tee -a "$LOG"
+  echo "[sp7-ladder] driver rc=$rc — still armed; resumes on next start / investigate $LOG" | tee -a "$LOG"
 fi

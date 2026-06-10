@@ -5,3 +5,8 @@ Description=SP-7 Phase B tier-ladder overnight window (armed via data/.sp7_ladde
 Type=oneshot
 WorkingDirectory=/root/openclaw
 ExecStart=/bin/bash /root/openclaw/scripts/overnight_ladder.sh
+# Continuous-mode memory safety (operator directive 2026-06-10): the drain runs
+# through the trading day, so make it the guaranteed first OOM victim and cap a
+# runaway cell. Protects the live trading cycle on the 8 GB no-swap box.
+OOMScoreAdjust=1000
+MemoryMax=3G
