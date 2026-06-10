@@ -22,7 +22,15 @@ DEFAULT_TP_CAP_MULT = 3.0
 
 
 def _tp_cap_mult() -> float:
-    return float(os.environ.get('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', DEFAULT_TP_CAP_MULT))
+    """TP-stacking cap = this multiple of the largest single-block take-profit.
+    Sentinel: a non-positive or non-finite value (e.g. 'inf', '0') disables the
+    cap entirely -> uncapped linear sum ("V2"). Unparseable -> default.
+    (A bare 0 means "no cap", NOT "no take-profit".)"""
+    try:
+        v = float(os.environ.get('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', DEFAULT_TP_CAP_MULT))
+    except (TypeError, ValueError):
+        return DEFAULT_TP_CAP_MULT
+    return math.inf if (v <= 0.0 or not math.isfinite(v)) else v
 
 
 def _finite(x) -> bool:
