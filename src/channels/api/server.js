@@ -6694,18 +6694,24 @@ function _groupByTicker(rows, mode) {
       let pn = s[pnlKey] != null ? parseFloat(s[pnlKey]) : null;
       const dh = s.days_held != null ? parseFloat(s.days_held) : null;
       const dn = _normalizeDir(s.direction);
-      // Open: compute the live directional return from each strategy's own
-      // entry vs the broker's live current price. The DB mark (unrealized_pnl_pct)
-      // is null OR stale (=entry/0 at open) intraday until the 16:15 compute, so
-      // the live broker price is the freshest basis and keeps the bars consistent
-      // with the price header — a long that's underwater shows red, a short on a
-      // rising ticker shows red. Fall back to the DB mark only when the broker
-      // leg is absent. Closed keeps the authoritative realized_pnl_pct.
-      if (isOpen && en != null && isFinite(en) && en !== 0) {
+      // Open: directional return off the broker's COST BASIS (avg_entry_price =
+      // the first entry into the position) vs its live current price, so the
+      // per-strategy P&L matches Alpaca's reported ticker P&L exactly. The
+      // signal's own entry_price is the *intended* entry, not the actual fill,
+      // and diverges (e.g. MU signal 949 vs broker basis 861). Each strategy's
+      // own direction signs it (a short on a net-long, rising ticker shows red).
+      // DB marks are null/stale intraday; the broker leg is the live basis.
+      // Closed keeps the authoritative realized_pnl_pct.
+      if (isOpen) {
         const bp = s.broker_position || null;
-        const bpx = bp && bp.current_price != null ? parseFloat(bp.current_price) : null;
+        const basis = (bp && bp.avg_entry_price != null && isFinite(parseFloat(bp.avg_entry_price)))
+          ? parseFloat(bp.avg_entry_price)
+          : ((en != null && isFinite(en)) ? en : null);   // broker cost basis; fallback to signal entry
+        const bpx = (bp && bp.current_price != null && isFinite(parseFloat(bp.current_price)))
+          ? parseFloat(bp.current_price)
+          : ((px != null && isFinite(px)) ? px : null);
         const dirSign = dn === 'LONG' ? 1 : (dn === 'SHORT' ? -1 : 0);
-        if (bpx != null && isFinite(bpx) && dirSign !== 0) pn = dirSign * (bpx - en) / en;
+        if (basis != null && basis !== 0 && bpx != null && dirSign !== 0) pn = dirSign * (bpx - basis) / basis;
       }
       if (dn) dirs.add(dn);
       s.dir_norm = dn;
@@ -6732,7 +6738,15 @@ function _groupByTicker(rows, mode) {
     }
     g.n = g.signals.length;
     g.net_dir = dirs.size === 0 ? '—' : (dirs.size === 1 ? [...dirs][0] : 'MIXED');
-    g.avg_entry = wEntryDen > 0 ? wEntrySum / wEntryDen : null;
+    // Open header entry = broker cost basis (avg_entry_price = first entry into
+    // the position) so entry→current matches Alpaca's reported P&L; closed uses
+    // the size-weighted signal entry (no broker leg once closed).
+    const _brokerAvg = (g.signals[0] && g.signals[0].broker_position
+                        && g.signals[0].broker_position.avg_entry_price != null)
+      ? parseFloat(g.signals[0].broker_position.avg_entry_price) : null;
+    g.avg_entry = (isOpen && _brokerAvg != null && isFinite(_brokerAvg))
+      ? _brokerAvg
+      : (wEntryDen > 0 ? wEntrySum / wEntryDen : null);
     // Open prefers the broker's live current price: the DB mark (close_price)
     // is null OR stale (=entry, written at open) intraday until the 16:15
     // compute, which would make the header read no movement while the bars
