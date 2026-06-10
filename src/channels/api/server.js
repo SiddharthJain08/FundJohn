@@ -6430,10 +6430,6 @@ async function _safeFetch(url, fallback, opts = {}) {
   }
 }
 
-// Per-ticker alpha decomposition cache — populated lazily on tile click
-// via _fetchTickerAlpha. The alpha bars renderer reads from here.
-const _alphaCache    = {};
-const _alphaInflight = {};
 // Account equity for tile dollar-P&L computation. Cached at module
 // scope so re-renders triggered by sort/expand don't need it re-passed.
 let _navCache = null;
@@ -6695,9 +6691,23 @@ function _groupByTicker(rows, mode) {
       const sz = s.position_size_pct != null ? parseFloat(s.position_size_pct) : null;
       const en = s.entry_price != null ? parseFloat(s.entry_price) : null;
       const px = s[priceKey] != null ? parseFloat(s[priceKey]) : null;
-      const pn = s[pnlKey] != null ? parseFloat(s[pnlKey]) : null;
+      let pn = s[pnlKey] != null ? parseFloat(s[pnlKey]) : null;
       const dh = s.days_held != null ? parseFloat(s.days_held) : null;
       const dn = _normalizeDir(s.direction);
+      // Open intraday: unrealized_pnl_pct marks are only written at the 16:15
+      // EOD compute, so they're null/stale during the session. Fall back to the
+      // live directional return — each strategy's own entry vs the broker's
+      // live current price — so the per-strategy bars reflect actual ticker
+      // movement (a long that's underwater shows red; a short on a rising
+      // ticker shows red). Closed keeps the authoritative realized_pnl_pct.
+      if (isOpen && (pn == null || !isFinite(pn)) && en != null && isFinite(en) && en !== 0) {
+        const bp = s.broker_position || null;
+        const bpx = bp && bp.current_price != null ? parseFloat(bp.current_price) : null;
+        const live = (bpx != null && isFinite(bpx)) ? bpx
+                   : (px != null && isFinite(px) ? px : null);
+        const dirSign = dn === 'LONG' ? 1 : (dn === 'SHORT' ? -1 : 0);
+        if (live != null && dirSign !== 0) pn = dirSign * (live - en) / en;
+      }
       if (dn) dirs.add(dn);
       s.dir_norm = dn;
       if (sz != null && isFinite(sz)) totalSize += sz;
@@ -6808,31 +6818,35 @@ function _pnlColor(pct) {
   return         'rgba(248,81,73,'  + (0.18 + 0.72 * -t).toFixed(2) + ')';
 }
 
-// On-demand fetcher for a ticker's signed alpha contributions
-// (/api/portfolio/ticker-alpha). De-dupes concurrent clicks; caches per
-// session so a re-expand is instant. Rendered by _buildAlphaBarsHtml.
-function _fetchTickerAlpha(ticker, onReady) {
-  if (_alphaCache[ticker]) { onReady(_alphaCache[ticker]); return; }
-  if (_alphaInflight[ticker]) { _alphaInflight[ticker].then(onReady); return; }
-  _alphaInflight[ticker] = fetch('/api/portfolio/ticker-alpha/' + encodeURIComponent(ticker))
-    .then(r => r.json())
-    .then(p => { _alphaCache[ticker] = p; delete _alphaInflight[ticker]; return p; })
-    .catch(_ => { delete _alphaInflight[ticker]; return { contributions: [], reason: 'fetch_error' }; });
-  _alphaInflight[ticker].then(onReady);
-}
-
-// Vertical stack of signed contribution bars — one per strategy recorded
-// in cycle_contributing_strategies for this ticker. Bar value = signed
-// allocation contribution (daily_weight × size_scalar × direction).
-// Positive (green) = long-side contribution; negative (red) = short-side.
-// Bars are centered on a zero-line, scaled to max |contribution|.
-// Entry + current/close prices come from the already-loaded group object.
+// Vertical stack of signed per-strategy NAV-contribution bars for a ticker.
+// Bars are centered on a zero-line, scaled to max |contribution|; entry +
+// current/close prices come from the already-loaded group object. See the
+// in-function comment for the contribution definition and data source.
 function _buildAlphaBarsHtml(group) {
-  const alpha = _alphaCache[group.ticker];
-  if (!alpha) {
-    return \`<div class="alpha-bars empty">Loading contributions for <b>\${group.ticker}</b>…</div>\`;
+  // Per-strategy NAV-contribution bars, sourced from the ticker's own signal
+  // rows (no fetch): bar value = position_size% × directional P&L%, summed
+  // across each strategy's signals on the ticker. Open uses the live
+  // unrealized return (entry vs broker current, computed in _groupByTicker);
+  // closed uses realized P&L. Positive (green) = the strategy's bet is winning;
+  // negative (red) = losing. Bars sum to the ticker's NAV-contribution badge.
+  const byStrat = new Map();
+  for (const s of (group.signals || [])) {
+    const sid = s.strategy_id || 'unknown';
+    let e = byStrat.get(sid);
+    if (!e) { e = { strategy_id: sid, contribution: 0, hasVal: false, dirs: new Set() }; byStrat.set(sid, e); }
+    const cc = (s.contrib_pct != null && isFinite(s.contrib_pct)) ? s.contrib_pct : null;
+    if (cc != null) { e.contribution += cc; e.hasVal = true; }
+    if (s.dir_norm) e.dirs.add(s.dir_norm);
   }
-  const contributions = alpha.contributions || [];
+  const contributions = [...byStrat.values()].map(e => ({
+    strategy_id: e.strategy_id,
+    contribution: e.hasVal ? e.contribution * 100 : null,   // NAV-fraction → display %
+    direction: e.dirs.size === 1 ? [...e.dirs][0] : (e.dirs.size > 1 ? 'MIXED' : ''),
+  })).sort((a, b) => {
+    if (a.contribution == null) return 1;
+    if (b.contribution == null) return -1;
+    return b.contribution - a.contribution;   // winners (green) top, losers (red) bottom
+  });
   // Price header (entry + current/close) — from the already-loaded position.
   const isOpen = group.is_open !== false;
   const entry  = group.avg_entry != null ? parseFloat(group.avg_entry) : null;
@@ -6845,7 +6859,7 @@ function _buildAlphaBarsHtml(group) {
 
   if (!contributions.length) {
     return \`<div class="alpha-bars">\${priceHdr}
-      <div class="alpha-bars empty">No corr-gate contributors recorded for <b>\${group.ticker}</b> yet.</div>
+      <div class="alpha-bars empty">No strategy signals recorded for <b>\${group.ticker}</b>.</div>
     </div>\`;
   }
   const haveValues = contributions.some(c => c.contribution != null && isFinite(c.contribution));
@@ -6865,10 +6879,10 @@ function _buildAlphaBarsHtml(group) {
     const widthPct = (Math.abs(val) / maxAbs) * 50;
     const sign     = val >= 0 ? 'pos' : 'neg';
     const valCls   = val >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    const dirNorm  = c.direction > 0 ? 'LONG' : (c.direction < 0 ? 'SHORT' : '');
-    const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2);
+    const dirNorm  = c.direction || '';
+    const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2) + '%';
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${c.strategy_id} · signed sharpe contribution">\${c.strategy_id}</div>
+      <div class="ab-label" title="\${c.strategy_id} · NAV contribution = size% × P&L%">\${c.strategy_id}</div>
       <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm}</div>
       <div class="ab-track">
         <div class="ab-zero"></div>
@@ -6878,10 +6892,10 @@ function _buildAlphaBarsHtml(group) {
     </div>\`;
   }).join('');
 
-  const net = alpha.net;
+  const net = haveValues ? contributions.reduce((s, c) => s + (c.contribution || 0), 0) : null;
   let badge = '';
-  if (haveValues && net != null && isFinite(net)) {
-    const netTxt = (net >= 0 ? '+' : '') + Number(net).toFixed(2);
+  if (net != null && isFinite(net)) {
+    const netTxt = (net >= 0 ? '+' : '') + net.toFixed(2) + '%';
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge = \`<span class="ab-badge">net = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
@@ -7697,12 +7711,9 @@ function _attachTileClickHandlers(el) {
         return;
       }
       _heatmapSelected['pf-positions'] = tk;
+      // Bars come straight from the group's own signals (synchronous) — a
+      // single render surfaces them; no fetch/second render needed.
       renderPositions(_rawDataCache['pf-positions']);
-      _fetchTickerAlpha(tk, () => {
-        if (_heatmapSelected['pf-positions'] === tk) {
-          renderPositions(_rawDataCache['pf-positions']);
-        }
-      });
     });
   });
 }
@@ -7778,14 +7789,9 @@ function _bindGroupClicks(tableId, renderFn) {
     tr.addEventListener('click', () => {
       const tk = tr.dataset.ticker;
       if (!tk) return;
+      // _toggleExpanded re-renders; the expanded row's bars come from the
+      // group's own signals (synchronous), so no fetch/second render needed.
       _toggleExpanded(tableId, tk, renderFn);
-      // If the row is now expanded, kick off the alpha fetch and re-render
-      // when the response lands. _isExpanded is checked *after* the toggle.
-      if (_isExpanded(tableId, tk)) {
-        _fetchTickerAlpha(tk, () => {
-          if (_isExpanded(tableId, tk)) renderFn(_rawDataCache[tableId] || []);
-        });
-      }
     });
   });
 }
