@@ -2,9 +2,18 @@
 Description=Nightly 01:00 UTC SP-7 tier-ladder window
 
 [Timer]
-# Mon-Fri 01:00 UTC; window closes 13:00 UTC (mirrors sp7-overnight-backfill).
-# Saturday EXCLUDED: the Sat 12:00 UTC weekend stack owns the box (OOM lesson).
+# Continuous-mode drain (operator directive 2026-06-10): runs 24/7 until the queue
+# empties and the wrapper disarms data/.sp7_ladder_armed. NO 13:00 UTC window cap —
+# memory-safety is OOMScoreAdjust=1000 + OOMPolicy=continue on the .service (the drain
+# is the kernel's first OOM victim and a killed cell just errors+continues), so
+# co-running with the live cycle / weekend stack is safe by construction.
+#   OnCalendar=Mon-Fri 01:00  -> daily calendar kick (initial arm path).
+#   OnUnitInactiveSec=20min   -> resurrection: if the drain exits while still armed
+#                                (crash / driver OOM between cells), restart within 20
+#                                min any day instead of waiting for 01:00. After a clean
+#                                drain+disarm this is a sub-100ms no-op.
 OnCalendar=Mon-Fri 01:00 UTC
+OnUnitInactiveSec=20min
 Persistent=false
 
 [Install]
