@@ -67,10 +67,35 @@ def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
                 already = _cur.fetchone()[0] or 0
                 _conn.close()
                 if already > 0:
-                    print(f'[sized_handoff] Refusing to overwrite sized handoff: '
-                          f'{already} Alpaca submission(s) already exist for {run_date}. '
+                    # An intraday regime-redeploy (or a same-cycle re-run) has
+                    # already submitted this run_date's orders. Do NOT abort:
+                    # the old `return False` surfaced as the trade step's rc=3,
+                    # which killed the 3:55pm EOD into-close fill's
+                    # reconcile/report/health on EVERY redeploy day — including
+                    # the EOD report on exactly the days a regime moved
+                    # (ERR-20260612-001, observed 06-09 + 06-11).
+                    #
+                    # Instead, leave the existing sized handoff intact
+                    # (send_report and trade_handoff_builder's d-1 context both
+                    # read it) and return True so the cycle proceeds to
+                    # alpaca -> reconcile -> report -> health. We deliberately
+                    # do NOT write a fresh handoff here: that would inject this
+                    # lane's residual delta orders as NEW submissions
+                    # (re-truing into the close is a separate operator-policy
+                    # choice, not this fix). The executor's per-order
+                    # already_executed() idempotency then skips every filled
+                    # order, so nothing is re-submitted — verified no-op:
+                    # re-running alpaca on an all-filled handoff yields
+                    # submitted=0 with no cancel/close preamble. (It will still
+                    # retry any order that FAILED earlier in the day — its
+                    # existing per-order retry semantics.) Override with
+                    # OPENCLAW_FORCE_RESIZE=1 to deliberately re-size.
+                    print(f'[sized_handoff] {already} Alpaca submission(s) already exist for '
+                          f'{run_date} (intraday redeploy or same-cycle re-run already executed '
+                          f"today's target) — leaving the existing sized handoff intact and "
+                          f'proceeding (no re-size; executor idempotently skips filled orders). '
                           f'Set OPENCLAW_FORCE_RESIZE=1 to override.')
-                    return False
+                    return True
             except Exception as _e:
                 print(f'[sized_handoff] alpaca_submissions check skipped: {_e}')
 
