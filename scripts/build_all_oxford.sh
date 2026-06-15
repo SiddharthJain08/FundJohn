@@ -19,6 +19,15 @@ total=$(echo "$strats" | wc -l | tr -d ' ')
 echo "[$(date -u +%H:%M:%S)] backtesting $total oxf strategies (timeout ${TIMEOUT_S}s each)" | tee -a "$LOG"
 for f in $strats; do
   s=$(basename "$f" .py); n=$((n+1))
+  # Resumable: skip strategies that already have a primary_window run (unless OXF_FORCE=1).
+  if [ "${OXF_FORCE:-0}" != "1" ] && python3 -c "
+import os,sys,psycopg2
+c=psycopg2.connect(os.environ['POSTGRES_URI']);cur=c.cursor()
+cur.execute('SELECT 1 FROM strategy_backtest_runs WHERE primary_window AND strategy_id=%s LIMIT 1',(sys.argv[1],))
+sys.exit(0 if cur.fetchone() else 1)" "$s" 2>/dev/null; then
+    echo "[$(date -u +%H:%M:%S)] ($n/$total) $s SKIP (already has primary_window run)" | tee -a "$LOG"
+    ok=$((ok+1)); continue
+  fi
   echo "[$(date -u +%H:%M:%S)] ($n/$total) $s ..." | tee -a "$LOG"
   if nice -n 19 timeout "$TIMEOUT_S" python3 -m backtest.unified_backtest \
         --strategy-file "$f" >>"$LOG" 2>&1; then
