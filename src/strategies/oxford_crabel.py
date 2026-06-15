@@ -515,6 +515,40 @@ def td_setup_count(bars: pd.DataFrame) -> int:
     return sign * count
 
 
+# --------------------------------------------------------------------------
+# Batch-3 indicator: Greatest Swing Value (gsv). oxfordstrat
+# greatest-swing-value-trend (fetched 2026-06-15). DIRECTIONAL noise, distinct
+# from avg_noise (which always uses the min shadow):
+#   Close > Open  → Noise = Open - Low   (lower shadow on an up day)
+#   Close < Open  → Noise = High - Open  (upper shadow on a down day)
+#   Close == Open → Noise = min(Open-Low, High-Open)
+#   GSV = SMA(Noise, GSV_Length) * GSV_Multiple
+# This helper returns Average_Noise (the SMA only); the strategy multiplies by
+# GSV_Multiple, so there is NO double-multiplication.
+# --------------------------------------------------------------------------
+
+def gsv(bars: pd.DataFrame, n: int = 10) -> float:
+    """Greatest Swing Value base = SMA over n bars of the DIRECTIONAL Crabel
+    noise (open-low on up days, high-open on down days, min(...) on dojis).
+    oxfordstrat greatest-swing-value-trend. Returns Average_Noise (caller
+    applies GSV_Multiple). NaN if fewer than n bars."""
+    n = int(n)
+    if n < 1 or len(bars) < n:
+        return float('nan')
+    sub = bars.iloc[-n:]
+    o = sub['open'].to_numpy(dtype=float)
+    h = sub['high'].to_numpy(dtype=float)
+    l = sub['low'].to_numpy(dtype=float)
+    c = sub['close'].to_numpy(dtype=float)
+    up_noise = o - l           # close > open
+    dn_noise = h - o           # close < open
+    doji_noise = np.minimum(o - l, h - o)  # close == open
+    noise = np.where(c > o, up_noise, np.where(c < o, dn_noise, doji_noise))
+    if not np.all(np.isfinite(noise)):
+        return float('nan')
+    return float(noise.mean())
+
+
 class OxfordBaseStrategy(BaseStrategy):
     """BaseStrategy + lazy, cached, point-in-time basket OHLC self-load."""
     instrument_class = 'etp'

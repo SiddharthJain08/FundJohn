@@ -4,7 +4,7 @@ from strategies.oxford_crabel import (
     avg_noise, is_nrn, gap_dir, OXFORD_ETF_BASKET,
     ema, macd, roc, linreg_slope, hma, zlma, kaufman_ama, frama, vortex,
     aroon, bollinger, keltner, heikin_ashi, heikin_ashi_series,
-    swing_pivots, td_setup_count)
+    swing_pivots, td_setup_count, gsv)
 
 def _bars(highs, lows, closes, opens=None):
     n = len(closes)
@@ -340,6 +340,49 @@ def test_heikin_ashi_look_back_1_equals_raw():
     lb1 = heikin_ashi_series(b, look_back=1)
     for col in ('ha_open', 'ha_close', 'ha_high', 'ha_low'):
         assert np.allclose(raw[col].to_numpy(), lb1[col].to_numpy(), equal_nan=True)
+
+# --- Batch-3 indicator: Greatest Swing Value (gsv) -------------------------
+# Oxford greatest-swing-value-trend (fetched 2026-06-15):
+#   If Close>Open: Noise = Open - Low     (down-shadow on an up day)
+#   If Close<Open: Noise = High - Open    (up-shadow on a down day)
+#   If Close==Open: Noise = min(Open-Low, High-Open)
+#   Average_Noise = SMA(Noise, GSV_Length);  GSV = Average_Noise * GSV_Multiple
+# gsv() returns Average_Noise (the directional-noise SMA); the strategy applies
+# the multiple, so this is NOT double-multiplied.
+
+def test_gsv_up_days_uses_open_minus_low():
+    # All up days (close>open): Noise = open-low. open=10, low=8 -> noise=2 each.
+    n = 4
+    b = _bars(highs=[12.0] * 6, lows=[8.0] * 6, closes=[11.0] * 6, opens=[10.0] * 6)
+    assert abs(gsv(b, n) - 2.0) < 1e-9  # SMA of constant 2.0
+
+def test_gsv_down_days_uses_high_minus_open():
+    # All down days (close<open): Noise = high-open. high=12, open=10 -> noise=2.
+    n = 4
+    b = _bars(highs=[12.0] * 6, lows=[8.0] * 6, closes=[9.0] * 6, opens=[10.0] * 6)
+    assert abs(gsv(b, n) - 2.0) < 1e-9
+
+def test_gsv_doji_uses_min_shadow():
+    # close==open: Noise = min(open-low, high-open) = min(10-8, 12-10) = 2.
+    n = 4
+    b = _bars(highs=[12.0] * 6, lows=[8.0] * 6, closes=[10.0] * 6, opens=[10.0] * 6)
+    assert abs(gsv(b, n) - 2.0) < 1e-9
+
+def test_gsv_averages_over_lookback():
+    # Mixed noises: last 3 up days noise = open-low = [1,2,3]; SMA(3) = 2.0.
+    opens = [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+    lows = [10.0, 10.0, 10.0, 9.0, 8.0, 7.0]   # last 3: open-low = 1,2,3
+    closes = [10.5] * 6  # up days
+    highs = [11.0] * 6
+    b = _bars(highs=highs, lows=lows, closes=closes, opens=opens)
+    assert abs(gsv(b, 3) - 2.0) < 1e-9  # mean(1,2,3)
+
+def test_gsv_nan_when_short():
+    b = _bars(highs=[1, 2], lows=[0, 1], closes=[1, 2], opens=[1, 2])
+    assert gsv(b, 10) != gsv(b, 10) or gsv(b, 10) != gsv(b, 10)  # NaN (len<n)
+    import numpy as _np
+    assert _np.isnan(gsv(b, 10))
+
 
 def test_heikin_ashi_look_back_smooths_ohlc_first():
     # Oxford page (verbatim): AvgOpen[i]=Average(Open,Look_Back) etc., THEN the HA
