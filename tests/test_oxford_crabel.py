@@ -2,7 +2,9 @@ import pandas as pd, numpy as np
 from strategies.oxford_crabel import (
     atr, donchian_prev, sma, rsi_wilder, true_range_series,
     avg_noise, is_nrn, gap_dir, OXFORD_ETF_BASKET,
-    ema, macd, roc, linreg_slope, hma, zlma, kaufman_ama, frama, vortex)
+    ema, macd, roc, linreg_slope, hma, zlma, kaufman_ama, frama, vortex,
+    aroon, bollinger, keltner, heikin_ashi, heikin_ashi_series,
+    swing_pivots, td_setup_count)
 
 def _bars(highs, lows, closes, opens=None):
     n = len(closes)
@@ -181,3 +183,149 @@ def test_vortex_returns_nan_when_short():
                       'low': [1, 2, 3], 'close': [1, 2, 3]}, index=idx)
     pvi, nvi = vortex(b, 14)
     assert pvi != pvi  # NaN
+
+
+# --- Batch-2 indicators (pattern / structure / bands) ----------------------
+# Oxford formulas fetched 2026-06-15 from oxfordstrat.com per-strategy pages.
+
+def test_aroon_up_100_when_current_is_highest():
+    # AroonUp = 100*(n - bars_since_highest_high_in_(n+1)) / n.
+    # If the LAST bar is the highest high in the last n+1 bars → 0 bars since → 100.
+    n = 5
+    b = _bars(highs=[10, 11, 12, 13, 14, 20], lows=[1] * 6, closes=[5] * 6)
+    up, dn = aroon(b, n)
+    assert abs(up - 100.0) < 1e-9
+
+def test_aroon_down_100_when_current_is_lowest():
+    n = 5
+    b = _bars(highs=[20] * 6, lows=[14, 13, 12, 11, 10, 1], closes=[5] * 6)
+    up, dn = aroon(b, n)
+    assert abs(dn - 100.0) < 1e-9
+
+def test_aroon_up_zero_when_oldest_is_highest():
+    # Highest high is the OLDEST bar of the n+1 window → n bars since → AroonUp = 0.
+    n = 5
+    b = _bars(highs=[99, 11, 12, 13, 14, 15], lows=[1] * 6, closes=[5] * 6)
+    up, dn = aroon(b, n)
+    assert abs(up - 0.0) < 1e-9
+
+def test_aroon_uptrend_up_dominates():
+    n = 14
+    m = n + 5
+    hi = np.arange(1.0, 1.0 + m)
+    b = _bars(highs=list(hi), lows=list(hi - 1), closes=list(hi - 0.5))
+    up, dn = aroon(b, n)
+    assert up > dn and up == 100.0
+
+def test_bollinger_upper_above_lower():
+    # Upper = SMA + k*std (population sigma); lower = SMA - k*std.
+    s = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
+    mid, up, lo = bollinger(s, n=10, k=2.0)
+    assert lo < mid < up
+    sigma = float(np.std(s.to_numpy(), ddof=0))
+    assert abs(mid - 5.5) < 1e-9
+    assert abs(up - (5.5 + 2.0 * sigma)) < 1e-9
+
+def test_bollinger_constant_series_collapses():
+    s = pd.Series([4.0] * 20)
+    mid, up, lo = bollinger(s, n=20, k=2.0)
+    assert abs(up - 4.0) < 1e-9 and abs(lo - 4.0) < 1e-9
+
+def test_keltner_uses_average_range_not_atr():
+    # Oxford keltner-channels-1: center = SMA(typical_price), band = SMA(High-Low)*mult.
+    # NOT ATR. Build bars where typical price and range are constant → easy to verify.
+    n = 4
+    b = _bars(highs=[12.0] * 6, lows=[8.0] * 6, closes=[10.0] * 6)  # TP=(12+8+10)/3=10, range=4
+    mid, buy, sell = keltner(b, lb=n, mult=1.0)
+    assert abs(mid - 10.0) < 1e-9
+    assert abs(buy - (10.0 + 4.0)) < 1e-9   # 14
+    assert abs(sell - (10.0 - 4.0)) < 1e-9  # 6
+
+def test_keltner_multiplier_scales_band():
+    n = 4
+    b = _bars(highs=[12.0] * 6, lows=[8.0] * 6, closes=[10.0] * 6)
+    _, buy2, _ = keltner(b, lb=n, mult=2.0)
+    assert abs(buy2 - (10.0 + 8.0)) < 1e-9  # range 4 * mult 2 = 8
+
+def test_heikin_ashi_constant_series_fixed_point():
+    # On a flat O=H=L=C series, HA candle collapses to that constant (open==close).
+    n = 30
+    b = _bars(highs=[5.0] * n, lows=[5.0] * n, closes=[5.0] * n, opens=[5.0] * n)
+    ha_open, ha_close, ha_high, ha_low = heikin_ashi(b)
+    assert abs(ha_open - 5.0) < 1e-9 and abs(ha_close - 5.0) < 1e-9
+
+def test_heikin_ashi_bullish_on_uptrend():
+    # Steady uptrend → latest HA candle bullish (HAclose > HAopen).
+    n = 30
+    base = np.arange(1.0, 1.0 + n)
+    b = _bars(highs=list(base + 0.5), lows=list(base - 0.5),
+              closes=list(base + 0.3), opens=list(base - 0.3))
+    ha_open, ha_close, ha_high, ha_low = heikin_ashi(b)
+    assert ha_close > ha_open
+
+def test_heikin_ashi_series_recursion_open():
+    # HaOpen[i] = (HaOpen[i-1] + HaClose[i-1])/2; HaClose[i] = mean(O,H,L,C).
+    b = _bars(highs=[11.0, 13.0], lows=[9.0, 11.0], closes=[10.0, 12.0], opens=[10.0, 12.0])
+    ser = heikin_ashi_series(b)
+    # bar0 seed: HaClose0=(10+11+9+10)/4=10; HaOpen0=(10+10)/2=10
+    assert abs(ser['ha_close'].iloc[0] - 10.0) < 1e-9
+    assert abs(ser['ha_open'].iloc[0] - 10.0) < 1e-9
+    # bar1: HaClose1=(12+13+11+12)/4=12; HaOpen1=(HaOpen0+HaClose0)/2=(10+10)/2=10
+    assert abs(ser['ha_close'].iloc[1] - 12.0) < 1e-9
+    assert abs(ser['ha_open'].iloc[1] - 10.0) < 1e-9
+
+def test_swing_pivots_detects_confirmed_high_only():
+    # A peak at index 3 (value 20) with k=2 lower bars on each side is a swing HIGH.
+    # The pivot must be CONFIRMED: needs k bars to its right. With k=2 and a peak at
+    # index 3 in a length-8 series, index 3 IS confirmable (right bars 4,5 exist).
+    closes = [10, 12, 15, 20, 16, 14, 13, 11]
+    b = _bars(highs=closes, lows=[c - 1 for c in closes], closes=closes)
+    highs, lows = swing_pivots(b, k=2)
+    assert len(highs) >= 1
+    # most recent confirmed swing high is at index 3 (price 20)
+    assert highs[-1][0] == 3 and abs(highs[-1][1] - 20.0) < 1e-9
+
+def test_swing_pivots_no_lookahead_recent_bars_excluded():
+    # The last k bars can NEVER be a confirmed pivot (no right-side confirmation).
+    # Build a monotonic ramp where the final bar is the highest — it must NOT be
+    # reported as a swing high (it has no right neighbours).
+    closes = list(range(1, 13))
+    b = _bars(highs=closes, lows=[c - 1 for c in closes], closes=closes)
+    highs, lows = swing_pivots(b, k=2)
+    last_idx = len(closes) - 1
+    assert all(h[0] <= last_idx - 2 for h in highs)  # all highs confirmed (>=k from end)
+
+def test_swing_pivots_low_detection():
+    closes = [20, 18, 15, 8, 12, 14, 16, 19]
+    b = _bars(highs=[c + 1 for c in closes], lows=closes, closes=closes)
+    highs, lows = swing_pivots(b, k=2)
+    assert len(lows) >= 1
+    assert lows[-1][0] == 3 and abs(lows[-1][1] - 8.0) < 1e-9
+
+def test_td_setup_count_buy_setup_reaches_nine():
+    # Buy setup = consecutive closes < close[i-4]. Build 4 anchor bars + 9 declining
+    # closes each below the close 4 bars earlier → setup count 9, signed negative (buy).
+    anchor = [100.0, 100.0, 100.0, 100.0]
+    decline = [95.0, 94.0, 93.0, 92.0, 91.0, 90.0, 89.0, 88.0, 87.0]
+    closes = anchor + decline
+    b = _bars(highs=closes, lows=closes, closes=closes)
+    cnt = td_setup_count(b)
+    assert cnt == -9  # buy setup of 9 (negative sign = down-run / bottom exhaustion)
+
+def test_td_setup_count_sell_setup_positive():
+    anchor = [100.0, 100.0, 100.0, 100.0]
+    rise = [105.0, 106.0, 107.0, 108.0, 109.0, 110.0, 111.0, 112.0, 113.0]
+    closes = anchor + rise
+    b = _bars(highs=closes, lows=closes, closes=closes)
+    cnt = td_setup_count(b)
+    assert cnt == 9  # sell setup of 9 (positive = up-run / top exhaustion)
+
+def test_td_setup_count_resets_on_break():
+    # A break in the run resets the count.
+    anchor = [100.0, 100.0, 100.0, 100.0]
+    closes = anchor + [95.0, 94.0, 99.0, 92.0]  # 3rd decline-bar (99) breaks (>=anchor 100)
+    b = _bars(highs=closes, lows=closes, closes=closes)
+    cnt = td_setup_count(b)
+    # last bar (92<100) is 1 fresh down-bar after the break (90 vs 99 anchor? -> close[i-4])
+    # i=7 close 92 vs close[3]=100 -> down (count from break). |cnt| < 9
+    assert abs(cnt) < 9

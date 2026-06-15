@@ -303,6 +303,204 @@ def vortex(bars: pd.DataFrame, n: int) -> tuple[float, float]:
     return float(pvm_s / tr_s), float(nvm_s / tr_s)
 
 
+# --------------------------------------------------------------------------
+# Batch-2 indicators (pattern / structure / bands). Each cites its oxfordstrat
+# slug; formulas fetched 2026-06-15 from the per-strategy pages. All return a
+# scalar / small tuple (latest value), NaN/empty on insufficient data — pure,
+# deterministic, never raising. Each is single-pass over the relevant tail (no
+# O(bars^2) rolling().apply()).
+# --------------------------------------------------------------------------
+
+def aroon(bars: pd.DataFrame, n: int) -> tuple[float, float]:
+    """Aroon Up/Down latest values (oxfordstrat aroon-indicator-breakout-1).
+
+    AroonUp   = 100 * (n - bars_since_highest_high_in_last_(n+1)) / n
+    AroonDown = 100 * (n - bars_since_lowest_low_in_last_(n+1))  / n
+    where 'bars since' counts back from the current bar (0 = current bar is the
+    extreme). Window = the last n+1 bars (Aroon_Index + 1, Oxford). Returns
+    (AroonUp, AroonDown), each in [0, 100]; NaN if fewer than n+1 bars."""
+    n = int(n)
+    if n < 1 or len(bars) < n + 1:
+        return float('nan'), float('nan')
+    win_h = bars['high'].iloc[-(n + 1):].to_numpy(dtype=float)
+    win_l = bars['low'].iloc[-(n + 1):].to_numpy(dtype=float)
+    if not (np.all(np.isfinite(win_h)) and np.all(np.isfinite(win_l))):
+        return float('nan'), float('nan')
+    last = n  # index of the current bar within the (n+1)-length window
+    # argmax/argmin return the FIRST occurrence; Oxford counts the most recent
+    # extreme, so scan from the right for ties (favours the latest bar).
+    hh_pos = last - int(np.argmax(win_h[::-1]))   # most-recent highest high
+    ll_pos = last - int(np.argmin(win_l[::-1]))   # most-recent lowest low
+    bars_since_hh = last - hh_pos
+    bars_since_ll = last - ll_pos
+    up = 100.0 * (n - bars_since_hh) / n
+    dn = 100.0 * (n - bars_since_ll) / n
+    return float(up), float(dn)
+
+
+def bollinger(s: pd.Series, n: int = 20, k: float = 2.0) -> tuple[float, float, float]:
+    """Bollinger Bands latest (mid, upper, lower) (oxfordstrat bollinger-bands).
+
+    mid = SMA(close, n); upper = mid + k*sigma; lower = mid - k*sigma, where
+    sigma is the POPULATION std (ddof=0) over the same n closes (standard
+    Bollinger). NaN tuple if fewer than n closes."""
+    n = int(n)
+    if n < 1 or len(s) < n:
+        return float('nan'), float('nan'), float('nan')
+    win = s.iloc[-n:].to_numpy(dtype=float)
+    if not np.all(np.isfinite(win)):
+        return float('nan'), float('nan'), float('nan')
+    mid = float(win.mean())
+    sigma = float(win.std(ddof=0))
+    return mid, mid + k * sigma, mid - k * sigma
+
+
+def keltner(bars: pd.DataFrame, lb: int = 10, mult: float = 1.0) -> tuple[float, float, float]:
+    """Keltner Channels latest (mid, buy_line, sell_line) (oxfordstrat keltner-channels-1).
+
+    DIVERGENCE FROM TEXTBOOK: Oxford's keltner-channels-1 uses AVERAGE RANGE, NOT
+    ATR. Per the page:
+      Typical_Price[i] = (High[i] + Low[i] + Close[i]) / 3
+      MA_TP   = SMA(Typical_Price, Look_Back)
+      Range[i]= High[i] - Low[i]
+      MA_Range= SMA(Range, Look_Back)
+      Buy_Line  = MA_TP + MA_Range * Range_Multiple
+      Sell_Line = MA_TP - MA_Range * Range_Multiple
+    Defaults Look_Back=10, Range_Multiple=1. NaN tuple if fewer than lb bars."""
+    lb = int(lb)
+    if lb < 1 or len(bars) < lb:
+        return float('nan'), float('nan'), float('nan')
+    sub = bars.iloc[-lb:]
+    tp = (sub['high'] + sub['low'] + sub['close']) / 3.0
+    rng = sub['high'] - sub['low']
+    ma_tp = float(tp.mean())
+    ma_rng = float(rng.mean())
+    if not (np.isfinite(ma_tp) and np.isfinite(ma_rng)):
+        return float('nan'), float('nan'), float('nan')
+    return ma_tp, ma_tp + ma_rng * mult, ma_tp - ma_rng * mult
+
+
+def heikin_ashi_series(bars: pd.DataFrame) -> pd.DataFrame:
+    """Full Heikin-Ashi candle series (oxfordstrat heikin-ashi-1). Single forward pass.
+
+    HaClose[i] = (Open[i] + High[i] + Low[i] + Close[i]) / 4
+    HaOpen[0]  = (Open[0] + Close[0]) / 2
+    HaOpen[i]  = (HaOpen[i-1] + HaClose[i-1]) / 2          (i > 0)
+    HaHigh[i]  = max(High[i], HaOpen[i], HaClose[i])
+    HaLow[i]   = min(Low[i],  HaOpen[i], HaClose[i])
+    Returns a DataFrame (same index) with ha_open/ha_close/ha_high/ha_low."""
+    o = bars['open'].to_numpy(dtype=float)
+    h = bars['high'].to_numpy(dtype=float)
+    l = bars['low'].to_numpy(dtype=float)
+    c = bars['close'].to_numpy(dtype=float)
+    m = len(c)
+    ha_close = (o + h + l + c) / 4.0
+    ha_open = np.empty(m)
+    ha_high = np.empty(m)
+    ha_low = np.empty(m)
+    if m == 0:
+        return pd.DataFrame({'ha_open': ha_open, 'ha_close': ha_close,
+                             'ha_high': ha_high, 'ha_low': ha_low}, index=bars.index)
+    ha_open[0] = (o[0] + c[0]) / 2.0
+    ha_high[0] = max(h[0], ha_open[0], ha_close[0])
+    ha_low[0] = min(l[0], ha_open[0], ha_close[0])
+    for i in range(1, m):
+        ha_open[i] = (ha_open[i - 1] + ha_close[i - 1]) / 2.0
+        ha_high[i] = max(h[i], ha_open[i], ha_close[i])
+        ha_low[i] = min(l[i], ha_open[i], ha_close[i])
+    return pd.DataFrame({'ha_open': ha_open, 'ha_close': ha_close,
+                         'ha_high': ha_high, 'ha_low': ha_low}, index=bars.index)
+
+
+def heikin_ashi(bars: pd.DataFrame) -> tuple[float, float, float, float]:
+    """Latest Heikin-Ashi candle (ha_open, ha_close, ha_high, ha_low).
+    NaN tuple if no bars. See heikin_ashi_series for the recursion."""
+    if len(bars) == 0:
+        return (float('nan'),) * 4
+    ser = heikin_ashi_series(bars)
+    return (float(ser['ha_open'].iloc[-1]), float(ser['ha_close'].iloc[-1]),
+            float(ser['ha_high'].iloc[-1]), float(ser['ha_low'].iloc[-1]))
+
+
+def swing_pivots(bars: pd.DataFrame, k: int = 2) -> tuple[list, list]:
+    """Fractal swing-pivot detector — CONFIRMED-only, no look-ahead (general primitive).
+
+    A bar j is a SWING HIGH if its high is strictly greater than the highs of the
+    k bars on EACH side (j-k..j-1 and j+1..j+k); a SWING LOW symmetrically on lows.
+    This is Oxford's DeMark 'Pivot_Size = k' definition (dow-theory-trend: "a low
+    that has two higher lows on either side has Pivot_Size = 2") and the general
+    detector reused by livermore / wyckoff / ross_hook.
+
+    CONFIRMATION (no look-ahead): a pivot at bar j is only emitted once its k
+    right-side bars exist, so the most-recent reported pivot is at least k bars
+    back from the current bar — the current bar is NEVER its own pivot (mirrors
+    donchian_prev's same-bar-leak care). Single pass, O(bars).
+
+    Returns (highs, lows) where each is a list of (positional_index, price) in
+    chronological order (oldest first); positional index is 0-based into `bars`."""
+    k = int(k)
+    h = bars['high'].to_numpy(dtype=float)
+    l = bars['low'].to_numpy(dtype=float)
+    m = len(h)
+    highs: list = []
+    lows: list = []
+    if k < 1 or m < 2 * k + 1:
+        return highs, lows
+    # Only bars k..m-1-k can be confirmed pivots (need k bars on the right).
+    for j in range(k, m - k):
+        hj = h[j]
+        lj = l[j]
+        if not (np.isfinite(hj) and np.isfinite(lj)):
+            continue
+        left_h = h[j - k:j]
+        right_h = h[j + 1:j + 1 + k]
+        if np.all(hj > left_h) and np.all(hj > right_h):
+            highs.append((j, float(hj)))
+        left_l = l[j - k:j]
+        right_l = l[j + 1:j + 1 + k]
+        if np.all(lj < left_l) and np.all(lj < right_l):
+            lows.append((j, float(lj)))
+    return highs, lows
+
+
+def td_setup_count(bars: pd.DataFrame) -> int:
+    """TD Sequential SETUP count at the latest bar (oxfordstrat td-sequential-1).
+
+    Walks the close series and counts the current consecutive run of:
+      - DOWN closes (Close[i] < Close[i-4])  → BUY setup  → returned NEGATIVE
+      - UP   closes (Close[i] > Close[i-4])  → SELL setup → returned POSITIVE
+    The run RESETS to 0 whenever the comparison direction flips or ties (Close[i]
+    == Close[i-4] breaks the run). Returns the SIGNED count of the run ending at
+    the latest bar (e.g. -9 = a completed 9-bar buy setup / bottom exhaustion;
+    +9 = a 9-bar sell setup / top exhaustion). 0 if fewer than 5 closes.
+
+    Per Oxford: a BUY setup (9 declining closes) is bottom exhaustion → the long
+    fires on the subsequent up-flip (Method 2), handled in the strategy."""
+    c = bars['close'].to_numpy(dtype=float)
+    m = len(c)
+    if m < 5:
+        return 0
+    sign = 0       # +1 up-run, -1 down-run, 0 none
+    count = 0
+    for i in range(4, m):
+        if not (np.isfinite(c[i]) and np.isfinite(c[i - 4])):
+            sign, count = 0, 0
+            continue
+        if c[i] < c[i - 4]:
+            cur = -1
+        elif c[i] > c[i - 4]:
+            cur = 1
+        else:
+            cur = 0  # tie breaks the run
+        if cur == 0:
+            sign, count = 0, 0
+        elif cur == sign:
+            count += 1
+        else:
+            sign, count = cur, 1
+    return sign * count
+
+
 class OxfordBaseStrategy(BaseStrategy):
     """BaseStrategy + lazy, cached, point-in-time basket OHLC self-load."""
     instrument_class = 'etp'
