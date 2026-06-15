@@ -23,9 +23,12 @@ function buildStrategyRow(x) {
     description: x.rec?.metadata?.description || '',
     // ── Backtest-sourced metrics ──
     sharpe: run.total_sharpe ?? null,
+    sortino: run.total_sortino ?? null,
+    calmar: run.total_calmar ?? null,
     effective_sharpe: panel.effective_sharpe ?? null,
     backtest_return_pct: run.total_return_pct ?? null,
     backtest_max_dd_pct: run.total_max_dd_pct ?? null,
+    backtest_avg_pnl_pct: run.total_avg_pnl_pct ?? null,
     closed_count: run.total_trades ?? 0,
     win_rate: run.total_hit_rate ?? null,
     arr_pct: arr,
