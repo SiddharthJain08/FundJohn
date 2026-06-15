@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-30T10:53:44.128209+00:00",
+  "updated_at": "2026-06-15T13:23:31.932663+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -5353,6 +5353,36 @@
         }
       ],
       "instrument_class": "equity"
+    },
+    "oxf_donchian_breakout": {
+      "state": "candidate",
+      "state_since": "2026-06-15T13:23:31.842058+00:00",
+      "metadata": {
+        "canonical_file": "oxf_donchian_breakout.py",
+        "class": "OxfDonchianBreakout",
+        "description": "Donchian breakout on liquid ETFs"
+      },
+      "history": [],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING"
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_nr7": {
+      "state": "candidate",
+      "state_since": "2026-06-15T13:23:31.931554+00:00",
+      "metadata": {
+        "canonical_file": "oxf_nr7.py",
+        "class": "OxfNR7",
+        "description": "NR7 daily-bar adaptation on liquid ETFs"
+      },
+      "history": [],
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING"
+      ],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {
