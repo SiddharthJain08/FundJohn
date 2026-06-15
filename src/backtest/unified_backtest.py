@@ -341,6 +341,15 @@ def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Ti
     return daily_returns, sorted_dates
 
 
+def _is_finite_pnl(t: dict) -> bool:
+    """True iff a trade's pnl_pct is a finite real number. Tolerant of None,
+    float('nan'), and Decimal('NaN') (some strategies emit Decimal NaN)."""
+    try:
+        return math.isfinite(float(t.get('pnl_pct')))
+    except (TypeError, ValueError):
+        return False
+
+
 def aggregate_metrics(trades: list[dict]) -> dict:
     """Total-level aggregate built from an equal-weight daily portfolio
     equity curve (Fix A, 2026-05-14). Replaces the prior cumulative-product
@@ -355,6 +364,23 @@ def aggregate_metrics(trades: list[dict]) -> dict:
                None if <2 daily points or no downside deviation.
     - calmar: annualized_return_pct / max_dd_pct; None if max_dd_pct==0.
     """
+    if not trades:
+        return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
+                'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
+                'avg_pnl_pct': 0.0, 'sortino': None, 'calmar': None}
+
+    # Guard: a single corrupt price bar yields a NaN pnl_pct that would
+    # propagate through the equal-weighted daily-return series and null the
+    # whole strategy's Sharpe/max_dd/return (NaN < 1e-9 is False, so the
+    # std-floor never trips). Drop non-finite trades from metric computation —
+    # loudly, so a recurring data hole stays visible rather than being masked.
+    # (2026-06-15 BRK-B 2026-04-07 incident: 1 bad bar nulled 6 strategies.)
+    _finite = [t for t in trades if _is_finite_pnl(t)]
+    _n_dropped = len(trades) - len(_finite)
+    if _n_dropped:
+        _log(f'WARNING aggregate_metrics: dropped {_n_dropped}/{len(trades)} '
+             f'trade(s) with non-finite pnl_pct (corrupt price bar?)')
+    trades = _finite
     if not trades:
         return {'sharpe': None, 'max_dd_pct': 0.0, 'return_pct': 0.0,
                 'total_trades': 0, 'hit_rate': None, 'avg_holding_days': None,
@@ -610,6 +636,14 @@ def _per_bar_simulate(
                 continue  # signal on the last available bar — cannot fill
             fill_date = _future_idx[0]
             entry_price = float(ticker_bars.loc[fill_date, _price_col])
+            # A corrupt price bar (NaN fill price) cannot fill an order at a
+            # known price. Skip rather than emit a NaN-entry trade whose NaN
+            # pnl_pct would poison the aggregate metrics. (2026-06-15 BRK-B
+            # 2026-04-07 incident: one NaN bar nulled 6 strategies' Sharpe.)
+            if not math.isfinite(entry_price):
+                _log(f'skip {ticker} fill {fill_date.date() if hasattr(fill_date, "date") else fill_date}: '
+                     f'non-finite {_price_col} (corrupt price bar)')
+                continue
             stop_loss, target_1 = _reanchor_bracket(
                 ref=ref, entry_price=entry_price, direction=direction,
                 stop_ref=stop_ref, target_ref=target_ref)

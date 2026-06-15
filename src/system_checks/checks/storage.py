@@ -49,6 +49,39 @@ def _intraday_features_accumulating():
     return Status.PASS, f'fresh ({age_min:.0f}m old)'
 
 
+@check(name='prices_no_nan_price_bars', tags=['storage'], requires=['fs'])
+def _prices_no_nan_price_bars():
+    """No NaN-close bars in the recent prices.parquet window. A single corrupt
+    OHLC bar (volume present, prices NaN) silently poisons backtest metrics:
+    the t+1 fill lands on the NaN close -> NaN pnl_pct -> NaN Sharpe/max_dd/
+    return for every strategy that fills on it. (2026-06-15 BRK-B 2026-04-07
+    incident nulled 6 strategies.) Recent-window scan catches new corruption
+    from the daily writer before the next backtest rebuild reads it."""
+    import pandas as pd
+    path = MASTER / 'prices.parquet'
+    if not path.exists():
+        return Status.SKIP, 'prices.parquet missing'
+    try:
+        df = pd.read_parquet(path, columns=['ticker', 'date', 'close'])
+    except Exception as e:  # noqa: BLE001
+        return Status.ERROR, f'read failed: {e}'
+    if df.empty:
+        return Status.WARN, 'prices.parquet empty'
+    df['date'] = pd.to_datetime(df['date'])
+    cutoff = df['date'].max() - pd.Timedelta(days=200)
+    recent = df[df['date'] >= cutoff]
+    bad = recent[recent['close'].isna()]
+    if len(bad):
+        items = (bad.assign(_d=bad['date'].dt.date)
+                    .groupby('ticker')['_d']
+                    .apply(lambda s: [str(x) for x in sorted(s)[:2]])
+                    .to_dict())
+        desc = '; '.join(f'{t}:{ds}' for t, ds in list(items.items())[:4])
+        return (Status.WARN,
+                f'{len(bad)} NaN-close bar(s) in last 200d (poisons backtest metrics): {desc}'[:200])
+    return Status.PASS, f'no NaN-close bars in last 200d ({len(recent)} bars scanned)'
+
+
 @check(name='logs_dir_size_under_50mb', tags=['storage'], requires=['fs'])
 def _logs_dir_size():
     """logs/ stays under 50MB. Old logs pile up if cleanup isn't run periodically."""

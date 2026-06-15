@@ -282,3 +282,89 @@ class TestRegimeStampingAndOverride:
         # Re-anchored to the t+1 FILL price, not the signal-day close[t].
         assert abs(tr['signal_stop'] - ep * (1 - 0.10)) < 1e-6
         assert abs(tr['signal_target'] - ep * (1 + 0.15)) < 1e-6
+
+
+class TestNaNFillSkip:
+    """A signal whose t+1 fill bar has a non-finite price is unfillable and
+    must be skipped — never recorded as a trade with a NaN entry_price.
+
+    Regression for the 2026-06-15 incident: one corrupt price bar (BRK-B
+    2026-04-07, OHLC=NaN) created a single NaN-entry trade per strategy whose
+    NaN pnl_pct then poisoned the entire equal-weighted daily-return series →
+    NaN Sharpe/max_dd/return for 6 high-trade-count strategies.
+    """
+
+    def test_signal_filling_on_nan_price_bar_is_skipped(self):
+        from strategies.base import BaseStrategy, Signal, CANONICAL_REGIMES
+
+        dates = pd.date_range('2024-01-01', periods=13, freq='B')
+        closes = [100.0 + i for i in range(13)]
+        close_wide = pd.DataFrame({'AAA': closes}, index=dates)
+        close_wide.index.name = 'date'
+        rows = [(c, c + 0.2, c - 0.2, c) for c in closes]
+        # Corrupt the FILL bar (t+1 of the signal): a row with NaN OHLC.
+        # Signal fires on dates[9] (len==10) -> fill = dates[10].
+        nan = float('nan')
+        rows[10] = (nan, nan, nan, nan)
+        bars = _bars_from_closes({'AAA': rows}, dates)
+        regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+
+        class OnceStub(BaseStrategy):
+            id = 'stub_t1'
+            min_lookback = 5
+            active_in_regimes = list(CANONICAL_REGIMES)
+
+            def generate_signals(self, prices, regime, universe, aux_data=None):
+                # Fire exactly once, on the bar BEFORE the corrupt fill bar.
+                if prices.index[-1] != dates[9] or not universe:
+                    return []
+                t = universe[0]
+                if t not in prices.columns:
+                    return []
+                close = float(prices[t].iloc[-1])
+                return [Signal(ticker=t, direction='LONG', entry_price=close,
+                               stop_loss=close * 0.93, target_1=close * 1.08,
+                               target_2=0.0, target_3=0.0,
+                               position_size_pct=0.0, confidence='MED')]
+
+        trades = _run_capture(OnceStub, close_wide, bars, regimes)
+        assert trades == [], \
+            'a signal that can only fill on a NaN price bar must be skipped'
+
+
+class TestAggregateMetricsNaNGuard:
+    """A single non-finite pnl_pct trade must not poison the aggregate metrics.
+    One bad bar in a 100k-trade strategy should drop only that trade, not null
+    out the strategy's Sharpe / max_dd / return.
+    """
+
+    @staticmethod
+    def _mk(pnl, hold, day):
+        import datetime as dt
+        return {'pnl_pct': pnl, 'holding_days': hold,
+                'entry_date': dt.date(2024, 1, day)}
+
+    def _finite_trades(self):
+        return [self._mk(0.05, 3, 2), self._mk(-0.02, 2, 5),
+                self._mk(0.03, 4, 8), self._mk(-0.015, 1, 11),
+                self._mk(0.04, 2, 15)]
+
+    def test_single_nan_pnl_does_not_poison_metrics(self):
+        trades = self._finite_trades()
+        baseline = ub.aggregate_metrics(trades)
+        assert baseline['sharpe'] is not None and np.isfinite(baseline['sharpe'])
+
+        with_nan = trades + [self._mk(float('nan'), 3, 18)]
+        out = ub.aggregate_metrics(with_nan)
+        assert out['sharpe'] is not None and np.isfinite(out['sharpe'])
+        assert np.isfinite(out['max_dd_pct'])
+        assert np.isfinite(out['return_pct'])
+        # Dropping the corrupt trade recovers exactly the clean-data metrics.
+        assert abs(out['sharpe'] - baseline['sharpe']) < 1e-9
+        assert abs(out['return_pct'] - baseline['return_pct']) < 1e-9
+
+    def test_all_nan_pnl_returns_none_sharpe(self):
+        out = ub.aggregate_metrics([self._mk(float('nan'), 2, 3)])
+        assert out['sharpe'] is None
+        assert np.isfinite(out['max_dd_pct'])
+        assert np.isfinite(out['return_pct'])
