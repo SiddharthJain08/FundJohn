@@ -329,3 +329,46 @@ def test_td_setup_count_resets_on_break():
     # last bar (92<100) is 1 fresh down-bar after the break (90 vs 99 anchor? -> close[i-4])
     # i=7 close 92 vs close[3]=100 -> down (count from break). |cnt| < 9
     assert abs(cnt) < 9
+
+def test_heikin_ashi_look_back_1_equals_raw():
+    # Oxford default Look_Back=1 -> AvgOHLC == raw OHLC -> identical to no smoothing.
+    n = 20
+    base = np.arange(1.0, 1.0 + n)
+    b = _bars(highs=list(base + 0.5), lows=list(base - 0.5),
+              closes=list(base + 0.2), opens=list(base - 0.1))
+    raw = heikin_ashi_series(b)
+    lb1 = heikin_ashi_series(b, look_back=1)
+    for col in ('ha_open', 'ha_close', 'ha_high', 'ha_low'):
+        assert np.allclose(raw[col].to_numpy(), lb1[col].to_numpy(), equal_nan=True)
+
+def test_heikin_ashi_look_back_smooths_ohlc_first():
+    # Oxford page (verbatim): AvgOpen[i]=Average(Open,Look_Back) etc., THEN the HA
+    # transform on the averaged series; HaHigh=max(AvgHigh,HaOpen,HaClose). Verify
+    # the transform runs on the trailing-SMA-smoothed OHLC, not the raw OHLC.
+    n = 12
+    opens = [10.0, 12.0, 11.0, 13.0, 12.0, 14.0, 13.0, 15.0, 14.0, 16.0, 15.0, 17.0]
+    highs = [o + 1.0 for o in opens]
+    lows = [o - 1.0 for o in opens]
+    closes = [o + 0.5 for o in opens]
+    b = _bars(highs=highs, lows=lows, closes=closes, opens=opens)
+    lb = 3
+    ser = heikin_ashi_series(b, look_back=lb)
+    # Build the expected smoothed OHLC (trailing SMA, min_periods=1 so early bars defined).
+    df = pd.DataFrame({'open': opens, 'high': highs, 'low': lows, 'close': closes})
+    avg = df.rolling(lb, min_periods=1).mean()
+    ao, ah, al, ac = (avg['open'].to_numpy(), avg['high'].to_numpy(),
+                      avg['low'].to_numpy(), avg['close'].to_numpy())
+    exp_close = (ao + ah + al + ac) / 4.0
+    exp_open = np.empty(n)
+    exp_open[0] = (ao[0] + ac[0]) / 2.0
+    for i in range(1, n):
+        exp_open[i] = (exp_open[i - 1] + exp_close[i - 1]) / 2.0
+    exp_high = np.maximum.reduce([ah, exp_open, exp_close])
+    exp_low = np.minimum.reduce([al, exp_open, exp_close])
+    assert np.allclose(ser['ha_close'].to_numpy(), exp_close)
+    assert np.allclose(ser['ha_open'].to_numpy(), exp_open)
+    assert np.allclose(ser['ha_high'].to_numpy(), exp_high)
+    assert np.allclose(ser['ha_low'].to_numpy(), exp_low)
+    # Smoothed differs from raw (sanity: smoothing actually changed something).
+    raw = heikin_ashi_series(b)
+    assert not np.allclose(ser['ha_close'].to_numpy(), raw['ha_close'].to_numpy())

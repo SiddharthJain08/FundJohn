@@ -380,19 +380,33 @@ def keltner(bars: pd.DataFrame, lb: int = 10, mult: float = 1.0) -> tuple[float,
     return ma_tp, ma_tp + ma_rng * mult, ma_tp - ma_rng * mult
 
 
-def heikin_ashi_series(bars: pd.DataFrame) -> pd.DataFrame:
+def heikin_ashi_series(bars: pd.DataFrame, look_back: int = 1) -> pd.DataFrame:
     """Full Heikin-Ashi candle series (oxfordstrat heikin-ashi-1). Single forward pass.
 
-    HaClose[i] = (Open[i] + High[i] + Low[i] + Close[i]) / 4
-    HaOpen[0]  = (Open[0] + Close[0]) / 2
-    HaOpen[i]  = (HaOpen[i-1] + HaClose[i-1]) / 2          (i > 0)
-    HaHigh[i]  = max(High[i], HaOpen[i], HaClose[i])
-    HaLow[i]   = min(Low[i],  HaOpen[i], HaClose[i])
+    Oxford first smooths the raw OHLC with a Look_Back SMA, THEN runs the HA
+    transform on the averaged series (page, verbatim):
+      AvgOpen[i]  = Average(Open,  Look_Back)   (likewise AvgHigh/AvgLow/AvgClose)
+      HaClose[i]  = (AvgOpen[i] + AvgHigh[i] + AvgLow[i] + AvgClose[i]) / 4
+      HaOpen[0]   = (AvgOpen[0] + AvgClose[0]) / 2
+      HaOpen[i]   = (HaOpen[i-1] + HaClose[i-1]) / 2        (i > 0)
+      HaHigh[i]   = max(AvgHigh[i], HaOpen[i], HaClose[i])
+      HaLow[i]    = min(AvgLow[i],  HaOpen[i], HaClose[i])
+    Oxford DEFAULT Look_Back=1 → AvgOHLC == raw OHLC → the standard (un-smoothed)
+    Heikin-Ashi; that is the default here (byte-identical to look_back omitted).
+    The trailing SMA uses min_periods=1 so early bars stay defined (no NaN holes).
     Returns a DataFrame (same index) with ha_open/ha_close/ha_high/ha_low."""
-    o = bars['open'].to_numpy(dtype=float)
-    h = bars['high'].to_numpy(dtype=float)
-    l = bars['low'].to_numpy(dtype=float)
-    c = bars['close'].to_numpy(dtype=float)
+    look_back = max(int(look_back), 1)
+    if look_back > 1:
+        sm = bars[['open', 'high', 'low', 'close']].rolling(look_back, min_periods=1).mean()
+        o = sm['open'].to_numpy(dtype=float)
+        h = sm['high'].to_numpy(dtype=float)
+        l = sm['low'].to_numpy(dtype=float)
+        c = sm['close'].to_numpy(dtype=float)
+    else:
+        o = bars['open'].to_numpy(dtype=float)
+        h = bars['high'].to_numpy(dtype=float)
+        l = bars['low'].to_numpy(dtype=float)
+        c = bars['close'].to_numpy(dtype=float)
     m = len(c)
     ha_close = (o + h + l + c) / 4.0
     ha_open = np.empty(m)
@@ -412,12 +426,12 @@ def heikin_ashi_series(bars: pd.DataFrame) -> pd.DataFrame:
                          'ha_high': ha_high, 'ha_low': ha_low}, index=bars.index)
 
 
-def heikin_ashi(bars: pd.DataFrame) -> tuple[float, float, float, float]:
+def heikin_ashi(bars: pd.DataFrame, look_back: int = 1) -> tuple[float, float, float, float]:
     """Latest Heikin-Ashi candle (ha_open, ha_close, ha_high, ha_low).
-    NaN tuple if no bars. See heikin_ashi_series for the recursion."""
+    NaN tuple if no bars. See heikin_ashi_series for the recursion + Look_Back."""
     if len(bars) == 0:
         return (float('nan'),) * 4
-    ser = heikin_ashi_series(bars)
+    ser = heikin_ashi_series(bars, look_back=look_back)
     return (float(ser['ha_open'].iloc[-1]), float(ser['ha_close'].iloc[-1]),
             float(ser['ha_high'].iloc[-1]), float(ser['ha_low'].iloc[-1]))
 
