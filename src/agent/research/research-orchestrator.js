@@ -123,6 +123,50 @@ function _optionUnderlyingSupported(underlying) {
   return r.status === 0;
 }
 
+// Pure builder for the strategycoder subagent context. Extracted from
+// _codeStrategy so the porting hook is unit-testable without spawning a
+// subagent. Returns the EXACT ctx object _codeStrategy used to build inline,
+// PLUS porting fields (REFERENCE_IMPLEMENTATION / PORTING_GUIDE / SOURCE_URL)
+// ONLY when strategySpec.reference_impl is truthy (git_blueprint origin).
+// Paper specs (no reference_impl) get the original 5-key ctx, byte-identical.
+// The SP-4 option-underlying envelope guard lives here (it throws on an
+// unsupported option underlying, exactly as the inline code did → the
+// rejection propagates through _codeFromQueue's catch).
+function buildCoderContext(strategySpec) {
+  const validInferred = _validateInferredFilter(strategySpec?.inferred_universe_filter ?? null);
+  const validClass    = _validateInferredClass(strategySpec?.inferred_instrument_class ?? null);
+  // SP-4 envelope guard: an option strategy must be on a Phase-0-supported
+  // index/ETF underlying, else the synthetic greeks engine can't price it
+  // with promotion-grade fidelity. Hard-reject here (propagates to
+  // _codeFromQueue's catch → status 'coding'→'failed') rather than emit a
+  // bogus backtest. Only fires when the gate is ON (validClass=='option').
+  if (validClass === 'option'
+      && !_optionUnderlyingSupported(strategySpec?.inferred_option_underlying ?? null)) {
+    throw new Error(
+      `option_envelope_unsupported: underlying `
+      + `'${strategySpec?.inferred_option_underlying ?? null}' not in `
+      + `VALID_OPTION_UNDERLYINGS (Phase-0 index/ETF-ATM envelope)`);
+  }
+  const ctx = {
+    role:          'implement_strategy',
+    STRATEGY_SPEC: JSON.stringify(strategySpec),
+    instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
+    INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 16 CANDIDATE_PREDICATES (12 legacy + 4 SP-7 tier ladder)
+    INFERRED_INSTRUMENT_CLASS: validClass,     // equity (default/gate-off) | option | etp | crypto | futures
+  };
+  // Porting mode (Blueprint Fast Lane): git-imported strategies arrive with
+  // the original LEAN/QuantConnect source in `reference_impl`. Hand it to the
+  // coder + point at the porting guide so it TRANSLATES the rule into our
+  // contract (clean-room) rather than reinventing. Conditionally added (never
+  // assigned undefined) so paper specs keep an identical key set.
+  if (strategySpec?.reference_impl) {
+    ctx.REFERENCE_IMPLEMENTATION = strategySpec.reference_impl;
+    ctx.PORTING_GUIDE            = 'docs/strategy-coding/quantconnect-to-basestrategy.md';
+    ctx.SOURCE_URL               = strategySpec.reference_url;
+  }
+  return ctx;
+}
+
 // Async python runner — returns {stdout, stderr, code}. Unlike execSync, the
 // Node event loop keeps serving HTTP traffic while this runs, so the Cancel
 // button / other dashboard actions remain responsive during long backtests.
@@ -1102,27 +1146,12 @@ class ResearchOrchestrator {
   }
 
   async _codeStrategy(strategySpec) {
-    const validInferred = _validateInferredFilter(strategySpec?.inferred_universe_filter ?? null);
-    const validClass    = _validateInferredClass(strategySpec?.inferred_instrument_class ?? null);
-    // SP-4 envelope guard: an option strategy must be on a Phase-0-supported
-    // index/ETF underlying, else the synthetic greeks engine can't price it
-    // with promotion-grade fidelity. Hard-reject here (propagates to
-    // _codeFromQueue's catch → status 'coding'→'failed') rather than emit a
-    // bogus backtest. Only fires when the gate is ON (validClass=='option').
-    if (validClass === 'option'
-        && !_optionUnderlyingSupported(strategySpec?.inferred_option_underlying ?? null)) {
-      throw new Error(
-        `option_envelope_unsupported: underlying `
-        + `'${strategySpec?.inferred_option_underlying ?? null}' not in `
-        + `VALID_OPTION_UNDERLYINGS (Phase-0 index/ETF-ATM envelope)`);
-    }
-    const ctx = {
-      role:          'implement_strategy',
-      STRATEGY_SPEC: JSON.stringify(strategySpec),
-      instructions:  'Implement this strategy. Apply fundjohn:strategy-coder and fundjohn:backtest-plumb skills.',
-      INFERRED_UNIVERSE_FILTER:  validInferred,  // null or one of the 16 CANDIDATE_PREDICATES (12 legacy + 4 SP-7 tier ladder)
-      INFERRED_INSTRUMENT_CLASS: validClass,     // equity (default/gate-off) | option | etp | crypto | futures
-    };
+    // ctx construction (validation + SP-4 option-envelope guard + porting hook)
+    // extracted to the pure, unit-tested buildCoderContext. The guard still
+    // throws synchronously on an unsupported option underlying, which rejects
+    // this async method's promise exactly as the inline throw did → propagates
+    // to _codeFromQueue's catch.
+    const ctx = buildCoderContext(strategySpec);
     const result = await this._runSubagent('strategycoder', strategySpec.strategy_id || 'strategy', ctx);
     await this._registerStrategy(strategySpec).catch((e) =>
       console.error('[research-orch] strategy_registry insert failed:', e.message)
@@ -1361,3 +1390,4 @@ module.exports = ResearchOrchestrator;
 module.exports._validateInferredFilter = _validateInferredFilter;
 module.exports._validateInferredClass = _validateInferredClass;
 module.exports._optionUnderlyingSupported = _optionUnderlyingSupported;
+module.exports.buildCoderContext = buildCoderContext;

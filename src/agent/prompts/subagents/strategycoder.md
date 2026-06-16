@@ -259,3 +259,16 @@ The template enforces:
 
 Existing strategies under `src/strategies/implementations/` use the older
 `BaseStrategy` contract; do NOT migrate them as part of new-strategy work.
+
+---
+
+## Porting mode (git-imported strategies)
+
+If `REFERENCE_IMPLEMENTATION` is present in your context, you are PORTING an
+already-coded strategy. Read it to recover the exact rule + parameters, then
+TRANSLATE that rule into our `generate_signals` contract following
+`PORTING_GUIDE` (`docs/strategy-coding/quantconnect-to-basestrategy.md`). Cite
+`SOURCE_URL` in the class docstring. Do NOT copy the reference code verbatim —
+it is a different framework (QuantConnect/LEAN) and a clean-room
+re-implementation is required. If `REFERENCE_IMPLEMENTATION` is absent,
+implement from `STRATEGY_SPEC` as usual.
