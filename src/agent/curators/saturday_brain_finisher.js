@@ -116,8 +116,17 @@ async function main() {
     params.push(sinceIsoArg);
     filters.push(`submitted_at >= $${params.length}`);
   } else if (gitGateOn) {
+    // Blueprints are exempt from the 48h freshness window (the one-off bulk
+    // import lands days before the next finisher, and its idempotent re-ingest
+    // never refreshes submitted_at), but BOUNDED to 30 days (review Finding 2):
+    // a blueprint we can never code (tier-C/no-data, or one that repeatedly
+    // fails coding and so never enters the manifest) must AGE OUT instead of
+    // being re-selected and re-attempted on every run forever — a silent slot
+    // and $-drain. 30d gives ample drain runway while capping wasted retries.
     filters.push(
-      `(submitted_at > NOW() - INTERVAL '48 hours' OR origin IN ('git_blueprint','blog_blueprint'))`);
+      `(submitted_at > NOW() - INTERVAL '48 hours'
+         OR (origin IN ('git_blueprint','blog_blueprint')
+             AND submitted_at > NOW() - INTERVAL '30 days'))`);
   } else {
     filters.push("submitted_at > NOW() - INTERVAL '48 hours'");
   }
@@ -152,7 +161,11 @@ async function main() {
       ORDER BY submitted_at DESC`,
     params,
   );
-  log(`Found ${candidates.length} candidates with extracted hunter specs.`);
+  const bpCount = candidates.filter(
+    c => c.origin === 'git_blueprint' || c.origin === 'blog_blueprint').length;
+  log(`Found ${candidates.length} candidates with extracted hunter specs `
+    + `(${bpCount} blueprint, ${candidates.length - bpCount} paper). `
+    + `Blueprints age out of the queue after 30d if never coded.`);
   if (candidates.length === 0) { await _markRunComplete(dryRun, log); process.exit(0); }
 
   // Filter out already-manifested strategies (idempotency).
