@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { partitionBlueprintBudget, promotionThresholdFor } = require('../src/agent/curators/saturday_brain.js');
+const { partitionBlueprintBudget } = require('../src/agent/curators/saturday_brain.js');
 
 const cands = [
   { candidate_id: 'p1', origin: 'paper' },
@@ -11,8 +11,6 @@ const r = partitionBlueprintBudget(cands, /*cap*/ 3, /*blueprintShare*/ 0.5);
 assert.deepStrictEqual(r.ordered.map(c => c.candidate_id), ['g1','b1','p1','p2']); // blueprint first
 assert.strictEqual(r.blueprintCap, 2);
 assert.strictEqual(r.paperCap, 1);
-assert.ok(promotionThresholdFor('git_blueprint').min_sharpe < promotionThresholdFor('paper').min_sharpe);
-assert.strictEqual(promotionThresholdFor('paper').min_sharpe, 0.5);
 
 // Finding 1 (review): an all-blueprint backlog (the post-bulk-import state) must
 // use the FULL cap, not just the reserved share — blueprint absorbs paper's

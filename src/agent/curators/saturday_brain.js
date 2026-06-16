@@ -50,19 +50,17 @@ const TIER_A_PER_RUN_USD       = 0.50;     // strategycoder ceiling estimate
 const SAFETY_RESERVE_USD       = 14;       // leave headroom for retries
 
 // ── Blueprint Fast Lane helpers (Phase 1.2) ─────────────────────────────────
-// Pure functions: blueprint-origin candidates get coded first in Phase 6 and a
-// reserved slice of the Tier-A coding budget, plus a lower promotion bar than
-// academic-paper candidates (blueprints are vetted, runnable strategy recipes).
+// Pure functions: blueprint-origin candidates get coded FIRST in Phase 6 and a
+// reserved slice of the Tier-A coding budget (the two realized priority levers).
+// NOTE: a per-origin "lower promotion bar" was considered but intentionally NOT
+// wired — every strategy that codes successfully becomes a CANDIDATE regardless
+// of Sharpe (there is no surfacing gate to lower), and the only real Sharpe gate
+// (candidate→live in lifecycle.py) must stay uniform + operator-gated for safety.
 const BLUEPRINT_ORIGINS = new Set(['git_blueprint', 'blog_blueprint']);
 const BLUEPRINT_TIER_A_SHARE = (() => {
   const v = parseFloat(process.env.OPENCLAW_BLUEPRINT_TIER_A_SHARE || '0.5');
   return (Number.isFinite(v) && v >= 0 && v <= 1) ? v : 0.5;
 })();
-const PROMOTION_MIN_SHARPE = { paper: 0.5, git_blueprint: 0.3, blog_blueprint: 0.3 };
-
-function promotionThresholdFor(origin) {
-  return { min_sharpe: PROMOTION_MIN_SHARPE[origin] ?? PROMOTION_MIN_SHARPE.paper };
-}
 
 function partitionBlueprintBudget(cands, cap, blueprintShare = BLUEPRINT_TIER_A_SHARE) {
   const isBp = c => BLUEPRINT_ORIGINS.has(c.origin);
@@ -1041,4 +1039,4 @@ async function run(opts = {}) {
   }
 }
 
-module.exports = { run, _hunt, partitionBlueprintBudget, promotionThresholdFor, BLUEPRINT_ORIGINS };
+module.exports = { run, _hunt, partitionBlueprintBudget, BLUEPRINT_ORIGINS };
