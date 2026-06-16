@@ -834,8 +834,9 @@ def run_backtest(strategy_id: str, *,
               (run_id, strategy_id, code_sha, window_kind, start_date, end_date,
                oos_days, total_sharpe, total_max_dd_pct, total_return_pct,
                total_trades, total_hit_rate, avg_holding_days, primary_window,
-               config_json, notes)
-            VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s)
+               config_json, notes,
+               total_sortino, total_calmar, total_avg_pnl_pct)
+            VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s,%s)
         """, (
             run_id, strategy_id, _code_sha(filepath), 'full_history',
             start_dt.date(), end_dt.date(), int((end_dt - start_dt).days + 1),
@@ -854,6 +855,7 @@ def run_backtest(strategy_id: str, *,
                 'methodology':    'discovery',
             }),
             None,
+            total_metrics['sortino'], total_metrics['calmar'], total_metrics['avg_pnl_pct'],
         ))
         # 2026-05-19: always write a row per canonical regime, even when
         # the strategy produced 0 trades in that regime. The dashboard's
@@ -873,6 +875,7 @@ def run_backtest(strategy_id: str, *,
                     run_id, regime,
                     0, None, None, None, None, None, None,
                     int(agg.get('oos_days_in_regime') or 0),
+                    None, None,
                 ))
                 continue
             regime_rows.append((
@@ -880,13 +883,14 @@ def run_backtest(strategy_id: str, *,
                 agg['trade_count'], agg['sharpe'], agg['max_dd_pct'],
                 agg['return_pct'], agg['hit_rate'], agg['avg_pnl_pct'],
                 agg['avg_holding_days'], agg['oos_days_in_regime'],
+                agg.get('sortino'), agg.get('calmar'),
             ))
         if regime_rows:
             psycopg2.extras.execute_values(cur, """
                 INSERT INTO strategy_backtest_regimes
                   (run_id, regime_state, trade_count, sharpe, max_dd_pct,
                    return_pct, hit_rate, avg_pnl_pct, avg_holding_days,
-                   oos_days_in_regime)
+                   oos_days_in_regime, sortino, calmar)
                 VALUES %s
             """, regime_rows)
         if trades:

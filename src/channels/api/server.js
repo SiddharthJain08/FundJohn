@@ -1141,7 +1141,8 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRunRows = (await dbQuery(`
       SELECT DISTINCT ON (strategy_id)
              strategy_id, total_sharpe, total_max_dd_pct, total_return_pct,
-             total_trades, total_hit_rate, avg_holding_days, run_at
+             total_trades, total_hit_rate, avg_holding_days, run_at,
+             total_sortino, total_calmar, total_avg_pnl_pct
       FROM strategy_backtest_runs
       WHERE primary_window = TRUE
       ORDER BY strategy_id, run_at DESC
@@ -1162,6 +1163,9 @@ app.get('/api/strategies', async (req, res) => {
     for (const r of ubtRunRows) {
       unifiedBacktest[r.strategy_id] = {
         sharpe:      r.total_sharpe,
+        sortino:     r.total_sortino,
+        calmar:      r.total_calmar,
+        avg_pnl_pct: r.total_avg_pnl_pct,
         return_pct:  r.total_return_pct,
         max_dd_pct:  r.total_max_dd_pct,
         trade_count: r.total_trades,
@@ -1357,6 +1361,9 @@ app.get('/api/strategies', async (req, res) => {
         // them (same unified→legacy fallback) to keep the candidate table's
         // BT Sharpe + Backtest Trades columns + sort keys working.
         backtest_sharpe:           unifiedBacktest[sid]?.sharpe      ?? sr.backtest_sharpe      ?? null,
+        backtest_sortino:          unifiedBacktest[sid]?.sortino     ?? null,
+        backtest_calmar:           unifiedBacktest[sid]?.calmar      ?? null,
+        backtest_avg_pnl_pct:      unifiedBacktest[sid]?.avg_pnl_pct ?? null,
         backtest_trade_count:      unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
         backtest_return_pct:       unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
         backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
@@ -1398,6 +1405,12 @@ app.get('/api/strategies', async (req, res) => {
         backtest_max_dd_pct:  unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
       });
     }
+    // Server-side default order: highest backtest Sharpe first, nulls last.
+    // (The candidate table is client-sortable via _bindSortable; when no
+    // column sort is active _renderCandidates re-sorts by strategy_id, so
+    // this sets the JSON/source order, not the table's visible default.)
+    rows.sort((a, b) =>
+      (b.backtest_sharpe ?? -Infinity) - (a.backtest_sharpe ?? -Infinity));
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
