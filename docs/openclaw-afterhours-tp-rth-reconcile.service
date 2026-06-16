@@ -1,0 +1,17 @@
+[Unit]
+Description=RTH-open reconcile: cancel resting extended-hours TPs so the GTC OCO owns the regular-session exit (9:30 ET)
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/python3 /root/openclaw/src/execution/afterhours_tp.py --reconcile
+StandardOutput=append:/var/log/openclaw-afterhours-tp.log
+StandardError=append:/var/log/openclaw-afterhours-tp.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
