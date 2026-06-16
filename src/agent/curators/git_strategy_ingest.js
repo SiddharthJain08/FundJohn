@@ -83,10 +83,15 @@ function _defaultDeps() {
       return r.rowCount > 0;
     },
     insertFn: async (row) => {
+      // NOTE: research_candidates has NO top-level strategy_id column — the
+      // strategy_id lives inside hunter_result_json (set in run() below) and
+      // every consumer reads it from there (_hunt / _tier / the finisher's
+      // hunter_result_json->>'strategy_id'). The `row.strategy_id` field stays
+      // on the row object for callers/tests; it is NOT a DB column.
       await _pool().query(
-        `INSERT INTO research_candidates (strategy_id, source_url, origin, kind, submitted_by, reference_url, hunter_result_json)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [row.strategy_id, row.source_url, row.origin, row.kind, row.submitted_by, row.reference_url,
+        `INSERT INTO research_candidates (source_url, origin, kind, submitted_by, reference_url, hunter_result_json)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [row.source_url, row.origin, row.kind, row.submitted_by, row.reference_url,
          JSON.stringify(row.hunter_result_json)]);
     },
   };
