@@ -1,0 +1,10 @@
+[Unit]
+Description=Fire ext-hours TP placement Mon-Fri 04:00 America/New_York (premarket open)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 04:00:00 America/New_York
+Persistent=true
+Unit=openclaw-afterhours-tp-premarket.service
+
+[Install]
+WantedBy=timers.target

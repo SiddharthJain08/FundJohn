@@ -1,0 +1,147 @@
+"""W3: extended-hours take-profit placement (limit/day/extended_hours)."""
+from __future__ import annotations
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from execution import afterhours_tp as ah
+
+
+def test_desired_tps_long_and_short():
+    positions = [
+        {'symbol': 'WDC', 'side': 'long', 'qty': '46'},
+        {'symbol': 'MU', 'side': 'short', 'qty': '12'},
+        {'symbol': 'NOTP', 'side': 'long', 'qty': '5'},
+    ]
+    def lookup(sym, side):
+        return {'WDC': {'target': 717.03}, 'MU': {'target': 880.0}}.get(sym)
+    out = {d['ticker']: d for d in ah.desired_tps(positions, lookup)}
+    assert out['WDC']['side'] == 'sell' and abs(out['WDC']['tp'] - 717.03) < 1e-6
+    assert out['MU']['side'] == 'buy' and abs(out['MU']['tp'] - 880.0) < 1e-6
+    assert 'NOTP' not in out            # no known TP → no order
+
+
+def test_already_covered_qty_is_skipped():
+    positions = [{'symbol': 'WDC', 'side': 'long', 'qty': '46'}]
+    lookup = lambda s, side: {'target': 717.03}
+    out = ah.desired_tps(positions, lookup, tp_covered={'WDC': 46})
+    assert out == []                    # already has a resting limit for full qty
+
+
+def test_place_submits_extended_hours_limit(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    calls = []
+    def _fake_submit(**kw):
+        calls.append(kw)
+        return True, {'id': 'oid'}, None
+    monkeypatch.setattr(ah, '_submit_limit', _fake_submit)
+    plan = [{'ticker': 'WDC', 'side': 'sell', 'qty': 46, 'tp': 717.03}]
+    n = ah._place_plan(plan, dry_run=False)
+    assert n == 1
+    kw = calls[0]
+    assert kw['order_type'] == 'limit' and kw['extended_hours'] is True
+    assert kw['tif'] == 'day' and kw['order_class'] == 'simple'
+    assert abs(kw['limit_price'] - 717.03) < 1e-6
+
+
+def test_gate_off_places_nothing(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_AFTERHOURS_TP', raising=False)
+    assert ah._place_plan([{'ticker': 'WDC', 'side': 'sell', 'qty': 46,
+                            'tp': 717.03}], dry_run=False) == 0
+
+
+# ---------------------------------------------------------------------------
+# reconcile_afterhours tests
+# ---------------------------------------------------------------------------
+
+def _setup_reconcile(monkeypatch, orders, positions, cancels):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    import execution.stop_reattach as sr
+    monkeypatch.setattr(sr, 'fetch_positions', lambda: positions)
+    def _fake_cli(args, timeout=15):
+        if args[:2] == ['order', 'list']:
+            return True, orders, None
+        if args[:2] == ['order', 'cancel']:
+            cancels.append(args[-1])           # the order id
+            return True, {}, None
+        return True, [], None
+    monkeypatch.setattr(ah, '_cli', _fake_cli)
+
+
+def test_reconcile_cancels_ahtp_tp_and_oversized_stop_only(monkeypatch):
+    cancels = []
+    orders = [
+        {'id': 'tp1', 'symbol': 'WDC', 'client_order_id': 'ahtp_WDC_1', 'type': 'limit'},
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},   # held 20 → oversized
+        {'id': 'st2', 'symbol': 'MU',  'type': 'stop', 'qty': '12'},   # held 12 → correctly sized
+    ]
+    positions = [{'symbol': 'WDC', 'qty': '20'}, {'symbol': 'MU', 'qty': '12'}]
+    _setup_reconcile(monkeypatch, orders, positions, cancels)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats['tp_canceled'] == 1
+    assert stats['stops_resized'] == 1
+    assert 'tp1' in cancels and 'st1' in cancels
+    assert 'st2' not in cancels                 # correctly-sized stop NOT canceled
+
+
+def test_reconcile_skips_stop_resize_when_positions_unavailable(monkeypatch):
+    """CRITICAL guard: a failed position fetch ([]) must NOT cause stops to be
+    canceled."""
+    cancels = []
+    orders = [
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},
+        {'id': 'st2', 'symbol': 'MU',  'type': 'stop', 'qty': '12'},
+    ]
+    _setup_reconcile(monkeypatch, orders, positions=[], cancels=cancels)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats['stops_resized'] == 0
+    assert cancels == []                        # NO stop canceled on empty positions
+
+
+def test_reconcile_dry_run_makes_no_cancel_calls(monkeypatch):
+    cancels = []
+    orders = [
+        {'id': 'tp1', 'symbol': 'WDC', 'client_order_id': 'ahtp_WDC_1', 'type': 'limit'},
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},
+    ]
+    positions = [{'symbol': 'WDC', 'qty': '20'}]
+    _setup_reconcile(monkeypatch, orders, positions, cancels)
+    stats = ah.reconcile_afterhours(dry_run=True)
+    assert cancels == []                        # dry-run cancels nothing
+    assert stats['tp_canceled'] == 1 and stats['stops_resized'] == 1
+
+
+def test_reconcile_gate_off_returns_zero(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_AFTERHOURS_TP', raising=False)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats == {'tp_canceled': 0, 'stops_resized': 0}
+
+
+# ---------------------------------------------------------------------------
+# main() path tests
+# ---------------------------------------------------------------------------
+
+def test_main_placement_path_reconciles_before_placing(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    order_of_calls = []
+    monkeypatch.setattr(ah, 'reconcile_afterhours',
+                        lambda dry_run: order_of_calls.append('reconcile') or {'tp_canceled': 0, 'stops_resized': 0})
+    monkeypatch.setattr(ah, '_place_plan',
+                        lambda plan, dry_run: order_of_calls.append('place') or 0)
+    import execution.stop_reattach as sr
+    monkeypatch.setattr(sr, 'fetch_positions', lambda: [])
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda: {})
+    monkeypatch.setattr(sr, 'latest_broker_bracket', lambda s, side: None)
+    rc = ah.main(['--dry-run'])
+    assert rc == 0
+    assert order_of_calls == ['reconcile', 'place']   # reconcile must precede placement
+
+
+def test_main_reconcile_only_path_does_not_place(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    calls = []
+    monkeypatch.setattr(ah, 'reconcile_afterhours',
+                        lambda dry_run: calls.append('reconcile') or {'tp_canceled': 0, 'stops_resized': 0})
+    monkeypatch.setattr(ah, '_place_plan', lambda plan, dry_run: calls.append('place') or 0)
+    rc = ah.main(['--reconcile', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reconcile']                      # reconcile-only: no placement

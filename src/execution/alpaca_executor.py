@@ -346,6 +346,39 @@ def already_executed(conn, run_date, strategy_id, ticker):
     return hit
 
 
+def _placed_or_order_stop(order, resp) -> float:
+    """Prefer the stop actually submitted (in the execute result) over the
+    pre-submit order's stop, when W1 is ON. The result's `stop` is the
+    post-recompute/stacked leg sent to the broker."""
+    if _record_placed_bracket_on():
+        s = (resp or {}).get('stop')
+        if s is not None:
+            return float(s)
+    return float(order.get('stop') or 0.0)
+
+
+def _placed_or_order_target(order, resp) -> float:
+    """Prefer the take-profit actually submitted over the pre-submit order's.
+    Logs a WARN if the chosen target is degenerate (<= entry for a long /
+    >= entry for a short) so a bad placement is never recorded silently.
+    The degenerate check only runs when the gate is ON (comparing placed
+    result vs placed entry is apples-to-apples); gate-OFF compares pre-submit
+    order levels against executed-result entry — mismatched sources that would
+    produce spurious warnings."""
+    if _record_placed_bracket_on():
+        t = (resp or {}).get('target')
+        tgt = float(t) if t is not None else float(order.get('t1') or order.get('target') or 0.0)
+        entry = float((resp or {}).get('entry') or order.get('entry') or 0.0)
+        side = (order.get('direction') or 'long').lower()
+        if entry > 0 and tgt > 0:
+            degenerate = (tgt <= entry) if side != 'short' else (tgt >= entry)
+            if degenerate:
+                log(f"  ⚠ {order.get('ticker','?')}: recording DEGENERATE target "
+                    f"{tgt:.2f} vs entry {entry:.2f} (side={side}) — placement bug upstream")
+        return tgt
+    return float(order.get('t1') or order.get('target') or 0.0)
+
+
 def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid):
     """Persist a row in alpaca_submissions tying the sized order to its
     Alpaca order_id. UNIQUE (run_date, strategy_id, ticker) makes re-runs
@@ -388,8 +421,8 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
         (order.get('direction') or 'long').lower(),
         alpaca_resp.get('qty') or 0,
         alpaca_resp.get('entry') or order.get('entry') or 0.0,
-        order.get('stop') or 0.0,
-        order.get('t1') or order.get('target') or 0.0,
+        _placed_or_order_stop(order, alpaca_resp),
+        _placed_or_order_target(order, alpaca_resp),
         order.get('pct_nav'),
         alpaca_resp.get('notional'),
         tif, order_class, coid,
@@ -1629,6 +1662,12 @@ def _dtbp_guard_enabled() -> bool:
     """Kill-switch, default ON. Set OPENCLAW_DTBP_GUARD=0 to disable (then
     the executor behaves byte-identically to the pre-guard path)."""
     return os.environ.get('OPENCLAW_DTBP_GUARD', '1') != '0'
+
+
+def _record_placed_bracket_on() -> bool:
+    """W1: when ON, alpaca_submissions records the legs actually submitted
+    (from the execute result) rather than the pre-submit per-strategy order."""
+    return os.environ.get('OPENCLAW_RECORD_PLACED_BRACKET') == '1'
 
 
 def _dtbp_summary_line(skipped: list) -> str:
