@@ -27,11 +27,31 @@
  *                                 persists to strategy_universe_recommendations and
  *                                 posts to #universe-recs. Gated on
  *                                 OPENCLAW_UNIVERSE_RECS=1 (--dry-run bypasses).
+ *   --mode git-ingest             Blueprint Fast Lane git importer. Clean-room
+ *                                 imports already-coded strategies from the repos
+ *                                 in src/ingestion/git_strategy_sources.json as
+ *                                 research_candidates (origin='git_blueprint'):
+ *                                 parse each file's rule comment → Sonnet extract
+ *                                 spec → idempotent insert (skips already-ingested
+ *                                 source_urls). Prints {inserted,skipped,errored}.
+ *                                 Driven for the bulk import by
+ *                                 scripts/bulk_git_ingest.sh.
  *
  * Universe-recs flags:
  *   --dry-run           Build grids + grid_sha only; no Opus/Discord/persist.
  *   --strategy-id ID    Run a single strategy instead of all live strategies.
  *   --week YYYY-MM-DD   Week-ending date for candidate_set_id + backtest window.
+ *
+ * Git-ingest flags:
+ *   --dry-run           Skip the DB insert only. NOTE: the Sonnet extractor
+ *                       still runs per file (≈$0.50/file), so a --dry-run over
+ *                       the full ≈61-file repo still costs ≈$30 — it is NOT a
+ *                       free preview. To preview file selection without spend,
+ *                       inspect git_strategy_sources.json + the repo's glob.
+ *   --incremental       Passed through to the ingester. Idempotency is by
+ *                       source_url dedup (existsFn), so incremental and full
+ *                       runs are equivalent — already-ingested files are always
+ *                       skipped; the flag is accepted for forward-compat.
  *
  * Saturday-brain flags:
  *   --dry-run           Build context + tier mock candidates, no DB writes,
@@ -301,6 +321,55 @@ async function runSaturdayBrain() {
   console.log(JSON.stringify({ mode: 'saturday-brain', dry_run: dryRun, ...result }, null, 2));
 }
 
+async function runGitIngest() {
+  // Blueprint Fast Lane: clean-room import already-coded strategies from the
+  // configured git repos as research_candidates (origin='git_blueprint').
+  // Each repo's run() is independent; one bad repo must not abort the rest.
+  const { run } = require('./git_strategy_ingest');
+  const dryRun      = !!getArg('--dry-run', false);
+  const incremental = !!getArg('--incremental', false);
+
+  const cfgPath = path.join(OPENCLAW_DIR, 'src/ingestion/git_strategy_sources.json');
+  let cfg;
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+  } catch (e) {
+    console.error(`[mastermind:git-ingest] cannot read ${cfgPath}: ${e.message}`);
+    process.exit(2);
+  }
+  const repos = Array.isArray(cfg.repos) ? cfg.repos : [];
+  if (repos.length === 0) {
+    console.error('[mastermind:git-ingest] no repos configured in git_strategy_sources.json');
+    process.exit(2);
+  }
+
+  console.error(`[mastermind:git-ingest] Starting over ${repos.length} repo(s)`
+    + `${dryRun ? ' (DRY RUN — insert skipped, extractor still spends)' : ''}`
+    + `${incremental ? ' (incremental)' : ''}...`);
+  const t0 = Date.now();
+  const totals = { inserted: 0, skipped: 0, errored: 0 };
+  const perRepo = [];
+  for (const repo of repos) {
+    console.error(`[mastermind:git-ingest]   repo ${repo.name || repo.repo} ...`);
+    try {
+      const res = await run({ dryRun, incremental, repo });
+      totals.inserted += res.inserted; totals.skipped += res.skipped; totals.errored += res.errored;
+      perRepo.push({ repo: repo.name || repo.repo, ...res });
+      console.error(`[mastermind:git-ingest]   repo ${repo.name || repo.repo}: `
+        + `inserted=${res.inserted} skipped=${res.skipped} errored=${res.errored}`);
+    } catch (e) {
+      // A clone/glob failure for one repo is non-fatal — continue to the next.
+      totals.errored += 1;
+      perRepo.push({ repo: repo.name || repo.repo, inserted: 0, skipped: 0, errored: 1, error: e.message });
+      console.error(`[mastermind:git-ingest]   repo ${repo.name || repo.repo} FAILED: ${e.message}`);
+    }
+  }
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  console.error(`[mastermind:git-ingest] Done in ${elapsed}s — `
+    + `inserted=${totals.inserted} skipped=${totals.skipped} errored=${totals.errored}.`);
+  console.log(JSON.stringify({ mode: 'git-ingest', dry_run: dryRun, incremental, ...totals, repos: perRepo }, null, 2));
+}
+
 (async () => {
   const mode = getArg('--mode', 'corpus');
   if (mode === 'saturday-brain')        return runSaturdayBrain();
@@ -310,7 +379,8 @@ async function runSaturdayBrain() {
   if (mode === 'paper-expansion')       return runPaperExpansion();
   if (mode === 'critique')              return runCritique();
   if (mode === 'universe-recs')         return runUniverseRecs();
-  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion | critique | universe-recs`);
+  if (mode === 'git-ingest')            return runGitIngest();
+  console.error(`Unknown --mode ${JSON.stringify(mode)}. Expected: saturday-brain | corpus | comprehensive-review | position-recs | paper-expansion | critique | universe-recs | git-ingest`);
   process.exit(2);
 })()
   // Force-exit after the mode finishes. Multiple sub-curators open pg
