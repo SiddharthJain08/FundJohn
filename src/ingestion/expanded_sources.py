@@ -302,6 +302,45 @@ def insert_into_corpus(papers: list[dict], conn) -> tuple[int, int]:
     return inserted, skipped
 
 
+_SEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'blueprint_seed_sources.json')
+
+
+def load_seed_sources() -> list[dict]:
+    """Load the deterministic blueprint-strategy seed feeds. These are ingested
+    on EVERY weekly run (independent of the Opus Phase-1 discovery), so the
+    high-value blueprint blogs never fall out of the corpus when the EXCLUDE_DOMAINS
+    mechanism suppresses re-discovery. Fail-soft: a missing/malformed file or the
+    OPENCLAW_BLUEPRINT_SEEDS=0 kill-switch returns [] so the ingest still proceeds."""
+    if os.environ.get('OPENCLAW_BLUEPRINT_SEEDS', '1').strip() in ('0', 'false', 'off', ''):
+        return []
+    try:
+        with open(_SEED_FILE, 'r', encoding='utf-8') as fh:
+            blob = json.load(fh)
+        sources = blob.get('sources') if isinstance(blob, dict) else blob
+        return [s for s in (sources or []) if isinstance(s, dict) and s.get('feed_url')]
+    except (OSError, ValueError) as e:
+        print(f'[expanded] seed load failed ({e}) — proceeding without seeds', file=sys.stderr)
+        return []
+
+
+def merge_with_seeds(seeds: list[dict], discovered: list[dict]) -> list[dict]:
+    """Prepend seed feeds to the Opus-discovered feeds, deduped by normalized
+    feed_url so a discovered feed that matches a seed isn't fetched twice. Seeds
+    come first (deterministic, always present); discovered feeds follow."""
+    def _key(s: dict) -> str:
+        u = (s.get('feed_url') or s.get('domain') or '').strip().lower()
+        return u.rstrip('/')
+    out, seen = [], set()
+    for s in list(seeds or []) + list(discovered or []):
+        k = _key(s)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
 def fetch_expansion_sources(conn, expansion_id: str | None) -> list[dict]:
     """Pull the sources_discovered list from a paper_source_expansions row."""
     cur = conn.cursor()
@@ -339,6 +378,10 @@ if __name__ == '__main__':
                         help='Cap papers ingested per source feed.')
     parser.add_argument('--dry-run', action='store_true',
                         help='Fetch + parse, but do not write to research_corpus.')
+    parser.add_argument('--no-seeds', action='store_true',
+                        help='Skip the deterministic blueprint seed feeds '
+                             '(blueprint_seed_sources.json); ingest only the '
+                             'Opus-discovered expansion sources.')
     args = parser.parse_args()
 
     pg_uri = os.environ.get('POSTGRES_URI')
@@ -349,9 +392,15 @@ if __name__ == '__main__':
     import psycopg2
     conn = psycopg2.connect(pg_uri)
     try:
-        sources = fetch_expansion_sources(conn, args.expansion_id)
-        print(f'[expanded] {len(sources)} source(s) from expansion '
-              f'{args.expansion_id or "(latest completed)"}')
+        discovered = fetch_expansion_sources(conn, args.expansion_id)
+        seeds = [] if args.no_seeds else load_seed_sources()
+        # Seeds first, then Opus-discovered feeds, deduped by feed_url. Merging
+        # BEFORE the empty-check guarantees the blueprint blogs are ingested even
+        # on weeks where Opus discovered nothing (or errored).
+        sources = merge_with_seeds(seeds, discovered)
+        print(f'[expanded] {len(sources)} source(s) '
+              f'({len(seeds)} seed + {len(discovered)} discovered from expansion '
+              f'{args.expansion_id or "(latest completed)"})')
         if not sources:
             print('[expanded] Nothing to ingest. Exit 0.')
             sys.exit(0)

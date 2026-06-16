@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "Deterministic blueprint-strategy RSS seed feeds. Always ingested by expanded_sources.py Phase 2 every weekly run, regardless of whether the Opus Phase-1 discovery run (paper_expansion_ingestor.js) succeeds. These are sites that publish EXPLICIT, reproducible rule-based daily-equity/ETF strategy blueprints (entry/exit/params + author backtests) — a higher implementation hit-rate than academic papers alone. Provenance: docs/research/strategy-blueprint-sources.md (2026-06-16). Each feed verified one-post-per-item RSS (real article title + link to original post) on 2026-06-16. NOTE: digest/aggregator hubs (Quantocracy — its RSS emits roundup stubs, not articles) and clean-URL HTML sites (TuringTrader, Quantpedia — anchors lack the .pdf/.htm extension expanded_sources.py's RX_PAPER_LINK requires) are intentionally NOT seeded here; they are steered via the Opus discovery prompt (EXPANSION_PROMPT_PREAMBLE) instead. To disable all seeds without a code change: set OPENCLAW_BLUEPRINT_SEEDS=0 in .env, or pass --no-seeds.",
+  "sources": [
+    {
+      "domain": "quantifiedstrategies.com",
+      "name": "Quantified Strategies",
+      "feed_url": "https://www.quantifiedstrategies.com/feed/",
+      "kind": "rss",
+      "strategy_types": ["mean-reversion", "momentum", "seasonal", "rotation", "etf"],
+      "notes": "Oddmund Groette — closest oxfordstrat analog; explicit entry/exit + params + backtest, heavy SPY/QQQ/sector daily. One post/item, abstract in description."
+    },
+    {
+      "domain": "robotwealth.com",
+      "name": "Robot Wealth",
+      "feed_url": "https://robotwealth.com/feed/",
+      "kind": "rss",
+      "strategy_types": ["stat-arb", "factor", "momentum", "etf", "crypto"],
+      "notes": "Kris Longmore — explicit edges + code, daily equity/ETF (+crypto). One post/item."
+    },
+    {
+      "domain": "alvarezquanttrading.com",
+      "name": "Alvarez Quant Trading",
+      "feed_url": "https://alvarezquanttrading.com/feed/",
+      "kind": "rss",
+      "strategy_types": ["mean-reversion", "etf", "rotation", "equity"],
+      "notes": "Cesar Alvarez (ex-Connors) — full daily US-equity mean-reversion rules published free. One post/item; source_url carries a stable utm tail (dedup keys on full URL, harmless)."
+    }
+  ]
+}

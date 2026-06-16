@@ -35,3 +35,23 @@ Connors *"Short Term Trading Strategies That Work"*, Clenow *"Stocks on the Move
 2. **Bulk-import awesome-systematic-trading** `./static/strategies/*.py` — ~80 already-coded daily strategies; translate the rule into a `BaseStrategy` (same pattern as the oxfordstrat build).
 3. **Crawl TuringTrader + Quantpedia-free + Quantified Strategies** per-strategy pages on a cadence; route each through PaperHunter-style extraction → StrategyCoder, filtering to daily equity/ETF.
 4. **Treat Allocate Smartly's list as an idea index** (names → cited papers), not a free-rules source.
+
+## STATUS — wired into the weekly cycle (2026-06-16)
+
+Wired into the existing Sunday research pipeline (Phase 1 Opus discovery + Phase 2 `expanded_sources.py` ingest). No new timer/service — rides the live `openclaw-sunday-research-ingest` run.
+
+**Deterministic seed feeds** (`src/ingestion/blueprint_seed_sources.json`, ingested **every** run by `expanded_sources.py` regardless of whether Opus's Phase-1 discovery succeeds; merged seed-first + deduped by `feed_url` before the empty-exit):
+- Quantified Strategies — `https://www.quantifiedstrategies.com/feed/`
+- Robot Wealth — `https://robotwealth.com/feed/`
+- Alvarez Quant Trading — `https://alvarezquanttrading.com/feed/`
+
+These three were verified on 2026-06-16 as clean **one-post-per-item** RSS (real strategy title + link to the original article). Kill-switch: `OPENCLAW_BLUEPRINT_SEEDS=0` or `--no-seeds`.
+
+**Why only 3 of the 7, not all of them** (the "add the new sources" scoping):
+- **Quantocracy** is a *digest aggregator* — its RSS emits "Recent Quant Links… as of MM/DD" roundup stubs (link → a quantocracy.com permalink, not the underlying article), which PaperHunter can't extract from. So it is **not** a direct seed; instead the Opus discovery prompt is told to **mine it as a hub** for new member blogs to propose. Same treatment for the **awesome-systematic-trading** GitHub list and **Allocate Smartly's** free index.
+- **TuringTrader / Quantpedia** are HTML, but `expanded_sources.py`'s `RX_PAPER_LINK` only matches anchors ending in `.pdf`/`.htm(l)`; their modern clean URLs (`/portfolios/x/`) match nothing, so seeding them would ingest junk. They are named in the Opus prompt as blueprint exemplars; ingesting them properly needs a parser enhancement (follow-up).
+- **awesome-systematic-trading** is ~80 coded `.py` files in a git repo — a different ingestion mode entirely (clone + translate, like the oxfordstrat build), not an RSS/HTML feed. Deferred as a separate task.
+
+**Source-expansion reframe** (`paper_expansion_ingestor.js` → `EXPANSION_PROMPT_PREAMBLE`): added a TOP-PRIORITY "explicit rule-based STRATEGY-BLUEPRINT sites" target category (rationale: paper-only pipeline has a low implementation hit-rate) with exemplars + the hub-mining instruction, and injects `SEEDED_BLUEPRINT_SOURCES` into the prompt context + EXCLUDE_DOMAINS so Opus hunts *new* blueprint sites rather than re-proposing the seeded ones. Academic targets left intact (additive).
+
+**Follow-ups:** (a) extend `RX_PAPER_LINK` / add a clean-URL HTML-index mode so TuringTrader + Quantpedia-free can be crawled directly; (b) a git-based ingestor for awesome-systematic-trading's `static/strategies/*.py`; (c) tune the corpus rater's `BLUEPRINT_SIGNAL_RX` if blog posts under-rate vs. academic abstracts.

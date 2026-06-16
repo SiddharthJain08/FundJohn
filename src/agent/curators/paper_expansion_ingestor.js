@@ -32,6 +32,24 @@ const { runOneShot, parseJsonBlock } = require('./_opus_oneshot');
 const OPENCLAW_DIR = process.env.OPENCLAW_DIR || '/root/openclaw';
 const WORKSPACE    = `${OPENCLAW_DIR}/workspaces/default`;
 
+// Deterministic blueprint-strategy seed feeds — the SAME file expanded_sources.py
+// (Phase 2) ingests every run. Loaded here so we can (a) tell Opus which blueprint
+// sites are ALREADY seeded (so it hunts NEW ones, not duplicates), and (b) add
+// their domains to EXCLUDE_DOMAINS. Phase 2 ingests seeds into research_corpus but
+// never writes them to sources_discovered, so their domains would NOT otherwise
+// appear in the exclude set. Fail-soft: missing/malformed file → empty list.
+const SEED_SOURCES_FILE = path.join(__dirname, '..', '..', 'ingestion', 'blueprint_seed_sources.json');
+function loadSeedSources() {
+  try {
+    const blob = JSON.parse(fs.readFileSync(SEED_SOURCES_FILE, 'utf8'));
+    const sources = Array.isArray(blob) ? blob : (blob && blob.sources);
+    return Array.isArray(sources) ? sources.filter(s => s && s.feed_url) : [];
+  } catch (e) {
+    console.error('[paper-expansion] seed source load failed; proceeding without seed context:', e.message);
+    return [];
+  }
+}
+
 // Phase 2-followup #21 — paper-fingerprint dedup, JS site (5th of 5).
 // Single source of truth: the existing Python helper at
 // src/research/paper_fingerprint.py. We shell out via a thin CLI wrapper
@@ -115,6 +133,14 @@ async function _gatherContext() {
       if (d) seenDomains.add(d);
     }
   }
+  // The deterministic blueprint seeds are ingested by Phase 2 every run but never
+  // land in sources_discovered, so add their domains to the exclude set explicitly
+  // — otherwise Opus would keep "discovering" sites we already seed.
+  const seededSources = loadSeedSources();
+  for (const s of seededSources) {
+    const d = (s?.domain || '').trim().toLowerCase();
+    if (d) seenDomains.add(d);
+  }
   const excludeDomains = Array.from(seenDomains).sort();
 
   return {
@@ -123,6 +149,7 @@ async function _gatherContext() {
     recent_corpus_venues: portfolio,   // note: positional arg reorder
     previous_expansion_runs: recentCorpusVenues,
     exclude_domains:      excludeDomains,
+    seeded_blueprint_sources: seededSources,
     corpus_freshness:     lastExpansion,
     vault_strategy_notes: vaultStrategyNotes,
     vault_result_notes:   vaultResultNotes,
@@ -181,6 +208,30 @@ beat 50 one-off papers.
   * JSON sitemaps (OpenAlex-style cursor-paginated APIs)
   * HTML index pages with stable anchor structure (author pages, journal
     "latest articles" pages)
+
+**TOP PRIORITY — explicit rule-based STRATEGY-BLUEPRINT sites (added 2026-06-16):**
+Our paper-only pipeline has a LOW implementation hit-rate — most academic
+abstracts never become a coded strategy. Sites that publish *complete,
+reproducible* trading rules (entry/exit conditions + parameters + the author's
+own backtest, often with code) convert far more reliably, so PRIORITISE
+discovering more sites like these. Hallmarks: daily-equity / ETF focus, named
+systematic strategies, explicit numeric thresholds (e.g. "buy when 2-period RSI
+< 25 and close > 200-day SMA, exit at next close"). Exemplars of this class:
+oxfordstrat, Quantified Strategies, Alvarez Quant Trading, Robot Wealth,
+TuringTrader, Quantpedia (free tier), Alpha Architect, Quantitativo / Quant
+Galore. Find ADJACENT sites we don't already have.
+
+  * **Hubs to MINE for new blueprint blogs** — do NOT ingest a hub's own digest
+    feed (it emits roundup stubs, not articles); instead crawl it to surface
+    member blogs we lack, then propose THOSE blogs' RSS/Atom feeds:
+      - Quantocracy (quantocracy.com) — daily aggregator of the whole quant-blog
+        ecosystem; its "Quant Mashup" links out to dozens of member blogs.
+      - awesome-systematic-trading (GitHub paperswithbacktest) — README table of
+        ~80 coded strategies, each tied to a source blog/paper.
+      - Allocate Smartly's free list — names of ~80 TAA strategies → cited sources.
+  * A few blueprint blogs are ALREADY seeded deterministically (see
+    SEEDED_BLUEPRINT_SOURCES in the context) — do NOT re-propose those exact
+    domains; surface NEW ones in the same class.
 
 **Target sources beyond arXiv/OpenAlex:**
   * Federal Reserve / ECB / BIS / IMF / central-bank working papers
@@ -255,13 +306,21 @@ do bulk ingestion using the feed_urls you provide. Your role is feed
 
 Context follows below.`;
 
+function seededBlocks(seeded) {
+  if (!seeded || !seeded.length) return '';
+  const rows = seeded.map(s => `  - ${s.name} (${s.domain}) — ${s.feed_url}`).join('\n');
+  return `\n--- SEEDED_BLUEPRINT_SOURCES (already ingested every run by Phase 2 — do NOT re-propose these exact domains; find ADJACENT blueprint sites) ---\n${rows}\n`;
+}
+
 function buildPrompt(ctx) {
   const excludeDomains = ctx.exclude_domains || [];
   const excludeBlock = excludeDomains.length
     ? `\n--- EXCLUDE_DOMAINS (already in our corpus from prior expansion runs — DO NOT re-propose) ---\n${excludeDomains.join('\n')}\n`
     : '';
+  const seededBlueprints = ctx.seeded_blueprint_sources || [];
+  const seededBlock = seededBlocks(seededBlueprints);
   return `${EXPANSION_PROMPT_PREAMBLE}
-
+${seededBlock}
 --- PORTFOLIO STRATEGIES ---
 ${JSON.stringify(ctx.portfolio_strategies || [], null, 2)}
 
