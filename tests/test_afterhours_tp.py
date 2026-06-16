@@ -114,3 +114,34 @@ def test_reconcile_gate_off_returns_zero(monkeypatch):
     monkeypatch.delenv('OPENCLAW_AFTERHOURS_TP', raising=False)
     stats = ah.reconcile_afterhours(dry_run=False)
     assert stats == {'tp_canceled': 0, 'stops_resized': 0}
+
+
+# ---------------------------------------------------------------------------
+# main() path tests
+# ---------------------------------------------------------------------------
+
+def test_main_placement_path_reconciles_before_placing(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    order_of_calls = []
+    monkeypatch.setattr(ah, 'reconcile_afterhours',
+                        lambda dry_run: order_of_calls.append('reconcile') or {'tp_canceled': 0, 'stops_resized': 0})
+    monkeypatch.setattr(ah, '_place_plan',
+                        lambda plan, dry_run: order_of_calls.append('place') or 0)
+    import execution.stop_reattach as sr
+    monkeypatch.setattr(sr, 'fetch_positions', lambda: [])
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda: {})
+    monkeypatch.setattr(sr, 'latest_broker_bracket', lambda s, side: None)
+    rc = ah.main(['--dry-run'])
+    assert rc == 0
+    assert order_of_calls == ['reconcile', 'place']   # reconcile must precede placement
+
+
+def test_main_reconcile_only_path_does_not_place(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    calls = []
+    monkeypatch.setattr(ah, 'reconcile_afterhours',
+                        lambda dry_run: calls.append('reconcile') or {'tp_canceled': 0, 'stops_resized': 0})
+    monkeypatch.setattr(ah, '_place_plan', lambda plan, dry_run: calls.append('place') or 0)
+    rc = ah.main(['--reconcile', '--dry-run'])
+    assert rc == 0
+    assert calls == ['reconcile']                      # reconcile-only: no placement

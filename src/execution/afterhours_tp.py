@@ -185,6 +185,9 @@ def main(argv=None) -> int:
     if args.reconcile:
         log(f'reconcile: {reconcile_afterhours(args.dry_run)}')
         return 0
+    # Session-boundary reconcile FIRST (clear the prior session's ext-hours TPs
+    # and resize any stop a filled TP left oversized), THEN place fresh TPs.
+    log(f'reconcile: {reconcile_afterhours(args.dry_run)}')
     positions = list(fetch_positions())
     plan = desired_tps(positions, latest_broker_bracket,
                        tp_covered=fetch_tp_covered())

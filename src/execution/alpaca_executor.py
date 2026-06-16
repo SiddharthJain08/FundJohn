@@ -360,22 +360,23 @@ def _placed_or_order_stop(order, resp) -> float:
 def _placed_or_order_target(order, resp) -> float:
     """Prefer the take-profit actually submitted over the pre-submit order's.
     Logs a WARN if the chosen target is degenerate (<= entry for a long /
-    >= entry for a short) so a bad placement is never recorded silently."""
-    tgt = None
+    >= entry for a short) so a bad placement is never recorded silently.
+    The degenerate check only runs when the gate is ON (comparing placed
+    result vs placed entry is apples-to-apples); gate-OFF compares pre-submit
+    order levels against executed-result entry — mismatched sources that would
+    produce spurious warnings."""
     if _record_placed_bracket_on():
         t = (resp or {}).get('target')
-        if t is not None:
-            tgt = float(t)
-    if tgt is None:
-        tgt = float(order.get('t1') or order.get('target') or 0.0)
-    entry = float((resp or {}).get('entry') or order.get('entry') or 0.0)
-    side = (order.get('direction') or 'long').lower()
-    if entry > 0 and tgt > 0:
-        degenerate = (tgt <= entry) if side != 'short' else (tgt >= entry)
-        if degenerate:
-            log(f"  ⚠ {order.get('ticker','?')}: recording DEGENERATE target "
-                f"{tgt:.2f} vs entry {entry:.2f} (side={side}) — placement bug upstream")
-    return tgt
+        tgt = float(t) if t is not None else float(order.get('t1') or order.get('target') or 0.0)
+        entry = float((resp or {}).get('entry') or order.get('entry') or 0.0)
+        side = (order.get('direction') or 'long').lower()
+        if entry > 0 and tgt > 0:
+            degenerate = (tgt <= entry) if side != 'short' else (tgt >= entry)
+            if degenerate:
+                log(f"  ⚠ {order.get('ticker','?')}: recording DEGENERATE target "
+                    f"{tgt:.2f} vs entry {entry:.2f} (side={side}) — placement bug upstream")
+        return tgt
+    return float(order.get('t1') or order.get('target') or 0.0)
 
 
 def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid):
