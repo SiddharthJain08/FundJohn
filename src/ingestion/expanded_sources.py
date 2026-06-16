@@ -62,6 +62,14 @@ RX_PAPER_LINK = re.compile(
     r'<a\b[^>]+href="([^"#]+\.(?:pdf|html?))"[^>]*>([^<]{8,200})</a>',
     re.IGNORECASE,
 )
+# Generic anchor for pattern-based HTML index extraction (Phase 4): captures any
+# href (extension-less clean URLs included) with >=8 chars of anchor text. The
+# per-source `link_pattern` regex (verified against the live index page) does the
+# real selection downstream — this just enumerates candidate anchors.
+RX_ANY_LINK = re.compile(
+    r'<a\b[^>]+href="([^"#]+)"[^>]*>([^<]{8,200})</a>',
+    re.IGNORECASE,
+)
 RX_RSS_ITEM    = re.compile(r'<item\b[\s\S]*?</item>', re.IGNORECASE)
 RX_RSS_TITLE   = re.compile(r'<title>([\s\S]*?)</title>', re.IGNORECASE)
 RX_RSS_LINK    = re.compile(r'<link>([\s\S]*?)</link>', re.IGNORECASE)
@@ -187,6 +195,52 @@ def _parse_html_index(body: bytes, source_url: str, source_tag: str,
     return out
 
 
+def _parse_html_index_pattern(body: bytes, source_url: str, pattern: str,
+                              source_tag: str, max_links: int) -> list[dict]:
+    """Per-source link-pattern HTML index parse (Phase 4 — Blueprint Fast Lane).
+
+    Like `_parse_html_index`, but instead of the fixed `.pdf`/`.htm(l)` anchor
+    filter it keeps anchors whose *absolute* URL matches the caller-supplied
+    `pattern` regex (`re.search`). This lets explicit-rule sites with clean,
+    extension-less URLs (TuringTrader `/portfolios/<slug>/`, Quantpedia
+    `/strategies/<slug>`) be crawled — the per-source pattern, verified against
+    the live index page, selects strategy pages and excludes nav/footer links.
+
+    Returns the SAME item dict shape as `_parse_html_index` (feed_kind
+    'html-pattern'). Dedupes by absolute URL; caps at `max_links`.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        print(f'[expanded] bad link_pattern {pattern!r} for {source_tag} ({e}) — skipping',
+              file=sys.stderr)
+        return out
+    text = body.decode('utf-8', errors='replace')
+    for m in RX_ANY_LINK.finditer(text):
+        if len(out) >= max_links:
+            break
+        href, title = m.group(1), _strip_html(m.group(2))
+        absolute = _absolute_url(href, source_url)
+        if not rx.search(absolute):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        out.append({
+            'source':         source_tag,
+            'source_url':     absolute,
+            'title':          title,
+            'abstract':       '',     # not present on index pages
+            'authors':        [],
+            'venue':          source_tag,
+            'published_date': None,
+            'raw_metadata':   {'feed_origin': source_url, 'feed_kind': 'html-pattern'},
+        })
+    return out
+
+
 def _parse_pubdate(s: str | None) -> str | None:
     if not s:
         return None
@@ -229,6 +283,12 @@ def fetch_source(source_spec: dict, max_per_source: int = 50) -> list[dict]:
     kind = source_spec.get('kind') or _detect_feed_kind(feed_url, body)
     if kind in ('rss', 'atom'):
         return _parse_rss(body, feed_url, f'expanded:{label}')
+    # Phase 4: a per-source `link_pattern` selects clean (extension-less) strategy
+    # URLs the default .pdf/.htm-only parser can't reach. Absent → unchanged path.
+    link_pattern = source_spec.get('link_pattern')
+    if link_pattern:
+        return _parse_html_index_pattern(body, feed_url, link_pattern,
+                                         f'expanded:{label}', max_per_source)
     return _parse_html_index(body, feed_url, f'expanded:{label}', max_per_source)
 
 
