@@ -72,6 +72,27 @@ def _gate_on() -> bool:
     return os.environ.get('OPENCLAW_STOP_REATTACH', '1') != '0'
 
 
+def _reattach_from_broker_on() -> bool:
+    return os.environ.get('OPENCLAW_REATTACH_FROM_BROKER') == '1'
+
+
+def _resolve_intended_bracket(conn, ticker: str, side: str):
+    """Return a submission-shaped dict {'entry_price','stop_price','target_price'}
+    representing the latest run's intended bracket. Prefers the broker's
+    last-placed bracket legs (W2); falls back to the DB submission row.
+    entry_price for the broker path is taken from the DB row (the broker leg
+    carries no entry) so the existing pct re-anchor math is unchanged."""
+    if _reattach_from_broker_on():
+        b = latest_broker_bracket(ticker, side)
+        if b:
+            db = latest_stop_submission(conn, ticker, side) or {}
+            entry = b.get('entry') or db.get('entry_price')
+            if entry:
+                return {'entry_price': float(entry),
+                        'stop_price': b['stop'], 'target_price': b['target']}
+    return latest_stop_submission(conn, ticker, side)
+
+
 def _run_cli(args, timeout=15):
     proc = subprocess.run(
         [ALPACA_CLI, *args],
@@ -474,7 +495,8 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
     breached, are left to the bare-stop floor reattach (and operator review)."""
     tp_cov = fetch_tp_covered()
     stats = {'oco': 0, 'already_tp': 0, 'no_sub': 0, 'degenerate': 0,
-             'breached': 0, 'reached': 0, 'rejected': 0, 'restored': 0}
+             'breached': 0, 'reached': 0, 'rejected': 0, 'restored': 0,
+             'tp_missing': 0}
     for pos in positions:
         sym = pos.get('symbol')
         try:
@@ -487,7 +509,7 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             stats['already_tp'] += 1
             continue
         side = (pos.get('side') or '').lower()
-        sub = latest_stop_submission(conn, sym, side)
+        sub = _resolve_intended_bracket(conn, sym, side)
         if not sub:
             stats['no_sub'] += 1
             continue
@@ -500,9 +522,15 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             stats['degenerate'] += 1
             continue
         if tstatus != 'ok':
-            # Target reached/degenerate → no OCO; leave the bare-stop floor pass
-            # (below in main) to ensure the loss side is covered.
-            stats['reached' if tstatus == 'reached' else 'degenerate'] += 1
+            # Never silently drop the TP: leave the loss side to the bare-stop
+            # floor, but surface a missing take-profit for operator review.
+            if tstatus == 'reached':
+                stats['reached'] += 1
+            else:
+                stats['degenerate'] += 1
+                stats['tp_missing'] += 1
+                log(f'  ⚠ {sym}: no valid take-profit from broker history or DB '
+                    f'(tstatus={tstatus}) — bare stop only, TP NOT re-established')
             continue
         # Both legs valid → cancel any bare stop, WAIT for the broker to free
         # the shares (cancel is async), then place the OCO. If the shares never
@@ -574,6 +602,9 @@ def main():
         if args.oco:
             oco_stats = run_oco_reattach(conn, positions, args.dry_run)
             log(f'OCO pass: {oco_stats}')
+            if oco_stats.get('tp_missing'):
+                log(f'⚠ {oco_stats["tp_missing"]} position(s) re-stopped WITHOUT a '
+                    f'take-profit (no recoverable TP) — operator review needed')
 
         # Bare-stop floor: ensure every still-uncovered position has a GTC stop.
         # An OCO surfaces as a limit order (its stop leg is linked, not a
