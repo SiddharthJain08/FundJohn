@@ -49,6 +49,32 @@ const DEFAULT_TIER_A_CAP       = 80;       // synchronous strategycoder runs
 const TIER_A_PER_RUN_USD       = 0.50;     // strategycoder ceiling estimate
 const SAFETY_RESERVE_USD       = 14;       // leave headroom for retries
 
+// ── Blueprint Fast Lane helpers (Phase 1.2) ─────────────────────────────────
+// Pure functions: blueprint-origin candidates get coded first in Phase 6 and a
+// reserved slice of the Tier-A coding budget, plus a lower promotion bar than
+// academic-paper candidates (blueprints are vetted, runnable strategy recipes).
+const BLUEPRINT_ORIGINS = new Set(['git_blueprint', 'blog_blueprint']);
+const BLUEPRINT_TIER_A_SHARE = (() => {
+  const v = parseFloat(process.env.OPENCLAW_BLUEPRINT_TIER_A_SHARE || '0.5');
+  return (Number.isFinite(v) && v >= 0 && v <= 1) ? v : 0.5;
+})();
+const PROMOTION_MIN_SHARPE = { paper: 0.5, git_blueprint: 0.3, blog_blueprint: 0.3 };
+
+function promotionThresholdFor(origin) {
+  return { min_sharpe: PROMOTION_MIN_SHARPE[origin] ?? PROMOTION_MIN_SHARPE.paper };
+}
+
+function partitionBlueprintBudget(cands, cap, blueprintShare = BLUEPRINT_TIER_A_SHARE) {
+  const isBp = c => BLUEPRINT_ORIGINS.has(c.origin);
+  const blueprint = cands.filter(isBp);
+  const papers    = cands.filter(c => !isBp(c));
+  const ordered   = [...blueprint, ...papers];
+  const reserved  = Math.ceil(cap * blueprintShare);
+  const blueprintCap = Math.min(reserved, blueprint.length);
+  const paperCap     = Math.min(cap - blueprintCap, papers.length);
+  return { ordered, blueprintCap, paperCap };
+}
+
 // ── Pool helper (pg singleton) ──────────────────────────────────────────────
 function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -912,4 +938,4 @@ async function run(opts = {}) {
   }
 }
 
-module.exports = { run, _hunt };
+module.exports = { run, _hunt, partitionBlueprintBudget, promotionThresholdFor };
