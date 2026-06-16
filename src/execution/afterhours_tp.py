@@ -12,11 +12,9 @@ prior session's TP and resizes the (unlinked) GTC stop after an ext-hours fill.
 Gate: OPENCLAW_AFTERHOURS_TP (default OFF).
 """
 from __future__ import annotations
-import json
 import os
-import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def afterhours_tp_on() -> bool:
@@ -77,7 +75,7 @@ def _place_plan(plan, dry_run: bool) -> int:
         return 0
     n = 0
     for o in plan:
-        coid = f"ahtp_{o['ticker']}_{int(datetime.utcnow().timestamp())}"
+        coid = f"ahtp_{o['ticker']}_{int(datetime.now(timezone.utc).timestamp())}"
         if dry_run:
             log(f"  DRY-RUN {o['ticker']} {o['side'].upper()} LIMIT x{o['qty']} "
                 f"@ {o['tp']:.2f} ext_hours=True")
@@ -103,7 +101,22 @@ def _cli(args, timeout=15):
 def reconcile_afterhours(dry_run: bool) -> dict:
     """Cancel any resting ext-hours TP we placed (coid prefix 'ahtp_'); if a
     position's TP filled (the GTC stop now over-covers the held qty), cancel the
-    oversized stop so the next stop_reattach pass re-sizes it. Idempotent."""
+    oversized stop so the next stop_reattach pass re-sizes it. Idempotent.
+
+    After an ext-hours TP fill the oversized stop is canceled here and the
+    position is left unprotected until the next stop_reattach pass (next RTH
+    open). This is a deliberate naked-position window: the ext-hours session is
+    over, the stop would be unexecutable anyway, and stop_reattach re-attaches
+    at RTH open.
+
+    Safety guard: the oversized-stop pass only cancels when we have POSITIVE
+    evidence that the held qty is below the stop qty. If fetch_positions()
+    returns empty (CLI glitch), the entire resize pass is skipped and a warning
+    is logged. Orphan cleanup after a real close is stop_reattach's job.
+    """
+    if not afterhours_tp_on():
+        log('OPENCLAW_AFTERHOURS_TP!=1 — skipping')
+        return {'tp_canceled': 0, 'stops_resized': 0}
     from execution.stop_reattach import fetch_positions
     stats = {'tp_canceled': 0, 'stops_resized': 0}
     ok, orders, _ = _cli(['order', 'list', '--status', 'open'])
@@ -115,24 +128,45 @@ def reconcile_afterhours(dry_run: bool) -> dict:
         if (o.get('client_order_id') or '').startswith('ahtp_'):
             if dry_run:
                 log(f"  DRY-RUN cancel ext-hours TP {o.get('symbol')} {o.get('id')}")
+                stats['tp_canceled'] += 1
             else:
-                _cli(['order', 'cancel', '--order-id', o.get('id')])
-            stats['tp_canceled'] += 1
-    for o in (orders or []):
-        if (o.get('type') or o.get('order_type')) not in ('stop', 'stop_limit'):
-            continue
+                ok_cancel, _, err = _cli(['order', 'cancel', '--order-id', o.get('id')])
+                if ok_cancel:
+                    stats['tp_canceled'] += 1
+                else:
+                    log(f"  ✘ cancel ext-hours TP {o.get('id')} failed: "
+                        f"{(err or {}).get('error', '?')}")
+    # Oversized-stop resize pass: only run when we have positive position evidence.
+    # If pos_qty is empty but there are open stops, the CLI likely glitched —
+    # log a warning and skip the entire resize pass (never cancel on unknown state).
+    open_stops = [o for o in (orders or [])
+                  if (o.get('type') or o.get('order_type')) in ('stop', 'stop_limit')]
+    if not pos_qty and open_stops:
+        log(f"  ⚠ fetch_positions returned empty with {len(open_stops)} open stop(s) "
+            f"present — resize pass SKIPPED (missing position data)")
+        return stats
+    for o in open_stops:
         sym = o.get('symbol')
         try:
             stop_qty = abs(float(o.get('qty') or 0))
         except (TypeError, ValueError):
             stop_qty = 0.0
-        held = pos_qty.get(sym, 0.0)
+        held = pos_qty.get(sym)
+        if held is None:
+            # No position data for this symbol — cannot confirm it shrank; skip.
+            continue
         if stop_qty > held + 0.01:
             log(f"  ⚠ {sym}: stop qty {stop_qty:.0f} > held {held:.0f} "
                 f"(ext-hours TP filled) — cancel+resize")
-            if not dry_run:
-                _cli(['order', 'cancel', '--order-id', o.get('id')])
-            stats['stops_resized'] += 1
+            if dry_run:
+                stats['stops_resized'] += 1
+            else:
+                ok_cancel, _, err = _cli(['order', 'cancel', '--order-id', o.get('id')])
+                if ok_cancel:
+                    stats['stops_resized'] += 1
+                else:
+                    log(f"  ✘ cancel oversized stop {o.get('id')} failed: "
+                        f"{(err or {}).get('error', '?')}")
     return stats
 
 

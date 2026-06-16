@@ -47,3 +47,70 @@ def test_gate_off_places_nothing(monkeypatch):
     monkeypatch.delenv('OPENCLAW_AFTERHOURS_TP', raising=False)
     assert ah._place_plan([{'ticker': 'WDC', 'side': 'sell', 'qty': 46,
                             'tp': 717.03}], dry_run=False) == 0
+
+
+# ---------------------------------------------------------------------------
+# reconcile_afterhours tests
+# ---------------------------------------------------------------------------
+
+def _setup_reconcile(monkeypatch, orders, positions, cancels):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_TP', '1')
+    import execution.stop_reattach as sr
+    monkeypatch.setattr(sr, 'fetch_positions', lambda: positions)
+    def _fake_cli(args, timeout=15):
+        if args[:2] == ['order', 'list']:
+            return True, orders, None
+        if args[:2] == ['order', 'cancel']:
+            cancels.append(args[-1])           # the order id
+            return True, {}, None
+        return True, [], None
+    monkeypatch.setattr(ah, '_cli', _fake_cli)
+
+
+def test_reconcile_cancels_ahtp_tp_and_oversized_stop_only(monkeypatch):
+    cancels = []
+    orders = [
+        {'id': 'tp1', 'symbol': 'WDC', 'client_order_id': 'ahtp_WDC_1', 'type': 'limit'},
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},   # held 20 → oversized
+        {'id': 'st2', 'symbol': 'MU',  'type': 'stop', 'qty': '12'},   # held 12 → correctly sized
+    ]
+    positions = [{'symbol': 'WDC', 'qty': '20'}, {'symbol': 'MU', 'qty': '12'}]
+    _setup_reconcile(monkeypatch, orders, positions, cancels)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats['tp_canceled'] == 1
+    assert stats['stops_resized'] == 1
+    assert 'tp1' in cancels and 'st1' in cancels
+    assert 'st2' not in cancels                 # correctly-sized stop NOT canceled
+
+
+def test_reconcile_skips_stop_resize_when_positions_unavailable(monkeypatch):
+    """CRITICAL guard: a failed position fetch ([]) must NOT cause stops to be
+    canceled."""
+    cancels = []
+    orders = [
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},
+        {'id': 'st2', 'symbol': 'MU',  'type': 'stop', 'qty': '12'},
+    ]
+    _setup_reconcile(monkeypatch, orders, positions=[], cancels=cancels)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats['stops_resized'] == 0
+    assert cancels == []                        # NO stop canceled on empty positions
+
+
+def test_reconcile_dry_run_makes_no_cancel_calls(monkeypatch):
+    cancels = []
+    orders = [
+        {'id': 'tp1', 'symbol': 'WDC', 'client_order_id': 'ahtp_WDC_1', 'type': 'limit'},
+        {'id': 'st1', 'symbol': 'WDC', 'type': 'stop', 'qty': '46'},
+    ]
+    positions = [{'symbol': 'WDC', 'qty': '20'}]
+    _setup_reconcile(monkeypatch, orders, positions, cancels)
+    stats = ah.reconcile_afterhours(dry_run=True)
+    assert cancels == []                        # dry-run cancels nothing
+    assert stats['tp_canceled'] == 1 and stats['stops_resized'] == 1
+
+
+def test_reconcile_gate_off_returns_zero(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_AFTERHOURS_TP', raising=False)
+    stats = ah.reconcile_afterhours(dry_run=False)
+    assert stats == {'tp_canceled': 0, 'stops_resized': 0}
