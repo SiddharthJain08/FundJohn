@@ -144,6 +144,11 @@ async function run({ dryRun = false, deps, repo, incremental = false } = {}) {
         hunter_result_json: {
           ...spec,
           reference_impl: parsed.code,
+          // reference_url also lives INSIDE hunter_result_json (not just the column)
+          // so it rides onto the coded strategy_spec — the finisher builds
+          // strategy_spec = {...hunter_result_json}, and buildCoderContext reads
+          // strategySpec.reference_url to set SOURCE_URL for porting-mode coding.
+          reference_url: parsed.cited_url,
           provenance: { repo: repo.repo, branch: repo.branch, path: source_url, source: parsed.cited_url },
         },
       };

@@ -438,6 +438,13 @@ class ResearchOrchestrator {
        WHERE candidate_id IN (
          SELECT candidate_id FROM research_candidates
          WHERE status = 'pending'
+           -- Blueprint Fast Lane: git-imported candidates (kind='git') carry a
+           -- pre-curated spec + reference_impl and must be coded ONLY by the
+           -- gated saturday_brain_finisher path (OPENCLAW_GIT_INGEST). Excluding
+           -- them here keeps this ungated daily drainer from (a) bypassing the
+           -- soak gate and (b) re-running PaperHunter on them, which would drop
+           -- reference_impl and waste a hunt call on a GitHub blob URL.
+           AND kind <> 'git'
          ORDER BY priority DESC, submitted_at ASC
          LIMIT $1
          FOR UPDATE SKIP LOCKED
