@@ -8932,6 +8932,8 @@ function _renderCandidates(rows) {
       <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
       <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Small dot = current market regime, blue border = declared eligible. Color = sign of Sharpe.">By Regime</th>
       <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
+      <th class="num" data-sort-key="backtest_sortino" data-sort-type="num" title="Backtest Sortino — downside-deviation-adjusted return (unified_backtest)">BT Sortino</th>
+      <th class="num" data-sort-key="backtest_calmar" data-sort-type="num" title="Backtest Calmar — annualized return / max drawdown">BT Calmar</th>
       <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
       <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
       <th class="num" data-sort-key="backtest_trade_count" data-sort-type="num">Backtest Trades</th>
@@ -8941,6 +8943,8 @@ function _renderCandidates(rows) {
       const sharpe = r.backtest_sharpe;
       const maxDd  = r.backtest_max_dd_pct;
       const ret    = r.backtest_return_pct;
+      const sortino = r.backtest_sortino;
+      const calmar  = r.backtest_calmar;
       // Backtest trade count from the convergence run, NOT live trade count
       // (which is r.total_count). 0 = strategy ran but emitted no signals;
       // null = never backtested. Both render as "—" but mean different
@@ -9022,6 +9026,8 @@ function _renderCandidates(rows) {
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
         <td>\${_regimeBacktestSharpe(r)}</td>
         <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
+        <td class="num">\${_fmtNum(sortino)}</td>
+        <td class="num">\${_fmtNum(calmar)}</td>
         <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
         <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
         <td class="num" style="color:var(--muted)" title="\${trades == null ? 'Never backtested' : (trades === 0 ? 'Backtest ran but emitted no signals' : trades + ' trades across the regime-stratified backtest windows')}">\${trades != null ? trades : '—'}</td>
