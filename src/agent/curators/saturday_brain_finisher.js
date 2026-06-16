@@ -137,18 +137,19 @@ async function main() {
     filters.push(`hunter_result_json->>'strategy_id' = ANY($${params.length}::text[])`);
   }
 
-  // Blueprint Fast Lane gate (Phase 2.4): when OPENCLAW_GIT_INGEST is OFF, the
-  // weekly 2PM coder must NOT auto-drain git_blueprint candidates — the operator
-  // soaks the one-off bulk import before enabling. The finisher query is
-  // otherwise origin-agnostic, so without this filter a gate-off bulk import
-  // would start coding (and, via the partition below, DISPLACE paper coding) on
-  // the next unattended run. Every pre-existing row is origin='paper' (migration
-  // 136 default), so this filter is a true no-op today. An explicit
-  // --strategy-ids invocation bypasses the gate (manual force-code).
-  // NOTE: this gate is read by TWO units — the 8AM ingest (saturday_brain._gitIngest)
+  // Blueprint Fast Lane gate (Phase 2.4): the gate scopes ONLY the heavy git
+  // lane (a one-off bulk import of ~61 repo strategies, each an LLM port — needs
+  // operator soak). When OPENCLAW_GIT_INGEST is OFF the weekly 2PM coder must NOT
+  // auto-drain git_blueprint candidates. blog_blueprint candidates, by contrast,
+  // come from the always-on seed feeds (TuringTrader/Quantpedia/RSS blogs —
+  // lightweight, already live) and code ungated WITH blueprint priority, so they
+  // are NOT gated here. Every pre-existing row is origin='paper' (migration 136
+  // default) and no git rows exist yet, so this remains a true no-op today.
+  // An explicit --strategy-ids invocation bypasses the gate (manual force-code).
+  // NOTE: the gate is read by TWO units — the 8AM ingest (saturday_brain._gitIngest)
   // and this 2PM finisher — so BOTH service envs must set OPENCLAW_GIT_INGEST=1.
   if (!gitGateOn && !explicitSids) {
-    filters.push(`origin = 'paper'`);
+    filters.push(`origin <> 'git_blueprint'`);
   }
 
   const { rows: candidates } = await _query(

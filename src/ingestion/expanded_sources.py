@@ -282,14 +282,26 @@ def fetch_source(source_spec: dict, max_per_source: int = 50) -> list[dict]:
         return []
     kind = source_spec.get('kind') or _detect_feed_kind(feed_url, body)
     if kind in ('rss', 'atom'):
-        return _parse_rss(body, feed_url, f'expanded:{label}')
-    # Phase 4: a per-source `link_pattern` selects clean (extension-less) strategy
-    # URLs the default .pdf/.htm-only parser can't reach. Absent → unchanged path.
-    link_pattern = source_spec.get('link_pattern')
-    if link_pattern:
-        return _parse_html_index_pattern(body, feed_url, link_pattern,
-                                         f'expanded:{label}', max_per_source)
-    return _parse_html_index(body, feed_url, f'expanded:{label}', max_per_source)
+        items = _parse_rss(body, feed_url, f'expanded:{label}')
+    else:
+        # Phase 4: a per-source `link_pattern` selects clean (extension-less)
+        # strategy URLs the default .pdf/.htm-only parser can't reach. Absent →
+        # unchanged path.
+        link_pattern = source_spec.get('link_pattern')
+        if link_pattern:
+            items = _parse_html_index_pattern(body, feed_url, link_pattern,
+                                              f'expanded:{label}', max_per_source)
+        else:
+            items = _parse_html_index(body, feed_url, f'expanded:{label}', max_per_source)
+    # Blueprint Fast Lane: carry the seed's origin_hint (e.g. 'blog_blueprint')
+    # into each item's raw_metadata so the corpus→candidate promotion (mastermind)
+    # can tag research_candidates.origin, and the finisher prioritizes it ahead of
+    # academic papers. Opus-discovered sources have no origin_hint → unchanged.
+    origin_hint = source_spec.get('origin_hint')
+    if origin_hint:
+        for it in items:
+            it.setdefault('raw_metadata', {})['origin_hint'] = origin_hint
+    return items
 
 
 def insert_into_corpus(papers: list[dict], conn) -> tuple[int, int]:

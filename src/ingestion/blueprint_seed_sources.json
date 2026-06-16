@@ -7,24 +7,44 @@
       "name": "Quantified Strategies",
       "feed_url": "https://www.quantifiedstrategies.com/feed/",
       "kind": "rss",
-      "strategy_types": ["mean-reversion", "momentum", "seasonal", "rotation", "etf"],
-      "notes": "Oddmund Groette — closest oxfordstrat analog; explicit entry/exit + params + backtest, heavy SPY/QQQ/sector daily. One post/item, abstract in description."
+      "strategy_types": [
+        "mean-reversion",
+        "momentum",
+        "seasonal",
+        "rotation",
+        "etf"
+      ],
+      "notes": "Oddmund Groette — closest oxfordstrat analog; explicit entry/exit + params + backtest, heavy SPY/QQQ/sector daily. One post/item, abstract in description.",
+      "origin_hint": "blog_blueprint"
     },
     {
       "domain": "robotwealth.com",
       "name": "Robot Wealth",
       "feed_url": "https://robotwealth.com/feed/",
       "kind": "rss",
-      "strategy_types": ["stat-arb", "factor", "momentum", "etf", "crypto"],
-      "notes": "Kris Longmore — explicit edges + code, daily equity/ETF (+crypto). One post/item."
+      "strategy_types": [
+        "stat-arb",
+        "factor",
+        "momentum",
+        "etf",
+        "crypto"
+      ],
+      "notes": "Kris Longmore — explicit edges + code, daily equity/ETF (+crypto). One post/item.",
+      "origin_hint": "blog_blueprint"
     },
     {
       "domain": "alvarezquanttrading.com",
       "name": "Alvarez Quant Trading",
       "feed_url": "https://alvarezquanttrading.com/feed/",
       "kind": "rss",
-      "strategy_types": ["mean-reversion", "etf", "rotation", "equity"],
-      "notes": "Cesar Alvarez (ex-Connors) — full daily US-equity mean-reversion rules published free. One post/item; source_url carries a stable utm tail (dedup keys on full URL, harmless)."
+      "strategy_types": [
+        "mean-reversion",
+        "etf",
+        "rotation",
+        "equity"
+      ],
+      "notes": "Cesar Alvarez (ex-Connors) — full daily US-equity mean-reversion rules published free. One post/item; source_url carries a stable utm tail (dedup keys on full URL, harmless).",
+      "origin_hint": "blog_blueprint"
     },
     {
       "domain": "turingtrader.com",
@@ -33,7 +53,12 @@
       "kind": "html",
       "link_pattern": "/portfolios/[a-z0-9-]+/?$",
       "origin_hint": "blog_blueprint",
-      "strategy_types": ["taa", "rotation", "etf", "momentum"],
+      "strategy_types": [
+        "taa",
+        "rotation",
+        "etf",
+        "momentum"
+      ],
       "notes": "Per-strategy portfolio pages with full numeric rules + author backtests; clean extension-less URLs (/portfolios/<slug>/). Static-HTML index verified 2026-06-16 (3 strategy cards on the static page; anchor text 'Learn More'). link_pattern excludes the bare /portfolios/ index + nav/footer + ?x= filter chips."
     },
     {
@@ -43,7 +68,14 @@
       "kind": "html",
       "link_pattern": "/strategies/[a-z0-9-]+/?$",
       "origin_hint": "blog_blueprint",
-      "strategy_types": ["momentum", "mean-reversion", "factor", "carry", "rotation", "etf"],
+      "strategy_types": [
+        "momentum",
+        "mean-reversion",
+        "factor",
+        "carry",
+        "rotation",
+        "etf"
+      ],
       "notes": "Free strategy encyclopedia; /screener server-renders 82 /strategies/<slug> links in static HTML (Next.js, but anchors are in SSR markup) verified 2026-06-16. link_pattern excludes /screener, /blog, /pricing, /_next nav. Per-strategy pages give a free summary + rule sketch (full backtest is paywalled, but the rule description is enough for PaperHunter)."
     }
   ]

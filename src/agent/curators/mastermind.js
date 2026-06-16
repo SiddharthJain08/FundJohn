@@ -263,7 +263,8 @@ class MastermindCurator {
     // Phase-4 paperhunter fan-out).
     const { rows: picks } = await this._query(
       `SELECT cc.candidate_eval_id, cc.paper_id, cc.confidence,
-              cc.implementability_score, cc.predicted_bucket, p.source_url
+              cc.implementability_score, cc.predicted_bucket, p.source_url,
+              p.raw_metadata->>'origin_hint' AS origin_hint
          FROM curated_candidates cc
          JOIN research_corpus p USING (paper_id)
         WHERE cc.run_id = $1
@@ -289,12 +290,17 @@ class MastermindCurator {
       const blended = (row.predicted_bucket === 'implementable_candidate' && row.implementability_score != null)
         ? Math.round(row.confidence * Number(row.implementability_score) * 10)
         : Math.round(row.confidence * 10);
+      // Blueprint Fast Lane: a corpus row tagged origin_hint='blog_blueprint'
+      // (from a seed blueprint feed — TuringTrader/Quantpedia/RSS blogs) becomes
+      // a blog_blueprint candidate so the finisher codes it ahead of academic
+      // papers. Everything else stays 'paper' (unchanged).
+      const origin = row.origin_hint === 'blog_blueprint' ? 'blog_blueprint' : 'paper';
       const { rows: inserted } = await this._query(
-        `INSERT INTO research_candidates (source_url, submitted_by, priority, status)
-         VALUES ($1, 'curator', $2, 'pending')
+        `INSERT INTO research_candidates (source_url, submitted_by, priority, status, origin)
+         VALUES ($1, 'curator', $2, 'pending', $3)
          ON CONFLICT DO NOTHING
          RETURNING candidate_id`,
-        [row.source_url, Math.max(1, blended)]
+        [row.source_url, Math.max(1, blended), origin]
       );
       if (inserted.length) {
         await this._query(
@@ -335,7 +341,7 @@ class MastermindCurator {
 
     const { rows: picks } = await this._query(
       `SELECT cc.candidate_eval_id, cc.paper_id, cc.confidence, cc.predicted_bucket,
-              p.source_url
+              p.source_url, p.raw_metadata->>'origin_hint' AS origin_hint
          FROM curated_candidates cc
          JOIN research_corpus p USING (paper_id)
         WHERE cc.run_id = $1
@@ -351,12 +357,13 @@ class MastermindCurator {
 
     let spotChecked = 0;
     for (const row of picks) {
+      const origin = row.origin_hint === 'blog_blueprint' ? 'blog_blueprint' : 'paper';
       const { rows: inserted } = await this._query(
-        `INSERT INTO research_candidates (source_url, submitted_by, priority, status)
-         VALUES ($1, 'curator_spotcheck', 1, 'pending')
+        `INSERT INTO research_candidates (source_url, submitted_by, priority, status, origin)
+         VALUES ($1, 'curator_spotcheck', 1, 'pending', $2)
          ON CONFLICT DO NOTHING
          RETURNING candidate_id`,
-        [row.source_url]
+        [row.source_url, origin]
       );
       if (inserted.length) {
         await this._query(
