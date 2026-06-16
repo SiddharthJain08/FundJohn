@@ -157,6 +157,42 @@ def latest_stop_submission(conn, ticker: str, position_side: str) -> dict | None
     return dict(row) if row else None
 
 
+def latest_broker_bracket(ticker: str, position_side: str) -> dict | None:
+    """Most-recent terminal bracket order for `ticker` on the side that OPENED
+    `position_side`, with its real take-profit + stop leg prices read back from
+    Alpaca order history. This is the levels the LAST run actually placed —
+    independent of the alpaca_submissions audit row.
+
+    Returns {'entry': None, 'stop': float, 'target': float, 'order_id': str}
+    or None when no bracket with both legs is found."""
+    open_side = 'buy' if position_side == 'long' else 'sell'
+    ok, payload, err = _run_cli(['order', 'list', '--status', 'all',
+                                 '--nested', '--limit', '500'])
+    if not ok:
+        log(f'order history fetch failed ({(err or {}).get("error","unknown")})')
+        return None
+    cands = []
+    for o in (payload or []):
+        if o.get('symbol') != ticker or o.get('side') != open_side:
+            continue
+        if (o.get('order_class') or '') != 'bracket':
+            continue
+        tp = stp = None
+        for leg in (o.get('legs') or []):
+            ltype = (leg.get('type') or leg.get('order_type') or '').lower()
+            if ltype == 'limit' and leg.get('limit_price'):
+                tp = float(leg['limit_price'])
+            elif ltype in ('stop', 'stop_limit') and leg.get('stop_price'):
+                stp = float(leg['stop_price'])
+        if tp and stp:
+            cands.append((o.get('submitted_at') or '', tp, stp, o.get('id') or ''))
+    if not cands:
+        return None
+    cands.sort(key=lambda c: c[0])           # ascending submitted_at
+    _, tp, stp, oid = cands[-1]              # most recent
+    return {'entry': None, 'stop': stp, 'target': tp, 'order_id': oid}
+
+
 def _compute_new_stop(position: dict, submission: dict) -> tuple[float | None, str]:
     """Apply the submission's stop_pct against the position's current
     avg_entry_price so the risk envelope tracks the actual cost basis even
