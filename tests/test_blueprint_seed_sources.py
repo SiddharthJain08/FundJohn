@@ -11,6 +11,7 @@ These guard the contract the Sunday research-ingest run depends on:
 import importlib
 import json
 import os
+import re
 
 import pytest
 
@@ -38,6 +39,27 @@ def test_load_seed_sources_shape():
             'alvarezquanttrading.com'} <= domains
     # Quantocracy is a digest hub — must NOT be a directly-ingested seed.
     assert not any('quantocracy' in d for d in domains)
+
+
+def test_html_pattern_seeds_load_with_link_pattern():
+    """Phase 4: clean-URL HTML seeds (TuringTrader, Quantpedia) load via
+    load_seed_sources() and carry a usable link_pattern + html kind, while the
+    RSS seeds keep loading unchanged."""
+    seeds = es.load_seed_sources()
+    html = [s for s in seeds if s.get('kind') == 'html']
+    assert len(html) >= 2, 'expected at least the TuringTrader + Quantpedia HTML seeds'
+    html_domains = {s['domain'] for s in html}
+    assert {'turingtrader.com', 'quantpedia.com'} <= html_domains
+    for s in html:
+        # link_pattern must be present and a compilable regex.
+        assert s.get('link_pattern'), s
+        re.compile(s['link_pattern'])
+        assert s.get('origin_hint') == 'blog_blueprint', s
+        assert s['feed_url'].startswith('https://'), s
+    # RSS seeds untouched by the HTML additions.
+    rss_domains = {s['domain'] for s in seeds if s.get('kind') == 'rss'}
+    assert {'quantifiedstrategies.com', 'robotwealth.com',
+            'alvarezquanttrading.com'} <= rss_domains
 
 
 def test_kill_switch_env_disables_seeds(monkeypatch):
