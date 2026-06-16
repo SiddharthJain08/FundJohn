@@ -70,8 +70,13 @@ function partitionBlueprintBudget(cands, cap, blueprintShare = BLUEPRINT_TIER_A_
   const papers    = cands.filter(c => !isBp(c));
   const ordered   = [...blueprint, ...papers];
   const reserved  = Math.ceil(cap * blueprintShare);
-  const blueprintCap = Math.min(reserved, blueprint.length);
-  const paperCap     = Math.min(cap - blueprintCap, papers.length);
+  let blueprintCap = Math.min(reserved, blueprint.length);
+  const paperCap   = Math.min(cap - blueprintCap, papers.length);
+  // Symmetric second pass: let blueprint absorb paper's unused slots (paperCap
+  // already absorbs blueprint's). Without this an all-blueprint backlog — the
+  // post-bulk-import state — would drain at only the reserved share (~half cap)
+  // per run instead of the full cap.
+  blueprintCap = Math.min(blueprint.length, cap - paperCap);
   return { ordered, blueprintCap, paperCap };
 }
 
