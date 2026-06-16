@@ -101,13 +101,27 @@ async function main() {
     "hunter_result_json->>'rejection_reason_if_any' IS NULL",
   ];
   const params = [];
-  if (sinceIsoArg && sinceIsoArg !== true) {
+  const explicitSids = (sidsArg && sidsArg !== true);
+  const explicitSince = (sinceIsoArg && sinceIsoArg !== true);
+  const gitGateOn = process.env.OPENCLAW_GIT_INGEST === '1';
+
+  // Recency window. Default 48h so the weekly 2PM finisher picks up THIS
+  // morning's 8AM-ingest rows. EXEMPTION (Phase 2.4): when the git gate is ON,
+  // blueprint-origin rows are exempt from the 48h window so the one-off BULK
+  // import (scripts/bulk_git_ingest.sh — runs days before the next scheduled
+  // finisher, and whose idempotent re-ingest never refreshes submitted_at) is
+  // still drainable. Blueprint volume is bounded by blueprintCap below, so
+  // there's no flood risk. An explicit --since-iso overrides the window entirely.
+  if (explicitSince) {
     params.push(sinceIsoArg);
     filters.push(`submitted_at >= $${params.length}`);
+  } else if (gitGateOn) {
+    filters.push(
+      `(submitted_at > NOW() - INTERVAL '48 hours' OR origin IN ('git_blueprint','blog_blueprint'))`);
   } else {
     filters.push("submitted_at > NOW() - INTERVAL '48 hours'");
   }
-  const explicitSids = (sidsArg && sidsArg !== true);
+
   if (explicitSids) {
     const sids = String(sidsArg).split(',').map(s => s.trim()).filter(Boolean);
     params.push(sids);
@@ -116,15 +130,14 @@ async function main() {
 
   // Blueprint Fast Lane gate (Phase 2.4): when OPENCLAW_GIT_INGEST is OFF, the
   // weekly 2PM coder must NOT auto-drain git_blueprint candidates — the operator
-  // soaks the one-off bulk import (scripts/bulk_git_ingest.sh) before enabling.
-  // The finisher query is otherwise origin-agnostic, so without this filter a
-  // gate-off bulk import would start coding (and, via the partition below,
-  // DISPLACE paper coding) on the next unattended run. Every pre-existing row is
-  // origin='paper' (migration 136 default), so this filter is a true no-op today.
-  // An explicit --strategy-ids invocation bypasses the gate (manual force-code).
+  // soaks the one-off bulk import before enabling. The finisher query is
+  // otherwise origin-agnostic, so without this filter a gate-off bulk import
+  // would start coding (and, via the partition below, DISPLACE paper coding) on
+  // the next unattended run. Every pre-existing row is origin='paper' (migration
+  // 136 default), so this filter is a true no-op today. An explicit
+  // --strategy-ids invocation bypasses the gate (manual force-code).
   // NOTE: this gate is read by TWO units — the 8AM ingest (saturday_brain._gitIngest)
   // and this 2PM finisher — so BOTH service envs must set OPENCLAW_GIT_INGEST=1.
-  const gitGateOn = process.env.OPENCLAW_GIT_INGEST === '1';
   if (!gitGateOn && !explicitSids) {
     filters.push(`origin = 'paper'`);
   }

@@ -460,7 +460,7 @@ async function _code(tierA, opts, runRowState, notify) {
       const { rows } = await _query(
         `SELECT candidate_id::text AS id, origin
            FROM research_candidates
-          WHERE candidate_id::text = ANY($1)`,
+          WHERE candidate_id::text = ANY($1::text[])`,
         [ids]
       );
       for (const r of rows) originById.set(r.id, r.origin);
@@ -901,8 +901,12 @@ async function run(opts = {}) {
     // (origin-agnostic, gate-filtered) candidate query in the SAME weekly run.
     const gitData = await _gitIngest(opts, notify);
     if (gitData.ran) {
+      // The Sonnet extractor runs once per non-skipped file (~$0.50/file);
+      // skipped files (already-ingested source_url) cost nothing.
+      totalCost += (gitData.inserted + gitData.errored) * TIER_A_PER_RUN_USD;
       notify(`git-ingest: +${gitData.inserted} new git_blueprint candidates `
-        + `(${gitData.skipped} already ingested, ${gitData.errored} errored)`);
+        + `(${gitData.skipped} already ingested, ${gitData.errored} errored), `
+        + `~$${((gitData.inserted + gitData.errored) * TIER_A_PER_RUN_USD).toFixed(2)}`);
     }
 
     // ── Ingest/Code split (Sunday 08:00 ET ingest vs 14:00 ET code) ──────────
