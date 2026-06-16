@@ -12,7 +12,11 @@ prior session's TP and resizes the (unlinked) GTC stop after an ext-hours fill.
 Gate: OPENCLAW_AFTERHOURS_TP (default OFF).
 """
 from __future__ import annotations
+import json
 import os
+import subprocess
+import sys
+from datetime import datetime
 
 
 def afterhours_tp_on() -> bool:
@@ -48,3 +52,112 @@ def desired_tps(positions, bracket_lookup, tp_covered=None):
         out.append({'ticker': sym, 'side': exit_side, 'qty': int(qty),
                     'tp': float(tp)})
     return out
+
+
+ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
+
+
+def log(msg: str) -> None:
+    print(f"{datetime.now().strftime('%H:%M:%S')} [AFTERHOURS_TP] {msg}")
+
+
+def _submit_limit(*, ticker, side, qty, limit_price, tif, order_class,
+                  order_type, extended_hours, coid):
+    """Thin wrapper over the executor's CLI submit (kept patchable in tests)."""
+    from execution.alpaca_executor import _submit_order_via_cli
+    return _submit_order_via_cli(
+        ticker=ticker, side=side, qty=qty, tif=tif, order_class=order_class,
+        target=None, stop=None, coid=coid, order_type=order_type,
+        extended_hours=extended_hours, limit_price=limit_price)
+
+
+def _place_plan(plan, dry_run: bool) -> int:
+    if not afterhours_tp_on():
+        log('OPENCLAW_AFTERHOURS_TP!=1 — skipping')
+        return 0
+    n = 0
+    for o in plan:
+        coid = f"ahtp_{o['ticker']}_{int(datetime.utcnow().timestamp())}"
+        if dry_run:
+            log(f"  DRY-RUN {o['ticker']} {o['side'].upper()} LIMIT x{o['qty']} "
+                f"@ {o['tp']:.2f} ext_hours=True")
+            n += 1
+            continue
+        ok, _pay, err = _submit_limit(
+            ticker=o['ticker'], side=o['side'], qty=o['qty'],
+            limit_price=o['tp'], tif='day', order_class='simple',
+            order_type='limit', extended_hours=True, coid=coid)
+        if ok:
+            log(f"  ✔ {o['ticker']} ext-hours TP x{o['qty']} @ {o['tp']:.2f}")
+            n += 1
+        else:
+            log(f"  ✘ {o['ticker']} ext-hours TP failed: {(err or {}).get('error','?')}")
+    return n
+
+
+def _cli(args, timeout=15):
+    from execution.stop_reattach import _run_cli
+    return _run_cli(args, timeout=timeout)
+
+
+def reconcile_afterhours(dry_run: bool) -> dict:
+    """Cancel any resting ext-hours TP we placed (coid prefix 'ahtp_'); if a
+    position's TP filled (the GTC stop now over-covers the held qty), cancel the
+    oversized stop so the next stop_reattach pass re-sizes it. Idempotent."""
+    from execution.stop_reattach import fetch_positions
+    stats = {'tp_canceled': 0, 'stops_resized': 0}
+    ok, orders, _ = _cli(['order', 'list', '--status', 'open'])
+    if not ok:
+        return stats
+    pos_qty = {p['symbol']: abs(float(p.get('qty') or 0))
+               for p in fetch_positions()}
+    for o in (orders or []):
+        if (o.get('client_order_id') or '').startswith('ahtp_'):
+            if dry_run:
+                log(f"  DRY-RUN cancel ext-hours TP {o.get('symbol')} {o.get('id')}")
+            else:
+                _cli(['order', 'cancel', '--order-id', o.get('id')])
+            stats['tp_canceled'] += 1
+    for o in (orders or []):
+        if (o.get('type') or o.get('order_type')) not in ('stop', 'stop_limit'):
+            continue
+        sym = o.get('symbol')
+        try:
+            stop_qty = abs(float(o.get('qty') or 0))
+        except (TypeError, ValueError):
+            stop_qty = 0.0
+        held = pos_qty.get(sym, 0.0)
+        if stop_qty > held + 0.01:
+            log(f"  ⚠ {sym}: stop qty {stop_qty:.0f} > held {held:.0f} "
+                f"(ext-hours TP filled) — cancel+resize")
+            if not dry_run:
+                _cli(['order', 'cancel', '--order-id', o.get('id')])
+            stats['stops_resized'] += 1
+    return stats
+
+
+def main(argv=None) -> int:
+    import argparse
+    from execution.stop_reattach import (fetch_positions, fetch_tp_covered,
+                                         latest_broker_bracket)
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--reconcile', action='store_true',
+                    help='session-boundary reconcile instead of placement')
+    ap.add_argument('--dry-run', action='store_true')
+    args = ap.parse_args(argv)
+    if not afterhours_tp_on():
+        log('OPENCLAW_AFTERHOURS_TP!=1 — skipping')
+        return 0
+    if args.reconcile:
+        log(f'reconcile: {reconcile_afterhours(args.dry_run)}')
+        return 0
+    positions = list(fetch_positions())
+    plan = desired_tps(positions, latest_broker_bracket,
+                       tp_covered=fetch_tp_covered())
+    log(f'placing {len(plan)} ext-hours TP(s)')
+    _place_plan(plan, args.dry_run)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
