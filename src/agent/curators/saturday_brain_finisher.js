@@ -40,6 +40,11 @@ try {
 const dataTierFilter       = require('./data_tier_filter');
 const vaultLinker          = require('./vault_linker');
 const ResearchOrchestrator = require('../research/research-orchestrator');
+// Blueprint Fast Lane (Phase 1.2 activation, Phase 2.4 wiring): the 2PM finisher
+// is the LIVE coder for both paper and git_blueprint candidates. partitionBlueprintBudget
+// orders blueprint-origin candidates first and reserves a slice of the Tier-A
+// coding budget for them; BLUEPRINT_ORIGINS classifies a row's origin.
+const { partitionBlueprintBudget, BLUEPRINT_ORIGINS } = require('./saturday_brain');
 
 function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -102,15 +107,32 @@ async function main() {
   } else {
     filters.push("submitted_at > NOW() - INTERVAL '48 hours'");
   }
-  if (sidsArg && sidsArg !== true) {
+  const explicitSids = (sidsArg && sidsArg !== true);
+  if (explicitSids) {
     const sids = String(sidsArg).split(',').map(s => s.trim()).filter(Boolean);
     params.push(sids);
     filters.push(`hunter_result_json->>'strategy_id' = ANY($${params.length}::text[])`);
   }
 
+  // Blueprint Fast Lane gate (Phase 2.4): when OPENCLAW_GIT_INGEST is OFF, the
+  // weekly 2PM coder must NOT auto-drain git_blueprint candidates — the operator
+  // soaks the one-off bulk import (scripts/bulk_git_ingest.sh) before enabling.
+  // The finisher query is otherwise origin-agnostic, so without this filter a
+  // gate-off bulk import would start coding (and, via the partition below,
+  // DISPLACE paper coding) on the next unattended run. Every pre-existing row is
+  // origin='paper' (migration 136 default), so this filter is a true no-op today.
+  // An explicit --strategy-ids invocation bypasses the gate (manual force-code).
+  // NOTE: this gate is read by TWO units — the 8AM ingest (saturday_brain._gitIngest)
+  // and this 2PM finisher — so BOTH service envs must set OPENCLAW_GIT_INGEST=1.
+  const gitGateOn = process.env.OPENCLAW_GIT_INGEST === '1';
+  if (!gitGateOn && !explicitSids) {
+    filters.push(`origin = 'paper'`);
+  }
+
   const { rows: candidates } = await _query(
     `SELECT candidate_id::text AS candidate_id,
             source_url,
+            origin,
             hunter_result_json
        FROM research_candidates
       WHERE ${filters.join(' AND ')}
@@ -144,6 +166,7 @@ async function main() {
       candidateId: cand.candidate_id,
       hunterResult: cand.hunter_result_json,
       sourceUrl: cand.source_url,
+      origin: cand.origin || 'paper',
       decision,
     });
     if (!dryRun) {
@@ -164,15 +187,27 @@ async function main() {
   }
 
   // Phase 6 — Tier-A synchronous code.
+  // Blueprint Fast Lane: code blueprint-origin candidates FIRST and reserve a
+  // slice (default 50%) of the Tier-A cap for them. partitionBlueprintBudget
+  // orders blueprint→paper and returns per-origin caps; we walk `ordered` with
+  // two counters so blueprint and paper each get their reserved slots and total
+  // attempts stay ≤ cap. A candidate skipped because its origin slice is full is
+  // DEFERRED (no failed++); a slot consumed by a missing-sid row still counts as
+  // an attempt (mirrors the original i<cap accounting).
   const orch = new ResearchOrchestrator();
   const cap = Math.min(tierACap, tiers.A.length);
-  log(`Coding Tier-A: ${cap}/${tiers.A.length}`);
+  const { ordered, blueprintCap, paperCap } = partitionBlueprintBudget(tiers.A, cap);
+  log(`Coding Tier-A: ${cap}/${tiers.A.length} (blueprint=${blueprintCap} paper=${paperCap})`);
   let coded = 0, failed = 0;
+  let bpUsed = 0, pUsed = 0, attempted = 0;
   const tierAStrategies = [];
-  for (let i = 0; i < cap; i++) {
-    const { hunterResult, candidateId } = tiers.A[i];
+  for (const { hunterResult, candidateId, origin } of ordered) {
+    const isBp = BLUEPRINT_ORIGINS.has(origin);
+    if (isBp ? (bpUsed >= blueprintCap) : (pUsed >= paperCap)) continue;  // defer
+    if (isBp) bpUsed++; else pUsed++;
+    attempted++;
     const sid = hunterResult.strategy_id;
-    log(`  code [${i+1}/${cap}] ${sid}`);
+    log(`  code [${attempted}/${cap}] ${sid} (${origin})`);
     try {
       const item = {
         candidate_id: candidateId,

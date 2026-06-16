@@ -348,6 +348,56 @@ async function _hunt(maxFanout, opts, notify, queryFn = _query) {
   return { run: all.length, results, candidateIds: all.map(r => r.candidate_id) };
 }
 
+// ── Phase 4.5: Blueprint Fast Lane git-ingest (GATED, DEFAULT-OFF) ──────────
+// Incrementally clean-room import already-coded strategies from the configured
+// git repos as research_candidates (origin='git_blueprint', status pending,
+// hunter_result_json pre-filled). Runs BEFORE the 8AM-ingest stopAfter return so
+// freshly-inserted git candidates are visible to the 2PM finisher's
+// origin-agnostic candidate query — i.e. they become eligible for coding in the
+// SAME weekly run via the existing queue-drain path (the finisher reloads pending
+// rows directly; no merge into _tier is needed here — see Part 3 notes).
+//
+// GATE: OPENCLAW_GIT_INGEST === '1'. DEFAULT OFF so an unattended Sunday run does
+// NOT auto-import ~61 strategies; the operator flips it on after the one-off bulk
+// import (scripts/bulk_git_ingest.sh) + a soak. The SAME gate also hides git rows
+// from the finisher when OFF (saturday_brain_finisher.js), so gate-off keeps the
+// paper path byte-identical.
+//
+// FAIL-SOFT: any error (config missing, clone failure, extractor failure) is
+// caught and logged — it must NEVER block the weekly run.
+async function _gitIngest(opts, notify) {
+  if (process.env.OPENCLAW_GIT_INGEST !== '1') {
+    return { ran: false, inserted: 0, skipped: 0, errored: 0, reason: 'gate-off' };
+  }
+  if (opts.dryRun) {
+    // saturday-brain dry-run is a no-spend contract; the git extractor would
+    // still call Sonnet per file, so skip it entirely (mirrors _expand).
+    notify('git-ingest: DRY RUN — skipping (extractor would spend)');
+    return { ran: false, inserted: 0, skipped: 0, errored: 0, reason: 'dry-run' };
+  }
+  const totals = { ran: true, inserted: 0, skipped: 0, errored: 0 };
+  try {
+    const { run: gitRun } = require('./git_strategy_ingest');
+    const cfgPath = path.join(OPENCLAW_DIR, 'src/ingestion/git_strategy_sources.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const repos = Array.isArray(cfg.repos) ? cfg.repos : [];
+    notify(`git-ingest: incremental import over ${repos.length} repo(s) (gate ON)`);
+    for (const repo of repos) {
+      try {
+        const res = await gitRun({ dryRun: false, incremental: true, repo });
+        totals.inserted += res.inserted; totals.skipped += res.skipped; totals.errored += res.errored;
+        notify(`  git-ingest: ${repo.name || repo.repo} → +${res.inserted} new, ${res.skipped} skipped, ${res.errored} errored`);
+      } catch (e) {
+        totals.errored += 1;
+        notify(`  git-ingest: ${repo.name || repo.repo} FAILED (non-fatal) — ${e.message}`);
+      }
+    }
+  } catch (e) {
+    notify(`git-ingest: skipped (non-fatal) — ${e.message}`);
+  }
+  return totals;
+}
+
 // ── Phase 5: data-tier the hunter results ───────────────────────────────────
 async function _tier(huntResults, capabilityMap, notify) {
   const tiers = { A: [], B: [], C: [] };
@@ -395,13 +445,47 @@ async function _code(tierA, opts, runRowState, notify) {
     return { coded: 0, failed: 0, strategies: [] };
   }
 
+  // Blueprint Fast Lane (Phase 1.2 activation): attach origin to each Tier-A
+  // element, then code blueprint-origin candidates FIRST with a reserved slice
+  // of the coding budget. _hunt's populations exclude origin='git_blueprint'
+  // (and we don't merge git rows into _tier — the finisher drains them), so in
+  // practice tierA here is all-paper and the partition is a no-op pass-through;
+  // this wiring is defensive/forward-compat. The LIVE blueprint prioritization
+  // runs in saturday_brain_finisher.js (the 2PM coder). One query fetches all
+  // origins; default 'paper' for anything not found.
+  const ids = tierA.map(t => t.candidateId).filter(Boolean);
+  const originById = new Map();
+  if (ids.length) {
+    try {
+      const { rows } = await _query(
+        `SELECT candidate_id::text AS id, origin
+           FROM research_candidates
+          WHERE candidate_id::text = ANY($1)`,
+        [ids]
+      );
+      for (const r of rows) originById.set(r.id, r.origin);
+    } catch (e) {
+      notify(`  code: origin lookup failed (defaulting to 'paper') — ${e.message}`);
+    }
+  }
+  for (const t of tierA) t.origin = originById.get(t.candidateId) || 'paper';
+
+  const { ordered, blueprintCap, paperCap } = partitionBlueprintBudget(tierA, cap);
+  notify(`code: budget split blueprint=${blueprintCap} paper=${paperCap} (of cap ${cap})`);
+
   const strategies = [];
   let coded = 0, failed = 0;
-  for (let i = 0; i < cap; i++) {
-    const { hunterResult, candidateId } = tierA[i];
+  let bpUsed = 0, pUsed = 0;   // per-origin slots consumed (attempts, incl. failures)
+  let attempted = 0;
+  for (const { hunterResult, candidateId, origin } of ordered) {
+    const isBp = BLUEPRINT_ORIGINS.has(origin);
+    // Skip (DEFER, not fail) once this origin's reserved slice is exhausted.
+    if (isBp ? (bpUsed >= blueprintCap) : (pUsed >= paperCap)) continue;
+    if (isBp) bpUsed++; else pUsed++;   // consume an origin slot
+    attempted++;
     const sid = hunterResult.strategy_id || null;
     if (!sid) { failed++; continue; }
-    notify(`  code [${i+1}/${cap}] ${sid}`);
+    notify(`  code [${attempted}/${cap}] ${sid} (${origin})`);
     try {
       // Build the implementation_queue item shape _codeFromQueue expects.
       const item = {
@@ -811,6 +895,16 @@ async function run(opts = {}) {
       cost_usd:         totalCost,
     });
 
+    // Phase 4.5 — Blueprint Fast Lane git-ingest (gated default-OFF, fail-soft).
+    // Runs before the 8AM-ingest stopAfter return so freshly-inserted
+    // origin='git_blueprint' candidates are picked up by the 2PM finisher's
+    // (origin-agnostic, gate-filtered) candidate query in the SAME weekly run.
+    const gitData = await _gitIngest(opts, notify);
+    if (gitData.ran) {
+      notify(`git-ingest: +${gitData.inserted} new git_blueprint candidates `
+        + `(${gitData.skipped} already ingested, ${gitData.errored} errored)`);
+    }
+
     // ── Ingest/Code split (Sunday 08:00 ET ingest vs 14:00 ET code) ──────────
     // An 8AM "ingest" run stops here. Phase 4 (_hunt) has already persisted each
     // candidate's hunter_result_json to research_candidates, so the 2PM "code"
@@ -938,4 +1032,4 @@ async function run(opts = {}) {
   }
 }
 
-module.exports = { run, _hunt, partitionBlueprintBudget, promotionThresholdFor };
+module.exports = { run, _hunt, partitionBlueprintBudget, promotionThresholdFor, BLUEPRINT_ORIGINS };
