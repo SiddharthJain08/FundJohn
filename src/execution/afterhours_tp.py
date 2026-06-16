@@ -15,6 +15,16 @@ from __future__ import annotations
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path as _Path
+
+# Run standalone via systemd (ExecStart=python3 .../afterhours_tp.py): src/ is not
+# on sys.path, so the lazy `from execution.X import` calls below would raise
+# ModuleNotFoundError. Mirror the repo idiom (alpaca_reconcile.py / ic_gate_runner.py):
+# put the repo root and src/ on the path so the `execution` package resolves.
+_ROOT = _Path(__file__).resolve().parents[2]
+for _p in (str(_ROOT), str(_ROOT / 'src')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 
 def afterhours_tp_on() -> bool:

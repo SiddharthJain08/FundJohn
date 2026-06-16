@@ -145,3 +145,17 @@ def test_main_reconcile_only_path_does_not_place(monkeypatch):
     rc = ah.main(['--reconcile', '--dry-run'])
     assert rc == 0
     assert calls == ['reconcile']                      # reconcile-only: no placement
+
+
+def test_module_runs_as_standalone_script():
+    """systemd runs `python3 .../afterhours_tp.py` directly — the lazy
+    `from execution.*` imports must resolve without a caller-provided sys.path
+    (this reproduces the ExecStart invocation that crashed in the 06-16 dry-run)."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[1] / 'src' / 'execution' / 'afterhours_tp.py'
+    r = subprocess.run([_sys.executable, str(script), '--help'],
+                       capture_output=True, text=True)
+    assert 'ModuleNotFoundError' not in r.stderr, r.stderr
+    assert r.returncode == 0, (r.returncode, r.stderr)
