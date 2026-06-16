@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "description": "Git repos of already-coded strategies to clean-room import (Blueprint Fast Lane). We extract the rule (stated in each file's comment block + cited source URL) and re-implement; we never vendor or execute the cloned code.",
+  "repos": [
+    {
+      "name": "awesome-systematic-trading",
+      "repo": "https://github.com/paperswithbacktest/awesome-systematic-trading.git",
+      "branch": "main",
+      "strategies_glob": "static/strategies/*.py",
+      "file_url_template": "https://github.com/paperswithbacktest/awesome-systematic-trading/blob/main/static/strategies/{file}",
+      "kind": "lean"
+    }
+  ]
+}
