@@ -1,9 +1,16 @@
 # Blueprint Fast Lane — Operator Handoff
 
 **Date:** 2026-06-16
-**Branch:** `feat/intraday-regime-15min-prefetch` (live; commits `62e779b`..`b298279`, NOT pushed)
+**Branch:** `feat/intraday-regime-15min-prefetch` (live; pushed to origin through `cd43791`)
 **Spec:** `docs/superpowers/specs/2026-06-16-blueprint-fast-lane-design.md` · **Plan:** `docs/superpowers/plans/2026-06-16-blueprint-fast-lane.md`
-**Status:** BUILT + reviewed (final verdict SHIP_WITH_FOLLOWUPS). Git lane GATED-OFF/inert; blog lane wired (activates on new seed posts). Nothing auto-promotes to live.
+**Status (2026-06-17): ACTIVATED + LIVE.** Reviewed (SHIP_WITH_FOLLOWUPS). Pushed; migrations 136/137 live; **51 git candidates bulk-ingested; gate `OPENCLAW_GIT_INGEST=1` set in `.env`** (read by both Sunday units). Pipeline smoke-verified end-to-end (see below). Blog lane live + prioritized. Nothing auto-promotes to live — all land as candidates/pending_approval.
+
+## Activation done (2026-06-17)
+- **Bulk ingest ran** (as claudebot via systemd-run; root can't run claude-bin's `bypassPermissions`) → **51 `git_blueprint` candidates** in `research_candidates` (origin=git_blueprint, kind=git). Gate-ON dry-run finisher selects all 51, tiered **A=25 / B=11 / C=13**.
+- **Gate flipped:** `OPENCLAW_GIT_INGEST=1` appended to `/root/openclaw/.env:228`. Both `sunday-research-{ingest,code}` units read it via `EnvironmentFile` on next fire — no restart/daemon-reload needed.
+- **End-to-end smoke (2 strategies, claudebot env):** `S_ast_asset_class_trend_following` ported clean-room (cites source, real BaseStrategy, zero QCAlgorithm copy) → validated → registered candidate → **backtest Sharpe 2.17 / Sortino 3.41 / +61.2% / 194 trades**. `S_ast_betting_against_beta_factor_in_stocks` ported+registered but **0 trades** (complex cross-sectional beta — strategy-specific, not a pipeline issue). Both `.py` live in the working tree (untracked, like other in-progress candidates).
+- **Sunday 06-21:** 8AM ingest = incremental no-op (already bulk-ingested); 2PM finisher codes ~`tier-a-cap`(10)/run, blueprint-first → drains the 51 over ~5-6 weeks. Each git backtest ~5-10 min on the 2-core box (within the 4h unit timeout).
+- **To halt:** unset `OPENCLAW_GIT_INGEST` in `.env` (reverts the finisher to `origin <> 'git_blueprint'` and skips the weekly git-ingest).
 
 ## What it does
 Two "blueprint" lanes feed `research_candidates` and reuse the existing Sunday 8AM-ingest (`saturday_brain.js`) / 2PM-code (`saturday_brain_finisher.js`) tier→code→register tail. Blueprint candidates are coded **first** and get a reserved share of the weekly Tier-A coding budget.
