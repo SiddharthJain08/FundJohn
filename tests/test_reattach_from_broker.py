@@ -50,7 +50,7 @@ def test_reattach_uses_broker_target_not_degenerate_db(monkeypatch):
     """WDC replay: DB row target is degenerate (604.79<627.51) but the broker
     bracket's real TP (717.03) is recovered → OCO is placed, not dropped."""
     monkeypatch.setenv('OPENCLAW_REATTACH_FROM_BROKER', '1')
-    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda: {})
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda linked_only=False: {})
     monkeypatch.setattr(sr, 'latest_broker_bracket',
                         lambda t, s: {'entry': None, 'stop': 611.89,
                                       'target': 717.03, 'order_id': 'oid'})
@@ -73,7 +73,7 @@ def test_no_silent_drop_when_target_unavailable(monkeypatch):
     """No broker legs and degenerate DB → place the stop AND record tp_missing;
     NOT a silent bare-stop-only skip."""
     monkeypatch.setenv('OPENCLAW_REATTACH_FROM_BROKER', '1')
-    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda: {})
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda linked_only=False: {})
     monkeypatch.setattr(sr, 'latest_broker_bracket', lambda t, s: None)
     monkeypatch.setattr(sr, 'latest_stop_submission',
                         lambda c, t, s: {'entry_price': 627.51, 'stop_price': 516.11,

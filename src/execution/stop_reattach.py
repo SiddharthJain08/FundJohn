@@ -417,10 +417,19 @@ def submit_protective_oco(*, ticker: str, position_side: str, qty: float,
             'error': em, 'coid': coid}
 
 
-def fetch_tp_covered() -> dict[str, float]:
-    """Map ticker -> qty already covered by a resting LIMIT (take-profit) leg.
-    A position with a resting limit on its exit side already has an OCO/TP, so
-    we skip it (idempotent re-runs)."""
+def fetch_tp_covered(linked_only: bool = False) -> dict[str, float]:
+    """Map ticker -> qty covered by a resting LIMIT (take-profit) leg.
+
+    Two callers, two meanings:
+      - afterhours_tp uses the permissive DEFAULT (count every resting limit) so
+        it doesn't double-place its own ext-hours TPs on re-runs (idempotency).
+      - stop_reattach passes ``linked_only=True``: only the limit leg of an
+        OCO/bracket (order_class in {'oco','bracket'}) counts as coverage,
+        because only a LINKED limit carries a stop leg. A standalone
+        order_class='simple' TP (e.g. afterhours_tp's `ahtp_*` day-TIF limit)
+        gives ZERO downside protection and must NOT mask a missing stop — that
+        conflation left 12 positions naked 2026-06-16→06-18 (the bare 16:05 TP
+        made stop_reattach skip the GTC stop, then the day-TIF TP expired)."""
     ok, payload, err = _run_cli(['order', 'list', '--status', 'open'])
     cov: dict[str, float] = {}
     if not ok:
@@ -428,14 +437,17 @@ def fetch_tp_covered() -> dict[str, float]:
         return cov
     for o in (payload or []):
         otype = o.get('order_type') or o.get('type')
-        if otype == 'limit':
-            try:
-                q = abs(float(o.get('qty') or 0))
-            except (TypeError, ValueError):
-                q = 0.0
-            sym = o.get('symbol')
-            if sym:
-                cov[sym] = cov.get(sym, 0.0) + q
+        if otype != 'limit':
+            continue
+        if linked_only and (o.get('order_class') or 'simple') not in ('oco', 'bracket'):
+            continue
+        try:
+            q = abs(float(o.get('qty') or 0))
+        except (TypeError, ValueError):
+            q = 0.0
+        sym = o.get('symbol')
+        if sym:
+            cov[sym] = cov.get(sym, 0.0) + q
     return cov
 
 
@@ -493,7 +505,7 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
     valid. Idempotent: positions already carrying a resting take-profit are
     skipped. Positions whose target is already reached, or whose stop is
     breached, are left to the bare-stop floor reattach (and operator review)."""
-    tp_cov = fetch_tp_covered()
+    tp_cov = fetch_tp_covered(linked_only=True)
     stats = {'oco': 0, 'already_tp': 0, 'no_sub': 0, 'degenerate': 0,
              'breached': 0, 'reached': 0, 'rejected': 0, 'restored': 0,
              'tp_missing': 0}
@@ -608,10 +620,13 @@ def main():
 
         # Bare-stop floor: ensure every still-uncovered position has a GTC stop.
         # An OCO surfaces as a limit order (its stop leg is linked, not a
-        # top-level stop), so fold take-profit/OCO coverage in — an OCO'd
+        # top-level stop), so fold its LINKED take-profit coverage in — an OCO'd
         # position is already protected on both sides and must be skipped here.
+        # linked_only=True is load-bearing: a bare order_class='simple' TP
+        # (afterhours_tp's `ahtp_*`) gives NO downside protection and must NOT
+        # count as covered, or the position is left naked when that TP expires.
         covered = fetch_active_stops()
-        for _sym_tp, _q_tp in fetch_tp_covered().items():
+        for _sym_tp, _q_tp in fetch_tp_covered(linked_only=True).items():
             covered[_sym_tp] = max(covered.get(_sym_tp, 0.0), _q_tp)
         log(f'active stops/oco cover {len(covered)} symbols (total {sum(covered.values()):.0f} shares)')
         for pos in positions:
