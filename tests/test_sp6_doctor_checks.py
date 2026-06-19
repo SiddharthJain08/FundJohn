@@ -247,13 +247,17 @@ class TestCarriedSetPresent:
 
     def test_gate_off_skips(self, monkeypatch):
         monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
-        result = pipeline._carried_set_present()
+        # Force a trading day so the SKIP comes from the gate-off branch, not
+        # the holiday guard (which runs first and would mask this assertion).
+        with patch('system_checks.checks.pipeline._is_trading_day', return_value=True):
+            result = pipeline._carried_set_present()
         assert result[0] is Status.SKIP
 
     def test_gate_on_zero_rows_warns(self, monkeypatch):
         monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
         pg = _pg_mock(fetchone_return=(0,))
-        with patch('system_checks.checks.pipeline._pg', pg):
+        with patch('system_checks.checks.pipeline._is_trading_day', return_value=True), \
+             patch('system_checks.checks.pipeline._pg', pg):
             result = pipeline._carried_set_present()
         assert result[0] is Status.WARN
         assert '0 COMPUTED/APPROVED' in result[1]
@@ -261,7 +265,8 @@ class TestCarriedSetPresent:
     def test_gate_on_rows_present_passes(self, monkeypatch):
         monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
         pg = _pg_mock(fetchone_return=(7,))
-        with patch('system_checks.checks.pipeline._pg', pg):
+        with patch('system_checks.checks.pipeline._is_trading_day', return_value=True), \
+             patch('system_checks.checks.pipeline._pg', pg):
             result = pipeline._carried_set_present()
         assert result[0] is Status.PASS
         assert '7' in result[1]
@@ -284,7 +289,8 @@ class TestCarriedSetPresent:
         conn_cm.__enter__ = MagicMock(return_value=conn_mock)
         conn_cm.__exit__ = MagicMock(return_value=False)
         pg = MagicMock(return_value=conn_cm)
-        with patch('system_checks.checks.pipeline._pg', pg):
+        with patch('system_checks.checks.pipeline._is_trading_day', return_value=True), \
+             patch('system_checks.checks.pipeline._pg', pg):
             pipeline._carried_set_present()
         sql_called = cur_mock.execute.call_args[0][0]
         assert 'target_date' in sql_called, (

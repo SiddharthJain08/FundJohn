@@ -1568,10 +1568,57 @@ def check_strategy_regime_params_consistency():
     return _warn(name, detail)
 
 
+def _johnbot_alive():
+    """Bus-agnostic liveness for johnbot.service.
+
+    johnbot runs as a systemd USER service under root (/run/user/0), so the
+    system-bus `systemctl is-active johnbot.service` returns 'inactive' even
+    when the bot is healthy — and a duplicate disabled SYSTEM unit makes that
+    answer actively misleading. Treat johnbot as up if ANY of these hold:
+      1. the process is running (`pgrep -f channels/discord/bot.js`) — the
+         simplest robust primary signal, bus-independent;
+      2. system-bus `is-active` reports active;
+      3. user-bus `is-active` reports active.
+    Each probe is exception-safe (the user-bus call errors when the invoking
+    uid has no session D-Bus) so a missing bus never crashes the check.
+
+    Returns (alive: bool, detail: str) where detail describes the path/state.
+    """
+    # 1. process check — primary, bus-independent.
+    try:
+        r = subprocess.run(['pgrep', '-f', 'channels/discord/bot.js'],
+                           capture_output=True, text=True, timeout=2)
+        if r.returncode == 0 and r.stdout.strip():
+            return True, 'process running'
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    # 2. system bus, 3. user bus.
+    sys_state = user_state = 'unknown'
+    for bus_args, label in (([], 'system'), (['--user'], 'user')):
+        try:
+            r = subprocess.run(['systemctl', *bus_args, 'is-active', 'johnbot.service'],
+                               capture_output=True, text=True, timeout=2)
+            state = r.stdout.strip()
+            if label == 'system':
+                sys_state = state
+            else:
+                user_state = state
+            if state == 'active':
+                return True, f'{label}-bus active'
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+    return False, f'no process; system={sys_state} user={user_state}'
+
+
 @_check('systemd_services', slow=True)
 def check_systemd_services():
     """Each expected unit must be `active` per `systemctl is-active`. Skips
-    cleanly if `systemctl` not available (e.g. running in a container)."""
+    cleanly if `systemctl` not available (e.g. running in a container).
+
+    johnbot.service is special-cased (see _johnbot_alive): it runs on the
+    USER bus, so its liveness is judged by process + either bus rather than
+    the system-bus `is-active` alone. All other services stay on the plain
+    system-bus path."""
     try:
         proc = subprocess.run(['systemctl', '--version'],
                               capture_output=True, text=True, timeout=2)
@@ -1582,6 +1629,11 @@ def check_systemd_services():
 
     inactive = []
     for unit in EXPECTED_SERVICES:
+        if unit == 'johnbot.service':
+            alive, detail = _johnbot_alive()
+            if not alive:
+                inactive.append(f'{unit}=inactive ({detail})')
+            continue
         try:
             r = subprocess.run(['systemctl', 'is-active', unit],
                                capture_output=True, text=True, timeout=2)

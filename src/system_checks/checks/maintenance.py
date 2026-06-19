@@ -1,13 +1,18 @@
 """Maintenance-cycle freshness checks.
 
 Defense-in-depth for the 2026-05-13..18 silent-maintenance incident: a
-SyntaxError in run_maintenance.js killed daily / saturday / saturday-verify
-for 5 days without anyone noticing. With OnFailure notifiers wired (see
-docs/onfailure-dropins/) failures now reach Discord, but a unit that
+SyntaxError in run_maintenance.js killed the daily / weekend maintenance
+runs for 5 days without anyone noticing. With OnFailure notifiers wired
+(see docs/onfailure-dropins/) failures now reach Discord, but a unit that
 *never starts* (timer disabled, masked, paused) would still be invisible.
 
 These checks ask systemd directly: "when did the unit last run, and was
 its last result a success?" If the answer is out of band, escalate.
+
+Unit set note: the weekend-split migration retired the old
+openclaw-botjohn-saturday-{maintenance,verify} units (their timers are now
+disabled). The live maintenance/audit units are the daily one plus the two
+weekend-maintenance-{sat,sun} units, so those are what we watch here.
 """
 from __future__ import annotations
 
@@ -19,12 +24,12 @@ from ..types import Status
 
 
 # Unit → (max age in hours, label). Tuned to give one full cadence of
-# tolerance: daily=26h covers a 2h overrun; saturday=8d covers a missed
-# Saturday plus 1d slack.
+# tolerance: daily=26h covers a 2h overrun; the weekly weekend runs get
+# 8d (8*24h) to cover a missed weekend plus 1d slack.
 MAINT_UNITS = [
-    ('openclaw-botjohn-maintenance.service',          26,  'daily 12:00 ET'),
-    ('openclaw-botjohn-saturday-maintenance.service', 8 * 24, 'Sat 16:00 ET'),
-    ('openclaw-botjohn-saturday-verify.service',      8 * 24, 'Sun 12:00 ET'),
+    ('openclaw-botjohn-maintenance.service',       26,     'daily 12:00 ET'),
+    ('openclaw-weekend-maintenance-sat.service',   8 * 24, '~Sat 20:00 ET'),
+    ('openclaw-weekend-maintenance-sun.service',   8 * 24, '~Sun 20:00 ET'),
 ]
 
 

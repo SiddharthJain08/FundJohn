@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -16,9 +17,36 @@ ROOT = Path('/root/openclaw')
 LOG_DIR = ROOT / 'logs'
 HANDOFF_DIR = ROOT / 'output' / 'handoffs'
 
+ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
+
 
 def _today() -> str:
     return date.today().isoformat()
+
+
+def _is_trading_day(d: date) -> bool:
+    """True if `d` is an NYSE trading day, per the broker calendar.
+
+    Asks `alpaca calendar --start <d> --end <d>`: a NON-EMPTY JSON array means
+    it's a trading day; `[]` means a holiday/weekend. On any CLI error/timeout
+    (binary missing, non-zero exit, bad JSON) we FALL BACK to a weekday check
+    (Mon-Fri => assume trading day) so the daily-cycle checks still fire on a
+    normal day when the CLI is unavailable. The env (ALPACA_* keys) is
+    inherited from os.environ by subprocess."""
+    iso = d.isoformat()
+    try:
+        r = subprocess.run(
+            [ALPACA_CLI, 'calendar', '--start', iso, '--end', iso],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f'rc={r.returncode}')
+        cal = json.loads(r.stdout)
+        return bool(cal)
+    except (FileNotFoundError, subprocess.TimeoutExpired,
+            json.JSONDecodeError, RuntimeError, OSError):
+        # Fallback: Mon-Fri are trading days, weekends are not.
+        return d.weekday() < 5
 
 
 def _pg():
@@ -28,6 +56,8 @@ def _pg():
 @check(name='pipeline_completed_today', tags=['pipeline'], requires=['fs'])
 def _pipeline_completed_today():
     """Today's orchestrator log shows all steps done — the daily heartbeat."""
+    if not _is_trading_day(date.today()):
+        return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
     today = _today()
     log = LOG_DIR / f'pipeline_orchestrator_{today}.log'
     if not log.exists():
@@ -43,6 +73,8 @@ def _pipeline_completed_today():
 @check(name='signals_persisted_today', tags=['pipeline'], requires=['db'])
 def _signals_persisted_today():
     """execution_signals has rows for today — engine actually ran strategies."""
+    if not _is_trading_day(date.today()):
+        return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
     with _pg() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM execution_signals WHERE signal_date = CURRENT_DATE"
@@ -85,6 +117,8 @@ def _signals_geometry_ordered_today():
 @check(name='handoff_written_today', tags=['pipeline'], requires=['fs'])
 def _handoff_written_today():
     """Sized handoff JSON exists for today; has orders or vetoed list non-empty."""
+    if not _is_trading_day(date.today()):
+        return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
     today = _today()
     sized = HANDOFF_DIR / f'{today}_sized.json'
     if not sized.exists():
@@ -172,6 +206,8 @@ def _carried_set_present():
     """When OPENCLAW_EOD_SIGNAL_REGISTER=1: expect COMPUTED and/or APPROVED
     execution_signals rows for today.  WARN if zero (engine may have hit the
     regime gate or universe was empty).  Gate off → SKIP."""
+    if not _is_trading_day(date.today()):
+        return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
     if os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1':
         return Status.SKIP, 'OPENCLAW_EOD_SIGNAL_REGISTER is OFF'
     with _pg() as conn, conn.cursor() as cur:
