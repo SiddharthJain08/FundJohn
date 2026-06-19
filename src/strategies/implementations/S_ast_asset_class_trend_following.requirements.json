@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_asset_class_trend_following",
+  "required": ["prices"],
+  "optional": []
+}

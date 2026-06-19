@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_investor_attention_market_timing",
+  "required": ["prices", "macro"],
+  "optional": []
+}

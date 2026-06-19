@@ -180,6 +180,47 @@ _IMPL_MAP = {
     'S_bm_divy_market_timing':              ('strategies.implementations.s_bm_divy_market_timing',              'S_bm_divy_market_timing'),
     'S_rd_intensity_intangible_factor':     ('strategies.implementations.s_rd_intensity_intangible_factor',     'S_rd_intensity_intangible_factor'),
     'S_growth_defensive_smooth_score_timing': ('strategies.implementations.s_growth_defensive_smooth_score_timing', 'S_growth_defensive_smooth_score_timing'),
+    # Chen, Tang, Yao & Zhou 2021: PLS composite investor attention index times SPY
+    'S_investor_attention_market_timing': ('strategies.implementations.S_investor_attention_market_timing', 'InvestorAttentionMarketTiming'),
+    # Frazzini & Pedersen 2014: Betting Against Beta — long low-beta decile, short high-beta decile
+    'S_ast_betting_against_beta_factor_in_stocks': ('strategies.implementations.S_ast_betting_against_beta_factor_in_stocks', 'BettingAgainstBetaFactorInStocks'),
+    # Quantpedia: Asset Class Trend Following — 210-day SMA filter across 5-ETF basket
+    'S_ast_asset_class_trend_following': ('strategies.implementations.S_ast_asset_class_trend_following', 'AssetClassTrendFollowing'),
+    # Oxford/blueprint batch — impl files + manifest entries existed but _IMPL_MAP
+    # wiring was never done, so all 30 were unimportable (12 live ones were
+    # "dead live": manifest live, 0 registry rows, 0 signals ever). Wired
+    # 2026-06-19 per operator. Live ones still need registry approval + weights
+    # to actually trade; candidates stay candidate but are now backtestable.
+    'oxf_adaptive_ma':            ('strategies.implementations.oxf_adaptive_ma',            'OxfAdaptiveMa'),
+    'oxf_aroon_breakout':         ('strategies.implementations.oxf_aroon_breakout',         'OxfAroonBreakout'),
+    'oxf_bollinger_momentum':     ('strategies.implementations.oxf_bollinger_momentum',     'OxfBollingerMomentum'),
+    'oxf_bull_oops':              ('strategies.implementations.oxf_bull_oops',              'OxfBullOops'),
+    'oxf_donchian_breakout':      ('strategies.implementations.oxf_donchian_breakout',      'OxfDonchianBreakout'),
+    'oxf_dow_theory':             ('strategies.implementations.oxf_dow_theory',             'OxfDowTheory'),
+    'oxf_dual_momentum_roc':      ('strategies.implementations.oxf_dual_momentum_roc',      'OxfDualMomentumRoc'),
+    'oxf_false_breakout':         ('strategies.implementations.oxf_false_breakout',         'OxfFalseBreakout'),
+    'oxf_frama':                  ('strategies.implementations.oxf_frama',                  'OxfFrama'),
+    'oxf_gap_a':                  ('strategies.implementations.oxf_gap_a',                  'OxfGapA'),
+    'oxf_greatest_swing_value':   ('strategies.implementations.oxf_greatest_swing_value',   'OxfGreatestSwingValue'),
+    'oxf_heikin_ashi':            ('strategies.implementations.oxf_heikin_ashi',            'OxfHeikinAshi'),
+    'oxf_hook':                   ('strategies.implementations.oxf_hook',                   'OxfHook'),
+    'oxf_hull_ma':                ('strategies.implementations.oxf_hull_ma',                'OxfHullMa'),
+    'oxf_keltner':                ('strategies.implementations.oxf_keltner',                'OxfKeltner'),
+    'oxf_linreg_slope':           ('strategies.implementations.oxf_linreg_slope',           'OxfLinregSlope'),
+    'oxf_livermore':              ('strategies.implementations.oxf_livermore',              'OxfLivermore'),
+    'oxf_macd_zero':              ('strategies.implementations.oxf_macd_zero',              'OxfMacdZero'),
+    'oxf_nr7':                    ('strategies.implementations.oxf_nr7',                    'OxfNR7'),
+    'oxf_orbp_momentum':          ('strategies.implementations.oxf_orbp_momentum',          'OxfOrbpMomentum'),
+    'oxf_price_momentum':         ('strategies.implementations.oxf_price_momentum',         'OxfPriceMomentum'),
+    'oxf_ross_hook':              ('strategies.implementations.oxf_ross_hook',              'OxfRossHook'),
+    'oxf_rsi2_meanrev':           ('strategies.implementations.oxf_rsi2_meanrev',           'OxfRsi2Meanrev'),
+    'oxf_sma_filter':             ('strategies.implementations.oxf_sma_filter',             'OxfSmaFilter'),
+    'oxf_smash_day_b':            ('strategies.implementations.oxf_smash_day_b',            'OxfSmashDayB'),
+    'oxf_td_sequential':          ('strategies.implementations.oxf_td_sequential',          'OxfTdSequential'),
+    'oxf_vortex':                 ('strategies.implementations.oxf_vortex',                 'OxfVortex'),
+    'oxf_welles_wilder_breakout': ('strategies.implementations.oxf_welles_wilder_breakout', 'OxfWellesWilderBreakout'),
+    'oxf_wyckoff_meanrev':        ('strategies.implementations.oxf_wyckoff_meanrev',        'OxfWyckoffMeanrev'),
+    'oxf_zero_lag_ma':            ('strategies.implementations.oxf_zero_lag_ma',            'OxfZeroLagMa'),
 }
 
 

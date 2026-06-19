@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-05-30T10:53:44.128209+00:00",
+  "updated_at": "2026-06-17T12:36:39.282933+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -508,9 +508,11 @@
         "description": "12-1m momentum top/bottom quintile filtered by up-market and low realized-vol",
         "eligible_regimes": [
           "LOW_VOL",
+          "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -599,7 +601,11 @@
       "metadata": {
         "canonical_file": "S_vp_macd_index_sensitivity.py",
         "class": "VPMACDIndexSensitivity",
-        "description": "VP-MACD with volume-volatility-intraday-weighted price input and \u03bb-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)"
+        "description": "VP-MACD with volume-volatility-intraday-weighted price input and \u03bb-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -730,7 +736,13 @@
       "metadata": {
         "canonical_file": "s_price_earnings_momentum_drift.py",
         "class": "S_price_earnings_momentum_drift",
-        "description": "Stocks with high past price returns and positive earnings surprises continue to drift upward because the market underreacts gradually to both price and fundamental information, making a composite price+earnings momentum rank persistently profitable."
+        "description": "Stocks with high past price returns and positive earnings surprises continue to drift upward because the market underreacts gradually to both price and fundamental information, making a composite price+earnings momentum rank persistently profitable.",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -969,7 +981,8 @@
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
         "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation",
-        "regime_agnostic_sharpe": true
+        "regime_agnostic_sharpe": true,
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [],
       "instrument_class": "equity"
@@ -980,7 +993,8 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility"
+        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -1095,7 +1109,8 @@
       "metadata": {
         "canonical_file": "shv7_iv_crush_fade.py",
         "class": "IVCrushFade",
-        "description": "IV Crush Fade  sell vol after peak iv_rank declines (Stein 1989)"
+        "description": "IV Crush Fade  sell vol after peak iv_rank declines (Stein 1989)",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -1128,7 +1143,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -1442,7 +1458,6 @@
         "description": "Vega*OI-weighted IV surface centroid tilt signal (Carr & Wu 2009 JFE)",
         "eligible_regimes": [
           "LOW_VOL",
-          "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
         ]
@@ -1544,10 +1559,10 @@
         "class": "MarkovFrontierRegimes",
         "description": "Monthly Markov frontier: cluster EF parabola coefficients, regime-weighted tangency E[w]",
         "eligible_regimes": [
-          "LOW_VOL",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -1641,10 +1656,10 @@
         "description": "Rank by momentum-proxy LightGBM scores; long top-decile, short bottom-decile; epistemic uncertainty gate",
         "eligible_regimes": [
           "LOW_VOL",
-          "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -1735,7 +1750,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -1789,6 +1805,7 @@
         "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime",
         "eligible_regimes": [
           "LOW_VOL",
+          "HIGH_VOL",
           "CRISIS"
         ]
       },
@@ -1846,7 +1863,6 @@
         "class": "RobustMinimumVarianceHedge",
         "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers",
         "eligible_regimes": [
-          "HIGH_VOL",
           "CRISIS"
         ]
       },
@@ -1997,11 +2013,11 @@
         "class": "BarbellTrendHorizon",
         "description": "Multi-horizon momentum barbell with adaptive Bayesian horizon weights: LONG top-decile, SHORT bottom-decile",
         "eligible_regimes": [
-          "LOW_VOL",
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -2104,7 +2120,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -2136,7 +2153,8 @@
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [],
       "instrument_class": "equity"
@@ -3016,7 +3034,6 @@
         "class": "CrossSectionalPriceMomentum",
         "description": "J&T cross-sectional momentum \u2014 LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)",
         "eligible_regimes": [
-          "LOW_VOL",
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
@@ -3189,7 +3206,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -3273,7 +3291,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -3596,7 +3615,13 @@
       "metadata": {
         "canonical_file": "S_macro_risk_momentum_ip_beta.py",
         "class": "MacroRiskMomentumIPBeta",
-        "description": "Momentum winners carry higher IP-growth beta; long top decile, short bottom decile (Liu & Zhang 2008)"
+        "description": "Momentum winners carry higher IP-growth beta; long top decile, short bottom decile (Liu & Zhang 2008)",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -3758,7 +3783,11 @@
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
         "class": "PairsTradingMinDistance",
-        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing."
+        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing.",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -3794,7 +3823,11 @@
       "metadata": {
         "canonical_file": "S_pca_etf_stat_arb_reversion.py",
         "class": "PCAETFStatArbReversion",
-        "description": "Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals."
+        "description": "Idiosyncratic OU residuals from PCA factor regression; contrarian s-score signals.",
+        "eligible_regimes": [
+          "CRISIS"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -3833,7 +3866,13 @@
       "metadata": {
         "canonical_file": "S_btc_gold_dual_momentum_rotation.py",
         "class": "BtcGoldDualMomentumRotation",
-        "description": "Rotate into the stronger store-of-value asset (IBIT or GLD) via composite 4/8/12-week dual momentum; go flat if both absolute momentum signals are negative."
+        "description": "Rotate into the stronger store-of-value asset (IBIT or GLD) via composite 4/8/12-week dual momentum; go flat if both absolute momentum signals are negative.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -4019,7 +4058,8 @@
           "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -4049,6 +4089,7 @@
         "class": "VisibilityGraphRSI",
         "description": "Backward-visibility graph RSI oscillator: LONG on oversold cross-up (VGRSI<30\u2192>30), SHORT on overbought cross-down (VGRSI>70\u2192<70).",
         "eligible_regimes": [
+          "TRANSITIONING",
           "HIGH_VOL",
           "CRISIS"
         ]
@@ -4631,7 +4672,11 @@
       "metadata": {
         "canonical_file": "S_growth_inflation_sector_timing.py",
         "class": "GrowthInflationSectorTiming",
-        "description": "Rotate into one sector ETF based on growth\u00d7inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength."
+        "description": "Rotate into one sector ETF based on growth\u00d7inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength.",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
       "history": [
         {
@@ -5052,7 +5097,8 @@
           "LOW_VOL",
           "HIGH_VOL",
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5117,7 +5163,12 @@
       "metadata": {
         "canonical_file": "s_idiosyncratic_vol_puzzle.py",
         "class": "S_idiosyncratic_vol_puzzle",
-        "description": "Stocks with high idiosyncratic volatility \u2014 measured as the std-dev of daily Fama-French three-factor residuals over the prior month \u2014 earn anomalously low subsequent returns that cannot be explained by size, book-to-market, momentum, or liquidity, enabling a long low-IVOL / shor"
+        "description": "Stocks with high idiosyncratic volatility \u2014 measured as the std-dev of daily Fama-French three-factor residuals over the prior month \u2014 earn anomalously low subsequent returns that cannot be explained by size, book-to-market, momentum, or liquidity, enabling a long low-IVOL / shor",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -5177,14 +5228,38 @@
       "instrument_class": "equity"
     },
     "S_commodity_etp_momentum": {
-      "state": "candidate",
-      "state_since": "2026-05-26T05:17:17.806232+00:00",
+      "state": "live",
+      "state_since": "2026-06-04T04:22:23.056Z",
       "metadata": {
         "canonical_file": "S_commodity_etp_momentum.py",
         "class": "CommodityEtpMomentum",
-        "description": "90-day total-return momentum rotator across commodity ETPs (GLD / SLV / USO); always long the single strongest name; reference implementation for SP-3 instrument_class=etp rails."
+        "description": "90-day total-return momentum rotator across commodity ETPs (GLD / SLV / USO); always long the single strongest name; reference implementation for SP-3 instrument_class=etp rails.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-04T04:22:23.056Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via literature: LOW_VOL,TRANSITIONING,HIGH_VOL]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL"
+            ]
+          }
+        }
+      ],
       "instrument_class": "etp"
     },
     "S_btc_momentum": {
@@ -5196,9 +5271,7 @@
         "description": "90-day momentum on spot BTC-USD; abs-momentum cash gate + 20% vol-target; reference crypto strategy.",
         "eligible_regimes": [
           "LOW_VOL",
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
+          "HIGH_VOL"
         ]
       },
       "history": [
@@ -5240,7 +5313,12 @@
         "description": "Opportunistic insider cluster SHORT \u2014 Cohen-Malloy-Pomorski 2012 classifier",
         "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
         "added": "2026-05-28",
-        "regime_agnostic_sharpe": true
+        "regime_agnostic_sharpe": true,
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ]
       },
       "history": [
         {
@@ -5277,7 +5355,8 @@
         "description": "Cross-sectional momentum corroborated by put-call ratio / IV skew (LONG & SHORT)",
         "instrument_class": "equity",
         "eligible_regimes": [
-          "TRANSITIONING"
+          "TRANSITIONING",
+          "HIGH_VOL"
         ],
         "backtest_results": {
           "regime_scope": "TRANSITIONING-only (live)",
@@ -5320,7 +5399,8 @@
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
-          "HIGH_VOL"
+          "HIGH_VOL",
+          "CRISIS"
         ],
         "backtest_results": {
           "sharpe": 0.996,
@@ -5337,7 +5417,8 @@
             "CRISIS": 0.39
           },
           "caveat": "NEWS-ONLY backtest on backfilled Alpaca/Benzinga news (334k rows, 2022-11-15+, median ~191 tickers/day). Live signal ALSO includes Reddit/StockTwits social sentiment (real-time-only, not reconstructable) so live behavior will differ. Positive Sharpe in every regime; CRISIS (+0.39) untraded per active_in_regimes."
-        }
+        },
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5353,6 +5434,658 @@
         }
       ],
       "instrument_class": "equity"
+    },
+    "S_investor_attention_market_timing": {
+      "state": "candidate",
+      "state_since": "2026-06-15T10:42:23.863655+00:00",
+      "metadata": {
+        "canonical_file": "S_investor_attention_market_timing.py",
+        "class": "InvestorAttentionMarketTiming",
+        "description": "A PLS-composite investor attention index built from price/volume/volatility proxies predicts the equity risk premium in- and out-of-sample by capturing the reversal of temporary attention-driven price pressure, especially in high-variance stocks."
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-06-14T18:00:00.268Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage/computed)",
+                "macro: reachable but not backfilled (providers yfinance)",
+                "returns: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2025-01-26",
+                  "gap_to": "2026-06-14"
+                }
+              ]
+            },
+            "candidate_id": "f8ad63f4-01af-4df1-938e-3161ec374170"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-06-15T10:41:02.856248+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_ast_betting_against_beta_factor_in_stocks": {
+      "state": "candidate",
+      "state_since": "2026-06-16T17:08:57.863252+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_betting_against_beta_factor_in_stocks.py",
+        "class": "BettingAgainstBetaFactorInStocks",
+        "description": "Long lowest-beta decile, short highest-beta decile; both rescaled to beta\u22481 for a zero-beta spread (Frazzini & Pedersen 2014)."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_ast_asset_class_trend_following": {
+      "state": "candidate",
+      "state_since": "2026-06-17T12:36:39.280779+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_asset_class_trend_following.py",
+        "class": "AssetClassTrendFollowing",
+        "description": "Equal-weight ETF basket (SPY/EFA/IEF/VNQ/GSG); hold each only when price > 210-day SMA, otherwise cash. Monthly rebalance.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_adaptive_ma": {
+      "state": "live",
+      "state_since": "2026-06-16T04:55:48.578Z",
+      "metadata": {
+        "canonical_file": "oxf_adaptive_ma.py",
+        "class": "OxfAdaptiveMa",
+        "description": "Kaufman AMA trend with std-dev filter on liquid ETFs (oxfordstrat adaptive-moving-average-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:55:48.578Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_aroon_breakout": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.601933+00:00",
+      "metadata": {
+        "canonical_file": "oxf_aroon_breakout.py",
+        "class": "OxfAroonBreakout",
+        "description": "Aroon up/down breakout on liquid ETFs (oxfordstrat aroon-indicator-breakout-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_bollinger_momentum": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.606280+00:00",
+      "metadata": {
+        "canonical_file": "oxf_bollinger_momentum.py",
+        "class": "OxfBollingerMomentum",
+        "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_bull_oops": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.610426+00:00",
+      "metadata": {
+        "canonical_file": "oxf_bull_oops.py",
+        "class": "OxfBullOops",
+        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_donchian_breakout": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.615350+00:00",
+      "metadata": {
+        "canonical_file": "oxf_donchian_breakout.py",
+        "class": "OxfDonchianBreakout",
+        "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_dow_theory": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.619477+00:00",
+      "metadata": {
+        "canonical_file": "oxf_dow_theory.py",
+        "class": "OxfDowTheory",
+        "description": "Dow-theory swing-pivot breakout on liquid ETFs (oxfordstrat dow-theory-trend). Close breaks the most-recent pivot. Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_dual_momentum_roc": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.624216+00:00",
+      "metadata": {
+        "canonical_file": "oxf_dual_momentum_roc.py",
+        "class": "OxfDualMomentumRoc",
+        "description": "Dual rate-of-change momentum filter (fast = half slow) on liquid ETFs (oxfordstrat dual-momentum-rate-of-change). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_false_breakout": {
+      "state": "live",
+      "state_since": "2026-06-16T04:51:24.892Z",
+      "metadata": {
+        "canonical_file": "oxf_false_breakout.py",
+        "class": "OxfFalseBreakout",
+        "description": "Failed channel-breakout fade on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat false-breakout-1). Buy a failed downside breakout: new N-bar low with the prior N-bar low >=5 bars earlier, then a confirmed recovery pierce on signal-day OHLC; close[t+1] fill. Page-faithful (single channel, drops plan ch2)."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:51:24.892Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: TRANSITIONING,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "TRANSITIONING",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_frama": {
+      "state": "live",
+      "state_since": "2026-06-16T04:54:11.190Z",
+      "metadata": {
+        "canonical_file": "oxf_frama.py",
+        "class": "OxfFrama",
+        "description": "FRAMA (Ehlers) volatility-band breakout on liquid ETFs (oxfordstrat fractal-adaptive-moving-average). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:54:11.190Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_gap_a": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.637863+00:00",
+      "metadata": {
+        "canonical_file": "oxf_gap_a.py",
+        "class": "OxfGapA",
+        "description": "Full-gap continuation in trend direction on liquid ETFs \u2014 confirmed daily-bar adaptation (oxfordstrat gap-pattern). Full gap + Donchian trend filter confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_greatest_swing_value": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.641640+00:00",
+      "metadata": {
+        "canonical_file": "oxf_greatest_swing_value.py",
+        "class": "OxfGreatestSwingValue",
+        "description": "GSV greatest-swing-value volatility breakout with trend filter on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat greatest-swing-value-trend). Buy stop at Open+GSV confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_heikin_ashi": {
+      "state": "live",
+      "state_since": "2026-06-16T04:52:13.838Z",
+      "metadata": {
+        "canonical_file": "oxf_heikin_ashi.py",
+        "class": "OxfHeikinAshi",
+        "description": "Heikin-Ashi single-bar candle reversal on liquid ETFs (oxfordstrat heikin-ashi-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:52:13.838Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_hook": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.650111+00:00",
+      "metadata": {
+        "canonical_file": "oxf_hook.py",
+        "class": "OxfHook",
+        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_hull_ma": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.655071+00:00",
+      "metadata": {
+        "canonical_file": "oxf_hull_ma.py",
+        "class": "OxfHullMa",
+        "description": "Dual Hull-MA trend filter on liquid ETFs (oxfordstrat hull-moving-average). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_keltner": {
+      "state": "live",
+      "state_since": "2026-06-16T04:55:10.848Z",
+      "metadata": {
+        "canonical_file": "oxf_keltner.py",
+        "class": "OxfKeltner",
+        "description": "Keltner-channel breakout on liquid ETFs (oxfordstrat keltner-channels-1; average-range bands, not ATR). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:55:10.848Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_linreg_slope": {
+      "state": "live",
+      "state_since": "2026-06-16T04:54:26.988Z",
+      "metadata": {
+        "canonical_file": "oxf_linreg_slope.py",
+        "class": "OxfLinregSlope",
+        "description": "Dual linear-regression-slope trend filter on liquid ETFs (oxfordstrat linear-regression). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:54:26.988Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_livermore": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.672538+00:00",
+      "metadata": {
+        "canonical_file": "oxf_livermore.py",
+        "class": "OxfLivermore",
+        "description": "Livermore pivotal-point breakout on liquid ETFs (oxfordstrat livermore-system-1). Penetrates 2 most-recent swing pivots by >= noise. Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_macd_zero": {
+      "state": "live",
+      "state_since": "2026-06-16T04:54:40.750Z",
+      "metadata": {
+        "canonical_file": "oxf_macd_zero.py",
+        "class": "OxfMacdZero",
+        "description": "MACD-line zero-cross trend filter on liquid ETFs (oxfordstrat macd-part-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:54:40.750Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_nr7": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.687388+00:00",
+      "metadata": {
+        "canonical_file": "oxf_nr7.py",
+        "class": "OxfNR7",
+        "description": "NR7 narrow-range breakout on liquid ETFs \u2014 daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_orbp_momentum": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.696146+00:00",
+      "metadata": {
+        "canonical_file": "oxf_orbp_momentum.py",
+        "class": "OxfOrbpMomentum",
+        "description": "ORBP opening-range-breakout-preference with momentum trend filter on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat orbp-trend). Buy stop at Open+Stretch confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_price_momentum": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.702818+00:00",
+      "metadata": {
+        "canonical_file": "oxf_price_momentum.py",
+        "class": "OxfPriceMomentum",
+        "description": "Dual absolute price-momentum (close minus close-lag) trend filter on liquid ETFs (oxfordstrat price-momentum-model). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_ross_hook": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.711126+00:00",
+      "metadata": {
+        "canonical_file": "oxf_ross_hook.py",
+        "class": "OxfRossHook",
+        "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_rsi2_meanrev": {
+      "state": "live",
+      "state_since": "2026-06-16T04:49:35.122Z",
+      "metadata": {
+        "canonical_file": "oxf_rsi2_meanrev.py",
+        "class": "OxfRsi2Meanrev",
+        "description": "RSI(2) oversold dip-buy inside an SMA(200) uptrend on liquid ETFs, long-only mean-reversion (oxfordstrat relative-strength-index-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:49:35.122Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: TRANSITIONING]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "TRANSITIONING"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_sma_filter": {
+      "state": "live",
+      "state_since": "2026-06-16T04:50:27.125Z",
+      "metadata": {
+        "canonical_file": "oxf_sma_filter.py",
+        "class": "OxfSmaFilter",
+        "description": "Dual simple-MA trend filter on liquid ETFs (oxfordstrat simple-moving-average). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:50:27.125Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_smash_day_b": {
+      "state": "live",
+      "state_since": "2026-06-16T04:50:13.821Z",
+      "metadata": {
+        "canonical_file": "oxf_smash_day_b.py",
+        "class": "OxfSmashDayB",
+        "description": "Smash-day B1 reversal on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat smash-day-pattern-b1). Prior-bar smash setup + trend filter, prior-high pierce confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:50:13.821Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: LOW_VOL,TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_td_sequential": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.745768+00:00",
+      "metadata": {
+        "canonical_file": "oxf_td_sequential.py",
+        "class": "OxfTdSequential",
+        "description": "TD Sequential setup(9) exhaustion + reversal flip on liquid ETFs (oxfordstrat td-sequential-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_vortex": {
+      "state": "live",
+      "state_since": "2026-06-16T04:49:47.076Z",
+      "metadata": {
+        "canonical_file": "oxf_vortex.py",
+        "class": "OxfVortex",
+        "description": "+VI/-VI crossover trend trigger on liquid ETFs (oxfordstrat vortex-indicator-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:49:47.076Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard [regimes via custom: LOW_VOL,TRANSITIONING,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_welles_wilder_breakout": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.775977+00:00",
+      "metadata": {
+        "canonical_file": "oxf_welles_wilder_breakout.py",
+        "class": "OxfWellesWilderBreakout",
+        "description": "Welles Wilder volatility breakout on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_wyckoff_meanrev": {
+      "state": "candidate",
+      "state_since": "2026-06-16T04:24:34.784801+00:00",
+      "metadata": {
+        "canonical_file": "oxf_wyckoff_meanrev.py",
+        "class": "OxfWyckoffMeanrev",
+        "description": "Wyckoff trap mean-reversion on liquid ETFs \u2014 swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "oxf_zero_lag_ma": {
+      "state": "live",
+      "state_since": "2026-06-16T04:52:25.190Z",
+      "metadata": {
+        "canonical_file": "oxf_zero_lag_ma.py",
+        "class": "OxfZeroLagMa",
+        "description": "Zero-Lag MA vs EMA with normalized-error filter on liquid ETFs (oxfordstrat zero-lag-moving-average; fixed-gain adaptation of the gain-optimization loop). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-16T04:52:25.190Z",
+          "actor": "manual:dashboard",
+          "reason": "Manual approve via dashboard (override) [regimes via custom: LOW_VOL,HIGH_VOL,CRISIS]",
+          "metadata": {
+            "override": true,
+            "failed_gates": [],
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "HIGH_VOL",
+              "CRISIS"
+            ]
+          }
+        }
+      ],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {
