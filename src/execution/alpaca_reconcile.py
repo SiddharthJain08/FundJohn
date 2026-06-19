@@ -150,7 +150,12 @@ def fetch_order_status(order_id: str) -> dict | None:
     Returns None for orders still in-flight (new/accepted/held/pending_new) or
     when the CLI call fails — callers leave those rows untouched.
     """
-    proc = subprocess.run([ALPACA_CLI, 'order', 'get', order_id],
+    # The CLI's `order get` requires the id via `--order-id`; a bare
+    # positional arg returns an error JSON with rc=0 and no `status` key,
+    # which makes this function silently return None for every order. (That
+    # latent bug is why the poll-to-terminal pass never upgraded anything and
+    # ext-hours fills accreted at broker_status=NULL — see --sweep-stale.)
+    proc = subprocess.run([ALPACA_CLI, 'order', 'get', '--order-id', order_id],
                           capture_output=True, text=True, timeout=30, check=False)
     if proc.returncode != 0:
         return None
@@ -252,6 +257,43 @@ def cleanup_phantom_signals(conn, dry_run: bool, broker_tickers: set[str]) -> in
     return n_closed
 
 
+def _apply_fill(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
+    """Write a terminal fill/partial record onto an alpaca_submissions row.
+
+    Shared by reconcile()'s first/poll passes and the stale-sweep so the
+    UPDATE SQL lives in exactly one place. Caller owns the commit.
+    """
+    if dry_run:
+        log(f'  DRY: would mark sub={sub_id} ({ticker}) → {rec["status"]} '
+            f'qty={rec["qty"]} avg=${rec["avg_price"]:.2f}')
+        return
+    cur.execute("""
+        UPDATE alpaca_submissions
+        SET broker_status=%s,
+            filled_qty=%s,
+            filled_avg_price=%s,
+            reconciled_at=NOW()
+        WHERE id=%s
+    """, (rec['status'], rec['qty'], rec['avg_price'], sub_id))
+
+
+def _mark_rejected(cur, sub_id, ticker, rec, *, dry_run: bool) -> None:
+    """Mark an alpaca_submissions row rejected_by_broker.
+
+    Shared by reconcile()'s first/poll passes and the stale-sweep. Caller
+    owns the commit.
+    """
+    if dry_run:
+        log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker')
+        return
+    cur.execute("""
+        UPDATE alpaca_submissions
+        SET broker_status='rejected_by_broker',
+            reconciled_at=NOW()
+        WHERE id=%s
+    """, (sub_id,))
+
+
 def reconcile(run_date: str, conn, dry_run: bool = False,
               poll_timeout_s: int = 30, poll_interval_s: int = 3):
     """Update alpaca_submissions rows for `run_date` with broker fill state.
@@ -291,18 +333,7 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
 
     def _apply(sub_id_, ticker_, rec_):
         nonlocal n_filled, n_partial
-        if dry_run:
-            log(f'  DRY: would mark sub={sub_id_} ({ticker_}) → {rec_["status"]} '
-                f'qty={rec_["qty"]} avg=${rec_["avg_price"]:.2f}')
-        else:
-            cur.execute("""
-                UPDATE alpaca_submissions
-                SET broker_status=%s,
-                    filled_qty=%s,
-                    filled_avg_price=%s,
-                    reconciled_at=NOW()
-                WHERE id=%s
-            """, (rec_['status'], rec_['qty'], rec_['avg_price'], sub_id_))
+        _apply_fill(cur, sub_id_, ticker_, rec_, dry_run=dry_run)
         if rec_['status'] == 'filled':
             n_filled += 1
         else:
@@ -321,15 +352,7 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
                 in_flight.append((sub_id, alpaca_order_id, ticker))
                 continue
             if order_rec['status'] == 'rejected':
-                if dry_run:
-                    log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker (order status)')
-                else:
-                    cur.execute("""
-                        UPDATE alpaca_submissions
-                        SET broker_status='rejected_by_broker',
-                            reconciled_at=NOW()
-                        WHERE id=%s
-                    """, (sub_id,))
+                _mark_rejected(cur, sub_id, ticker, order_rec, dry_run=dry_run)
                 n_rejected += 1
                 continue
             rec = order_rec
@@ -358,15 +381,7 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
                     still_pending.append((sub_id, oid, ticker))
                     continue
                 if order_rec['status'] == 'rejected':
-                    if dry_run:
-                        log(f'  DRY: would mark sub={sub_id} ({ticker}) → rejected_by_broker (poll)')
-                    else:
-                        cur.execute("""
-                            UPDATE alpaca_submissions
-                            SET broker_status='rejected_by_broker',
-                                reconciled_at=NOW()
-                            WHERE id=%s
-                        """, (sub_id,))
+                    _mark_rejected(cur, sub_id, ticker, order_rec, dry_run=dry_run)
                     n_rejected += 1
                 else:
                     log(f'  {ticker}: order terminal after poll → {order_rec["status"]}')
@@ -386,6 +401,77 @@ def reconcile(run_date: str, conn, dry_run: bool = False,
     return len(submissions)
 
 
+def sweep_stale(conn, days: int = 5, dry_run: bool = False) -> int:
+    """Re-reconcile alpaca_submissions rows left broker_status=NULL on prior runs.
+
+    The normal reconcile() only scans the current cycle's run_date and polls
+    in-flight orders for ~30s. Ext-hours fills lag Alpaca's activity API by
+    more than that, so those rows are stranded at broker_status=NULL and are
+    never re-examined on a later day even though the broker eventually filled
+    them (2026-06-17 17/19, 2026-06-18 15/17 stuck silently).
+
+    This sweep selects the last `days` of NULL-status submitted orders and
+    re-queries each order's definitive status directly via
+    fetch_order_status() — the same helper reconcile()'s fallback/poll passes
+    use. We deliberately do NOT reuse the date-windowed fetch_fills_for_date()
+    nor the poll-to-terminal loop: both exist to absorb propagation lag on
+    FRESH orders, whereas these rows are days old and the broker has long
+    since reached a terminal state, so one order-get per row is the right,
+    cheaper probe. Updates reuse the shared _apply_fill / _mark_rejected
+    helpers so the write logic is not duplicated.
+
+    Idempotent: the SELECT is scoped to `broker_status IS NULL`, so once a row
+    is reconciled it falls out of the selection and a re-run is a no-op. Rows
+    that are still genuinely in-flight (fetch_order_status → None) are left
+    untouched — a later sweep re-examines them.
+
+    Returns the number of rows updated (or that WOULD be updated in dry-run).
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, alpaca_order_id, ticker, qty, run_date
+          FROM alpaca_submissions
+         WHERE broker_status IS NULL
+           AND alpaca_order_id IS NOT NULL
+           AND run_date >= CURRENT_DATE - (%s || ' days')::interval
+         ORDER BY run_date ASC
+    """, (days,))
+    rows = cur.fetchall()
+    if not rows:
+        log(f'sweep-stale: no NULL-status submitted orders in last {days}d — nothing to do')
+        cur.close()
+        return 0
+
+    log(f'sweep-stale: {len(rows)} NULL-status submitted order(s) in last {days}d'
+        f'{" (DRY-RUN)" if dry_run else ""}')
+    n_filled = n_partial = n_rejected = n_inflight = 0
+    for sub_id, alpaca_order_id, ticker, _qty, run_date in rows:
+        order_rec = fetch_order_status(alpaca_order_id)
+        if order_rec is None:
+            # Still in-flight (or transient CLI failure) — leave it for a later sweep.
+            log(f'  {ticker} (run_date={run_date}): order not terminal/unfetchable — leaving NULL')
+            n_inflight += 1
+            continue
+        if order_rec['status'] == 'rejected':
+            _mark_rejected(cur, sub_id, ticker, order_rec, dry_run=dry_run)
+            n_rejected += 1
+        else:
+            _apply_fill(cur, sub_id, ticker, order_rec, dry_run=dry_run)
+            if order_rec['status'] == 'filled':
+                n_filled += 1
+            else:
+                n_partial += 1
+
+    if not dry_run:
+        conn.commit()
+    cur.close()
+    n_updated = n_filled + n_partial + n_rejected
+    prefix = 'sweep-stale DRY-RUN would update' if dry_run else 'sweep-stale updated'
+    log(f'{prefix} {n_updated}/{len(rows)}: filled={n_filled} partial={n_partial} '
+        f'rejected={n_rejected} still-in-flight={n_inflight}')
+    return n_updated
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=str(date.today()))
@@ -396,12 +482,34 @@ def main():
                          'Set to 0 to disable polling (legacy behavior).')
     ap.add_argument('--poll-interval-s', type=int, default=3,
                     help='Seconds between poll attempts for in-flight orders.')
+    ap.add_argument('--sweep-stale', action='store_true',
+                    help='Additive backfill mode: re-reconcile alpaca_submissions rows '
+                         'left broker_status=NULL on PRIOR runs (ext-hours fills that '
+                         'lagged the activity API past the poll window). Does NOT run '
+                         'the normal current-date reconcile or phantom cleanup.')
+    ap.add_argument('--days', type=int, default=5,
+                    help='With --sweep-stale: how many days back to scan for stale '
+                         'NULL-status submissions (default 5).')
     args = ap.parse_args()
 
     uri = os.environ.get('POSTGRES_URI', '')
     if not uri:
         log('POSTGRES_URI not set — aborting')
         sys.exit(2)   # auth/config error per Tier 3 exit-code discipline
+
+    # ── Stale re-sweep mode (additive; does not run the normal reconcile) ──
+    if args.sweep_stale:
+        log(f'Sweeping stale NULL-status submissions (last {args.days}d)'
+            f'{" (DRY-RUN)" if args.dry_run else ""}')
+        conn = psycopg2.connect(uri)
+        try:
+            sweep_stale(conn, days=args.days, dry_run=args.dry_run)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return
 
     log(f'Reconciling {args.date}{" (DRY-RUN)" if args.dry_run else ""}')
     conn = psycopg2.connect(uri)

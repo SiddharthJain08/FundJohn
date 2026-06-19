@@ -63,6 +63,28 @@ class FakeConn:
         pass
 
 
+# ── fetch_order_status CLI contract ──────────────────────────────────────────
+
+class TestFetchOrderStatusCli(unittest.TestCase):
+    """The Alpaca CLI's `order get` requires `--order-id <id>`; a bare
+    positional arg returns an error JSON (`{"code":0,"error":"--order-id
+    required",...}`) with rc=0 and no `status` key, so fetch_order_status
+    silently returned None for EVERY order. That dead fallback is why the
+    poll-to-terminal pass never upgraded anything and 119 ext-hours fills
+    accreted at broker_status=NULL since 2026-04-21. Assert the flag form."""
+
+    def test_invokes_order_get_with_order_id_flag(self):
+        filled = json.dumps({'id': 'ord-Z', 'status': 'filled',
+                             'filled_qty': '5', 'filled_avg_price': '10.0'})
+        with patch('execution.alpaca_reconcile.subprocess.run',
+                   return_value=_mock_proc(0, filled, '')) as mock_run:
+            rec = ar.fetch_order_status('ord-Z')
+        argv = mock_run.call_args[0][0]
+        self.assertIn('--order-id', argv)
+        self.assertEqual(argv[argv.index('--order-id') + 1], 'ord-Z')
+        self.assertEqual(rec, {'qty': 5.0, 'avg_price': 10.0, 'status': 'filled'})
+
+
 # ── collapse_fills tests ─────────────────────────────────────────────────────
 
 class TestCollapseFills(unittest.TestCase):
