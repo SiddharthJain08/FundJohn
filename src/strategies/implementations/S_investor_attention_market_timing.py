@@ -120,10 +120,17 @@ class InvestorAttentionMarketTiming(BaseStrategy):
             print(f'[debug] {STRATEGY_ID}: signals=0 (regime={regime_state} excluded)', file=sys.stderr)
             return []
 
-        # Require VIX from macro
-        macro = (aux_data or {}).get('macro', {})
-        vix_series = macro.get('VIX')
-        if vix_series is None or vix_series.empty:
+        # VIX level (P3). Prefer the ^VIX column in the price panel (point-in-time,
+        # no per-bar I/O) — the backtest/live panel carries it as a ticker. Fall
+        # back to aux_data macro['VIX'] if a caller wires it that way. (The prior
+        # code read ONLY aux_data['macro']['VIX'], which the loader never
+        # populates → every bar bailed "VIX unavailable" → 0 trades.)
+        vix_series = None
+        if '^VIX' in prices.columns:
+            vix_series = prices['^VIX'].dropna()
+        if vix_series is None or getattr(vix_series, 'empty', True):
+            vix_series = ((aux_data or {}).get('macro', {}) or {}).get('VIX')
+        if vix_series is None or getattr(vix_series, 'empty', True):
             print(f'[debug] {STRATEGY_ID}: signals=0 (VIX unavailable)', file=sys.stderr)
             return []
 
@@ -131,6 +138,15 @@ class InvestorAttentionMarketTiming(BaseStrategy):
         cs_cols = [c for c in prices.columns if c in universe or c == MARKET_PROXY]
         if len(cs_cols) < 10:
             cs_cols = list(prices.columns)
+        # Cap the cross-section to bound memory/compute. Without a universe
+        # resolver the universe is every ticker (~5800) and the proxy build OOMs;
+        # a few hundred names give a stable market-breadth signal. Always keep SPY
+        # and never let ^VIX leak into the equity cross-section.
+        MAX_CS = 600
+        cs_cols = [c for c in cs_cols if c != '^VIX']
+        if len(cs_cols) > MAX_CS:
+            keep = [c for c in cs_cols if c != MARKET_PROXY][:MAX_CS - 1]
+            cs_cols = [MARKET_PROXY] + keep
         prices_cs = prices[cs_cols].dropna(axis=1, how='all')
         if MARKET_PROXY not in prices_cs.columns:
             print(f'[debug] {STRATEGY_ID}: signals=0 (SPY dropped from cs_cols)', file=sys.stderr)
