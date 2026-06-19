@@ -53,3 +53,7 @@ src/agent/config/skill-allowlist.json
 .DS_Store
 .incoming/
 analysis/deep_dip_buy_feasibility/rows.parquet
+
+# local brainstorm cache + timestamped manifest backups (not for VCS)
+.superpowers/
+src/strategies/manifest.json.bak-*
