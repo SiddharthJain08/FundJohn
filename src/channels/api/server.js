@@ -1701,13 +1701,21 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   if (targetStatus) {
     try {
       if (targetStatus === 'approved') {
+        // UPSERT, not UPDATE: a plain UPDATE no-ops when no registry row exists
+        // yet (strategies bulk-imported outside the research mint path — e.g.
+        // the oxf/blueprint batch — never got a pending_approval row), leaving
+        // them manifest-live but unexecutable (engine gates on
+        // strategy_registry.status='approved'). Insert-if-missing guarantees a
+        // promotion to live/monitoring always yields an approved row.
         await dbQuery(
-          `UPDATE strategy_registry
+          `INSERT INTO strategy_registry
+              (id, name, implementation_path, status, approved_by, approved_at, tier, universe, signal_frequency)
+           VALUES ($1, $1, $4, $2, $3, NOW(), 2, ARRAY['SP500'], 'daily')
+           ON CONFLICT (id) DO UPDATE
               SET status      = $2,
-                  approved_by = COALESCE(approved_by, $3),
-                  approved_at = COALESCE(approved_at, NOW())
-            WHERE id = $1`,
-          [sid, targetStatus, actor],
+                  approved_by = COALESCE(strategy_registry.approved_by, $3),
+                  approved_at = COALESCE(strategy_registry.approved_at, NOW())`,
+          [sid, targetStatus, actor, `src/strategies/implementations/${sid}.py`],
         );
       } else {
         await dbQuery(

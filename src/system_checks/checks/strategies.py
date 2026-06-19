@@ -204,6 +204,34 @@ def _live_strategies_have_weights():
     return Status.PASS, f'all {len(active_equity_class)} live/monitoring equity strategies have ≥1 weights row (crypto excluded)'
 
 
+@check(name='live_strategies_registry_approved', tags=['strategies'], requires=['db', 'fs'])
+def _live_strategies_registry_approved():
+    """Every manifest live/monitoring strategy must have a strategy_registry row
+    with status='approved' — that's the gate engine.py's get_approved_strategies
+    uses to decide which strategies actually fire. A strategy can be manifest-live
+    AND in _IMPL_MAP yet have NO registry row (bulk-imported outside the research
+    mint, or a promotion whose registry sync no-op'd before the 2026-06-19
+    UPDATE→UPSERT fix in server.js) → it silently never trades. Companion to
+    manifest_in_registry_impl_map (which only checks _IMPL_MAP membership)."""
+    if not MANIFEST.exists():
+        return Status.SKIP, 'no manifest'
+    m = json.loads(MANIFEST.read_text())
+    active = {
+        sid for sid, e in (m.get('strategies') or {}).items()
+        if e.get('state') in ('live', 'monitoring')
+    }
+    if not active:
+        return Status.SKIP, 'no live/monitoring strategies'
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id FROM strategy_registry WHERE id = ANY(%s) AND status = 'approved'",
+                    (list(active),))
+        approved = {r[0] for r in cur.fetchall()}
+    missing = sorted(active - approved)
+    if missing:
+        return Status.FAIL, f'{len(missing)}/{len(active)} live/monitoring strategies have NO registry-approved row (will not trade): {missing[:5]}'
+    return Status.PASS, f'all {len(active)} live/monitoring strategies are registry-approved'
+
+
 @check(name='live_strategies_have_cadence', tags=['strategies'], requires=['db', 'fs'])
 def _live_strategies_have_cadence():
     """Every is_current strategy_weights_by_regime row must carry cadence_days
