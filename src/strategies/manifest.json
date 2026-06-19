@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-06-17T12:36:39.282933+00:00",
+  "updated_at": "2026-06-19T17:59:00.746772Z",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -5498,8 +5498,8 @@
       "instrument_class": "equity"
     },
     "S_ast_asset_class_trend_following": {
-      "state": "candidate",
-      "state_since": "2026-06-17T12:36:39.280779+00:00",
+      "state": "live",
+      "state_since": "2026-06-19T17:57:11.909Z",
       "metadata": {
         "canonical_file": "S_ast_asset_class_trend_following.py",
         "class": "AssetClassTrendFollowing",
@@ -5510,8 +5510,22 @@
           "HIGH_VOL"
         ]
       },
-      "history": [],
-      "instrument_class": "etp"
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-06-19T17:57:11.909Z",
+          "actor": "operator",
+          "reason": "operator: viable blueprint port (Sharpe 2.17/12.4%DD/194 trades), completing the research run",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "etp",
+      "eligible_regimes": [
+        "LOW_VOL",
+        "TRANSITIONING",
+        "HIGH_VOL"
+      ]
     },
     "oxf_adaptive_ma": {
       "state": "live",
