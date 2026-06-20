@@ -1,5 +1,10 @@
 # Trading-Day Panel Harness Implementation Plan
 
+> **⚠️ SUPERSEDED (2026-06-20):** Phase 1 (Tasks 1-3) is DONE and reused; Phases
+> 2-3 (validate-then-flip the **backtest only**) are replaced by the system-wide
+> plan, because the live engine uses the same union panel. See
+> `docs/superpowers/specs/2026-06-20-system-wide-trading-day-panel-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give equity-class backtests a price panel built on the equity trading calendar (no crypto/forex weekend rows) so wide-frame `pct_change`/`rolling`, row-count windows, and period-start detection are correct — gated, validated, then flipped to default.

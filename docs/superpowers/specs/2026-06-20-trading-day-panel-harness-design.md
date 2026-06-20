@@ -1,7 +1,14 @@
 # Trading-Day Panel Harness — Design
 
+> **⚠️ SUPERSEDED (2026-06-20)** by
+> `2026-06-20-system-wide-trading-day-panel-design.md`. Verification found the
+> panel bug is **system-wide** — the live engine (`engine.py:load_prices`) feeds
+> the same union panel as the backtest, so a backtest-only flip would diverge
+> backtest from live. Phase 1 (the gated backtest helpers) is reused by the
+> successor spec; Phases 2-3 here are replaced. Read the successor.
+
 - **Date:** 2026-06-20
-- **Status:** Approved (design); implementation pending
+- **Status:** SUPERSEDED (Phase 1 implemented + reused; Phases 2-3 replaced)
 - **Author:** BotJohn
 - **Scope:** `src/backtest/unified_backtest.py` (signal-generation price panel only)
 - **Branch:** `feat/intraday-regime-15min-prefetch` (current live branch)
