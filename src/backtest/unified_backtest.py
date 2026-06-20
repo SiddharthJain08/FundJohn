@@ -193,7 +193,22 @@ def _apply_equity_calendar(close_wide: pd.DataFrame) -> pd.DataFrame:
     return close_wide.loc[equity_day.values]
 
 
-def load_prices_panels() -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+def _equity_calendar_enabled() -> bool:
+    """Gate for the equity trading-day panel. Phase 1: default OFF (union
+    panel, byte-identical to legacy). Phase 3 flip: change default to '1'."""
+    return os.environ.get('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '0') == '1'
+
+
+def _calendar_for(instrument_class: str) -> str:
+    """Pick the price-panel calendar for a strategy's instrument class.
+    Equity-like classes get the equity trading calendar when the gate is on;
+    crypto ALWAYS gets the full union calendar (it trades 7 days a week)."""
+    if _equity_calendar_enabled() and instrument_class in ('equity', 'etp', 'option'):
+        return 'equity'
+    return 'union'
+
+
+def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """Load prices.parquet and return:
       - close_wide: date × ticker close panel for strategy.generate_signals
       - bars_by_ticker: {ticker: DataFrame indexed by date with open/high/low/close}
@@ -210,6 +225,8 @@ def load_prices_panels() -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
     close_wide = p.pivot(index='date', columns='ticker', values='close')
     close_wide.index.name = 'date'
+    if calendar == 'equity':
+        close_wide = _apply_equity_calendar(close_wide)
     bars_by_ticker = {t: g.set_index('date')[['open','high','low','close']]
                       for t, g in p.groupby('ticker')}
     return close_wide, bars_by_ticker

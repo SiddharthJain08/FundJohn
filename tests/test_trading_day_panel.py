@@ -80,7 +80,7 @@ class TestLoadPricesPanelsDispatch:
         raw = pd.DataFrame({'ticker': ['AAPL'], 'date': ['2024-01-05'],
                             'open': [1.0], 'high': [1.0], 'low': [1.0], 'close': [1.0]})
         monkeypatch.setattr(ub.pd, 'read_parquet', lambda *a, **k: raw.copy())
-        import pipeline.quarantine_filter as qf
+        import src.pipeline.quarantine_filter as qf
         monkeypatch.setattr(qf, 'filter_quarantined', lambda p, name: p)
 
         ub.load_prices_panels(calendar='union')
@@ -98,7 +98,7 @@ class TestRunBacktestWiring:
             raise RuntimeError('stop-after-load')  # short-circuit the heavy path
 
         monkeypatch.setattr(ub, 'load_prices_panels', fake_load)
-        monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: 'x.py')
+        monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: str(ROOT / 'x.py'))
         monkeypatch.setattr(ub, 'load_strategy_class',
                             lambda fp: type('S', (), {'__name__': 'S', 'active_in_regimes': []}))
         monkeypatch.setenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '1')
@@ -119,7 +119,7 @@ class TestRunBacktestWiring:
             raise RuntimeError('stop-after-load')
 
         monkeypatch.setattr(ub, 'load_prices_panels', fake_load)
-        monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: 'x.py')
+        monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: str(ROOT / 'x.py'))
         monkeypatch.setattr(ub, 'load_strategy_class',
                             lambda fp: type('S', (), {'__name__': 'S', 'active_in_regimes': []}))
         monkeypatch.delenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', raising=False)
