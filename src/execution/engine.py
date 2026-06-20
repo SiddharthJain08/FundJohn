@@ -38,6 +38,7 @@ from strategies.regime_gate import is_eligible
 from strategies.instrument_class import instrument_class_for
 from regime.crypto_regime import load_crypto_regime_state
 from execution import regime_param_override
+from lib.price_panel import apply_equity_calendar, calendar_for
 
 logging.basicConfig(
     level=logging.INFO,
@@ -866,7 +867,8 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
     for strat in strategies:
         try:
             # SP-3.1 Phase C: crypto strategies gate on the CRYPTO regime, not equity.
-            if instrument_class_for(strat.id) == 'crypto':
+            ic = instrument_class_for(strat.id)
+            if ic == 'crypto':
                 if _crypto_regime is None:
                     _crypto_regime = load_crypto_regime_state()
                 strat_regime = _crypto_regime
@@ -890,6 +892,8 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                 strat_universe = _su
             else:
                 strat_prices, strat_aux, strat_universe = prices, aux_data, universe
+            if calendar_for(ic) == 'equity':
+                strat_prices = apply_equity_calendar(strat_prices)
             signals = strat.generate_signals(strat_prices, strat_regime, strat_universe, strat_aux)
             _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
             results[strat.id] = signals or []
