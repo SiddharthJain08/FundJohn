@@ -49,22 +49,22 @@ class TestApplyEquityCalendar:
 
 class TestGateAndDispatch:
     def test_gate_default_off(self, monkeypatch):
-        monkeypatch.delenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', raising=False)
+        monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
         assert ub._equity_calendar_enabled() is False
 
     def test_gate_on_off(self, monkeypatch):
-        monkeypatch.setenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '1')
+        monkeypatch.setenv('OPENCLAW_EQUITY_TRADING_CALENDAR', '1')
         assert ub._equity_calendar_enabled() is True
-        monkeypatch.setenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '0')
+        monkeypatch.setenv('OPENCLAW_EQUITY_TRADING_CALENDAR', '0')
         assert ub._equity_calendar_enabled() is False
 
     def test_calendar_for_gate_off(self, monkeypatch):
-        monkeypatch.delenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', raising=False)
+        monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
         for ic in ('equity', 'etp', 'option', 'crypto'):
             assert ub._calendar_for(ic) == 'union'
 
     def test_calendar_for_gate_on(self, monkeypatch):
-        monkeypatch.setenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '1')
+        monkeypatch.setenv('OPENCLAW_EQUITY_TRADING_CALENDAR', '1')
         assert ub._calendar_for('equity') == 'equity'
         assert ub._calendar_for('etp') == 'equity'
         assert ub._calendar_for('option') == 'equity'
@@ -101,7 +101,7 @@ class TestRunBacktestWiring:
         monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: str(ROOT / 'x.py'))
         monkeypatch.setattr(ub, 'load_strategy_class',
                             lambda fp: type('S', (), {'__name__': 'S', 'active_in_regimes': []}))
-        monkeypatch.setenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '1')
+        monkeypatch.setenv('OPENCLAW_EQUITY_TRADING_CALENDAR', '1')
 
         with pytest.raises(RuntimeError, match='stop-after-load'):
             ub.run_backtest('S_x', instrument_class='equity', commit=False)
@@ -122,7 +122,7 @@ class TestRunBacktestWiring:
         monkeypatch.setattr(ub, 'find_strategy_file', lambda sid: str(ROOT / 'x.py'))
         monkeypatch.setattr(ub, 'load_strategy_class',
                             lambda fp: type('S', (), {'__name__': 'S', 'active_in_regimes': []}))
-        monkeypatch.delenv('OPENCLAW_BACKTEST_EQUITY_CALENDAR', raising=False)
+        monkeypatch.delenv('OPENCLAW_EQUITY_TRADING_CALENDAR', raising=False)
 
         with pytest.raises(RuntimeError, match='stop-after-load'):
             ub.run_backtest('S_x', instrument_class='equity', commit=False)

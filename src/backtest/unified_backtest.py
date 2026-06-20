@@ -172,40 +172,15 @@ def _code_sha(filepath: str) -> str:
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-def _is_equity_ticker(ticker: str) -> bool:
-    """True for cash-equity / ETF tickers; False for indices (^…), crypto
-    (…-USD), futures (…=F) and forex (…=X). Defines the equity trading
-    calendar (rows on which the equity market was open)."""
-    t = str(ticker)
-    return (not t.startswith('^')) and ('-USD' not in t) and ('=F' not in t) and ('=X' not in t)
-
-
-def _apply_equity_calendar(close_wide: pd.DataFrame) -> pd.DataFrame:
-    """Restrict a (date × ticker) close panel to the equity trading calendar:
-    keep only rows with ≥1 non-NaN equity observation. Drops weekend/holiday
-    rows contributed solely by 7-day crypto/forex tickers (which poison
-    wide-frame pct_change/rolling, row-count windows and period-start
-    detection). Rows only — columns are untouched."""
-    eq_cols = [c for c in close_wide.columns if _is_equity_ticker(c)]
-    if not eq_cols:
-        return close_wide
-    equity_day = close_wide[eq_cols].notna().any(axis=1)
-    return close_wide.loc[equity_day.values]
-
-
-def _equity_calendar_enabled() -> bool:
-    """Gate for the equity trading-day panel. Phase 1: default OFF (union
-    panel, byte-identical to legacy). Phase 3 flip: change default to '1'."""
-    return os.environ.get('OPENCLAW_BACKTEST_EQUITY_CALENDAR', '0') == '1'
-
-
-def _calendar_for(instrument_class: str) -> str:
-    """Pick the price-panel calendar for a strategy's instrument class.
-    Equity-like classes get the equity trading calendar when the gate is on;
-    crypto ALWAYS gets the full union calendar (it trades 7 days a week)."""
-    if _equity_calendar_enabled() and instrument_class in ('equity', 'etp', 'option'):
-        return 'equity'
-    return 'union'
+# Equity trading-day calendar — shared with the live engine via lib.price_panel
+# so backtest and live never diverge. Aliased to the historical underscore names
+# used by load_prices_panels() and run_backtest() below.
+from lib.price_panel import (
+    is_equity_ticker as _is_equity_ticker,
+    apply_equity_calendar as _apply_equity_calendar,
+    equity_calendar_enabled as _equity_calendar_enabled,
+    calendar_for as _calendar_for,
+)
 
 
 def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
