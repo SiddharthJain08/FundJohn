@@ -813,7 +813,7 @@ def run_backtest(strategy_id: str, *,
     instance = strategy_cls()
     instance.active_in_regimes = list(CANONICAL_REGIMES)
 
-    close_wide, bars_by_ticker = load_prices_panels()
+    close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class))
     regimes = load_regimes()
     _log(f'prices: {close_wide.shape[0]} dates × {close_wide.shape[1]} tickers; '
          f'regimes: {len(regimes)} days')
