@@ -109,12 +109,20 @@ def floor_pin_probe(clusters, regime_tables, conn, n=50, seed=0,
     """Run generator.generate on up to ``n`` real clusters; report the fraction
     whose ensemble stop multiplier ``a_mult`` pins at the grid floor (a_grid[0]).
 
-    Lazily loads + caches per-regime tables when ``regime_tables`` is None (so
-    the Task-9 standalone invocation works). Logged, not assumed -- decides
+    Lazily loads + caches per-regime tables when ``regime_tables`` is None AND
+    primes its OWN price cache for the probed tickers (so the standalone Task-9
+    invocation works without a prior run()). Logged, not assumed -- decides
     whether per-cluster Monte Carlo is needed.
     """
+    probe_clusters = clusters[:n]
+    if not probe_clusters:
+        return dict(frac_at_floor=float("nan"), evaluated=0, interior_examples=[])
     if regime_tables is None:
-        regime_tables = _load_regime_tables({c.regime for c in clusters[:n] or clusters})
+        regime_tables = _load_regime_tables({c.regime for c in probe_clusters})
+    # prime the probe's own price cache (floor_pin_probe may run before run())
+    _prime_prices({c.ticker for c in probe_clusters},
+                  min(c.day for c in probe_clusters),
+                  max(c.day for c in probe_clusters))
     cfg = e_config(seed=seed, a_grid=a_grid)
     floor = float(a_grid[0])
     at_floor = 0
