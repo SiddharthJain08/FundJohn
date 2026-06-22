@@ -135,6 +135,9 @@ def extract_clusters(conn, window_start="2026-05-04", min_legs=2):
                  where es.entry_price is not null
                    and es.stop_loss is not null
                    and es.target_1 is not null
+                   and es.entry_price <> 'NaN'::numeric
+                   and es.stop_loss <> 'NaN'::numeric
+                   and es.target_1 <> 'NaN'::numeric
                    and upper(es.direction) <> 'FLAT'
                    and coalesce(es.target_date, es.signal_date) >= %s::date
              ) q

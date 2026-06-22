@@ -216,12 +216,20 @@ def _forward_bars(cluster, h_max):
 # --------------------------------------------------------------------------- #
 # main run
 # --------------------------------------------------------------------------- #
-def _policies_for_cluster(cluster, strategies, ctx, ids, regime_tables, atr, cfg):
+def _policies_for_cluster(cluster, strategies, ctx, ids, regime_tables, atr, cfg,
+                          H_max=DEFAULT_H_MAX):
     """Build the four Policy dicts for one cluster (ensemble + 3 baselines).
 
     Returns dict policy_key -> Policy, or None if the ensemble generation fails.
     Baselines consume the pruned-leg cluster view (same eligible legs as the
     ensemble) so all four are scored on the SAME constituents.
+
+    ``H_max`` (the run's shared max-hold cap, design Sec.7) is threaded to ALL
+    THREE baselines so they ride to the SAME horizon as the ensemble -- not a
+    hardcoded 30. The ensemble's native ``T_exit`` is additionally clamped at
+    ``H_max`` so its effective horizon matches even if the forward price slice
+    is later lengthened beyond H_max+1 bars (keeping the comparison apples-to-
+    apples per Sec.7).
     """
     rt = regime_tables[cluster.regime]
     weights = {sid: rt["weights"].get(sid, 0.0) for sid in ids}
@@ -238,7 +246,8 @@ def _policies_for_cluster(cluster, strategies, ctx, ids, regime_tables, atr, cfg
         ens = G.generate(strategies, ctx, cfg)
     except Exception:
         return None
-    h_max = int(DEFAULT_H_MAX)
+    h_max = int(H_max)
+    ens["time_stop_bars"] = min(float(ens["time_stop_bars"]), float(h_max))
     return {
         "ensemble": ens,
         "min_stop_cumulative": B.min_stop_cumulative(pruned, weights, H_max=h_max),
@@ -311,7 +320,8 @@ def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered
                 skip["bad_slice"] += 1
                 continue
 
-            pols = _policies_for_cluster(c, strategies, ctx, ids, regime_tables, atr, cfg)
+            pols = _policies_for_cluster(c, strategies, ctx, ids, regime_tables, atr, cfg,
+                                         H_max=H_max)
             if pols is None:
                 skip["gen_fail"] += 1
                 continue
