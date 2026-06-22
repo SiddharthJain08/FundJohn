@@ -23,7 +23,8 @@ The decision-grade test is **T-DOM (Section 9)**: on our real held-out backtest 
 ### User-chosen (this session)
 1. **Scope:** synthetic reproduction (done) **+ full T-DOM** on our data. **No live wiring.**
 2. **`half_life` proxy:** **signal-autocorrelation half-life (primary)** + **`cadence_days` (sensitivity arm)**. Rationale: `half_life` drives the takes and time-stop (the parts that move); `cadence_days` is the realized holding period *under the incumbent exit policy*, so using it as the sole proxy contaminates T-DOM with the incumbent's behavior (circularity).
-3. **Shorts:** **mirror the generator for shorts**, use all clusters (≈3,979), not long-only.
+3. **Shorts:** **mirror the generator for shorts**, use all clusters (≈3,979), not long-only. Shorts run through the verified **Short-Position Delta v1.0** (`exit_sim_short.py`, deltas D1–D3): D1 direction-aware price mapping (`stop=entry−d·a`, `take=entry+d·b`), D2 per-bar carry on the drift, D3 decay baseline = carry. Reproduced in our env (T-SYM, T-CARRY PASS, match the delta's Section-6 evidence to the digit).
+4. **Short carry (D2/D3):** **tiered assumption + carry=0 sensitivity.** We have no borrow-rate data (only a binary `easy_to_borrow` flag; no div yield), so carry is an explicit *assumption axis*, not a sourced input. Primary arm: flat borrow keyed on `easy_to_borrow` (GC ≈ 0.3%/yr vs HTB ≈ 5%/yr, converted to per-bar) + div estimate from corp-actions if cheap. Sensitivity arm: `carry=0` (shorts → pure mirrors). **The market-dynamics asymmetries A1–A4 (leverage-vol, skew/squeeze, recall, margin) are deferred** — unverified Phase 2, needing data we lack.
 
 ### Forced by data / spec (not optional)
 4. **Bar = 1 trading day; `session_end` dropped.** Our `execution_signals` are daily-EOD, multi-day holds (median 1d, mean 5.8d, max 28d; `signal_date` is a `DATE`). The spec is written intraday; the faithful mapping is non-intraday (`session_bars = None`), so `T_exit = t_star` (edge-exhaustion only).
@@ -45,7 +46,8 @@ The decision-grade test is **T-DOM (Section 9)**: on our real held-out backtest 
 | `confidence` | `daily_weight` (= `effective_sharpe/√cadence_days`) | No numeric confidence field; `daily_weight` is the upstream sizing weight. Spec defaults to `inv(C)@S` anyway; `confidence` only feeds baseline (b) and optional weight mode. |
 | `entry_price` | `execution_signals.entry_price` | Anchor (top-Sharpe constituent for the cluster). |
 | `txn_cost` | round-trip cost in σ units (config; default from a realistic bps assumption × entry / ATR) | Same value across all policies. |
-| `direction` | `execution_signals.direction` → ±1 (LONG/BUY/BUY_VOL=+1) | Mirror geometry for −1. |
+| `direction` | `execution_signals.direction` → ±1 (LONG/BUY/BUY_VOL=+1) | Mirror geometry for −1 via `exit_sim_short` (D1). |
+| `carry_per_bar` (shorts) | tiered on `easy_to_borrow` (`ticker_metadata_snapshots` / `alpaca_tradable_universe`): GC ≈0.3%/yr, HTB ≈5%/yr → per-bar; + div est. (corp-actions, optional) | **Assumption, not sourced.** Same value across all 3 policies on a cluster; also charged in the realized replay (D2). `carry=0` sensitivity arm. |
 
 `win_rate`, `avg_win`, `avg_loss` are declared spec inputs but **not used** by `generate_exit_policy`'s code path — so they are not required for T-DOM (we note this rather than materializing them).
 
@@ -57,16 +59,20 @@ All under the worktree; analysis-only; imports live `src/execution/*` and reads 
 
 ```
 harness/
-  exit_sim.py            # reference generator (verbatim from spec §13) + short-mirror wrapper
-  inputs.py              # cluster extraction + per-strategy input mapping (sharpe, C-slice, sigma, half_life, weights)
+  exit_sim.py            # reference generator (verbatim from spec §13) — longs
+  exit_sim_short.py      # verified short delta D1–D3 (verbatim) — shorts
+  generator.py           # dispatch by direction (long→exit_sim, short→exit_sim_short); normalize diagnostics shape
+  inputs.py              # cluster extraction + per-strategy input mapping (sharpe, C-slice, sigma, half_life, weights, carry)
   half_life.py          # autocorrelation half-life estimator (+ cadence passthrough)
-  baselines.py           # baseline (a) min-stop+cumulative-takes; baseline (b) conf-weighted-ATR-blend; (info) current-live V2
-  replay.py              # daily-bar multi-day first-touch engine (shared by all policies)
+  baselines.py           # baseline (a) min-stop+cumulative-takes; baseline (b) conf-weighted-ATR-blend; (info) current-live V2 — all direction-aware
+  replay.py              # daily-bar multi-day first-touch engine (shared by all policies); charges per-bar carry on shorts
   growth.py              # per-trade R, τ; growth G (spec §4); block-bootstrap CI on ΔG
   prices.py              # sliced daily-OHLC loader (ticker+date filtered; never loads full 728MB panel)
   run_tdom.py            # orchestrator: clusters → 3 policies → replay → G → CI → report (JSON + markdown)
   tests/                 # pytest unit tests per module (TDD)
 ```
+
+The generator dispatches on cluster direction: `+1` → `exit_sim.generate_exit_policy` (long), `−1` → `exit_sim_short.generate_exit_policy` (carry-aware short). `generator.py` normalizes the two diagnostics shapes into one `Policy`. The realized replay charges the same per-bar carry on short positions for every policy, so a policy that exits sooner (shorter τ) genuinely pays less borrow — the only channel by which carry moves ΔG.
 
 **Unit contracts (what each does / inputs / outputs):**
 - `inputs.extract_clusters(window_start) -> [Cluster]` — Cluster = {day, ticker, dir, entry, [Strategy], regime}.
@@ -126,7 +132,7 @@ execution_signals ──extract──> clusters ──map(sharpe,C,σ,half_life,
 
 Build each module test-first. Tests use synthetic fixtures (no DB/network) where possible; DB-touching tests are read-only and tiny.
 
-1. **Reference parity:** `exit_sim.py` reproduces Section-14 numbers (done) + short-mirror produces sign-symmetric levels on a mirrored fixture.
+1. **Reference parity:** `exit_sim.py` reproduces Section-14 numbers (done); `exit_sim_short.py` reproduces T-SYM/T-CARRY (done). `generator.py` dispatch returns the long policy unchanged for `d=+1` and the carry-aware mirror for `d=−1`; with `carry=0` the short policy equals the long mirror (T-SYM at the harness level). Replay charges carry: a short held N bars loses `N·|carry|` more than the same trade at `carry=0`.
 2. **Step 0 floor-pin probe:** run `generate_exit_policy` on ~50 real clusters; assert/measure `a_mult` at the floor. Gates whether MC is needed. **Logged**, not assumed.
 3. **`half_life.autocorr_half_life`:** recovers known half-life from a synthetic AR(1) series within tolerance; bounded output on degenerate input.
 4. **`replay.first_touch_multiday`:** hand-checked fixtures — stop-only, take-only, stop-wins-on-tie, partial-take-then-time-stop, gap-through-level (fill at level, conservative), no-touch→mark-at-cap. **Sanity cross-check:** on trades whose horizon is one session, reproduce `combine_replay.py`'s outcome.
@@ -154,6 +160,7 @@ Adversarial review pass (independent agents) on: the growth/bootstrap math, the 
 - Position sizing (consumed as input).
 - Materializing `win_rate`/`avg_win`/`avg_loss` (unused by the code path).
 - Re-deriving signal generation or the backtest that produced per-strategy stats.
+- Short-delta **Phase 2 (A1–A4)**: leverage-effect asymmetric vol, skew/squeeze jump term, recall hazard, margin-geometry stop cap. Specified in the delta but unverified and data-hungry; future work.
 
 ---
 
@@ -165,12 +172,13 @@ Adversarial review pass (independent agents) on: the growth/bootstrap math, the 
 - **Replay realism:** daily OHLC first-touch can't see intrabar path order (stop-wins-on-tie is the conservative convention, applied uniformly).
 - **Survivorship / regime:** clusters carry their `regime_state`; if sparse we fall back to LOW_VOL, noted per cluster.
 - **Selection:** report deflated-Sharpe-style caution given multiple configs (primary + sensitivity + 3 baselines).
+- **Short carry is fabricated, not sourced.** No borrow-rate/div data exists; the tiered GC/HTB carry is an assumption. At realistic GC scale (~1e-5/bar) the carry effect is negligible and shorts ≈ mirrored longs, so on most easy-to-borrow names the short policy is effectively the long mirror. Carry only bites on genuine HTB names — exactly where A1–A4 (deferred) also matter. State this prominently in the short results; do not present the short verdict as if borrow were measured.
 
 ---
 
 ## 12. Deliverables
 
 1. Tested harness on branch `feat/ensemble-exit-tdom` (analysis-only).
-2. T-DOM result: `ΔG` + 95% block-bootstrap CI for ensemble vs each baseline (primary half_life arm + cadence sensitivity arm), plus informational vs current-live V2.
+2. T-DOM result: `ΔG` + 95% block-bootstrap CI for ensemble vs each baseline, split **long / short / combined**, across arms = {half_life: autocorr | cadence} × {short carry: tiered | 0}, plus informational vs current-live V2.
 3. A markdown report: verdict (does it dominate?), distributions/CIs (not point estimates), floor-pin finding, diagnostics (stopout/take-hit/hold distributions, kappa/fallback rates), and the caveats above.
 4. Recommendation: adopt / reject / inconclusive — with the explicit note that adoption (live wiring) is a separate, out-of-scope, operator-gated step.
