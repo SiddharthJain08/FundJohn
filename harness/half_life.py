@@ -37,13 +37,20 @@ def autocorr_half_life(returns, lo=1.0, hi=252.0):
     return float(min(max(np.log(2.0) / (-np.log(rho)), lo), hi))
 
 
+_SERIES_CACHE = {}   # strategy_id -> np.ndarray; the series is deterministic per
+                     # strategy, so memoizing is correctness-neutral and removes
+                     # the dominant cost (same strategies recur across ~800 clusters).
+
+
 def series_for_strategy(strategy_id, conn):
-    """Daily-aggregated return series for a strategy (read-only).
+    """Daily-aggregated return series for a strategy (read-only, memoized).
 
     Prefers strategy_backtest_trades.pnl_pct (latest run, mean-per-day);
     falls back to signal_pnl.realized_pnl_pct (mean-per-day) if < 8 daily obs.
     Returns an empty float array when neither source has data.
     """
+    if strategy_id in _SERIES_CACHE:
+        return _SERIES_CACHE[strategy_id]
     cur = conn.cursor()
     cur.execute(
         """select entry_date, avg(pnl_pct)
@@ -70,7 +77,9 @@ def series_for_strategy(strategy_id, conn):
             (strategy_id,),
         )
         rows = [float(x[1]) for x in cur.fetchall() if x[1] is not None]
-    return np.array(rows, float)
+    arr = np.array(rows, float)
+    _SERIES_CACHE[strategy_id] = arr
+    return arr
 
 
 def half_life_for(strategy_id, conn, mode, cadence_days):

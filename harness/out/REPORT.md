@@ -1,70 +1,62 @@
-# Ensemble Exit Policy — T-DOM Result
+# Ensemble Exit Policy — T-DOM Result (metric-corrected)
 
 **Date:** 2026-06-22 · **Branch:** `feat/ensemble-exit-tdom` · **Window:** 2026-05-04 → 2026-06-22
 
-## Verdict: ❌ REJECT — the policy does NOT pass T-DOM
+## Verdict: ⚠️ INCONCLUSIVE — no significant difference. Do NOT adopt (no demonstrated edge), but the policy is NOT worse than the baselines.
 
-On our real multi-strategy `execution_signals` clusters, the Ensemble Exit Policy is **significantly worse** than the simplest rejected baseline (min-stop + cumulative-takes) and than the current live method, and is **not better** than the confidence-weighted-ATR baseline. The spec's adoption gate — bootstrap CI lower bound of `ΔG` > 0 vs **both** baselines — is not met on any segment. The result is **robust to the short-carry assumption**.
+On our real multi-strategy clusters, under the **spec-faithful growth metric**, the Ensemble Exit Policy is **statistically indistinguishable** from both rejected baselines and the current live method — every 95% bootstrap CI on `ΔG` straddles 0, with point estimates marginally favoring the ensemble. The spec's adoption gate (CI lower bound > 0 vs **both** baselines) is **not met**, so the policy is not adoption-justified by this test — but the correct reason is "no demonstrated edge," **not** "it underperforms."
 
-This is a decision-grade negative, not a harness artifact: the adversarial-review stage passed (2 findings fixed), 29 unit tests pass, and the mechanism is internally coherent (below).
+> ⚠️ **Correction:** an earlier version of this report concluded "significantly worse / REJECT." That was a **metric artifact** (see below), caught on review. The corrected verdict is inconclusive.
 
-## Method (recap)
+## The metric artifact (why the first pass was wrong)
 
-Per the design doc (`docs/superpowers/specs/2026-06-22-...`) and plan: each cluster of ≥2 same-direction strategies on one underlying gets three exit policies — the spec ensemble (long via `exit_sim.py`, short via `exit_sim_short.py` deltas D1–D3), and the two rejected baselines — plus the current live V2 as an informational comparison. All are scored on the **same** daily-bar multi-day first-touch replay (stop-wins-on-tie, partial takes, time-stop, carry charged on shorts). Growth `G = mean_i[ln(1+φR_i)] / mean_i[τ_i]`, φ=0.5, R in σ units. CI via stationary **block bootstrap by trading day** (2000 resamples).
+The first scoring used `R = pnl/σ` (ATR units) with the spec reference's log clip at `1e-6`. With **49% stop-outs** at the ensemble's **wide, floor-pinned** stops, `R ≈ −2` to `−5` there → `1+φR ≤ 0` → clipped to `ln(1e-6) = −13.8`, a ruin penalty applied hardest to the **widest-stop** policy. Spec §4 actually defines `R` as return on **risk capital** (= the stop distance), where a full stop-out is `R = −1` (`ln 0.5 = −0.69`, never clipped). The σ-shortcut is only valid when stops are ~equal across the compared policies — which they are not.
 
-- Bar = 1 trading day; `session_end` dropped (non-intraday). σ_eff = daily ATR(20).
-- Sample: **800 of 3,924 clusters** (strided to span all 31→28 distinct days — a logged memory/time bound, *not* silent truncation). After eligibility/ATR/slice drops → **413 trades** (skips: 369 few-legs-after-eligibility, 12 bad-slice, 6 no-ATR).
+**Evidence it was an artifact:**
+- `clip_rate(σ)`: ensemble **0.046–0.054** vs baselines **0.000–0.016** (≈5× more) — the ensemble alone trips the clip.
+- `clip_rate(risk-capital)`: **0.000 for every policy** — the correct normalization removes the clipping.
+- Tell: under σ/log the ensemble had the **worst** G despite the **2nd-best per-trade return** — economically incoherent.
 
-## Results
+## Results — growth G by metric (combined, n=413, 28 days)
 
-### Gate arm — autocorr half-life + tiered carry (n=413 trades, 28 days)
+| Metric | ensemble | min-stop | conf-ATR | live-V2 | Note |
+|---|---|---|---|---|---|
+| **risk-capital / log** ✅ | **−0.036** | −0.044 | −0.047 | −0.038 | spec-faithful, bounded → **use this** |
+| σ / log (flawed) | −0.168 | −0.052 | −0.098 | −0.031 | clip artifact penalizes wide stops |
+| σ / mv | −0.072 | −0.042 | −0.062 | −0.055 | σ-based |
+| risk-capital / mv | −0.038 | −7.17 | −0.197 | −41.8 | opposite artifact: variance explodes on tight-stop baselines → unreliable |
 
-| Comparison | G(ensemble) | G(baseline) | ΔG | 95% CI | P(ΔG>0) | Pass |
-|---|---|---|---|---|---|---|
-| vs **min-stop + cumulative** | −0.134 | −0.052 | **−0.082** | [−0.138, −0.019] | 0.3% | ❌ |
-| vs **conf-weighted-ATR** | −0.134 | −0.098 | −0.036 | [−0.093, +0.035] | 15.3% | ❌ |
-| vs current-live V2 *(info)* | −0.134 | −0.031 | −0.103 | [−0.160, −0.037] | 0.2% | ❌ |
+Under the one clean metric (risk-capital / log) the ensemble is the **best point estimate**, but the bootstrap shows the gaps are not significant.
 
-Long (n=246): ΔG vs min-stop −0.086, CI [−0.185, +0.004] (worse, not quite significant alone).
-Short (n=167): ΔG vs min-stop −0.083, CI [−0.158, −0.013] (significantly worse).
+## T-DOM gate — risk-capital / log, 95% day-block bootstrap
 
-### Carry-sensitivity arm — autocorr half-life + carry = 0 (n=413)
-
-| Comparison | ΔG | 95% CI | P(ΔG>0) | Pass |
+| Split | ΔG vs min-stop | ΔG vs conf-ATR | ΔG vs live-V2 (info) | Gate |
 |---|---|---|---|---|
-| vs min-stop + cumulative | −0.093 | [−0.148, −0.033] | 0.1% | ❌ |
-| vs conf-weighted-ATR | −0.047 | [−0.105, +0.023] | 9.3% | ❌ |
-| vs current-live V2 *(info)* | −0.114 | [−0.171, −0.050] | 0.1% | ❌ |
+| Combined (413) | +0.008 [−0.024, +0.044] p=0.67 | +0.011 [−0.012, +0.036] p=0.81 | +0.001 [−0.033, +0.039] | ❌ no strict dominance |
+| Long (246) | +0.008 [−0.041, +0.049] | +0.008 [−0.019, +0.036] | −0.001 [−0.045, +0.040] | ❌ |
+| Short (167) | +0.004 [−0.035, +0.057] | +0.010 [−0.021, +0.055] | +0.000 [−0.037, +0.056] | ❌ |
 
-Carry barely moves the verdict (it only touches shorts, ~mirrors at realistic borrow). Tiered carry makes the ensemble's shorts *slightly less bad* (short ΔG −0.083 vs −0.108), consistent with carry shortening holds — but nowhere near a pass.
+All CIs include 0 → ensemble ≈ baselines ≈ live, everywhere. For contrast, the **flawed** σ/log metric reported ΔG vs min-stop −0.12 [−0.18, −0.05] p=0.002 — the entire "significantly worse" signal lived in the clip.
 
-## Why it loses (mechanism, gate arm per-policy)
+## Why this is plausible (mechanism)
 
-| Policy | mean R (ret/entry) | mean τ (days) | frac of takes filled | stop% / take% / time% |
-|---|---|---|---|---|
-| **ensemble** | +0.0069 | 4.41 | 0.27 | 49 / 27 / 24 |
-| min-stop + cumulative | +0.0035 | 2.46 | 0.35 | 60 / 34 / 6 |
-| conf-weighted-ATR | +0.0022 | 2.66 | 0.37 | 56 / 37 / 7 |
-| current-live V2 | +0.0159 | 3.76 | 0.13 | 66 / 13 / 21 |
-
-The ensemble holds longer behind a wide, floor-pinned stop, and its **decay-derived takes fill only 27%** of the time (they sit far out where real multi-day price rarely reaches), so it gives back more on the 49% that stop out. The baselines use each strategy's **own empirically-calibrated** stop/target levels and exit faster. Note all G are negative — this window was unfavorable to *every* exit policy — but T-DOM is about the **relative** ranking, and the ensemble ranks last/near-last everywhere. Interestingly live-V2 has the best per-trade R (uncapped TP lets winners run) at the cost of variance.
+All policies post negative G in this ~7-week window (it was unfavorable to *every* exit policy). Once the wide-stop penalty is scored correctly (a 2σ stop-out is a −1 on risk capital, not ruin), the ensemble's profile — wider stop, fewer but not catastrophic stop-outs, decay-derived takes — nets out even with the baselines that use each strategy's own calibrated levels. No policy demonstrated an edge over another on this sample.
 
 ## Floor-pin finding (Step 0)
 
-`frac_at_floor ≈ 0.75`, `frac_noiseband_bound ≈ 0.81` (median `a_mult` = 0.5, the grid floor), `frac_at_ceiling ≈ 0.125`. Confirms the spec's own claim: the stop is governed by the noise-band floor (A-5), not a cost-driven interior optimum — so the per-cluster Monte Carlo was largely inert and deterministic levels are a faithful shortcut for ~80% of clusters. (~12.5% hit the grid ceiling — strong, slow-decay ensembles wanting a very wide stop.)
+`frac_at_floor ≈ 0.75`, `frac_noiseband_bound ≈ 0.81` (median `a_mult` = 0.5 grid floor), `frac_at_ceiling ≈ 0.125`. Confirms the spec's claim that the stop is governed by the noise-band floor, not a cost-driven interior optimum — so per-cluster Monte Carlo is largely inert and deterministic levels are faithful. (This is also exactly *why* the σ-clip bit: floor-pinned ≈ wide stops.)
 
-## Caveats (read before acting)
+## Caveats (carry forward)
 
-1. **Short carry is fabricated, not sourced.** We have no borrow-rate/dividend data — only a binary `easy_to_borrow` flag. Tiered carry (GC ~0.3%/yr vs HTB ~5%/yr) is an assumption; at realistic GC scale shorts ≈ mirrored longs. Verdict is robust to it (both carry arms reject), but it is not measured.
-2. **`C` is a Jaccard-co-firing blend with return-correlation**, not pure Jaccard (per `strategy_similarity`). Close to spec intent; kappa>30 fallback fired where ill-conditioned.
-3. **`effective_sharpe` mixes annualized backtest + per-trade live** Sharpe — shared by all policies (doesn't bias ΔG) but inflates absolute `mu0`.
-4. **800/3,924 strided subsample, 413 trades, one ~7-week window**, all-policies-negative regime. The ranking is consistent and CIs exclude 0 for the gate baseline, but this is one window — not a multi-regime, full-sample verdict.
-5. **Selection:** four arms × three baselines compared; treat marginal (conf-ATR) results with deflation caution. The decisive results (vs min-stop, vs live-V2) are far from marginal.
+1. **Metric choice is load-bearing** — the verdict depends on scoring `R` as return on risk capital (spec §4), not σ. Both σ/log (clip) and risk-capital/mv (variance blow-up) are artifact-prone; **risk-capital/log is the only clean form** and is what the verdict rests on.
+2. **Short carry is fabricated** (no borrow data; tiered on `easy_to_borrow`). Verdict is robust to it; at realistic scale shorts ≈ mirrored longs.
+3. `C` is a Jaccard-co-firing **blend with return-correlation**, not pure Jaccard. `effective_sharpe` mixes annualized backtest + per-trade live (shared by all policies → no ΔG bias).
+4. **800/3,924 strided clusters, 413 trades, one ~7-week all-negative window.** This is a single-window null result, not a multi-regime verdict. A larger / multi-regime sample could resolve the (currently insignificant) marginal edge either way.
 
-## Deferred (non-decisive)
+## Recommendation
 
-The **cadence half_life-sensitivity arms** were not completed — the orchestrator's detached recovery process (`harness/finish.py`) was stopped to protect the concurrent calendar sweep and box memory. Given the gate fails by a wide margin, is robust to the carry dimension, and most stops are floor-pinned (half_life mainly shifts the rarely-filled takes + time-stop), the cadence arm is very unlikely to flip REJECT. It can be completed cleanly later with `python3 harness/finish.py` (reduce `mc_paths` first; run in a quiet window).
+**Do not wire the policy live on this evidence** — it shows no demonstrated edge over the far simpler min-stop baseline or the current live method. But it is **not** inferior, so it is not disproven either. If pursued, the next step is a larger, multi-regime backtest (more clusters, more windows) scored under risk-capital/log; absent a positive lower-bound there, the simpler incumbent should stand. Live wiring remains a separate, operator-gated step and is **not** recommended now.
 
 ## Reproducibility
 
-Tested harness (29 unit tests, adversarial review) on branch `feat/ensemble-exit-tdom`. Per-arm JSON in `harness/out/tdom_autocorr_{tiered,zero}.json`, floor-pin in `harness/out/floor_pin.json`. **No live wiring** — that remains a separate, operator-gated step, and on this evidence it should not proceed.
+Tested harness (27 unit tests + adversarial review) on `feat/ensemble-exit-tdom`. Metric variants + clip rates: `harness/out/rescore_autocorr_tiered.json` (via `harness/rescore.py`). Original arm JSON: `harness/out/tdom_autocorr_{tiered,zero}.json` (σ/log — superseded for the verdict). Cadence half_life-sensitivity arms not run (non-decisive; `harness/finish.py`, run in a quiet window).

@@ -283,7 +283,7 @@ def _policies_for_cluster(cluster, strategies, ctx, ids, regime_tables, atr, cfg
 def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered",
         n_clusters=None, txn_cost_sigma=DEFAULT_TXN_COST_SIGMA, H_max=DEFAULT_H_MAX,
         seed=0, conn=None, clusters=None, regime_tables=None, n_boot=2000,
-        sample=None):
+        sample=None, mc_paths=20_000, dump_trades=None):
     """Full T-DOM pipeline for one (half_life_mode, carry_mode) arm.
 
     Returns a dict with per-trade counts, per-policy G, and ΔG+CI of the
@@ -318,7 +318,7 @@ def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered
         win_end = max((c.day for c in clusters), default=window_start)
         _prime_prices({c.ticker for c in clusters}, window_start, win_end)
 
-        cfg = e_config(seed=seed)
+        cfg = e_config(seed=seed, mc_paths=mc_paths)
 
         # per-trade record lists, kept index-aligned across all four policies
         recs = {k: [] for k in POLICY_KEYS}
@@ -365,7 +365,9 @@ def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered
                     ok = False
                     break
                 trades[k] = dict(day=c.day, R_ret=float(o["R"]), tau=float(o["tau"]),
-                                 sigma_ret=float(sigma_ret), exit_kind=o["exit_kind"],
+                                 sigma_ret=float(sigma_ret),
+                                 stop_dist_frac=float(pols[k]["stop_dist"]) / float(c.entry),
+                                 exit_kind=o["exit_kind"],
                                  frac_filled=float(o["frac_filled"]))
             if not ok:
                 skip["gen_fail"] += 1
@@ -376,6 +378,12 @@ def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered
             kept += 1
 
         side = np.array(side, int)
+        if dump_trades:
+            import json as _json
+            with open(dump_trades, "w") as _f:
+                _json.dump(dict(recs=recs, side=side.tolist(),
+                                arm=dict(half_life_mode=half_life_mode, carry_mode=carry_mode)),
+                           _f)
         result = dict(
             arm=dict(half_life_mode=half_life_mode, carry_mode=carry_mode),
             window_start=window_start, H_max=int(H_max),

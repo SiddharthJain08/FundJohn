@@ -1,0 +1,260 @@
+{
+ "arm": {
+  "half_life_mode": "autocorr",
+  "carry_mode": "tiered"
+ },
+ "splits": {
+  "combined": {
+   "n": 413,
+   "G": {
+    "sigma/log": {
+     "ensemble": -0.16765289215210652,
+     "min_stop_cumulative": -0.05196459625321299,
+     "conf_weighted_atr": -0.09772190780169981,
+     "current_live_v2": -0.030812110897713338
+    },
+    "sigma/mv": {
+     "ensemble": -0.07221310742237477,
+     "min_stop_cumulative": -0.04242282866813843,
+     "conf_weighted_atr": -0.061864052508869345,
+     "current_live_v2": -0.055042451916888675
+    },
+    "riskcap/log": {
+     "ensemble": -0.03615115551029881,
+     "min_stop_cumulative": -0.044390176052541176,
+     "conf_weighted_atr": -0.047446745017193814,
+     "current_live_v2": -0.037465263952771846
+    },
+    "riskcap/mv": {
+     "ensemble": -0.03750070372155938,
+     "min_stop_cumulative": -7.170562255020363,
+     "conf_weighted_atr": -0.19662296407238944,
+     "current_live_v2": -41.793358204228696
+    }
+   },
+   "clip_sigma": {
+    "ensemble": 0.04600484261501211,
+    "min_stop_cumulative": 0.002421307506053269,
+    "conf_weighted_atr": 0.009685230024213076,
+    "current_live_v2": 0.002421307506053269
+   },
+   "clip_riskcap": {
+    "ensemble": 0.0,
+    "min_stop_cumulative": 0.0,
+    "conf_weighted_atr": 0.0,
+    "current_live_v2": 0.0
+   },
+   "deltas": {
+    "riskcap/log": {
+     "min_stop_cumulative": {
+      "delta": 0.008239020542242369,
+      "lo": -0.02400488757166947,
+      "hi": 0.043557483397136235,
+      "p_gt0": 0.671
+     },
+     "conf_weighted_atr": {
+      "delta": 0.011295589506895007,
+      "lo": -0.011689821748281433,
+      "hi": 0.03581774584686693,
+      "p_gt0": 0.807
+     },
+     "current_live_v2": {
+      "delta": 0.0013141084424730387,
+      "lo": -0.03255332674874724,
+      "hi": 0.03941909222196883,
+      "p_gt0": 0.536
+     }
+    },
+    "sigma/log": {
+     "min_stop_cumulative": {
+      "delta": -0.11568829589889354,
+      "lo": -0.17567451428146497,
+      "hi": -0.04984954908230178,
+      "p_gt0": 0.002
+     },
+     "conf_weighted_atr": {
+      "delta": -0.0699309843504067,
+      "lo": -0.13557881928036822,
+      "hi": 0.01564016785719948,
+      "p_gt0": 0.045
+     },
+     "current_live_v2": {
+      "delta": -0.1368407812543932,
+      "lo": -0.2042299191151573,
+      "hi": -0.06381835070138991,
+      "p_gt0": 0.0
+     }
+    }
+   },
+   "tdom_pass_riskcap_log": false
+  },
+  "long": {
+   "n": 246,
+   "G": {
+    "sigma/log": {
+     "ensemble": -0.18319418539592233,
+     "min_stop_cumulative": -0.08010956074633464,
+     "conf_weighted_atr": -0.14747589076170556,
+     "current_live_v2": -0.05342697841937523
+    },
+    "sigma/mv": {
+     "ensemble": -0.086276792689057,
+     "min_stop_cumulative": -0.05846055448541807,
+     "conf_weighted_atr": -0.08435954361469834,
+     "current_live_v2": -0.07304074988855465
+    },
+    "riskcap/log": {
+     "ensemble": -0.05187798164231616,
+     "min_stop_cumulative": -0.05947822248636221,
+     "conf_weighted_atr": -0.05945568242628676,
+     "current_live_v2": -0.051092143652136934
+    },
+    "riskcap/mv": {
+     "ensemble": -0.052999609644167694,
+     "min_stop_cumulative": -11.278862402029263,
+     "conf_weighted_atr": -0.12740171245942208,
+     "current_live_v2": -70.03361188361849
+    }
+   },
+   "clip_sigma": {
+    "ensemble": 0.04065040650406504,
+    "min_stop_cumulative": 0.0040650406504065045,
+    "conf_weighted_atr": 0.016260162601626018,
+    "current_live_v2": 0.0040650406504065045
+   },
+   "clip_riskcap": {
+    "ensemble": 0.0,
+    "min_stop_cumulative": 0.0,
+    "conf_weighted_atr": 0.0,
+    "current_live_v2": 0.0
+   },
+   "deltas": {
+    "riskcap/log": {
+     "min_stop_cumulative": {
+      "delta": 0.0076002408440460495,
+      "lo": -0.04134805058514215,
+      "hi": 0.048703141853708956,
+      "p_gt0": 0.639
+     },
+     "conf_weighted_atr": {
+      "delta": 0.0075777007839705965,
+      "lo": -0.01857902379435845,
+      "hi": 0.035851469299326665,
+      "p_gt0": 0.699
+     },
+     "current_live_v2": {
+      "delta": -0.0007858379901792278,
+      "lo": -0.045146398345931996,
+      "hi": 0.039966113337692136,
+      "p_gt0": 0.523
+     }
+    },
+    "sigma/log": {
+     "min_stop_cumulative": {
+      "delta": -0.10308462464958769,
+      "lo": -0.20504239966886764,
+      "hi": -0.007670578221737695,
+      "p_gt0": 0.012
+     },
+     "conf_weighted_atr": {
+      "delta": -0.035718294634216774,
+      "lo": -0.14465901671023004,
+      "hi": 0.07891964151656597,
+      "p_gt0": 0.275
+     },
+     "current_live_v2": {
+      "delta": -0.1297672069765471,
+      "lo": -0.23176519310446125,
+      "hi": -0.0345345959003748,
+      "p_gt0": 0.002
+     }
+    }
+   },
+   "tdom_pass_riskcap_log": false
+  },
+  "short": {
+   "n": 167,
+   "G": {
+    "sigma/log": {
+     "ensemble": -0.1494818148576333,
+     "min_stop_cumulative": -0.00981647208617366,
+     "conf_weighted_atr": -0.014959229124886394,
+     "current_live_v2": 0.0017234296405266507
+    },
+    "sigma/mv": {
+     "ensemble": -0.05532781890061953,
+     "min_stop_cumulative": -0.01727120454751879,
+     "conf_weighted_atr": -0.02219307205859175,
+     "current_live_v2": -0.02801139536228912
+    },
+    "riskcap/log": {
+     "ensemble": -0.01776315080835138,
+     "min_stop_cumulative": -0.021795269077754954,
+     "conf_weighted_atr": -0.027470619109090058,
+     "current_live_v2": -0.017860554951326792
+    },
+    "riskcap/mv": {
+     "ensemble": -0.01900661556986563,
+     "min_stop_cumulative": -1.0104798044567433,
+     "conf_weighted_atr": -0.3076214284502377,
+     "current_live_v2": -1.0521210224374276
+    }
+   },
+   "clip_sigma": {
+    "ensemble": 0.05389221556886228,
+    "min_stop_cumulative": 0.0,
+    "conf_weighted_atr": 0.0,
+    "current_live_v2": 0.0
+   },
+   "clip_riskcap": {
+    "ensemble": 0.0,
+    "min_stop_cumulative": 0.0,
+    "conf_weighted_atr": 0.0,
+    "current_live_v2": 0.0
+   },
+   "deltas": {
+    "riskcap/log": {
+     "min_stop_cumulative": {
+      "delta": 0.004032118269403574,
+      "lo": -0.03503464104090353,
+      "hi": 0.05733034104137464,
+      "p_gt0": 0.616
+     },
+     "conf_weighted_atr": {
+      "delta": 0.009707468300738677,
+      "lo": -0.021056885294173686,
+      "hi": 0.054974409415448545,
+      "p_gt0": 0.725
+     },
+     "current_live_v2": {
+      "delta": 9.740414297541161e-05,
+      "lo": -0.03690501993528816,
+      "hi": 0.05550975376228438,
+      "p_gt0": 0.551
+     }
+    },
+    "sigma/log": {
+     "min_stop_cumulative": {
+      "delta": -0.13966534277145962,
+      "lo": -0.24548957086077658,
+      "hi": -0.048900435505050646,
+      "p_gt0": 0.002
+     },
+     "conf_weighted_atr": {
+      "delta": -0.1345225857327469,
+      "lo": -0.24420868273264834,
+      "hi": -0.03953810757892587,
+      "p_gt0": 0.003
+     },
+     "current_live_v2": {
+      "delta": -0.15120524449815995,
+      "lo": -0.26396343295889046,
+      "hi": -0.05619120358904841,
+      "p_gt0": 0.0
+     }
+    }
+   },
+   "tdom_pass_riskcap_log": false
+  }
+ }
+}
