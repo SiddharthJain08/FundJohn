@@ -23,6 +23,7 @@ def generate(strategies, ctx, config=None):
         direction=d,
         diagnostics=dict(a_mult=diag.get("a_mult"), stopout_prob=diag.get("stopout_prob"),
                          S_comb=diag.get("S_comb"), mu0=diag.get("mu0"),
+                         sigma_eff=diag.get("sigma_eff"),
                          E_tau=diag.get("E_tau"), kappa_C=diag.get("kappa_C"),
                          fallback_used=diag.get("fallback_used"), carry=diag.get("carry", 0.0)),
     )

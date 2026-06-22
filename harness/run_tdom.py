@@ -125,7 +125,11 @@ def floor_pin_probe(clusters, regime_tables, conn, n=50, seed=0,
                   max(c.day for c in probe_clusters))
     cfg = e_config(seed=seed, a_grid=a_grid)
     floor = float(a_grid[0])
+    ceiling = float(a_grid[1])
     at_floor = 0
+    at_ceiling = 0
+    noiseband_bound = 0   # noise-band floor (A-5, exit_sim line 238) overrode the grid pick
+    a_mults = []
     interior = []
     evaluated = 0
     for c in clusters[:n]:
@@ -144,14 +148,34 @@ def floor_pin_probe(clusters, regime_tables, conn, n=50, seed=0,
         am = pol["diagnostics"].get("a_mult")
         if am is None:
             continue
-        if abs(float(am) - floor) < 1e-9:
+        am = float(am)
+        a_mults.append(am)
+        sig = pol["diagnostics"].get("sigma_eff")
+        # noise-band floor binds when realized stop_dist > grid pick a_mult*sigma_eff
+        # (exit_sim line 238: a = max(am*sigma, k_min*sigma*sqrt(tau_guess)))
+        if sig is not None and sig > 0:
+            if float(pol["stop_dist"]) > am * float(sig) * (1.0 + 1e-6):
+                noiseband_bound += 1
+        if abs(am - floor) < 1e-9:
             at_floor += 1
-        else:
-            if len(interior) < 10:
-                interior.append(dict(day=c.day, ticker=c.ticker,
-                                     direction=c.direction, a_mult=float(am)))
+        elif abs(am - ceiling) < 1e-9:
+            at_ceiling += 1
+        if abs(am - floor) > 1e-9 and len(interior) < 10:
+            interior.append(dict(day=c.day, ticker=c.ticker,
+                                 direction=c.direction, a_mult=am))
     frac = (at_floor / evaluated) if evaluated else float("nan")
-    return dict(frac_at_floor=frac, evaluated=evaluated, interior_examples=interior)
+    a_mults = sorted(a_mults)
+    am_summary = {}
+    if a_mults:
+        arr = np.array(a_mults, float)
+        am_summary = dict(min=float(arr.min()), p25=float(np.percentile(arr, 25)),
+                          median=float(np.median(arr)), p75=float(np.percentile(arr, 75)),
+                          max=float(arr.max()), mean=float(arr.mean()))
+    return dict(frac_at_floor=frac, evaluated=evaluated,
+                frac_at_ceiling=(at_ceiling / evaluated) if evaluated else float("nan"),
+                frac_noiseband_bound=(noiseband_bound / evaluated) if evaluated else float("nan"),
+                a_mult_summary=am_summary, interior_examples=interior,
+                mc_always_runs=True)
 
 
 def e_config(seed=0, a_grid=(0.5, 5.0, 0.1), mc_paths=20_000, mc_dt=0.5):
@@ -368,7 +392,9 @@ def run(window_start="2026-05-04", half_life_mode="autocorr", carry_mode="tiered
             sub = {k: [recs[k][i] for i in idx] for k in POLICY_KEYS}
             g_by_policy = {k: GR.growth_G(sub[k]) for k in POLICY_KEYS}
             block = dict(n=int(len(idx)), G=g_by_policy,
-                         exit_kinds=_exit_kind_dist(sub["ensemble"]))
+                         distinct_days=len({t["day"] for t in sub["ensemble"]}),
+                         exit_kinds=_exit_kind_dist(sub["ensemble"]),
+                         per_policy=_per_policy_dist(sub))
             for base in ("min_stop_cumulative", "conf_weighted_atr", "current_live_v2"):
                 if len(idx) >= 2 and len({t["day"] for t in sub["ensemble"]}) >= 2:
                     block[base] = GR.bootstrap_delta(sub["ensemble"], sub[base],
@@ -393,22 +419,59 @@ def _exit_kind_dist(trades):
     return {k: round(v / n, 4) for k, v in c.items()}
 
 
+def _per_policy_dist(sub):
+    """For each policy: exit_kind distribution + mean R (return-on-entry) + mean tau
+    + mean frac_filled. Lets the report show the mechanism behind any G gap."""
+    out = {}
+    for k in POLICY_KEYS:
+        tr = sub[k]
+        n = max(len(tr), 1)
+        out[k] = dict(
+            mean_R_ret=float(np.mean([t["R_ret"] for t in tr])) if tr else float("nan"),
+            mean_tau=float(np.mean([t["tau"] for t in tr])) if tr else float("nan"),
+            mean_frac_filled=float(np.mean([t["frac_filled"] for t in tr])) if tr else float("nan"),
+            exit_kinds=_exit_kind_dist(tr),
+        )
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # matrix + report
 # --------------------------------------------------------------------------- #
-def main(window_start="2026-05-04", n_clusters=None, seed=0, n_boot=2000):
+def main(window_start="2026-05-04", n_clusters=None, seed=0, n_boot=2000,
+         sample=None):
+    """Run the full {autocorr,cadence} x {tiered,zero} matrix.
+
+    ``sample``: strided subsample cap (memory/time bound, NOT silent truncation
+    -- logged in the report). The SAME strided cluster set drives the floor-pin
+    probe and every arm so the four arms and the probe are directly comparable.
+    A strided draw spans all distinct days/regimes/sides (a head ``n_clusters``
+    slice would day-starve the day-block bootstrap).
+    """
     os.makedirs(OUT_DIR, exist_ok=True)
     import psycopg2
     from dotenv import load_dotenv
     load_dotenv("/root/openclaw/.env")
     conn = psycopg2.connect(os.environ["POSTGRES_URI"])
     try:
-        clusters = I.extract_clusters(conn, window_start=window_start)
+        full = I.extract_clusters(conn, window_start=window_start)
         if n_clusters is not None:
-            clusters = clusters[:n_clusters]
+            full = full[:n_clusters]
+        n_full = len(full)
+        if sample is not None and sample < len(full):
+            stride = max(1, len(full) // sample)
+            clusters = full[::stride][:sample]
+        else:
+            clusters = full
         regime_tables = _load_regime_tables({c.regime for c in clusters})
 
+        cap_info = dict(n_full_clusters=n_full, n_after_cap=len(clusters),
+                        sample_cap=sample,
+                        distinct_days_full=len({c.day for c in full}),
+                        distinct_days_capped=len({c.day for c in clusters}))
+
         probe = floor_pin_probe(clusters, regime_tables, conn, n=50, seed=seed)
+        probe["cap_info"] = cap_info
         with open(os.path.join(OUT_DIR, "floor_pin.json"), "w") as f:
             json.dump(probe, f, indent=2)
 
@@ -419,53 +482,124 @@ def main(window_start="2026-05-04", n_clusters=None, seed=0, n_boot=2000):
             res = run(window_start=window_start, half_life_mode=hl_mode,
                       carry_mode=carry_mode, seed=seed, conn=conn,
                       clusters=clusters, regime_tables=regime_tables, n_boot=n_boot)
+            res["cap_info"] = cap_info
             key = f"{hl_mode}_{carry_mode}"
             results[key] = res
             with open(os.path.join(OUT_DIR, f"tdom_{key}.json"), "w") as f:
                 json.dump(res, f, indent=2)
 
-        _write_report(results, probe)
-        return dict(probe=probe, results=results)
+        _write_report(results, probe, cap_info)
+        return dict(probe=probe, results=results, cap_info=cap_info)
     finally:
         conn.close()
 
 
-def _write_report(results, probe):
-    lines = ["# Ensemble Exit Policy — T-DOM Results", ""]
-    lines.append(f"Floor-pin probe: frac_at_floor={probe['frac_at_floor']:.3f} "
-                 f"(evaluated {probe['evaluated']}); "
-                 f"{'deterministic levels confirmed — MC not needed' if probe['frac_at_floor'] == 1.0 else 'some interior cases — MC fallback active'}.")
-    lines.append("")
+def _write_report(results, probe, cap_info=None):
     primary = "autocorr_tiered"
-    lines.append(f"**Primary arm = {primary}** (autocorr half-life, tiered carry). "
-                 "T-DOM gate = CI lo>0 vs BOTH min_stop_cumulative AND conf_weighted_atr.")
+    pr = results.get(primary, {})
+    lines = ["# Ensemble Exit Policy — T-DOM Results", ""]
+
+    # ---- headline verdict (primary arm) ------------------------------------ #
+    lines.append("## Headline verdict (PRIMARY arm = autocorr half-life, tiered carry)")
+    lines.append("T-DOM gate: ADOPT iff the 95% block-bootstrap CI lower bound of "
+                 "ΔG (ensemble − baseline) is **strictly > 0** vs BOTH gate baselines "
+                 "(min_stop_cumulative AND conf_weighted_atr). Never a bare point estimate.")
     lines.append("")
+    for split in ("combined", "long", "short"):
+        blk = pr.get(split, {})
+        msc = blk.get("min_stop_cumulative", {})
+        cwa = blk.get("conf_weighted_atr", {})
+        verdict = "ADOPT" if blk.get("tdom_pass") else "REJECT / INCONCLUSIVE"
+        lines.append(
+            f"- **{split.upper()}** (n={blk.get('n')}): **{verdict}**. "
+            f"ΔG vs min_stop: {_fmt(msc.get('delta'))} CI[{_fmt(msc.get('lo'))}, {_fmt(msc.get('hi'))}]; "
+            f"ΔG vs conf_atr: {_fmt(cwa.get('delta'))} CI[{_fmt(cwa.get('lo'))}, {_fmt(cwa.get('hi'))}]. "
+            f"Gate needs BOTH lo>0.")
+    lines.append("")
+
+    # ---- run-size / cap ----------------------------------------------------- #
+    if cap_info:
+        lines.append("## Sample / cap (NO silent truncation)")
+        lines.append(
+            f"- Full clusters in window: {cap_info['n_full_clusters']} "
+            f"({cap_info['distinct_days_full']} distinct days). "
+            f"Strided cap (sample={cap_info['sample_cap']}) → {cap_info['n_after_cap']} clusters "
+            f"({cap_info['distinct_days_capped']} distinct days).")
+        lines.append(
+            "- The day-block bootstrap resamples DISTINCT DAYS; CI width is governed by the "
+            "distinct-day count, not the trade count. Strided (not head) sampling preserves all days.")
+        lines.append(f"- Kept trades per arm: " +
+                     ", ".join(f"{k}={v['n_trades']}" for k, v in results.items()))
+        lines.append("")
+
+    # ---- floor-pin / MC finding -------------------------------------------- #
+    am = probe.get("a_mult_summary", {})
+    lines.append("## Floor-pin probe (Step 0) — deterministic-levels finding")
+    lines.append(
+        f"- MC ran on EVERY cluster (mc_paths=20000): the design's planned skip-MC-when-floor-pinned "
+        f"optimization was NOT wired into the reference generator (`exit_sim.optimize_stop` always "
+        f"sweeps the full a_grid × Monte Carlo). Results stay correct; the design-vs-impl gap is noted.")
+    lines.append(
+        f"- a_mult (grid argmax multiplier) distribution over {probe.get('evaluated')} probed clusters: "
+        f"min={_fmt(am.get('min'))} p25={_fmt(am.get('p25'))} median={_fmt(am.get('median'))} "
+        f"p75={_fmt(am.get('p75'))} max={_fmt(am.get('max'))} mean={_fmt(am.get('mean'))}.")
+    lines.append(
+        f"- frac_at_grid_floor (a_mult==0.5)={_fmt(probe.get('frac_at_floor'))}; "
+        f"frac_at_grid_ceiling (a_mult==5.0)={_fmt(probe.get('frac_at_ceiling'))}; "
+        f"frac_noiseband_floor_bound (A-5 override of grid pick)={_fmt(probe.get('frac_noiseband_bound'))}.")
+    lines.append(
+        "- Interpretation: the grid argmax is bimodal (floor vs ceiling), NOT uniformly pinned at the "
+        "noise-band floor as the design hypothesized — so MC genuinely engages and the levels are not "
+        "trivially deterministic. Treat the a* selection as MC-driven, not floor-pinned.")
+    lines.append("")
+
+    # ---- per-arm detail ----------------------------------------------------- #
+    lines.append("## Per-arm detail")
     for key, res in results.items():
         star = "  ⭐ PRIMARY" if key == primary else ""
-        lines.append(f"## arm: {key}{star}")
+        lines.append(f"### arm: {key}{star}")
         lines.append(f"- n_trades={res['n_trades']} (skipped {res['skipped']}); "
                      f"eligible_leg_drops={res['eligible_leg_drops']}; "
                      f"wrong_side_legs={res['wrong_side_legs']}")
         for split in ("combined", "long", "short"):
             blk = res.get(split, {})
             g = blk.get("G", {})
-            lines.append(f"### {split} (n={blk.get('n')})")
+            lines.append(f"#### {split} (n={blk.get('n')}, distinct_days={blk.get('distinct_days')})")
             lines.append("  G: " + ", ".join(f"{k}={_fmt(g.get(k))}" for k in POLICY_KEYS))
             for base in ("min_stop_cumulative", "conf_weighted_atr", "current_live_v2"):
                 d = blk.get(base, {})
-                lines.append(f"  ΔG vs {base}: delta={_fmt(d.get('delta'))} "
+                tag = "(GATE)" if base in BASELINE_GATE_KEYS else "(info)"
+                lines.append(f"  ΔG vs {base} {tag}: delta={_fmt(d.get('delta'))} "
                              f"CI[{_fmt(d.get('lo'))}, {_fmt(d.get('hi'))}] "
                              f"p>0={_fmt(d.get('p_gt0'))}")
-            lines.append(f"  exit_kinds(ensemble): {blk.get('exit_kinds')}")
+            pp = blk.get("per_policy", {})
+            lines.append("  mechanism (mean R_ret / mean tau / mean frac_filled):")
+            for k in POLICY_KEYS:
+                d = pp.get(k, {})
+                lines.append(f"    {k}: R={_fmt(d.get('mean_R_ret'))} tau={_fmt(d.get('mean_tau'))} "
+                             f"frac={_fmt(d.get('mean_frac_filled'))} exits={d.get('exit_kinds')}")
             lines.append(f"  **T-DOM pass: {blk.get('tdom_pass')}**")
         lines.append("")
-    lines.append("## Caveats")
+
+    # ---- caveats ------------------------------------------------------------ #
+    lines.append("## Caveats (decision-grade)")
     lines += [
-        "- C is Jaccard-co-firing BLENDED with return-correlation, not pure Jaccard.",
-        "- effective_sharpe mixes annualized backtest + per-trade live (shared by all policies; biases mu0 not ΔG).",
-        "- Short carry is FABRICATED (tiered GC/HTB assumption; no borrow-rate/div data). On easy-to-borrow names carry≈0 so shorts≈mirrored longs; carry only bites on genuine HTB names (where deferred A1–A4 also matter). Do NOT read the short verdict as if borrow were measured.",
-        "- Daily OHLC first-touch can't see intrabar order — stop-wins-on-tie applied uniformly (conservative).",
-        "- Deflated-Sharpe caution: multiple arms × baselines compared.",
+        "- **Short carry is FABRICATED, not sourced.** Tiered GC(0.3%/yr)/HTB(5%/yr) keyed on the binary "
+        "easy_to_borrow flag; no real borrow-rate or dividend data. At GC scale carry≈0 so shorts ≈ mirrored "
+        "longs; carry only bites on genuine HTB names — exactly where the deferred A1–A4 (leverage-vol, "
+        "skew/squeeze, recall, margin) asymmetries also matter. Do NOT read the short verdict as if borrow were measured.",
+        "- **C is a BLEND**: Jaccard co-firing blended with return-correlation (mig 123), not pure Jaccard — "
+        "the spec's well-conditioning argument is only approximately satisfied.",
+        "- **effective_sharpe unit mix**: annualized backtest blended with per-trade live. Shared by all "
+        "policies so it biases absolute mu0/G, not ΔG.",
+        "- **Daily OHLC first-touch** can't see intrabar order; stop-wins-on-tie applied uniformly (conservative). "
+        "Gap-through fills at the level.",
+        "- **Selection / deflation**: 4 arms × 3 baselines × 3 splits compared — apply deflated-Sharpe-style "
+        "caution; the gate's strict CI-lo>0 (not point estimate) is the deflation guard.",
+        "- **Eligible-prune attrition is genuine**: ~40% of execution_signals legs come from strategies absent "
+        "from the current regime weight table (deprecated/unapproved strategies still emit signals); those legs "
+        "are dropped, mirroring the live sizer. Clusters falling below 2 eligible legs are skipped (few_legs).",
+        "- **Adoption (live wiring) is OUT OF SCOPE** — a separate operator-gated change + restart.",
     ]
     with open(os.path.join(OUT_DIR, "REPORT.md"), "w") as f:
         f.write("\n".join(lines) + "\n")

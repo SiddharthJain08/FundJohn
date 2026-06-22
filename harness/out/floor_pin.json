@@ -1,0 +1,48 @@
+{
+  "frac_at_floor": 0.75,
+  "evaluated": 16,
+  "frac_at_ceiling": 0.125,
+  "frac_noiseband_bound": 0.8125,
+  "a_mult_summary": {
+    "min": 0.5,
+    "p25": 0.5,
+    "median": 0.5,
+    "p75": 1.15,
+    "max": 4.999999999999999,
+    "mean": 1.4999999999999998
+  },
+  "interior_examples": [
+    {
+      "day": "2026-05-04",
+      "ticker": "CHRW",
+      "direction": 1,
+      "a_mult": 4.999999999999999
+    },
+    {
+      "day": "2026-05-04",
+      "ticker": "GEN",
+      "direction": -1,
+      "a_mult": 4.899999999999999
+    },
+    {
+      "day": "2026-05-04",
+      "ticker": "GLW",
+      "direction": 1,
+      "a_mult": 4.999999999999999
+    },
+    {
+      "day": "2026-05-04",
+      "ticker": "WBD",
+      "direction": 1,
+      "a_mult": 3.0999999999999996
+    }
+  ],
+  "mc_always_runs": true,
+  "cap_info": {
+    "n_full_clusters": 3924,
+    "n_after_cap": 800,
+    "sample_cap": 800,
+    "distinct_days_full": 31,
+    "distinct_days_capped": 28
+  }
+}
