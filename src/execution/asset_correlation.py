@@ -44,3 +44,42 @@ def corr_from_returns(returns: dict[str, dict[str, float]]) -> dict[str, dict[st
                 rho = 0.0 if r is None else max(-1.0, min(1.0, r))
             out[a][b] = out[b][a] = rho
     return out
+
+
+def _load_returns(tickers, window, as_of=None):
+    """Sliced read: daily close-to-close returns for `tickers` over the last
+    `window`+1 trading days up to `as_of`. pyarrow predicate pushdown; never
+    materializes the full panel. Returns {ticker: {date_str: ret}}."""
+    import pyarrow.parquet as pq
+    import pyarrow.compute as pc
+    tickers = list(tickers)
+    if not tickers:
+        return {}
+    flt = pc.field("ticker").isin(tickers)
+    if as_of is not None:
+        flt = flt & (pc.field("date") <= str(as_of))
+    tbl = pq.read_table(PARQUET, columns=["ticker", "date", "close"], filters=flt)
+    df = tbl.to_pandas()
+    df["date"] = df["date"].astype(str)
+    out: dict[str, dict[str, float]] = {}
+    need = window + 1
+    for tk, g in df.groupby("ticker"):
+        g = g.sort_values("date").tail(need)
+        closes = g["close"].astype(float).tolist()
+        dates = g["date"].tolist()
+        rets: dict[str, float] = {}
+        for k in range(1, len(closes)):
+            p = closes[k - 1]
+            if p and p == p and closes[k] == closes[k]:   # nonzero + non-NaN
+                rets[dates[k]] = closes[k] / p - 1.0
+        out[str(tk)] = rets
+    return out
+
+
+def price_return_corr(tickers, window=63, as_of=None):
+    """Ticker x ticker Pearson correlation of daily returns over the trailing
+    window. Fail-open: any read/compute error -> {} (caller applies no capping)."""
+    try:
+        return corr_from_returns(_load_returns(tickers, window, as_of))
+    except Exception:
+        return {}
