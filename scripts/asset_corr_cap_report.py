@@ -9,7 +9,7 @@ sell-down (which currently-held names get trimmed). Read-only. Serial/nice.
 Usage (with Alpaca + parquet env):
   nice -n 19 python3 scripts/asset_corr_cap_report.py
 """
-import os, sys, json, subprocess
+import os, sys, json, subprocess, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from execution import asset_correlation as ac
 from execution import asset_correlation_filter as acf
@@ -18,8 +18,23 @@ ALPACA = os.environ.get('ALPACA_BIN', '/root/go/bin/alpaca')
 
 
 def _positions():
-    r = subprocess.run([ALPACA, 'position', 'list'], capture_output=True, text=True)
-    return json.loads(r.stdout)
+    """Fetch positions, retrying to defend against Alpaca's intermittent
+    truncated `position list` response. Keeps the largest set seen across
+    retries and prints the count so a truncated book can't pass silently."""
+    best = []
+    for i in range(6):
+        r = subprocess.run([ALPACA, 'position', 'list'], capture_output=True, text=True)
+        try:
+            pos = json.loads(r.stdout) or []
+        except Exception:
+            pos = []
+        if len(pos) > len(best):
+            best = pos
+        time.sleep(0.4 * (i + 1))
+    if not best:
+        raise SystemExit('alpaca position list returned no positions after retries')
+    print(f'positions fetched: {len(best)} (max over 6 retries — verify this matches your expected book size)')
+    return best
 
 
 def main():
@@ -28,8 +43,18 @@ def main():
     target = {p['symbol']: float(p['market_value']) for p in pos}
     conv = {p['symbol']: abs(float(p['market_value'])) for p in pos}  # proxy until run live
     # NAV from account equity
-    acct = json.loads(subprocess.run([ALPACA, 'account', 'get'],
-                                     capture_output=True, text=True).stdout)
+    acct = None
+    for i in range(4):
+        r = subprocess.run([ALPACA, 'account', 'get'], capture_output=True, text=True)
+        try:
+            a = json.loads(r.stdout)
+            if a.get('equity'):
+                acct = a; break
+        except Exception:
+            pass
+        time.sleep(0.4 * (i + 1))
+    if not acct or not acct.get('equity'):
+        raise SystemExit('alpaca account get failed after retries')
     nav = float(acct['equity'])
     window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
     corr = ac.price_return_corr(list(target), window=window)
