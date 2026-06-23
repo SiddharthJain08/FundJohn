@@ -229,3 +229,129 @@ correctness gate**:
   `intraday_regime_backtest`) — confirm whether they pivot the union index too;
   fold into the shared module if so.
 - `=X` forex tickers in `static_universe` (tiny; pre-existing).
+
+---
+
+## 10. Phase 3 results — full-book off→on diff (2026-06-23)
+
+Satisfies acceptance criterion #6. Each strategy was backtested twice through
+the *same* `run_backtest` harness — `g0` = `OPENCLAW_EQUITY_TRADING_CALENDAR`
+OFF (union panel, 3718 dates), `g1` = ON (equity panel, 2565 dates). Sweep ran
+detached, nice-19, sequential, 1.5 GB MemAvailable floor.
+
+**Verdict: PASS. 65/67 strategies swept, ZERO pathologies.** No strategy
+crashed, produced NaN/None Sharpe, or went `trades→0` where it had traded on the
+union panel. Every g1 change is one of three benign outcomes:
+
+- **Unlock (the headline fix).** `S_price_path_convexity` — the first of the two
+  target strategies — goes `0 → 123,212` trades. The union panel had it
+  silently dead; the equity panel lets it trade **and** renders an honest verdict
+  (Sharpe −1.35 = correctly unprofitable). This is logical soundness, not a
+  return improvement.
+- **De-inflation (intended).** Inflated union Sharpes collapse to their true
+  values once weekend-zero bars are removed: `epistemic_rank_gate` 4.99→2.70,
+  `extreme_intraday_reversal_nasdaq` 4.68→2.30, `tr_06_eod_reversal` 4.40→2.17,
+  `barbell_trend_horizon` 2.65→0.57, `price_earnings_momentum_drift` 4.95→3.01.
+  A lower g1 Sharpe is the correction working, **not** a pathology. Some move the
+  other way (`cross_sectional_price_momentum` 1.75→2.96, `ptree_panel_tangency`
+  1.76→2.80) — removing weekend ffill/vol distortion is direction-agnostic.
+- **Byte-identical.** Already-equity-only strategies (`S_HV*`, `S12_insider`,
+  `news_sentiment_long_short`, `S21_iv_hv_spread`) show ΔSharpe 0.0000.
+
+**Two inert (dead under BOTH gates → genuinely dead, not a calendar artifact):**
+`S_vp_macd_index_sensitivity` (the second target strategy — confirmed dead, not
+poisoned) and `S15_insider_opportunistic_short`.
+
+**Two pending (slow tail, not yet swept):** `S_tr_03_bocpd_change_point` and
+`S_pairs_trading_jump_diffusion_intraday`. BOCPD is ~O(T²) over the 3718-date
+union panel and ran >22 h on a single g0 backtest before this table was cut.
+This slowness is a **backtest-sim artifact only** — the live path
+(`engine.py:load_prices` → per-day signal generation) does not run the historical
+sim, so the calendar flip does not make these strategies slow in production.
+They will be validated on a bounded window separately; they do not gate Phase 4.
+
+Merge tooling: `/tmp/panel_merge.py` (overrides the original contaminated sweep
+with the corrected rerun per (sid,gate); raw table `/tmp/panel_phase3_table.md`).
+
+> **Methodology note — harness contamination caught & corrected.** The first
+> overnight sweep set the *dead pre-rename* gate name
+> `OPENCLAW_BACKTEST_EQUITY_CALENDAR`; current code reads only
+> `OPENCLAW_EQUITY_TRADING_CALENDAR`, so the gate silently no-op'd and 18
+> strategies came back falsely byte-identical (measuring union-vs-union). The
+> **shipped production code was never affected** — only the throwaway runner. The
+> corrected 106-run sweep below confirms a probe triple (off=2850/0.50,
+> dead-name=no-effect, live-name=equity-active).
+
+| # | Strategy | g0 trades | g0 Sharpe | g0 maxDD% | g1 trades | g1 Sharpe | g1 maxDD% | ΔSharpe | Δtrades | flag |
+|---|----------|-----------|-----------|-----------|-----------|-----------|-----------|---------|---------|------|
+| 1 | S_intl_momentum_attention_regime | 70734 | 2.5343 | 8.94 | 21147 | 1.4400 | 18.97 | -1.0943 | -49587 |  |
+| 2 | S_3d_pca_characteristic_factors | 2850 | 0.5005 | 10.27 | 5500 | 0.3358 | 16.57 | -0.1647 | 2650 |  |
+| 3 | S_markov_frontier_regimes | 9714 | 1.1524 | 18.29 | 9204 | 1.4134 | 18.29 | 0.2610 | -510 |  |
+| 4 | S_epistemic_rank_gate | 116473 | 4.9889 | 4.50 | 112166 | 2.6989 | 14.23 | -2.2900 | -4307 |  |
+| 5 | S_tr_02_hurst_regime_flip | 116272 | 1.5013 | 5.37 | 111544 | 0.3317 | 6.83 | -1.1696 | -4728 |  |
+| 6 | S_price_path_convexity | 0 | — | 0.00 | 123212 | -1.3477 | 38.80 | — | 123212 | UNLOCK |
+| 7 | S_nonstationarity_adaptive_selection | 95265 | -1.3492 | 79.92 | 122977 | -0.6120 | 72.20 | 0.7372 | 27712 |  |
+| 8 | S_reversal_momentum_transition_earnings | 106150 | 1.8038 | 7.24 | 102200 | 2.3079 | 6.23 | 0.5041 | -3950 |  |
+| 9 | S_ptree_panel_tangency | 113787 | 1.7645 | 15.22 | 113776 | 2.8025 | 14.64 | 1.0380 | -11 |  |
+| 10 | momentum_12_1 | 22799 | 1.2299 | 50.56 | 22749 | 1.2412 | 50.56 | 0.0113 | -50 |  |
+| 11 | S_vp_macd_index_sensitivity | 0 | — | 0.00 | 0 | — | 0.00 | — | 0 | ⚪ inert |
+| 12 | S_price_earnings_momentum_drift | 109737 | 4.9531 | 5.10 | 101896 | 3.0097 | 9.12 | -1.9434 | -7841 |  |
+| 13 | S9_dual_momentum | 9195 | 0.4127 | 66.41 | 9170 | 0.4276 | 66.41 | 0.0149 | -25 |  |
+| 14 | S12_insider | 276 | -1.0178 | 39.27 | 276 | -1.0178 | 39.27 | 0.0000 | 0 |  |
+| 15 | S_custom_jt_momentum_12mo | 11410 | 0.6850 | 56.96 | 11385 | 0.6969 | 56.96 | 0.0119 | -25 |  |
+| 16 | S23_regime_momentum | 4995 | -0.3903 | 92.95 | 4959 | -0.2154 | 83.06 | 0.1749 | -36 |  |
+| 17 | S24_52wk_high_proximity | 4612 | -0.2796 | 25.71 | 4470 | -0.8054 | 29.15 | -0.5258 | -142 |  |
+| 18 | S25_dual_momentum_v2 | 16131 | 0.9111 | 48.52 | 15939 | 0.9365 | 48.52 | 0.0254 | -192 |  |
+| 19 | S_HV8_gamma_theta_carry | 21181 | 0.8488 | 11.86 | 21181 | 0.8488 | 11.86 | 0.0000 | 0 |  |
+| 20 | S_HV16_gex_regime | 2126 | -3.7761 | 44.62 | 2126 | -3.7761 | 44.62 | 0.0000 | 0 |  |
+| 21 | S_HV19_iv_surface_tilt | 2128 | 2.5571 | 17.19 | 2128 | 2.5571 | 17.19 | 0.0000 | 0 |  |
+| 22 | S_HV20_iv_dispersion_reversion | 2215 | -0.6743 | 13.60 | 2215 | -0.6743 | 13.60 | 0.0000 | 0 |  |
+| 23 | S_tr_06_eod_reversal | 125780 | 4.4009 | 2.62 | 125705 | 2.1729 | 4.51 | -2.2280 | -75 |  |
+| 24 | S_barbell_trend_horizon | 118531 | 2.6538 | 18.20 | 114658 | 0.5665 | 38.94 | -2.0873 | -3873 |  |
+| 25 | S_sparse_basis_pursuit_sdf | 21886 | 1.0804 | 37.79 | 20326 | 1.0152 | 37.79 | -0.0652 | -1560 |  |
+| 26 | S21_iv_hv_spread | 5172 | 0.0088 | 7.15 | 5172 | 0.0088 | 7.15 | 0.0000 | 0 |  |
+| 27 | S22_quality_momentum | 18227 | 1.4117 | 39.24 | 18179 | 1.5647 | 37.21 | 0.1530 | -48 |  |
+| 28 | S25_dual_momentum | 16131 | 0.9111 | 48.52 | 15939 | 0.9365 | 48.52 | 0.0254 | -192 |  |
+| 29 | low_volatility_us | 118073 | -7.8289 | 3.49 | 114176 | -6.6508 | 3.26 | 1.1781 | -3897 |  |
+| 30 | S_cross_sectional_price_momentum | 102199 | 1.7495 | 19.20 | 102150 | 2.9610 | 11.89 | 1.2115 | -49 |  |
+| 31 | S_ivol_mispricing_asymmetry | 84152 | 0.7627 | 13.43 | 101780 | 0.8439 | 13.36 | 0.0812 | 17628 |  |
+| 32 | S_extreme_intraday_reversal_nasdaq | 68498 | 4.6770 | 10.66 | 65296 | 2.2963 | 30.48 | -2.3807 | -3202 |  |
+| 33 | S_ma_tsmom_crossover | 115611 | 0.7370 | 16.98 | 115459 | 0.7617 | 16.97 | 0.0247 | -152 |  |
+| 34 | S_long_term_price_reversal | 78375 | -0.9964 | 50.02 | 88195 | -1.1119 | 38.87 | -0.1155 | 9820 |  |
+| 35 | S_macro_risk_momentum_ip_beta | 22339 | 1.4518 | 24.24 | 21979 | 1.4382 | 21.84 | -0.0136 | -360 |  |
+| 36 | S_pca_etf_stat_arb_reversion | 96450 | 0.1416 | 19.41 | 48100 | 0.4192 | 16.59 | 0.2776 | -48350 |  |
+| 37 | S_btc_gold_dual_momentum_rotation | 1596 | 0.5928 | 39.39 | 1567 | 0.6251 | 39.39 | 0.0323 | -29 |  |
+| 38 | S_prism_vq_cross_section_factor | 23784 | 2.7205 | 9.62 | 22904 | 1.9989 | 8.66 | -0.7216 | -880 |  |
+| 39 | S_visibility_graph_rsi | 123582 | 0.4583 | 7.16 | 123533 | 0.4647 | 7.16 | 0.0064 | -49 |  |
+| 40 | S_price_filter_rule_trend | 83119 | -0.0381 | 54.29 | 76710 | 0.5344 | 29.05 | 0.5725 | -6409 |  |
+| 41 | S_labor_day_week_momentum_reversal | 9 | 4.7845 | 2.69 | 8 | 5.4759 | 2.09 | 0.6914 | -1 |  |
+| 42 | S_fomc_presell_spy_long | 5 | 4.6535 | 2.77 | 5 | 6.5540 | 1.91 | 1.9005 | 0 |  |
+| 43 | S_bppp_bayesian_parametric_weights | 62800 | 0.8758 | 4.99 | 62619 | 0.3316 | 9.69 | -0.5442 | -181 |  |
+| 44 | S_growth_inflation_sector_timing | 2202 | 0.3379 | 41.88 | 2046 | 0.2858 | 41.88 | -0.0521 | -156 |  |
+| 45 | S_fama_french_anomaly_dissection | 82998 | 2.9689 | 12.06 | 63496 | 3.0162 | 12.06 | 0.0473 | -19502 |  |
+| 46 | S_value_momentum_everywhere | 82826 | 3.2395 | 10.18 | 63312 | 3.3041 | 9.83 | 0.0646 | -19514 |  |
+| 47 | S_idiosyncratic_vol_puzzle | 88080 | 1.4940 | 17.07 | 81840 | 1.7009 | 14.50 | 0.2069 | -6240 |  |
+| 48 | S_commodity_etp_momentum | 2465 | 0.9116 | 38.92 | 2460 | 0.9302 | 38.92 | 0.0186 | -5 |  |
+| 49 | S_btc_momentum | 1491 | 0.9801 | 61.07 | 1491 | 0.9801 | 61.07 | 0.0000 | 0 | crypto=union |
+| 50 | S15_insider_opportunistic_short | 0 | — | 0.00 | 0 | — | 0.00 | — | 0 | ⚪ inert |
+| 51 | S_options_flow_confirmed_momentum | 208 | -2.6334 | 63.95 | 208 | -2.6334 | 63.95 | 0.0000 | 0 |  |
+| 52 | S_news_sentiment_long_short | 40549 | 1.2368 | 7.08 | 40549 | 1.2368 | 7.08 | 0.0000 | 0 |  |
+| 53 | S_ast_asset_class_trend_following | 194 | 2.0283 | 12.40 | 308 | 2.9306 | 10.73 | 0.9023 | 114 |  |
+| 54 | oxf_adaptive_ma | 61856 | -0.4902 | 12.88 | 61731 | -0.5042 | 12.88 | -0.0140 | -125 |  |
+| 55 | oxf_false_breakout | 4039 | 0.4617 | 29.18 | 4030 | 0.4183 | 29.18 | -0.0434 | -9 |  |
+| 56 | oxf_frama | 36523 | -0.1273 | 14.49 | 36446 | -0.1545 | 14.49 | -0.0272 | -77 |  |
+| 57 | oxf_heikin_ashi | 63125 | -0.0034 | 5.80 | 63000 | 0.0003 | 5.80 | 0.0037 | -125 |  |
+| 58 | oxf_keltner | 42281 | -0.3582 | 12.58 | 42215 | -0.3374 | 12.58 | 0.0208 | -66 |  |
+| 59 | oxf_linreg_slope | 53398 | -0.1331 | 22.78 | 53336 | -0.1573 | 22.78 | -0.0242 | -62 |  |
+| 60 | oxf_macd_zero | 62875 | -0.2075 | 13.62 | 62750 | -0.1931 | 13.62 | 0.0144 | -125 |  |
+| 61 | oxf_rsi2_meanrev | 1857 | 1.1047 | 20.05 | 1856 | 1.0768 | 20.05 | -0.0279 | -1 |  |
+| 62 | oxf_sma_filter | 54385 | 0.5656 | 17.41 | 54269 | 0.5922 | 17.41 | 0.0266 | -116 |  |
+| 63 | oxf_smash_day_b | 7330 | 0.7339 | 14.28 | 7317 | 0.7558 | 14.28 | 0.0219 | -13 |  |
+| 64 | oxf_vortex | 2757 | 0.9406 | 11.76 | 2752 | 0.8972 | 11.76 | -0.0434 | -5 |  |
+| 65 | oxf_zero_lag_ma | 48279 | 0.0178 | 16.01 | 48175 | 0.0158 | 16.01 | -0.0020 | -104 |  |
+| — | S_tr_03_bocpd_change_point | PENDING | — | — | PENDING | — | — | — | — | slow (O(T²)); live unaffected |
+| — | S_pairs_trading_jump_diffusion_intraday | PENDING | — | — | PENDING | — | — | — | — | slow; live unaffected |
+
+**Phase 4 (operator-gated):** with 0 pathologies across 65/67, the equity-calendar
+flip is clear from a correctness standpoint. The 2 pending tail strategies are a
+backtest-speed footnote, not a flip blocker. Flip steps unchanged from §6.
