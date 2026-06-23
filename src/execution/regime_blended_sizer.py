@@ -1168,6 +1168,12 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 len(_capped),
                 [(t, round(o), round(n)) for t, o, n in _capped[:10]])
 
+    # Asset-correlation cluster cap (gated, default-OFF). De-grosses correlated
+    # same-direction clusters by releasing low-conviction redundancy (no renorm),
+    # mirroring the per-ticker cap above but at the cluster level. Applied BEFORE
+    # the cap-exempt option-hedge injection + broker netting.
+    target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav)
+
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
     # equity target_usd is byte-identical when gate is unset.
@@ -1431,6 +1437,37 @@ def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
         return {}
     usable.sort(key=lambda b: float(b.get('weight') or 0.0), reverse=True)
     return usable[0]
+
+
+def _apply_asset_corr_cap(target_usd, conviction, nav):
+    """Asset-correlation cluster cap (gated, post λ×NAV scaling, dollar terms).
+    OPENCLAW_ASSET_CORR_CAP=1 applies the cap; OPENCLAW_ASSET_CORR_CAP_SHADOW=1
+    logs the would-be cap without changing targets; both unset -> identity (no
+    correlation work). Fail-open: any error returns target_usd unchanged."""
+    apply_on = os.environ.get('OPENCLAW_ASSET_CORR_CAP') == '1'
+    shadow_on = os.environ.get('OPENCLAW_ASSET_CORR_CAP_SHADOW') == '1'
+    if not (apply_on or shadow_on):
+        return target_usd
+    try:
+        from execution import asset_correlation as _ac
+        from execution import asset_correlation_filter as _acf
+        cap_pct = float(os.environ.get('OPENCLAW_ASSET_CORR_CAP_PCT', '0.22'))
+        corr_thr = float(os.environ.get('OPENCLAW_ASSET_CORR_THR', '0.70'))
+        window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
+        corr = _ac.price_return_corr(list(target_usd), window=window)
+        capped, audit = _acf.cap_correlated_clusters(
+            target_usd, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr)
+        logger.info(
+            'asset_corr_cap.%s: clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
+            'apply' if apply_on else 'shadow',
+            sum(1 for c in audit['clusters'] if len(c['members']) >= 2),
+            audit['total_gross_before'], audit['total_gross_after'], audit['released_usd'],
+            [(c['members'], round(c['gross_before']), round(c['gross_after']))
+             for c in audit['clusters'] if c['released'] or c['trimmed']][:10])
+        return capped if apply_on else target_usd
+    except Exception as e:
+        logger.warning('asset_corr_cap failed (%s); fail-open', e)
+        return target_usd
 
 
 def _choose_bracket(candidates: list[dict], dir_sign: int,
