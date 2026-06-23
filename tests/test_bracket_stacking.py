@@ -26,7 +26,7 @@ def test_single_block_returns_top_sharpe_rep_not_max_weight():
     assert math.isclose(out['stop'], 94.0, rel_tol=1e-9)
 
 
-def test_two_uncorrelated_blocks_stack_tp_keep_tightest_stop():
+def test_two_uncorrelated_blocks_take_max_tp_keep_tightest_stop():
     cands = [
         _b('A', 1, 5.0, 100.0, 98.0, 105.0),    # block 1: stop 2%, tp 5%
         _b('B', 1, 5.0, 100.0, 96.0, 105.0),    # block 2: stop 4%, tp 5%
@@ -34,46 +34,25 @@ def test_two_uncorrelated_blocks_stack_tp_keep_tightest_stop():
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
     assert out['n_blocks'] == 2
-    # tp stacks: 5% + 5% = 10% (under 3x cap). stop = min(2%,4%) = 2%.
-    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
+    # tp = MAX(5%,5%) = 5% (NOT the 10% sum). stop = min(2%,4%) = 2%.
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
     assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
 
 
-def test_tp_cap_is_three_times_largest_single_block():
-    # Four blocks each tp 5% -> sum 20%, cap = 3 * 5% = 15%.
-    cands = [_b(s, 1, 1.0, 100.0, 99.0, 105.0) for s in ('A', 'B', 'C', 'D')]
+def test_tp_total_is_max_across_blocks_not_sum():
+    # Three blocks with DIFFERENT takes (3%, 5%, 4%) -> MAX = 5% (not sum 12%).
+    cands = [
+        _b('A', 1, 1.0, 100.0, 99.0, 103.0),    # block 1: stop 1%, tp 3%
+        _b('B', 1, 1.0, 100.0, 98.0, 105.0),    # block 2: stop 2%, tp 5%  <- max tp
+        _b('C', 1, 1.0, 100.0, 97.0, 104.0),    # block 3: stop 3%, tp 4%
+    ]
     out = bs.stacked_bracket(cands, 1,
-                             block_map={'A': 1, 'B': 2, 'C': 3, 'D': 4},
-                             eff_sharpe={s: 1.0 for s in ('A', 'B', 'C', 'D')})
-    assert out['n_blocks'] == 4
-    assert math.isclose(out['t1'], 115.0, rel_tol=1e-9)   # capped at +15%
-    assert math.isclose(out['stop'], 99.0, rel_tol=1e-9)  # tightest 1%
-
-
-def test_tp_cap_mult_uncapped_sentinel(monkeypatch):
-    # "V2": a non-positive or non-finite cap multiple disables the cap (uncapped).
-    monkeypatch.delenv('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', raising=False)
-    assert bs._tp_cap_mult() == 3.0                        # default unchanged
-    for sentinel in ('inf', '0', '-1'):
-        monkeypatch.setenv('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', sentinel)
-        assert bs._tp_cap_mult() == math.inf, sentinel     # uncapped
-    monkeypatch.setenv('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', '2.5')
-    assert bs._tp_cap_mult() == 2.5                         # explicit value honored
-    monkeypatch.setenv('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', 'notanumber')
-    assert bs._tp_cap_mult() == 3.0                         # unparseable -> default
-
-
-def test_stacked_bracket_uncapped_tp_sums_all_blocks(monkeypatch):
-    # Four blocks each tp 5%. Capped(3x) = +15%; uncapped sentinel => full +20%.
-    # Stop stays tightest (1%): V2 only loosens the take-profit, never the stop.
-    monkeypatch.setenv('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', '0')
-    cands = [_b(s, 1, 1.0, 100.0, 99.0, 105.0) for s in ('A', 'B', 'C', 'D')]
-    out = bs.stacked_bracket(cands, 1,
-                             block_map={'A': 1, 'B': 2, 'C': 3, 'D': 4},
-                             eff_sharpe={s: 1.0 for s in ('A', 'B', 'C', 'D')})
-    assert out['n_blocks'] == 4
-    assert math.isclose(out['t1'], 120.0, rel_tol=1e-9)   # uncapped +20%
-    assert math.isclose(out['stop'], 99.0, rel_tol=1e-9)  # stop unchanged (V2)
+                             block_map={'A': 1, 'B': 2, 'C': 3},
+                             eff_sharpe={'A': 1.0, 'B': 1.0, 'C': 1.0})
+    assert out['n_blocks'] == 3
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # MAX take = +5%, never +12% sum
+    assert math.isclose(out['stop'], 99.0, rel_tol=1e-9)  # tightest stop = 1%
+    assert 'max-of-blocks' in out['why']
 
 
 def test_short_side_mirrors_long():
@@ -83,8 +62,8 @@ def test_short_side_mirrors_long():
     ]
     out = bs.stacked_bracket(cands, -1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
-    # tp stacks to 10% -> t1 = 90; stop = min(2%,3%) -> 102.
-    assert math.isclose(out['t1'], 90.0, rel_tol=1e-9)
+    # tp = MAX(5%,5%) = 5% -> t1 = 95 (short); stop = min(2%,3%) -> 102.
+    assert math.isclose(out['t1'], 95.0, rel_tol=1e-9)
     assert math.isclose(out['stop'], 102.0, rel_tol=1e-9)
 
 
@@ -96,7 +75,7 @@ def test_ungrouped_strategies_are_singleton_blocks():
     ]
     out = bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={'A': 1.0, 'B': 1.0})
     assert out['n_blocks'] == 2
-    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # MAX(5%,5%) = +5%, not the +10% sum
     assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)  # tightest of 98(2%)/97(3%)
 
 
@@ -133,15 +112,15 @@ def test_rep_tiebreak_is_deterministic_smallest_sid():
 
 
 def test_t2_never_inverts_past_stacked_t1():
-    # Long: anchor t2 (108) is below the stacked t1 (110) -> clamp up to t1.
+    # Long: anchor t2 (108) is below the MAX-take t1 (110) -> clamp up to t1.
     cands = [
-        _b('A', 1, 5.0, 100.0, 98.0, 105.0, t2=108.0),   # block1, sharpe high (anchor)
-        _b('B', 1, 5.0, 100.0, 96.0, 105.0, t2=109.0),   # block2
+        _b('A', 1, 5.0, 100.0, 98.0, 110.0, t2=108.0),   # block1 anchor: tp 10% (the max)
+        _b('B', 1, 5.0, 100.0, 96.0, 105.0, t2=109.0),   # block2: tp 5%
     ]
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
-    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
-    assert out['t2'] >= out['t1']                         # no inversion
+    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)  # MAX(10%,5%) = +10%
+    assert out['t2'] >= out['t1']                         # t2 clamped up, no inversion
 
     # Single block long with a finite t2 above t1 is preserved unchanged.
     out1 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=112.0)], 1,

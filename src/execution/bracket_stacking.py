@@ -4,8 +4,9 @@
 When multiple strategies co-fire on a ticker, combine their exit brackets instead
 of picking one (the legacy regime_blended_sizer._select_bracket max-weight pick):
   * within a correlated factor block -> the top-effective-sharpe member's bracket
-  * across uncorrelated blocks        -> stack the take-profit (capped-linear),
-                                         keep the stop at the tightest (min) per-block value.
+  * across uncorrelated blocks        -> take the MAX take-profit (the most ambitious
+                                         single reachable block target, NOT the
+                                         cumulative sum), keep the tightest (min) stop.
 
 Pure: no I/O, no DB. Returns the SAME dict shape as
 regime_blended_sizer._select_bracket (entry/stop/t1/t2/weight/direction) so the
@@ -16,21 +17,6 @@ Spec: docs/superpowers/specs/2026-05-29-block-stacked-brackets-design.md
 """
 from __future__ import annotations
 import math
-import os
-
-DEFAULT_TP_CAP_MULT = 3.0
-
-
-def _tp_cap_mult() -> float:
-    """TP-stacking cap = this multiple of the largest single-block take-profit.
-    Sentinel: a non-positive or non-finite value (e.g. 'inf', '0') disables the
-    cap entirely -> uncapped linear sum ("V2"). Unparseable -> default.
-    (A bare 0 means "no cap", NOT "no take-profit".)"""
-    try:
-        v = float(os.environ.get('OPENCLAW_BRACKET_STACK_TP_CAP_MULT', DEFAULT_TP_CAP_MULT))
-    except (TypeError, ValueError):
-        return DEFAULT_TP_CAP_MULT
-    return math.inf if (v <= 0.0 or not math.isfinite(v)) else v
 
 
 def _finite(x) -> bool:
@@ -91,12 +77,9 @@ def daily_normalized_levels(entry, stop, t1, t2, cadence_days):
 
 
 def stacked_bracket(brackets: list[dict], dir_sign: int,
-                    block_map: dict[str, int], eff_sharpe: dict[str, float],
-                    tp_cap_mult: float | None = None) -> dict:
+                    block_map: dict[str, int], eff_sharpe: dict[str, float]) -> dict:
     """Combine direction-aligned contributing brackets into one stacked bracket.
     Returns {} when no usable bracket exists (caller falls back)."""
-    if tp_cap_mult is None:
-        tp_cap_mult = _tp_cap_mult()
     # 1. Filter to winning direction + finite; convert to fractions of entry.
     usable: list[dict] = []
     for b in brackets:
@@ -129,11 +112,11 @@ def stacked_bracket(brackets: list[dict], dir_sign: int,
     # 3. Per-block representative = top-effective-sharpe member.
     reps = [_pick_top_sharpe(members, eff_sharpe) for members in groups.values()]
 
-    # 4. Combine across blocks: stop = tightest; tp = capped-linear sum.
+    # 4. Combine across blocks: stop = tightest; tp = MAX across blocks (the most
+    #    ambitious single REACHABLE block target, NOT the cumulative sum -> a take
+    #    that actually fires, so winners get banked instead of riding into reversals).
     stop_total = min(r['stop_pct'] for r in reps)
-    tp_sum = sum(r['tp_pct'] for r in reps)
-    tp_max = max(r['tp_pct'] for r in reps)
-    tp_total = min(tp_sum, tp_cap_mult * tp_max)
+    tp_total = max(r['tp_pct'] for r in reps)
 
     # 5. Anchor to the highest-sharpe block rep; rebuild absolute levels.
     anchor = _pick_top_sharpe(reps, eff_sharpe)
@@ -155,7 +138,6 @@ def stacked_bracket(brackets: list[dict], dir_sign: int,
         'entry': entry, 'stop': stop, 't1': t1, 't2': t2_out,
         'weight': max(r['weight'] for r in reps),
         'direction': dir_sign, 'n_blocks': len(reps),
-        'why': (f'stacked tp={tp_total:.4f}(sum={tp_sum:.4f},'
-                f'cap={tp_cap_mult * tp_max:.4f}) stop={stop_total:.4f} '
-                f'blocks={len(reps)}'),
+        'why': (f'stacked tp={tp_total:.4f}(max-of-blocks) '
+                f'stop={stop_total:.4f} blocks={len(reps)}'),
     }

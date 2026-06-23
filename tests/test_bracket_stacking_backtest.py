@@ -19,12 +19,13 @@ def _bars():
 
 
 def test_compare_event_distinguishes_policies():
-    # Two uncorrelated blocks, both long, tp 5% (105), stops 2% & 4%.
+    # Two uncorrelated blocks, both long. Max-weight pick (B) carries tp 5%; the OTHER
+    # block (A) carries the larger 8% take -> MAX-stacked takes 8% with the tightest stop.
     cands = [
         {'sid': 'A', 'direction': 1, 'weight': 5.0, 'entry': 100.0,
-         'stop': 98.0, 't1': 105.0, 't2': None},
+         'stop': 98.0, 't1': 108.0, 't2': None},   # block1: stop 2%, tp 8% (the max take)
         {'sid': 'B', 'direction': 1, 'weight': 9.0, 'entry': 100.0,
-         'stop': 96.0, 't1': 105.0, 't2': None},
+         'stop': 96.0, 't1': 105.0, 't2': None},   # block2: stop 4%, tp 5% (max-weight pick)
     ]
     res = compare_event(
         ticker='TST', dir_sign=1, candidates=cands,
@@ -34,6 +35,7 @@ def test_compare_event_distinguishes_policies():
     # current = max-weight pick (B): tp 105 -> target hit day2 (high 108>=105) -> +5%.
     assert res['current']['exit_reason'] == 'target'
     assert abs(res['current']['pnl_pct'] - 0.05) < 1e-9
-    # stacked: tp 110 -> target hit day3 (high 110) -> +10%; stop tightest 98 (never hit).
+    # stacked: tp = MAX(8%,5%) = +8% (108) -> target hit day2 (high 108) -> +8%;
+    # stop tightest 98 (never hit). NOT the old +10% cumulative sum.
     assert res['stacked']['exit_reason'] == 'target'
-    assert abs(res['stacked']['pnl_pct'] - 0.10) < 1e-9
+    assert abs(res['stacked']['pnl_pct'] - 0.08) < 1e-9
