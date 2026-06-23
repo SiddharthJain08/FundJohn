@@ -48,16 +48,24 @@ def corr_from_returns(returns: dict[str, dict[str, float]]) -> dict[str, dict[st
 
 def _load_returns(tickers, window, as_of=None):
     """Sliced read: daily close-to-close returns for `tickers` over the last
-    `window`+1 trading days up to `as_of`. pyarrow predicate pushdown; never
-    materializes the full panel. Returns {ticker: {date_str: ret}}."""
+    `window`+1 trading days up to `as_of` (default: today). pyarrow predicate
+    pushdown bounded to a trailing calendar window; never materializes the full
+    panel or a ticker's full history. Returns {ticker: {date_str: ret}}."""
+    import datetime
     import pyarrow.parquet as pq
     import pyarrow.compute as pc
     tickers = list(tickers)
     if not tickers:
         return {}
-    flt = pc.field("ticker").isin(tickers)
-    if as_of is not None:
-        flt = flt & (pc.field("date") <= str(as_of))
+    # Trailing calendar-window floor: ~2x the trading-day window in calendar
+    # days (+buffer) comfortably covers window+1 trading days across weekends/
+    # holidays, so we never read a ticker's full history.
+    anchor_d = (datetime.date.fromisoformat(str(as_of)) if as_of is not None
+                else datetime.date.today())
+    lo = (anchor_d - datetime.timedelta(days=int(window) * 2 + 10)).isoformat()
+    flt = (pc.field("ticker").isin(tickers)
+           & (pc.field("date") >= lo)
+           & (pc.field("date") <= anchor_d.isoformat()))
     tbl = pq.read_table(PARQUET, columns=["ticker", "date", "close"], filters=flt)
     df = tbl.to_pandas()
     df["date"] = df["date"].astype(str)
