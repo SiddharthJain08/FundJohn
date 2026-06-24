@@ -207,6 +207,36 @@ def _drop_zero_greeks(df: 'pd.DataFrame') -> 'pd.DataFrame':
     return df[~zero_mask].copy()
 
 
+# Memory-bounded options read for the signals step (2026-06-24 OOM fix).
+# run_strategies references only these 14 of options_eod.parquet's 27 columns and looks
+# back at most 30 calendar days (IV-rank), so loading the full multi-million-row file
+# each cycle (which OOM-killed the step once it grew past ~6M rows) is wasteful. Project
+# these columns + a trailing date window via pyarrow predicate pushdown instead.
+# `theta`/`vega` are kept because `_drop_zero_greeks` checks all four greeks.
+_OPTIONS_SIGNAL_COLS = [
+    'ticker', 'date', 'expiry', 'strike', 'option_type', 'implied_volatility',
+    'delta', 'gamma', 'theta', 'vega', 'open_interest', 'volume', 'open', 'close',
+]
+# Trailing read windows (calendar days) for the signals step's master-parquet reads.
+# Each MUST exceed the longest lookback its consumer needs; they cap memory as the
+# archives deepen. Options: 60 >= the 30d IV-rank lookback. HV20 prices: 120 — the
+# HV20 calc only needs ~28 trading days, but the `len(_g) < 22` skip below means a
+# too-tight window would silently drop sparse/halted tickers, so keep generous headroom.
+_OPTIONS_READ_WINDOW_DAYS = int(os.environ.get('OPENCLAW_OPTIONS_READ_WINDOW_DAYS', '60'))
+_HV20_PRICES_WINDOW_DAYS  = int(os.environ.get('OPENCLAW_HV20_PRICES_WINDOW_DAYS', '120'))
+
+
+def _read_parquet_window(path, columns, window_days, today=None, date_col='date'):
+    """Read a master parquet projected to `columns` and limited to the trailing
+    `window_days`, via pyarrow predicate pushdown — avoids materializing the full file
+    in pandas (the 2026-06-24 signals-step OOM). The date column is an ISO 'YYYY-MM-DD'
+    string, so the filter compares strings (lexicographic == chronological for ISO)."""
+    if today is None:
+        today = pd.Timestamp.today().normalize()
+    cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
+    return pd.read_parquet(path, columns=list(columns), filters=[(date_col, '>=', cutoff)])
+
+
 # ──────────────────────────────────────────────────────────
 # 1. LOAD REGIME
 # ──────────────────────────────────────────────────────────
@@ -459,6 +489,7 @@ def load_aux_data(universe: list) -> dict:
     opts_path = master_dir / 'options_eod.parquet'
     if opts_path.exists():
         try:
+            today = pd.Timestamp.today().normalize()
             # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)
             # Used for rv_20 and vrp fields consumed by S_HV9, S_HV11, S_HV12, S_HV14, S_HV20.
             _hv20_by_ticker = {}
@@ -466,7 +497,9 @@ def load_aux_data(universe: list) -> dict:
             try:
                 _px_path = master_dir / 'prices.parquet'
                 if _px_path.exists():
-                    _px = pd.read_parquet(_px_path, columns=['ticker', 'date', 'close'])
+                    # Memory-bounded: HV20 needs only the recent window, not 10y of prices.
+                    _px = _read_parquet_window(_px_path, ['ticker', 'date', 'close'],
+                                               _HV20_PRICES_WINDOW_DAYS, today)
                     _px['date'] = pd.to_datetime(_px['date'])
                     _px = _px.sort_values(['ticker', 'date'])
                     for _t, _g in _px.groupby('ticker'):
@@ -485,10 +518,13 @@ def load_aux_data(universe: list) -> dict:
             except Exception as _e:
                 logger.warning(f"HV20 pre-compute failed: {_e}")
 
-            opts = pd.read_parquet(opts_path)
+            # Memory-bounded: project the 14 referenced columns + a trailing date window
+            # via pyarrow pushdown instead of full-loading the multi-million-row
+            # options_eod.parquet (the 2026-06-24 signals-step OOM, rc=137). `today` is
+            # computed once at the top of this try block (also used by the HV20 read).
+            opts = _read_parquet_window(opts_path, _OPTIONS_SIGNAL_COLS, _OPTIONS_READ_WINDOW_DAYS, today)
             # SP-1: drop degenerate (all-zero-greek) rows before any aggregation.
             opts = _drop_zero_greeks(opts)
-            today = pd.Timestamp.today().normalize()
 
             # Ensure expiry is datetime
             if 'expiry' in opts.columns:
