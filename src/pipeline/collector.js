@@ -1022,6 +1022,20 @@ async function runIntradaySnapshotPrices(tickers = null) {
 // trade/alpaca can still run on time. Override with OPTIONS_PHASE_BUDGET_S.
 const OPTIONS_PHASE_BUDGET_S = parseInt(process.env.OPTIONS_PHASE_BUDGET_S || '1800', 10);
 
+// Incremental-flush threshold (rows). runOptions buffers each ticker's contracts
+// in memory; without periodic flushing the whole day's chain (~405k contracts)
+// piles up in the node process before the single end-of-phase flush. Flushing when
+// the buffer crosses this threshold bounds node-side memory. The parquet WRITE
+// itself is memory-bounded in parquet_store (DuckDB streaming merge) so each flush
+// is cheap on RAM. 0 disables (single end-of-phase flush). Override via env.
+function _optionsFlushThreshold(env = process.env) {
+  return parseInt(env.OPTIONS_FLUSH_ROW_THRESHOLD || '250000', 10);
+}
+function _shouldFlushOptions(bufferedRows, threshold) {
+  return threshold > 0 && bufferedRows >= threshold;
+}
+const OPTIONS_FLUSH_ROW_THRESHOLD = _optionsFlushThreshold();
+
 /**
  * Greeks-validity filter for Alpaca chain snapshots.
  *
@@ -1091,6 +1105,7 @@ async function runOptions(tickers = null) {
 
   let budgetExceeded = false;
   let processed = 0;
+  let bufferedRows = 0;   // rows in store's options buffer since the last flush
   for (let i = 0; i < needed.length; i++) {
     // Soft budget check — bail out cleanly so the rest of the daily
     // cycle (signals/handoff/trade/alpaca) doesn't starve while we
@@ -1133,6 +1148,7 @@ async function runOptions(tickers = null) {
       const written = await store.upsertOptions(ticker, contracts, today);
       await store.updateCoverage(ticker, 'options', today, today, written);
       _stats.options += written;
+      bufferedRows += written;
       tickProgress('🎲 Options', skipped + i + 1, tickers.length, ticker, written);
       await store.logRun(ticker, 'options', 'success', written, null, Date.now() - start, 1);
       processed++;
@@ -1143,6 +1159,21 @@ async function runOptions(tickers = null) {
       if (processed % 25 === 0) {
         const phaseElapsed = Math.round((Date.now() - phaseStart) / 1000);
         notify(`🎲 Options progress — ${processed}/${needed.length} fetched, ${_progress.rowsThisPhase.toLocaleString()} contracts in ${phaseElapsed}s`);
+      }
+      // Incremental flush once the buffer crosses the threshold — bounds node-side
+      // memory so the whole day's chain never piles up before the end-of-phase flush.
+      if (_shouldFlushOptions(bufferedRows, OPTIONS_FLUSH_ROW_THRESHOLD)) {
+        bufferedRows = 0;
+        try {
+          const f = await store.flushOptions();
+          if (f && f.flushed) {
+            console.log(`[collector] Options incremental flush: ${f.flushed} rows → options_eod.parquet (total ${f.total_after})`);
+          }
+        } catch (err) {
+          // store._flush returns the rows to the buffer on failure; they ride the
+          // end-of-phase flush. Surface but don't abort the phase.
+          notify(`[WARN] Options incremental flush failed (rows retained for end-of-phase flush): ${err.message}`);
+        }
       }
     } catch (err) {
       _stats.errors++;
@@ -2153,4 +2184,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };

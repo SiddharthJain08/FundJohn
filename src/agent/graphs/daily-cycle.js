@@ -18,6 +18,7 @@ const { PostgresSaver }                                    = require('@langchain
 const traceBus       = require('../traceBus');
 const pipelineLog    = require('../../execution/pipeline_logging');
 const { makeStepNode } = require('./daily_cycle_node');
+const { postAbortAlert } = require('./daily_cycle_helpers');
 
 const STEPS_IN_ORDER = [
   'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
@@ -201,12 +202,16 @@ async function runDailyCycleGraph(input) {
     // Read partial state from the checkpoint to surface completedSteps
     const snap = await compiled.getState(config).catch(() => null);
     const partial = (snap && snap.values) || {};
+    const lastError = { step: abortedAt, rc: err.rc || null, message: err.message };
+    // Surface the abort to #botjohn-log — the health step never runs after an abort,
+    // so without this the failure is silent (see 2026-06-22/23 EOD collect OOM).
+    await postAbortAlert({ runDate, runId, abortedAt, lastError, reason }).catch(() => {});
     return {
       ...partial,
       runId, threadId,
       status:     'aborted',
       abortedAt,
-      lastError:  { step: abortedAt, rc: err.rc || null, message: err.message },
+      lastError,
     };
   } finally {
     if (lock) await lock.release().catch(() => {});
@@ -232,13 +237,16 @@ async function resumeDailyCycle(runDate) {
     await pipelineLog.cycleEnd(runDate, runId, 'ok', null);
     return { ...out, runId, threadId, status: 'ok', resumed: true };
   } catch (err) {
+    const abortedAt = err.step || 'unknown';
     traceBus.endRun(runId, 'error', err.message);
-    await pipelineLog.cycleEnd(runDate, runId, 'aborted', err.step || 'unknown');
+    await pipelineLog.cycleEnd(runDate, runId, 'aborted', abortedAt);
+    const lastError = { step: err.step, rc: err.rc, message: err.message };
+    await postAbortAlert({ runDate, runId, abortedAt, lastError, reason: 'resumed' }).catch(() => {});
     return {
       runId, threadId,
       status:    'aborted',
-      abortedAt: err.step || 'unknown',
-      lastError: { step: err.step, rc: err.rc, message: err.message },
+      abortedAt,
+      lastError,
     };
   }
 }
