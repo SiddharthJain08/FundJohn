@@ -355,3 +355,40 @@ with the corrected rerun per (sid,gate); raw table `/tmp/panel_phase3_table.md`)
 **Phase 4 (operator-gated):** with 0 pathologies across 65/67, the equity-calendar
 flip is clear from a correctness standpoint. The 2 pending tail strategies are a
 backtest-speed footnote, not a flip blocker. Flip steps unchanged from §6.
+
+### Phase 4 — EXECUTED 2026-06-24 (LIVE)
+
+Operator authorized the flip. `OPENCLAW_EQUITY_TRADING_CALENDAR=1` added to `.env`
+and johnbot (`--user`) restarted; verified the gate is in the live process env,
+`equity_calendar_enabled()=True`, `calendar_for('equity')→equity`,
+`calendar_for('crypto')→union`, NRestarts=0, clean startup.
+
+**Unlock-handling (the non-obvious risk fail-open does NOT cover).** Fail-open
+(`engine.py` per-strategy `try/except`) protects against *crashes*, not *unlocks*:
+a currently-inert approved strategy can run fine on the equity panel and start
+trading a negative-Sharpe book (exactly `price_path_convexity`). Discriminator =
+live-signal activity (`execution_signals`), since `registry.backtest_trade_count`
+is mostly NULL. Of 80 approved, 67 were swept clean; the 13 unswept-equity split
+into currently-active (flip only de-inflates → safe) and truly-inert (0 live
+signals → unlock unknowns). The truly-inert set was spot-checked on the equity
+panel; operator rule = **deprecate any inert strategy the flip unlocks into a
+negative-Sharpe book**. Deprecated (registry `status='deprecated'`, reversible):
+
+| Strategy | equity-panel verdict |
+|----------|----------------------|
+| `S_price_path_convexity` | 123,212 trades, Sharpe −1.35 |
+| `S_HV11_cross_stock_dispersion` | 1,095 trades, −0.95 |
+| `S_HV15_iv_term_structure` | 2,321 trades, −1.87 (1.5y window) |
+| `S_quantum_rebalance_qaoa` | 459 trades, −0.65 (2mo; un-backtestable longer) |
+
+Kept (confirmed stay-dead, 0 trades on equity panel → harmless inert):
+`S10_quality_value`, `S_HV17_earnings_straddle_fade`, `S_bankruptcy_risk_anomaly`,
+`S_skewness_dispersion_macro`, `S_local_global_balance`. `bocpd`/`pairs` are
+live-active (743/18 signals) so the flip only de-inflates them — no slow backtest
+needed to flip. Approved book 80 → 76.
+
+**Remaining:** (1) monitor first post-flip compute (errored count + unlock-flood +
+deprecated-emit-zero); (2) reweight — committed equity-panel re-backtest CHUNKED
+per-strategy gate-ON then `strategy_weights --rebuild` (deferred; stale weights ==
+today's weights, so non-acute). **Never `refresh_backtests.sh --all-live`** — its
+monolithic loop global-OOMs the 8 GB box.
