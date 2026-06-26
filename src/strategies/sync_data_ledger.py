@@ -77,14 +77,26 @@ PROVIDERS = {
 
 
 def _stats(parquet_path: Path) -> dict:
-    """Return {min_date, max_date, row_count, ticker_count} for a parquet file."""
+    """Return {min_date, max_date, row_count, ticker_count} for a parquet file.
+
+    Column-pushdown: reads ONLY the date + ticker columns (row_count comes from
+    file metadata, zero data load). Runs at every johnbot boot — a full
+    pd.read_parquet of the two heavy master parquets peaks at ~1.5 GB (prices,
+    8.3M×10) / ~2.9 GB (options_eod, 6.7M×27); projecting to just the 2 stat
+    columns cuts the boot peak to ~1.1 GB. Same pattern as the 2026-06-24
+    EOD-OOM fix (engine.py pyarrow column/date pushdown, c4210eb). Output is
+    byte-identical to a full read — unread columns can't affect date/ticker
+    coverage. Regression: tests/test_sync_data_ledger_pushdown.py.
+    """
     try:
+        import pyarrow.parquet as pq
         import pandas as pd
-        df = pd.read_parquet(parquet_path)
+        pf = pq.ParquetFile(parquet_path)
+        schema_names = list(pf.schema_arrow.names)
+        row_count = pf.metadata.num_rows
     except Exception as e:
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0, 'error': str(e)}
 
-    row_count = len(df)
     if row_count == 0:
         return {'min_date': None, 'max_date': None, 'row_count': 0, 'ticker_count': 0}
 
@@ -92,9 +104,24 @@ def _stats(parquet_path: Path) -> dict:
     # (intraday_features.parquet); same coverage semantics as the daily
     # ones — we just truncate the timestamp to a date for ledger stats.
     date_col = next((c for c in ['date', 'Date', 'timestamp', 'Timestamp', 'ts_utc']
-                      if c in df.columns), None)
+                      if c in schema_names), None)
+    # Distinct-ticker column.
+    ticker_col = next((c for c in ['ticker', 'Ticker', 'symbol', 'Symbol']
+                        if c in schema_names), None)
+
+    # Read ONLY the columns the stats need (pushdown), then apply the exact same
+    # pandas logic a full read would have. Project list is de-duped + order-safe.
+    read_cols = [c for c in (date_col, ticker_col) if c]
+    df = None
+    if read_cols:
+        try:
+            df = pq.read_table(parquet_path, columns=read_cols).to_pandas()
+        except Exception as e:
+            return {'min_date': None, 'max_date': None, 'row_count': row_count,
+                    'ticker_count': 0, 'error': str(e)}
+
     min_date = max_date = None
-    if date_col:
+    if date_col is not None and df is not None:
         try:
             dates = pd.to_datetime(df[date_col], errors='coerce').dropna()
             if not dates.empty:
@@ -108,8 +135,7 @@ def _stats(parquet_path: Path) -> dict:
             pass
 
     # Count distinct tickers
-    ticker_col = next((c for c in ['ticker', 'Ticker', 'symbol', 'Symbol'] if c in df.columns), None)
-    ticker_count = int(df[ticker_col].nunique()) if ticker_col else 0
+    ticker_count = int(df[ticker_col].nunique()) if (ticker_col is not None and df is not None) else 0
 
     return {
         'min_date':     min_date,
