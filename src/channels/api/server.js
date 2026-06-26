@@ -461,8 +461,12 @@ app.get('/api/portfolio/ticker-alpha/:ticker', async (req, res) => {
 // limits; the existing value (3.0 set 2026-05-16) was clamped to 2.0.
 const LAMBDA_OVERNIGHT_MIN = 0.10;
 const LAMBDA_OVERNIGHT_MAX = 2.00;
-const LAMBDA_INTRADAY_MIN  = 0.10;
-const LAMBDA_INTRADAY_MAX  = 4.00;   // PDT day-trading buying power max
+// Asset-correlation de-gross threshold slider band (replaced the unused
+// intraday-leverage placeholder 2026-06-26). Pearson cutoff for clustering
+// correlated same-direction positions before the per-cluster gross cap.
+const ASSET_CORR_THR_MIN = 0.50;
+const ASSET_CORR_THR_MAX = 0.90;
+const ASSET_CORR_THR_DEFAULT = 0.70;
 
 app.get('/api/config/lambda', async (req, res) => {
   try {
@@ -491,33 +495,39 @@ app.put('/api/config/lambda', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Intraday lambda — separate placeholder for PDT day-trading buying power
-// (up to 4× equity). 2026-05-19: stored but NOT consumed by any sizer
-// today. Will come online once intraday strategies + Phase 3 extended-hours
-// executor are wired to consume it. Operator can pre-tune from the
-// Portfolio page without affecting today's overnight trades.
-app.get('/api/config/lambda-intraday', async (req, res) => {
+// Asset-correlation de-gross threshold — the Pearson cutoff for clustering
+// correlated same-direction positions before the per-cluster gross cap
+// (asset_correlation_filter.py). The sizer reads pipeline_config.asset_corr_cap_thr
+// every cycle, so a slider change takes effect on the next pipeline tick with no
+// johnbot restart. Lower de-grosses more aggressively (0.60 catches the semi
+// sector; 0.70 mostly catches ETF/market-beta). The `enabled` flag reflects the
+// asset_corr_cap_enabled gate/kill-switch (also pipeline_config). Replaced the
+// unused intraday-leverage placeholder 2026-06-26.
+app.get('/api/config/asset-corr-thr', async (req, res) => {
   try {
-    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda_intraday'");
-    const row = r.rows[0];
+    const [thrRes, enRes] = await Promise.all([
+      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'asset_corr_cap_thr'"),
+      dbQuery("SELECT value FROM pipeline_config WHERE key = 'asset_corr_cap_enabled'"),
+    ]);
+    const row = thrRes.rows[0];
     res.json({
-      value:      row ? Math.min(parseFloat(row.value), LAMBDA_INTRADAY_MAX) : 1.0,
-      min:        LAMBDA_INTRADAY_MIN, max: LAMBDA_INTRADAY_MAX,
+      value:      row ? Math.max(ASSET_CORR_THR_MIN, Math.min(parseFloat(row.value), ASSET_CORR_THR_MAX)) : ASSET_CORR_THR_DEFAULT,
+      min:        ASSET_CORR_THR_MIN, max: ASSET_CORR_THR_MAX,
+      enabled:    enRes.rows[0] ? ['1', 'true', 'on'].includes(String(enRes.rows[0].value).trim().toLowerCase()) : false,
       updated_at: row ? row.updated_at : null,
-      active:     false,   // not yet consumed by any sizer
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.put('/api/config/lambda-intraday', async (req, res) => {
+app.put('/api/config/asset-corr-thr', async (req, res) => {
   const v = parseFloat(req.body && req.body.value);
-  if (!isFinite(v) || v < LAMBDA_INTRADAY_MIN || v > LAMBDA_INTRADAY_MAX) {
-    return res.status(400).json({ error: `value must be a number in [${LAMBDA_INTRADAY_MIN}, ${LAMBDA_INTRADAY_MAX}]` });
+  if (!isFinite(v) || v < ASSET_CORR_THR_MIN || v > ASSET_CORR_THR_MAX) {
+    return res.status(400).json({ error: `value must be a number in [${ASSET_CORR_THR_MIN}, ${ASSET_CORR_THR_MAX}]` });
   }
   try {
     await dbQuery(`
       INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('position_sizing_lambda_intraday', $1, 'Intraday (PDT day-trading) leverage. Range [0.10, 4.00]. Placeholder — not consumed by current sizer (2026-05-19).', NOW())
+      VALUES ('asset_corr_cap_thr', $1, 'Asset-correlation de-gross threshold (Pearson cutoff for same-direction clustering). Range [0.50, 0.90]. Sizer reads every cycle. Adjustable via dashboard.', NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
@@ -530,9 +540,10 @@ app.put('/api/config/lambda-intraday', async (req, res) => {
 // (= λ × liquidity_param) on one screen.
 app.get('/api/config/regime-sizing', async (req, res) => {
   try {
-    const [lamRes, lamIntradayRes, regimeRes] = await Promise.all([
+    const [lamRes, acThrRes, acEnRes, regimeRes] = await Promise.all([
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
-      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda_intraday'"),
+      dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'asset_corr_cap_thr'"),
+      dbQuery("SELECT value FROM pipeline_config WHERE key = 'asset_corr_cap_enabled'"),
       dbQuery(`SELECT regime_state, liquidity_param, position_circuit_breaker_pct,
                       min_cumulative_sharpe, updated_at
                FROM regime_sizer_params
@@ -556,7 +567,8 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
     }
     const lam = lamRes.rows[0];
-    const lamId = lamIntradayRes.rows[0];
+    const acThr = acThrRes.rows[0];
+    const acEn  = acEnRes.rows[0];
     res.json({
       current_regime: currentRegime,
       global: {
@@ -564,13 +576,13 @@ app.get('/api/config/regime-sizing', async (req, res) => {
         min:        LAMBDA_OVERNIGHT_MIN,
         max:        LAMBDA_OVERNIGHT_MAX,
         updated_at: lam ? lam.updated_at : null,
-        // Intraday placeholder (PDT) — separate slider in dashboard.
-        // Not consumed by current sizer (2026-05-19).
-        lambda_intraday:        lamId ? Math.min(parseFloat(lamId.value), LAMBDA_INTRADAY_MAX) : 1.0,
-        lambda_intraday_min:    LAMBDA_INTRADAY_MIN,
-        lambda_intraday_max:    LAMBDA_INTRADAY_MAX,
-        lambda_intraday_updated_at: lamId ? lamId.updated_at : null,
-        lambda_intraday_active: false,
+        // Asset-correlation de-gross threshold — separate slider in dashboard.
+        // LIVE: consumed by regime_blended_sizer._apply_asset_corr_cap (2026-06-26).
+        asset_corr_thr:         acThr ? Math.max(ASSET_CORR_THR_MIN, Math.min(parseFloat(acThr.value), ASSET_CORR_THR_MAX)) : ASSET_CORR_THR_DEFAULT,
+        asset_corr_thr_min:     ASSET_CORR_THR_MIN,
+        asset_corr_thr_max:     ASSET_CORR_THR_MAX,
+        asset_corr_thr_updated_at: acThr ? acThr.updated_at : null,
+        asset_corr_enabled:     acEn ? ['1', 'true', 'on'].includes(String(acEn.value).trim().toLowerCase()) : false,
       },
       regimes: regimeRes.rows.map(r => ({
         state:                          r.regime_state,
@@ -7483,42 +7495,42 @@ function renderRiskPanel(cfg) {
       </div>
     </div>\`;
   }).join('');
-  // Intraday lambda (placeholder, not consumed yet) — separate slider.
-  // 2026-05-19: matches Alpaca PDT day-trading max (4×); overnight slider
-  // capped at Reg T overnight max (2×).
-  const lamIntraday = (cfg.global.lambda_intraday != null) ? cfg.global.lambda_intraday : 1.0;
-  const lamIdMin    = (cfg.global.lambda_intraday_min != null) ? cfg.global.lambda_intraday_min : 0.10;
-  const lamIdMax    = (cfg.global.lambda_intraday_max != null) ? cfg.global.lambda_intraday_max : 4.00;
-  const lamIdActive = !!cfg.global.lambda_intraday_active;
-  const lamIdStamp  = cfg.global.lambda_intraday_updated_at
-    ? 'saved ' + new Date(cfg.global.lambda_intraday_updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
+  // Asset-correlation de-gross threshold (LIVE — consumed by the sizer's
+  // _apply_asset_corr_cap). Replaced the unused intraday-leverage placeholder
+  // 2026-06-26. Lower = de-gross correlated clusters more aggressively.
+  const acThr      = (cfg.global.asset_corr_thr != null) ? cfg.global.asset_corr_thr : 0.70;
+  const acThrMin   = (cfg.global.asset_corr_thr_min != null) ? cfg.global.asset_corr_thr_min : 0.50;
+  const acThrMax   = (cfg.global.asset_corr_thr_max != null) ? cfg.global.asset_corr_thr_max : 0.90;
+  const acEnabled  = !!cfg.global.asset_corr_enabled;
+  const acStamp    = cfg.global.asset_corr_thr_updated_at
+    ? 'saved ' + new Date(cfg.global.asset_corr_thr_updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
     : '';
-  const intradayTicks = [
-    { v: 1.00, label: '1×' },
-    { v: 2.00, label: '2×' },
-    { v: 3.00, label: '3×' },
-    { v: 4.00, label: 'PDT max' },
+  const acTicks = [
+    { v: 0.55, label: 'aggressive' },
+    { v: 0.60, label: 'semis' },
+    { v: 0.70, label: 'ETF-beta' },
+    { v: 0.85, label: 'loose' },
   ];
-  const intradayTickHtml = intradayTicks.map(t => {
-    const pct = ((t.v - lamIdMin) / (lamIdMax - lamIdMin)) * 100;
-    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}×</span><span class="pf-tick-label">\${t.label}</span></span>\`;
+  const acTickHtml = acTicks.map(t => {
+    const pct = ((t.v - acThrMin) / (acThrMax - acThrMin)) * 100;
+    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}</span><span class="pf-tick-label">\${t.label}</span></span>\`;
   }).join('');
 
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
-      <div class="pf-risk-title">Leverage</div>
-      <div class="pf-risk-help">Two independent caps. <strong>Intraday (PDT)</strong> is a placeholder up to 4× — not consumed by any strategy today, comes online when intraday-only strategies + extended-hours executor are wired. <strong>Daily (Reg T)</strong> controls today's daily/multi-day process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T overnight rules.</div>
+      <div class="pf-risk-title">Leverage &amp; Correlation</div>
+      <div class="pf-risk-help"><strong>Asset-Corr De-Gross</strong> caps each cluster of correlated same-direction positions at a share of NAV and releases the rest; this slider is the Pearson clustering threshold — lower de-grosses harder (0.60 catches the semi sector, 0.70 mostly ETF/market-beta). <strong>Daily (Reg T)</strong> controls today's daily/multi-day process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T overnight rules.</div>
     </div>
 
-    <div class="pf-lambda-block" style="opacity:\${lamIdActive ? 1 : 0.78}">
-      <div class="pf-lambda-block-head"><span class="pf-lr-label">Intraday Leverage (PDT)</span><span class="pf-lr-cap">cap \${lamIdMax.toFixed(2)}× · \${lamIdActive ? 'active' : 'placeholder — not yet consumed'}</span></div>
+    <div class="pf-lambda-block" style="opacity:\${acEnabled ? 1 : 0.78}">
+      <div class="pf-lambda-block-head"><span class="pf-lr-label">Asset-Corr De-Gross Threshold</span><span class="pf-lr-cap">\${acEnabled ? 'live' : 'disabled — set asset_corr_cap_enabled=1'}</span></div>
       <div class="pf-lambda-mega">
-        <input type="range" id="pf-lambda-intraday-slider" min="\${lamIdMin}" max="\${lamIdMax}" step="0.05" value="\${lamIntraday.toFixed(2)}" />
-        <div class="pf-lambda-ticks">\${intradayTickHtml}</div>
+        <input type="range" id="pf-asset-corr-slider" min="\${acThrMin}" max="\${acThrMax}" step="0.05" value="\${acThr.toFixed(2)}" />
+        <div class="pf-lambda-ticks">\${acTickHtml}</div>
       </div>
       <div class="pf-lambda-readout">
-        <span class="pf-lr-value" id="pf-lambda-intraday-readout">\${lamIntraday.toFixed(2)}×</span>
-        <span class="pf-lr-sub" id="pf-lambda-intraday-stamp">\${lamIdStamp}</span>
+        <span class="pf-lr-value" id="pf-asset-corr-readout">\${acThr.toFixed(2)}</span>
+        <span class="pf-lr-sub" id="pf-asset-corr-stamp">\${acStamp}</span>
       </div>
     </div>
 
@@ -7587,35 +7599,35 @@ function renderRiskPanel(cfg) {
     });
   }
 
-  // Intraday slider — debounced PUT to /api/config/lambda-intraday.
-  // Stored but not consumed by any sizer yet (lambda_intraday_active=false
-  // from the API); operator can pre-tune for when intraday strategies +
-  // extended-hours executor are wired.
-  const intradaySlider  = el.querySelector('#pf-lambda-intraday-slider');
-  const intradayReadout = el.querySelector('#pf-lambda-intraday-readout');
-  const intradayStamp   = el.querySelector('#pf-lambda-intraday-stamp');
-  if (intradaySlider && intradayReadout) {
-    let intradayTimer = null;
-    intradaySlider.addEventListener('input', () => {
-      const v = parseFloat(intradaySlider.value);
-      intradayReadout.textContent = v.toFixed(2) + '×';
-      clearTimeout(intradayTimer);
-      intradayTimer = setTimeout(async () => {
+  // Asset-correlation de-gross threshold slider — debounced PUT to
+  // /api/config/asset-corr-thr. LIVE: the sizer reads pipeline_config
+  // asset_corr_cap_thr every cycle, so the new value takes effect on the
+  // next pipeline tick (no restart).
+  const acSlider  = el.querySelector('#pf-asset-corr-slider');
+  const acReadout = el.querySelector('#pf-asset-corr-readout');
+  const acStampEl = el.querySelector('#pf-asset-corr-stamp');
+  if (acSlider && acReadout) {
+    let acTimer = null;
+    acSlider.addEventListener('input', () => {
+      const v = parseFloat(acSlider.value);
+      acReadout.textContent = v.toFixed(2);
+      clearTimeout(acTimer);
+      acTimer = setTimeout(async () => {
         try {
-          const r = await fetch('/api/config/lambda-intraday', {
+          const r = await fetch('/api/config/asset-corr-thr', {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ value: v }),
           });
           if (r.ok) {
-            cfg.global.lambda_intraday = v;
-            cfg.global.lambda_intraday_updated_at = new Date().toISOString();
-            if (intradayStamp) intradayStamp.textContent = 'saved just now (placeholder — not consumed yet)';
-            toast('Intraday leverage saved: ' + v.toFixed(2) + '× — placeholder, no effect until intraday strategies wire up', 'ok', 4000);
+            cfg.global.asset_corr_thr = v;
+            cfg.global.asset_corr_thr_updated_at = new Date().toISOString();
+            if (acStampEl) acStampEl.textContent = 'saved just now';
+            toast('De-gross threshold saved: ' + v.toFixed(2) + ' — next cycle picks up the new value', 'ok', 4000);
           } else {
-            toast('Intraday leverage update failed', 'error', 4000);
+            toast('De-gross threshold update failed', 'error', 4000);
           }
         } catch (e) {
-          toast('Intraday leverage update error: ' + e.message, 'error', 4000);
+          toast('De-gross threshold update error: ' + e.message, 'error', 4000);
         }
       }, 400);
     });
