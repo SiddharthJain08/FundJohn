@@ -82,6 +82,37 @@ def _prices_no_nan_price_bars():
     return Status.PASS, f'no NaN-close bars in last 200d ({len(recent)} bars scanned)'
 
 
+@check(name='data_ledger_usage_map_evaluable', tags=['storage'], requires=['db'])
+def _data_ledger_usage_map_evaluable():
+    """data_usage_map must evaluate — and therefore the data_ledger materialized
+    view that sync_data_ledger.py REFRESHes at every johnbot boot. The view unrolls
+    strategy_registry.parameters->'required_columns', which exists in two shapes: a
+    flat string array, and an object {"required":[...],"optional":[...]} whose elements
+    may be strings or {"column":...} objects. The original view used
+    jsonb_array_elements_text() on the value, which throws 'cannot extract elements
+    from an object' on the object form — silently skipping the boot sync (caught in
+    bot.js) so data_columns coverage quietly stopped updating for days. Fixed
+    2026-06-26 (migration 138, shape-tolerant view). This re-runs the view so a future
+    regression — or a new registry JSON shape — is caught on the next maintenance run."""
+    import psycopg2
+    uri = os.environ.get('POSTGRES_URI') or os.environ.get('DATABASE_URL', '')
+    if not uri:
+        return Status.FAIL, 'POSTGRES_URI not set'
+    try:
+        conn = psycopg2.connect(uri)
+    except Exception as e:  # noqa: BLE001
+        return Status.ERROR, f'connect failed: {e}'
+    try:
+        with conn.cursor() as cur:
+            cur.execute('SELECT count(*) FROM data_usage_map')
+            n = cur.fetchone()[0]
+        return Status.PASS, f'data_usage_map evaluates ({n} columns mapped)'
+    except Exception as e:  # noqa: BLE001
+        return Status.FAIL, f'data_usage_map failed (data_ledger refresh would skip): {str(e).strip()[:140]}'
+    finally:
+        conn.close()
+
+
 @check(name='logs_dir_size_under_50mb', tags=['storage'], requires=['fs'])
 def _logs_dir_size():
     """logs/ stays under 50MB. Old logs pile up if cleanup isn't run periodically."""
