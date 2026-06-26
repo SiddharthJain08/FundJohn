@@ -23,6 +23,9 @@ from execution.regime_blended_sizer import (        # noqa: E402
     _ASSET_CORR_THR_MIN,
     _ASSET_CORR_THR_MAX,
     _ASSET_CORR_THR_DEFAULT,
+    _ASSET_CORR_CAP_PCT_MIN,
+    _ASSET_CORR_CAP_PCT_MAX,
+    _ASSET_CORR_CAP_PCT_DEFAULT,
 )
 
 
@@ -65,13 +68,14 @@ def _patch_db(monkeypatch, rows=None, raises=False):
 def _clear_env(monkeypatch):
     monkeypatch.delenv('OPENCLAW_ASSET_CORR_CAP', raising=False)
     monkeypatch.delenv('OPENCLAW_ASSET_CORR_THR', raising=False)
+    monkeypatch.delenv('OPENCLAW_ASSET_CORR_CAP_PCT', raising=False)
 
 
 def test_pipeline_config_enables_and_sets_threshold(monkeypatch):
     _clear_env(monkeypatch)
     _patch_db(monkeypatch, rows=[('asset_corr_cap_enabled', '1'),
                                  ('asset_corr_cap_thr', '0.6')])
-    enabled, thr = _load_asset_corr_cfg()
+    enabled, thr, _ = _load_asset_corr_cfg()
     assert enabled is True
     assert thr == pytest.approx(0.6)
 
@@ -80,7 +84,7 @@ def test_threshold_clamped_below_band(monkeypatch):
     _clear_env(monkeypatch)
     _patch_db(monkeypatch, rows=[('asset_corr_cap_enabled', '1'),
                                  ('asset_corr_cap_thr', '0.05')])
-    enabled, thr = _load_asset_corr_cfg()
+    enabled, thr, _ = _load_asset_corr_cfg()
     assert enabled is True
     assert thr == pytest.approx(_ASSET_CORR_THR_MIN)
 
@@ -88,7 +92,7 @@ def test_threshold_clamped_below_band(monkeypatch):
 def test_threshold_clamped_above_band(monkeypatch):
     _clear_env(monkeypatch)
     _patch_db(monkeypatch, rows=[('asset_corr_cap_thr', '2.0')])
-    _, thr = _load_asset_corr_cfg()
+    _, thr, _ = _load_asset_corr_cfg()
     assert thr == pytest.approx(_ASSET_CORR_THR_MAX)
 
 
@@ -97,7 +101,7 @@ def test_env_fallback_when_config_absent(monkeypatch):
     monkeypatch.setenv('OPENCLAW_ASSET_CORR_CAP', '1')
     monkeypatch.setenv('OPENCLAW_ASSET_CORR_THR', '0.65')
     _patch_db(monkeypatch, rows=[])
-    enabled, thr = _load_asset_corr_cfg()
+    enabled, thr, _ = _load_asset_corr_cfg()
     assert enabled is True
     assert thr == pytest.approx(0.65)
 
@@ -105,7 +109,7 @@ def test_env_fallback_when_config_absent(monkeypatch):
 def test_defaults_fail_off_when_config_and_env_absent(monkeypatch):
     _clear_env(monkeypatch)
     _patch_db(monkeypatch, rows=[])
-    enabled, thr = _load_asset_corr_cfg()
+    enabled, thr, _ = _load_asset_corr_cfg()
     assert enabled is False                      # fail OFF
     assert thr == pytest.approx(_ASSET_CORR_THR_DEFAULT)
 
@@ -113,7 +117,7 @@ def test_defaults_fail_off_when_config_and_env_absent(monkeypatch):
 def test_db_error_never_throws_and_fails_off(monkeypatch):
     _clear_env(monkeypatch)
     _patch_db(monkeypatch, raises=True)
-    enabled, thr = _load_asset_corr_cfg()        # must not raise
+    enabled, thr, _ = _load_asset_corr_cfg()        # must not raise
     assert enabled is False
     assert thr == pytest.approx(_ASSET_CORR_THR_DEFAULT)
 
@@ -123,5 +127,43 @@ def test_config_disabled_overrides_env_enabled_kill_switch(monkeypatch):
     monkeypatch.setenv('OPENCLAW_ASSET_CORR_CAP', '1')
     _patch_db(monkeypatch, rows=[('asset_corr_cap_enabled', '0'),
                                  ('asset_corr_cap_thr', '0.6')])
-    enabled, _ = _load_asset_corr_cfg()
+    enabled, _, _ = _load_asset_corr_cfg()
     assert enabled is False
+
+
+def test_cap_pct_from_pipeline_config(monkeypatch):
+    """Per-cluster gross cap (fraction of NAV) is config-driven, 3rd return value."""
+    _clear_env(monkeypatch)
+    _patch_db(monkeypatch, rows=[('asset_corr_cap_enabled', '1'),
+                                 ('asset_corr_cap_pct', '0.20')])
+    _, _, cap_pct = _load_asset_corr_cfg()
+    assert cap_pct == pytest.approx(0.20)
+
+
+def test_cap_pct_clamped_above_band(monkeypatch):
+    _clear_env(monkeypatch)
+    _patch_db(monkeypatch, rows=[('asset_corr_cap_pct', '5.0')])
+    _, _, cap_pct = _load_asset_corr_cfg()
+    assert cap_pct == pytest.approx(_ASSET_CORR_CAP_PCT_MAX)
+
+
+def test_cap_pct_clamped_below_band(monkeypatch):
+    _clear_env(monkeypatch)
+    _patch_db(monkeypatch, rows=[('asset_corr_cap_pct', '0.001')])
+    _, _, cap_pct = _load_asset_corr_cfg()
+    assert cap_pct == pytest.approx(_ASSET_CORR_CAP_PCT_MIN)
+
+
+def test_cap_pct_default_when_absent(monkeypatch):
+    _clear_env(monkeypatch)
+    _patch_db(monkeypatch, rows=[])
+    _, _, cap_pct = _load_asset_corr_cfg()
+    assert cap_pct == pytest.approx(_ASSET_CORR_CAP_PCT_DEFAULT)
+
+
+def test_cap_pct_env_fallback_when_config_absent(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv('OPENCLAW_ASSET_CORR_CAP_PCT', '0.18')
+    _patch_db(monkeypatch, rows=[])
+    _, _, cap_pct = _load_asset_corr_cfg()
+    assert cap_pct == pytest.approx(0.18)
