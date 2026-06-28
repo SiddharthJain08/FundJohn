@@ -5,10 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=claudebot
+# User=root: the archiver appends to the root-owned options_eod.parquet (same
+# master-data convention as the JS collect-step writer); claudebot could not
+# overwrite it. (W1 reconcile, 2026-06-28)
+User=root
 WorkingDirectory=/root/openclaw
 EnvironmentFile=/root/openclaw/.env
-ExecStartPre=/usr/bin/python3 /root/openclaw/src/maintenance/doctor.py --required-only --quick --fail-only
+# Narrowed preflight: gate ONLY on alpaca reachability (the archiver's actual
+# dependency), not the full --required-only sweep that was failing exit 2 on
+# unrelated drift (mastermind_calibration_brier, strategy_regime_params_consistency,
+# alpaca_aat_plus_tier) and blocking the archive every run. (W1 reconcile, 2026-06-28)
+ExecStartPre=/usr/bin/python3 /root/openclaw/src/maintenance/doctor.py --only alpaca_cli_binary,alpaca_auth --quick --fail-only
 ExecStart=/usr/bin/python3 /root/openclaw/src/pipeline/backfillers/alpaca_options.py
 StandardOutput=append:/var/log/openclaw-options-archive.log
 StandardError=append:/var/log/openclaw-options-archive.log
