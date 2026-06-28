@@ -29,13 +29,15 @@ node src/agent/curators/run_mastermind.js --mode position-recs 2>&1 | tee -a "$L
 step "4/8 backtest-coupling"
 python3 -m execution.backtest_coupled_recs $DRY 2>&1 | tee -a "$LOG" || step "WARN coupling rc=$?"
 
-step "5/8 full backtest refresh"
+step "5/8 full backtest refresh (internally time-bounded; WARN-and-continue)"
 bash src/maintenance/refresh_backtests.sh 2>&1 | tee -a "$LOG"
 BT_RC=${PIPESTATUS[0]}
-if [ "$BT_RC" -ne 0 ]; then
-  step "ABORT backtest refresh rc=$BT_RC — skipping weights/panels"
-  exit "$BT_RC"
-fi
+# DECOUPLED (W1 reconcile 2026-06-28): step 5 is internally bounded to 6h, so a
+# slow/incomplete refresh no longer aborts the pipeline. Steps 6-8 (weights/
+# panels/universe) now run on last-known backtests instead of being skipped —
+# the prior hard `exit "$BT_RC"` was the root cause of weekly weights/panels
+# repeatedly needing manual rebuilds.
+[ "$BT_RC" -ne 0 ] && step "WARN backtest refresh rc=$BT_RC — continuing to weights/panels on last-known backtests"
 
 step "6/8 weekly strategy weights"
 node src/agent/curators/weekly_live_sharpe.js 2>&1 | tee -a "$LOG" || step "WARN weights rc=$?"

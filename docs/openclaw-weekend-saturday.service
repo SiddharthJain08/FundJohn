@@ -8,10 +8,16 @@ Type=oneshot
 User=claudebot
 WorkingDirectory=/root/openclaw
 EnvironmentFile=/root/openclaw/.env
+# Nice=19: deprioritize the multi-hour weekend pipeline so it never starves the
+# live bot on the 2-core VPS. (W1 reconcile, 2026-06-28)
+Nice=19
 ExecStart=/bin/bash /root/openclaw/src/maintenance/weekend_saturday.sh
 StandardOutput=append:/var/log/openclaw/weekend_saturday.log
 StandardError=append:/var/log/openclaw/weekend_saturday.log
-TimeoutStartSec=28800
+# 36000 (10h): was 28800 (8h). Step 5 (backtest refresh) is now internally
+# capped at 6h and WARN-continues, so this budget covers steps 1-4 + capped
+# step 5 + steps 6-8 (weights/panels/universe) with headroom. (W1 reconcile, 2026-06-28)
+TimeoutStartSec=36000
 
 [Install]
 WantedBy=multi-user.target
