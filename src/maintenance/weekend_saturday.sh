@@ -59,4 +59,13 @@ PY
 step "8/8 universe-ladder sentinel (SP-7 Phase B — replaced legacy universe-recs 2026-06-06)"
 nice -n 19 python3 scripts/check_ladder_saturday.py 2>&1 | tee -a "$LOG" || step "WARN ladder-sentinel rc=$?"
 
+# No-silent-failure (W1 reconcile 2026-06-28): steps 6-8 ran above regardless,
+# but if step 5's bounded refresh was incomplete (BT_RC!=0, e.g. rc=124 = 6h cap
+# hit) some strategies' backtests are STALE and the weights/panels just rebuilt
+# used last-known data. Fail the unit so OnFailure alerts #botjohn-log instead of
+# the staleness being silent. Clears permanently via the per-strategy refresh redesign.
+if [ "${BT_RC:-0}" -ne 0 ]; then
+  step "INCOMPLETE: step-5 backtest refresh rc=$BT_RC (rc=124 = 6h cap hit). Weights/panels ran on last-known backtests; some are STALE. log=$LOG"
+  exit "$BT_RC"
+fi
 step "DONE log=$LOG"

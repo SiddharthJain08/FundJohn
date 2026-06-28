@@ -2,6 +2,7 @@
 Description=OpenClaw weekend — Saturday adjustment+backtest pipeline (review->recs->coupling->refresh->weights->panels->universe)
 After=network-online.target postgresql.service
 Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
 
 [Service]
 Type=oneshot

@@ -2,6 +2,7 @@
 Description=CBOE vol indices ingestion (VIX/VVIX/VIX9D → vol_indices.parquet)
 After=network-online.target
 Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
 
 [Service]
 Type=oneshot

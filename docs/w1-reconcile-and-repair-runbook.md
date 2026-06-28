@@ -164,8 +164,24 @@ to scratchpad before any git op.
 - **Recorded≠reality reconciled**: memory's "johnbot restarted (PID 3274404)" was
   TRUE (user-scope unit); the "dead a month / unmanaged" reading was a systemd-scope artifact.
 
+### Observability (C8 — no-silent-failure close)
+- **weekend-saturday** now exits non-zero when step 5's refresh was incomplete
+  (after steps 6-8 run), so the unit fails and alerts instead of silently feeding
+  the sizer stale backtests. **Expect a weekly `failed` + #botjohn-log alert until
+  the per-strategy redesign** — that is the honest incomplete-refresh signal, not a
+  regression. The 07-04 run also answers: does the capped refresh rotate coverage
+  or skip the SAME strategy tail? (the latter ⇒ prioritize the redesign).
+- `OnFailure=openclaw-failure-notify@%n.service` added to vol-indices,
+  options-archive, weekend-saturday (were missing → silent for weeks). edgar@
+  left without it (templated-unit double-`@` finickiness); it stays visible via
+  `systemctl --failed` + the Monday check.
+- **Open**: confirm the disabled standalone `openclaw-backtest-refresh.timer` is
+  intentional (if so, capped step 5 is the ONLY place `--all-live` runs → staleness
+  is systemic until redesign). A scheduled "did each repaired unit's next run pass?"
+  check is still owed for the Mon/Sat/Sun dated verifications.
+
 ### Final state
 - `systemctl --failed` (openclaw): **0 units**.
-- W1 commits C1–C7 on `feat/intraday-regime-15min-prefetch`.
+- W1 commits C1–C8 on `feat/intraday-regime-15min-prefetch`.
 - During execution the live research finisher (PID 3335484) was actively coding
   candidates — research origination pipeline confirmed functional (preview of W4).

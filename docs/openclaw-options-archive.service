@@ -2,6 +2,7 @@
 Description=SP-1 Alpaca options EOD self-archive (daily 16:30 ET Mon-Fri)
 After=network-online.target redis.service postgresql.service
 Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
 
 [Service]
 Type=oneshot
