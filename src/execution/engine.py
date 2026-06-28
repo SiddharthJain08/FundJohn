@@ -1604,16 +1604,16 @@ def main():
                 universe = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META']
         universe = list(dict.fromkeys(universe))  # dedupe preserving order
 
-        # SP-7 Phase A4: gated clamp — pins live equity universe while broad
-        # price backfills widen prices.parquet underneath. Removed in Phase C.
-        from execution.universe_clamp import clamp_universe
-        universe = clamp_universe(universe)
+        # SP-7 Phase C §6 (2026-06-28): the Phase-A4 sp500 clamp was DELETED here
+        # once C1/C2/C3 were live — the per-strategy resolver below is now the sole
+        # authority on the live universe (adopted tiers widen past sp500). The
+        # Phase-A4 clamp module and its gate env var were removed in the same commit.
 
         # SP-7 Phase C (C1): per-strategy universes via UniverseResolver.
-        # Gate default-OFF. When ON: the union of per-strategy sets replaces
-        # the clamped universe for the ONE panel load (memory invariant), and
-        # run_strategies slices prices/aux per strategy. Whole-build failure
-        # fails open to the legacy shared universe.
+        # When ON: the union of per-strategy sets replaces the shared fallback
+        # universe for the ONE panel load (memory invariant), and run_strategies
+        # slices prices/aux per strategy. Whole-build failure fails open to the
+        # legacy shared universe.
         strategy_universes = None
         if os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') == '1':
             try:
@@ -1629,20 +1629,8 @@ def main():
                             f"{len(strategy_universes)} strategies, {_n_err} fail-open")
             except Exception as e:
                 logger.error(f"live-universe build failed — fail-open to shared "
-                             f"clamped universe: {e}")
+                             f"fallback universe: {e}")
                 strategy_universes = None
-
-        # SP-7 Phase C shadow parity (spec §3.5): resolver-vs-clamp diff rows,
-        # written by a non-fatal sidecar. Only meaningful while the live
-        # resolver gate is OFF — once it flips, there is no clamp to diff.
-        if (os.environ.get('OPENCLAW_LIVE_UNIVERSE_SHADOW') == '1'
-                and os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') != '1'):
-            try:
-                from execution.live_universe import write_shadow_parity
-                write_shadow_parity(run_date, [s.id for s in strategies],
-                                    list(universe))
-            except Exception as e:  # noqa: BLE001 — non-fatal sidecar
-                logger.warning(f"universe shadow parity failed (non-fatal): {e}")
 
         # 3. Load data
         prices   = load_prices(universe)
