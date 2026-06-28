@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_turn_of_the_month_in_equity_indexes",
+  "required": ["prices"],
+  "optional": []
+}

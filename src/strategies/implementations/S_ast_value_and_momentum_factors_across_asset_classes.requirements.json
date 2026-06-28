@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_value_and_momentum_factors_across_asset_classes",
+  "required": ["prices"],
+  "optional": []
+}

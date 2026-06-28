@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_wti_brent_spread_mean_reversion",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-06-19T17:59:00.746772Z",
+  "updated_at": "2026-06-26T23:00:05.353935+00:00",
   "strategies": {
     "S_abnormal_accruals_earnings_quality": {
       "state": "candidate",
@@ -1399,8 +1399,8 @@
       "instrument_class": "equity"
     },
     "S_HV16_gex_regime": {
-      "state": "live",
-      "state_since": "2026-04-22T05:18:07.798201+00:00",
+      "state": "candidate",
+      "state_since": "2026-06-26T23:00:05.289608+00:00",
       "metadata": {
         "canonical_file": "shv16_gex_regime.py",
         "class": "GEXRegime",
@@ -1417,6 +1417,14 @@
             "option": "A",
             "preserve_execution": true
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-06-26T23:00:05.289608+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4450,8 +4458,8 @@
       "instrument_class": "equity"
     },
     "S_labor_day_week_momentum_reversal": {
-      "state": "live",
-      "state_since": "2026-05-24T15:33:26.907Z",
+      "state": "candidate",
+      "state_since": "2026-06-26T23:00:05.329158+00:00",
       "metadata": {
         "canonical_file": "S_labor_day_week_momentum_reversal.py",
         "class": "LaborDayWeekMomentumReversal",
@@ -4472,6 +4480,14 @@
               "HIGH_VOL"
             ]
           }
+        },
+        {
+          "from_state": "live",
+          "to_state": "candidate",
+          "timestamp": "2026-06-26T23:00:05.329158+00:00",
+          "actor": "strategy_weights_engine",
+          "reason": "auto_demote_after_weekly_cron",
+          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -5520,12 +5536,58 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "etp",
-      "eligible_regimes": [
-        "LOW_VOL",
-        "TRANSITIONING",
-        "HIGH_VOL"
-      ]
+      "instrument_class": "etp"
+    },
+    "S_ast_value_factor_effect_within_countries": {
+      "state": "candidate",
+      "state_since": "2026-06-21T18:08:57.218286+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_value_factor_effect_within_countries.py",
+        "class": "AstValueFactorEffectWithinCountries",
+        "description": "Annual cross-country CAPE value rotation: invest equally in the bottom tercile of country ETFs with Shiller CAPE below 15, rebalanced every December."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_ast_value_and_momentum_factors_across_asset_classes": {
+      "state": "candidate",
+      "state_since": "2026-06-21T18:17:24.454218+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_value_and_momentum_factors_across_asset_classes.py",
+        "class": "AstValueAndMomentumFactorsAcrossAssetClasses",
+        "description": "Monthly rebalance across 11 asset-class ETFs; ranks by 12-1m momentum z-score; long top one-third equal-weight.",
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_ast_turn_of_the_month_in_equity_indexes": {
+      "state": "candidate",
+      "state_since": "2026-06-21T18:26:49.425144+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_turn_of_the_month_in_equity_indexes.py",
+        "class": "AstTurnOfTheMonthInEquityIndexes",
+        "description": "Long SPY on last trading day of each month; exit on 3rd trading day of next month.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_ast_trend_following_effect_in_stocks": {
+      "state": "candidate",
+      "state_since": "2026-06-21T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_trend_following_effect_in_stocks.py",
+        "class": "AstTrendFollowingEffectInStocks",
+        "description": "Stocks hitting all-time-high closes exhibit momentum continuation; enter on ATH breakout and trail a 10-period ATR stop to ride the trend."
+      },
+      "history": [],
+      "instrument_class": "equity"
     },
     "oxf_adaptive_ma": {
       "state": "live",
@@ -6100,6 +6162,88 @@
         }
       ],
       "instrument_class": "etp"
+    },
+    "S_wti_brent_spread_mean_reversion": {
+      "state": "candidate",
+      "state_since": "2026-06-21T18:53:11.798896+00:00",
+      "metadata": {
+        "canonical_file": "S_wti_brent_spread_mean_reversion.py",
+        "class": "WtiBrentSpreadMeanReversion",
+        "description": "Fade USO/BNO spread deviations from their 20-day SMA; exit on reversion to fair value.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_ast_time_series_momentum_effect": {
+      "state": "candidate",
+      "state_since": "2026-06-21T19:01:36.297290+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_time_series_momentum_effect.py",
+        "class": "AstTimeSeriesMomentumEffect",
+        "description": "Monthly 12-month trailing return signal across 24 multi-asset ETFs; LONG when return > 0, inverse-vol sized to target 10% annualized portfolio vol.",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_ast_skewness_effect_in_commodities": {
+      "state": "candidate",
+      "state_since": "2026-06-21T19:27:28.576363+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_skewness_effect_in_commodities.py",
+        "class": "AstSkewnessEffectInCommodities",
+        "description": "Monthly quintile sort on 252-day log-return skewness across commodity ETFs; long bottom quintile (most negatively skewed), flat top quintile.",
+        "eligible_regimes": [
+          "TRANSITIONING",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_triangulated_stat_arb_triplets": {
+      "state": "candidate",
+      "state_since": "2026-06-21T00:00:00.000000+00:00",
+      "metadata": {
+        "canonical_file": "S_triangulated_stat_arb_triplets.py",
+        "class": "TriangulatedStatArbTriplets",
+        "description": "Triangulated stat arb across stock triplets \u2014 OLS hedge ratio z-score mean reversion."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_trend_vol_quadratic_forecast": {
+      "state": "candidate",
+      "state_since": "2026-06-21T19:56:52.410252+00:00",
+      "metadata": {
+        "canonical_file": "S_trend_vol_quadratic_forecast.py",
+        "class": "TrendVolQuadraticForecast",
+        "description": "Quadratic polynomial of trend strength predicts next-day vol; long top-trend stocks, short bottom-trend stocks, vol-targeted sizing."
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_schur_damped_minvar_shrinkage": {
+      "state": "candidate",
+      "state_since": "2026-06-21T00:00:00Z",
+      "metadata": {
+        "canonical_file": "S_schur_damped_minvar_shrinkage.py",
+        "class": "SchurDampedMinVarShrinkage",
+        "description": "Closed-form Schur/Ledoit-Wolf damping intensity blends min-variance and HRP weights for a robust long-only equity portfolio."
+      },
+      "history": [],
+      "instrument_class": "equity"
     }
   },
   "decommissioned": {
