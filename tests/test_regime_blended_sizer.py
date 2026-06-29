@@ -170,6 +170,58 @@ def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None):
         )
 
 
+class TestSignalSetHealthGate:
+    """W3 C4: the signal-set-health gate (OPENCLAW_INTRADAY_REDEPLOY=1) must
+    return [] when the active set is thin relative to the recent baseline,
+    preventing orphan-closes on bad-data redeployments."""
+
+    def test_thin_signal_set_aborts_intraday_redeploy(self, monkeypatch):
+        """Gate-FIRES path: 5 active signals vs a mocked baseline of 50 triggers
+        the FRAC arm — threshold = max(floor=10, 0.30×50=15) = 15; 5 < 15 →
+        return [] with zero orders (broker load + _classify_position_deltas are
+        never reached, so no orphan-closes).
+
+        Mirrors _run_intraday_path setup but overrides _recent_active_counts to a
+        HIGH baseline (50) so the FRAC arm fires rather than relying on the floor
+        alone. Signals have eff_sharpe=3.5 (> min_cum_sharpe=3.0) so they pass the
+        cum-sharpe gate; the signal-set-health gate is the one that aborts.
+        """
+        monkeypatch.setenv('OPENCLAW_INTRADAY_REDEPLOY', '1')
+        monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+        for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',
+                     'OPENCLAW_STRATEGY_BRACKET_STACK', 'OPENCLAW_OPTION_DELTA_HEDGE',
+                     'OPENCLAW_STRATEGY_CORR_WEIGHT'):
+            monkeypatch.delenv(gate, raising=False)
+
+        thin_signals = [_carried_cap(f'S_thin_{i}', f'THIN{i:02d}') for i in range(5)]
+        thin_weights = [_weights_row_cap(f'S_thin_{i}', eff_sharpe=3.5) for i in range(5)]
+
+        monkeypatch.setattr(_sizer, '_load_active_window_signals',
+                            lambda rstate, wbs, cbs: list(thin_signals))
+        monkeypatch.setattr(_sizer, '_load_lambda',
+                            lambda default=2.0, *, intraday=False: _CAP_LAM)
+        monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
+        # High baseline (50) → FRAC arm: threshold = max(floor=10, 0.30×50=15) = 15.
+        # len(active) = 5 < 15 → is_signal_set_thin returns True → gate fires.
+        monkeypatch.setattr(_sizer, '_recent_active_counts',
+                            lambda lookback=10: [50] * lookback)
+
+        with _mock.patch('execution.strategy_weights.load_current',
+                         return_value=list(thin_weights)):
+            orders = _sizer.size_positions(
+                signals=list(thin_signals),
+                account_state=_cap_account(),
+                regime={'state': 'LOW_VOL'},
+                run_date=date(2026, 6, 4), strategy_state={},
+                regime_params=_cap_params(), confirmer=lambda proposals: {},
+            )
+
+        assert orders == [], (
+            f'thin signal set (5 vs baseline 50, gate threshold 15) must abort '
+            f'intraday redeploy with zero orders; got {len(orders)} orders'
+        )
+
+
 class TestIntradayRedeployConvictionCap:
     """W3 F2c: OPENCLAW_INTRADAY_REDEPLOY=1 must engage the per-ticker
     conviction cap identical to the existing EOD path."""
