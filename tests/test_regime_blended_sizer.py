@@ -149,6 +149,13 @@ def _run_intraday_path(monkeypatch, weights_rows, signals_rows, broker=None):
     monkeypatch.setattr(_sizer, '_load_lambda',
                         lambda default=2.0, *, intraday=False: _CAP_LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker or {}))
+    # W3 C4 — signal-set-health gate is intraday-only; stub _recent_active_counts
+    # so the gate uses a baseline consistent with len(signals_rows). Callers that
+    # want to test the gate itself should override this stub via their own
+    # monkeypatch.setattr call after _run_intraday_path returns or by not using
+    # this helper at all.
+    monkeypatch.setattr(_sizer, '_recent_active_counts',
+                        lambda lookback=10: [len(signals_rows)] * lookback)
 
     with _mock.patch('execution.strategy_weights.load_current',
                      return_value=list(weights_rows)):
@@ -172,11 +179,21 @@ class TestIntradayRedeployConvictionCap:
         cap = PER_TICKER_CAP_SHARPE_FRAC × |sharpe| × λ × NAV.
 
         Without the C3 gate fix this test is RED (cap not applied on intraday
-        path → target = full λ×NAV = $200k instead of $35k)."""
+        path → target = full λ×NAV = $200k instead of $35k).
+
+        W3 C4 note: the signal-set-health gate (floor=10) is active on the
+        intraday path. Nine dummy signals with sharpe=0.5 pad len(active) to
+        10 so the gate passes; they are filtered by the cum_sharpe gate (3.0)
+        and never produce orders. The _recent_active_counts stub in
+        _run_intraday_path returns [10]*10 → baseline=10, threshold=10 ≤
+        len(active)=10 → gate passes. STX is the sole surviving ticker."""
+        dummy_sids = [f'S_dummy_{i}' for i in range(9)]
+        dummy_weights = [_weights_row_cap(sid, eff_sharpe=0.5) for sid in dummy_sids]
+        dummy_signals = [_carried_cap(sid, f'DUMMY{i:02d}') for i, sid in enumerate(dummy_sids)]
         orders = _run_intraday_path(
             monkeypatch,
-            weights_rows=[_weights_row_cap('S1', eff_sharpe=3.5)],
-            signals_rows=[_carried_cap('S1', 'STX')],
+            weights_rows=[_weights_row_cap('S1', eff_sharpe=3.5)] + dummy_weights,
+            signals_rows=[_carried_cap('S1', 'STX')] + dummy_signals,
         )
         opens = _open_by_ticker_cap(orders)
         assert 'STX' in opens, f'expected STX open order, got {orders}'

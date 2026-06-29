@@ -36,6 +36,13 @@ PER_TICKER_CAP_SHARPE_FRAC = 0.05
 # it only stops the sizer emitting an order the broker would reject.
 DUST_FLOOR_USD = 1.0
 
+# W3 F2a — signal-set-health gate constants (intraday-redeploy only).
+# If the active signal set is both below SIGNAL_SET_MIN_FLOOR AND below
+# SIGNAL_SET_MIN_FRAC × recent median, the redeploy is assumed to be acting on
+# thin/bad data and is aborted with zero orders (no orphan-closes).
+SIGNAL_SET_MIN_FLOOR = 10
+SIGNAL_SET_MIN_FRAC = 0.30
+
 
 def _dust_tickers(target_usd: dict, dust_floor_usd: float = DUST_FLOOR_USD) -> list:
     """Tickers whose absolute target notional is below the hard dust floor.
@@ -225,6 +232,19 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
     except Exception:
         pass
     return default
+
+
+def _recent_active_counts(lookback: int = 10) -> list[int]:
+    """Recent per-cycle active-signal-set sizes (count of open execution_signals per
+    signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) FROM execution_signals WHERE status='open'
+                           GROUP BY signal_date ORDER BY signal_date DESC LIMIT %s""", (lookback,))
+            return [int(r[0]) for r in cur.fetchall()]
+    except Exception:
+        return []
 
 
 def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[dict]:
@@ -1209,6 +1229,21 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     #                     portion).
     #   • flip_open     — the paired new-direction open following flip_close.
     #                     Tier-2 (short) or tier-3 (long) in executor.
+    # W3 F2a — signal-set-health gate: abort intraday redeploy if the active
+    # signal set is abnormally thin vs a recent baseline (thin/bad-data guard).
+    # `return []` here means ZERO orders → _classify_position_deltas never runs
+    # → no orphan-closes computed against the broker book.  The zero-signal case
+    # (active is completely empty) is already handled earlier; this gate catches
+    # the partial-thin case where some signals arrive but not enough to trust.
+    # Runs only when OPENCLAW_INTRADAY_REDEPLOY=1 — daily/EOD lane is untouched.
+    if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
+        from execution.signal_set_health import is_signal_set_thin, recent_baseline
+        _baseline = recent_baseline(_recent_active_counts(lookback=10))
+        if is_signal_set_thin(len(active), _baseline, floor=SIGNAL_SET_MIN_FLOOR, frac=SIGNAL_SET_MIN_FRAC):
+            logger.warning('ABORT intraday redeploy sizing: active=%d < gate(floor=%d, %.0f%%*baseline=%.1f) — leaving book intact (no orphan-close)',
+                           len(active), SIGNAL_SET_MIN_FLOOR, SIGNAL_SET_MIN_FRAC*100, _baseline)
+            return []
+
     broker = _load_broker_positions_usd()
     emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
     flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
