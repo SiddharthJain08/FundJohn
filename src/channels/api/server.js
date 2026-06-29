@@ -12,6 +12,7 @@ const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
 const { isRegimeEligibleNow } = require('./regime_active');
+const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
@@ -2444,7 +2445,8 @@ app.post('/api/events/data-updated', (req, res) => {
 app.get('/api/regime', async (req, res) => {
   try {
     const raw = await fs.promises.readFile(REGIME_FILE, 'utf8');
-    res.json({ available: true, ...JSON.parse(raw) });
+    const parsed = JSON.parse(raw);
+    res.json({ available: true, ...parsed, ...regimeFreshness(parsed, Date.now()) });
   } catch (err) {
     if (err.code === 'ENOENT' || err instanceof SyntaxError)
       return res.json({ available: false, state: 'NO_DATA' });
@@ -5064,6 +5066,13 @@ function _renderRegimeStructure(intraday, daily) {
   const roroClr   = roro >= 0 ? 'var(--green)' : 'var(--red)';
   const roroLbl   = dly == null ? '—' : (roro >= 0 ? \`+\${(dly.roro_score||0).toFixed(1)} risk-on\` : \`\${(dly.roro_score||0).toFixed(1)} risk-off\`);
 
+  // Daily-block freshness: flag frozen date/stress/roro so the gauge greys them
+  // instead of presenting stale values as current (e.g. 2026-06-08 operator resync).
+  const _stale = dly && dly.daily_stale;
+  const _asOf  = dly && dly.daily_date ? \` (as-of \${dly.daily_date}\${_stale ? ', stale' : ''})\` : '';
+  const stressClrEff = _stale ? 'var(--dim)' : stressClr;
+  const roroClrEff   = _stale ? 'var(--dim)' : roroClr;
+
   const macroHtml = [
     ['VIX 5d Δ',     df.vix_5d_chg   != null ? (df.vix_5d_chg>=0?'+':'')+df.vix_5d_chg.toFixed(2) : '—'],
     ['SPX 20d RV',   df.spx_rv_20d   != null ? df.spx_rv_20d.toFixed(2)+'%'                       : '—'],
@@ -5121,16 +5130,16 @@ function _renderRegimeStructure(intraday, daily) {
         </div>
 
         <div class="regime-section">
-          <div class="regime-section-header">Market Stress</div>
+          <div class="regime-section-header">Market Stress\${_stale ? \` <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal;letter-spacing:0">\${_asOf}</span>\` : ''}</div>
           <div class="regime-bar-group" style="margin-bottom:12px">
-            <div class="regime-bar-label"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stress}/100</span></div>
-            <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClr}"></div></div>
+            <div class="regime-bar-label" style="\${_stale ? 'color:var(--dim)' : ''}"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stress}/100</span></div>
+            <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClrEff}"></div></div>
           </div>
           <div class="regime-bar-group">
-            <div class="regime-bar-label"><span>RORO</span><span>\${roroLbl}</span></div>
+            <div class="regime-bar-label" style="\${_stale ? 'color:var(--dim)' : ''}"><span>RORO</span><span>\${roroLbl}</span></div>
             <div class="regime-roro-track">
               <div class="regime-roro-center"></div>
-              <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClr}"></div>
+              <div class="regime-roro-fill" style="\${roroLeft};background:\${roroClrEff}"></div>
             </div>
           </div>
         </div>
