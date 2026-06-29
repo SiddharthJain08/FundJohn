@@ -36,4 +36,13 @@ function isRegimeEligibleNow(regimeParamsForStrategy, currentRegime) {
   return true;
 }
 
-module.exports = { isRegimeEligibleNow };
+/**
+ * Pick the regime a strategy's badge should be evaluated against. Crypto
+ * strategies are gated by the engine on the crypto regime; everything else on
+ * the equity regime. Falls back to the equity regime if the crypto one is absent.
+ */
+function regimeForStrategy(instrumentClass, equityRegime, cryptoRegime) {
+  if (instrumentClass === 'crypto') return cryptoRegime || equityRegime || null;
+  return equityRegime || null;
+}
+module.exports = { isRegimeEligibleNow, regimeForStrategy };

@@ -11,10 +11,11 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
-const { isRegimeEligibleNow } = require('./regime_active');
+const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
 const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
-const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
+const REGIME_FILE        = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
+const CRYPTO_REGIME_FILE = require('path').join(__dirname, '../../../.agents/crypto-market-state/crypto_regime_latest.json');
 
 const app  = express();
 app.use(express.json());
@@ -1259,6 +1260,17 @@ app.get('/api/strategies', async (req, res) => {
       console.warn(`[regime-sizing] regime file read failed: ${e.message}`);
     }
 
+    // Crypto regime — loaded once before the badge loop; null on any error
+    // (best-effort, mirrors how currentRegime is loaded above). When null,
+    // regimeForStrategy falls back to the equity regime for crypto strategies.
+    let cryptoRegime = null;
+    try {
+      const cryptoJson = JSON.parse(fs.readFileSync(CRYPTO_REGIME_FILE, 'utf8'));
+      cryptoRegime = cryptoJson.state || null;
+    } catch (e) {
+      // best-effort: no crypto regime file → cryptoRegime stays null → fallback to equity
+    }
+
     // ── Backtest dashboard panel (precomputed; strategy_backtest_panel) ──
     // Effective Sharpe + GBM-σ OUE counts (overall + per regime). This
     // REPLACES the prior live OUE (execution_signals.oue_kind), the live
@@ -1305,8 +1317,9 @@ app.get('/api/strategies', async (req, res) => {
       // badge + staleness match what actually trades. Previously a strategy toggled to
       // e.g. CRISIS-only still showed LIVE in a LOW_VOL market while the engine skipped
       // it. regimeParamsById[sid] is the same source the live sizer reads. See
-      // regime_active.js.
-      const regimeActive  = isRegimeEligibleNow(regimeParamsById[sid], currentRegime);
+      // regime_active.js. Crypto strategies are gated on the crypto regime (D4).
+      const _regime      = regimeForStrategy(rec.instrument_class, currentRegime, cryptoRegime);
+      const regimeActive = isRegimeEligibleNow(regimeParamsById[sid], _regime);
       // last_signal_date is now sourced from execution_signals (lastSignalById)
       // so is_stale and the Last Signal column share one live source.
       const _lastSig = lastSignalById[sid] || null;
@@ -1359,7 +1372,7 @@ app.get('/api/strategies', async (req, res) => {
       const _defaultScope = _eligRaw ? 'ELIGIBLE' : 'ALL';
       rows.push({
         ...buildStrategyRow({
-          sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime,
+          sid, rec, isStale, regimeActive, activeRegimes, eligRaw: _eligRaw, currentRegime: _regime,
           run: ubtRunById[sid] || {},
           regimeBreakdown: _decoratedBreakdown,
           panel: panelById[sid] || null,
