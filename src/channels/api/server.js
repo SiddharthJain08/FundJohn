@@ -4287,6 +4287,7 @@ body.rs-chat-locked{overflow:hidden}
         <div class="pl-tile-sub">in langgraph.checkpoints</div>
       </div>
     </div>
+    <div id="pl-count-window" style="font-size:10px;color:var(--muted);margin-top:6px;display:none"></div>
 
     <div class="pl-card">
       <header>
@@ -9805,6 +9806,8 @@ async function _refreshPipelineSummary() {
     _tileState(document.getElementById('pl-tile-card-today'), d.today||0, 'ok');
     _tileState(document.getElementById('pl-tile-card-failures'), d.failures_24h||0, 'failures');
     _tileState(document.getElementById('pl-tile-card-durable'), d.durable_total||0, 'ok');
+    const wEl = document.getElementById('pl-count-window');
+    if (wEl) { const lbl = d.live_window ? d.live_window.replace(/_/g,' ') : null; wEl.textContent = lbl ? 'counts '+lbl : ''; wEl.style.display = lbl ? '' : 'none'; }
 
     // Populate graph filter dropdown if not present yet
     const sel = document.getElementById('pl-filter-graph');
