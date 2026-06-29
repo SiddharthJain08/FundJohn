@@ -337,6 +337,7 @@ async function main() {
                            ...tiers.B.map(t => t.hunterResult.strategy_id)],
   }, null, 2));
   log('Finisher complete.');
+  process.exit(0);
 }
 
 main().catch((e) => {

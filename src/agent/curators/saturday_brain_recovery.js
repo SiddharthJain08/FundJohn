@@ -286,6 +286,7 @@ async function main() {
   };
   console.log(JSON.stringify(summary, null, 2));
   log('Recovery complete.');
+  process.exit(0);
 }
 
 main().catch((e) => {
