@@ -12,6 +12,7 @@ const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
 const { isRegimeEligibleNow } = require('./regime_active');
+const { realizedLeverage } = require('./leverage');
 const REGIME_FILE = require('path').join(__dirname, '../../../.agents/market-state/regime_latest.json');
 
 const app  = express();
@@ -1936,6 +1937,7 @@ app.get('/api/portfolio/account', async (req, res) => {
       return res.status(status).json({ error: r.error?.error || r.stderr || 'alpaca cli error' });
     }
     const a = r.payload || {};
+    const _lev = realizedLeverage(a);
     res.json({
       equity:             parseFloat(a.equity)             || 0,
       cash:               parseFloat(a.cash)               || 0,
@@ -1943,6 +1945,8 @@ app.get('/api/portfolio/account', async (req, res) => {
       last_equity:        parseFloat(a.last_equity)        || 0,
       long_market_value:  parseFloat(a.long_market_value)  || 0,
       short_market_value: parseFloat(a.short_market_value) || 0,
+      gross_leverage:     _lev.gross,
+      net_leverage:       _lev.net,
       day_pnl:           (parseFloat(a.equity) - parseFloat(a.last_equity)) || 0,
       day_pnl_pct:        parseFloat(a.last_equity) > 0
                             ? ((parseFloat(a.equity) - parseFloat(a.last_equity)) / parseFloat(a.last_equity) * 100)
@@ -6470,6 +6474,7 @@ let _navCache = null;
 // reads this server-side from pipeline_config; the dashboard value is
 // purely cosmetic + the source of the PUT.
 let _lambdaCache = 2.0;
+let _grossLevCache = null; // set by renderAccountRow, consumed by renderRiskPanel
 
 async function loadPortfolio() {
   const [summary, positions, history, candles, account, valCurve, lifeCurve, reg90, reg1y] = await Promise.all([
@@ -6563,6 +6568,10 @@ function renderAccountRow(a) {
   const fmt = (v) => v != null ? '$' + parseFloat(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—';
   const fmtPct = (v) => v != null ? (v >= 0 ? '+' : '') + parseFloat(v).toFixed(2) + '%' : '';
 
+  // Cache actual gross leverage so renderRiskPanel (called right after) can
+  // display "actual N.NN×" beside the target (config-intent) lambda.
+  _grossLevCache = a.gross_leverage ?? null;
+
   const equity   = a.equity;
   const cash     = a.cash;
   const dayPnl   = a.day_pnl;
@@ -6583,9 +6592,14 @@ function renderAccountRow(a) {
   dayEl.className    = 'pf-stat-value ' + pnlCls(dayPnl);
   daySub.textContent = fmtPct(dayPct);
 
-  document.getElementById('pf-invested').textContent     = fmt(invested);
-  document.getElementById('pf-invested-sub').textContent = a.short_market_value
-    ? 'short ' + fmt(a.short_market_value) : '';
+  // Show "actual N.NN×" sub under Invested so the operator can see the
+  // realized broker exposure (not just the config-intent target lambda).
+  const _actLev = (a.gross_leverage == null) ? '—' : a.gross_leverage.toFixed(2) + '×';
+  document.getElementById('pf-invested').textContent = fmt(invested);
+  const investedSubParts = [];
+  if (a.short_market_value) investedSubParts.push('short ' + fmt(a.short_market_value));
+  investedSubParts.push('λ actual ' + _actLev);
+  document.getElementById('pf-invested-sub').textContent = investedSubParts.join(' · ');
 }
 
 function renderPortfolioSummary(s, valCurve) {
@@ -7477,7 +7491,7 @@ function renderRiskPanel(cfg) {
         \${active ? '<span class="pf-regime-active-badge">LIVE</span>' : ''}
       </div>
       <div class="pf-regime-eff" id="pf-eff-\${r.state}">\${eff.toFixed(2)}×</div>
-      <div class="pf-regime-eff-label">effective leverage</div>
+      <div class="pf-regime-eff-label">target leverage</div>
       <div class="pf-regime-eff-formula">= Leverage × <span id="pf-liq-display-\${r.state}">\${r.liquidity_param.toFixed(2)}</span></div>
       <div class="pf-regime-param-row">
         <span class="pf-regime-param-label-block">
@@ -7542,7 +7556,7 @@ function renderRiskPanel(cfg) {
       </div>
       <div class="pf-lambda-readout">
         <span class="pf-lr-value" id="pf-lambda-readout">\${lam.toFixed(2)}×</span>
-        <span class="pf-lr-sub">→ effective in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV gross</span>
+        <span class="pf-lr-sub">→ target in <strong style="color:var(--text)">\${currentRegime.replace('_',' ') || '—'}</strong>: <span id="pf-current-eff" style="color:var(--blue);font-weight:700">\${currentEff.toFixed(2)}×</span> NAV · <span title="Gross broker exposure (|long|+|short|)/equity from last account refresh" style="color:var(--muted)">actual <strong style="color:var(--text)">\${_grossLevCache != null ? _grossLevCache.toFixed(2) + '×' : '—'}</strong></span></span>
       </div>
     </div>
 
