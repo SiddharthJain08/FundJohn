@@ -1769,17 +1769,29 @@ def _all_checks():
     return out
 
 
-def run(*, quick=False, required_only=False):
-    """Run all checks and return (results, exit_code)."""
+def run(*, quick=False, required_only=False, only=None):
+    """Run all checks and return (results, exit_code).
+
+    only: optional iterable of check names. When provided, ONLY those checks
+    run (ignoring quick/required_only/slow filters). Used by narrow systemd
+    ExecStartPre gates that must depend on a specific subset of checks rather
+    than the full sweep — e.g. the options-archive preflight gates only on
+    alpaca reachability, not on unrelated subsystem drift.
+    """
     results = []
     overall = PASS
+    only = set(only) if only is not None else None
     for name, fn, slow in _all_checks():
-        if quick and slow:
-            continue
-        if required_only and name in {
-                'env_optional', 'data_coverage', 'orchestrator_lock',
-                'systemd_services'}:
-            continue
+        if only is not None:
+            if name not in only:
+                continue
+        else:
+            if quick and slow:
+                continue
+            if required_only and name in {
+                    'env_optional', 'data_coverage', 'orchestrator_lock',
+                    'systemd_services'}:
+                continue
         try:
             res = fn()
         except Exception as exc:
@@ -1829,10 +1841,17 @@ def main():
                     help='Exit 0 on WARN; only FAIL drives non-zero exit. For systemd ExecStartPre gates that must not be blocked by advisory warnings.')
     ap.add_argument('--json',          action='store_true',
                     help='Emit machine-readable JSON instead of human table')
+    ap.add_argument('--only',
+                    help='Comma-separated check names to run EXCLUSIVELY '
+                         '(overrides --quick/--required-only). For narrow '
+                         'ExecStartPre gates, e.g. --only alpaca_cli_binary,alpaca_auth')
     args = ap.parse_args()
 
+    only = ({s.strip() for s in args.only.split(',') if s.strip()}
+            if args.only else None)
     started = time.monotonic()
-    results, exit_code = run(quick=args.quick, required_only=args.required_only)
+    results, exit_code = run(quick=args.quick, required_only=args.required_only,
+                             only=only)
     elapsed_ms = int((time.monotonic() - started) * 1000)
 
     n_pass = sum(1 for r in results if r['severity'] == PASS)
@@ -1844,14 +1863,16 @@ def main():
             'overall':    {0: 'pass', 1: 'warn', 2: 'fail'}[exit_code],
             'exit_code':  exit_code,
             'elapsed_ms': elapsed_ms,
-            'mode':       ('required_only' if args.required_only
+            'mode':       ('only' if only
+                           else 'required_only' if args.required_only
                            else 'quick' if args.quick else 'full'),
             'summary':    f'{n_pass} pass, {n_warn} warn, {n_fail} fail',
             'checks':     results,
         }))
     else:
         print('FundJohn doctor — '
-              + ('required-only' if args.required_only
+              + ('only' if only
+                 else 'required-only' if args.required_only
                  else 'quick' if args.quick else 'full')
               + f' mode  ({elapsed_ms}ms)')
         print(_format_table(results))

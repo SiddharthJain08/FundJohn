@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_trend_vol_quadratic_forecast",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_schur_damped_minvar_shrinkage",
+  "required": ["prices"],
+  "optional": []
+}

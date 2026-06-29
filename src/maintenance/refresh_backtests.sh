@@ -4,10 +4,9 @@
 # staging strategy and then refreshes their eligible_regimes from the
 # discovered per-regime metrics.
 #
-# Scheduled via openclaw-backtest-refresh.timer (Saturday 06:00 UTC, before
-# the Saturday mastermind corpus run at 10:00 ET). Logs to journal and to
-# /var/log/openclaw/backtest_refresh.log; posts a one-line summary to
-# #botjohn-log on completion (best-effort).
+# Invoked as step 5 of weekend_saturday.sh (Sat 08:00 ET). The standalone
+# openclaw-backtest-refresh.timer (Sat 06:00 UTC) is DISABLED, so this is the
+# sole Saturday caller. Logs to /var/log/openclaw/backtest_refresh_*.log.
 
 set -euo pipefail
 
@@ -19,8 +18,14 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 echo "[refresh_backtests] start $(date -u +%FT%TZ)" | tee -a "$LOG_FILE"
 
-# 1. Run unified backtest for every live/candidate/staging strategy
-python3 -m backtest.unified_backtest --all-live 2>&1 | tee -a "$LOG_FILE"
+# 1. Run unified backtest for every live/candidate/staging strategy.
+# Bounded (6h) + niced (W1 reconcile 2026-06-28): the full --all-live refresh can
+# exceed the weekend window on the 2-core VPS. The cap lets the caller
+# (weekend_saturday.sh) still run weekly weights/panels on last-known backtests
+# instead of being killed mid-refresh. timeout wraps the python directly so the
+# whole process tree dies cleanly (no orphaned backtest).
+# Durable fix = per-strategy subprocess/watchdog resumable refresh (tracked separately).
+timeout -k 60 21600 nice -n 19 python3 -m backtest.unified_backtest --all-live 2>&1 | tee -a "$LOG_FILE"
 BT_RC=${PIPESTATUS[0]}
 
 # 2. Refresh eligible_regimes from data (only if backtest succeeded)

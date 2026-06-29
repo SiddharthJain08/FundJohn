@@ -13,9 +13,10 @@ so the price panel always has every column a strategy may reference.
 Fail-open per strategy: any resolve error leaves that strategy on the FULL
 fallback universe (never empty a live universe) and records the error.
 
-The classification helpers are LIFTED from src/execution/universe_clamp.py
-(not imported): the clamp is DELETED at the end of C1 (spec §3.6) and this
-module must survive that deletion.
+The classification helpers were LIFTED from the now-retired Phase-A4 sp500-clamp
+module rather than imported, precisely so this module would survive that module's
+deletion — which happened in SP-7 §6 (2026-06-28); the resolver is now the sole
+live-universe authority.
 """
 from __future__ import annotations
 

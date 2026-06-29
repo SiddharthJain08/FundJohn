@@ -156,6 +156,8 @@ _IMPL_MAP = {
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
     # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
     'S_short_straddle_vrp':              ('strategies.implementations.S_short_straddle_vrp',              'ShortStraddleVRP'),
+    # Cotton (2026) — Schur-damped MV/HRP shrinkage portfolio
+    'S_schur_damped_minvar_shrinkage':   ('strategies.implementations.S_schur_damped_minvar_shrinkage',   'SchurDampedMinVarShrinkage'),
     # Value + Momentum Everywhere — Asness, Moskowitz & Pedersen (2013)
     'S_value_momentum_everywhere':       ('strategies.implementations.S_value_momentum_everywhere',       'ValueMomentumEverywhere'),
     # Ang et al. 2006 — idiosyncratic volatility puzzle
@@ -186,6 +188,14 @@ _IMPL_MAP = {
     'S_ast_betting_against_beta_factor_in_stocks': ('strategies.implementations.S_ast_betting_against_beta_factor_in_stocks', 'BettingAgainstBetaFactorInStocks'),
     # Quantpedia: Asset Class Trend Following — 210-day SMA filter across 5-ETF basket
     'S_ast_asset_class_trend_following': ('strategies.implementations.S_ast_asset_class_trend_following', 'AssetClassTrendFollowing'),
+    # Quantpedia: Value Factor CAPE Effect Within Countries — annual CAPE rotation across 25 country ETFs
+    'S_ast_value_factor_effect_within_countries': ('strategies.implementations.S_ast_value_factor_effect_within_countries', 'AstValueFactorEffectWithinCountries'),
+    # Asness, Moskowitz & Pedersen 2013: 12-1 momentum rotation across 11 multi-asset ETFs
+    'S_ast_value_and_momentum_factors_across_asset_classes': ('strategies.implementations.S_ast_value_and_momentum_factors_across_asset_classes', 'AstValueAndMomentumFactorsAcrossAssetClasses'),
+    # QuantPedia: Turn of the Month — long SPY last day of month, exit 3rd day of new month
+    'S_ast_turn_of_the_month_in_equity_indexes': ('strategies.implementations.S_ast_turn_of_the_month_in_equity_indexes', 'AstTurnOfTheMonthInEquityIndexes'),
+    # Quantpedia: Trend Following Effect in Stocks — ATH-breakout + ATR(10) trailing stop
+    'S_ast_trend_following_effect_in_stocks': ('strategies.implementations.S_ast_trend_following_effect_in_stocks', 'AstTrendFollowingEffectInStocks'),
     # Oxford/blueprint batch — impl files + manifest entries existed but _IMPL_MAP
     # wiring was never done, so all 30 were unimportable (12 live ones were
     # "dead live": manifest live, 0 registry rows, 0 signals ever). Wired
@@ -221,6 +231,16 @@ _IMPL_MAP = {
     'oxf_welles_wilder_breakout': ('strategies.implementations.oxf_welles_wilder_breakout', 'OxfWellesWilderBreakout'),
     'oxf_wyckoff_meanrev':        ('strategies.implementations.oxf_wyckoff_meanrev',        'OxfWyckoffMeanrev'),
     'oxf_zero_lag_ma':            ('strategies.implementations.oxf_zero_lag_ma',            'OxfZeroLagMa'),
+    # Quantpedia: WTI-Brent spread mean reversion via USO/BNO ETF proxies
+    'S_wti_brent_spread_mean_reversion': ('strategies.implementations.S_wti_brent_spread_mean_reversion', 'WtiBrentSpreadMeanReversion'),
+    # Moskowitz, Ooi & Pedersen (2012): Time Series Momentum across 24 multi-asset ETFs
+    'S_ast_time_series_momentum_effect': ('strategies.implementations.S_ast_time_series_momentum_effect', 'AstTimeSeriesMomentumEffect'),
+    # Quantpedia: Skewness Effect in Commodities — monthly quintile sort on 252-day skewness across commodity ETFs
+    'S_ast_skewness_effect_in_commodities': ('strategies.implementations.S_ast_skewness_effect_in_commodities', 'AstSkewnessEffectInCommodities'),
+    # Longmore 2026: Triangulated stat arb — OLS spread across stock triplets, z-score mean reversion
+    'S_triangulated_stat_arb_triplets': ('strategies.implementations.S_triangulated_stat_arb_triplets', 'TriangulatedStatArbTriplets'),
+    # Safari & Schmidhuber 2026: quadratic trend-strength model forecasts next-day variance → vol-targeted long-short
+    'S_trend_vol_quadratic_forecast': ('strategies.implementations.S_trend_vol_quadratic_forecast', 'TrendVolQuadraticForecast'),
 }
 
 

@@ -57,7 +57,9 @@ class MacroRiskMomentumIPBeta(BaseStrategy):
         prices_sub = prices[available].copy()
 
         # ── 2. Extract IP growth from macro aux_data ─────────────────────────
-        ip_growth = self._get_ip_growth(aux_data, len(prices_sub))
+        # Pass the price DatetimeIndex (not just the length) so monthly IP-growth
+        # aligns to the actual trading days.
+        ip_growth = self._get_ip_growth(aux_data, prices_sub.index)
 
         # ── 3. Compute daily returns ─────────────────────────────────────────
         rets = prices_sub.pct_change().fillna(0.0)
@@ -175,26 +177,38 @@ class MacroRiskMomentumIPBeta(BaseStrategy):
 
     # ── helpers ────────────────────────────────────────────────────────────────
 
-    def _get_ip_growth(self, aux_data: dict, n_rows: int) -> pd.Series | None:
-        """Extract INDPRO monthly pct-change, reindex to daily length."""
-        if aux_data is None:
+    def _get_ip_growth(self, aux_data: dict, price_index) -> pd.Series | None:
+        """Daily IP-growth aligned to `price_index`, forward-filled from monthly INDPRO.
+
+        `aux_data['macro']` is the engine's aux shape: {series_name: pd.Series(date_index
+        -> value)} — a DICT, not a DataFrame. Returns a positional Series of length
+        len(price_index), or None when macro / the INDPRO series is unavailable (callers
+        then fall back to momentum-only ranking via uniform betas).
+
+        NOTE: macro.parquet currently carries only VIX*/VVIX (no INDPRO), so this returns
+        None today and the strategy runs momentum-only; it auto-activates the IP-beta
+        refinement once an INDPRO series is ingested into macro.parquet.
+        """
+        if not aux_data:
             return None
         macro = aux_data.get('macro')
-        if macro is None or macro.empty:
+        if not macro:                      # None or empty dict
             return None
-        col = None
-        for c in ['INDPRO', 'indpro', 'industrial_production', 'ip']:
-            if c in macro.columns:
-                col = c
+        series = None
+        for c in ('INDPRO', 'indpro', 'industrial_production', 'ip'):
+            if c in macro:                 # macro is a dict keyed by series name
+                series = macro[c]
                 break
-        if col is None:
+        if series is None or len(series) < 2:
             return None
-        ip_monthly = macro[col].dropna().pct_change().fillna(0.0)
-        # Forward-fill monthly values to daily length
-        ip_daily = ip_monthly.reindex(
-            range(n_rows), method='ffill'
-        ).fillna(0.0)
-        return ip_daily
+        ip_growth = series.dropna().astype(float).pct_change().dropna()
+        if ip_growth.empty:
+            return None
+        idx = pd.DatetimeIndex(pd.to_datetime(price_index))
+        # IP is monthly; forward-fill its growth onto the daily trading days.
+        aligned = (ip_growth.reindex(ip_growth.index.union(idx)).ffill()
+                            .reindex(idx).fillna(0.0))
+        return aligned.reset_index(drop=True)
 
     def _compute_betas(self, rets: pd.DataFrame, ip: np.ndarray) -> pd.Series:
         """OLS beta of each stock's returns on IP-growth series."""

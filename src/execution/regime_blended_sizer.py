@@ -1439,27 +1439,91 @@ def _select_bracket(candidates: list[dict], dir_sign: int) -> dict:
     return usable[0]
 
 
+# Asset-correlation cap threshold band. Below ~0.50 even loosely-related names
+# collapse into one cluster (over-de-grossing); above ~0.95 only literally-
+# identical series cluster (no-op). The slider + clamp both live in this band.
+_ASSET_CORR_THR_MIN = 0.50
+_ASSET_CORR_THR_MAX = 0.95
+_ASSET_CORR_THR_DEFAULT = 0.70
+
+# Per-cluster gross cap as a fraction of NAV. 0.20 matches the give-back
+# calibration (thr=0.6 → 1.82x→1.31x); band guards operator-pasted garbage.
+_ASSET_CORR_CAP_PCT_MIN = 0.05
+_ASSET_CORR_CAP_PCT_MAX = 0.50
+_ASSET_CORR_CAP_PCT_DEFAULT = 0.22
+
+
+def _load_asset_corr_cfg(default_thr: float = _ASSET_CORR_THR_DEFAULT,
+                         default_cap_pct: float = _ASSET_CORR_CAP_PCT_DEFAULT):
+    """Resolve the asset-correlation cap's (enabled, threshold, cap_pct).
+
+    Source precedence: pipeline_config (operator dashboard slider, re-read every
+    sizer cycle so a change/kill takes effect next cycle with NO johnbot restart)
+    wins; legacy env vars OPENCLAW_ASSET_CORR_CAP / _THR / _CAP_PCT are the
+    fallback; then hard defaults. Mirrors _load_lambda's pipeline_config read.
+
+    FAILS OFF: any DB error or absent config leaves the env/default layer, and
+    this read can never raise out of the sizer hot path (a risk-reducer silently
+    not firing is strictly safer than a DB hiccup throwing mid-sizing). thr is
+    clamped to [_ASSET_CORR_THR_MIN, _ASSET_CORR_THR_MAX], cap_pct to
+    [_ASSET_CORR_CAP_PCT_MIN, _ASSET_CORR_CAP_PCT_MAX]."""
+    # Layer 1 — legacy env gates (preserved as fallback + shadow soak path).
+    enabled = os.environ.get('OPENCLAW_ASSET_CORR_CAP') == '1'
+    try:
+        thr = float(os.environ.get('OPENCLAW_ASSET_CORR_THR', default_thr))
+    except (TypeError, ValueError):
+        thr = default_thr
+    try:
+        cap_pct = float(os.environ.get('OPENCLAW_ASSET_CORR_CAP_PCT', default_cap_pct))
+    except (TypeError, ValueError):
+        cap_pct = default_cap_pct
+    # Layer 2 — pipeline_config wins when the row is present (operator control).
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT key, value FROM pipeline_config "
+                    "WHERE key IN ('asset_corr_cap_enabled', 'asset_corr_cap_thr', "
+                    "'asset_corr_cap_pct')")
+                rows = dict(cur.fetchall())
+        if 'asset_corr_cap_enabled' in rows:
+            enabled = str(rows['asset_corr_cap_enabled']).strip().lower() in ('1', 'true', 'on')
+        if 'asset_corr_cap_thr' in rows:
+            thr = float(rows['asset_corr_cap_thr'])
+        if 'asset_corr_cap_pct' in rows:
+            cap_pct = float(rows['asset_corr_cap_pct'])
+    except Exception:
+        pass  # fail-safe: keep the env/default layer
+    if thr != thr:                                   # NaN guard
+        thr = default_thr
+    if cap_pct != cap_pct:                           # NaN guard
+        cap_pct = default_cap_pct
+    return (enabled,
+            max(_ASSET_CORR_THR_MIN, min(_ASSET_CORR_THR_MAX, thr)),
+            max(_ASSET_CORR_CAP_PCT_MIN, min(_ASSET_CORR_CAP_PCT_MAX, cap_pct)))
+
+
 def _apply_asset_corr_cap(target_usd, conviction, nav):
     """Asset-correlation cluster cap (gated, post λ×NAV scaling, dollar terms).
-    OPENCLAW_ASSET_CORR_CAP=1 applies the cap; OPENCLAW_ASSET_CORR_CAP_SHADOW=1
-    logs the would-be cap without changing targets; both unset -> identity (no
-    correlation work). Fail-open: any error returns target_usd unchanged."""
-    apply_on = os.environ.get('OPENCLAW_ASSET_CORR_CAP') == '1'
+    Enable + threshold resolve via _load_asset_corr_cfg (pipeline_config slider →
+    env → default). OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
+    changing targets. Disabled (and no shadow) -> identity (no correlation work).
+    Fail-open: any error returns target_usd unchanged."""
+    apply_on, corr_thr, cap_pct = _load_asset_corr_cfg()
     shadow_on = os.environ.get('OPENCLAW_ASSET_CORR_CAP_SHADOW') == '1'
     if not (apply_on or shadow_on):
         return target_usd
     try:
         from execution import asset_correlation as _ac
         from execution import asset_correlation_filter as _acf
-        cap_pct = float(os.environ.get('OPENCLAW_ASSET_CORR_CAP_PCT', '0.22'))
-        corr_thr = float(os.environ.get('OPENCLAW_ASSET_CORR_THR', '0.70'))
         window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
         corr = _ac.price_return_corr(list(target_usd), window=window)
         capped, audit = _acf.cap_correlated_clusters(
             target_usd, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr)
         logger.info(
-            'asset_corr_cap.%s: clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
-            'apply' if apply_on else 'shadow',
+            'asset_corr_cap.%s: thr=%.2f cap_pct=%.2f clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
+            'apply' if apply_on else 'shadow', corr_thr, cap_pct,
             sum(1 for c in audit['clusters'] if len(c['members']) >= 2),
             audit['total_gross_before'], audit['total_gross_after'], audit['released_usd'],
             [(c['members'], round(c['gross_before']), round(c['gross_after']))

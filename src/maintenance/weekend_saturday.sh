@@ -29,13 +29,15 @@ node src/agent/curators/run_mastermind.js --mode position-recs 2>&1 | tee -a "$L
 step "4/8 backtest-coupling"
 python3 -m execution.backtest_coupled_recs $DRY 2>&1 | tee -a "$LOG" || step "WARN coupling rc=$?"
 
-step "5/8 full backtest refresh"
+step "5/8 full backtest refresh (internally time-bounded; WARN-and-continue)"
 bash src/maintenance/refresh_backtests.sh 2>&1 | tee -a "$LOG"
 BT_RC=${PIPESTATUS[0]}
-if [ "$BT_RC" -ne 0 ]; then
-  step "ABORT backtest refresh rc=$BT_RC — skipping weights/panels"
-  exit "$BT_RC"
-fi
+# DECOUPLED (W1 reconcile 2026-06-28): step 5 is internally bounded to 6h, so a
+# slow/incomplete refresh no longer aborts the pipeline. Steps 6-8 (weights/
+# panels/universe) now run on last-known backtests instead of being skipped —
+# the prior hard `exit "$BT_RC"` was the root cause of weekly weights/panels
+# repeatedly needing manual rebuilds.
+[ "$BT_RC" -ne 0 ] && step "WARN backtest refresh rc=$BT_RC — continuing to weights/panels on last-known backtests"
 
 step "6/8 weekly strategy weights"
 node src/agent/curators/weekly_live_sharpe.js 2>&1 | tee -a "$LOG" || step "WARN weights rc=$?"
@@ -57,4 +59,13 @@ PY
 step "8/8 universe-ladder sentinel (SP-7 Phase B — replaced legacy universe-recs 2026-06-06)"
 nice -n 19 python3 scripts/check_ladder_saturday.py 2>&1 | tee -a "$LOG" || step "WARN ladder-sentinel rc=$?"
 
+# No-silent-failure (W1 reconcile 2026-06-28): steps 6-8 ran above regardless,
+# but if step 5's bounded refresh was incomplete (BT_RC!=0, e.g. rc=124 = 6h cap
+# hit) some strategies' backtests are STALE and the weights/panels just rebuilt
+# used last-known data. Fail the unit so OnFailure alerts #botjohn-log instead of
+# the staleness being silent. Clears permanently via the per-strategy refresh redesign.
+if [ "${BT_RC:-0}" -ne 0 ]; then
+  step "INCOMPLETE: step-5 backtest refresh rc=$BT_RC (rc=124 = 6h cap hit). Weights/panels ran on last-known backtests; some are STALE. log=$LOG"
+  exit "$BT_RC"
+fi
 step "DONE log=$LOG"

@@ -43,12 +43,13 @@ def refs(tmp_path, monkeypatch):
 
 
 def test_unadopted_equals_clamp_output(refs):
-    """THE load-bearing parity test: a default-predicate strategy reproduces
-    clamp_universe() exactly (mirror-clamp semantics, decision D3)."""
-    from src.execution.universe_clamp import clamp_universe
-    import os
-    os.environ["OPENCLAW_ENGINE_UNIVERSE_CLAMP"] = "sp500"
-    clamp_out = clamp_universe(list(FALLBACK), lambda: META, lambda: CATS)
+    """THE load-bearing parity test: a default-predicate strategy reproduces the
+    old sp500-clamp output exactly (mirror-clamp semantics, decision D3).
+    The Phase-A4 sp500-clamp module was DELETED in SP-7 §6 (2026-06-28), so the
+    expected output is pinned to its literal value: sp500-clamping FALLBACK keeps AAPL+BRK-B (sp500
+    equities) and all non-equity passthrough (SPY/GLD etf, BTC-USD), dropping RDDT
+    (the only non-sp500 equity)."""
+    clamp_out = ["AAPL", "BRK-B", "SPY", "BTC-USD", "GLD"]
 
     resolver = FakeResolver({"S_default": ["AAPL", "BRK.B"]})  # sp500∩floor, dot-form
     out = refs.build_strategy_universes(

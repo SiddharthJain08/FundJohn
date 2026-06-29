@@ -56,6 +56,8 @@ Spec: docs/superpowers/specs/2026-06-07-sp7-phase-c-live-wiring-design.md
 - .env: remove OPENCLAW_ENGINE_UNIVERSE_CLAMP + OPENCLAW_LIVE_UNIVERSE_SHADOW
 - grep-verify: `grep -rn "universe_clamp\|ENGINE_UNIVERSE_CLAMP" src/ tests/ scripts/` → only historical docs
 - commit + restart; universe_shadow_parity TABLE stays (audit history — never delete)
+- **ROLLBACK is 3 parts** (the `.env` gate is untracked, so `git revert` alone leaves it wide — see Rollback Matrix): revert the deletion commit + re-add `OPENCLAW_ENGINE_UNIVERSE_CLAMP=sp500` to `.env` + restart johnbot.
+- **DONE 2026-06-28** (commit `1896baf`): clamp deleted; memory-validated pre-deletion (signals-step peak RSS 3078→3281MB = +203MB at the 5180 union; reads are universe-independent). First wide signals compute = next weekday 16:15 ET EOD lane. C1 is now the SOLE load-bearing universe gate.
 - **NOTE:** Post-deletion + broad-tier adoption, each adopted strategy's panel slice is a per-iteration pandas copy (~100 MB at a ~5k-col union; one alive at a time). Watch the first wide cycle's RSS.
 
 ## 7. C3 FLIPS (individually, any time after C2; each independently revertible)
@@ -69,5 +71,5 @@ Spec: docs/superpowers/specs/2026-06-07-sp7-phase-c-live-wiring-design.md
 |---|---|
 | shadow rows missing / errors | it's non-fatal — check logs; OPENCLAW_LIVE_UNIVERSE_SHADOW=0 silences |
 | collect step slow / quota burn | OPENCLAW_COLLECTOR_RESOLVER_ENVELOPE=0 + restart |
-| signals anomalies post-C1-flip | OPENCLAW_LIVE_UNIVERSE_RESOLVER=0 + restart (pre-deletion); post-deletion: git revert the deletion commit |
+| signals anomalies post-C1-flip | OPENCLAW_LIVE_UNIVERSE_RESOLVER=0 + restart (pre-deletion); **post-§6-deletion rollback is 3 PARTS, not just revert**: (1) `git revert <deletion-sha>` (restores the clamp module+code) **+ (2) re-add `OPENCLAW_ENGINE_UNIVERSE_CLAMP=sp500` to `.env`** (UNTRACKED — revert does NOT restore it; without the gate the restored `clamp_universe` returns identity → still wide) **+ (3) `systemctl --user restart johnbot`**. §6 deletion sha (2026-06-28) = `1896baf`. |
 | sentiment/archive issues | respective gate =0 |

@@ -16,7 +16,11 @@ WorkingDirectory=/root/openclaw
 # filter, Tier-A synchronous code+backtest (idempotent — skips strategies already
 # in the manifest), Tier-B → STAGING (operator-gated), Tier-C vault notes; then
 # flip today's 08:00 ingest row (status='ingest_complete') to 'completed'.
-ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete
+# --tier-a-cap 3: the default 10 serial LLM-coder+backtest jobs overran the 4h
+# budget on the 2-core VPS (CPU only ~1.4h/4h -> time spent BLOCKED on I/O, so a
+# bigger timeout doesn't help). Cap to 3/run; a per-candidate watchdog is the
+# durable follow-up. (W1 reconcile, 2026-06-28)
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 3
 
 # NEW: MasterMind (Opus) re-examines RECENT candidate implementations (incl. the
 # ones just coded above) for IMPLEMENTATION-LOGIC bugs; candidates with <30

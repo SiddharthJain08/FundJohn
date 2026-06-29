@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_triangulated_stat_arb_triplets",
+  "required": ["prices"],
+  "optional": []
+}

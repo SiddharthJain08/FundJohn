@@ -107,6 +107,24 @@ async def _backfill_filings(column_name: str, from_date: date, to_date: date) ->
     return len(rows)
 
 
+def _write_cik_cache(cache, out) -> bool:
+    """Best-effort write of the SEC ticker->CIK cache.
+
+    Returns True on success. A write failure (e.g. the cache file is root-owned
+    and this process lacks permission) is non-fatal: the caller already holds
+    the freshly-fetched dict in memory, so log and continue rather than aborting
+    the entire 8-K ingest. (W1 reconcile, 2026-06-28)
+    """
+    import json
+    try:
+        cache.write_text(json.dumps(out))
+        return True
+    except OSError as exc:
+        print(f'  [edgar] WARN: ticker->CIK cache not refreshed '
+              f'({type(exc).__name__}: {exc}); continuing with fetched data')
+        return False
+
+
 async def _load_ticker_to_cik() -> dict[str, str]:
     """Load the SEC ticker→CIK JSON. Caches locally for 7 days."""
     import json, time, aiohttp
@@ -119,7 +137,7 @@ async def _load_ticker_to_cik() -> dict[str, str]:
                 return {}
             payload = await r.json()
     out = {row['ticker']: str(row['cik_str']).zfill(10) for row in payload.values() if row.get('ticker')}
-    cache.write_text(json.dumps(out))
+    _write_cik_cache(cache, out)
     return out
 
 

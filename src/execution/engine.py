@@ -207,6 +207,36 @@ def _drop_zero_greeks(df: 'pd.DataFrame') -> 'pd.DataFrame':
     return df[~zero_mask].copy()
 
 
+# Memory-bounded options read for the signals step (2026-06-24 OOM fix).
+# run_strategies references only these 14 of options_eod.parquet's 27 columns and looks
+# back at most 30 calendar days (IV-rank), so loading the full multi-million-row file
+# each cycle (which OOM-killed the step once it grew past ~6M rows) is wasteful. Project
+# these columns + a trailing date window via pyarrow predicate pushdown instead.
+# `theta`/`vega` are kept because `_drop_zero_greeks` checks all four greeks.
+_OPTIONS_SIGNAL_COLS = [
+    'ticker', 'date', 'expiry', 'strike', 'option_type', 'implied_volatility',
+    'delta', 'gamma', 'theta', 'vega', 'open_interest', 'volume', 'open', 'close',
+]
+# Trailing read windows (calendar days) for the signals step's master-parquet reads.
+# Each MUST exceed the longest lookback its consumer needs; they cap memory as the
+# archives deepen. Options: 60 >= the 30d IV-rank lookback. HV20 prices: 120 — the
+# HV20 calc only needs ~28 trading days, but the `len(_g) < 22` skip below means a
+# too-tight window would silently drop sparse/halted tickers, so keep generous headroom.
+_OPTIONS_READ_WINDOW_DAYS = int(os.environ.get('OPENCLAW_OPTIONS_READ_WINDOW_DAYS', '60'))
+_HV20_PRICES_WINDOW_DAYS  = int(os.environ.get('OPENCLAW_HV20_PRICES_WINDOW_DAYS', '120'))
+
+
+def _read_parquet_window(path, columns, window_days, today=None, date_col='date'):
+    """Read a master parquet projected to `columns` and limited to the trailing
+    `window_days`, via pyarrow predicate pushdown — avoids materializing the full file
+    in pandas (the 2026-06-24 signals-step OOM). The date column is an ISO 'YYYY-MM-DD'
+    string, so the filter compares strings (lexicographic == chronological for ISO)."""
+    if today is None:
+        today = pd.Timestamp.today().normalize()
+    cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
+    return pd.read_parquet(path, columns=list(columns), filters=[(date_col, '>=', cutoff)])
+
+
 # ──────────────────────────────────────────────────────────
 # 1. LOAD REGIME
 # ──────────────────────────────────────────────────────────
@@ -459,6 +489,7 @@ def load_aux_data(universe: list) -> dict:
     opts_path = master_dir / 'options_eod.parquet'
     if opts_path.exists():
         try:
+            today = pd.Timestamp.today().normalize()
             # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)
             # Used for rv_20 and vrp fields consumed by S_HV9, S_HV11, S_HV12, S_HV14, S_HV20.
             _hv20_by_ticker = {}
@@ -466,7 +497,9 @@ def load_aux_data(universe: list) -> dict:
             try:
                 _px_path = master_dir / 'prices.parquet'
                 if _px_path.exists():
-                    _px = pd.read_parquet(_px_path, columns=['ticker', 'date', 'close'])
+                    # Memory-bounded: HV20 needs only the recent window, not 10y of prices.
+                    _px = _read_parquet_window(_px_path, ['ticker', 'date', 'close'],
+                                               _HV20_PRICES_WINDOW_DAYS, today)
                     _px['date'] = pd.to_datetime(_px['date'])
                     _px = _px.sort_values(['ticker', 'date'])
                     for _t, _g in _px.groupby('ticker'):
@@ -485,10 +518,13 @@ def load_aux_data(universe: list) -> dict:
             except Exception as _e:
                 logger.warning(f"HV20 pre-compute failed: {_e}")
 
-            opts = pd.read_parquet(opts_path)
+            # Memory-bounded: project the 14 referenced columns + a trailing date window
+            # via pyarrow pushdown instead of full-loading the multi-million-row
+            # options_eod.parquet (the 2026-06-24 signals-step OOM, rc=137). `today` is
+            # computed once at the top of this try block (also used by the HV20 read).
+            opts = _read_parquet_window(opts_path, _OPTIONS_SIGNAL_COLS, _OPTIONS_READ_WINDOW_DAYS, today)
             # SP-1: drop degenerate (all-zero-greek) rows before any aggregation.
             opts = _drop_zero_greeks(opts)
-            today = pd.Timestamp.today().normalize()
 
             # Ensure expiry is datetime
             if 'expiry' in opts.columns:
@@ -1568,16 +1604,16 @@ def main():
                 universe = ['SPY', 'QQQ', 'AAPL', 'MSFT', 'AMZN', 'NVDA', 'GOOGL', 'META']
         universe = list(dict.fromkeys(universe))  # dedupe preserving order
 
-        # SP-7 Phase A4: gated clamp — pins live equity universe while broad
-        # price backfills widen prices.parquet underneath. Removed in Phase C.
-        from execution.universe_clamp import clamp_universe
-        universe = clamp_universe(universe)
+        # SP-7 Phase C §6 (2026-06-28): the Phase-A4 sp500 clamp was DELETED here
+        # once C1/C2/C3 were live — the per-strategy resolver below is now the sole
+        # authority on the live universe (adopted tiers widen past sp500). The
+        # Phase-A4 clamp module and its gate env var were removed in the same commit.
 
         # SP-7 Phase C (C1): per-strategy universes via UniverseResolver.
-        # Gate default-OFF. When ON: the union of per-strategy sets replaces
-        # the clamped universe for the ONE panel load (memory invariant), and
-        # run_strategies slices prices/aux per strategy. Whole-build failure
-        # fails open to the legacy shared universe.
+        # When ON: the union of per-strategy sets replaces the shared fallback
+        # universe for the ONE panel load (memory invariant), and run_strategies
+        # slices prices/aux per strategy. Whole-build failure fails open to the
+        # legacy shared universe.
         strategy_universes = None
         if os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') == '1':
             try:
@@ -1593,20 +1629,8 @@ def main():
                             f"{len(strategy_universes)} strategies, {_n_err} fail-open")
             except Exception as e:
                 logger.error(f"live-universe build failed — fail-open to shared "
-                             f"clamped universe: {e}")
+                             f"fallback universe: {e}")
                 strategy_universes = None
-
-        # SP-7 Phase C shadow parity (spec §3.5): resolver-vs-clamp diff rows,
-        # written by a non-fatal sidecar. Only meaningful while the live
-        # resolver gate is OFF — once it flips, there is no clamp to diff.
-        if (os.environ.get('OPENCLAW_LIVE_UNIVERSE_SHADOW') == '1'
-                and os.environ.get('OPENCLAW_LIVE_UNIVERSE_RESOLVER') != '1'):
-            try:
-                from execution.live_universe import write_shadow_parity
-                write_shadow_parity(run_date, [s.id for s in strategies],
-                                    list(universe))
-            except Exception as e:  # noqa: BLE001 — non-fatal sidecar
-                logger.warning(f"universe shadow parity failed (non-fatal): {e}")
 
         # 3. Load data
         prices   = load_prices(universe)

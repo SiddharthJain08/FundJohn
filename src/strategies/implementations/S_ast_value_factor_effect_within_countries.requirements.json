@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_value_factor_effect_within_countries",
+  "required": ["prices"],
+  "optional": ["cape_by_country_external"]
+}
