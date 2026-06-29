@@ -162,19 +162,25 @@ def _derive_action(kind: str, out_current: float, out_target: float, dir_sign: i
     return 'flip_to_long' if tgt > 0 else 'flip_to_short'   # opposite-sign delta (defensive)
 
 
-def _load_lambda(default: float = 2.0) -> float:
+def _load_lambda(default: float = 2.0, *, intraday: bool = False) -> float:
     """Read position_sizing_lambda from pipeline_config; fall back to default
     on any error. Bounded clamp guards against operator-pasted garbage.
 
     Cap = 2.0 (Reg T overnight max). 2026-05-19: tightened from 3.50 to
     2.00 to match Reg T overnight rule (50% initial margin → 2× equity
     gross). Pre-existing values above 2.0 silently clamp on next cycle —
-    intentional, since trading over 2× overnight would violate Reg T."""
+    intentional, since trading over 2× overnight would violate Reg T.
+
+    intraday=True reads position_sizing_lambda_intraday instead, allowing
+    intraday regime-change redeploys to size at a lower leverage (e.g. 1×
+    NAV) without touching the overnight target. Set by the redeploy driver
+    via OPENCLAW_INTRADAY_REDEPLOY=1 in the subprocess env."""
+    key = 'position_sizing_lambda_intraday' if intraday else 'position_sizing_lambda'
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor() as cur:
-                cur.execute("SELECT value FROM pipeline_config WHERE key = 'position_sizing_lambda'")
+                cur.execute("SELECT value FROM pipeline_config WHERE key = %s", (key,))
                 row = cur.fetchone()
                 v = float(row[0]) if row else default
                 return max(0.10, min(2.00, v))
@@ -903,7 +909,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # row can't slip past the sizer. Historically sharpe_cadence skipped
     # liquidity_param entirely; operator added it 2026-05-16 so per-regime
     # target gross matches the documented intent (TRANSITIONING 1.5×, etc.).
-    lam_global   = _load_lambda()
+    lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
     min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
