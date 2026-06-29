@@ -209,12 +209,12 @@ app.get('/api/db/news', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Trigger news collection on demand (runs in background, streams status via SSE)
+// Prune market_news older than 30d on demand (real ingestion runs in the sentiment step)
 app.post('/api/trigger/news', async (req, res) => {
   try {
     const collector = require('../../pipeline/collector');
     const store     = require('../../pipeline/store');
-    res.json({ ok: true, message: 'News collection started' });
+    res.json({ ok: true, message: 'Old news pruned (>30d)' });
     // Run in background after response sent
     const fullUniverse  = await store.getActiveUniverse();
     const equityTickers = fullUniverse.filter(u => u.category === 'equity').map(u => u.ticker);
