@@ -1153,11 +1153,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # bounds comes from the conviction weighting itself on few-survivor days
     # (the old min-notional drop+renorm that used to feed it was removed
     # 2026-06-08). Applied BEFORE the cap-exempt option hedge injection +
-    # broker netting. EOD-mode only: rides
-    # OPENCLAW_EOD_RECONCILE so the legacy cadence-window path stays
-    # byte-identical (its multi-day accumulation makes few-survivor days
-    # structurally rare). Missing gate value → fail-open (target untouched).
-    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+    # broker netting. Fires on EOD mode (OPENCLAW_EOD_RECONCILE=1) AND on
+    # intraday redeploy (OPENCLAW_INTRADAY_REDEPLOY=1; W3 F2c); lam is
+    # already the intraday λ on the intraday path (C2). The plain daily
+    # cadence path (neither flag) stays byte-identical (its multi-day
+    # accumulation makes few-survivor days structurally rare).
+    # Missing gate value → fail-open (target untouched).
+    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
         _capped = []
         for _tkr, _usd in list(target_usd.items()):
             _gs = gate_net_sharpe.get(_tkr)
