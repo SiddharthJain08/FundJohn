@@ -16,6 +16,7 @@ const router = express.Router();
 
 const { query: dbQuery } = require('../../database/postgres');
 const traceBus = require('../../agent/traceBus');
+const { summarizePipelines } = require('./pipelines_summary');
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -91,42 +92,16 @@ function mergeRuns(liveRuns, persistedRuns) {
 router.get('/summary', async (_req, res) => {
   try {
     const liveRuns = traceBus.listRuns();
-    const active = liveRuns.filter((r) => r.status === 'running').length;
-    const failures24h = liveRuns.filter((r) => {
-      const isFail = r.status === 'error' || r.status === 'failed';
-      const within = Date.now() - (r.updatedAt || 0) < 24 * 3600_000;
-      return isFail && within;
-    }).length;
-
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const todayUnix = todayStart.getTime();
-    const today = liveRuns.filter((r) => r.startedAt >= todayUnix).length;
-
-    // Distinct graphs seen
-    const graphs = [...new Set(liveRuns.map(graphFromRun))].filter((g) => g && g !== 'unknown');
-
-    // Cheap durable count — total threads in checkpoints (lifetime)
+    let persisted = [];
+    try { persisted = await fetchPersistedRuns(200); } catch (_) { /* schema absent; non-fatal */ }
+    const base = summarizePipelines(liveRuns, persisted, Date.now());
     let durableTotal = null;
     try {
-      const r = await dbQuery(`
-        SELECT COUNT(DISTINCT thread_id) AS n
-          FROM langgraph.checkpoints WHERE checkpoint_ns = ''
-      `);
+      const r = await dbQuery(`SELECT COUNT(DISTINCT thread_id) AS n FROM langgraph.checkpoints WHERE checkpoint_ns = ''`);
       durableTotal = Number((r.rows || r)[0].n);
-    } catch (_) { /* schema absent on fresh box; non-fatal */ }
-
-    res.json({
-      active,
-      today,
-      failures_24h: failures24h,
-      graphs,
-      durable_total: durableTotal,
-      generated_at: new Date().toISOString(),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    } catch (_) { /* non-fatal */ }
+    res.json({ ...base, durable_total: durableTotal, generated_at: new Date().toISOString() });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // GET /api/pipelines/runs?limit=50&graph=daily-cycle
