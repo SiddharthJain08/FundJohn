@@ -1003,7 +1003,7 @@ class MastermindCurator {
         ]
       );
       // Funnel instrumentation: 'pass' for high bucket, 'reject' otherwise.
-      const outcome = r.predicted_bucket === 'high' ? 'pass' : 'reject';
+      const outcome = HIGH_BUCKETS.has(r.predicted_bucket) ? 'pass' : 'reject';
       await emitGateDecision({
         paperId:      r.paper_id,
         gateName:     'curator',
