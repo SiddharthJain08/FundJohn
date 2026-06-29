@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 # SP-6 per-ticker conviction cap fraction (operator formula 2026-06-04):
 # cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe| × λ × NAV.
-# Applied in EOD mode only (OPENCLAW_EOD_RECONCILE=1) inside
-# _sharpe_cadence_path — see the cap block there for full rationale.
+# Applied in EOD mode (OPENCLAW_EOD_RECONCILE=1) and intraday-redeploy mode
+# (OPENCLAW_INTRADAY_REDEPLOY=1) inside _sharpe_cadence_path — see the cap
+# block there for full rationale.
 PER_TICKER_CAP_SHARPE_FRAC = 0.05
 
 # Hard dust floor (2026-06-08). Replaces the removed per-regime min-notional
