@@ -120,11 +120,18 @@ router.get('/queue', async (_req, res) => {
           LIMIT 100`
       ),
       query(
-        `SELECT id, run_type, status, records_written, duration_ms, created_at
-           FROM pipeline_runs
-          WHERE run_type LIKE '%research%' OR run_type LIKE '%paper%' OR run_type LIKE '%curator%'
-          ORDER BY created_at DESC
-          LIMIT 15`
+        `SELECT id, run_type, status, records_written, duration_ms, created_at FROM (
+           SELECT run_id::text AS id, 'saturday-brain' AS run_type, status,
+                  coded_synchronous AS records_written, NULL::int AS duration_ms, started_at AS created_at
+             FROM saturday_runs ORDER BY started_at DESC LIMIT 8
+         ) b
+         UNION ALL
+         SELECT id, run_type, status, records_written, duration_ms, created_at FROM (
+           SELECT run_id::text AS id, 'corpus' AS run_type, status,
+                  output_count AS records_written, NULL::int AS duration_ms, started_at AS created_at
+             FROM curator_runs ORDER BY started_at DESC LIMIT 7
+         ) c
+         ORDER BY created_at DESC LIMIT 15`
       ),
     ]);
     res.json({
