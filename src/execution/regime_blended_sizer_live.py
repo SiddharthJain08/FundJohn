@@ -375,6 +375,26 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
     return n
 
 
+def _resolve_account_or_none(session_fn=None, fetch_fn=None):
+    """Fetch the Alpaca account dict, returning None on any failure.
+
+    Accepts injectable session_fn / fetch_fn for testing.  In production
+    both default to the real _alpaca_session / _fetch_account_state.
+
+    Returns:
+        dict  — account state on success
+        None  — on any exception (caller MUST abort, never fabricate equity)
+    """
+    try:
+        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
+        _sfn = session_fn if session_fn is not None else _alpaca_session
+        _ffn = fetch_fn if fetch_fn is not None else _fetch_account_state
+        return _ffn(_sfn())
+    except Exception as e:
+        print(f'[regime_blended_sizer_live] account fetch failed ({e})', file=sys.stderr)
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Phase 3 LIVE sizer — use regime_blended_sizer with real LLM confirmer',
@@ -489,14 +509,22 @@ def main():
     # Account snapshot — same path as parity wrapper. _alpaca_session()
     # attaches auth headers + sess._base required by _fetch_account_state;
     # a bare requests.Session() yields 'Session has no attribute _base'.
-    try:
-        from execution.alpaca_trader import _alpaca_session, _fetch_account_state
-        account = _fetch_account_state(_alpaca_session())
-    except Exception as e:
-        print(f'[regime_blended_sizer_live] account fetch failed ({e}); using defaults',
-              file=sys.stderr)
-        account = {'equity': 100_000.0, 'regt_buying_power': 400_000.0,
-                   'long_market_value': 0.0, 'cash': 100_000.0}
+    # W3 F1: on fetch failure return None so we abort (zero orders) rather
+    # than sizing against fabricated $100k equity (over-leverage risk).
+    account = _resolve_account_or_none()
+    if account is None or account.get('fetched') is False:
+        msg = ('[regime_blended_sizer_live] ABORT: account fetch failed — '
+               'emitting ZERO orders (no sizing against fabricated equity)')
+        print(msg, file=sys.stderr)
+        try:
+            from execution.pipeline_orchestrator import post_channel
+            post_channel(
+                os.environ.get('OPENCLAW_TRADE_ALERT_WEBHOOK_NAME', 'trade-reports'),
+                '\U0001f6d1 ' + msg,
+            )
+        except Exception as _e:
+            print(f'  (alert post failed: {_e})', file=sys.stderr)
+        return
 
     equity = float(account.get('equity', 100_000.0))
 

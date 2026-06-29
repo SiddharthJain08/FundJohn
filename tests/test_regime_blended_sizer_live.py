@@ -314,3 +314,61 @@ class TestExecutorFlipPriorityAndPolling:
 # Legacy aggregate-cap tests removed 2026-05-14 — _apply_aggregate_cap
 # was deleted with the cap drop. Sizer's per-ticker cap + sharpe_cadence
 # normalization is the new authority; no aggregate-scale step remains.
+
+
+class TestResolveAccountOrNone:
+    """W3 F1: account-fetch failure must return None — caller aborts (zero orders),
+    never fabricates equity.  Tests drive _resolve_account_or_none directly
+    via injected session_fn / fetch_fn so no live Alpaca creds are needed.
+    """
+
+    def test_returns_none_when_session_fn_raises(self):
+        """If the session factory raises, the helper must return None (not a fake dict)."""
+        from execution.regime_blended_sizer_live import _resolve_account_or_none
+
+        def _bad_session():
+            raise RuntimeError('connection refused')
+
+        result = _resolve_account_or_none(session_fn=_bad_session)
+        assert result is None, (
+            'fetch failure must return None, not a fabricated account dict'
+        )
+
+    def test_returns_none_when_fetch_fn_raises(self):
+        """If fetch_fn raises (session ok, fetch fails), helper must return None."""
+        from execution.regime_blended_sizer_live import _resolve_account_or_none
+
+        def _ok_session():
+            return object()
+
+        def _bad_fetch(sess):
+            raise ConnectionError('Alpaca API unreachable')
+
+        result = _resolve_account_or_none(session_fn=_ok_session, fetch_fn=_bad_fetch)
+        assert result is None
+
+    def test_returns_account_dict_on_success(self):
+        """Happy path: valid account dict passes through unchanged."""
+        from execution.regime_blended_sizer_live import _resolve_account_or_none
+
+        expected = {'equity': 250_000.0, 'fetched': True,
+                    'regt_buying_power': 1_000_000.0}
+
+        def _ok_session():
+            return object()
+
+        def _ok_fetch(sess):
+            return expected
+
+        result = _resolve_account_or_none(session_fn=_ok_session, fetch_fn=_ok_fetch)
+        assert result is expected
+
+    def test_returns_none_on_generic_exception(self):
+        """Any exception (not just network errors) causes a None return."""
+        from execution.regime_blended_sizer_live import _resolve_account_or_none
+
+        def _bad_session():
+            raise ValueError('unexpected response shape')
+
+        result = _resolve_account_or_none(session_fn=_bad_session)
+        assert result is None
