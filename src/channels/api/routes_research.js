@@ -209,6 +209,7 @@ router.get('/staging', async (_req, res) => {
   }
 });
 
+// Advisory review flag only: records approve/reject on strategy_staging.status. There is NO promoter that consumes 'approved' — promotion of a staged spec into a live strategy is a separate (currently manual) step. See W2 D2 / the staged-spec-promoter follow-up workstream.
 router.post('/staging/:id/decision', async (req, res) => {
   const action = (req.body?.action || '').toLowerCase();
   const note = (req.body?.note || '').toString().slice(0, 2000) || null;

@@ -6379,8 +6379,9 @@ async function _refreshStaging() {
   const { items = [] } = await _fetchJSON('/api/research/staging');
   const pending = items.filter(i => i.status === 'pending');
   document.getElementById('staging-count').textContent = \`\${pending.length} pending / \${items.length} total\`;
-  if (!items.length) { document.getElementById('staging-body').innerHTML = '<div style="color:var(--muted);font-size:11px">— nothing staged —</div>'; return; }
-  document.getElementById('staging-body').innerHTML = items.map(it => {
+  const _stagingNote = '<div style="color:var(--muted);font-size:11px;margin-bottom:6px">Review-only — ✓/✗ records a decision; it does NOT promote to live (promotion is a separate manual step).</div>';
+  if (!items.length) { document.getElementById('staging-body').innerHTML = _stagingNote + '<div style="color:var(--muted);font-size:11px">— nothing staged —</div>'; return; }
+  document.getElementById('staging-body').innerHTML = _stagingNote + items.map(it => {
     const actions = it.status === 'pending'
       ? \`<div class="stage-actions">
           <button class="stage-btn ok" data-id="\${_rsEsc(it.id)}" data-action="approved">✓</button>
@@ -6427,7 +6428,7 @@ async function _refreshStaging() {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const action = btn.dataset.action;
-      if (!confirm(\`\${action.toUpperCase()} this proposal?\`)) return;
+      if (!confirm(\`Mark this proposal \${action.toUpperCase()} (review only — does NOT promote to live)?\`)) return;
       btn.disabled = true;
       const r = await fetch(\`/api/research/staging/\${encodeURIComponent(btn.dataset.id)}/decision\`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
