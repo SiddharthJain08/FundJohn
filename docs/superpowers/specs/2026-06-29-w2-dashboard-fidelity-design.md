@@ -144,18 +144,28 @@ scope.
 
 ## §9 Sequencing & commit plan
 
-Independent, path-scoped commits (W1-style), low-risk first:
+Independent, path-scoped commits (W1-style), low-risk first, split into two phases by an
+**operator review gate** (operator decision 2026-06-29):
 
+**Phase 1 — low-risk display/relabel (land, then STOP for operator review):**
 1. C1 — `leverage.js` + D6 surface (pure helper + panel) [TDD]
 2. C2 — D5 regime freshness flag [TDD]
 3. C3 — D3 pipelines-tile durable backfill [TDD]
 4. C4 — D4 crypto badge branch [TDD]
 5. C5 — D7 relabels + dead-panel removal (trigger-news, watchlist, regime-priors, verdicts, db/cycles cols, max_hold_days UI removal)
+
+>>> **OPERATOR REVIEW GATE** — stop after C5. Operator reviews Phase 1 (and the D1c sign-off
+sheet, produced read-only in parallel) before any live-touching change. Do NOT begin Phase 2
+until the operator approves. <<<
+
+**Phase 2 — live-touching (only after the gate):**
 6. C6 — `strategy_drift.js` + D1a display drift-flag [TDD]
 7. C7 — D1b fatal+retried sync (highest risk) [full TDD]
 8. C8 — D2 staging-Approve → real promotion queue [TDD]
 9. C9 — D8 pipeline_config dedup + UNIQUE migration [round-trip test]
-10. (parallel, read-only) D1c sign-off sheet generated for operator review
+
+**Parallel (read-only, produced during Phase 1):** D1c strategy-drift sign-off sheet, delivered for
+operator review at the gate.
 
 Each commit staged by explicit path to avoid staging the live finisher's WIP
 (`manifest.json`, `registry.py`, untracked `implementations/S_*` — the mastermind is actively coding).
