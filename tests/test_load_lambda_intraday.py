@@ -7,7 +7,7 @@ except ImportError:
     psycopg2 = None
 
 @pytest.mark.skipif(psycopg2 is None, reason="psycopg2 not installed")
-def test_load_lambda_picks_intraday_key(monkeypatch):
+def test_load_lambda_picks_intraday_key():
     dsn = os.environ.get("POSTGRES_URI")
     if not dsn:
         pytest.skip("POSTGRES_URI not set")
@@ -23,6 +23,25 @@ def test_load_lambda_picks_intraday_key(monkeypatch):
             assert cur.fetchone()[0] == expect
     finally:
         conn.rollback(); conn.close()
+
+def test_load_lambda_end_to_end_reads_correct_key():
+    import os, pytest
+    dsn = os.environ.get("POSTGRES_URI")
+    if dsn is None:
+        pytest.skip("POSTGRES_URI not set")
+    try:
+        import psycopg2
+    except ImportError:
+        pytest.skip("psycopg2 not installed")
+    from src.execution.regime_blended_sizer import _load_lambda
+    def _clamped_live(key):
+        with psycopg2.connect(dsn) as c, c.cursor() as cur:
+            cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (key,))
+            r = cur.fetchone()
+            return max(0.10, min(2.00, float(r[0]))) if r else 2.0
+    # _load_lambda must read the intraday key under intraday=True and the overnight key otherwise
+    assert _load_lambda(intraday=True)  == _clamped_live("position_sizing_lambda_intraday")
+    assert _load_lambda(intraday=False) == _clamped_live("position_sizing_lambda")
 
 def test_load_lambda_signature_accepts_intraday():
     from src.execution.regime_blended_sizer import _load_lambda
