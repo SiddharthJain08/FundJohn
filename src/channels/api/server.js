@@ -1122,7 +1122,7 @@ app.get('/api/strategies', async (req, res) => {
     // data spec the dashboard renders for STAGING strategies) and
     // staging_approved_at (operator's data-fetch approval timestamp).
     const srRows = (await dbQuery(`
-      SELECT id, regime_conditions,
+      SELECT id, status, regime_conditions,
              backtest_sharpe, backtest_return_pct, backtest_max_dd_pct, backtest_trade_count,
              backtest_regime_breakdown,
              data_requirements_planned, staging_approved_at
@@ -1380,6 +1380,7 @@ app.get('/api/strategies', async (req, res) => {
           lastSignalDate: _lastSig,
           metricsByScope: _metricsByScope,
           defaultScope: _defaultScope,
+          registryStatus: (srById[sid] || {}).status ?? null,
         }),
         // Carry-overs the active-stack rewrite (Tasks 9/10) does NOT cover but
         // the CANDIDATE-table renderer (_renderCandidates) still reads. The
@@ -3353,6 +3354,9 @@ body.rs-chat-locked{overflow:hidden}
 /* Staging unsupported-source warning — shown on staging rows whose
    data_requirements_planned references a column no provider knows about. */
 .st-data-warn{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
+/* Manifest↔registry drift badge — additive, never replaces the primary status. */
+.st-drift-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
+.st-drift-header{font-size:11px;color:var(--yellow);padding:4px 6px 8px;letter-spacing:.03em}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .pf-stat-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -4117,6 +4121,8 @@ body.rs-chat-locked{overflow:hidden}
         <div class="st-sharpe-card-empty">Loading conviction gates…</div>
       </div>
     </div>
+
+    <div id="st-drift-summary"></div>
 
     <!-- Section 1: Active Stack (live + stale + waiting) -->
     <div class="pf-section">
@@ -8128,6 +8134,18 @@ function _renderStrategyPage() {
   document.getElementById('st-data-tile').textContent = paramCount || '—';
   document.getElementById('st-data-sub').textContent  = 'financial parameters ingested';
 
+  // Drift summary header: counts across all sections.
+  const n_trading_not_shown     = rows.filter(r => r.drift === 'trading_not_shown').length;
+  const n_shown_live_not_trading = rows.filter(r => r.drift === 'shown_live_not_trading').length;
+  const driftSummaryEl = document.getElementById('st-drift-summary');
+  if (driftSummaryEl) {
+    if (n_trading_not_shown > 0 || n_shown_live_not_trading > 0) {
+      driftSummaryEl.innerHTML = '<div class="st-drift-header">⚠️ ' + n_trading_not_shown + ' trading but not shown live \xb7 ' + n_shown_live_not_trading + ' shown live but not trading</div>';
+    } else {
+      driftSummaryEl.innerHTML = '';
+    }
+  }
+
   _renderActiveStack(active);
   _renderInactiveStack(inactive);
   _renderCandidates(candidate);
@@ -8337,6 +8355,21 @@ function _fmtNum(v, d) {
   return parseFloat(v).toFixed(d == null ? 2 : d);
 }
 function _escStr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+
+// Returns an inline ⚠️ badge when the strategy has manifest↔registry drift.
+// r.drift is one of 'none' | 'trading_not_shown' | 'shown_live_not_trading'.
+// The manifest state (r.state) remains the PRIMARY displayed status; this
+// badge is purely additive.
+function _driftBadge(r) {
+  if (!r.drift || r.drift === 'none') return '';
+  if (r.drift === 'trading_not_shown') {
+    return '<span class="st-drift-badge" title="Engine IS trading this (registry: approved); manifest shows ' + _escStr(r.state) + '">⚠️ trading</span>';
+  }
+  if (r.drift === 'shown_live_not_trading') {
+    return '<span class="st-drift-badge" title="Manifest shows ' + _escStr(r.state) + ' but engine is NOT trading it (registry: ' + _escStr(r.registry_status || '—') + ')">⚠️ not trading</span>';
+  }
+  return '';
+}
 
 // ── Section 1: Active Stack ────────────────────────────────────────────────
 const _SUB_ORDER = { live: 0, stale: 1, waiting: 2 };
@@ -8683,7 +8716,7 @@ function _renderActiveStack(rows) {
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
           <span class="st-chevron">▶</span>\${r.strategy_id}
         </td>
-        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span></td>
+        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}</td>
         <td>\${_regimeBreakdown(r)}</td>
         <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
         <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
@@ -8947,7 +8980,7 @@ function _renderInactiveStack(rows) {
     \${shown.map(r => {
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
         <td>\${_regimesCell(r)}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
@@ -9075,7 +9108,7 @@ function _renderCandidates(rows) {
         : '';
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span></td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
         <td>\${_regimeBacktestSharpe(r)}</td>
         <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
         <td class="num">\${_fmtNum(sortino)}</td>

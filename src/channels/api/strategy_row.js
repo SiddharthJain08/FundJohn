@@ -1,6 +1,7 @@
 // src/channels/api/strategy_row.js
 // Pure builder for one /api/strategies row. Backtest-sourced; only
 // last_signal_date + status are live. No open positions, no live P&L.
+const { classifyDrift } = require('./strategy_drift');
 function buildStrategyRow(x) {
   const run = x.run || {};
   const panel = x.panel || {};
@@ -48,6 +49,9 @@ function buildStrategyRow(x) {
     // client which to show first. Absent → client falls back to top-level r.*.
     metrics_by_scope: x.metricsByScope || null,
     default_scope:    x.defaultScope || 'ALL',
+    // ── Registry drift (read-only; never writes to manifest/registry) ──
+    registry_status: x.registryStatus ?? null,
+    drift: classifyDrift(x.rec?.state, x.registryStatus),
     // ── Live (the ONLY live fields) ──
     last_signal_date: x.lastSignalDate ?? null,
   };
