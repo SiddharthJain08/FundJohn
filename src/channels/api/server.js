@@ -1597,6 +1597,40 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     reason:     reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
     metadata:   force ? { override: true, failed_gates: failedGates } : {},
   };
+
+  // Map lifecycle state → registry status (engine's trade-gate):
+  //   live, monitoring         → 'approved' (runs daily)
+  //   candidate, staging       → 'pending_approval'
+  //   deprecated, archived     → 'deprecated'
+  // (`paper` is legacy/frozen — map defensively for any orphan.)
+  const REGISTRY_STATUS_FOR = {
+    live:       'approved',
+    monitoring: 'approved',
+    paper:      'pending_approval',
+    candidate:  'pending_approval',
+    staging:    'pending_approval',
+    deprecated: 'deprecated',
+    archived:   'deprecated',
+  };
+  const targetStatus = REGISTRY_STATUS_FOR[toState];
+
+  // ── Registry-first gating (C7/D1b) ──────────────────────────────────────
+  // Sync strategy_registry.status (the engine's trade-gate) BEFORE writing the
+  // manifest (the dashboard's displayed state). A persistent DB failure refuses
+  // the transition with NOTHING written — instead of writing the manifest and
+  // then silently diverging (or reverting, which a lost-ack could turn into the
+  // very drift this prevents). Residual inverse failure (manifest write fails
+  // after this succeeds) is rare + visible via the drift badge; logged below.
+  const { syncRegistryStatus } = require('./registry_sync');
+  if (targetStatus) {
+    try {
+      await syncRegistryStatus({ dbQuery, sid, targetStatus, actor });
+    } catch (e) {
+      console.error(`[transition] registry sync failed (${sid}→${targetStatus}); refusing transition, manifest unchanged: ${e.message}`);
+      return res.status(500).json({ error: `registry sync failed after retries; transition refused, manifest unchanged (${e.message})` });
+    }
+  }
+
   try {
     const { withManifestLock } = require('../../lib/manifest_lock');
     await withManifestLock(manifestPath, (m) => {
@@ -1624,6 +1658,7 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
       return m;
     }, { actor: `dashboard:${actor || 'unknown'}` });
   } catch (e) {
+    console.error(`[transition] manifest write FAILED after registry already synced to ${targetStatus} for ${sid} — registry=${targetStatus}, manifest stays ${fromState}; surfaces as a drift badge, manual fix if persistent: ${e.message}`);
     return res.status(500).json({ error: 'Manifest write failed: ' + e.message });
   }
 
@@ -1705,55 +1740,6 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     );
   } catch (e) {
     console.warn('lifecycle_events insert failed (non-fatal):', e.message);
-  }
-
-  // ── Sync strategy_registry.status ───────────────────────────────────────
-  // The daily execution pipeline reads strategy_registry.status='approved'
-  // as the gate for which strategies actually fire. Map lifecycle state →
-  // registry status:
-  //   live, monitoring         → 'approved' (runs daily)
-  //   candidate, staging       → 'pending_approval'
-  //   deprecated, archived     → 'deprecated'
-  // (`paper` is legacy/frozen — no rows should be transitioning into it
-  // post-rewrite. Map it defensively to 'pending_approval' for any orphan.)
-  const REGISTRY_STATUS_FOR = {
-    live:       'approved',
-    monitoring: 'approved',
-    paper:      'pending_approval',
-    candidate:  'pending_approval',
-    staging:    'pending_approval',
-    deprecated: 'deprecated',
-    archived:   'deprecated',
-  };
-  const targetStatus = REGISTRY_STATUS_FOR[toState];
-  if (targetStatus) {
-    try {
-      if (targetStatus === 'approved') {
-        // UPSERT, not UPDATE: a plain UPDATE no-ops when no registry row exists
-        // yet (strategies bulk-imported outside the research mint path — e.g.
-        // the oxf/blueprint batch — never got a pending_approval row), leaving
-        // them manifest-live but unexecutable (engine gates on
-        // strategy_registry.status='approved'). Insert-if-missing guarantees a
-        // promotion to live/monitoring always yields an approved row.
-        await dbQuery(
-          `INSERT INTO strategy_registry
-              (id, name, implementation_path, status, approved_by, approved_at, tier, universe, signal_frequency)
-           VALUES ($1, $1, $4, $2, $3, NOW(), 2, ARRAY['SP500'], 'daily')
-           ON CONFLICT (id) DO UPDATE
-              SET status      = $2,
-                  approved_by = COALESCE(strategy_registry.approved_by, $3),
-                  approved_at = COALESCE(strategy_registry.approved_at, NOW())`,
-          [sid, targetStatus, actor, `src/strategies/implementations/${sid}.py`],
-        );
-      } else {
-        await dbQuery(
-          `UPDATE strategy_registry SET status = $2 WHERE id = $1`,
-          [sid, targetStatus],
-        );
-      }
-    } catch (e) {
-      console.warn('strategy_registry status sync failed (non-fatal):', e.message);
-    }
   }
 
   // Broadcast SSE so the dashboard refreshes even without polling.
