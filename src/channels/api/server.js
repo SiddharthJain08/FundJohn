@@ -5506,7 +5506,7 @@ async function showTab(name, btn) {
     if (!cycles.length) { el.innerHTML = '<div class="empty">No collection cycles recorded yet</div>'; return; }
     const dur = ms => !ms ? '—' : ms < 60000 ? Math.round(ms/1000)+'s' : Math.round(ms/60000)+'m '+Math.round((ms%60000)/1000)+'s';
     el.innerHTML = \`<table class="db-table">
-      <tr><th>#</th><th>Started (ET)</th><th>Dur</th><th>Prices</th><th>Options</th><th>Fund</th><th>API P/F/Y</th><th>Errors</th><th>Status</th></tr>
+      <tr><th>#</th><th>Started (ET)</th><th>Dur</th><th>Prices</th><th>Options</th><th>Fund</th><th>API (FMP)</th><th>Errors</th><th>Status</th></tr>
       \${cycles.map(c => \`<tr class="cycle-row">
         <td>\${c.id}</td>
         <td>\${new Date(c.started_at).toLocaleString('en-US',{timeZone:'America/New_York',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false})}</td>
@@ -5514,7 +5514,7 @@ async function showTab(name, btn) {
         <td class="num">\${parseInt(c.price_rows||0).toLocaleString()}</td>
         <td class="num">\${parseInt(c.options_contracts||0).toLocaleString()}</td>
         <td class="num">\${c.fundamental_records||0}</td>
-        <td class="num">\${c.polygon_calls||0}/\${c.fmp_calls||0}/\${c.yfinance_calls||0}</td>
+        <td class="num">\${c.fmp_calls||0}</td>
         <td class="num \${(c.errors||0)>0?'negative':''}">\${c.errors||0}</td>
         <td class="status-\${(c.status||'').replace('-','')}">\${c.status}</td>
       </tr>\`).join('')}

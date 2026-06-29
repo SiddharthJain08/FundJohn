@@ -86,7 +86,6 @@ router.post('/:strategy/:regime', async (req, res) => {
   if (typeof body.size_scalar   === 'number') args.push('--size', String(body.size_scalar));
   if (typeof body.stop_pct      === 'number') args.push('--stop', String(body.stop_pct));
   if (typeof body.target_pct    === 'number') args.push('--target', String(body.target_pct));
-  if (typeof body.max_hold_days === 'number') args.push('--max-hold', String(body.max_hold_days));
 
   try {
     const out = await runPython(args);
