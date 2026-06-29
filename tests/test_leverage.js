@@ -13,6 +13,11 @@ const { realizedLeverage } = require('../src/channels/api/leverage');
   const r = realizedLeverage({ long_market_value: 100, short_market_value: 0, equity: 0 });
   assert.strictEqual(r.gross, null); assert.strictEqual(r.net, null);
 }
+// 2b. negative equity → null (equity NOT > 0, covers margin blowout scenario)
+{
+  const r = realizedLeverage({ long_market_value: 100, equity: -500 });
+  assert.strictEqual(r.gross, null); assert.strictEqual(r.net, null);
+}
 // 3. Flat book → 0
 {
   const r = realizedLeverage({ long_market_value: 0, short_market_value: 0, equity: 1000 });
