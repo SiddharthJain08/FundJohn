@@ -86,7 +86,7 @@ def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None,
 
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda weight_by_strat: list(carried_rows))
-    monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0: LAM)
+    monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker or {}))
 
     with _mock.patch('execution.strategy_weights.load_current', return_value=list(weights_rows)):
@@ -199,7 +199,7 @@ class TestLegacyPathUncapped:
         monkeypatch.setattr(_sizer, '_load_active_window_signals',
                             lambda regime_state, weight_by_strat, cadence_by_strat:
                                 [_carried('S1', 'STX')])
-        monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0: LAM)
+        monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
         monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
 
         with _mock.patch('execution.strategy_weights.load_current',
