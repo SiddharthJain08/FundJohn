@@ -73,5 +73,41 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
     assert.strictEqual(r.weights_rebuild_triggered, true); // live -> deprecated removes from active stack
     fs.unlinkSync(mp);
   }
+  // (f) manifestMutator runs inside the lock: deletes a manifest field AND
+  //     mutates event.metadata, which the lifecycle_events insert then persists.
+  {
+    const mp = path.join(os.tmpdir(), `t3c3_manifest_${process.pid}_${_n++}.json`);
+    fs.writeFileSync(mp, JSON.stringify({ strategies: { X: { state: 'candidate', history: [], foo: 'bar' } } }, null, 2));
+    const lifecycleCalls = [];
+    const q = async (sql, params) => {
+      if (/strategy_backtest_runs/.test(sql)) return { rows: [{ total_sharpe: 0.9, total_max_dd_pct: 5 }] };
+      if (/strategy_registry/.test(sql))      return { rows: [] };
+      if (/lifecycle_events/.test(sql))       lifecycleCalls.push({ sql, params });
+      return { rows: [] };
+    };
+    const mutator = (r, event) => { delete r.foo; event.metadata = Object.assign({}, event.metadata || {}, { x: 1 }); };
+    const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true, manifestMutator: mutator });
+    assert.strictEqual(r.ok, true);
+    const m = JSON.parse(fs.readFileSync(mp));
+    assert.ok(!('foo' in m.strategies.X), 'manifestMutator deleted foo from the manifest record');
+    assert.strictEqual(m.strategies.X.state, 'live');
+    assert.strictEqual(lifecycleCalls.length, 1, 'exactly one lifecycle_events insert');
+    assert.ok(/"x":1/.test(lifecycleCalls[0].params[5]), 'lifecycle_events metadata carries the mutator-set x=1');
+    fs.unlinkSync(mp);
+  }
+  // (g) unknown-toState guard (controller addendum): ok:false with NO registry
+  //     and NO manifest write; consistent failure shape carries fromState/toState.
+  {
+    const mp = tmpManifest('candidate');
+    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5 } });
+    const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'bogus_state', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: false });
+    assert.strictEqual(r.ok, false);
+    assert.ok(/unknown toState/.test(r.error));
+    assert.strictEqual(r.fromState, 'candidate'); assert.strictEqual(r.toState, 'bogus_state');
+    assert.strictEqual(r.weights_rebuild_triggered, false);
+    assert.ok(!wroteRegistry(q), 'no registry write on unknown-toState guard');
+    assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'candidate'); // manifest untouched
+    fs.unlinkSync(mp);
+  }
   console.log('ok test_promotion_service_transition');
 })().catch(e => { console.error(e); process.exit(1); });

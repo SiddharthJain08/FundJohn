@@ -1482,8 +1482,10 @@ const STRATEGY_VALID_TRANSITIONS = new Map([
   ['monitoring:deprecated', 'demote from monitoring'],
   ['deprecated:archived',   'archive after review period'],
 ]);
-const CANDIDATE_TO_LIVE_MIN_SHARPE = 0.5;
-const CANDIDATE_TO_LIVE_MAX_DD_PCT = 20;   // DB stores as percent (e.g. 15.0 = 15%)
+// candidate→live Sharpe/DD thresholds moved into the shared promotion service
+// (src/lib/promotion_service.js PROMOTION_THRESHOLDS.equity = 0.5 / 20). The old
+// CANDIDATE_TO_LIVE_MIN_SHARPE / _MAX_DD_PCT module constants were deleted in
+// W4-T3-C3 when /transition was refactored to call that class-aware gate.
 
 app.post('/api/strategies/:id/transition', async (req, res) => {
   const fs   = require('fs');
@@ -1553,127 +1555,59 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     });
   }
 
-  // Guard: candidate → live requires Sharpe/DD thresholds unless force=true.
-  // Under the fused-approval lifecycle, this is the single remaining
-  // operator-gated promotion step.
-  const failedGates = [];
-  if (tKey === 'candidate:live' && !force) {
-    // Read unified backtest first (canonical 2026-05-14); legacy
-    // strategy_registry as fallback for strategies not yet backfilled.
-    let sharpe = NaN, maxDd = NaN;
-    try {
-      const ubt = await dbQuery(
-        `SELECT total_sharpe, total_max_dd_pct FROM strategy_backtest_runs
-          WHERE strategy_id = $1 AND primary_window = TRUE
-          ORDER BY run_at DESC LIMIT 1`,
-        [sid]
-      );
-      if (ubt.rows[0]) {
-        sharpe = parseFloat(ubt.rows[0].total_sharpe);
-        maxDd  = parseFloat(ubt.rows[0].total_max_dd_pct);
-      }
-    } catch (_) {}
-    if (isNaN(sharpe) || isNaN(maxDd)) {
-      try {
-        const srRes = await dbQuery(
-          `SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`,
-          [sid]
-        );
-        const sr = srRes.rows[0] || {};
-        if (isNaN(sharpe)) sharpe = parseFloat(sr.backtest_sharpe);
-        if (isNaN(maxDd))  maxDd  = parseFloat(sr.backtest_max_dd_pct);
-      } catch (_) {}
-    }
-    if (!isNaN(sharpe) && sharpe < CANDIDATE_TO_LIVE_MIN_SHARPE) failedGates.push('sharpe');
-    if (!isNaN(maxDd)  && maxDd  > CANDIDATE_TO_LIVE_MAX_DD_PCT) failedGates.push('max_dd');
-    if (failedGates.length > 0) {
-      return res.status(422).json({
-        error: `candidate→live blocked: ${failedGates.join(', ')} gate(s) failed`,
-        failed_gates: failedGates,
-        allow_override: true,
-      });
-    }
-  }
+  // ── Class-aware promotion gate + C7 registry-first transition core ────────
+  // Both this dashboard route AND the Discord /approve-strategy path now run
+  // through the shared promotion service (src/lib/promotion_service.js), so the
+  // engine's trade-gate (strategy_registry.status='approved') is reachable ONLY
+  // through the same class-aware Sharpe/DD gate. Behavior-preserving for equity
+  // (thresholds 0.5/20 == the old CANDIDATE_TO_LIVE_* constants, same backtest-
+  // runs→registry fallback read, same registry-first-then-manifest order); the
+  // only intended change is that instrument_class now selects per-class
+  // thresholds (option 0.80/30, crypto 0.50/70). The gate fires inside
+  // transitionStrategy when gateApplies (candidate→live) and !force, returning
+  // failedGates with NOTHING written — same as the old 422-before-write path.
+  const { transitionStrategy } = require('../../lib/promotion_service');
+  const instrumentClass = rec.instrument_class || 'equity';
 
-  // Cross-process locked read-modify-write — see src/lib/manifest_lock.js.
-  // Re-read the manifest under the lock so concurrent writers (lifecycle.py
-  // auto_backtest, saturday_brain.js _stage, the approvals worker) can't be
-  // clobbered by stale in-memory state from this request handler. The
-  // validation above happened against the snapshot we read at line 540;
-  // re-validate on the fresh disk view in case the strategy was archived
-  // by another writer in the millisecond between read and write.
-  const now = new Date().toISOString();
-  const event = {
-    from_state: fromState,
-    to_state:   toState,
-    timestamp:  now,
+  const result = await transitionStrategy({
+    dbQuery, manifestPath, sid, toState, fromState, force,
     actor,
-    reason:     reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
-    metadata:   force ? { override: true, failed_gates: failedGates } : {},
-  };
+    // Preserve the route's lifecycle_events.reason default: when the operator
+    // gives no reason, the human-readable transition description is used (e.g.
+    // 'promote to live after passing backtest guards'), not the arrow form.
+    reason: reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
+    instrumentClass,
+    gateApplies: (tKey === 'candidate:live'),
+    // Dashboard-only manifest mutation, run inside the same lock: drop the
+    // now-DB-owned eligible_regimes copy (else the doctor's
+    // manifest_eligibility_drift check FAILs) and fold before/after into the
+    // lifecycle event metadata so /api/lifecycle/audit shows the decision.
+    manifestMutator: eligibleRegimes ? (r, event) => {
+      const prior = Array.isArray(r.eligible_regimes) ? r.eligible_regimes.slice() : null;
+      delete r.eligible_regimes;
+      event.metadata = Object.assign({}, event.metadata || {}, {
+        eligible_regimes_before: prior,
+        eligible_regimes_after:  eligibleRegimes,
+      });
+    } : undefined,
+  });
 
-  // Map lifecycle state → registry status (engine's trade-gate):
-  //   live, monitoring         → 'approved' (runs daily)
-  //   candidate, staging       → 'pending_approval'
-  //   deprecated, archived     → 'deprecated'
-  // (`paper` is legacy/frozen — map defensively for any orphan.)
-  const REGISTRY_STATUS_FOR = {
-    live:       'approved',
-    monitoring: 'approved',
-    paper:      'pending_approval',
-    candidate:  'pending_approval',
-    staging:    'pending_approval',
-    deprecated: 'deprecated',
-    archived:   'deprecated',
-  };
-  const targetStatus = REGISTRY_STATUS_FOR[toState];
-
-  // ── Registry-first gating (C7/D1b) ──────────────────────────────────────
-  // Sync strategy_registry.status (the engine's trade-gate) BEFORE writing the
-  // manifest (the dashboard's displayed state). A persistent DB failure refuses
-  // the transition with NOTHING written — instead of writing the manifest and
-  // then silently diverging (or reverting, which a lost-ack could turn into the
-  // very drift this prevents). Residual inverse failure (manifest write fails
-  // after this succeeds) is rare + visible via the drift badge; logged below.
-  const { syncRegistryStatus } = require('./registry_sync');
-  if (targetStatus) {
-    try {
-      await syncRegistryStatus({ dbQuery, sid, targetStatus, actor });
-    } catch (e) {
-      console.error(`[transition] registry sync failed (${sid}→${targetStatus}); refusing transition, manifest unchanged: ${e.message}`);
-      return res.status(500).json({ error: `registry sync failed after retries; transition refused, manifest unchanged (${e.message})` });
-    }
+  // Gate failure → 422 (registry-first: nothing written). Identical JSON shape
+  // to the pre-refactor route.
+  if (!result.ok && result.failedGates) {
+    return res.status(422).json({
+      error: `candidate→live blocked: ${result.failedGates.join(', ')} gate(s) failed`,
+      failed_gates: result.failedGates,
+      allow_override: true,
+    });
   }
-
-  try {
-    const { withManifestLock } = require('../../lib/manifest_lock');
-    await withManifestLock(manifestPath, (m) => {
-      const r = (m.strategies || {})[sid];
-      if (!r) throw new Error(`strategy ${sid} not in manifest`);
-      r.state       = toState;
-      r.state_since = now;
-      r.history     = r.history || [];
-      r.history.push(event);
-      if (eligibleRegimes) {
-        const prior = Array.isArray(r.eligible_regimes) ? r.eligible_regimes.slice() : null;
-        // Phase 2A ownership moved to strategy_regime_params (DB). Don't keep
-        // a stale copy on the manifest — the doctor's manifest_eligibility_drift
-        // check FAILs when this field is present under OPENCLAW_REGIME_BLENDED_LIVE=1.
-        // The DB upsert below this withManifestLock is the canonical write.
-        delete r.eligible_regimes;
-        // Fold the eligibility change into the lifecycle event metadata so
-        // /api/lifecycle/audit shows exactly what was decided at promotion.
-        event.metadata = Object.assign({}, event.metadata || {}, {
-          eligible_regimes_before: prior,
-          eligible_regimes_after:  eligibleRegimes,
-        });
-      }
-      m.updated_at = now;
-      return m;
-    }, { actor: `dashboard:${actor || 'unknown'}` });
-  } catch (e) {
-    console.error(`[transition] manifest write FAILED after registry already synced to ${targetStatus} for ${sid} — registry=${targetStatus}, manifest stays ${fromState}; surfaces as a drift badge, manual fix if persistent: ${e.message}`);
-    return res.status(500).json({ error: 'Manifest write failed: ' + e.message });
+  // Registry-sync or manifest-write failure → 500. The service refuses with
+  // NOTHING written on a registry-sync failure (manifest stays put); a manifest
+  // write that fails AFTER the registry synced surfaces as a drift badge. Log
+  // loudly — these logs are how the operator detects registry↔manifest drift.
+  if (!result.ok) {
+    console.error(`[transition] ${sid} ${fromState}→${toState} refused: ${result.error}`);
+    return res.status(500).json({ error: result.error });
   }
 
   // ── Sync strategy_regime_params (source-of-truth, Phase 2A) ──────────────
@@ -1745,28 +1679,21 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     }
   }
 
-  // Audit trail (non-fatal if DB unavailable).
-  try {
-    await dbQuery(
-      `INSERT INTO lifecycle_events (strategy_id, from_state, to_state, actor, reason, metadata)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [sid, fromState, toState, actor, event.reason, JSON.stringify(event.metadata)]
-    );
-  } catch (e) {
-    console.warn('lifecycle_events insert failed (non-fatal):', e.message);
-  }
+  // NOTE: the lifecycle_events audit insert now happens INSIDE
+  // transitionStrategy (after the manifest write, using the same `event` the
+  // manifestMutator folded the eligible_regimes before/after into), so the
+  // route no longer inserts it here.
 
   // Broadcast SSE so the dashboard refreshes even without polling.
-  try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: now }); } catch (_) {}
+  try { broadcast({ type: 'strategy_transition', strategy_id: sid, from_state: fromState, to_state: toState, at: result.event.timestamp }); } catch (_) {}
 
   // Strategy-weights rebuild: any transition that adds or removes the
   // strategy from the active stack (live/monitoring) invalidates the
   // current strategy_weights_by_regime snapshot. Fire-and-forget — the
   // response doesn't block on the ~5s python invocation; the next
-  // pipeline cycle reads the refreshed table.
-  const ACTIVE = new Set(['live', 'monitoring']);
-  const stackChanged = ACTIVE.has(fromState) !== ACTIVE.has(toState);
-  if (stackChanged) {
+  // pipeline cycle reads the refreshed table. The service computes whether
+  // the active stack changed (same ACTIVE={live,monitoring} XOR logic).
+  if (result.weights_rebuild_triggered) {
     const { spawn } = require('child_process');
     const path = require('path');
     const rootDir = path.join(__dirname, '../../..');
@@ -1776,8 +1703,8 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState + ')');
   }
 
-  res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: now,
-             weights_rebuild_triggered: stackChanged });
+  res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: result.event.timestamp,
+             weights_rebuild_triggered: result.weights_rebuild_triggered });
 });
 
 // ── Manual backtest rerun ────────────────────────────────────────────────────

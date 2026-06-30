@@ -39,29 +39,41 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force }) {
 const REGISTRY_STATUS_FOR = { live:'approved', monitoring:'approved', paper:'pending_approval',
   candidate:'pending_approval', staging:'pending_approval', deprecated:'deprecated', archived:'deprecated' };
 
-async function transitionStrategy({ dbQuery, manifestPath, sid, toState, fromState, force, actor, reason, instrumentClass, gateApplies }) {
+async function transitionStrategy({ dbQuery, manifestPath, sid, toState, fromState, force, actor, reason, instrumentClass, gateApplies, manifestMutator }) {
   const { syncRegistryStatus } = require('../channels/api/registry_sync');
   const { withManifestLock } = require('./manifest_lock');
   if (gateApplies && !force) {
     const g = await evaluatePromotionGate({ dbQuery, sid, instrumentClass, force: false });
-    if (!g.pass) return { ok: false, failedGates: g.failedGates };
+    if (!g.pass) return { ok: false, fromState, toState, weights_rebuild_triggered: false, failedGates: g.failedGates };
   }
   const now = new Date().toISOString();
   const event = { from_state: fromState, to_state: toState, timestamp: now, actor,
                   reason: reason || `${fromState}->${toState}`, metadata: force ? { override: true } : {} };
   const targetStatus = REGISTRY_STATUS_FOR[toState];
+  // C7-hole guard (W4-T3-C3 controller addendum): refuse an unknown toState
+  // rather than silently writing the manifest with NO registry sync. All 7
+  // lifecycle states are in REGISTRY_STATUS_FOR today; this only guards a
+  // future-added state from slipping past the registry-first invariant.
+  if (!(toState in REGISTRY_STATUS_FOR)) {
+    return { ok: false, fromState, toState, weights_rebuild_triggered: false, error: `unknown toState '${toState}'` };
+  }
   if (targetStatus) {
     try { await syncRegistryStatus({ dbQuery, sid, targetStatus, actor }); }
-    catch (e) { return { ok: false, error: `registry sync refused (nothing written): ${e.message}` }; }
+    catch (e) { return { ok: false, fromState, toState, weights_rebuild_triggered: false, error: `registry sync refused (nothing written): ${e.message}` }; }
   }
   try {
     await withManifestLock(manifestPath, (m) => {
       const r = (m.strategies || {})[sid];
       if (!r) throw new Error(`strategy ${sid} not in manifest`);
       r.state = toState; r.state_since = now; r.history = r.history || []; r.history.push(event);
+      // Optional caller-supplied mutation inside the same lock (e.g. the
+      // dashboard route's eligible_regimes cleanup + event.metadata fold).
+      // Runs AFTER history.push so it can mutate the just-pushed event's
+      // metadata, which the lifecycle_events insert below then persists.
+      if (typeof manifestMutator === 'function') manifestMutator(r, event);
       m.updated_at = now; return m;
     }, { actor: `${actor || 'unknown'}` });
-  } catch (e) { return { ok: false, error: `manifest write failed (registry already ${targetStatus}; drift badge): ${e.message}` }; }
+  } catch (e) { return { ok: false, fromState, toState, weights_rebuild_triggered: false, error: `manifest write failed (registry already ${targetStatus}; drift badge): ${e.message}` }; }
   try { await dbQuery(`INSERT INTO lifecycle_events (strategy_id, from_state, to_state, actor, reason, metadata) VALUES ($1,$2,$3,$4,$5,$6)`,
     [sid, fromState, toState, actor, event.reason, JSON.stringify(event.metadata)]); } catch (_) {}
   const ACTIVE = new Set(['live','monitoring']);
