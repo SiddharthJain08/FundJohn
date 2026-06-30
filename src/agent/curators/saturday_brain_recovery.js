@@ -49,6 +49,7 @@ const dataTierFilter       = require('./data_tier_filter');
 const vaultLinker          = require('./vault_linker');
 const ResearchOrchestrator = require('../research/research-orchestrator');
 const { terminalStatusFor } = require('./_candidate_terminal_status');
+const { _isDuplicateCandidate } = require('./_candidate_dedup');
 
 function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -185,12 +186,13 @@ async function main() {
   const TIER_A_CAP = parseInt(getArg('--tier-a-cap', '30'), 10);
   const cap = Math.min(TIER_A_CAP, tiers.A.length);
   log(`Coding Tier-A: ${cap}/${tiers.A.length} (cap=${TIER_A_CAP})`);
-  let coded = 0, failed = 0;
+  let coded = 0, failed = 0, deduped = 0;
   const tierAStrategies = [];
   for (let i = 0; i < cap; i++) {
     const { hunterResult, candidateId } = tiers.A[i];
     const sid = hunterResult.strategy_id;
     if (!sid) { failed++; continue; }
+    if (_isDuplicateCandidate(sid, hunterResult, log)) { deduped++; continue; }
     log(`  code [${i + 1}/${cap}] ${sid}`);
     try {
       const item = {
@@ -216,7 +218,7 @@ async function main() {
       failed++;
     }
   }
-  log(`Tier-A coding complete: ${coded} promoted to PAPER, ${failed} failed.`);
+  log(`Tier-A coding complete: ${coded} promoted to PAPER, ${failed} failed, ${deduped} dedup-skipped.`);
 
   // ── 7. Tier-B → STAGING (mirrors saturday_brain.js _stage).
   // Cross-process locked read-modify-write — see src/lib/manifest_lock.js.
@@ -297,6 +299,7 @@ async function main() {
     tier_counts:          { A: tiers.A.length, B: tiers.B.length, C: tiers.C.length },
     coded_synchronous:    coded,
     coding_failed:        failed,
+    deduped:              deduped,
     tier_b_staged:        staged,
     tier_c_deferred:      deferred,
     threshold_used:       threshold,

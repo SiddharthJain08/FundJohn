@@ -46,6 +46,7 @@ const { terminalStatusFor }   = require('./_candidate_terminal_status');
 // orders blueprint-origin candidates first and reserves a slice of the Tier-A
 // coding budget for them; BLUEPRINT_ORIGINS classifies a row's origin.
 const { partitionBlueprintBudget, BLUEPRINT_ORIGINS } = require('./saturday_brain');
+const { _isDuplicateCandidate } = require('./_candidate_dedup');
 
 function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -89,6 +90,7 @@ async function _markRunComplete(dryRun, log, stats = {}) {
 
 async function main() {
   const dryRun       = !!getArg('--dry-run', false);
+  const noDedup      = !!getArg('--no-dedup', false);
   const sinceIsoArg  = getArg('--since-iso');
   const tierACap     = parseInt(getArg('--tier-a-cap', '10'), 10);
   const sidsArg      = getArg('--strategy-ids');
@@ -226,15 +228,16 @@ async function main() {
   const cap = Math.min(tierACap, tiers.A.length);
   const { ordered, blueprintCap, paperCap } = partitionBlueprintBudget(tiers.A, cap);
   log(`Coding Tier-A: ${cap}/${tiers.A.length} (blueprint=${blueprintCap} paper=${paperCap})`);
-  let coded = 0, failed = 0;
+  let coded = 0, failed = 0, deduped = 0;
   let bpUsed = 0, pUsed = 0, attempted = 0;
   const tierAStrategies = [];
   for (const { hunterResult, candidateId, origin } of ordered) {
     const isBp = BLUEPRINT_ORIGINS.has(origin);
     if (isBp ? (bpUsed >= blueprintCap) : (pUsed >= paperCap)) continue;  // defer
+    const sid = hunterResult.strategy_id;
+    if (!noDedup && _isDuplicateCandidate(sid, hunterResult, log)) { deduped++; continue; }
     if (isBp) bpUsed++; else pUsed++;
     attempted++;
-    const sid = hunterResult.strategy_id;
     log(`  code [${attempted}/${cap}] ${sid} (${origin})`);
     try {
       const item = {
@@ -261,7 +264,7 @@ async function main() {
       log(`    error: ${e.message}`);
     }
   }
-  log(`Coded: ${coded} promoted, ${failed} failed.`);
+  log(`Coded: ${coded} promoted, ${failed} failed, ${deduped} dedup-skipped.`);
 
   // Phase 7 — Tier-B → STAGING (manifest write + strategy_registry upsert).
   // Cross-process locked read-modify-write — see src/lib/manifest_lock.js.
@@ -353,6 +356,7 @@ async function main() {
     tier_counts:          { A: tiers.A.length, B: tiers.B.length, C: tiers.C.length },
     coded:                coded,
     coding_failed:        failed,
+    deduped:              deduped,
     staged_tier_b:        staged,
     deferred_tier_c:      deferred,
     new_strategies:       [...tierAStrategies.map(s => s.strategy_id),
