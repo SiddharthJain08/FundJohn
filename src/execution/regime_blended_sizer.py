@@ -234,6 +234,36 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
     return default
 
 
+def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> float:
+    """Per-regime floor for the correlation-adjusted cumulative-Sharpe gate
+    (OPENCLAW_STRATEGY_CORR_CUMSHARPE). Mirrors _resolve_min_cumulative_sharpe but
+    reads regime_sizer_params.min_corr_cum_sharpe, bound [0.0, 10.0] (migration 140),
+    falling back to pipeline_config['min_corr_cum_sharpe'], then `default`.
+
+    NOTE the scale differs from the legacy floor: this quantity is cadence-normalized
+    AND diversification-deflated, so values are smaller. The operator sets per-regime
+    values from the shadow run before flipping the flag; `default` is a placeholder.
+    """
+    if isinstance(params, dict):
+        v = params.get('min_corr_cum_sharpe')
+        if v is not None:
+            try:
+                return max(0.0, min(10.0, float(v)))
+            except (TypeError, ValueError):
+                pass
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_corr_cum_sharpe'")
+                row = cur.fetchone()
+                if row is not None:
+                    return max(0.0, min(10.0, float(row[0])))
+    except Exception:
+        pass
+    return default
+
+
 def _recent_active_counts(lookback: int = 10) -> list[int]:
     """Recent per-cycle active-signal-set sizes (count of open execution_signals per
     signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
