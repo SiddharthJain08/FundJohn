@@ -116,6 +116,28 @@ def _run_shadow(monkeypatch, weights_rows, carried_rows, sim):
             regime_params=_params(1.0), confirmer=lambda proposals: {})
 
 
+def test_on_path_emits_live_diagnostics(monkeypatch, caplog):
+    import logging
+    posted = []
+    monkeypatch.setattr(_sizer, '_post_corr_cumsharpe_log', lambda line: posted.append(line))
+    sim = {'S1': {'S1': 1.0, 'S2': 0.0}, 'S2': {'S2': 1.0, 'S1': 0.0}}
+    with caplog.at_level(logging.INFO):
+        orders = _run(monkeypatch,
+                      weights_rows=[_weights_row('S1', 3.0), _weights_row('S2', 3.0)],
+                      carried_rows=[_carried('S1', 'AAA'), _carried('S2', 'AAA')],
+                      sim=sim, min_corr_cum_sharpe=0.5)
+    assert 'AAA' in _opens(orders)
+    assert 'corr_cumsharpe.live[' in caplog.text
+    assert posted and 'corr_cumsharpe.live[' in posted[0]
+    assert 'rec_floor=' in posted[0] and 'cap_binds=' in posted[0]
+
+
+def test_post_helper_is_failsafe_without_db(monkeypatch):
+    # The poster must NEVER raise (it runs inside the live trade step).
+    monkeypatch.delenv('POSTGRES_URI', raising=False)
+    _sizer._post_corr_cumsharpe_log('corr_cumsharpe.live[X]: smoke')  # no exception == pass
+
+
 def test_shadow_runs_and_logs_without_routing_change(monkeypatch, caplog):
     import logging
     sim = {'S1': {'S1': 1.0, 'S2': 0.0}, 'S2': {'S2': 1.0, 'S1': 0.0}}

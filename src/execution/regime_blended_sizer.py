@@ -335,6 +335,44 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
             'sign_flips': sign_flips, 'top_dollar_moves': top_moves}
 
 
+def _post_corr_cumsharpe_log(line: str) -> None:
+    """Best-effort post of a corr_cumsharpe.live diagnostic line to #botjohn-log, for the
+    operator's week-long live monitoring. Self-expiring via pipeline_config
+    'corr_cumsharpe_log_until' (YYYY-MM-DD): silent no-op past that date, if the key is
+    unset, or on ANY error. NEVER raises — the live `trade` step must never abort on a
+    Discord failure. urllib + explicit User-Agent (Discord webhooks 403 a missing UA)."""
+    try:
+        import datetime as _dt
+        import psycopg2
+        url = None
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT value FROM pipeline_config WHERE key = 'corr_cumsharpe_log_until'")
+            row = cur.fetchone()
+            if not row or not row[0]:
+                return
+            try:
+                until = _dt.date.fromisoformat(str(row[0]).strip())
+            except ValueError:
+                return
+            if _dt.date.today() > until:
+                return
+            cur.execute("SELECT webhook_urls->>'botjohn-log' FROM agent_registry "
+                        "WHERE webhook_urls->>'botjohn-log' IS NOT NULL LIMIT 1")
+            wrow = cur.fetchone()
+            url = wrow[0] if wrow else None
+        if not url:
+            return
+        import json as _json
+        import urllib.request as _ur
+        data = _json.dumps({'content': line[:1900]}).encode()
+        req = _ur.Request(url, data=data, method='POST',
+                          headers={'Content-Type': 'application/json',
+                                   'User-Agent': 'fundjohn-sizer/1.0'})
+        _ur.urlopen(req, timeout=8).read()
+    except Exception as e:
+        logger.warning('corr_cumsharpe.live discord post skipped (%s)', e)
+
+
 def _recent_active_counts(lookback: int = 10) -> list[int]:
     """Recent per-cycle active-signal-set sizes (count of open execution_signals per
     signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
@@ -1177,6 +1215,29 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         _sim = _ortho_groups.get('matrix') or {}
         gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
             ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
+        # Live diagnostics: SAME metrics as the shadow rail, computed against what the
+        # legacy gate/sizing this cycle WOULD have produced (ticker_net_sharpe + the
+        # pre-replacement ticker_w), logged AND best-effort posted to #botjohn-log so the
+        # operator monitors the LIVE system exactly like the shadow. rec_floor is the
+        # value that reproduces today's surviving-ticker count — the slider target.
+        try:
+            _m = _corr_cumsharpe_shadow_metrics(
+                gate_net_sharpe, _size_adj, ticker_net_sharpe, dict(ticker_w),
+                min_cum_sharpe, lam, nav, _nb_g, _nb_s)
+            _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
+                     'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
+                     'backstop=%s top_dollar_moves=%s' % (
+                         regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
+                         _m['live_keep'], _m['would_keep'], _m['rec_floor'],
+                         _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
+                         _m['backstop_fires'], _m['top_dollar_moves']))
+            logger.info(_line)
+            # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
+            # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
+            if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+                _post_corr_cumsharpe_log(_line)
+        except Exception as e:
+            logger.warning('corr_cumsharpe.live diag failed (%s)', e)
         # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
         ticker_w = defaultdict(float, _size_adj)
         # Equity gate now reads the per-regime corr floor (scale matches S_adj).
