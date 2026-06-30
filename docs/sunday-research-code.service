@@ -16,10 +16,17 @@ WorkingDirectory=/root/openclaw
 # filter, Tier-A synchronous code+backtest (idempotent — skips strategies already
 # in the manifest), Tier-B → STAGING (operator-gated), Tier-C vault notes; then
 # flip today's 08:00 ingest row (status='ingest_complete') to 'completed'.
-# --tier-a-cap 3: the default 10 serial LLM-coder+backtest jobs overran the 4h
-# budget on the 2-core VPS (CPU only ~1.4h/4h -> time spent BLOCKED on I/O, so a
-# bigger timeout doesn't help). Cap to 3/run; a per-candidate watchdog is the
-# durable follow-up. (W1 reconcile, 2026-06-28)
+# --tier-a-cap 6 (W4-T3, 2026-06-30; was 3): the default 10 serial LLM-coder+
+# backtest jobs overran the 4h budget on the 2-core VPS (CPU only ~1.4h/4h, rest
+# blocked on I/O). Raised 3->6 now that three things freed the budget: W4-1 fixed
+# the finisher hang (exit0), W4-5 moved the Opus code-review to its own unit (the
+# full 4h is coding-only now), and W4-T3-C5 fingerprint-dedup skips duplicate
+# candidates before coding. A per-candidate watchdog is NOT needed: every coding
+# step runs through research-orchestrator._spawnPython, which SIGKILLs the child
+# on its own timeoutMs (validate 60s, backtest/port ~10min) — so per-candidate
+# time is already bounded and 6 jobs * ~24min stays well under 4h. A JS-level
+# Promise.race would only orphan those killable children, not help. Raise further
+# (8) only after observing a few clean Sunday runs at 6.
 #
 # Note: the MasterMind (Opus) candidate code-review was split into its own unit
 # openclaw-sunday-code-review (W4-5, 2026-06-30) so it has an independent 2h
@@ -29,7 +36,7 @@ WorkingDirectory=/root/openclaw
 # hung run before this oneshot starts. The leading '-' makes a no-match non-fatal.
 ExecStartPre=-/usr/bin/pkill -f saturday_brain_finisher
 
-ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 3
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 6
 
 StandardOutput=journal
 StandardError=journal
