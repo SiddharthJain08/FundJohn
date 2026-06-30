@@ -156,3 +156,13 @@ Shadow reuses the established `_ortho_enabled` gating idiom and logs under a sta
 - **`PER_TICKER_CAP_SHARPE_FRAC` coupling** — measured in shadow, retuned only if needed.
 - **Quadratic conviction concentration** (§2) is a real behavioral shift toward dominant-strategy tickers; the operator accepts it pending shadow Δ$ evidence.
 - VPS 2-core/8GB: the new computation is O(Σ per-ticker pairs²) on already-loaded in-memory data — negligible; no new parquet/DB reads on the hot path.
+
+## 10. Build-time deltas (surfaced by the ON-path integration smoke)
+
+Two corrections made during implementation, not in the original §4 (commit `9869735`):
+
+1. **Similarity-matrix load trigger.** `_ortho_groups` (the `strategy_similarity` matrix) was loaded only when FOLD/CORR_WEIGHT/ORTHO_SHADOW/BRACKET_STACK was enabled. With *only* `CORR_CUMSHARPE` (or its shadow) on, the matrix never loaded and the corr path silently never activated. Fix: added `_corr_cumsharpe_on or _corr_cumsharpe_shadow` to the load trigger. (Fail-safe preserved: if `load_groups` raises, `_ortho_groups` stays None and the path falls back to the legacy gate+floor.)
+
+2. **Equity gate floor isolated from the option/legacy floor.** `min_cum_sharpe` is overloaded: besides the equity gate it also drives `_consolidate_option_orders` (which gates a **naive raw-Sharpe** `u_net_sharpe` — correctly calibrated to the legacy `[1,10]` floor) and the legacy ortho-shadow. The corr floor must not leak there (options aren't in the equity similarity matrix). Fix: `min_cum_sharpe` stays legacy (option/legacy-shadow path); a new `equity_gate_floor` is the corr floor **only when the corr path is actually taken** (`_ortho_groups` present AND flag on) — so a missing matrix fails safe to the legacy floor *and* legacy quantity together. The equity gate-drop and the shadow's `legacy_floor` arg read `equity_gate_floor`.
+
+Both are covered by `tests/test_corr_cumsharpe_integration.py` (corr path activates; `S_adj` drives gate+cap; corr floor selects tickers).
