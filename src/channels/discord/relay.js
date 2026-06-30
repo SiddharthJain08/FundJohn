@@ -112,19 +112,21 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
 
         // ── Execution Engine Commands ──────────────────────────────────────
         case '/approve-strategy': {
-            // /approve-strategy {strategy_id}
-            const stratId = args[1];
-            if (!stratId) { await relay.reply('Usage: /approve-strategy {strategy_id}'); break; }
-            const res = await pgQuery(
-                `UPDATE strategy_registry SET status='approved', approved_by='operator', approved_at=NOW()
-                 WHERE id=$1 RETURNING id, name`,
-                [stratId]
-            );
-            if (res.rows.length === 0) {
-                await relay.reply(`Strategy \`${stratId}\` not found in registry.`);
-            } else {
-                await relay.reply(`✅ Strategy **${res.rows[0].name}** (\`${stratId}\`) approved and active.`);
-            }
+            // /approve-strategy {strategy_id} [force]
+            // Dual role: PROMOTE a candidate (gated) OR RESUME a paused live/monitoring strategy (no gate).
+            // Routes through the shared promotion service (W4-F2 fix — T3-C4).
+            const path = require('path');
+            const { transitionStrategy: _ts } = require('../../lib/promotion_service');
+            const { syncRegistryStatus: _ss } = require('../api/registry_sync');
+            await approveStrategyCommand({
+                stratId: args[1],
+                force: args[2] === 'force',
+                manifestPath: path.join(__dirname, '../../strategies/manifest.json'),
+                pgQuery,
+                reply: (msg) => relay.reply(msg),
+                transitionStrategy: _ts,
+                syncRegistryStatus: _ss,
+            });
             break;
         }
 
@@ -382,4 +384,67 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
     return true;
 }
 
-module.exports = { send, split, formatDiligence, formatTrade, handleStrategistCommand };
+/**
+ * Core logic for /approve-strategy — dependency-injected so it is unit-testable
+ * without standing up Discord or a real DB.
+ *
+ * Dual role (W4-F2 / T3-C4):
+ *   candidate        → PROMOTE via gated transitionStrategy (sub-floor is BLOCKED unless force)
+ *   live/monitoring  → RESUME (pause→approved) via syncRegistryStatus directly, no gate
+ *   staging          → refuse (use the dashboard/approval pipeline)
+ *   anything else    → refuse
+ *
+ * @param {Object} opts
+ * @param {string}   opts.stratId
+ * @param {boolean}  opts.force
+ * @param {string}   opts.manifestPath    — absolute path to manifest.json
+ * @param {Function} opts.pgQuery         — pg query fn
+ * @param {Function} opts.reply           — async (msg) => void
+ * @param {Function} opts.transitionStrategy   — from promotion_service
+ * @param {Function} opts.syncRegistryStatus   — from registry_sync
+ */
+async function approveStrategyCommand({ stratId, force, manifestPath, pgQuery, reply, transitionStrategy, syncRegistryStatus }) {
+    if (!stratId) { await reply('Usage: /approve-strategy {strategy_id} [force]'); return; }
+    const fs = require('fs'); const path = require('path');
+    let rec;
+    try { rec = (JSON.parse(fs.readFileSync(manifestPath, 'utf8')).strategies || {})[stratId]; }
+    catch (e) { await reply(`Cannot read manifest: ${e.message}`); return; }
+    if (!rec) { await reply(`Strategy \`${stratId}\` not found in manifest.`); return; }
+    const fromState      = rec.state;
+    const instrumentClass = rec.instrument_class || 'equity';
+
+    if (fromState === 'candidate') {
+        const result = await transitionStrategy({
+            dbQuery: pgQuery, manifestPath, sid: stratId, toState: 'live', fromState,
+            force, actor: 'discord:operator', reason: '/approve-strategy', instrumentClass, gateApplies: true,
+        });
+        if (!result.ok && result.failedGates && result.failedGates.length > 0) {
+            await reply(`⛔ \`${stratId}\` blocked: ${result.failedGates.join(', ')} gate(s) failed (${instrumentClass} floor). Re-run \`/approve-strategy ${stratId} force\` to override.`);
+        } else if (!result.ok) {
+            await reply(`❌ \`${stratId}\` not approved: ${result.error}`);
+        } else {
+            await reply(`✅ Strategy **${stratId}** promoted candidate→live and approved${force ? ' (FORCE override)' : ''}.`);
+            if (result.weights_rebuild_triggered) {
+                const { spawn } = require('child_process');
+                const child = spawn(
+                    '/usr/bin/python3',
+                    ['-m', 'execution.strategy_weights', '--rebuild', '--trigger=approve_strategy'],
+                    { cwd: path.join(__dirname, '../../..'), env: { ...process.env, PYTHONPATH: 'src' }, detached: true, stdio: 'ignore' }
+                );
+                child.unref();
+            }
+        }
+    } else if (fromState === 'live' || fromState === 'monitoring') {
+        // RESUME (pause→approved) or already active — no gate, no manifest change.
+        try {
+            await syncRegistryStatus({ dbQuery: pgQuery, sid: stratId, targetStatus: 'approved', actor: 'discord:operator' });
+            await reply(`✅ Strategy **${stratId}** is active (registry status=approved).`);
+        } catch (e) { await reply(`❌ \`${stratId}\` resume failed: ${e.message}`); }
+    } else if (fromState === 'staging') {
+        await reply(`\`${stratId}\` is in staging — approve it via the dashboard/approval pipeline, not /approve-strategy.`);
+    } else {
+        await reply(`Cannot approve \`${stratId}\` from state '${fromState}' — use the dashboard for ${fromState} transitions.`);
+    }
+}
+
+module.exports = { send, split, formatDiligence, formatTrade, handleStrategistCommand, approveStrategyCommand };
