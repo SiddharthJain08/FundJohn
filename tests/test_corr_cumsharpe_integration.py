@@ -92,3 +92,41 @@ def test_on_path_corr_floor_drops_ticker(monkeypatch):
                   carried_rows=[_carried('S1', 'AAA'), _carried('S2', 'AAA')],
                   sim=sim, min_corr_cum_sharpe=5.0)
     assert 'AAA' not in _opens(orders), 'corr floor 5.0 > S_adj 3.0 must drop AAA'
+
+
+def _run_shadow(monkeypatch, weights_rows, carried_rows, sim):
+    """Shadow flag ON, live flag OFF: legacy routing + shadow metrics logged."""
+    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW', '1')
+    monkeypatch.delenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE', raising=False)
+    for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
+                 'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
+                 'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_OPTION_DELTA_HEDGE'):
+        monkeypatch.delenv(gate, raising=False)
+    import execution.strategy_similarity as _ss
+    monkeypatch.setattr(_ss, 'load_groups',
+                        lambda regime: {'block_map': {}, 'fold_map': {}, 'rep_map': {}, 'matrix': sim})
+    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w: list(carried_rows))
+    monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
+    with _mock.patch('execution.strategy_weights.load_current', return_value=list(weights_rows)):
+        return _sizer.size_positions(
+            signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
+            run_date=date(2026, 6, 4), strategy_state={},
+            regime_params=_params(1.0), confirmer=lambda proposals: {})
+
+
+def test_shadow_runs_and_logs_without_routing_change(monkeypatch, caplog):
+    import logging
+    sim = {'S1': {'S1': 1.0, 'S2': 0.0}, 'S2': {'S2': 1.0, 'S1': 0.0}}
+    with caplog.at_level(logging.INFO):
+        orders = _run_shadow(monkeypatch,
+                             weights_rows=[_weights_row('S1', 3.0), _weights_row('S2', 3.0)],
+                             carried_rows=[_carried('S1', 'AAA'), _carried('S2', 'AAA')],
+                             sim=sim)
+    # Shadow routes nothing extra: the LEGACY path still emits the AAA open.
+    assert 'AAA' in _opens(orders)
+    # The shadow glue ran end-to-end (NOT swallowed by the except) and logged the
+    # richer metrics the rollout depends on.
+    assert 'corr_cumsharpe.shadow:' in caplog.text
+    assert 'cap_binds=' in caplog.text and 'sign_flips=' in caplog.text

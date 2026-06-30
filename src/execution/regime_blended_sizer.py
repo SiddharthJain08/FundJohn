@@ -280,9 +280,15 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
 def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_w,
                                    legacy_floor, lam, nav, nb_g, nb_s):
     """Pure shadow metrics for the corr-adjusted gate vs the live gate. Routes nothing.
-    Reports |S_adj| distribution, live-vs-would-keep counts, a recommended floor that
-    preserves ~the live surviving-ticker count, non-PSD backstop fires, and the top
-    cross-sectional dollar reallocations (size_adj vs the live cadence-weighted ticker_w)."""
+
+    Reports |S_adj| distribution; live-vs-would-keep counts; a recommended floor that
+    preserves ~the live surviving-ticker count; non-PSD backstop fires; per-ticker-cap
+    binding frequency + post-cap gross fraction (cap = PER_TICKER_CAP_SHARPE_FRAC·|S_adj|·
+    λ·NAV — this is what the operator needs to decide whether to retune the cap before the
+    flip); direction flips vs the legacy sizing (matters with SIZE_SCALAR live + the wᵢ²
+    numerator); and the top post-cap dollar reallocations. Δ$ and cap modeling are computed
+    over the WOULD-SURVIVE set (|S_adj| >= rec_floor) and normalized to λ·NAV exactly as the
+    live sizer does — so the numbers reflect what would actually route, not raw pre-gate gross."""
     mags = sorted(abs(v) for v in gate_adj.values())
     def _pct(p):
         if not mags:
@@ -295,18 +301,38 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
     desc = sorted((abs(v) for v in gate_adj.values()), reverse=True)
     k = min(len(desc), len(live_keep))
     rec_floor = desc[k - 1] if k > 0 else 0.0
-    def _alloc(m):
-        g = sum(abs(v) for v in m.values())
-        return {t: (v / g * lam * nav) for t, v in m.items()} if g > 0 else {}
-    new_alloc, live_alloc = _alloc(size_adj), _alloc(live_ticker_w)
-    moved = {t: round(new_alloc.get(t, 0.0) - live_alloc.get(t, 0.0))
-             for t in set(new_alloc) | set(live_alloc)}
+    # Would-survive set under the recommended floor (selection by |S_adj|).
+    survivors = {t: size_adj[t] for t in size_adj if abs(gate_adj.get(t, 0.0)) >= rec_floor}
+    denom = lam * nav
+    gross = sum(abs(v) for v in survivors.values())
+    cap_binds = 0
+    capped_gross = 0.0
+    new_alloc = {}
+    if gross > 0 and denom > 0:
+        for t, v in survivors.items():
+            tgt = v / gross * denom
+            cap = PER_TICKER_CAP_SHARPE_FRAC * abs(gate_adj.get(t, 0.0)) * denom
+            if abs(tgt) > cap:
+                cap_binds += 1
+                tgt = cap if tgt > 0 else -cap
+            new_alloc[t] = tgt
+            capped_gross += abs(tgt)
+    # Legacy $ over the SAME survivor set (live cadence-weighted ticker_w, renormalized).
+    live_surv = {t: live_ticker_w.get(t, 0.0) for t in survivors}
+    lg = sum(abs(v) for v in live_surv.values())
+    live_alloc = {t: (v / lg * denom) for t, v in live_surv.items()} if lg > 0 else {}
+    moved = {t: round(new_alloc.get(t, 0.0) - live_alloc.get(t, 0.0)) for t in survivors}
     top_moves = dict(sorted(((t, d) for t, d in moved.items() if abs(d) >= 1000),
                             key=lambda kv: -abs(kv[1]))[:10])
-    return {'dist': dist, 'live_keep': len(live_keep),
-            'would_keep': sum(1 for v in gate_adj.values() if abs(v) >= rec_floor),
+    # Direction flips vs legacy sizing (size_adj sign != live ticker_w sign on a survivor).
+    sign_flips = sorted(t for t in survivors
+                        if live_ticker_w.get(t, 0.0) != 0.0
+                        and (size_adj[t] > 0) != (live_ticker_w[t] > 0))
+    return {'dist': dist, 'live_keep': len(live_keep), 'would_keep': len(survivors),
             'rec_floor': rec_floor, 'backstop_fires': {'gate': nb_g, 'size': nb_s},
-            'top_dollar_moves': top_moves}
+            'cap_binds': cap_binds,
+            'gross_after_cap_frac': round(capped_gross / denom, 4) if denom > 0 else 0.0,
+            'sign_flips': sign_flips, 'top_dollar_moves': top_moves}
 
 
 def _recent_active_counts(lookback: int = 10) -> list[int]:
@@ -1183,9 +1209,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 _g_adj, _s_adj, gate_net_sharpe, dict(ticker_w),
                 equity_gate_floor, lam, nav, _nbg, _nbs)
             logger.info('corr_cumsharpe.shadow: dist=%s live_keep=%d would_keep=%d '
-                        'rec_floor=%.4f backstop=%s top_dollar_moves=%s',
+                        'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
+                        'backstop=%s top_dollar_moves=%s',
                         {k: round(v, 4) for k, v in _m['dist'].items()},
                         _m['live_keep'], _m['would_keep'], _m['rec_floor'],
+                        _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
                         _m['backstop_fires'], _m['top_dollar_moves'])
         except Exception as e:
             logger.warning('corr_cumsharpe.shadow failed (%s)', e)
