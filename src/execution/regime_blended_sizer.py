@@ -1010,8 +1010,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    min_cum_sharpe = (_resolve_min_corr_cum_sharpe(params) if _corr_cumsharpe_on
-                      else _resolve_min_cumulative_sharpe(params))
+    # Legacy floor: drives the OPTION consolidation path (_consolidate_option_orders,
+    # which gates a naive raw-Sharpe sum) and the legacy ortho-shadow. Always legacy —
+    # the corr floor is an equity-similarity-matrix construct and must NOT leak here.
+    min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
+    # Equity conviction-gate floor: legacy by default; switched to the per-regime
+    # corr floor ONLY when the corr path is actually taken (flag on AND matrix loaded),
+    # so a missing similarity matrix fails safe to the legacy floor+quantity.
+    equity_gate_floor = min_cum_sharpe
 
     # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
     # legacy path loads the cadence-window active signals. Gate OFF is the
@@ -1065,7 +1071,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _ortho_groups = None
     if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
             or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
-            or _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK'):
+            or _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK') \
+            or _corr_cumsharpe_on or _corr_cumsharpe_shadow:
         try:
             from execution import strategy_similarity as _ss
             _ortho_groups = _ss.load_groups(regime_state)
@@ -1146,6 +1153,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
         # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
         ticker_w = defaultdict(float, _size_adj)
+        # Equity gate now reads the per-regime corr floor (scale matches S_adj).
+        equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
         if _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
             logger.info('corr_cumsharpe: superseding deflated_net_sharpe gate (CORR_WEIGHT bypassed)')
         logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
@@ -1172,7 +1181,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
             _m = _corr_cumsharpe_shadow_metrics(
                 _g_adj, _s_adj, gate_net_sharpe, dict(ticker_w),
-                min_cum_sharpe, lam, nav, _nbg, _nbs)
+                equity_gate_floor, lam, nav, _nbg, _nbs)
             logger.info('corr_cumsharpe.shadow: dist=%s live_keep=%d would_keep=%d '
                         'rec_floor=%.4f backstop=%s top_dollar_moves=%s',
                         {k: round(v, 4) for k, v in _m['dist'].items()},
@@ -1185,15 +1194,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # below the configured floor (default 3.0, from pipeline_config). This
     # is the operator's primary conviction filter — kills single-strategy
     # bets AND near-cancellation tickers in one rule.
-    if min_cum_sharpe > 0:
+    if equity_gate_floor > 0:
         gated_out = [tkr for tkr in list(ticker_w.keys())
-                     if abs(gate_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
+                     if abs(gate_net_sharpe.get(tkr, 0.0)) < equity_gate_floor]
         for tkr in gated_out:
             ticker_w.pop(tkr, None)
             ticker_meta.pop(tkr, None)
         if gated_out:
-            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below min_cum_sharpe=%.2f (kept=%d)',
-                        len(gated_out), min_cum_sharpe, len(ticker_w))
+            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d tickers below gate_floor=%.4f (kept=%d)',
+                        len(gated_out), equity_gate_floor, len(ticker_w))
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
