@@ -75,3 +75,54 @@ sudo systemctl enable  --now openclaw-saturday-brain.timer openclaw-weekend-sund
 - Re-point `botjohn-saturday-maintenance` (Sat 16:00, audits research) and
   `botjohn-saturday-verify` (Sun 12:00) to fire AFTER the new Sunday cadence
   (e.g. audit Sun ~16:30 ET, verify Mon) so self-healing stays aligned.
+
+## W4-5/W4-6: code-review split (2026-06-30)
+
+### Why
+
+`saturday_brain_finisher.js` was missing a `process.exit(0)` call after its final
+async step. A `Type=oneshot` unit waits for the process to exit; without an explicit
+exit the Node.js event loop kept open handles and hung indefinitely. systemd killed
+it only when the 4h `TimeoutStartSec` expired — at which point the second `ExecStart`
+(the Opus candidate code-review) never executed. The code-review **has not run since
+2026-06-14** for this reason.
+
+Fix W4-1 added `process.exit(0)` to the finisher. This split (W4-5) is
+defense-in-depth: the Opus review now lives in its own unit with an independent 2h
+timeout so it can never be starved by the finisher's budget regardless of hang
+behaviour. The `ExecStartPre` zombie-reap guard (W4-6) also kills any lingering
+finisher process before the next oneshot starts.
+
+### New / changed units
+
+| Tracked template | Installed as | Change |
+|---|---|---|
+| `docs/sunday-research-code.service` | `openclaw-sunday-research-code.service` | Finisher only (phases 5-8); code-review `ExecStart` removed; `ExecStartPre` reap guard added |
+| `docs/sunday-code-review.service` | `openclaw-sunday-code-review.service` | NEW — Opus candidate review; `TimeoutStartSec=7200` |
+| `docs/sunday-code-review.timer` | `openclaw-sunday-code-review.timer` | NEW — fires Sun 18:00 ET (after the 14:00 finisher slot) |
+
+### Operator deploy (GATED — do not apply automatically)
+
+```bash
+# Re-copy the updated finisher unit (removes code-review ExecStart, adds W4-6 guard)
+sudo cp docs/sunday-research-code.service \
+    /etc/systemd/system/openclaw-sunday-research-code.service
+
+# Install the new code-review unit + timer
+sudo cp docs/sunday-code-review.service \
+    /etc/systemd/system/openclaw-sunday-code-review.service
+sudo cp docs/sunday-code-review.timer \
+    /etc/systemd/system/openclaw-sunday-code-review.timer
+
+sudo systemctl daemon-reload
+
+# Enable + arm the new timer (will fire next Sun 18:00 ET)
+sudo systemctl enable --now openclaw-sunday-code-review.timer
+
+# W4-6: reap any lingering zombie processes from the old hung unit
+sudo systemctl stop smoke-git-code.service smoke-git-code2.service
+
+# Verify
+systemctl list-timers | grep -E 'sunday-(research-code|code-review)'
+systemctl status openclaw-sunday-code-review.timer
+```

@@ -1,0 +1,10 @@
+[Unit]
+Description=Sunday MasterMind code-review — Sun 18:00 America/New_York
+
+[Timer]
+OnCalendar=Sun *-*-* 18:00:00 America/New_York
+Persistent=true
+Unit=openclaw-sunday-code-review.service
+
+[Install]
+WantedBy=timers.target

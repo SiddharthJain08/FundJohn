@@ -1,5 +1,5 @@
 [Unit]
-Description=Sunday research CODE — finisher phases 5-8 + MasterMind candidate code-review
+Description=Sunday research CODE — finisher phases 5-8
 After=network-online.target postgresql.service
 Wants=network-online.target
 PartOf=johnbot.service
@@ -20,22 +20,22 @@ WorkingDirectory=/root/openclaw
 # budget on the 2-core VPS (CPU only ~1.4h/4h -> time spent BLOCKED on I/O, so a
 # bigger timeout doesn't help). Cap to 3/run; a per-candidate watchdog is the
 # durable follow-up. (W1 reconcile, 2026-06-28)
-ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 3
+#
+# Note: the MasterMind (Opus) candidate code-review was split into its own unit
+# openclaw-sunday-code-review (W4-5, 2026-06-30) so it has an independent 2h
+# timeout and cannot be starved by this unit's 4h finisher budget.
 
-# NEW: MasterMind (Opus) re-examines RECENT candidate implementations (incl. the
-# ones just coded above) for IMPLEMENTATION-LOGIC bugs; candidates with <30
-# trades get a "bug vs genuinely rare" diagnosis. REPORT-ONLY for now (operator
-# decision 2026-06-08: candidate gated auto-apply — apply→re-backtest→keep-if-
-# non-regressing — is a separate, backtest-guarded upgrade). Best-effort: the
-# leading '-' means a review hiccup does not fail the code run.
-ExecStart=-/usr/bin/node /root/openclaw/src/agent/curators/mastermind_code_review.js --state candidate --recent-days 14 --include-low-trade --concurrency 3 --out logs/code_review_candidates_sunday.md
+# W4-6 recurrence guard: reap any zombie saturday_brain_finisher from a prior
+# hung run before this oneshot starts. The leading '-' makes a no-match non-fatal.
+ExecStartPre=-/usr/bin/pkill -f saturday_brain_finisher
+
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 3
 
 StandardOutput=journal
 StandardError=journal
 
 # Tier-A coding runs sequential backtests (heavy strategies can take ~hours; the
-# finisher caps Tier-A via --tier-a-cap) plus the Opus candidate review.
-# 14400 = 4 hours.
+# finisher caps Tier-A via --tier-a-cap). 14400 = 4 hours.
 TimeoutStartSec=14400
 
 [Install]
