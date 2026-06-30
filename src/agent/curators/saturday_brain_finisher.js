@@ -37,9 +37,10 @@ try {
   }
 } catch (_) {}
 
-const dataTierFilter       = require('./data_tier_filter');
-const vaultLinker          = require('./vault_linker');
-const ResearchOrchestrator = require('../research/research-orchestrator');
+const dataTierFilter          = require('./data_tier_filter');
+const vaultLinker             = require('./vault_linker');
+const ResearchOrchestrator    = require('../research/research-orchestrator');
+const { terminalStatusFor }   = require('./_candidate_terminal_status');
 // Blueprint Fast Lane (Phase 1.2 activation, Phase 2.4 wiring): the 2PM finisher
 // is the LIVE coder for both paper and git_blueprint candidates. partitionBlueprintBudget
 // orders blueprint-origin candidates first and reserves a slice of the Tier-A
@@ -246,6 +247,11 @@ async function main() {
       if (outcome && outcome.promoted) {
         coded++;
         tierAStrategies.push({ strategy_id: sid, hunterResult });
+        const _tsA = terminalStatusFor({ tier: 'A', promoted: true });
+        if (_tsA) await _query(
+          'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+          [_tsA, candidateId]
+        ).catch((e) => log(`  status-stamp[${sid}] failed: ${e.message}`));
       } else {
         failed++;
         log(`    not promoted (outcome=${JSON.stringify(outcome).slice(0,200)})`);
@@ -294,6 +300,11 @@ async function main() {
           dbQuery: _query,
         }).catch((e) => log(`  stage[${sid}]: registry upsert failed — ${e.message}`));
         staged++;
+        const _tsB = terminalStatusFor({ tier: 'B', promoted: false });
+        if (_tsB) await _query(
+          'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+          [_tsB, candidateId]
+        ).catch((e) => log(`  status-stamp[${sid}] failed: ${e.message}`));
       }
       m.updated_at = now;
       return m;
@@ -304,6 +315,17 @@ async function main() {
   // Phase 8 — Tier-C deferred vault notes + Tier-A/B vault notes for newly-coded.
   let deferred = 0, paperNotes = 0, strategyNotes = 0;
   for (const { hunterResult, candidateId, decision, sourceUrl } of tiers.C) {
+    // Stamp the terminal status for this no-provider candidate BEFORE the vault-note
+    // logic so it fires regardless of corpus-row presence (W4-2 observability: Tier-C
+    // historically left 'pending' forever). .catch-guarded so it can't break the run.
+    const _sidC = hunterResult.strategy_id;
+    const _tsC = terminalStatusFor({
+      tier: 'C', rejected: !!(hunterResult.rejection_reason_if_any),
+    });
+    if (_tsC) await _query(
+      'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+      [_tsC, candidateId]
+    ).catch((e) => log(`  status-stamp[${_sidC}] failed: ${e.message}`));
     const { rows: paperRow } = await _query(
       `SELECT * FROM research_corpus WHERE source_url = $1`, [sourceUrl]
     );
