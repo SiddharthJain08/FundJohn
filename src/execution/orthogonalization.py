@@ -8,6 +8,9 @@ Tier-2 (k_eff): deflate within-factor-block conviction at the GATE only.
 Spec: docs/superpowers/specs/2026-05-29-strategy-orthogonalization-design.md
 """
 from __future__ import annotations
+import math
+
+SPARSE_DEFAULT = 0.05   # unknown strategy-pair similarity (matches strategy_similarity/correlation_matrix)
 
 
 def _dir_to_int(direction) -> int:
@@ -114,3 +117,58 @@ def deflated_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
             net += conv * d
         out[ticker] = net
     return out
+
+
+def corr_adjusted_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
+                             sim: dict[str, dict[str, float]],
+                             weight_by_strat: dict[str, float],
+                             eps: float = 1e-9) -> tuple[dict[str, float], int]:
+    """Signed, correlation-adjusted (Sharpe-weighted) combination Sharpe per ticker.
+
+    contribs_by_ticker: {ticker: [(strategy_id, direction_int), ...]} (post-fold survivors).
+    sim:   per-regime strategy x strategy similarity matrix {sid: {sid: rho}}.
+    weight_by_strat: the w_i basis (cadence-normalized daily_weight).
+    Returns ({ticker: signed S_adj}, n_backstop_fires).
+
+    APPROXIMATE (similarity-proxy): `sim` is a heuristic Jaccard-return-corr blend, not a true
+    return-correlation matrix and NOT PSD-guaranteed -> the signed quadratic form q can go <= 0.
+    The inert non-PSD backstop then falls back to the diagonal ("assume independent") denominator
+    and is counted; it is a NaN guard, NOT a deflating floor.
+
+        num = sum_i  w_i^2 * d_i                              (signed: opposing strategies cancel)
+        q   = sum_ij w_i * w_j * d_i * d_j * rho_ij           (rho_ii = 1; missing -> SPARSE_DEFAULT)
+        S_adj = num / sqrt(q)            if q >  eps          (no floor; full diversification credit)
+              = num / sqrt(sum_i w_i^2)  if q <= eps          (backstop; counted)
+    """
+    out: dict[str, float] = {}
+    n_backstop = 0
+    for ticker, contribs in contribs_by_ticker.items():
+        rows = []
+        for sid, d in contribs:
+            w = weight_by_strat.get(sid)
+            if w is None or not d:
+                continue
+            rows.append((sid, int(d), float(w)))
+        if not rows:
+            continue
+        num = sum(w * w * d for (_s, d, w) in rows)
+        diag = sum(w * w for (_s, _d, w) in rows)
+        q = diag                                  # i == j terms (rho_ii = 1)
+        n = len(rows)
+        for i in range(n):
+            sid_i, d_i, w_i = rows[i]
+            a_i = w_i * d_i
+            row_i = sim.get(sid_i, {})
+            for j in range(i + 1, n):
+                sid_j, d_j, w_j = rows[j]
+                rho = row_i.get(sid_j)
+                if rho is None:
+                    rho = sim.get(sid_j, {}).get(sid_i, SPARSE_DEFAULT)
+                q += 2.0 * a_i * (w_j * d_j) * float(rho)
+        if q > eps:
+            den = math.sqrt(q)
+        else:
+            den = math.sqrt(diag) if diag > 0 else 0.0
+            n_backstop += 1
+        out[ticker] = (num / den) if den > 0 else 0.0
+    return out, n_backstop
