@@ -10,6 +10,7 @@ SCHEMA NOTE (confirmed from 033_paper_gate_decisions.sql): paper_gate_decisions 
 So this backfill targets reason_code='bucket_implementable_candidate'.
 """
 import os
+import sys
 import psycopg2
 
 SQL = (
@@ -19,7 +20,26 @@ SQL = (
 
 
 def main():
-    dsn = os.environ["POSTGRES_URI"]
+    # Load .env if POSTGRES_URI not already set.
+    if not os.environ.get("POSTGRES_URI"):
+        env_path = os.path.join(os.path.dirname(__file__), '..', '.env')
+        try:
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                        k, v = line.split('=', 1)
+                        k = k.strip()
+                        if k and k == 'POSTGRES_URI':
+                            os.environ.setdefault(k, v.strip())
+        except FileNotFoundError:
+            pass
+
+    dsn = os.environ.get("POSTGRES_URI")
+    if not dsn:
+        print("ERROR: POSTGRES_URI not set", file=sys.stderr)
+        sys.exit(1)
+
     with psycopg2.connect(dsn) as c, c.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM paper_gate_decisions "

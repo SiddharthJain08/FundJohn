@@ -6,10 +6,12 @@
 // terminal stamp applies (e.g. Tier-A coding failed -> leave 'pending' for a future retry).
 //
 // `rejected` (hunter_result_json.rejection_reason_if_any present) takes precedence over `tier`,
-// mirroring the historical backfill's CASE precedence. Note: dataTierFilter.tierCandidate tiers
-// purely by data-requirement reachability and does NOT read rejection, so in the live finisher a
-// rejected row only reaches this helper via the Tier-C loop (a rejected paper whose columns are
-// also unreachable) — the common no-provider Tier-C case maps to 'blocked_unclassified'.
+// mirroring the historical backfill's CASE precedence. Note: the `rejected` branch is dead code
+// in BOTH live lanes — the finisher's candidate query filters `rejection_reason_if_any IS NULL`
+// before selecting rows, and the recovery's tiering loop skips any row where
+// r.rejection_reason_if_any is truthy — so no rejected row ever reaches this helper in either
+// lane. The branch exists solely to mirror the one-time backfill's CASE precedence for textual
+// parity. The common no-provider Tier-C case (no rejection, no data) maps to 'blocked_unclassified'.
 function terminalStatusFor({ tier, promoted, rejected }) {
   if (rejected) return 'blocked_rejected';
   if (tier === 'A') return promoted ? 'done' : null;  // failed coding -> null (leave pending for retry)

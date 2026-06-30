@@ -48,6 +48,7 @@ const MastermindCurator    = require('./mastermind');
 const dataTierFilter       = require('./data_tier_filter');
 const vaultLinker          = require('./vault_linker');
 const ResearchOrchestrator = require('../research/research-orchestrator');
+const { terminalStatusFor } = require('./_candidate_terminal_status');
 
 function _query(sql, params = []) {
   const { Pool } = require('pg');
@@ -202,6 +203,11 @@ async function main() {
       if (outcome && outcome.promoted) {
         coded++;
         tierAStrategies.push(sid);
+        const _tsA = terminalStatusFor({ tier: 'A', promoted: true });
+        if (_tsA) await _query(
+          'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+          [_tsA, candidateId]
+        ).catch((e) => log(`  status-stamp[${sid}] failed: ${e.message}`));
       } else {
         failed++;
       }
@@ -249,6 +255,11 @@ async function main() {
           dbQuery: _query,
         }).catch((e) => log(`  stage[${sid}]: registry upsert failed — ${e.message}`));
         staged++;
+        const _tsB = terminalStatusFor({ tier: 'B', promoted: false });
+        if (_tsB) await _query(
+          'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+          [_tsB, candidateId]
+        ).catch((e) => log(`  status-stamp[${sid}] failed: ${e.message}`));
       }
       manifest.updated_at = now;
       return manifest;
@@ -259,6 +270,12 @@ async function main() {
   // ── 8. Tier-C deferred vault notes.
   let deferred = 0;
   for (const { hunterResult, candidateId, decision } of tiers.C) {
+    const _sidC = hunterResult.strategy_id;
+    const _tsC = terminalStatusFor({ tier: 'C', rejected: !!(hunterResult.rejection_reason_if_any) });
+    if (_tsC) await _query(
+      'UPDATE research_candidates SET status=$1 WHERE candidate_id=$2',
+      [_tsC, candidateId]
+    ).catch((e) => log(`  status-stamp[${_sidC}] failed: ${e.message}`));
     const { rows: paperRow } = await _query(
       `SELECT p.* FROM research_corpus p
          JOIN research_candidates rc ON rc.source_url = p.source_url
