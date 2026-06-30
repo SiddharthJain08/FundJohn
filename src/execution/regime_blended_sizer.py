@@ -277,6 +277,38 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
     return gate_net_sharpe, sizing_weight, nb_gate, nb_size
 
 
+def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_w,
+                                   legacy_floor, lam, nav, nb_g, nb_s):
+    """Pure shadow metrics for the corr-adjusted gate vs the live gate. Routes nothing.
+    Reports |S_adj| distribution, live-vs-would-keep counts, a recommended floor that
+    preserves ~the live surviving-ticker count, non-PSD backstop fires, and the top
+    cross-sectional dollar reallocations (size_adj vs the live cadence-weighted ticker_w)."""
+    mags = sorted(abs(v) for v in gate_adj.values())
+    def _pct(p):
+        if not mags:
+            return 0.0
+        i = max(0, min(len(mags) - 1, int(round(p * (len(mags) - 1)))))
+        return mags[i]
+    dist = {'min': (mags[0] if mags else 0.0), 'p25': _pct(0.25), 'median': _pct(0.5),
+            'p75': _pct(0.75), 'max': (mags[-1] if mags else 0.0)}
+    live_keep = {t for t in gate_adj if abs(legacy_gate.get(t, 0.0)) >= legacy_floor}
+    desc = sorted((abs(v) for v in gate_adj.values()), reverse=True)
+    k = min(len(desc), len(live_keep))
+    rec_floor = desc[k - 1] if k > 0 else 0.0
+    def _alloc(m):
+        g = sum(abs(v) for v in m.values())
+        return {t: (v / g * lam * nav) for t, v in m.items()} if g > 0 else {}
+    new_alloc, live_alloc = _alloc(size_adj), _alloc(live_ticker_w)
+    moved = {t: round(new_alloc.get(t, 0.0) - live_alloc.get(t, 0.0))
+             for t in set(new_alloc) | set(live_alloc)}
+    top_moves = dict(sorted(((t, d) for t, d in moved.items() if abs(d) >= 1000),
+                            key=lambda kv: -abs(kv[1]))[:10])
+    return {'dist': dist, 'live_keep': len(live_keep),
+            'would_keep': sum(1 for v in gate_adj.values() if abs(v) >= rec_floor),
+            'rec_floor': rec_floor, 'backstop_fires': {'gate': nb_g, 'size': nb_s},
+            'top_dollar_moves': top_moves}
+
+
 def _recent_active_counts(lookback: int = 10) -> list[int]:
     """Recent per-cycle active-signal-set sizes (count of open execution_signals per
     signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
@@ -1129,6 +1161,25 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             contribs_by_ticker, _ortho_groups['block_map'],
             _ortho_groups['matrix'], sharpe_by_strat)
         logger.info('orthogonalization.corr_weight: deflated gate for %d tickers', len(gate_net_sharpe))
+
+    # Shadow: compute the corr-adjusted gate alongside the live gate and log
+    # distribution / would-drop / Δ$ / backstop / recommended-floor. Routes nothing.
+    # Runs only when the shadow flag is on AND the live flag is off (no double-compute).
+    if _ortho_groups and _corr_cumsharpe_shadow and not _corr_cumsharpe_on:
+        try:
+            _sim = _ortho_groups.get('matrix') or {}
+            _g_adj, _s_adj, _nbg, _nbs = _corr_adjusted_maps(
+                ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
+            _m = _corr_cumsharpe_shadow_metrics(
+                _g_adj, _s_adj, gate_net_sharpe, dict(ticker_w),
+                min_cum_sharpe, lam, nav, _nbg, _nbs)
+            logger.info('corr_cumsharpe.shadow: dist=%s live_keep=%d would_keep=%d '
+                        'rec_floor=%.4f backstop=%s top_dollar_moves=%s',
+                        {k: round(v, 4) for k, v in _m['dist'].items()},
+                        _m['live_keep'], _m['would_keep'], _m['rec_floor'],
+                        _m['backstop_fires'], _m['top_dollar_moves'])
+        except Exception as e:
+            logger.warning('corr_cumsharpe.shadow failed (%s)', e)
 
     # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
     # below the configured floor (default 3.0, from pipeline_config). This
