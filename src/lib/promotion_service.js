@@ -75,7 +75,8 @@ async function transitionStrategy({ dbQuery, manifestPath, sid, toState, fromSta
     }, { actor: `${actor || 'unknown'}` });
   } catch (e) { return { ok: false, fromState, toState, weights_rebuild_triggered: false, error: `manifest write failed (registry already ${targetStatus}; drift badge): ${e.message}` }; }
   try { await dbQuery(`INSERT INTO lifecycle_events (strategy_id, from_state, to_state, actor, reason, metadata) VALUES ($1,$2,$3,$4,$5,$6)`,
-    [sid, fromState, toState, actor, event.reason, JSON.stringify(event.metadata)]); } catch (_) {}
+    [sid, fromState, toState, actor, event.reason, JSON.stringify(event.metadata)]); }
+  catch (e) { console.warn('lifecycle_events insert failed (non-fatal):', e.message); }
   const ACTIVE = new Set(['live','monitoring']);
   const weights_rebuild_triggered = ACTIVE.has(fromState) !== ACTIVE.has(toState);
   return { ok: true, fromState, toState, weights_rebuild_triggered, event };
