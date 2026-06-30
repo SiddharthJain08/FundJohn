@@ -264,6 +264,19 @@ def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> f
     return default
 
 
+def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
+    """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
+    Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
+    intent); sizing uses eff_weight (size_scalar folded in). Identical when all scalars=1.
+    Returns (gate_net_sharpe, sizing_weight, nb_gate, nb_size)."""
+    from execution import orthogonalization as _og
+    contribs_by_ticker = {tkr: list(zip(m['strategies'], m['directions']))
+                          for tkr, m in ticker_meta.items()}
+    gate_net_sharpe, nb_gate = _og.corr_adjusted_net_sharpe(contribs_by_ticker, sim, weight_by_strat)
+    sizing_weight, nb_size = _og.corr_adjusted_net_sharpe(contribs_by_ticker, sim, eff_weight_by_strat)
+    return gate_net_sharpe, sizing_weight, nb_gate, nb_size
+
+
 def _recent_active_counts(lookback: int = 10) -> list[int]:
     """Recent per-cycle active-signal-set sizes (count of open execution_signals per
     signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
@@ -942,6 +955,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # The bracket-leader pick also stays on raw conviction.
     _size_scalar_on = os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1'
     _cadence_stop_norm_on = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')
+    _corr_cumsharpe_on = _ortho_enabled('OPENCLAW_STRATEGY_CORR_CUMSHARPE')
+    _corr_cumsharpe_shadow = _ortho_enabled('OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW')
     if _cadence_stop_norm_on:
         from execution import bracket_stacking as _bs
     try:
@@ -963,7 +978,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
+    min_cum_sharpe = (_resolve_min_corr_cum_sharpe(params) if _corr_cumsharpe_on
+                      else _resolve_min_cumulative_sharpe(params))
 
     # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
     # legacy path loads the cadence-window active signals. Gate OFF is the
@@ -1088,9 +1104,22 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         _warn_options_dropped_no_equity_scale(opt_active, 'no eligible equity signals after weight filter')
         return []
 
-    # Tier-2: deflate the conviction gate by effective-independent-bets (gate only; sizing untouched).
+    # Conviction adjustment (gate quantity). Precedence:
+    #   CORR_CUMSHARPE (closed-form Sharpe-weighted combination Sharpe) supersedes
+    #   CORR_WEIGHT (legacy within-block heuristic deflation).
     gate_net_sharpe = ticker_net_sharpe
-    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
+    if _ortho_groups and _corr_cumsharpe_on:
+        _sim = _ortho_groups.get('matrix') or {}
+        gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
+            ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
+        # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
+        ticker_w = defaultdict(float, _size_adj)
+        if _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
+            logger.info('corr_cumsharpe: superseding deflated_net_sharpe gate (CORR_WEIGHT bypassed)')
+        logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
+                    '(non-PSD backstop fires gate=%d size=%d)',
+                    len(gate_net_sharpe), _nb_g, _nb_s)
+    elif _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
         from execution import orthogonalization as _og
         contribs_by_ticker = {
             tkr: list(zip(meta['strategies'], meta['directions']))
