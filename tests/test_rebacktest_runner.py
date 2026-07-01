@@ -1,8 +1,9 @@
 """tests/test_rebacktest_runner.py — re-backtest harness pure helpers (Phase 1b)."""
 from __future__ import annotations
-import sys, unittest
+import sys, tempfile, unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'scripts'))
@@ -56,6 +57,15 @@ class TestCmd(unittest.TestCase):
         self.assertIn('MemoryMax=4G', j)
         self.assertIn('RuntimeMaxSec=5400', j)
         self.assertIn('--strategy-id', cmd); self.assertIn('S_live_a', cmd)
+        # Pin the safety-critical flags: dropping --wait would make subprocess.run
+        # non-blocking -> the sequential loop fires all units at once -> OOM.
+        self.assertIn('--wait', cmd)
+        self.assertIn('--quiet', cmd)
+        self.assertIn('--collect', cmd)
+        self.assertTrue(any(c.startswith('EnvironmentFile=') for c in cmd))
+        self.assertIn('/usr/bin/env', cmd)               # process-level flag override
+        self.assertTrue(any(c.startswith('PYTHONPATH=') for c in cmd))
+        self.assertTrue(any(c.startswith('WorkingDirectory=') for c in cmd))
     def test_orphan_uses_strategy_file(self):
         cmd = rr.build_systemd_cmd({'sid': 'S_orphan_d', 'mode': 'strategy-file'},
                                    memory_max_g=4, watchdog_sec=5400, log_path='/tmp/x.log')
@@ -69,6 +79,25 @@ class TestSummarize(unittest.TestCase):
                           {'sid': 'c', 'status': 'ok'}, {'sid': 'd', 'status': 'skip'}])
         self.assertEqual((s['ok'], s['fail'], s['skip']), (2, 1, 1))
         self.assertEqual(s['failed_sids'], ['b'])
+
+
+class TestMainDryRun(unittest.TestCase):
+    def test_dry_run_launches_no_unit_and_persists_no_state(self):
+        # main(--dry-run) must NEVER call subprocess.run (would launch a real
+        # backtest unit) and must NOT write state.json (would poison a later
+        # real run's resume timestamp).
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(rr, '_connect', return_value=mock.MagicMock()), \
+             mock.patch.object(rr, '_primary_sids', return_value={'S_live_a'}), \
+             mock.patch.object(rr, '_latest_primary_run_at', return_value=None), \
+             mock.patch.object(rr, '_load_manifest',
+                               return_value={'strategies': {'S_live_a': {'state': 'live'}}}), \
+             mock.patch.object(rr, '_competing_active', return_value=False), \
+             mock.patch.object(rr.subprocess, 'run',
+                               side_effect=AssertionError('no unit may launch in --dry-run')):
+            rc = rr.main(['--dry-run', '--log-dir', td, '--only', 'S_live_a'])
+            self.assertEqual(rc, 0)
+            self.assertFalse((Path(td) / 'state.json').exists())
 
 
 if __name__ == '__main__':

@@ -44,14 +44,19 @@ def build_systemd_cmd(item, *, memory_max_g, watchdog_sec, log_path, repo=REPO):
     return [
         'systemd-run', '--quiet', '--collect', f'--unit=rebacktest-{sid}', '--wait',
         '-p', f'EnvironmentFile={repo}/.env',
-        '-p', 'Environment=OPENCLAW_TRUE_MTM_MARKS=1',
-        '-p', f'Environment=PYTHONPATH={repo}/src',
         '-p', f'WorkingDirectory={repo}',
         '-p', f'MemoryMax={memory_max_g}G',
         '-p', f'RuntimeMaxSec={watchdog_sec}',
         '-p', 'Nice=19',
         '-p', f'StandardOutput=append:{log_path}',
         '-p', f'StandardError=append:{log_path}',
+        # `/usr/bin/env VAR=val` sets these in the python process itself, which
+        # WINS over the unit's EnvironmentFile(.env) regardless of systemd's
+        # EnvironmentFile-vs-Environment= precedence. This guarantees the marks
+        # flag is ON even if .env ever gains an OPENCLAW_TRUE_MTM_MARKS line —
+        # the whole point of this harness. (We cannot read the 0600-root .env
+        # to assert no conflict, so we override at the process boundary.)
+        '/usr/bin/env', 'OPENCLAW_TRUE_MTM_MARKS=1', f'PYTHONPATH={repo}/src',
         'python3', '-m', 'backtest.unified_backtest', *target,
     ]
 
@@ -98,9 +103,29 @@ def _competing_active():
     try:
         out = subprocess.run(['systemctl', 'is-active', *COMPETING_UNITS],
                              capture_output=True, text=True).stdout
-        return 'active' in out.split()
+        states = set(out.split())
+        return bool(states & {'active', 'activating', 'reloading'})
     except Exception:
         return False
+
+
+def _load_manifest():
+    return json.loads(Path(f'{REPO}/src/strategies/manifest.json').read_text())
+
+
+def _read_state(state_path):
+    """Return the persisted start_ts ISO string, or None if absent/corrupt."""
+    try:
+        return json.loads(state_path.read_text())['start_ts']
+    except Exception:
+        return None
+
+
+def _write_state(state_path, start_ts_str):
+    """Atomic write (temp + rename) so a crash mid-write can't corrupt state."""
+    tmp = state_path.with_suffix('.tmp')
+    tmp.write_text(json.dumps({'start_ts': start_ts_str}))
+    tmp.replace(state_path)
 
 
 def main(argv=None):
@@ -126,17 +151,21 @@ def main(argv=None):
         sys.exit(2)
 
     conn = _connect()
+    conn.autocommit = True  # runner only READS; avoid holding a txn open across each subprocess wait
     primary = _primary_sids(conn)
-    manifest = json.loads(Path(f'{REPO}/src/strategies/manifest.json').read_text())
+    manifest = _load_manifest()
     worklist = build_worklist(primary, manifest, include_deprecated=a.include_deprecated,
                               only=only, exclude=exclude)
 
-    # start_ts: reuse persisted (resume) or stamp now
-    if state_path.exists():
-        start_ts_str = json.loads(state_path.read_text())['start_ts']
-    else:
+    # start_ts: dry-run uses a throwaway (never persisted, so it can't poison a
+    # later real run's resume timestamp); a real run reuses the persisted value.
+    if a.dry_run:
         start_ts_str = datetime.now(timezone.utc).isoformat()
-        state_path.write_text(json.dumps({'start_ts': start_ts_str}))
+    else:
+        start_ts_str = _read_state(state_path)  # None if absent/corrupt
+        if start_ts_str is None:
+            start_ts_str = datetime.now(timezone.utc).isoformat()
+            _write_state(state_path, start_ts_str)
     start_ts = datetime.fromisoformat(start_ts_str)
 
     print(f'work-list: {len(worklist)} strategies | start_ts={start_ts_str} | '
@@ -144,22 +173,40 @@ def main(argv=None):
     results = []
     for w in worklist:
         sid = w['sid']
-        if is_done(_latest_primary_run_at(conn, sid), start_ts):
-            print(f'SKIP {sid} done'); results.append({'sid': sid, 'status': 'skip'}); continue
-        cmd = build_systemd_cmd(w, memory_max_g=a.memory_max_g, watchdog_sec=watchdog_sec,
-                                log_path=str(log_dir / f'{sid}.log'))
-        if a.dry_run:
-            print('DRY-RUN', ' '.join(cmd)); results.append({'sid': sid, 'status': 'skip'}); continue
-        waited = 0
-        while _mem_available_gb() < ram_floor and waited < 1800:
-            time.sleep(30); waited += 30
-        t0 = time.time()
-        rc = subprocess.run(cmd).returncode
-        conn.rollback()  # drop any aborted txn state before the verify query
-        done = is_done(_latest_primary_run_at(conn, sid), start_ts)
-        status = 'ok' if done else 'fail'
-        print(f'{status.upper()} {sid} {int(time.time()-t0)}s rc={rc}')
-        results.append({'sid': sid, 'status': status})
+        try:
+            if is_done(_latest_primary_run_at(conn, sid), start_ts):
+                print(f'SKIP {sid} done'); results.append({'sid': sid, 'status': 'skip'}); continue
+            cmd = build_systemd_cmd(w, memory_max_g=a.memory_max_g, watchdog_sec=watchdog_sec,
+                                    log_path=str(log_dir / f'{sid}.log'))
+            if a.dry_run:
+                print('DRY-RUN', ' '.join(cmd)); results.append({'sid': sid, 'status': 'skip'}); continue
+            waited = 0
+            while _mem_available_gb() < ram_floor and waited < 1800:
+                time.sleep(30); waited += 30
+            if waited >= 1800:
+                print(f'WARN {sid}: RAM floor {ram_floor}G not met after {waited}s; '
+                      f'proceeding (MemoryMax={a.memory_max_g}G still contains it)', file=sys.stderr)
+            t0 = time.time()
+            rc = subprocess.run(cmd).returncode
+            done = is_done(_latest_primary_run_at(conn, sid), start_ts)
+            status = 'ok' if done else 'fail'
+            print(f'{status.upper()} {sid} {int(time.time()-t0)}s rc={rc}')
+            results.append({'sid': sid, 'status': status})
+        except Exception as e:
+            # One strategy's failure (subprocess error, dead DB conn, etc.) must
+            # never abort the whole multi-hour run — log, mark FAIL, reconnect, continue.
+            print(f'FAIL {sid} runner-exception: {e}', file=sys.stderr)
+            results.append({'sid': sid, 'status': 'fail'})
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                conn = _connect(); conn.autocommit = True
+            except Exception as e2:
+                print(f'FATAL: cannot reconnect ({e2}); aborting remaining strategies '
+                      f'(resume via state.json).', file=sys.stderr)
+                break
     s = summarize(results)
     print(f'DONE ok={s["ok"]} fail={s["fail"]} skip={s["skip"]}')
     if s['failed_sids']:
