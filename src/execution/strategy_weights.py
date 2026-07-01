@@ -291,6 +291,38 @@ def _load_active_strategies(conn) -> list[dict]:
     return out
 
 
+def _get_bt_sharpe_cap(cur) -> float:
+    """Read bt_sharpe_plausibility_cap from pipeline_config; default 3.0.
+    Interim guard (§7 metric recon, 2026-07-01) for the backtest-Sharpe
+    methodology defect (flat P&L smearing understates vol -> inflated,
+    overlap-dependent |Sharpe|). Set the key very high (e.g. 999) to disable.
+    Fail-safe: any read error keeps the guard ON at the 3.0 default."""
+    try:
+        cur.execute("SELECT value FROM pipeline_config WHERE key='bt_sharpe_plausibility_cap'")
+        row = cur.fetchone()
+        if row:
+            return float(row[0])
+    except Exception:
+        pass
+    return 3.0
+
+
+def _clamp_bt_sharpes(out: dict, cap: float) -> list:
+    """Clamp each entry's bt_sharpe to [-cap, +cap] IN PLACE (sign-preserving,
+    so no strategy changes inclusion/exclusion state). Leaves None / NaN / Inf
+    untouched (the _is_sizeable_sharpe guard drops those). Returns the list of
+    (key, before, after) tuples for entries actually clamped."""
+    clamped = []
+    for key, v in out.items():
+        s = v.get('bt_sharpe')
+        if s is not None and math.isfinite(s):
+            c = max(-cap, min(cap, s))
+            if c != s:
+                clamped.append((key, s, c))
+                v['bt_sharpe'] = c
+    return clamped
+
+
 def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
     """Most-recent per-(strategy, regime) sharpe + trade_count, with a
     three-tier fallback so newly promoted strategies aren't immediately
@@ -380,6 +412,11 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
                 'bt_sharpe': float(r['backtest_sharpe']),
                 'bt_n':      int(r['backtest_trade_count']) if r['backtest_trade_count'] is not None else None,
             }
+    cap = _get_bt_sharpe_cap(cur)
+    clamped = _clamp_bt_sharpes(out, cap)
+    if clamped:
+        logger.info('bt_sharpe plausibility clamp: %d/%d entries clamped to ±%s (e.g. %s %.2f->%.2f)',
+                    len(clamped), len(out), cap, clamped[0][0], clamped[0][1], clamped[0][2])
     return out
 
 
