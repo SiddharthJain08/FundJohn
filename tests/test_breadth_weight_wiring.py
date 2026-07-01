@@ -100,3 +100,15 @@ def test_flag_on_missing_N_defaults_to_unity(monkeypatch):
     # No stored size for either strategy -> factor 1.0 -> byte-identical to flag OFF.
     a, b = _targets(monkeypatch, breadth_on=True, sizes={})
     assert a == pytest.approx(b)
+
+
+def test_reserved_anchor_row_read_not_a_strategy(monkeypatch):
+    # __anchor_sp500__ is the breadth anchor (resolver-computed sp500 size), read
+    # from the same load — it must NEVER become a phantom strategy/order, and the
+    # real strategies still size (broad upweighted) with the stored anchor applied.
+    orders = _run(monkeypatch, breadth_on=True,
+                  sizes={'S1': 5180, 'S2': 50, '__anchor_sp500__': 503})
+    opens = _opens(orders)
+    assert '__anchor_sp500__' not in opens
+    assert '__anchor_sp500__' not in {o['ticker'] for o in orders}
+    assert abs(opens['AAA']['target_usd']) > abs(opens['BBB']['target_usd'])

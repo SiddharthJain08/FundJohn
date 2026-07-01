@@ -38,6 +38,17 @@ def _resolver():
         manifest_loader=manifest_loader)
 
 
+def _n_sp500(as_of: date) -> int:
+    """Live sp500 set size = the breadth anchor. Mirrors SP-7 compute_union_n's
+    n_sp500 baseline (MockResolver with the sp500 predicate)."""
+    from src.strategies.universe_default import sp500
+    from src.strategies.universe_resolver import MockResolver
+    from src.strategies._db_adapters import PostgresMetadataDB, ParquetCoverage
+    base = MockResolver(db=PostgresMetadataDB(os.environ['POSTGRES_URI']),
+                        coverage=ParquetCoverage(), predicate=sp500)
+    return len(base.resolve('_sp500_baseline', as_of))
+
+
 def refresh(as_of: date | None = None, verbose: bool = True) -> int:
     import psycopg2
     as_of = as_of or date.today()
@@ -64,6 +75,21 @@ def refresh(as_of: date | None = None, verbose: bool = True) -> int:
                 written += 1
                 if verbose:
                     print(f'  {sid}: N={size}')
+            # Anchor N_sp500 = live resolver-computed sp500 set size (same as SP-7's
+            # compute_union_n baseline). Stored under a reserved strategy_id so the
+            # sizer reads it in the same load; refreshed here every night so the
+            # breadth factor's anchor tracks the actual sp500 membership.
+            try:
+                n_sp500 = _n_sp500(as_of)
+                cur.execute("""
+                    INSERT INTO strategy_universe_sizes (strategy_id, universe_size, updated_at)
+                    VALUES ('__anchor_sp500__', %s, NOW())
+                    ON CONFLICT (strategy_id) DO UPDATE
+                      SET universe_size = EXCLUDED.universe_size, updated_at = NOW()
+                """, (n_sp500,))
+                print(f'[universe-size] anchor N_sp500={n_sp500}')
+            except Exception as e:
+                print(f'[universe-size] anchor N_sp500 refresh failed (non-fatal): {e}')
         pg.commit()
         print(f'[universe-size] refreshed {written}/{len(sids)} approved strategies as_of {as_of}')
         if sids and written == 0:

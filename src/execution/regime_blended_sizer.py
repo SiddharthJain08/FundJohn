@@ -1179,13 +1179,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _cw_gate, _cw_size = weight_by_strat, eff_weight_by_strat
     if _breadth_weight_on:
         from execution import orthogonalization as _ogbw
-        _bwf = {sid: _ogbw.breadth_weight_factor(_universe_size_by_strat.get(sid))
+        # Anchor = live resolver-computed sp500 set size (reserved row, refreshed
+        # nightly); falls back to the module constant if not yet populated.
+        _anchor = _universe_size_by_strat.get('__anchor_sp500__') or _ogbw.BREADTH_ANCHOR_N
+        _bwf = {sid: _ogbw.breadth_weight_factor(_universe_size_by_strat.get(sid), anchor=_anchor)
                 for sid in set(weight_by_strat) | set(eff_weight_by_strat)}
         _cw_gate = {sid: w * _bwf.get(sid, 1.0) for sid, w in weight_by_strat.items()}
         _cw_size = {sid: w * _bwf.get(sid, 1.0) for sid, w in eff_weight_by_strat.items()}
         _n_bw = sum(1 for f in _bwf.values() if abs(f - 1.0) > 1e-9)
         logger.info('breadth_weight: applied √(ln N) factor to %d/%d strategies (anchor N=%d)',
-                    _n_bw, len(_bwf), _ogbw.BREADTH_ANCHOR_N)
+                    _n_bw, len(_bwf), _anchor)
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
         ticker_meta, _cw_gate, _cw_size, _sim)
     # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
