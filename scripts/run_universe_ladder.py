@@ -436,13 +436,12 @@ def _maybe_record_full_run(pg) -> None:
     if items:
         from backtest import universe_ladder_recs as recs
         recs.post_discord(pg, recs.format_summary_message(items))
+    # Clear the drain-autoadopt flag. The drain-end SP-7 B3 √ln(N)
+    # min_cumulative_sharpe proposal refresh was removed 2026-07-01 with the
+    # retired legacy cum-Sharpe gate (proposals had no consumer once the
+    # dashboard Apply endpoint was deleted).
     if r.get('sp7:ladder:autoadopted_this_drain'):
         r.delete('sp7:ladder:autoadopted_this_drain')
-        try:
-            from src.execution.universe_threshold_proposals import compute_and_write
-            compute_and_write(trigger='ladder-drain-autoadopt')
-        except Exception as e:
-            print(f'[ladder] drain-end B3 refresh failed (non-fatal): {e}')
     full_run = r.get('sp7:ladder:full_run_id')
     if full_run:
         with pg.cursor() as cur:
