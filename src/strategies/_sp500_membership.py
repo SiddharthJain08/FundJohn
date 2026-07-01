@@ -38,7 +38,7 @@ SP500_SET = frozenset({
     "PRU", "PSA", "PSX", "PTC", "PVH", "PWR", "QCOM", "QQQ", "RCL", "REGN",
     "REXR", "RF", "RJF", "RL", "RMD", "ROK", "ROP", "ROST", "RPM", "RSG",
     "RTX", "SAIC", "SBUX", "SCHW", "SEE", "SHW", "SLB", "SLG", "SNPS", "SO",
-    "SON", "SPB", "SPG", "SPGI", "SPR", "SPY", "SRE", "STE", "STT", "STX",
+    "SON", "SPB", "SPCX", "SPG", "SPGI", "SPR", "SPY", "SRE", "STE", "STT", "STX",
     "SWKS", "SYK", "SYY", "T", "TDG", "TECH", "TEL", "TER", "TFC", "TJX",
     "TMO", "TMUS", "TOL", "TPR", "TRNO", "TRV", "TSLA", "TSN", "TT", "TTWO",
     "TXN", "UAA", "UNH", "UNM", "UNP", "UPS", "URI", "USB", "V", "VFC",

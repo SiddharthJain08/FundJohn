@@ -49,7 +49,7 @@ const SP500 = [
   'PTC','PWR','PYPL','Q','QCOM','RCL','REG','REGN','RF','RJF',
   'RL','RMD','ROK','ROL','ROP','ROST','RSG','RTX','RVTY','SATS',
   'SBAC','SBUX','SCHW','SHW','SJM','SLB','SMCI','SNA','SNDK','SNPS',
-  'SO','SOLV','SPG','SPGI','SRE','STE','STLD','STT','STX','STZ',
+  'SO','SOLV','SPCX','SPG','SPGI','SRE','STE','STLD','STT','STX','STZ',
   'SW','SWK','SWKS','SYF','SYK','SYY','T','TAP','TDG','TDY',
   'TECH','TEL','TER','TFC','TGT','TJX','TKO','TMO','TMUS','TPL',
   'TPR','TRGP','TRMB','TROW','TRV','TSCO','TSLA','TSN','TT','TTD',
