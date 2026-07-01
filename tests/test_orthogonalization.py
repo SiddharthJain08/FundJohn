@@ -1,4 +1,4 @@
-"""Tests for orthogonalization — Tier-1 fold + Tier-2 k_eff (pure)."""
+"""Tests for orthogonalization — Tier-1 fold + corr-adjusted gate (pure)."""
 from __future__ import annotations
 import sys
 from pathlib import Path
@@ -60,39 +60,6 @@ def test_dir_to_int_known_directions():
     assert og._dir_to_int('') == 0
 
 
-def test_k_eff_endpoints():
-    assert abs(og.k_eff(5, 0.0) - 5.0) < 1e-9     # uncorrelated -> full count
-    assert abs(og.k_eff(5, 1.0) - 1.0) < 1e-9     # identical -> one bet
-    assert abs(og.k_eff(2, 0.9) - (2 / 1.9)) < 1e-9
-    assert og.k_eff(1, 0.5) == 1.0                 # single member guard
-
-
-def test_block_conviction_floor_never_below_max_member():
-    # strong 3.5 + correlated weak 1.0 at rho 0.5: must stay ABOVE 3.5 (the strong standalone)
-    conv = og.block_conviction([3.5, 1.0], 0.5)
-    assert conv > 3.5
-    assert abs(conv - 3.8333333) < 1e-4            # 3.5 + (4.5-3.5)*(k_eff-1)/(k-1)
-
-
-def test_block_conviction_endpoints():
-    assert abs(og.block_conviction([1.0, 1.0, 1.0], 0.0) - 3.0) < 1e-9   # rho 0 -> sum
-    assert abs(og.block_conviction([2.0, 1.0], 1.0) - 2.0) < 1e-9        # rho 1 -> max
-    assert og.block_conviction([4.0], 0.9) == 4.0                         # singleton -> itself
-
-
-def test_deflated_net_sharpe_gate_value():
-    # AAPL: block B1 = {S1,S2} LONG (rho 0.5, sharpes 3.5 & 1.0); block B2 = {S3} LONG sharpe 2.0
-    contribs = {'AAPL': [('S1', 1), ('S2', 1), ('S3', 1)]}
-    block_map = {'S1': 10, 'S2': 10}              # S3 ungrouped -> its own pseudo-block
-    sim = {'S1': {'S2': 0.5}, 'S2': {'S1': 0.5}}
-    eff = {'S1': 3.5, 'S2': 1.0, 'S3': 2.0}
-    out = og.deflated_net_sharpe(contribs, block_map, sim, eff)
-    # B1 conviction ~3.833 + B2 (singleton) 2.0 = ~5.833 (vs naive 6.5)
-    assert abs(out['AAPL'] - 5.8333333) < 1e-3
-
-
-def test_deflated_net_sharpe_cross_block_full_credit_and_signs():
-    # Two uncorrelated single-strategy blocks, opposite directions -> signed sum
-    contribs = {'XYZ': [('A', 1), ('B', -1)]}
-    out = og.deflated_net_sharpe(contribs, {}, {}, {'A': 4.0, 'B': 1.0})
-    assert abs(out['XYZ'] - 3.0) < 1e-9            # +4 -1
+# Tier-2 k_eff / block_conviction / deflated_net_sharpe tests removed 2026-07-01
+# with those functions (legacy deflation gate, superseded by corr_adjusted_net_sharpe
+# — covered by tests/test_corr_adjusted_net_sharpe.py).

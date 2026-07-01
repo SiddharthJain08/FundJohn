@@ -238,19 +238,20 @@ def test_no_equity_signals_fail_closed(monkeypatch):
 # Test 3 — min_cum_sharpe gate applies to the option group
 # ===========================================================================
 
-def test_option_group_below_min_cum_sharpe_dropped(monkeypatch):
-    """An option group whose |Σ sharpe×dir| < min_cum_sharpe emits nothing, while a
-    benign equity signal establishes scale and survives."""
+def test_option_group_emitted_no_legacy_floor(monkeypatch):
+    """The legacy min_cumulative_sharpe conviction gate on the option path was
+    retired 2026-07-01 (options are inert; the floor was never option-appropriate).
+    An option group now passes through regardless of a naive raw-Sharpe sum, and a
+    benign equity signal establishes scale. TODO(option-gate): reinstate an
+    option-appropriate conviction gate when the first option strategy promotes."""
     sigs = [
         _sig('S_eq_aapl', 'AAPL', direction=1, sharpe=5.0, weight=1.0),
-        # Option net_sharpe = 1.0 < floor 3.0 → dropped.
         _sig('S_opt_spy', 'SPY', direction='BUY_VOL', sharpe=1.0, weight=1.0,
              option_spec=_STRADDLE_SPEC),
     ]
-    orders = _run_sizer(monkeypatch, sigs, min_cum_sharpe=3.0)
-    op = [o for o in orders if o.get('instrument_class') == 'option']
-    assert op == [], f'below-floor option group must emit nothing, got {orders}'
-    # The equity AAPL signal (sharpe 5.0 ≥ 3.0) survives.
+    orders = _run_sizer(monkeypatch, sigs)
+    assert any(o.get('instrument_class') == 'option' for o in orders), \
+        'option group must pass through now that the legacy floor is gone'
     assert any(o['ticker'] == 'AAPL' for o in orders)
 
 

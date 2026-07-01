@@ -653,66 +653,10 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// SP-7 Phase B B3 — pending √ln(N) threshold proposals (read-only list)
-app.get('/api/universe-threshold-proposals', async (req, res) => {
-  try {
-    const r = await dbQuery(
-      `SELECT id, proposed_at, proposer, regime_state, current_row,
-              proposed_min_cumulative_sharpe, basis, status
-         FROM universe_threshold_proposals
-        WHERE status = 'pending'
-        ORDER BY CASE regime_state WHEN 'LOW_VOL' THEN 1
-                 WHEN 'TRANSITIONING' THEN 2 WHEN 'HIGH_VOL' THEN 3
-                 ELSE 4 END`);
-    res.json({ proposals: r.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// SP-7 Phase B B3 — apply ONE proposal through the same validation as the
-// direct PUT (value into regime_sizer_params, proposal stamped approved).
-app.post('/api/universe-threshold-proposals/:id/apply', async (req, res) => {
-  const id = String(req.params.id || '');
-  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'id must be numeric' });
-  try {
-    const p = await dbQuery(
-      `SELECT regime_state, proposed_min_cumulative_sharpe
-         FROM universe_threshold_proposals
-        WHERE id = $1 AND status = 'pending'`, [id]);
-    if (p.rowCount === 0) return res.status(404).json({ error: 'no pending proposal with that id' });
-    const regime = p.rows[0].regime_state;
-    const v = parseFloat(p.rows[0].proposed_min_cumulative_sharpe);
-    if (!isFinite(v) || v < 1.0 || v > 10.0) {
-      return res.status(400).json({ error: 'proposed value outside [1.0, 10.0]' });
-    }
-    const upd = await dbQuery(
-      `UPDATE regime_sizer_params SET min_cumulative_sharpe = $2,
-              updated_at = NOW()
-        WHERE regime_state = $1 RETURNING *`, [regime, v]);
-    if (upd.rowCount === 0) return res.status(404).json({ error: `regime ${regime} not found` });
-    await dbQuery(
-      `UPDATE universe_threshold_proposals
-          SET status = 'approved', decided_at = NOW(),
-              decided_by = 'operator:dashboard',
-              applied_row = $2::jsonb
-        WHERE id = $1 AND status = 'pending'`, [id, JSON.stringify(upd.rows[0])]);
-    res.json({ ok: true, regime, applied: v });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// SP-7 Phase B B3 — reject a pending proposal
-app.post('/api/universe-threshold-proposals/:id/reject', async (req, res) => {
-  const id = String(req.params.id || '');
-  if (!/^\d+$/.test(id)) return res.status(400).json({ error: 'id must be numeric' });
-  try {
-    const r = await dbQuery(
-      `UPDATE universe_threshold_proposals
-          SET status = 'rejected', decided_at = NOW(),
-              decided_by = 'operator:dashboard'
-        WHERE id = $1 AND status = 'pending'`, [id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: 'no pending proposal with that id' });
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+// SP-7 √ln(N) threshold-proposal endpoints removed 2026-07-01 — they proposed
+// the retired legacy min_cumulative_sharpe floor. The universe_threshold_proposals
+// table is left intact (append-only); any proposal-creation job now writes a
+// deprecated column with no consumer.
 
 // 30-trading-day threshold derived from Alpaca's NYSE calendar.
 // Cached for 1h — the calendar only changes daily and an extra CLI

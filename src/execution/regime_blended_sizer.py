@@ -196,44 +196,6 @@ def _load_lambda(default: float = 2.0, *, intraday: bool = False) -> float:
         return default
 
 
-def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) -> float:
-    """Pick the conviction floor for the active regime.
-
-    Used by _sharpe_cadence_path to drop tickers where the SIGNED sum of
-    contributing strategies' effective_sharpe falls below this threshold.
-    Naturally kills (a) low-conviction single-strategy bets and (b) tickers
-    where opposing strategies nearly cancel out — the operator's
-    'conflicting strategy information will cancel out' invariant.
-
-    Per-regime as of 2026-05-21 (migration 108) — stored on
-    regime_sizer_params.min_cumulative_sharpe, bound [1.0, 10.0] by the
-    table's CHECK constraint. The sizer reads the value from the
-    `params` dict already loaded for the active regime, so no extra DB
-    round-trip is needed. Falls back to the legacy
-    pipeline_config['min_cumulative_sharpe'] global if the per-regime
-    field is missing (e.g. brand-new DB before the migration runs),
-    then to `default` if that's also absent.
-    """
-    if isinstance(params, dict):
-        v = params.get('min_cumulative_sharpe')
-        if v is not None:
-            try:
-                return max(1.0, min(10.0, float(v)))
-            except (TypeError, ValueError):
-                pass
-    try:
-        import psycopg2
-        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
-            with c.cursor() as cur:
-                cur.execute("SELECT value FROM pipeline_config WHERE key = 'min_cumulative_sharpe'")
-                row = cur.fetchone()
-                if row is not None:
-                    return max(1.0, min(10.0, float(row[0])))
-    except Exception:
-        pass
-    return default
-
-
 def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> float:
     """Per-regime floor for the correlation-adjusted cumulative-Sharpe gate —
     the sole live conviction gate. Reads regime_sizer_params.min_corr_cum_sharpe,
@@ -837,14 +799,16 @@ def _warn_options_dropped_no_equity_scale(opt_active, reason: str) -> None:
 
 
 def _consolidate_option_orders(opt_active, weight_by_strat, sharpe_by_strat, scale,
-                               nav, min_cum_sharpe, account_state, equity_gross):
+                               nav, account_state, equity_gross):
     """SP-5.1a (G1 prong 1 + G2): build per-UNDERLYING option orders from the
     partitioned option-class contributors. Mirrors the equity emission loop's order
     shape, with option-specific semantics:
 
       • per-UNDERLYING aggregation over option contributors only:
           w = Σ weight×dir (same _dir_to_int), net_sharpe = Σ sharpe×dir
-      • SAME min_cum_sharpe drop (|net_sharpe| < floor → drop the group)
+      • no conviction floor here — the legacy min_cumulative_sharpe gate was retired
+        2026-07-01 (options are inert: no live option strategy). TODO: add an
+        option-appropriate conviction gate when the first option strategy promotes.
       • option_spec = first contributor's spec; a LATER contributor with a DIFFERENT
         spec logs a loud warning (first-wins) — keeps the structure deterministic
       • strategy_id = option-only composite '|'.join(sorted(set(sids)))[:120]  (G2:
@@ -897,17 +861,8 @@ def _consolidate_option_orders(opt_active, weight_by_strat, sharpe_by_strat, sca
     if not u_w:
         return []
 
-    # SAME conviction gate as the equity path.
-    if min_cum_sharpe > 0:
-        dropped = [tkr for tkr in list(u_w.keys())
-                   if abs(u_net_sharpe.get(tkr, 0.0)) < min_cum_sharpe]
-        for tkr in dropped:
-            u_w.pop(tkr, None)
-        if dropped:
-            logger.info('regime_blended_sizer.sharpe_cadence: dropped %d option group(s) '
-                        'below min_cum_sharpe=%.2f', len(dropped), min_cum_sharpe)
-    if not u_w:
-        return []
+    # (Legacy min_cumulative_sharpe conviction gate removed 2026-07-01 — see the
+    # docstring TODO. Options are inert; no live option strategy routes here.)
 
     # Per-unit-weight USD parity with the equity scale.
     opt_usd = {tkr: w * scale for tkr, w in u_w.items()}
@@ -1073,15 +1028,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    # Raw-Sharpe floor for the OPTION consolidation path (_consolidate_option_orders
-    # gates a naive raw-Sharpe sum) and the ORTHO_SHADOW diagnostic — both on the
-    # legacy [1,10] scale. This must NOT be used for the equity conviction gate:
-    # that reads the corr floor (min_corr_cum_sharpe, set in the gate block below).
-    min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
-    # Equity conviction-gate floor: unconditionally the per-regime corr floor,
-    # assigned in the corr gate block below. Pre-seeded here only as a safe
-    # placeholder (always overwritten before the gate-drop).
-    equity_gate_floor = min_cum_sharpe
+    # Equity conviction-gate floor: the per-regime corr floor (min_corr_cum_sharpe),
+    # assigned in the corr gate block below. Pre-seeded to 0.0 (permissive) only as a
+    # safe placeholder — always overwritten before the gate-drop.
+    equity_gate_floor = 0.0
 
     # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
     # legacy path loads the cadence-window active signals. Gate OFF is the
@@ -1151,14 +1101,12 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             active, _ortho_groups['fold_map'], _ortho_groups['rep_map'], sharpe_by_strat)
         logger.info('orthogonalization.fold: %d -> %d contributions', before, len(active))
 
-    # Aggregate ticker_weight across signalling strategies. ticker_net_sharpe
-    # is the SIGNED sum of effective_sharpe — opposing strategies cancel
-    # (so a long_sharpe=5 + short_sharpe=4 ticker collapses to |1|, dropped
-    # by the gate below). Unsigned sum would let conflicting tickers slip
-    # through.
+    # Aggregate the naive signed ticker_weight (Σ effective_weight × direction)
+    # across signalling strategies. This is the pre-corr sizing basis; the corr
+    # gate block below REPLACES ticker_w with the correlation-adjusted S_adj. It
+    # is retained here as `live_ticker_w` for the #botjohn-log sign-flip diagnostic.
     from collections import defaultdict
     ticker_w = defaultdict(float)
-    ticker_net_sharpe = defaultdict(float)
     ticker_meta = defaultdict(lambda: {'strategies': [], 'directions': [], 'brackets': []})
     for s in active:
         sid = s.get('strategy_id')
@@ -1169,7 +1117,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         if d == 0:
             continue
         ticker_w[tkr] += eff_weight_by_strat[sid] * d
-        ticker_net_sharpe[tkr] += sharpe_by_strat.get(sid, 0.0) * d
         ticker_meta[tkr]['strategies'].append(sid)
         ticker_meta[tkr]['directions'].append(d)
         # Direction-leader bracket pick (Phase 1 spec #6): the largest-weight
@@ -1211,19 +1158,20 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # (closed-form Sharpe-weighted combination Sharpe, S_adj). This is the SOLE
     # conviction gate — one quantity drives BOTH ticker selection (the
     # equity_gate_floor drop below) AND the sizing weight (ticker_w is rebuilt
-    # from S_adj). ticker_net_sharpe (the naive signed Σ effective-sharpe·dir)
-    # is retained ONLY as the reference baseline for the #botjohn-log diagnostic.
+    # from S_adj).
     _sim = (_ortho_groups or {}).get('matrix') or {}
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
         ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
-    # Live diagnostics vs the naive baseline (ticker_net_sharpe + the
-    # pre-replacement ticker_w): logged AND best-effort posted to #botjohn-log
-    # (daily lane only) so the operator can calibrate the per-regime corr floor.
-    # rec_floor is the value that reproduces today's surviving-ticker count.
+    # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
+    equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
+    # Live diagnostics: |S_adj| distribution, names clearing the current corr floor,
+    # a count-preserving rec_floor to calibrate against, per-ticker cap binding, and
+    # direction flips of the corr sizing vs the naive pre-replacement ticker_w.
+    # Logged AND best-effort posted to #botjohn-log (daily lane only).
     try:
         _m = _corr_cumsharpe_shadow_metrics(
-            gate_net_sharpe, _size_adj, ticker_net_sharpe, dict(ticker_w),
-            min_cum_sharpe, lam, nav, _nb_g, _nb_s)
+            gate_net_sharpe, _size_adj, gate_net_sharpe, dict(ticker_w),
+            equity_gate_floor, lam, nav, _nb_g, _nb_s)
         _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
                  'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
                  'backstop=%s top_dollar_moves=%s' % (
@@ -1240,8 +1188,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.warning('corr_cumsharpe.live diag failed (%s)', e)
     # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
     ticker_w = defaultdict(float, _size_adj)
-    # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
-    equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
     logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
                 '(non-PSD backstop fires gate=%d size=%d)',
                 len(gate_net_sharpe), _nb_g, _nb_s)
@@ -1264,33 +1210,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
         _warn_options_dropped_no_equity_scale(opt_active, 'no equity tickers cleared cum_sharpe gate')
         return []
-
-    # Shadow: log what orthogonalization WOULD change without affecting routing.
-    if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
-            and not (_ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT')):
-        try:
-            from execution import orthogonalization as _og
-            shadow_contribs = {
-                tkr: list(zip(meta['strategies'], meta['directions']))
-                for tkr, meta in ticker_meta.items()
-            }
-            shadow_gate = _og.deflated_net_sharpe(
-                shadow_contribs, _ortho_groups['block_map'],
-                _ortho_groups['matrix'], sharpe_by_strat)
-            would_drop = [t for t in ticker_w
-                          if abs(shadow_gate.get(t, 0.0)) < min_cum_sharpe]
-            mat = _ortho_groups.get('matrix') or {}
-            offdiag = [mat[a][b] for a in mat for b in mat.get(a, {}) if a != b]
-            hist = {}
-            for v in offdiag:
-                bucket = round(float(v) * 10) / 10
-                hist[bucket] = hist.get(bucket, 0) + 1
-            logger.info('orthogonalization.shadow: would_drop=%s similarity_histogram=%s '
-                        'fold_pairs=%d block_pairs=%d',
-                        would_drop, dict(sorted(hist.items())),
-                        len(_ortho_groups['fold_map']), len(_ortho_groups['block_map']))
-        except Exception as e:
-            logger.warning('orthogonalization.shadow failed (%s)', e)
 
     gross = sum(abs(w) for w in ticker_w.values())
     if gross <= 0:
@@ -1530,7 +1449,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     _equity_gross = sum(abs(v) for v in target_usd.values())
     _opt_orders = _consolidate_option_orders(
         opt_active, weight_by_strat, sharpe_by_strat, scale, nav,
-        min_cum_sharpe, account_state, _equity_gross)
+        account_state, _equity_gross)
 
     # SP-5 Phase 1b (G4b) + SP-5.3 (C2/C4): option position lifecycle. The equity book
     # logic above is OCC-filtered (G1 prong 2) so it is structurally blind to held
