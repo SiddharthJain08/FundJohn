@@ -548,7 +548,7 @@ app.get('/api/config/regime-sizing', async (req, res) => {
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'asset_corr_cap_thr'"),
       dbQuery("SELECT value FROM pipeline_config WHERE key = 'asset_corr_cap_enabled'"),
       dbQuery(`SELECT regime_state, liquidity_param, position_circuit_breaker_pct,
-                      min_cumulative_sharpe, min_corr_cum_sharpe, updated_at
+                      min_corr_cum_sharpe, updated_at
                FROM regime_sizer_params
                ORDER BY CASE regime_state
                           WHEN 'LOW_VOL' THEN 1
@@ -574,9 +574,6 @@ app.get('/api/config/regime-sizing', async (req, res) => {
     const acEn  = acEnRes.rows[0];
     res.json({
       current_regime: currentRegime,
-      // Which conviction gate is live: the corr-adjusted floor (min_corr_cum_sharpe)
-      // when the sizer flag is on, else the legacy min_cumulative_sharpe.
-      active_conviction_gate: (['1','true','on'].includes(String(process.env.OPENCLAW_STRATEGY_CORR_CUMSHARPE || '').trim().toLowerCase()) ? 'corr_cumsharpe' : 'legacy'),
       global: {
         lambda:     lam ? Math.min(parseFloat(lam.value), LAMBDA_OVERNIGHT_MAX) : 2.0,
         min:        LAMBDA_OVERNIGHT_MIN,
@@ -594,12 +591,10 @@ app.get('/api/config/regime-sizing', async (req, res) => {
         state:                          r.regime_state,
         liquidity_param:                parseFloat(r.liquidity_param),
         position_circuit_breaker_pct:   parseFloat(r.position_circuit_breaker_pct),
-        // Per-regime conviction floor for the sharpe-cadence sizer
-        // (migration 108). Bound to [1.0, 10.0] by table CHECK; the
-        // dashboard's Strategies-page sliders enforce the same range.
-        min_cumulative_sharpe:          r.min_cumulative_sharpe != null ? parseFloat(r.min_cumulative_sharpe) : 3.0,
-        // Per-regime floor for the correlation-adjusted gate (migration 140),
-        // bound [0.0, 10.0]. Active only when OPENCLAW_STRATEGY_CORR_CUMSHARPE=1.
+        // Per-regime floor for the correlation-adjusted cumulative-Sharpe
+        // conviction gate (migration 140), bound [0.0, 10.0] by table CHECK.
+        // This is the sole live conviction gate (drives ticker selection AND
+        // sizing weight); read fresh each sizer cycle (no restart needed).
         min_corr_cum_sharpe:            r.min_corr_cum_sharpe != null ? parseFloat(r.min_corr_cum_sharpe) : 1.0,
         updated_at:                     r.updated_at,
       })),
@@ -632,15 +627,6 @@ app.put('/api/config/regime-sizing/:regime', async (req, res) => {
       return res.status(400).json({ error: 'position_circuit_breaker_pct must be a number in [0.0, 0.5]' });
     }
     updates.position_circuit_breaker_pct = v;
-  }
-  if (body.min_cumulative_sharpe !== undefined) {
-    const v = parseFloat(body.min_cumulative_sharpe);
-    // Range matches the regime_sizer_params_min_cum_sharpe_check
-    // CHECK constraint and the Strategies-page slider's min/max.
-    if (!isFinite(v) || v < 1.0 || v > 10.0) {
-      return res.status(400).json({ error: 'min_cumulative_sharpe must be a number in [1.0, 10.0]' });
-    }
-    updates.min_cumulative_sharpe = v;
   }
   if (body.min_corr_cum_sharpe !== undefined) {
     const v = parseFloat(body.min_corr_cum_sharpe);
@@ -4036,13 +4022,13 @@ body.rs-chat-locked{overflow:hidden}
       </table>
     </div>
 
-    <!-- Per-regime conviction-gate sliders (migration 108). Each card
-         binds to regime_sizer_params.min_cumulative_sharpe via debounced
-         PUT to /api/config/regime-sizing/:regime. Range 1..10 enforced
-         both by slider attr and DB CHECK constraint. -->
+    <!-- Per-regime conviction-gate sliders. Each card binds to
+         regime_sizer_params.min_corr_cum_sharpe (migration 140) via debounced
+         PUT to /api/config/regime-sizing/:regime. Range 0..10 enforced both by
+         slider attr and DB CHECK constraint. -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎯 Conviction Gates <span class="st-sub-label">min cumulative daily Sharpe per regime over strategies (High: fewer trades + greater empirical conviction)</span></span>
+        <span>🎯 Conviction Gates <span class="st-sub-label">corr-adjusted cumulative Sharpe per regime (High: fewer trades + greater empirical conviction)</span></span>
       </div>
       <div class="st-sharpe-grid" id="st-sharpe-gates">
         <div class="st-sharpe-card-empty">Loading conviction gates…</div>
@@ -7854,12 +7840,7 @@ async function _loadSharpeGates() {
     host.innerHTML = '<div class="st-sharpe-card-empty">No regime sizing rows in DB</div>';
     return;
   }
-  const activeGate = (cfg.active_conviction_gate === 'corr_cumsharpe') ? 'corr' : 'legacy';
-  const liveBadge = g => (activeGate === g)
-    ? ' <span class="st-sharpe-card-tag" style="background:#2563eb">LIVE GATE</span>' : '';
   host.innerHTML = regimes.map(r => {
-    const v = (r.min_cumulative_sharpe != null && isFinite(r.min_cumulative_sharpe))
-      ? Number(r.min_cumulative_sharpe) : 3.0;
     const vc = (r.min_corr_cum_sharpe != null && isFinite(r.min_corr_cum_sharpe))
       ? Number(r.min_corr_cum_sharpe) : 1.0;
     const tag = r.state === current ? '<span class="st-sharpe-card-tag">CURRENT</span>' : '';
@@ -7869,13 +7850,6 @@ async function _loadSharpeGates() {
         <span class="st-sharpe-card-regime">\${r.state}</span>
         \${tag}
       </div>
-      <div style="font-size:11px;opacity:.7;margin-top:4px">legacy cum-sharpe\${liveBadge('legacy')}</div>
-      <div class="st-sharpe-card-value" id="st-sg-val-\${r.state}">\${v.toFixed(2)}</div>
-      <input type="range" class="st-sharpe-card-slider" id="st-sg-slider-\${r.state}"
-             min="1" max="10" step="0.1" value="\${v}" data-regime="\${r.state}" />
-      <div class="st-sharpe-card-range"><span>1.0</span><span>10.0</span></div>
-      <div class="st-sharpe-card-status" id="st-sg-status-\${r.state}"></div>
-      <div style="font-size:11px;opacity:.7;margin-top:8px">corr-adjusted\${liveBadge('corr')}</div>
       <div class="st-sharpe-card-value" id="st-cg-val-\${r.state}">\${vc.toFixed(2)}</div>
       <input type="range" class="st-sharpe-card-slider" id="st-cg-slider-\${r.state}"
              min="0" max="10" step="0.05" value="\${vc}" data-regime="\${r.state}" />
@@ -7883,87 +7857,22 @@ async function _loadSharpeGates() {
       <div class="st-sharpe-card-status" id="st-cg-status-\${r.state}"></div>
     </div>\`;
   }).join('');
-  // Wire each slider — live label update on input, debounced PUT on
-  // change. 300ms is short enough to feel responsive without firing on
-  // every pixel of drag.
+  // Wire each corr-adjusted cum-sharpe slider — live label update on input,
+  // debounced PUT (min_corr_cum_sharpe) on change. 300ms is short enough to
+  // feel responsive without firing on every pixel of drag.
   for (const r of regimes) {
-    const slider = document.getElementById('st-sg-slider-' + r.state);
-    const valEl  = document.getElementById('st-sg-val-' + r.state);
-    const statEl = document.getElementById('st-sg-status-' + r.state);
-    if (!slider || !valEl) continue;
-    slider.addEventListener('input', () => {
-      valEl.textContent = parseFloat(slider.value).toFixed(2);
-    });
-    slider.addEventListener('change', () => {
-      if (_sharpeGateDebounce[r.state]) clearTimeout(_sharpeGateDebounce[r.state]);
-      _sharpeGateDebounce[r.state] = setTimeout(() => _sharpeGatePut(r.state, parseFloat(slider.value), statEl), 300);
-    });
-    // Corr-adjusted floor slider (migration 140) -> min_corr_cum_sharpe.
     const cslider = document.getElementById('st-cg-slider-' + r.state);
     const cvalEl  = document.getElementById('st-cg-val-' + r.state);
     const cstatEl = document.getElementById('st-cg-status-' + r.state);
-    if (cslider && cvalEl) {
-      cslider.addEventListener('input', () => {
-        cvalEl.textContent = parseFloat(cslider.value).toFixed(2);
-      });
-      cslider.addEventListener('change', () => {
-        if (_sharpeGateDebounce['corr_' + r.state]) clearTimeout(_sharpeGateDebounce['corr_' + r.state]);
-        _sharpeGateDebounce['corr_' + r.state] = setTimeout(
-          () => _corrSharpeGatePut(r.state, parseFloat(cslider.value), cstatEl), 300);
-      });
-    }
-  }
-  // SP-7 Phase B B3: surface pending √ln(N) proposals next to the sliders
-  try {
-    const pr = await fetch('/api/universe-threshold-proposals').then(r => r.json());
-    const props = Array.isArray(pr.proposals) ? pr.proposals : [];
-    for (const p of props) {
-      const card = host.querySelector('[data-regime="' + p.regime_state + '"]');
-      if (!card) continue;
-      const chip = document.createElement('div');
-      chip.style.cssText = 'margin-top:4px;font-size:11px;opacity:0.85';
-      const cur = (p.current_row && p.current_row.min_cumulative_sharpe) || '?';
-      const basis = p.basis || {};
-      chip.innerHTML =
-        'proposal: ' + cur + ' → <b>' + p.proposed_min_cumulative_sharpe + '</b>' +
-        ' <span title="N_union=' + basis.n_union + ' N_sp500=' + basis.n_sp500 + '">(×' + basis.factor + ')</span>' +
-        ' <button data-apply="' + p.id + '">Apply</button>' +
-        ' <button data-reject="' + p.id + '">✗</button>';
-      chip.querySelector('[data-apply]').addEventListener('click', async () => {
-        const r = await fetch('/api/universe-threshold-proposals/' + p.id + '/apply', { method: 'POST' });
-        chip.textContent = r.ok ? '✓ applied' : '✗ apply failed';
-        if (r.ok) _loadSharpeGates();
-      });
-      chip.querySelector('[data-reject]').addEventListener('click', async () => {
-        await fetch('/api/universe-threshold-proposals/' + p.id + '/reject', { method: 'POST' });
-        chip.remove();
-      });
-      card.appendChild(chip);
-    }
-  } catch (e) { /* proposals are progressive enhancement — never break gates */ }
-}
-
-async function _sharpeGatePut(regime, value, statEl) {
-  if (_sharpeGateInflight[regime]) return;
-  _sharpeGateInflight[regime] = true;
-  if (statEl) statEl.textContent = 'saving…';
-  try {
-    const resp = await fetch('/api/config/regime-sizing/' + encodeURIComponent(regime), {
-      method:  'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ min_cumulative_sharpe: value }),
+    if (!cslider || !cvalEl) continue;
+    cslider.addEventListener('input', () => {
+      cvalEl.textContent = parseFloat(cslider.value).toFixed(2);
     });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}));
-      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
-    } else if (statEl) {
-      statEl.textContent = '✓ saved · next cycle picks up ' + value.toFixed(2);
-      setTimeout(() => { if (statEl) statEl.textContent = ''; }, 4000);
-    }
-  } catch (e) {
-    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
-  } finally {
-    _sharpeGateInflight[regime] = false;
+    cslider.addEventListener('change', () => {
+      if (_sharpeGateDebounce['corr_' + r.state]) clearTimeout(_sharpeGateDebounce['corr_' + r.state]);
+      _sharpeGateDebounce['corr_' + r.state] = setTimeout(
+        () => _corrSharpeGatePut(r.state, parseFloat(cslider.value), cstatEl), 300);
+    });
   }
 }
 
