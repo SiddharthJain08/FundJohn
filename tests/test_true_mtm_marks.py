@@ -88,6 +88,29 @@ class TestPortfolioDailyReturns(unittest.TestCase):
         self.assertEqual(len(dr), 4)
         self.assertAlmostEqual(float(dr[0]), 0.01, places=9)
 
+    def test_nonfinite_marks_dropped_not_poisoning(self):
+        # a NaN interior mark must NOT reach the aggregate (would cumprod-poison
+        # every trade sharing that date). It is dropped; finite marks survive.
+        d = pd.bdate_range('2020-01-02', periods=3)
+        t = {'pnl_pct': 0.03, 'holding_days': 3, 'entry_date': pd.Timestamp('2020-01-01'),
+             'entry_regime': 'LOW_VOL',
+             'daily_marks': [(d[0], 0.02), (d[1], float('nan')), (d[2], 0.01)]}
+        dr, dates = ub._portfolio_daily_returns([t])
+        self.assertTrue(all(np.isfinite(dr)))          # no NaN reaches the series
+        self.assertEqual(len(dr), 2)                    # the NaN day dropped, 2 finite remain
+
+    def test_multi_trade_equal_weight_on_shared_date(self):
+        # two trades open on the same date -> that date is the equal-weight avg
+        d = pd.bdate_range('2020-01-02', periods=2)
+        t1 = {'pnl_pct': 0.0, 'holding_days': 2, 'entry_date': pd.Timestamp('2020-01-01'),
+              'entry_regime': 'LOW_VOL', 'daily_marks': [(d[0], 0.10), (d[1], -0.02)]}
+        t2 = {'pnl_pct': 0.0, 'holding_days': 2, 'entry_date': pd.Timestamp('2020-01-01'),
+              'entry_regime': 'LOW_VOL', 'daily_marks': [(d[0], 0.00), (d[1], 0.04)]}
+        dr, dates = ub._portfolio_daily_returns([t1, t2])
+        self.assertEqual(len(dr), 2)
+        self.assertAlmostEqual(float(dr[0]), (0.10 + 0.00) / 2, places=9)
+        self.assertAlmostEqual(float(dr[1]), (-0.02 + 0.04) / 2, places=9)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -236,7 +236,12 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
                    include_entry_bar: bool = False) -> dict:
     """Walk forward from entry_date+1 (or entry_date if include_entry_bar=True),
     returning the exit dict:
-       {exit_date, exit_price, exit_reason, holding_days, pnl_pct}.
+       {exit_date, exit_price, exit_reason, holding_days, pnl_pct, daily_marks}.
+    `daily_marks` is the true per-day mark-to-market path: a list of
+    (date, direction*(mark_i/mark_{i-1} - 1)) with mark_0=entry_price, each
+    non-exit day marked to that bar's close, and the exit day marked to
+    exit_price. len(daily_marks) == holding_days ([] when holding_days == 0).
+    Longs compound to pnl_pct exactly; shorts do not (path-dependent).
 
     Long: target hit when high >= target_1; stop when low <= stop_loss.
     Short: target hit when low <= target_1; stop when high >= stop_loss.
@@ -333,11 +338,19 @@ def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
 def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Timestamp]]:
     """Build an equal-weighted daily portfolio return series.
 
-    Methodology: each trade's total pnl_pct is distributed evenly across its
-    holding_days as a per-day return contribution. On any given day, the
-    portfolio return is the *equal-weighted average* of all trades that are
-    open on that day (this is the marked-to-market view of a portfolio that
-    rebalances daily to equal weight across currently-active positions).
+    Methodology: when a trade carries a `daily_marks` list (true daily
+    mark-to-market, OPENCLAW_TRUE_MTM_MARKS) each (date, return) is booked on
+    its real trading day. Otherwise the trade's total pnl_pct is smeared evenly
+    across its holding_days (legacy fallback for options_backtest trades and
+    test fixtures). On any given day, the portfolio return is the
+    *equal-weighted average* of all trades open that day (the marked-to-market
+    view of a portfolio rebalancing daily to equal weight across active positions).
+
+    Non-finite daily marks (NaN/Inf from a corrupt interior price bar) are
+    dropped loudly — the smear path is already NaN-guarded upstream by
+    `_is_finite_pnl`, but a marks trade can carry a finite pnl_pct yet a NaN
+    interior mark, so it must be filtered here too or one bad bar would poison
+    every trade sharing that date's average and cumprod the whole equity curve.
 
     Returns (daily_returns_array, sorted_dates_list). Empty arrays for
     trades that have zero holding_days (degenerate same-day exits).
@@ -351,8 +364,17 @@ def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Ti
             continue
         marks = t.get('daily_marks')
         if marks:
+            bad = 0
             for d, r in marks:
-                daily_pnls.setdefault(pd.Timestamp(d), []).append(float(r))
+                rf = float(r)
+                if not math.isfinite(rf):
+                    bad += 1
+                    continue
+                daily_pnls.setdefault(pd.Timestamp(d), []).append(rf)
+            if bad:
+                _log(f'WARNING _portfolio_daily_returns: dropped {bad}/{len(marks)} '
+                     f'non-finite daily mark(s) for {t.get("ticker", "?")} '
+                     f'(corrupt interior price bar?)')
             continue
         per_day = float(t['pnl_pct']) / hold
         start = pd.Timestamp(t['entry_date'])
