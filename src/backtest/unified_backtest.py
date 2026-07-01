@@ -259,36 +259,51 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
         bars_future = bars.loc[bars.index > entry_date]
     if bars_future.empty:
         return {'exit_date': entry_date, 'exit_price': entry_price,
-                'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0}
+                'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0,
+                'daily_marks': []}
     bars_window = bars_future.iloc[:max_hold_days]
+    daily_marks = []
+    prev_mark = entry_price
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
         if direction > 0:   # long
             if high >= target_1:
                 pnl = (target_1 - entry_price) / entry_price
+                daily_marks.append((dt, direction * (float(target_1) / prev_mark - 1.0)))
                 return {'exit_date': dt, 'exit_price': float(target_1),
-                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl}
+                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl,
+                        'daily_marks': daily_marks}
             if low <= stop_loss:
                 pnl = (stop_loss - entry_price) / entry_price
+                daily_marks.append((dt, direction * (float(stop_loss) / prev_mark - 1.0)))
                 return {'exit_date': dt, 'exit_price': float(stop_loss),
-                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl}
+                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl,
+                        'daily_marks': daily_marks}
         else:               # short
             if low <= target_1:
                 pnl = (entry_price - target_1) / entry_price
+                daily_marks.append((dt, direction * (float(target_1) / prev_mark - 1.0)))
                 return {'exit_date': dt, 'exit_price': float(target_1),
-                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl}
+                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl,
+                        'daily_marks': daily_marks}
             if high >= stop_loss:
                 pnl = (entry_price - stop_loss) / entry_price
+                daily_marks.append((dt, direction * (float(stop_loss) / prev_mark - 1.0)))
                 return {'exit_date': dt, 'exit_price': float(stop_loss),
-                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl}
-    # Neither fired within max_hold → exit at last close
+                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl,
+                        'daily_marks': daily_marks}
+        # no exit this bar -> mark to close
+        daily_marks.append((dt, direction * (close / prev_mark - 1.0)))
+        prev_mark = close
+    # Neither fired within max_hold -> exit at last close (already the final mark above)
     last_dt = bars_window.index[-1]
     last_close = float(bars_window.iloc[-1]['close'])
     pnl_raw = (last_close - entry_price) / entry_price
     pnl = pnl_raw if direction > 0 else -pnl_raw
     reason = 'max_hold' if len(bars_window) == max_hold_days else 'end_of_data'
     return {'exit_date': last_dt, 'exit_price': last_close,
-            'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl}
+            'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl,
+            'daily_marks': daily_marks}
 
 
 def _reanchor_bracket(*, ref: float, entry_price: float, direction: int,
@@ -333,6 +348,11 @@ def _portfolio_daily_returns(trades: list[dict]) -> tuple[np.ndarray, list[pd.Ti
     for t in trades:
         hold = int(t.get('holding_days') or 0)
         if hold <= 0:
+            continue
+        marks = t.get('daily_marks')
+        if marks:
+            for d, r in marks:
+                daily_pnls.setdefault(pd.Timestamp(d), []).append(float(r))
             continue
         per_day = float(t['pnl_pct']) / hold
         start = pd.Timestamp(t['entry_date'])
@@ -540,6 +560,7 @@ def _per_bar_simulate(
         raise ValueError(f'fill_model must be "close" or "open", got {fill_model!r}')
     _price_col = 'open' if fill_model == 'open' else 'close'
     _include_fill_bar = fill_model == 'open'
+    _true_mtm = os.environ.get('OPENCLAW_TRUE_MTM_MARKS') == '1'
 
     # Static universe: equity tickers only (no indices, crypto, futures).
     static_universe = [c for c in close_wide.columns
@@ -700,6 +721,7 @@ def _per_bar_simulate(
                 'entry_regime':   str(regime_state),
                 'signal_stop':    stop_loss,
                 'signal_target':  target_1,
+                'daily_marks':    exit_info.get('daily_marks', []) if _true_mtm else [],
             })
 
     return {
