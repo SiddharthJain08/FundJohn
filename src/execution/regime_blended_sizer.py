@@ -1017,6 +1017,20 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.warning('size_scalar: load failed (%s); treating all as 1.0', e)
         _size_scalars = {}
     eff_weight_by_strat = _apply_size_scalars(weight_by_strat, _size_scalars, _size_scalar_on)
+    # Breadth weight factor (default-OFF). √(ln N / ln anchor) upweights strategies
+    # acting on a broader universe N (Grinold: IR = IC·√breadth). Applied ONLY inside
+    # the corr cum-Sharpe calc below (both gate + sizing weights), NOT to the global
+    # weight_by_strat/eff_weight_by_strat — so FOLD + bracket-leader stay on raw
+    # conviction (mirrors size_scalar's scope). N per strategy is regime-independent
+    # (strategy_universe_sizes, migration 141), refreshed out-of-band.
+    _breadth_weight_on = _ortho_enabled('OPENCLAW_STRATEGY_BREADTH_WEIGHT')
+    _universe_size_by_strat: dict = {}
+    if _breadth_weight_on:
+        try:
+            _universe_size_by_strat = _sw.load_universe_sizes()
+        except Exception as e:
+            logger.warning('breadth_weight: universe-size load failed (%s); factors default to 1.0', e)
+            _universe_size_by_strat = {}
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
@@ -1160,8 +1174,20 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # equity_gate_floor drop below) AND the sizing weight (ticker_w is rebuilt
     # from S_adj).
     _sim = (_ortho_groups or {}).get('matrix') or {}
+    # Breadth-scale the weights fed to the corr calc (default-OFF). Scoped here so
+    # only the corr gate+sizing see the √(ln N) factor; FOLD/bracket stay raw.
+    _cw_gate, _cw_size = weight_by_strat, eff_weight_by_strat
+    if _breadth_weight_on:
+        from execution import orthogonalization as _ogbw
+        _bwf = {sid: _ogbw.breadth_weight_factor(_universe_size_by_strat.get(sid))
+                for sid in set(weight_by_strat) | set(eff_weight_by_strat)}
+        _cw_gate = {sid: w * _bwf.get(sid, 1.0) for sid, w in weight_by_strat.items()}
+        _cw_size = {sid: w * _bwf.get(sid, 1.0) for sid, w in eff_weight_by_strat.items()}
+        _n_bw = sum(1 for f in _bwf.values() if abs(f - 1.0) > 1e-9)
+        logger.info('breadth_weight: applied √(ln N) factor to %d/%d strategies (anchor N=%d)',
+                    _n_bw, len(_bwf), _ogbw.BREADTH_ANCHOR_N)
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
-        ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
+        ticker_meta, _cw_gate, _cw_size, _sim)
     # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
     equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
     # Live diagnostics: |S_adj| distribution, names clearing the current corr floor,

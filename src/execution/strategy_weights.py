@@ -695,6 +695,19 @@ def load_current(regime_state: str) -> list[dict]:
         conn.close()
 
 
+def load_universe_sizes() -> dict[str, int]:
+    """Per-strategy universe size N (strategy_universe_sizes, migration 141),
+    regime-independent. Feeds the sizer's √(ln N) breadth weight factor. Missing
+    strategies simply aren't in the dict (breadth factor then defaults to 1.0)."""
+    conn = _db()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT strategy_id, universe_size FROM strategy_universe_sizes')
+        return {r[0]: int(r[1]) for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 GRACE_PERIOD_DAYS_DEFAULT = 30
 
 

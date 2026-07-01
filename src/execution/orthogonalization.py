@@ -115,3 +115,26 @@ def corr_adjusted_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
             n_backstop += 1
         out[ticker] = (num / den) if den > 0 else 0.0
     return out, n_backstop
+
+
+# ---------------------------------------------------------------------------
+# Grinold breadth weight factor (2026-07-01): √(ln N / ln anchor), applied to
+# each strategy's weight in the corr-adjusted cum-Sharpe calc. Broader universe
+# (larger N) → larger factor → more weight (fundamental law of active mgmt:
+# IR = IC·√breadth). Anchored at the sp500 baseline so a ~sp500-breadth strategy
+# is unchanged. N is regime-independent, stored per strategy (strategy_universe_sizes).
+# ---------------------------------------------------------------------------
+BREADTH_ANCHOR_N = 500   # sp500 baseline (scale anchor; floors are re-tuned to it)
+
+
+def breadth_weight_factor(n, anchor: int = BREADTH_ANCHOR_N) -> float:
+    """√(ln N / ln anchor). Fail-safe to 1.0 (no reweight) when N<=1, N is
+    missing/non-numeric, or the anchor is degenerate — mirrors the guard in the
+    SP-7 breadth_factor and avoids ln<=0 / div-by-zero."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return 1.0
+    if n <= 1 or anchor <= 1:
+        return 1.0
+    return math.sqrt(math.log(n) / math.log(anchor))
