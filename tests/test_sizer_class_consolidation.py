@@ -396,8 +396,10 @@ def test_equity_only_byte_identical(monkeypatch):
     and exact, partition-agnostic notionals. The partition is a provable no-op:
     opt_active is empty, the helper returns [], and the equity loop is unchanged.
 
-    Representative equity-only set: two strategies agree LONG on AAPL (net weight 2.0)
-    and one is LONG MSFT (weight 1.0). Broker flat. No min-notional floor."""
+    Representative equity-only set: two strategies agree LONG on AAPL and one is
+    LONG MSFT (each daily_weight 1.0). Broker flat. No min-notional floor. Under
+    the corr-adjusted gate the two correlated AAPL LONGs deflate below the naive
+    sum of 2.0, while single-strategy MSFT stays at 1.0."""
     sigs = [
         _sig('S_eq_a', 'AAPL', direction=1, sharpe=4.0, weight=1.0),
         _sig('S_eq_b', 'AAPL', direction=1, sharpe=4.0, weight=1.0),
@@ -410,11 +412,20 @@ def test_equity_only_byte_identical(monkeypatch):
         assert 'instrument_class' not in o, f'equity-only run leaked instrument_class: {o}'
     by_tkr = {o['ticker']: o for o in orders}
     assert set(by_tkr) == {'AAPL', 'MSFT'}
-    # Gross of ticker_w = |2.0| + |1.0| = 3.0; scale = lam*nav/3.0.
+    # Derive expected corr weights from the SAME function the sizer uses (empty sim
+    # == the sparse-default these test-only strategies resolve to), so the test
+    # tracks the formula rather than a magic number.
+    meta = {'AAPL': {'strategies': ['S_eq_a', 'S_eq_b'], 'directions': [1, 1], 'brackets': []},
+            'MSFT': {'strategies': ['S_eq_c'], 'directions': [1], 'brackets': []}}
+    wbs = {'S_eq_a': 1.0, 'S_eq_b': 1.0, 'S_eq_c': 1.0}
+    _, exp_size, _, _ = _sizer._corr_adjusted_maps(meta, wbs, wbs, {})
+    assert exp_size['AAPL'] < 2.0                      # corr-deflated below the naive sum
+    assert exp_size['MSFT'] == pytest.approx(1.0)      # single strategy: S_adj == weight
+    gross = abs(exp_size['AAPL']) + abs(exp_size['MSFT'])
     lam = _sizer._load_lambda() * 1.0
-    scale = lam * 100_000 / 3.0
-    assert by_tkr['AAPL']['notional_usd'] == pytest.approx(2.0 * scale, rel=1e-9)
-    assert by_tkr['MSFT']['notional_usd'] == pytest.approx(1.0 * scale, rel=1e-9)
+    scale = lam * 100_000 / gross
+    assert by_tkr['AAPL']['notional_usd'] == pytest.approx(exp_size['AAPL'] * scale, rel=1e-9)
+    assert by_tkr['MSFT']['notional_usd'] == pytest.approx(exp_size['MSFT'] * scale, rel=1e-9)
     # Σ notionals == λ×NAV (the normalization invariant).
     assert sum(o['notional_usd'] for o in orders) == pytest.approx(lam * 100_000, rel=1e-9)
     assert all(o['source_mode'] == 'sharpe_cadence' for o in orders)

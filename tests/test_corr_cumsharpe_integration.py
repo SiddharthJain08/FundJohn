@@ -1,9 +1,11 @@
-"""End-to-end ON-path smoke for the corr-adjusted cumulative-Sharpe gate.
+"""End-to-end smoke for the corr-adjusted cumulative-Sharpe gate — the sole,
+unconditional conviction gate (no feature flag).
 
-Drives _sharpe_cadence_path (via size_positions) with OPENCLAW_STRATEGY_CORR_CUMSHARPE=1,
+Drives _sharpe_cadence_path (via size_positions) with all ortho flags cleared,
 all external surfaces stubbed (weights DB, carried-set, lambda, broker, confirmer,
-similarity load_groups). Proves: the matrix loads, the corr path activates, S_adj drives
-both the gate (ticker selection) and sizing, and the per-regime corr floor controls selection.
+similarity load_groups). Proves: the matrix loads, the corr gate runs with no flag
+set, S_adj drives both the gate (ticker selection) and sizing, and the per-regime
+corr floor controls selection.
 """
 import sys
 from datetime import date
@@ -44,10 +46,12 @@ def _params(min_corr_cum_sharpe):
 
 def _run(monkeypatch, weights_rows, carried_rows, sim, min_corr_cum_sharpe):
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
-    monkeypatch.setenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE', '1')
+    # The corr-adjusted gate is unconditional now — prove it fires with NO ortho
+    # flag set (CORR_CUMSHARPE included in the clear-list).
     for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
                  'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
-                 'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW',
+                 'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_STRATEGY_CORR_CUMSHARPE',
+                 'OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW',
                  'OPENCLAW_OPTION_DELTA_HEDGE'):
         monkeypatch.delenv(gate, raising=False)
     import execution.strategy_similarity as _ss
@@ -94,28 +98,6 @@ def test_on_path_corr_floor_drops_ticker(monkeypatch):
     assert 'AAA' not in _opens(orders), 'corr floor 5.0 > S_adj 3.0 must drop AAA'
 
 
-def _run_shadow(monkeypatch, weights_rows, carried_rows, sim):
-    """Shadow flag ON, live flag OFF: legacy routing + shadow metrics logged."""
-    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
-    monkeypatch.setenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW', '1')
-    monkeypatch.delenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE', raising=False)
-    for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
-                 'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
-                 'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_OPTION_DELTA_HEDGE'):
-        monkeypatch.delenv(gate, raising=False)
-    import execution.strategy_similarity as _ss
-    monkeypatch.setattr(_ss, 'load_groups',
-                        lambda regime: {'block_map': {}, 'fold_map': {}, 'rep_map': {}, 'matrix': sim})
-    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w: list(carried_rows))
-    monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
-    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
-    with _mock.patch('execution.strategy_weights.load_current', return_value=list(weights_rows)):
-        return _sizer.size_positions(
-            signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
-            run_date=date(2026, 6, 4), strategy_state={},
-            regime_params=_params(1.0), confirmer=lambda proposals: {})
-
-
 def test_on_path_emits_live_diagnostics(monkeypatch, caplog):
     import logging
     posted = []
@@ -138,17 +120,42 @@ def test_post_helper_is_failsafe_without_db(monkeypatch):
     _sizer._post_corr_cumsharpe_log('corr_cumsharpe.live[X]: smoke')  # no exception == pass
 
 
-def test_shadow_runs_and_logs_without_routing_change(monkeypatch, caplog):
+def test_matrix_load_failure_degrades_to_sparse_default(monkeypatch, caplog):
+    """Similarity-matrix load failure (transient DB) must NOT crash and must NOT
+    revert to the retired legacy naive gate. The (now unconditional) corr gate
+    runs with sparse-default correlations (assume ~independent) and logs a loud
+    warning for observability. This is the ONE path whose behavior changed vs the
+    old flag-gated code (which fell back to the legacy gate); pinned here so the
+    degraded-but-safe behavior is deliberate, not accidental.
+
+    NOTE the sparse-default under-deflates correlated bets on exactly the day
+    correlation data is missing — a documented risk-posture tradeoff, partially
+    mitigated by the separate asset-corr cap (different correlation source)."""
     import logging
-    sim = {'S1': {'S1': 1.0, 'S2': 0.0}, 'S2': {'S2': 1.0, 'S1': 0.0}}
-    with caplog.at_level(logging.INFO):
-        orders = _run_shadow(monkeypatch,
-                             weights_rows=[_weights_row('S1', 3.0), _weights_row('S2', 3.0)],
-                             carried_rows=[_carried('S1', 'AAA'), _carried('S2', 'AAA')],
-                             sim=sim)
-    # Shadow routes nothing extra: the LEGACY path still emits the AAA open.
-    assert 'AAA' in _opens(orders)
-    # The shadow glue ran end-to-end (NOT swallowed by the except) and logged the
-    # richer metrics the rollout depends on.
-    assert 'corr_cumsharpe.shadow:' in caplog.text
-    assert 'cap_binds=' in caplog.text and 'sign_flips=' in caplog.text
+    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
+                 'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
+                 'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_STRATEGY_CORR_CUMSHARPE',
+                 'OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW', 'OPENCLAW_OPTION_DELTA_HEDGE'):
+        monkeypatch.delenv(gate, raising=False)
+
+    import execution.strategy_similarity as _ss
+
+    def _boom(regime):
+        raise RuntimeError('similarity DB down')
+
+    monkeypatch.setattr(_ss, 'load_groups', _boom)
+    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w: [_carried('S1', 'AAA')])
+    monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
+    monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
+    with caplog.at_level(logging.WARNING):
+        with _mock.patch('execution.strategy_weights.load_current',
+                         return_value=[_weights_row('S1', 3.0)]):
+            orders = _sizer.size_positions(
+                signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
+                run_date=date(2026, 6, 4), strategy_state={},
+                regime_params=_params(0.5), confirmer=lambda proposals: {})
+    # Single strategy on AAA -> S_adj == daily_weight (3.0) regardless of matrix;
+    # clears floor 0.5. The gate ran (no crash, no legacy revert) and warned.
+    assert 'AAA' in _opens(orders), 'corr gate must still size when the matrix fails to load'
+    assert 'load_groups failed' in caplog.text, 'load failure must be logged (observable)'

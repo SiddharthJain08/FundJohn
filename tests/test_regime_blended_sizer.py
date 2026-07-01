@@ -115,9 +115,14 @@ def _carried_cap(sid, ticker, direction='LONG'):
             'signal_params': {}}
 
 
-def _weights_row_cap(sid, eff_sharpe, daily_weight=1.0):
+def _weights_row_cap(sid, eff_sharpe, daily_weight=None, cadence_days=1.0):
+    # The corr-adjusted gate reads daily_weight (= effective_sharpe / sqrt(cadence),
+    # the real weights-pipeline invariant), not raw effective_sharpe. Default to
+    # that invariant so single-strategy S_adj == effective_sharpe here.
+    if daily_weight is None:
+        daily_weight = eff_sharpe / (cadence_days ** 0.5)
     return {'strategy_id': sid, 'daily_weight': daily_weight,
-            'effective_sharpe': eff_sharpe, 'cadence_days': 1.0}
+            'effective_sharpe': eff_sharpe, 'cadence_days': cadence_days}
 
 
 def _open_by_ticker_cap(orders):

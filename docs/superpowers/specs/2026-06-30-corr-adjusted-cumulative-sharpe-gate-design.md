@@ -2,7 +2,14 @@
 
 **Date:** 2026-06-30
 **Branch:** `feat/corr-adjusted-cumsharpe-gate` (off `feat/intraday-regime-15min-prefetch` @ `ad56acd`)
-**Status:** Design approved (operator), pre-implementation
+**Status:** DEPLOYED LIVE 2026-06-30 (operator chose direct-live over the shadow-first
+rollout in §Rollout below — that section is SUPERSEDED). **2026-07-01 follow-up
+(`feat/remove-legacy-cumsharpe`):** legacy cum-Sharpe gate fully retired — the corr
+gate is now UNCONDITIONAL (flag `OPENCLAW_STRATEGY_CORR_CUMSHARPE` dropped), the legacy
+naive/deflated gate branches + corr shadow rail removed, and the dashboard legacy
+slider removed. The `min_cumulative_sharpe` floor/resolver + `deflated_net_sharpe`
+are KEPT for the inert option path + ORTHO_SHADOW; the DB column is deprecated-in-code,
+not dropped. Rollback is now git-revert (no flag).
 **Touches:** `src/execution/orthogonalization.py`, `src/execution/regime_blended_sizer.py`, `src/channels/api/server.js`, new migration `140_*`, tests.
 
 ---

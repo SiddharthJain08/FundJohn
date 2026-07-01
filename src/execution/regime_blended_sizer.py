@@ -235,14 +235,15 @@ def _resolve_min_cumulative_sharpe(params: dict | None, default: float = 3.0) ->
 
 
 def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> float:
-    """Per-regime floor for the correlation-adjusted cumulative-Sharpe gate
-    (OPENCLAW_STRATEGY_CORR_CUMSHARPE). Mirrors _resolve_min_cumulative_sharpe but
-    reads regime_sizer_params.min_corr_cum_sharpe, bound [0.0, 10.0] (migration 140),
-    falling back to pipeline_config['min_corr_cum_sharpe'], then `default`.
+    """Per-regime floor for the correlation-adjusted cumulative-Sharpe gate —
+    the sole live conviction gate. Reads regime_sizer_params.min_corr_cum_sharpe,
+    bound [0.0, 10.0] (migration 140), falling back to
+    pipeline_config['min_corr_cum_sharpe'], then `default`. Set per regime from
+    the dashboard Conviction Gates card; read fresh each sizer cycle.
 
-    NOTE the scale differs from the legacy floor: this quantity is cadence-normalized
-    AND diversification-deflated, so values are smaller. The operator sets per-regime
-    values from the shadow run before flipping the flag; `default` is a placeholder.
+    NOTE the scale differs from the retired legacy min_cumulative_sharpe floor:
+    this quantity is cadence-normalized AND diversification-deflated, so values
+    are smaller — calibrate from the #botjohn-log rec_floor, not the old scale.
     """
     if isinstance(params, dict):
         v = params.get('min_corr_cum_sharpe')
@@ -1051,8 +1052,6 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # The bracket-leader pick also stays on raw conviction.
     _size_scalar_on = os.environ.get('OPENCLAW_STRATEGY_SIZE_SCALAR') == '1'
     _cadence_stop_norm_on = _ortho_enabled('OPENCLAW_STRATEGY_CADENCE_STOP_NORM')
-    _corr_cumsharpe_on = _ortho_enabled('OPENCLAW_STRATEGY_CORR_CUMSHARPE')
-    _corr_cumsharpe_shadow = _ortho_enabled('OPENCLAW_STRATEGY_CORR_CUMSHARPE_SHADOW')
     if _cadence_stop_norm_on:
         from execution import bracket_stacking as _bs
     try:
@@ -1074,13 +1073,14 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
-    # Legacy floor: drives the OPTION consolidation path (_consolidate_option_orders,
-    # which gates a naive raw-Sharpe sum) and the legacy ortho-shadow. Always legacy —
-    # the corr floor is an equity-similarity-matrix construct and must NOT leak here.
+    # Raw-Sharpe floor for the OPTION consolidation path (_consolidate_option_orders
+    # gates a naive raw-Sharpe sum) and the ORTHO_SHADOW diagnostic — both on the
+    # legacy [1,10] scale. This must NOT be used for the equity conviction gate:
+    # that reads the corr floor (min_corr_cum_sharpe, set in the gate block below).
     min_cum_sharpe = _resolve_min_cumulative_sharpe(params)
-    # Equity conviction-gate floor: legacy by default; switched to the per-regime
-    # corr floor ONLY when the corr path is actually taken (flag on AND matrix loaded),
-    # so a missing similarity matrix fails safe to the legacy floor+quantity.
+    # Equity conviction-gate floor: unconditionally the per-regime corr floor,
+    # assigned in the corr gate block below. Pre-seeded here only as a safe
+    # placeholder (always overwritten before the gate-drop).
     equity_gate_floor = min_cum_sharpe
 
     # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
@@ -1131,18 +1131,18 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.info('regime_blended_sizer.sharpe_cadence: partitioned %d option-class '
                     'contributor(s) out of the equity book', len(opt_active))
 
-    # Strategy orthogonalization (default-OFF; byte-identical when both gates unset).
+    # Strategy similarity matrix — loaded unconditionally because the
+    # corr-adjusted conviction gate always needs it; also consumed by the
+    # FOLD / ORTHO_SHADOW / BRACKET_STACK features when their flags are on.
+    # A load failure degrades the corr gate to sparse-default correlations
+    # (treat pairs as ~independent), never crashes the sizer.
     _ortho_groups = None
-    if _ortho_enabled('OPENCLAW_STRATEGY_FOLD') or _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT') \
-            or _ortho_enabled('OPENCLAW_STRATEGY_ORTHO_SHADOW') \
-            or _ortho_enabled('OPENCLAW_STRATEGY_BRACKET_STACK') \
-            or _corr_cumsharpe_on or _corr_cumsharpe_shadow:
-        try:
-            from execution import strategy_similarity as _ss
-            _ortho_groups = _ss.load_groups(regime_state)
-        except Exception as e:
-            logger.warning('orthogonalization: load_groups failed (%s); proceeding without', e)
-            _ortho_groups = None
+    try:
+        from execution import strategy_similarity as _ss
+        _ortho_groups = _ss.load_groups(regime_state)
+    except Exception as e:
+        logger.warning('orthogonalization: load_groups failed (%s); proceeding without', e)
+        _ortho_groups = None
 
     if _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_FOLD'):
         from execution import orthogonalization as _og
@@ -1207,82 +1207,49 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         _warn_options_dropped_no_equity_scale(opt_active, 'no eligible equity signals after weight filter')
         return []
 
-    # Conviction adjustment (gate quantity). Precedence:
-    #   CORR_CUMSHARPE (closed-form Sharpe-weighted combination Sharpe) supersedes
-    #   CORR_WEIGHT (legacy within-block heuristic deflation).
-    gate_net_sharpe = ticker_net_sharpe
-    if _ortho_groups and _corr_cumsharpe_on:
-        _sim = _ortho_groups.get('matrix') or {}
-        gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
-            ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
-        # Live diagnostics: SAME metrics as the shadow rail, computed against what the
-        # legacy gate/sizing this cycle WOULD have produced (ticker_net_sharpe + the
-        # pre-replacement ticker_w), logged AND best-effort posted to #botjohn-log so the
-        # operator monitors the LIVE system exactly like the shadow. rec_floor is the
-        # value that reproduces today's surviving-ticker count — the slider target.
-        try:
-            _m = _corr_cumsharpe_shadow_metrics(
-                gate_net_sharpe, _size_adj, ticker_net_sharpe, dict(ticker_w),
-                min_cum_sharpe, lam, nav, _nb_g, _nb_s)
-            _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
-                     'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
-                     'backstop=%s top_dollar_moves=%s' % (
-                         regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
-                         _m['live_keep'], _m['would_keep'], _m['rec_floor'],
-                         _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
-                         _m['backstop_fires'], _m['top_dollar_moves']))
-            logger.info(_line)
-            # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
-            # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
-            if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
-                _post_corr_cumsharpe_log(_line)
-        except Exception as e:
-            logger.warning('corr_cumsharpe.live diag failed (%s)', e)
-        # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
-        ticker_w = defaultdict(float, _size_adj)
-        # Equity gate now reads the per-regime corr floor (scale matches S_adj).
-        equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
-        if _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
-            logger.info('corr_cumsharpe: superseding deflated_net_sharpe gate (CORR_WEIGHT bypassed)')
-        logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
-                    '(non-PSD backstop fires gate=%d size=%d)',
-                    len(gate_net_sharpe), _nb_g, _nb_s)
-    elif _ortho_groups and _ortho_enabled('OPENCLAW_STRATEGY_CORR_WEIGHT'):
-        from execution import orthogonalization as _og
-        contribs_by_ticker = {
-            tkr: list(zip(meta['strategies'], meta['directions']))
-            for tkr, meta in ticker_meta.items()
-        }
-        gate_net_sharpe = _og.deflated_net_sharpe(
-            contribs_by_ticker, _ortho_groups['block_map'],
-            _ortho_groups['matrix'], sharpe_by_strat)
-        logger.info('orthogonalization.corr_weight: deflated gate for %d tickers', len(gate_net_sharpe))
+    # Conviction gate quantity: the correlation-adjusted cumulative Sharpe
+    # (closed-form Sharpe-weighted combination Sharpe, S_adj). This is the SOLE
+    # conviction gate — one quantity drives BOTH ticker selection (the
+    # equity_gate_floor drop below) AND the sizing weight (ticker_w is rebuilt
+    # from S_adj). ticker_net_sharpe (the naive signed Σ effective-sharpe·dir)
+    # is retained ONLY as the reference baseline for the #botjohn-log diagnostic.
+    _sim = (_ortho_groups or {}).get('matrix') or {}
+    gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
+        ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
+    # Live diagnostics vs the naive baseline (ticker_net_sharpe + the
+    # pre-replacement ticker_w): logged AND best-effort posted to #botjohn-log
+    # (daily lane only) so the operator can calibrate the per-regime corr floor.
+    # rec_floor is the value that reproduces today's surviving-ticker count.
+    try:
+        _m = _corr_cumsharpe_shadow_metrics(
+            gate_net_sharpe, _size_adj, ticker_net_sharpe, dict(ticker_w),
+            min_cum_sharpe, lam, nav, _nb_g, _nb_s)
+        _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
+                 'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
+                 'backstop=%s top_dollar_moves=%s' % (
+                     regime_state, {k: round(v, 4) for k, v in _m['dist'].items()},
+                     _m['live_keep'], _m['would_keep'], _m['rec_floor'],
+                     _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
+                     _m['backstop_fires'], _m['top_dollar_moves']))
+        logger.info(_line)
+        # Post once per daily cycle only (skip the every-5-min intraday redeploy lane
+        # to avoid #botjohn-log spam); the post self-expires via pipeline_config.
+        if os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1':
+            _post_corr_cumsharpe_log(_line)
+    except Exception as e:
+        logger.warning('corr_cumsharpe.live diag failed (%s)', e)
+    # One quantity drives BOTH gate and sizing: rebuild ticker_w from S_adj.
+    ticker_w = defaultdict(float, _size_adj)
+    # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
+    equity_gate_floor = _resolve_min_corr_cum_sharpe(params)
+    logger.info('corr_cumsharpe: gate+sizing rebuilt from S_adj for %d tickers '
+                '(non-PSD backstop fires gate=%d size=%d)',
+                len(gate_net_sharpe), _nb_g, _nb_s)
 
-    # Shadow: compute the corr-adjusted gate alongside the live gate and log
-    # distribution / would-drop / Δ$ / backstop / recommended-floor. Routes nothing.
-    # Runs only when the shadow flag is on AND the live flag is off (no double-compute).
-    if _ortho_groups and _corr_cumsharpe_shadow and not _corr_cumsharpe_on:
-        try:
-            _sim = _ortho_groups.get('matrix') or {}
-            _g_adj, _s_adj, _nbg, _nbs = _corr_adjusted_maps(
-                ticker_meta, weight_by_strat, eff_weight_by_strat, _sim)
-            _m = _corr_cumsharpe_shadow_metrics(
-                _g_adj, _s_adj, gate_net_sharpe, dict(ticker_w),
-                equity_gate_floor, lam, nav, _nbg, _nbs)
-            logger.info('corr_cumsharpe.shadow: dist=%s live_keep=%d would_keep=%d '
-                        'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
-                        'backstop=%s top_dollar_moves=%s',
-                        {k: round(v, 4) for k, v in _m['dist'].items()},
-                        _m['live_keep'], _m['would_keep'], _m['rec_floor'],
-                        _m['cap_binds'], _m['gross_after_cap_frac'], _m['sign_flips'],
-                        _m['backstop_fires'], _m['top_dollar_moves'])
-        except Exception as e:
-            logger.warning('corr_cumsharpe.shadow failed (%s)', e)
-
-    # Cumulative-sharpe gate: drop tickers whose signed net_sharpe falls
-    # below the configured floor (default 3.0, from pipeline_config). This
-    # is the operator's primary conviction filter — kills single-strategy
-    # bets AND near-cancellation tickers in one rule.
+    # Conviction gate: drop tickers whose signed corr-adjusted net Sharpe falls
+    # below the per-regime floor (min_corr_cum_sharpe, migration 140). This is
+    # the operator's primary conviction filter — kills single-strategy bets AND
+    # near-cancellation tickers in one rule.
     if equity_gate_floor > 0:
         gated_out = [tkr for tkr in list(ticker_w.keys())
                      if abs(gate_net_sharpe.get(tkr, 0.0)) < equity_gate_floor]

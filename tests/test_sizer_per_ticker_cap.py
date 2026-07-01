@@ -8,13 +8,16 @@ whatever cleared the cum-sharpe gate, so a 1-survivor day would otherwise
 put 2× equity into one name (observed in the 2026-06-03 diagnosis,
 /root/sp6_phaseA_conviction_gate_diagnosis_2026-06-04.md §4).
 
+The cap reads |gate_net_sharpe| — the corr-adjusted S_adj that is now the sole
+conviction gate. For single-strategy tickers S_adj == daily_weight
+(= effective_sharpe / sqrt(cadence)), so these fixtures set daily_weight to that
+invariant.
+
 Contract under test:
-  1. EOD mode, single survivor → |target| clamped to 0.05·|sharpe|·λ·NAV.
+  1. EOD mode, single survivor → |target| clamped to 0.05·|S_adj|·λ·NAV.
   2. EOD mode, cap not binding → targets byte-identical (no-op on fat days).
-  3. Legacy mode (gate OFF) → NO cap (byte-identical legacy path).
+  3. Legacy (non-EOD) mode → NO cap (byte-identical legacy path).
   4. No renorm-up: shaved capital is NOT redistributed to other tickers.
-  5. Cap reads the SAME conviction value as the gate (deflated when
-     OPENCLAW_STRATEGY_CORR_WEIGHT is on).
 """
 import sys
 import os
@@ -58,31 +61,26 @@ def _carried(sid, ticker, direction='LONG'):
             'signal_params': {}}
 
 
-def _weights_row(sid, eff_sharpe, daily_weight=1.0):
+def _weights_row(sid, eff_sharpe, daily_weight=None, cadence_days=1.0):
+    # The corr-adjusted gate reads daily_weight (= effective_sharpe / sqrt(cadence),
+    # the real weights-pipeline invariant), NOT raw effective_sharpe. Default the
+    # fixture to that invariant so single-strategy S_adj == effective_sharpe here.
+    if daily_weight is None:
+        daily_weight = eff_sharpe / (cadence_days ** 0.5)
     return {'strategy_id': sid, 'daily_weight': daily_weight,
-            'effective_sharpe': eff_sharpe, 'cadence_days': 1.0}
+            'effective_sharpe': eff_sharpe, 'cadence_days': cadence_days}
 
 
-def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None,
-             corr_weight=False, deflated_override=None):
+def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None):
     """Drive size_positions through the full sharpe_cadence path with all
     external surfaces (weights DB, carried-set DB, λ DB, broker, confirmer)
-    stubbed. Returns the emitted orders."""
+    stubbed. The corr-adjusted gate is unconditional; clear all ortho flags so
+    the cap reads the same corr S_adj the gate does. Returns the emitted orders."""
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
-    for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_ORTHO_SHADOW',
-                 'OPENCLAW_STRATEGY_BRACKET_STACK', 'OPENCLAW_OPTION_DELTA_HEDGE'):
+    for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
+                 'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
+                 'OPENCLAW_OPTION_DELTA_HEDGE'):
         monkeypatch.delenv(gate, raising=False)
-    if corr_weight:
-        monkeypatch.setenv('OPENCLAW_STRATEGY_CORR_WEIGHT', '1')
-        import execution.strategy_similarity as _ss
-        import execution.orthogonalization as _og
-        monkeypatch.setattr(_ss, 'load_groups',
-                            lambda regime: {'block_map': {}, 'matrix': {}, 'fold_map': {}})
-        if deflated_override is not None:
-            monkeypatch.setattr(_og, 'deflated_net_sharpe',
-                                lambda contribs, block_map, matrix, sharpe: dict(deflated_override))
-    else:
-        monkeypatch.delenv('OPENCLAW_STRATEGY_CORR_WEIGHT', raising=False)
 
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda weight_by_strat: list(carried_rows))
@@ -141,14 +139,15 @@ class TestPerTickerCapEOD:
         """Two tickers, one capped: the shaved capital must NOT be
         redistributed to the other (no renorm-up).
 
-        S_hi (w=3, sharpe 9 on A) + S_lo (w=1, sharpe 3.2 on B):
-        gross=4, scale=λ·NAV/4=50k → raw targets A=150k, B=50k.
-        caps: A = 0.05·9·200k = 90k (binds), B = 0.05·3.2·200k = 32k (binds).
-        Both clamp; crucially B stays at ITS cap, not pumped up by A's shave."""
+        S_hi (sharpe 9 on A) + S_lo (sharpe 3.2 on B), single-strategy each so
+        corr S_adj == effective_sharpe: gross=12.2, scale=λ·NAV/12.2≈16.4k →
+        raw targets A≈147k, B≈52k. caps: A = 0.05·9·200k = 90k (binds),
+        B = 0.05·3.2·200k = 32k (binds). Both clamp; crucially B stays at ITS
+        cap, not pumped up by A's shave (total 122k < λ×NAV)."""
         orders = _run_eod(
             monkeypatch,
-            weights_rows=[_weights_row('S_hi', eff_sharpe=9.0, daily_weight=3.0),
-                          _weights_row('S_lo', eff_sharpe=3.2, daily_weight=1.0)],
+            weights_rows=[_weights_row('S_hi', eff_sharpe=9.0),
+                          _weights_row('S_lo', eff_sharpe=3.2)],
             carried_rows=[_carried('S_hi', 'AAA'), _carried('S_lo', 'BBB')],
         )
         opens = _open_by_ticker(orders)
@@ -168,21 +167,11 @@ class TestPerTickerCapEOD:
         assert 'XYZ' in opens
         assert abs(opens['XYZ']['target_usd'] - (-0.05 * 4.0 * LAM * NAV)) < 1e-6
 
-    def test_cap_uses_deflated_value_when_corr_weight_on(self, monkeypatch):
-        """With OPENCLAW_STRATEGY_CORR_WEIGHT=1 the gate uses the DEFLATED
-        net sharpe — the cap must read the SAME value (self-consistent
-        conviction measure). Raw sharpe 7 deflated to 3.5 ⇒ cap $35k not $70k."""
-        orders = _run_eod(
-            monkeypatch,
-            weights_rows=[_weights_row('S1', eff_sharpe=7.0)],
-            carried_rows=[_carried('S1', 'STX')],
-            corr_weight=True,
-            deflated_override={'STX': 3.5},
-        )
-        opens = _open_by_ticker(orders)
-        assert abs(opens['STX']['target_usd'] - 0.05 * 3.5 * LAM * NAV) < 1e-6, (
-            'cap must use the deflated gate value, not the raw net sharpe'
-        )
+    # NOTE: the cap's self-consistency with the gate quantity (cap reads the
+    # SAME corr S_adj the gate uses, not a naive sum) is covered end-to-end by
+    # test_corr_cumsharpe_integration.test_on_path_activates_and_caps_on_corr_sadj
+    # (two correlated strategies → cap reflects the corr-deflated S_adj). The
+    # legacy deflated-gate variant was removed with the legacy cum-sharpe gate.
 
 
 class TestLegacyPathUncapped:

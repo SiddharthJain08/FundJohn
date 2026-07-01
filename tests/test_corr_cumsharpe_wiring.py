@@ -11,11 +11,6 @@ def _meta(strats, dirs):
     return {'AAA': {'strategies': list(strats), 'directions': list(dirs), 'brackets': []}}
 
 
-def test_flag_default_off(monkeypatch):
-    monkeypatch.delenv('OPENCLAW_STRATEGY_CORR_CUMSHARPE', raising=False)
-    assert rbs._ortho_enabled('OPENCLAW_STRATEGY_CORR_CUMSHARPE') is False
-
-
 def test_gate_uses_raw_sizing_uses_scaled():
     # daily_weight (raw) vs eff_weight (size_scalar folded in) must differ on sizing,
     # while the gate stays on raw. Single strategy: S_adj = w * d.
