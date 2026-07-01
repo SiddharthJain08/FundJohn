@@ -66,10 +66,17 @@ def refresh(as_of: date | None = None, verbose: bool = True) -> int:
                     print(f'  {sid}: N={size}')
         pg.commit()
         print(f'[universe-size] refreshed {written}/{len(sids)} approved strategies as_of {as_of}')
+        if sids and written == 0:
+            # Every resolve failed — nothing written. Signal LOUDLY so the systemd
+            # run shows FAILED rather than silently green (breadth factors then just
+            # stay at their last-good stored N, or 1.0 for never-populated ones).
+            raise RuntimeError(f'universe-size refresh wrote 0/{len(sids)} rows — resolver failing')
         return written
     finally:
         pg.close()
 
 
 if __name__ == '__main__':
-    sys.exit(0 if refresh() >= 0 else 1)
+    # An uncaught exception (incl. the total-failure guard above) exits non-zero,
+    # so systemd surfaces a failed refresh instead of a false success.
+    refresh()
