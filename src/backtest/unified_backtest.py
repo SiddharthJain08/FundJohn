@@ -74,7 +74,7 @@ REGIMES_PARQUET = ROOT / 'data' / 'master' / 'historical_regimes.parquet'
 
 # SP-3: per-instrument-class execution cost (one-way, basis points). equity/etp
 # share the equity model in MVP; options/crypto get their own when those engines land.
-INSTRUMENT_COST_BPS: dict[str, float] = {"equity": 1.0, "etp": 1.0, "option": 5.0, "crypto": 25.0}
+INSTRUMENT_COST_BPS: dict[str, float] = {"equity": 10.0, "etp": 10.0, "option": 5.0, "crypto": 25.0}
 
 
 def resolve_cost_model_bps(instrument_class: str) -> float:
@@ -233,15 +233,20 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
                    direction: int, entry_price: float,
                    stop_loss: float, target_1: float,
                    max_hold_days: int, *,
-                   include_entry_bar: bool = False) -> dict:
+                   include_entry_bar: bool = False,
+                   slippage_bps: float = 0.0) -> dict:
     """Walk forward from entry_date+1 (or entry_date if include_entry_bar=True),
     returning the exit dict:
        {exit_date, exit_price, exit_reason, holding_days, pnl_pct, daily_marks}.
     `daily_marks` is the true per-day mark-to-market path: a list of
-    (date, direction*(mark_i/mark_{i-1} - 1)) with mark_0=entry_price, each
+    (date, direction*(mark_i/mark_{i-1} - 1)) with mark_0=entry_fill, each
     non-exit day marked to that bar's close, and the exit day marked to
-    exit_price. len(daily_marks) == holding_days ([] when holding_days == 0).
+    exit_fill. len(daily_marks) == holding_days ([] when holding_days == 0).
     Longs compound to pnl_pct exactly; shorts do not (path-dependent).
+
+    `exit_price` is the adverse fill (see slippage_bps below), not the raw
+    bracket/close level. `mark_0 == entry_fill` (== entry_price when
+    slippage_bps == 0.0, since entry_fill collapses to entry_price).
 
     Long: target hit when high >= target_1; stop when low <= stop_loss.
     Short: target hit when low <= target_1; stop when high >= stop_loss.
@@ -257,7 +262,15 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     include_entry_bar: when True (fill_model='open'), the fill bar itself is
     included in the exit walk (H/L occur after an open fill so bracket exits on
     that bar are legitimate). Default False keeps existing '>'-only behavior.
+
+    slippage_bps: always-adverse per-fill slippage in basis points (one-way).
+    Entry fills pay up (long) / sell down (short); exits fill worse than the
+    triggering level in the same adverse direction. Default 0.0 reproduces
+    the pre-slippage behavior exactly (entry_fill == entry_price, exit_fill
+    == exit_level).
     """
+    s = float(slippage_bps) / 10000.0
+    entry_fill = entry_price * (1.0 + direction * s)  # adverse entry: pay up (long) / sell down (short)
     if include_entry_bar:
         bars_future = bars.loc[bars.index >= entry_date]
     else:
@@ -267,47 +280,37 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
                 'exit_reason': 'end_of_data', 'holding_days': 0, 'pnl_pct': 0.0,
                 'daily_marks': []}
     bars_window = bars_future.iloc[:max_hold_days]
+    n = len(bars_window)
     daily_marks = []
-    prev_mark = entry_price
+    prev_mark = entry_fill
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
+        exit_level, reason = None, None
         if direction > 0:   # long
             if high >= target_1:
-                pnl = (target_1 - entry_price) / entry_price
-                daily_marks.append((dt, direction * (float(target_1) / prev_mark - 1.0)))
-                return {'exit_date': dt, 'exit_price': float(target_1),
-                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl,
-                        'daily_marks': daily_marks}
-            if low <= stop_loss:
-                pnl = (stop_loss - entry_price) / entry_price
-                daily_marks.append((dt, direction * (float(stop_loss) / prev_mark - 1.0)))
-                return {'exit_date': dt, 'exit_price': float(stop_loss),
-                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl,
-                        'daily_marks': daily_marks}
+                exit_level, reason = float(target_1), 'target'
+            elif low <= stop_loss:
+                exit_level, reason = float(stop_loss), 'stop'
         else:               # short
             if low <= target_1:
-                pnl = (entry_price - target_1) / entry_price
-                daily_marks.append((dt, direction * (float(target_1) / prev_mark - 1.0)))
-                return {'exit_date': dt, 'exit_price': float(target_1),
-                        'exit_reason': 'target', 'holding_days': i, 'pnl_pct': pnl,
-                        'daily_marks': daily_marks}
-            if high >= stop_loss:
-                pnl = (entry_price - stop_loss) / entry_price
-                daily_marks.append((dt, direction * (float(stop_loss) / prev_mark - 1.0)))
-                return {'exit_date': dt, 'exit_price': float(stop_loss),
-                        'exit_reason': 'stop', 'holding_days': i, 'pnl_pct': pnl,
-                        'daily_marks': daily_marks}
-        # no exit this bar -> mark to close
+                exit_level, reason = float(target_1), 'target'
+            elif high >= stop_loss:
+                exit_level, reason = float(stop_loss), 'stop'
+        if exit_level is None and i == n:  # last bar, no bracket -> exit at close
+            exit_level = close
+            reason = 'max_hold' if n == max_hold_days else 'end_of_data'
+        if exit_level is not None:  # this bar is the exit -> adverse exit fill
+            exit_fill = exit_level * (1.0 - direction * s)
+            daily_marks.append((dt, direction * (exit_fill / prev_mark - 1.0)))
+            pnl = direction * (exit_fill - entry_fill) / entry_fill
+            return {'exit_date': dt, 'exit_price': exit_fill, 'exit_reason': reason,
+                    'holding_days': i, 'pnl_pct': pnl, 'daily_marks': daily_marks}
+        # interior non-exit bar -> mark to market at the close (no transaction, no slippage)
         daily_marks.append((dt, direction * (close / prev_mark - 1.0)))
         prev_mark = close
-    # Neither fired within max_hold -> exit at last close (already the final mark above)
-    last_dt = bars_window.index[-1]
-    last_close = float(bars_window.iloc[-1]['close'])
-    pnl_raw = (last_close - entry_price) / entry_price
-    pnl = pnl_raw if direction > 0 else -pnl_raw
-    reason = 'max_hold' if len(bars_window) == max_hold_days else 'end_of_data'
-    return {'exit_date': last_dt, 'exit_price': last_close,
-            'exit_reason': reason, 'holding_days': len(bars_window), 'pnl_pct': pnl,
+    # Unreachable: the i == n branch always exits. Defensive fallback.
+    return {'exit_date': bars_window.index[-1], 'exit_price': entry_fill,
+            'exit_reason': 'end_of_data', 'holding_days': n, 'pnl_pct': 0.0,
             'daily_marks': daily_marks}
 
 
@@ -552,6 +555,7 @@ def _per_bar_simulate(
     param_override=None,
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
     fill_model: str = 'close',
+    slippage_bps: float = 0.0,
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
 
@@ -718,7 +722,8 @@ def _per_bar_simulate(
                 continue
             exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days,
-                                       include_entry_bar=_include_fill_bar)
+                                       include_entry_bar=_include_fill_bar,
+                                       slippage_bps=slippage_bps)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
             # the LATEST stop date per ticker.
@@ -823,7 +828,9 @@ def run_backtest(strategy_id: str, *,
     strategy_cls = load_strategy_class(filepath)
     _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
     _cost_bps = resolve_cost_model_bps(instrument_class)
-    _log(f'instrument_class={instrument_class} cost_model_bps={_cost_bps}')
+    _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE') == '1'
+    _slippage_bps = _cost_bps if _slippage_on else 0.0
+    _log(f'instrument_class={instrument_class} cost_model_bps={_cost_bps} slippage_applied={_slippage_on}')
 
     # Discovery mode: bypass should_run() by widening active_in_regimes on
     # the instance. Strategies that branch on regime['state'] *inside*
@@ -851,6 +858,7 @@ def run_backtest(strategy_id: str, *,
     # does not accept it (option brackets are priced contracts, not open/close fills).
     if _sim_fn is _per_bar_simulate:
         _sim_kwargs['fill_model'] = fill_model
+        _sim_kwargs['slippage_bps'] = _slippage_bps
     sim = _sim_fn(
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         **_sim_kwargs,
