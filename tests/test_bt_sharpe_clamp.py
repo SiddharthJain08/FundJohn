@@ -33,6 +33,12 @@ class TestGetCap(unittest.TestCase):
         self.assertEqual(sw._get_bt_sharpe_cap(FakeCur(row=('abc',))), 3.0)
     def test_query_error_defaults_3(self):
         self.assertEqual(sw._get_bt_sharpe_cap(FakeCur(raise_on_execute=True)), 3.0)
+    def test_negative_cap_defaults_3(self):
+        # A non-positive cap would break sign-preservation (a negative cap flips
+        # an excluded negative Sharpe to positive -> fundable). Reject to default.
+        self.assertEqual(sw._get_bt_sharpe_cap(FakeCur(row=('-1',))), 3.0)
+    def test_zero_cap_defaults_3(self):
+        self.assertEqual(sw._get_bt_sharpe_cap(FakeCur(row=('0',))), 3.0)
 
 
 class TestClamp(unittest.TestCase):

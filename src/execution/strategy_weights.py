@@ -296,12 +296,18 @@ def _get_bt_sharpe_cap(cur) -> float:
     Interim guard (§7 metric recon, 2026-07-01) for the backtest-Sharpe
     methodology defect (flat P&L smearing understates vol -> inflated,
     overlap-dependent |Sharpe|). Set the key very high (e.g. 999) to disable.
-    Fail-safe: any read error keeps the guard ON at the 3.0 default."""
+    Fail-safe: any read error OR a non-positive value keeps the guard ON at the
+    3.0 default (the clamp [-cap,+cap] is only sign-preserving for cap>0; a
+    negative cap would flip an excluded negative Sharpe to positive -> fundable,
+    so a misconfig falls back to the safe default rather than breaking the
+    invariant)."""
     try:
         cur.execute("SELECT value FROM pipeline_config WHERE key='bt_sharpe_plausibility_cap'")
         row = cur.fetchone()
         if row:
-            return float(row[0])
+            v = float(row[0])
+            if v > 0:
+                return v
     except Exception:
         pass
     return 3.0
