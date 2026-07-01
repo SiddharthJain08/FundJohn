@@ -52,11 +52,13 @@ def build_systemd_cmd(item, *, memory_max_g, watchdog_sec, log_path, repo=REPO):
         '-p', f'StandardError=append:{log_path}',
         # `/usr/bin/env VAR=val` sets these in the python process itself, which
         # WINS over the unit's EnvironmentFile(.env) regardless of systemd's
-        # EnvironmentFile-vs-Environment= precedence. This guarantees the marks
-        # flag is ON even if .env ever gains an OPENCLAW_TRUE_MTM_MARKS line —
-        # the whole point of this harness. (We cannot read the 0600-root .env
-        # to assert no conflict, so we override at the process boundary.)
-        '/usr/bin/env', 'OPENCLAW_TRUE_MTM_MARKS=1', f'PYTHONPATH={repo}/src',
+        # EnvironmentFile-vs-Environment= precedence. This guarantees the two
+        # §7 correction flags are ON even if .env ever gains a conflicting line —
+        # the whole point of this harness is the fully-corrected re-backtest
+        # (true daily mark-to-market + always-adverse slippage). (We cannot read
+        # the 0600-root .env to assert no conflict, so we override at the boundary.)
+        '/usr/bin/env', 'OPENCLAW_TRUE_MTM_MARKS=1', 'OPENCLAW_BACKTEST_SLIPPAGE=1',
+        f'PYTHONPATH={repo}/src',
         'python3', '-m', 'backtest.unified_backtest', *target,
     ]
 

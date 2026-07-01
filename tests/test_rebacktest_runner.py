@@ -54,6 +54,7 @@ class TestCmd(unittest.TestCase):
                                    memory_max_g=4, watchdog_sec=5400, log_path='/tmp/x.log')
         j = ' '.join(cmd)
         self.assertIn('OPENCLAW_TRUE_MTM_MARKS=1', j)
+        self.assertIn('OPENCLAW_BACKTEST_SLIPPAGE=1', j)  # fully-corrected re-backtest: both flags
         self.assertIn('MemoryMax=4G', j)
         self.assertIn('RuntimeMaxSec=5400', j)
         self.assertIn('--strategy-id', cmd); self.assertIn('S_live_a', cmd)
