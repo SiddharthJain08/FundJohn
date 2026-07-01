@@ -1,6 +1,6 @@
 """tests/test_adverse_slippage.py — always-adverse per-fill slippage."""
 from __future__ import annotations
-import math, sys, unittest
+import sys, unittest
 from pathlib import Path
 import pandas as pd
 
@@ -56,6 +56,24 @@ class TestSlippage(unittest.TestCase):
         out = ub.simulate_trade(bars, bars.index[0], +1, 100.0, 95.0, 200.0, 5, slippage_bps=10.0)
         self.assertEqual(out['exit_reason'], 'stop')
         self.assertLess(out['exit_price'], 95.0)  # long stop fills BELOW the level (adverse)
+
+    def test_long_target_triggered_slippage(self):
+        # bar[1] high 106 >= target 105 -> long target fires; adverse exit fills BELOW 105
+        bars = _bars([100.0, 103.0], highs=[100.1, 106.0], lows=[99.9, 102.0])
+        base = ub.simulate_trade(bars, bars.index[0], +1, 100.0, 90.0, 105.0, 5)
+        slip = ub.simulate_trade(bars, bars.index[0], +1, 100.0, 90.0, 105.0, 5, slippage_bps=10.0)
+        self.assertEqual(slip['exit_reason'], 'target')
+        self.assertLess(slip['exit_price'], 105.0)          # long target fills below the level
+        self.assertLess(slip['pnl_pct'], base['pnl_pct'])
+
+    def test_short_stop_triggered_slippage(self):
+        # short (dir=-1): bar[1] high 106 >= stop 105 -> stop fires; adverse exit fills ABOVE 105
+        bars = _bars([100.0, 103.0], highs=[100.1, 106.0], lows=[99.9, 102.0])
+        base = ub.simulate_trade(bars, bars.index[0], -1, 100.0, 105.0, 1.0, 5)
+        slip = ub.simulate_trade(bars, bars.index[0], -1, 100.0, 105.0, 1.0, 5, slippage_bps=10.0)
+        self.assertEqual(slip['exit_reason'], 'stop')
+        self.assertGreater(slip['exit_price'], 105.0)       # short stop fills above the level (buy to cover)
+        self.assertLess(slip['pnl_pct'], base['pnl_pct'])
 
     def test_cost_bps_recalibrated(self):
         self.assertEqual(ub.resolve_cost_model_bps('equity'), 10.0)
