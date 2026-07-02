@@ -56,13 +56,16 @@ function makeStepNode(STEP, scriptName) {
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
     const { rc, stdout, stderrTail, durationMs, timedOut } = await runSubprocess(argv, { timeoutSec, env });
 
-    // Persist the step's stdout tail on EVERY completion (success included).
-    // rc=0 zero-order days were un-diagnosable twice (2026-06-02/03): the
-    // sizer's own log line naming the cause ("dropped N tickers below
+    // Persist the step's stdout AND stderr tails on EVERY completion (success
+    // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):
+    // the sizer's own log line naming the cause ("dropped N tickers below
     // min_cum_sharpe=4.00 (kept=0)") was captured above and then discarded —
-    // only aborts persisted anything (stderr, below). Tail-bounded so chatty
-    // steps (engine.py) can't bloat the file. Failure here must never break
-    // the step itself.
+    // only aborts persisted anything (stderr, below). Same pattern, stderr
+    // edition (2026-07-02): the sizer's rc=0 diagnostics (corr_cumsharpe.live /
+    // breadth_weight / clamp) print to stderr whose only other sink is a
+    // self-expiring Discord post (pipeline_config corr_cumsharpe_log_until).
+    // Tail-bounded so chatty steps (engine.py) can't bloat the file. Failure
+    // here must never break the step itself.
     try {
       const fs = require('node:fs');
       const logDir = path.join(ROOT, 'logs');
@@ -70,7 +73,10 @@ function makeStepNode(STEP, scriptName) {
       const stepsLog = path.join(logDir, `daily_cycle_steps_${state.runDate}.log`);
       const header = `\n=== ${new Date().toISOString()} step=${STEP} rc=${rc} durationMs=${durationMs} timedOut=${timedOut || false} runId=${runId} ===\n`;
       const tail = (stdout || '').slice(-4000);
-      fs.appendFileSync(stepsLog, header + (tail || '(stdout empty)') + '\n');
+      const errTail = (stderrTail || '').slice(-4000);
+      fs.appendFileSync(stepsLog,
+        header + (tail || '(stdout empty)') + '\n'
+        + (errTail ? `--- stderr tail ---\n${errTail}\n` : ''));
     } catch (e) {
       console.warn(`[daily_cycle_node] stdout persistence failed for ${STEP}: ${e.message}`);
     }

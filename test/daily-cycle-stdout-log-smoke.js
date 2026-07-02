@@ -42,7 +42,8 @@ Module._load = function (request, parent, ...rest) {
           if (scriptMode === 'ok') {
             return {
               argv: ['node', '-e',
-                'console.log("STDOUT_MARKER_OK kept=0 below min_cum_sharpe=4.00")'],
+                'console.log("STDOUT_MARKER_OK kept=0 below min_cum_sharpe=4.00");' +
+                'console.error("STDERR_DIAG_OK corr_cumsharpe.live dist=[1.1,1.6]")'],
               timeoutSec: 30,
             };
           }
@@ -104,6 +105,8 @@ function cleanup() {
     'steps log must carry a header with step + rc');
   assert.ok(log.includes('run-stdoutlog-test'),
     'steps log header must carry the runId');
+  assert.ok(log.includes('STDERR_DIAG_OK corr_cumsharpe.live'),
+    'rc=0 stderr (sizer diagnostics) must ALSO land in the steps log');
 
   // ── 2. rc=2: stdout persisted to steps log; stderr still in aborts log ──
   scriptMode = 'fail';

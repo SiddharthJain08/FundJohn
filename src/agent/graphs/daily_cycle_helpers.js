@@ -53,7 +53,7 @@ function runSubprocess(argv, { timeoutSec = 600, env = process.env, cwd } = {}) 
       resolve({
         rc,
         stdout,
-        stderrTail: stderr.slice(-1000),
+        stderrTail: stderr.slice(-4000),
         durationMs,
         timedOut,
       });
