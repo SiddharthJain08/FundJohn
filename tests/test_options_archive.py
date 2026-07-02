@@ -107,6 +107,122 @@ def test_concurrent_append_preserves_all_rows(tmp_path):
     assert len(df) == 800, f'expected 800 rows after 8 concurrent writers, got {len(df)}'
 
 
+def test_append_parquet_write_is_atomic(tmp_path, monkeypatch):
+    """2026-06-29 regression: a kill mid-to_parquet must leave the previous
+    master intact (write goes to a tmp sibling, then os.replace)."""
+    from src.pipeline.backfillers.alpaca_options import _append_parquet
+    parquet = tmp_path / 'options_eod.parquet'
+    _append_parquet(
+        [{'date': '2026-05-21', 'contract_symbol': 'A', 'delta': 0.5}],
+        parquet_path=parquet,
+    )
+    before = parquet.read_bytes()
+
+    real_to_parquet = pd.DataFrame.to_parquet
+
+    def dying_to_parquet(self, path, *a, **kw):
+        # Simulate SIGTERM mid-write: leave a partial tmp file, then die.
+        Path(path).write_bytes(b'PAR1partial-no-footer')
+        raise KeyboardInterrupt('killed mid-write')
+
+    monkeypatch.setattr(pd.DataFrame, 'to_parquet', dying_to_parquet)
+    with pytest.raises(KeyboardInterrupt):
+        _append_parquet(
+            [{'date': '2026-05-22', 'contract_symbol': 'B', 'delta': 0.6}],
+            parquet_path=parquet,
+        )
+    monkeypatch.setattr(pd.DataFrame, 'to_parquet', real_to_parquet)
+
+    assert parquet.read_bytes() == before, 'master must be untouched by a failed write'
+    assert not list(tmp_path.glob('*.tmp-*')), 'failed write must not leave tmp litter'
+    df = pd.read_parquet(parquet)  # still readable
+    assert len(df) == 1
+
+
+def test_main_fail_fast_on_corrupt_master(tmp_path, monkeypatch):
+    """A corrupt master previously produced ~5k per-ticker read failures per
+    run; main() must now abort before touching the universe or the pool."""
+    from src.pipeline.backfillers import alpaca_options
+    corrupt = tmp_path / 'options_eod.parquet'
+    corrupt.write_bytes(b'PAR1' + b'\x00' * 128)  # header ok, no footer
+    monkeypatch.setattr(alpaca_options, 'PARQUET_PATH', corrupt)
+    with patch.object(alpaca_options, '_load_universe') as mock_uni, \
+         patch.object(alpaca_options, '_resolver_archive_universe') as mock_res:
+        rc = alpaca_options.main('2026-07-02')
+        assert rc == 1
+        mock_uni.assert_not_called()
+        mock_res.assert_not_called()
+
+
+def test_main_single_merge_write_and_deferred_checkpoints(tmp_path, monkeypatch):
+    """The run must rewrite the master ONCE (not once per ticker) and set
+    Redis checkpoints only after the flush lands."""
+    from src.pipeline.backfillers import alpaca_options
+    parquet = tmp_path / 'options_eod.parquet'
+    monkeypatch.setattr(alpaca_options, 'PARQUET_PATH', parquet)
+
+    def fake_page(ticker, page_token=None):
+        return {
+            'next_page_token': None,
+            'snapshots': {
+                f'{ticker}260618C00100000':
+                    SAMPLE_CHAIN_PAGE_1['snapshots']['SPY260618C00742000'],
+            },
+        }
+
+    merge_calls = []
+    real_merge = alpaca_options._merge_write
+
+    def counting_merge(new_df, **kw):
+        merge_calls.append(len(new_df))
+        kw.setdefault('parquet_path', parquet)
+        return real_merge(new_df, **kw)
+
+    checkpoints = []
+    with patch.object(alpaca_options, '_fetch_chain_page', side_effect=fake_page), \
+         patch.object(alpaca_options, '_resolver_archive_universe', return_value=None), \
+         patch.object(alpaca_options, '_load_universe', return_value=['SPY', 'QQQ', 'IWM']), \
+         patch.object(alpaca_options, '_redis_checkpoint_done', return_value=False), \
+         patch.object(alpaca_options, '_redis_checkpoint_set',
+                      side_effect=lambda t, d: checkpoints.append(t)), \
+         patch.object(alpaca_options, '_merge_write', side_effect=counting_merge):
+        rc = alpaca_options.main('2026-07-02')
+
+    assert rc == 0
+    assert len(merge_calls) == 1, f'expected ONE master rewrite, got {len(merge_calls)}'
+    assert merge_calls[0] == 3
+    assert sorted(checkpoints) == ['IWM', 'QQQ', 'SPY']
+    df = pd.read_parquet(parquet)
+    assert len(df) == 3
+
+
+def test_main_no_checkpoint_when_flush_fails(tmp_path, monkeypatch):
+    """Flush failure must return rc=1 and checkpoint NOTHING — otherwise the
+    day is marked done while its rows evaporate with the process."""
+    from src.pipeline.backfillers import alpaca_options
+    monkeypatch.setattr(alpaca_options, 'PARQUET_PATH', tmp_path / 'options_eod.parquet')
+
+    def fake_page(ticker, page_token=None):
+        return {
+            'next_page_token': None,
+            'snapshots': {
+                f'{ticker}260618C00100000':
+                    SAMPLE_CHAIN_PAGE_1['snapshots']['SPY260618C00742000'],
+            },
+        }
+
+    with patch.object(alpaca_options, '_fetch_chain_page', side_effect=fake_page), \
+         patch.object(alpaca_options, '_resolver_archive_universe', return_value=None), \
+         patch.object(alpaca_options, '_load_universe', return_value=['SPY']), \
+         patch.object(alpaca_options, '_redis_checkpoint_done', return_value=False), \
+         patch.object(alpaca_options, '_redis_checkpoint_set') as mock_ckpt, \
+         patch.object(alpaca_options, '_merge_write', side_effect=OSError('disk full')):
+        rc = alpaca_options.main('2026-07-02')
+
+    assert rc == 1
+    mock_ckpt.assert_not_called()
+
+
 def test_decode_occ_rejects_adjusted_symbol():
     """SP-1: GME1-style adjusted symbols must not produce bogus expiries."""
     from src.pipeline.backfillers.alpaca_options import _decode_occ

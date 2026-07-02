@@ -230,16 +230,35 @@ def _flatten_snapshot(contract_symbol: str, snap: dict, *, date: str, underlying
     }
 
 
-def _append_parquet(rows: list[dict], *, parquet_path: Path = PARQUET_PATH) -> None:
-    """Append-dedupe on (date, contract_symbol). Last write wins on duplicates.
+def _master_readable(parquet_path: Path | None = None) -> bool:
+    """Cheap footer/metadata validation before a run touches anything.
 
-    Thread-safe: serializes read-modify-write via module-level lock so concurrent
-    archive_ticker_chain calls from the ThreadPoolExecutor don't clobber each other.
+    A corrupt master (the 2026-06-29 mid-write SIGTERM truncation) previously
+    surfaced as ~5k per-ticker read failures over ~12 CPU-minutes every run;
+    abort up-front with one actionable error instead.
     """
-    if not rows:
-        return
+    parquet_path = parquet_path or PARQUET_PATH
+    if not parquet_path.exists():
+        return True
+    try:
+        import pyarrow.parquet as pq
+        pq.ParquetFile(parquet_path)
+        return True
+    except Exception as e:  # noqa: BLE001 — any unreadable state must abort
+        log.error('master parquet unreadable (%s) — aborting run; repair/restore '
+                  '%s before the next archive', e, parquet_path)
+        return False
+
+
+def _merge_write(new_df: pd.DataFrame, *, parquet_path: Path = PARQUET_PATH) -> None:
+    """Merge-dedupe new_df into the master and write ATOMICALLY.
+
+    The pre-2026-07 writer called to_parquet on the master path directly; a
+    SIGTERM mid-write truncated the file (footer never landed). Write to a
+    pid-suffixed sibling and os.replace so a kill at any instant leaves the
+    previous master intact.
+    """
     with _PARQUET_LOCK:
-        new_df = pd.DataFrame(rows)
         if parquet_path.exists():
             old_df = pd.read_parquet(parquet_path)
             merged = pd.concat([old_df, new_df], ignore_index=True)
@@ -249,11 +268,37 @@ def _append_parquet(rows: list[dict], *, parquet_path: Path = PARQUET_PATH) -> N
             subset=['date', 'contract_symbol'], keep='last',
         )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        merged.to_parquet(parquet_path, index=False)
+        tmp = parquet_path.with_name(f'{parquet_path.name}.tmp-{os.getpid()}')
+        try:
+            merged.to_parquet(tmp, index=False)
+            os.replace(tmp, parquet_path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
-def archive_ticker_chain(ticker: str, *, date: str) -> int:
-    """Archive one ticker's full chain. Returns row count written."""
+def _append_parquet(rows: list[dict], *, parquet_path: Path = PARQUET_PATH) -> None:
+    """Append-dedupe on (date, contract_symbol). Last write wins on duplicates.
+
+    Thread-safe: serializes read-modify-write via module-level lock so
+    concurrent callers don't clobber each other. External callers
+    (backfill_universe_5y promotion) keep this immediate-write semantic;
+    main() spools instead — one merge per run, not one per ticker.
+    """
+    if not rows:
+        return
+    _merge_write(pd.DataFrame(rows), parquet_path=parquet_path)
+
+
+def archive_ticker_chain(ticker: str, *, date: str, sink=None,
+                         defer_checkpoint: bool = False) -> int:
+    """Archive one ticker's full chain. Returns row count written.
+
+    sink: rows consumer; defaults to the immediate atomic merge-write.
+    main() passes a spool so the whole run does ONE master rewrite.
+    defer_checkpoint: caller owns the Redis checkpoint — set it only after
+    the spooled rows actually land on disk, else a crash between fetch and
+    flush would mark the day done while its rows evaporate with the process.
+    """
     if _redis_checkpoint_done(ticker, date):
         return 0
     rows: list[dict] = []
@@ -266,8 +311,9 @@ def archive_ticker_chain(ticker: str, *, date: str) -> int:
         page_token = page.get('next_page_token')
         if not page_token:
             break
-    _append_parquet(rows)
-    _redis_checkpoint_set(ticker, date)
+    (sink or _append_parquet)(rows)
+    if not defer_checkpoint:
+        _redis_checkpoint_set(ticker, date)
     return len(rows)
 
 
@@ -286,6 +332,8 @@ def _load_universe() -> list[str]:
 
 def main(date_str: str | None = None) -> int:
     date = date_str or _date.today().isoformat()
+    if not _master_readable(PARQUET_PATH):
+        return 1
     universe = _resolver_archive_universe(date) or _load_universe()
     log.info('options-archive start date=%s tickers=%d', date, len(universe))
 
@@ -293,9 +341,25 @@ def main(date_str: str | None = None) -> int:
     written_total = 0
     completed = 0
     failed: list[str] = []
+    done_ticks: list[str] = []
+
+    # Spool per-ticker rows in memory; ONE merge + atomic write at the end.
+    # The old per-ticker sink re-read + rewrote the whole master once per
+    # ticker — O(N²) I/O that blew the unit timeout at the SP-7 wide universe
+    # (5k names) and got SIGTERM'd mid-write (2026-06-29 corruption).
+    spooled: list[pd.DataFrame] = []
+    spool_lock = threading.Lock()
+
+    def _spool(rows: list[dict], **_kw) -> None:
+        if not rows:
+            return
+        with spool_lock:
+            spooled.append(pd.DataFrame(rows))
 
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-        futures = {ex.submit(archive_ticker_chain, t, date=date): t for t in universe}
+        futures = {ex.submit(archive_ticker_chain, t, date=date,
+                             sink=_spool, defer_checkpoint=True): t
+                   for t in universe}
         for fut in as_completed(futures):
             t = futures[fut]
             if time.time() > deadline:
@@ -305,9 +369,20 @@ def main(date_str: str | None = None) -> int:
                 n = fut.result()
                 written_total += n
                 completed += 1
+                done_ticks.append(t)
             except Exception as e:
                 log.warning('archive failed for %s: %s', t, e)
                 failed.append(t)
+
+    try:
+        if spooled:
+            _merge_write(pd.concat(spooled, ignore_index=True))
+        for t in done_ticks:
+            _redis_checkpoint_set(t, date)
+    except Exception as e:  # noqa: BLE001 — flush failure must not checkpoint
+        log.error('final merge-write failed — nothing checkpointed, the day '
+                  're-fetches on the next run: %s', e)
+        return 1
 
     log.info('options-archive done date=%s tickers=%d/%d rows=%d failed=%d',
              date, completed, len(universe), written_total, len(failed))
