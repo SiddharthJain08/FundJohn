@@ -2240,6 +2240,18 @@ def execute_single(sess, equity, order, run_date):
                 if qty_opg < 1:
                     log(f'{ticker} OPG: no broker qty resolved — falling back to RTH day-sweep')
                 else:
+                    # 2026-07-01: 55 of 73 premarket OPG closes 403'd
+                    # "insufficient qty available (requested N, available 0)" —
+                    # the prior evening's reattached GTC OCO stop legs reserve
+                    # the full position qty overnight; this is the same hold
+                    # the RTH path already clears (_rth_position_close). Same
+                    # gate, same settle-polling helper, same best-effort guard:
+                    # a cancel failure must never abort the close attempt.
+                    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+                        try:
+                            _cancel_open_equity_orders(ticker)
+                        except Exception as _cx:   # noqa: BLE001 — close must proceed
+                            log(f'  ↳ equity order-cancel best-effort failed (continuing to OPG): {_cx}')
                     ok_opg, pay_opg, err_opg = _submit_order_via_cli(
                         ticker=ticker, side=side, qty=qty_opg, tif='opg',
                         order_class='simple', target=None, stop=None, coid=coid,

@@ -339,3 +339,80 @@ def test_resolve_fill_price_filled_positive_no_warning():
 if __name__ == '__main__':
     import pytest
     raise SystemExit(pytest.main([__file__, '-v']))
+
+
+def test_opg_close_cancels_resting_stops_first():
+    """2026-07-01 regression: 55/73 premarket OPG closes 403'd 'insufficient
+    qty available' because the prior evening's reattached GTC OCO stop legs
+    reserved the full qty. Gated on OPENCLAW_EOD_RECONCILE=1, the OPG path
+    must cancel open equity orders (settle-polled) BEFORE the OPG submit —
+    mirroring _rth_position_close."""
+    call_order = []
+
+    def fake_cli(args, timeout=30):
+        if args[:2] == ['order', 'submit']:
+            call_order.append('submit')
+            return True, {'id': 'opg_oid', 'status': 'accepted'}, None
+        raise AssertionError(f'no further CLI expected; got {args}')
+
+    def fake_cancel(ticker):
+        call_order.append(f'cancel:{ticker}')
+        return 2
+
+    with mock.patch.dict('os.environ', {'OPENCLAW_OPEN_CLOSE_MODE': 'opg_then_day',
+                                        'OPENCLAW_EOD_RECONCILE': '1'}), \
+            mock.patch.object(ae, '_alpaca_session_kind', return_value='premarket'), \
+            mock.patch.object(ae, '_fetch_position_qty', return_value=50.0), \
+            mock.patch.object(ae, '_cancel_open_equity_orders', side_effect=fake_cancel), \
+            mock.patch.object(ae, '_run_alpaca_cli', side_effect=fake_cli), \
+            mock.patch.object(ae, '_poll_to_terminal', return_value={
+                'id': 'opg_oid', 'status': 'filled', 'filled_qty': 50,
+                'filled_avg_price': 99.80}):
+        res = _exec(_dropped_order())
+
+    assert res['status'] == 'filled', res
+    assert call_order == ['cancel:SPY', 'submit'], call_order  # cancel BEFORE submit
+
+
+def test_opg_close_cancel_failure_never_blocks_the_close():
+    """Best-effort guard: a cancel-helper crash must not abort the OPG close."""
+    def fake_cli(args, timeout=30):
+        if args[:2] == ['order', 'submit']:
+            return True, {'id': 'opg_oid', 'status': 'accepted'}, None
+        raise AssertionError(f'no further CLI expected; got {args}')
+
+    with mock.patch.dict('os.environ', {'OPENCLAW_OPEN_CLOSE_MODE': 'opg_then_day',
+                                        'OPENCLAW_EOD_RECONCILE': '1'}), \
+            mock.patch.object(ae, '_alpaca_session_kind', return_value='premarket'), \
+            mock.patch.object(ae, '_fetch_position_qty', return_value=50.0), \
+            mock.patch.object(ae, '_cancel_open_equity_orders',
+                              side_effect=RuntimeError('cancel exploded')), \
+            mock.patch.object(ae, '_run_alpaca_cli', side_effect=fake_cli), \
+            mock.patch.object(ae, '_poll_to_terminal', return_value={
+                'id': 'opg_oid', 'status': 'filled', 'filled_qty': 50,
+                'filled_avg_price': 99.80}):
+        res = _exec(_dropped_order())
+
+    assert res['status'] == 'filled', res
+
+
+def test_opg_close_gate_off_skips_cancel():
+    """OPENCLAW_EOD_RECONCILE off → zero new CLI calls (legacy byte-identical)."""
+    def fake_cli(args, timeout=30):
+        if args[:2] == ['order', 'submit']:
+            return True, {'id': 'opg_oid', 'status': 'accepted'}, None
+        raise AssertionError(f'no further CLI expected; got {args}')
+
+    with mock.patch.dict('os.environ', {'OPENCLAW_OPEN_CLOSE_MODE': 'opg_then_day',
+                                        'OPENCLAW_EOD_RECONCILE': '0'}), \
+            mock.patch.object(ae, '_alpaca_session_kind', return_value='premarket'), \
+            mock.patch.object(ae, '_fetch_position_qty', return_value=50.0), \
+            mock.patch.object(ae, '_cancel_open_equity_orders') as mock_cancel, \
+            mock.patch.object(ae, '_run_alpaca_cli', side_effect=fake_cli), \
+            mock.patch.object(ae, '_poll_to_terminal', return_value={
+                'id': 'opg_oid', 'status': 'filled', 'filled_qty': 50,
+                'filled_avg_price': 99.80}):
+        res = _exec(_dropped_order())
+
+    assert res['status'] == 'filled', res
+    mock_cancel.assert_not_called()
