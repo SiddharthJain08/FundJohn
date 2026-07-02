@@ -196,6 +196,10 @@ _IMPL_MAP = {
     'S_ast_turn_of_the_month_in_equity_indexes': ('strategies.implementations.S_ast_turn_of_the_month_in_equity_indexes', 'AstTurnOfTheMonthInEquityIndexes'),
     # Quantpedia: Trend Following Effect in Stocks — ATH-breakout + ATR(10) trailing stop
     'S_ast_trend_following_effect_in_stocks': ('strategies.implementations.S_ast_trend_following_effect_in_stocks', 'AstTrendFollowingEffectInStocks'),
+    # Quantpedia: Short-Term Reversal in Stocks — weekly long/short cross-sectional reversal
+    'S_ast_short_term_reversal_in_stocks': ('strategies.implementations.S_ast_short_term_reversal_in_stocks', 'AstShortTermReversalInStocks'),
+    # Quantpedia: Sector Momentum Rotational System — monthly top-3 252-day ROC rotation across 10 sector ETFs
+    'S_ast_sector_momentum_rotational_system': ('strategies.implementations.S_ast_sector_momentum_rotational_system', 'SectorMomentumRotationalSystem'),
     # Oxford/blueprint batch — impl files + manifest entries existed but _IMPL_MAP
     # wiring was never done, so all 30 were unimportable (12 live ones were
     # "dead live": manifest live, 0 registry rows, 0 signals ever). Wired
@@ -241,6 +245,26 @@ _IMPL_MAP = {
     'S_triangulated_stat_arb_triplets': ('strategies.implementations.S_triangulated_stat_arb_triplets', 'TriangulatedStatArbTriplets'),
     # Safari & Schmidhuber 2026: quadratic trend-strength model forecasts next-day variance → vol-targeted long-short
     'S_trend_vol_quadratic_forecast': ('strategies.implementations.S_trend_vol_quadratic_forecast', 'TrendVolQuadraticForecast'),
+    # Quantpedia: Return Asymmetry Effect in Commodity Futures — monthly long/short IE-ranked ETP proxies
+    'S_ast_return_asymmetry_effect_in_commodity_futures': ('strategies.implementations.S_ast_return_asymmetry_effect_in_commodity_futures', 'ReturnAsymmetryEffectInCommodityFutures'),
+    # Quantpedia: Rebalancing Premium in Cryptocurrencies — daily equal-weight rebalancing BTC-USD + ETH-USD
+    'S_ast_rebalancing_premium_in_cryptocurrencies': ('strategies.implementations.S_ast_rebalancing_premium_in_cryptocurrencies', 'RebalancingPremiumInCryptocurrencies'),
+    # Quantpedia: Payday Anomaly — long SPY on monthly payday (15th or prior Friday), exit next day
+    'S_ast_payday_anomaly': ('strategies.implementations.S_ast_payday_anomaly', 'AstPaydayAnomaly'),
+    # Quantpedia: Pairs Trading with Country ETFs — mean-reversion long/short across 23 MSCI country ETFs + SPY
+    'S_ast_pairs_trading_with_country_etfs': ('strategies.implementations.S_ast_pairs_trading_with_country_etfs', 'AstPairsTradingWithCountryEtfs'),
+    # Quantpedia: Paired Switching — quarterly rotation between SPY and AGG based on 90-day trailing return
+    'S_ast_paired_switching': ('strategies.implementations.S_ast_paired_switching', 'AstPairedSwitching'),
+    # Zhao 2026: gradient-boosting insider purchase signals in microcap equities ($30M–$500M)
+    'S_microcap_insider_purchase_momentum': ('strategies.implementations.S_microcap_insider_purchase_momentum', 'MicrocapInsiderPurchaseMomentum'),
+    # Devanathan et al. 2026: proportional-control vol targeting on IVV/SPY ETP
+    'S_adaptive_vol_control_proportional': ('strategies.implementations.S_adaptive_vol_control_proportional', 'AdaptiveVolControlProportional'),
+    # Roman 2026: SVD condition-number MRI over 11 sector ETFs — monthly SPY timing gate
+    'S_market_rank_indicator_timing': ('strategies.implementations.S_market_rank_indicator_timing', 'MarketRankIndicatorTiming'),
+    # Quantpedia: Option Expiration Week Effect — long OEF Mon–Thu of 3rd-Friday expiry week
+    'S_ast_option_expiration_week_effect': ('strategies.implementations.S_ast_option_expiration_week_effect', 'OptionExpirationWeekEffect'),
+    # Quantpedia: Momentum in Mutual Fund Returns — quarterly top-decile 6-month momentum rotation across broad ETF proxy basket
+    'S_ast_momentum_in_mutual_fund_returns': ('strategies.implementations.S_ast_momentum_in_mutual_fund_returns', 'MomentumInMutualFundReturns'),
 }
 
 

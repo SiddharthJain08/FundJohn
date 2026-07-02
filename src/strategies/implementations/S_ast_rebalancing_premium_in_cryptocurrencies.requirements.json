@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_rebalancing_premium_in_cryptocurrencies",
+  "required": ["prices"],
+  "optional": []
+}

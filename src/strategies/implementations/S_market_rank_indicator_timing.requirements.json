@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_market_rank_indicator_timing",
+  "required": ["prices"],
+  "optional": []
+}

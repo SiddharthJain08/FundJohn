@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_option_expiration_week_effect",
+  "required": ["prices"],
+  "optional": []
+}

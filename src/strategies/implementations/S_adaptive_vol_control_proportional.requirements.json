@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_adaptive_vol_control_proportional",
+  "required": ["prices"],
+  "optional": []
+}

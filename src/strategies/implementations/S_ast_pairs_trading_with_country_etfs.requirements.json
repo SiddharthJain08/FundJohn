@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_pairs_trading_with_country_etfs",
+  "required": ["prices"],
+  "optional": []
+}

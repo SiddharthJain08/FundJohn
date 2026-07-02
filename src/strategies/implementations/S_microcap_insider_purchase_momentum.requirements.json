@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_microcap_insider_purchase_momentum",
+  "required": ["prices", "insider"],
+  "optional": ["financials"]
+}

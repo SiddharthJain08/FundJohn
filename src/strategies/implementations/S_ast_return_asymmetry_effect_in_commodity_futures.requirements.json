@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_return_asymmetry_effect_in_commodity_futures",
+  "required": ["prices"],
+  "optional": []
+}

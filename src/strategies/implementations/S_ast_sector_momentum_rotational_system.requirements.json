@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_sector_momentum_rotational_system",
+  "required": ["prices"],
+  "optional": []
+}
