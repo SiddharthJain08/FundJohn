@@ -55,7 +55,10 @@ def _fetch_account_state(sess):
         'short_market_value':    0.0,
         'buying_power':          PAPER_PORTFOLIO,
         'regt_buying_power':     PAPER_PORTFOLIO,
-        'daytrading_buying_power': PAPER_PORTFOLIO,
+        # daytrading_buying_power: deliberately NO default — Alpaca removes
+        # the field 2026-07-06 (PDT retirement); it is set below only while
+        # the API still provides it. A fabricated default would re-cap the
+        # opening budget with a phantom value after removal.
         'initial_margin':        0.0,
         'maintenance_margin':    0.0,
         'multiplier':            1.0,

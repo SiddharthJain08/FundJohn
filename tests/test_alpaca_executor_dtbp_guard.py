@@ -11,29 +11,48 @@ from execution import alpaca_executor as ae  # noqa: E402
 
 
 class TestDtbpBudget(unittest.TestCase):
-    def test_budget_is_min_of_dtbp_and_regt_floored_at_zero(self):
+    def test_budget_is_min_of_bp_and_regt_floored_at_zero(self):
         self.assertEqual(ae._dtbp_opening_budget(
-            {'daytrading_buying_power': 0.0, 'regt_buying_power': 58000.0}), 0.0)
+            {'buying_power': 0.0, 'regt_buying_power': 58000.0}), 0.0)
         self.assertEqual(ae._dtbp_opening_budget(
-            {'daytrading_buying_power': 90000.0, 'regt_buying_power': 58000.0}), 58000.0)
+            {'buying_power': 90000.0, 'regt_buying_power': 58000.0}), 58000.0)
         self.assertEqual(ae._dtbp_opening_budget(
-            {'daytrading_buying_power': -5.0, 'regt_buying_power': 100.0}), 0.0)
+            {'buying_power': -5.0, 'regt_buying_power': 100.0}), 0.0)
         self.assertEqual(ae._dtbp_opening_budget({}), 0.0)
+
+    def test_legacy_dtbp_field_honored_while_present_and_positive(self):
+        # Pre-2026-07-06: Alpaca still sends daytrading_buying_power — when
+        # positive it stays an extra min() term (old behavior preserved).
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'buying_power': 90000.0, 'regt_buying_power': 58000.0,
+             'daytrading_buying_power': 40000.0}), 40000.0)
+
+    def test_dtbp_field_removed_or_dummy_is_ignored(self):
+        # Post-removal (field absent) and the dummy-value window (0/None):
+        # budget must come from buying_power/regt, NOT collapse to 0.
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'buying_power': 90000.0, 'regt_buying_power': 58000.0}), 58000.0)
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'buying_power': 90000.0, 'regt_buying_power': 58000.0,
+             'daytrading_buying_power': 0.0}), 58000.0)
+        self.assertEqual(ae._dtbp_opening_budget(
+            {'buying_power': 90000.0, 'regt_buying_power': 58000.0,
+             'daytrading_buying_power': None}), 58000.0)
 
     def test_failed_fetch_is_conservative_zero(self):
         # _fetch_account_state sets fetched=False on failure (BP fields fall
         # back to PAPER_PORTFOLIO). A failed re-fetch must NOT be permissive.
         self.assertEqual(ae._dtbp_opening_budget(
-            {'fetched': False, 'daytrading_buying_power': 100000.0,
+            {'fetched': False, 'buying_power': 100000.0,
              'regt_buying_power': 100000.0}), 0.0)
 
     def test_fetched_true_or_absent_uses_values(self):
         # fetched=True → normal; missing 'fetched' key (e.g. unit-test dicts) → normal
         self.assertEqual(ae._dtbp_opening_budget(
-            {'fetched': True, 'daytrading_buying_power': 40000.0,
+            {'fetched': True, 'buying_power': 40000.0,
              'regt_buying_power': 60000.0}), 40000.0)
         self.assertEqual(ae._dtbp_opening_budget(
-            {'daytrading_buying_power': 40000.0, 'regt_buying_power': 60000.0}), 40000.0)
+            {'buying_power': 40000.0, 'regt_buying_power': 60000.0}), 40000.0)
 
 
 class TestComputeDtbpSkips(unittest.TestCase):
@@ -44,13 +63,13 @@ class TestComputeDtbpSkips(unittest.TestCase):
     def test_skips_lowest_conviction_when_budget_tight(self):
         opens = [self._open('A', 0.30, 0.30), self._open('B', 0.30, 0.20),
                  self._open('C', 0.30, 0.10)]
-        acct = {'daytrading_buying_power': 65000.0, 'regt_buying_power': 999999.0}
+        acct = {'buying_power': 65000.0, 'regt_buying_power': 999999.0}
         self.assertEqual(ae._compute_dtbp_skips(opens, acct, equity=100000.0), {('C', 'C')})
 
     def test_stop_and_skip_all_after_first_nonfit(self):
         opens = [self._open('A', 0.30, 0.30), self._open('B', 0.05, 0.20),
                  self._open('C', 0.30, 0.10)]
-        acct = {'daytrading_buying_power': 31000.0, 'regt_buying_power': 999999.0}
+        acct = {'buying_power': 31000.0, 'regt_buying_power': 999999.0}
         self.assertEqual(ae._compute_dtbp_skips(opens, acct, equity=100000.0),
                          {('B', 'B'), ('C', 'C')})
 
@@ -66,7 +85,7 @@ class TestComputeDtbpSkips(unittest.TestCase):
 
     def test_ample_budget_skips_nothing(self):
         opens = [self._open('A', 0.30, 0.30), self._open('B', 0.30, 0.20)]
-        acct = {'daytrading_buying_power': 999999.0, 'regt_buying_power': 999999.0}
+        acct = {'buying_power': 999999.0, 'regt_buying_power': 999999.0}
         self.assertEqual(ae._compute_dtbp_skips(opens, acct, equity=100000.0), set())
 
 

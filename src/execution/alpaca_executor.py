@@ -1606,23 +1606,33 @@ def _exec_priority_for_test(o: dict) -> tuple[int, float]:
 def _dtbp_opening_budget(account: dict) -> float:
     """Max notional of NEW opening orders the account can fund this cycle.
 
-    = max(0, min(daytrading_buying_power, regt_buying_power)).
-    DTBP is the intraday day-trade limit Alpaca rejects opens against on a
-    PDT account; regt is the Reg-T overnight cap. Missing/negative -> 0.0
-    (fail safe: skip opens rather than over-submit). No headroom by design.
+    = max(0, min(buying_power, regt_buying_power [, daytrading_buying_power])).
+    FINRA retired the PDT rule 2026-06-04 and Alpaca REMOVES the
+    daytrading_buying_power account field on 2026-07-06 (dummy values until
+    then) — the old `min(dtbp, regt)` would read the missing field as 0 and
+    permanently skip every open. Under the Intraday Margin Framework the
+    binding intraday constraint is the real-time `buying_power` field;
+    regt_buying_power stays the Reg-T overnight cap. While the legacy field
+    is still present AND positive it is honored as an extra min() term, so
+    pre-removal behavior is unchanged; a 0/dummy/absent value is ignored.
+    Missing/negative inputs -> 0.0 (fail safe: skip opens, never over-submit).
 
     A failed account re-fetch (fetched is explicitly False) returns 0.0 so
     the guard skips opens rather than over-submitting on stale fallback values.
     (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
     """
-    # A failed account re-fetch (fetched is explicitly False) must not be
-    # permissive: return 0 so the guard skips opens rather than over-submit.
-    # (Absent 'fetched' key — e.g. unit-test dicts — is treated as fine.)
     if account.get('fetched') is False:
         return 0.0
-    dtbp = float(account.get('daytrading_buying_power') or 0.0)
+    bp = float(account.get('buying_power') or 0.0)
     regt = float(account.get('regt_buying_power') or 0.0)
-    return max(0.0, min(dtbp, regt))
+    budget = min(bp, regt)
+    try:
+        legacy = float(account.get('daytrading_buying_power'))
+    except (TypeError, ValueError):
+        legacy = None
+    if legacy is not None and legacy > 0:
+        budget = min(budget, legacy)
+    return max(0.0, budget)
 
 
 def _open_conviction(o: dict) -> float:
