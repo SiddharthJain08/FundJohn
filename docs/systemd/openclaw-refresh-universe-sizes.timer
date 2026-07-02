@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly refresh of per-strategy universe size N (breadth weight factor)
+
+[Timer]
+# Daily 06:00 UTC — quiet window (well before the 14:00 UTC / 10:00 ET cycle).
+# Universes only move on adoption / snapshot growth, so daily lag is fine.
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

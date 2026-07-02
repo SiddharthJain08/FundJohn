@@ -1,0 +1,21 @@
+[Unit]
+Description=SP-7 Phase B tier-ladder overnight window (armed via data/.sp7_ladder_armed)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/openclaw
+ExecStart=/bin/bash /root/openclaw/scripts/overnight_ladder.sh
+# Continuous-mode memory safety (operator directive 2026-06-10, fixed 2026-06-11):
+# the drain runs through the trading day. Two controls protect the live cycle on
+# the 8 GB no-swap box:
+#   OOMScoreAdjust=1000  -> a drain cell is ALWAYS the kernel's first OOM victim
+#                           (johnbot live runtime is +100), never the trading cycle.
+#   OOMPolicy=continue   -> when a cell's backtest child IS OOM-killed, systemd does
+#                           NOT tear down the unit (default 'stop' did); run_cell
+#                           records 'error' and the driver continues to the next cell.
+# NO MemoryMax: a hard cap below a heavy cell's legit peak (pairs_trading/tier_liquid
+# needs >3G) deterministically kills it. The 8 GB ceiling + system OOM + the driver's
+# RAM_FLOOR_MB=1800 self-throttle are the real bound. (MemoryMax=3G broke the drain
+# 2026-06-11: every heavy cell tripped a cgroup OOM and OOMPolicy=stop killed the unit.)
+OOMScoreAdjust=1000
+OOMPolicy=continue

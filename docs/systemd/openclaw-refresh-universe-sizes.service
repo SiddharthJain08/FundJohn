@@ -1,0 +1,20 @@
+[Unit]
+Description=Refresh strategy_universe_sizes — per-strategy universe size N for the breadth weight factor
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/refresh_universe_sizes.py
+StandardOutput=journal
+StandardError=journal
+# Reads a 2-column slice of prices.parquet + resolves ~62 predicates; seconds.
+# OOM-yield so it never competes with the live cycle on the 8GB box.
+OOMScoreAdjust=800
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

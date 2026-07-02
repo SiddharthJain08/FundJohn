@@ -1,0 +1,17 @@
+[Unit]
+Description=BotJohn — Saturday research verify (Sun 12:00 ET, read-only)
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/run_maintenance.js --mode saturday-verify
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=1200
+
+[Install]
+WantedBy=multi-user.target

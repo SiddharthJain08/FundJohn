@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly position sizing recommendations — Saturday 19:00 ET (23:00 UTC)
+
+[Timer]
+OnCalendar=Sat *-*-* 23:00:00
+Persistent=true
+Unit=openclaw-position-recs.service
+
+[Install]
+WantedBy=timers.target

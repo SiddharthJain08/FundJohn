@@ -1,0 +1,12 @@
+[Unit]
+Description=OpenClaw weekly strategy-weights + similarity refresh (Sun 24:00 ET / Mon 00:00 America/New_York)
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/weekly_live_sharpe.js
+StandardOutput=journal
+StandardError=journal

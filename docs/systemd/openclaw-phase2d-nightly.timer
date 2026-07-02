@@ -1,0 +1,11 @@
+[Unit]
+Description=Phase 2D nightly: signal overlap + proposal outcomes (03:00 ET)
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 America/New_York
+Persistent=true
+RandomizedDelaySec=5min
+Unit=openclaw-phase2d-nightly.service
+
+[Install]
+WantedBy=timers.target

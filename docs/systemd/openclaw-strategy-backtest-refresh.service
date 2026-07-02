@@ -1,0 +1,21 @@
+[Unit]
+Description=OpenClaw — weekly regime-partitioned backtest refresh
+After=docker.service postgresql.service network.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+# Nice=19: 65-strategy serial walk-forward pegs a full core for hours on the
+# 2-core VPS; deprioritize so it never starves the live bot / weekend jobs.
+Nice=19
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/backfill_regime_backtests.py --states live
+StandardOutput=append:/root/openclaw/logs/strategy_backtest_refresh.log
+StandardError=append:/root/openclaw/logs/strategy_backtest_refresh.log
+# 14400 (4h): was 3600 (1h), too short for the serial 65-strategy refresh -> it
+# was SIGTERM-killed at 1h before reaching [backfill] DONE. (W1 reconcile, 2026-06-28)
+TimeoutStartSec=14400
+
+[Install]
+WantedBy=multi-user.target

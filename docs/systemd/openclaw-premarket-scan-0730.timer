@@ -1,0 +1,11 @@
+[Unit]
+Description=Fire pre-market scan at 07:30 ET
+Requires=openclaw-premarket-scan@07:30.service
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 07:30:00 America/New_York
+Persistent=false
+Unit=openclaw-premarket-scan@07:30.service
+
+[Install]
+WantedBy=timers.target

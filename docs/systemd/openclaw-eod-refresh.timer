@@ -1,0 +1,11 @@
+[Unit]
+Description=OpenClaw EOD refresh — fires Mon-Fri at 20:30 UTC (4:30pm ET, 30 min after market close)
+After=network.target
+
+[Timer]
+OnCalendar=Mon..Fri 20:30:00
+Persistent=true
+Unit=openclaw-eod-refresh.service
+
+[Install]
+WantedBy=timers.target

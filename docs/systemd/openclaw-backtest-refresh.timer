@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh strategy backtests weekly (Saturday 06:00 UTC)
+
+[Timer]
+OnCalendar=Sat *-*-* 06:00:00 UTC
+Persistent=true
+Unit=openclaw-backtest-refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=MastermindJohn — weekly corpus curation (Saturday)
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+# Step 1a: arXiv q-fin broad fetch (90 days, 6 categories, no keyword filter)
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/arxiv_discovery.py --days 90 --max-per-cat 80 --no-legacy
+# Step 1b: SSRN + NBER + practitioner venues via OpenAlex
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/openalex_discovery.py --days 90 --limit-per-venue 200 --min-citations 0
+# Step 2: run MastermindJohn (corpus mode) + promote high bucket
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode corpus --full --batch-size 100 --max-promote 600
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

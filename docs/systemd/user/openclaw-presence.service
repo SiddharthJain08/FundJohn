@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenClaw Presence Manager — Agent online status for Discord
+After=network.target johnbot.service
+Requires=johnbot.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node src/channels/discord/presence-manager.js
+Restart=always
+RestartSec=10
+Environment=NODE_ENV=production
+EnvironmentFile=/root/openclaw/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openclaw-presence
+
+[Install]
+WantedBy=default.target

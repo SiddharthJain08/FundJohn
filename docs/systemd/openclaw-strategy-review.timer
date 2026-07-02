@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly comprehensive strategy review — Saturday 18:00 ET (22:00 UTC)
+
+[Timer]
+OnCalendar=Sat *-*-* 22:00:00
+Persistent=true
+Unit=openclaw-strategy-review.service
+
+[Install]
+WantedBy=timers.target

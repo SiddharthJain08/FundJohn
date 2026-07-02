@@ -1,0 +1,18 @@
+[Unit]
+Description=Refresh alpaca_tradable_universe from Alpaca asset list
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/python3 -m maintenance.refresh_tradable_universe
+Environment=PYTHONPATH=/root/openclaw/src
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

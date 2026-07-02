@@ -1,0 +1,19 @@
+[Unit]
+Description=MastermindJohn — Sunday paper expansion ingestion (web-scraped sources)
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode paper-expansion
+StandardOutput=journal
+StandardError=journal
+# Opus with WebSearch/WebFetch — may take up to 25 minutes.
+TimeoutStartSec=2100
+
+[Install]
+WantedBy=multi-user.target

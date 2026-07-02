@@ -1,0 +1,18 @@
+[Unit]
+Description=SP-7 C3 guarded auto-flip — RE-ARMED, fire once Fri 2026-06-26 22:30 UTC (after Fri EOD compute; G7 floor 4500→2500)
+Documentation=file:/root/openclaw/docs/sp7-phase-c-runbook.md
+
+[Timer]
+# RE-ARMED 2026-06-26: the Thu 06-25 22:30 fire ran + correctly aborted on G7
+# (MemAvailable 4428MB < the old 4500 floor) — a memory-floor abort, NOT a dirty
+# cycle (06-25 compute was clean, 921 signals). Floor recalibrated to 2500 after
+# measuring the real restart peak (~1.1GB; sync_data_ledger pyarrow pushdown) and
+# confirming the +1.65GB sentiment term is EOD-cron/clamp-gated, not the restart.
+# New target observes the Fri 06-26 20:15 UTC EOD compute. 22:30 UTC = ~2h15 after
+# the compute + option_hedge (clear of it), before the overnight-backfill. One-time.
+OnCalendar=2026-06-26 22:30:00 UTC
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

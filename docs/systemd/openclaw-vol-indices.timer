@@ -1,0 +1,16 @@
+[Unit]
+Description=Run CBOE vol indices ingest Mon-Fri 17:30 America/New_York
+
+[Timer]
+# Fires 90 minutes after market close — by then Yahoo Finance has published
+# the day's settlement values for ^VIX / ^VVIX / ^VIX9D. Independent of the
+# daily collector cycle so vol_indices.parquet freshness doesn't depend on
+# yfinance succeeding inside collector.js's per-step timeout. Previously the
+# collector's ingest path silently dropped vol_indices fetches on yfinance
+# throttles, leading to 2d staleness despite the doctor WARN since 05-28.
+OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
+Persistent=true
+Unit=openclaw-vol-indices.service
+
+[Install]
+WantedBy=timers.target

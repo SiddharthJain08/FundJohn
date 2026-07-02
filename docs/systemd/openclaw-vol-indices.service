@@ -1,0 +1,22 @@
+[Unit]
+Description=CBOE vol indices ingestion (VIX/VVIX/VIX9D → vol_indices.parquet)
+After=network-online.target
+Wants=network-online.target
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+# User=root: matches the collector and every other data/master/*.parquet writer
+# (all root:root). Was User=claudebot, which could not overwrite the root-owned
+# vol_indices.parquet -> PermissionError. (W1 reconcile, 2026-06-28)
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw/src
+ExecStart=/usr/bin/python3 /root/openclaw/src/ingestion/ingest_vol_indices.py
+StandardOutput=append:/var/log/openclaw-vol-indices.log
+StandardError=append:/var/log/openclaw-vol-indices.log
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

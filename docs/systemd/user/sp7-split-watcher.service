@@ -1,0 +1,8 @@
+[Unit]
+Description=SP-7 split-watcher — detect splits on covered tickers, queue supersede re-backfills
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/nice -n 19 /usr/bin/python3 /root/openclaw/scripts/split_watcher.py

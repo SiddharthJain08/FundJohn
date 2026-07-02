@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly regime live PnL rollup (02:30 ET, after mark-to-close)
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 America/New_York
+Persistent=true
+RandomizedDelaySec=5min
+Unit=openclaw-regime-live-pnl.service
+
+[Install]
+WantedBy=timers.target

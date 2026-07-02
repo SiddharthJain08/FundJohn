@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly paper expansion ingestion — Sunday 08:00 ET (12:00 UTC)
+
+[Timer]
+OnCalendar=Sun *-*-* 12:00:00
+Persistent=true
+Unit=openclaw-paper-expansion.service
+
+[Install]
+WantedBy=timers.target

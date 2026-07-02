@@ -1,0 +1,40 @@
+[Unit]
+Description=BotJohn v2 — OpenClaw Hedge Fund Discord Bot (PTC Architecture)
+After=network-online.target
+Wants=network-online.target
+# Crash-loop backstop (matches the documented system unit): stop restarting
+# after 10 failures in 300s rather than hammering forever.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw
+# Pre-flight health check — non-blocking (leading '-'); matches the system unit.
+ExecStartPre=-/usr/bin/python3 /root/openclaw/src/maintenance/doctor.py --quick
+ExecStart=/usr/bin/node /root/openclaw/src/channels/discord/bot.js
+# Restart=always: recover even from a clean exit-0 — an always-on bot should
+# never stay down (was on-failure). (W1 reconcile, 2026-06-28)
+Restart=always
+RestartSec=10
+
+# API keys and runtime config from .env
+EnvironmentFile=-/root/openclaw/.env
+
+# Environment
+Environment="JOHN_WORKDIR=/root"
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="CLAUDE_BIN=/usr/local/bin/claude-bin"
+Environment="CLAUDE_UID=1001"
+Environment="CLAUDE_GID=1001"
+Environment="CLAUDE_HOME=/home/claudebot"
+Environment="CLAUDE_TIMEOUT_MS=600000"
+Environment="PATH=/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=johnbot
+
+[Install]
+WantedBy=default.target

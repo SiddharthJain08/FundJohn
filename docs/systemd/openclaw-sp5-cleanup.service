@@ -1,0 +1,17 @@
+[Unit]
+Description=SP-5.0 grounding-gate one-shot cleanup (close test-4 vertical, dry-run iron condor, L1 hierarchy test)
+After=network.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/root/openclaw/scripts/sp5_grounding_cleanup.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

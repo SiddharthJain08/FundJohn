@@ -1,0 +1,14 @@
+[Unit]
+Description=SP-7 Phase C C3 guarded auto-flip (OPENCLAW_SENTIMENT_RESOLVER_UNIVERSE) — one-shot
+Documentation=file:/root/openclaw/docs/sp7-phase-c-runbook.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=-/root/openclaw/.env
+Environment=PYTHONPATH=/root/openclaw
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/sp7_c3_guarded_flip.py
+# The script verifies Monday's C1 observe was clean + the restart is memory-safe,
+# then uncomments the .env gate and `systemctl --user restart johnbot`. On any
+# failed guard it aborts + alerts Discord and leaves C3 staged. Stdout → journald
+# (`journalctl --user -u sp7-c3-flip`).

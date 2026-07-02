@@ -1,0 +1,14 @@
+[Unit]
+Description=Post Discord notification when %i fails
+After=network.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/python3 /root/openclaw/scripts/systemd_failure_notify.py %i
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=60

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run BotJohn Saturday verify at 12:00 America/New_York
+
+[Timer]
+OnCalendar=Sun *-*-* 12:00:00 America/New_York
+Persistent=true
+Unit=openclaw-botjohn-saturday-verify.service
+
+[Install]
+WantedBy=timers.target

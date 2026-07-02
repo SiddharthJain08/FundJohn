@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenClaw pre-market sentiment panic scan (label=%i)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/python3 -m src.pipeline.run_premarket_scan --scan-label %i
+StandardOutput=journal
+StandardError=journal

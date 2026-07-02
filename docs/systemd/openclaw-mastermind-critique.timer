@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly MastermindJohn critique fan-out — Saturday 18:30 ET (22:30 UTC)
+
+[Timer]
+OnCalendar=Sat *-*-* 22:30:00
+Persistent=true
+Unit=openclaw-mastermind-critique.service
+
+[Install]
+WantedBy=timers.target

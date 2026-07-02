@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw weekend — Sunday research (8-phase saturday-brain pipeline)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/run_mastermind.js --mode saturday-brain
+StandardOutput=append:/var/log/openclaw/weekend_sunday.log
+StandardError=append:/var/log/openclaw/weekend_sunday.log
+TimeoutStartSec=21600
+
+[Install]
+WantedBy=multi-user.target

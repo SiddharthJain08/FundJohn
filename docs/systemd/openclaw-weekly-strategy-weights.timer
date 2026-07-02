@@ -1,0 +1,16 @@
+[Unit]
+Description=OpenClaw weekly strategy-weights refresh timer
+
+[Timer]
+# Sunday 24:00 ET (= Mon 00:00 America/New_York; DST-aware → 04:00 UTC EDT /
+# 05:00 UTC EST). Runs weekly_live_sharpe.js = strategy-weights THEN
+# strategy-similarity rebuild, so correlations recompute AFTER the weekend
+# research/review cycle accepts newly-created strategies into live trading,
+# and before Monday's first pipeline cycle. (Was Sun 10:00 UTC — moved 2026-06-26
+# so the recompute lands after weekend acceptances, not before them.)
+OnCalendar=Mon *-*-* 00:00:00 America/New_York
+Persistent=true
+Unit=openclaw-weekly-strategy-weights.service
+
+[Install]
+WantedBy=timers.target

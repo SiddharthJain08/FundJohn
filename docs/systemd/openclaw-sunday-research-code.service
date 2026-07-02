@@ -1,0 +1,49 @@
+[Unit]
+Description=Sunday research CODE — finisher phases 5-8
+After=network-online.target postgresql.service
+Wants=network-online.target
+PartOf=johnbot.service
+OnFailure=openclaw-failure-notify@%n.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+
+# Phase 5-8: reload today's hunted candidates from research_candidates, data-tier
+# filter, Tier-A synchronous code+backtest (idempotent — skips strategies already
+# in the manifest), Tier-B → STAGING (operator-gated), Tier-C vault notes; then
+# flip today's 08:00 ingest row (status='ingest_complete') to 'completed'.
+# --tier-a-cap 6 (W4-T3, 2026-06-30; was 3): the default 10 serial LLM-coder+
+# backtest jobs overran the 4h budget on the 2-core VPS (CPU only ~1.4h/4h, rest
+# blocked on I/O). Raised 3->6 now that three things freed the budget: W4-1 fixed
+# the finisher hang (exit0), W4-5 moved the Opus code-review to its own unit (the
+# full 4h is coding-only now), and W4-T3-C5 fingerprint-dedup skips duplicate
+# candidates before coding. A per-candidate watchdog is NOT needed: every coding
+# step runs through research-orchestrator._spawnPython, which SIGKILLs the child
+# on its own timeoutMs (validate 60s, backtest/port ~10min) — so per-candidate
+# time is already bounded and 6 jobs * ~24min stays well under 4h. A JS-level
+# Promise.race would only orphan those killable children, not help. Raise further
+# (8) only after observing a few clean Sunday runs at 6.
+#
+# Note: the MasterMind (Opus) candidate code-review was split into its own unit
+# openclaw-sunday-code-review (W4-5, 2026-06-30) so it has an independent 2h
+# timeout and cannot be starved by this unit's 4h finisher budget.
+
+# W4-6 recurrence guard: reap any zombie saturday_brain_finisher from a prior
+# hung run before this oneshot starts. The leading '-' makes a no-match non-fatal.
+ExecStartPre=-/usr/bin/pkill -f saturday_brain_finisher
+
+ExecStart=/usr/bin/node /root/openclaw/src/agent/curators/saturday_brain_finisher.js --mark-run-complete --tier-a-cap 6
+
+StandardOutput=journal
+StandardError=journal
+
+# Tier-A coding runs sequential backtests (heavy strategies can take ~hours; the
+# finisher caps Tier-A via --tier-a-cap). 14400 = 4 hours.
+TimeoutStartSec=14400
+
+[Install]
+WantedBy=multi-user.target

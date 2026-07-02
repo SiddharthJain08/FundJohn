@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenClaw — post-market EOD bar refresh (closes the 10am-ET cycle's same-day data gap)
+After=network.target postgresql.service
+PartOf=johnbot.service
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+EnvironmentFile=/root/openclaw/.env
+WorkingDirectory=/root/openclaw
+Environment=OPENCLAW_NO_HTTP_LISTEN=1
+ExecStart=/usr/bin/node /root/openclaw/src/pipeline/run_collector_once.js --eod-only
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
