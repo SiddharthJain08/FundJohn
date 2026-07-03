@@ -81,7 +81,7 @@ Fees aggregate per type per day, each rounded UP to the cent, posted EOD ([regul
 
 ## Open questions for the operator
 
-1. Is OPG/CLS available on a standard (non-Elite) live account? (Docs conflict — ask support; lane-critical.)
+1. ~~Is OPG/CLS available on a standard (non-Elite) live account?~~ **ANSWERED by Alpaca support (2026-07-02): OPG works on live accounts** — submit market/limit OPG before the open; executes ONLY in the opening auction, unfilled portions cancelled; submissions 9:28am–7:00pm ET are rejected, after 7:00pm queued for next day; execution timing per exchange auction rules. → The EOD→next-open fill lane is live-viable; the paper 7% fill rate stays an artifact.
 2. Will the live account be provisioned `multiplier=4`? (Needs only ≥$2k equity now, but confirm.)
 3. HTB shorting availability (margin doc vs fee schedule conflict) — recommendation: stay ETB-only regardless.
 4. Does paper deduct crypto maker/taker fees? (UNCONFIRMED both ways.)
