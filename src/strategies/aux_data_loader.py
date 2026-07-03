@@ -39,6 +39,7 @@ AGG_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 EARNINGS_PATH = ROOT / 'data' / 'master' / 'earnings.parquet'
 VOL_INDICES_PATH = ROOT / 'data' / 'master' / 'vol_indices.parquet'
 MACRO_PATH = ROOT / 'data' / 'master' / 'macro.parquet'
+FINANCIALS_PATH = ROOT / 'data' / 'master' / 'financials.parquet'
 INSIDER_PATH = ROOT / 'data' / 'master' / 'insider.parquet'
 SENTIMENT_PATH = ROOT / 'data' / 'master' / 'sentiment.parquet'
 
@@ -48,7 +49,25 @@ _AGG_DF: Optional[pd.DataFrame] = None
 _EARNINGS_DF: Optional[pd.DataFrame] = None
 _VOL_INDICES_DF: Optional[pd.DataFrame] = None
 _MACRO_SERIES: Optional[dict] = None
+_FIN_DF: Optional[pd.DataFrame] = None
 _SENT_DF = None
+
+# camelCase aliases MUST mirror engine.py load_aux_data exactly — strategies
+# read the FMP-style names (S10_quality_value, S_bankruptcy_risk_anomaly).
+_FIN_CAMEL_ALIASES = {
+    'returnOnEquity':           'roe',
+    'returnOnInvestedCapital':  'roic',
+    'grossProfitMargin':        'gross_margin',
+    'debtEquityRatio':          'debt_equity_ratio',
+    'enterpriseValueMultiple':  'ev_ebitda',
+    'priceToFreeCashFlowsRatio': 'p_fcf_ratio',
+    'totalAssets':              'total_assets',
+    'totalLiabilities':         'total_liabilities',
+    'retainedEarnings':         'retained_earnings',
+    'workingCapital':           'working_capital',
+    'operatingIncome':          'operating_income',
+    'marketCap':                'market_cap',
+}
 SENTIMENT_FIELDS = ['news_count_24h', 'news_mean_score', 'news_finbert_pos',
                     'news_finbert_neu', 'news_finbert_neg']
 # News sentiment decays fast; do not serve a score older than this (avoids stale-data signals).
@@ -377,6 +396,58 @@ def _macro_slice(date_str: str) -> dict:
     return out
 
 
+def _load_financials() -> pd.DataFrame:
+    global _FIN_DF
+    if _FIN_DF is not None:
+        return _FIN_DF
+    if not FINANCIALS_PATH.exists():
+        log.warning('aux_data_loader: %s missing — financials unavailable', FINANCIALS_PATH)
+        _FIN_DF = pd.DataFrame()
+        return _FIN_DF
+    try:
+        df = pd.read_parquet(FINANCIALS_PATH)
+        df['date'] = pd.to_datetime(df['date'])
+        _FIN_DF = df.sort_values('date')
+        log.info('aux_data_loader: financials loaded rows=%d tickers=%d',
+                 len(df), df['ticker'].nunique())
+    except Exception as e:  # noqa: BLE001 — aux is best-effort, never fatal
+        log.warning('aux_data_loader: financials load failed (%s)', e)
+        _FIN_DF = pd.DataFrame()
+    return _FIN_DF
+
+
+def _financials_slice(date_str: str) -> dict:
+    """Point-in-time financials: latest reported row per ticker with
+    period date <= as-of date, shaped {ticker: {field: value, ...camelCase
+    aliases}} exactly like engine.py's live aux['financials'].
+
+    Coverage note: financials.parquet holds a rolling ~4-6 quarters
+    (collector limit=4/quarterly), so deep-history backtest bars simply see
+    no financials (strategies already guard) — recent-window bars get the
+    real as-of snapshot. Added 2026-07-03 so financials strategies (S10,
+    S_bankruptcy) are no longer structurally backtest-blind.
+    """
+    df = _load_financials()
+    if df.empty:
+        return {}
+    ts = pd.to_datetime(date_str)
+    asof = df[df['date'] <= ts]
+    if asof.empty:
+        return {}
+    latest = asof.groupby('ticker').last()
+    out: dict = {}
+    for ticker, row in latest.iterrows():
+        d = {
+            k: (float(v) if pd.notna(v) else None)
+            for k, v in row.items()
+            if k not in ('date', 'period') and not isinstance(v, str)
+        }
+        for camel, snake in _FIN_CAMEL_ALIASES.items():
+            d[camel] = d.get(snake)
+        out[ticker] = d
+    return out
+
+
 def _load_sentiment_panel():
     global _SENT_DF
     if _SENT_DF is not None:
@@ -490,6 +561,10 @@ def load_aux_data(
                                 # point-in-time (rows <= date); mirrors the
                                 # live engine.py aux['macro'] format exactly
                                 # (VIX / VIX3M / VIX9D / VVIX from macro.parquet)
+        'financials':           {ticker: {field: value, +camelCase aliases}},
+                                # point-in-time latest report per ticker
+                                # (period date <= as-of); mirrors engine.py's
+                                # live aux['financials'] incl. aliases
         'insider_txns':         {ticker: [{transactionDate, transactionType,
                                            reportingName, value, shares}]},
         'insider_history_long': {ticker: [{transactionDate, transactionType,
@@ -513,6 +588,7 @@ def load_aux_data(
         'options':              _day_slice(date_str),
         'vol_indices':          _vol_indices_slice(date_str),
         'macro':                _macro_slice(date_str),
+        'financials':           _financials_slice(date_str),
         'insider_txns':         _insider_slice(date_str),
         'insider_history_long': _insider_long_slice(date_str),
         'sentiment':            _sentiment_day_slice(date_str),

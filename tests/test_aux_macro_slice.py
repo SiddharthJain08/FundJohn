@@ -66,3 +66,27 @@ def test_load_aux_data_carries_macro(macro_fixture, monkeypatch):
     assert 'macro' in aux
     assert set(aux['macro']) == {'VIX', 'VVIX'}
     assert float(aux['macro']['VIX'].loc['2026-07-01']) == 16.6
+
+
+def test_financials_slice_point_in_time(monkeypatch, tmp_path):
+    df = pd.DataFrame({
+        'ticker': ['AAPL', 'AAPL', 'MSFT'],
+        'period': ['2026Q1', '2026Q2', '2026Q2'],
+        'date':   ['2026-03-31', '2026-06-30', '2026-06-30'],
+        'roe':    [1.40, 1.52, 0.30],
+        'total_assets': [3.6e11, 3.7e11, 6.9e11],
+    })
+    p = tmp_path / 'financials.parquet'
+    df.to_parquet(p, index=False)
+    monkeypatch.setattr(adl, 'FINANCIALS_PATH', p)
+    monkeypatch.setattr(adl, '_FIN_DF', None)
+    mid = adl._financials_slice('2026-05-15')       # only Q1 visible
+    assert set(mid) == {'AAPL'}
+    assert mid['AAPL']['returnOnEquity'] == 1.40    # camelCase alias
+    assert mid['AAPL']['totalAssets'] == 3.6e11
+    late = adl._financials_slice('2026-07-01')      # Q2 for both
+    assert set(late) == {'AAPL', 'MSFT'}
+    assert late['AAPL']['returnOnEquity'] == 1.52
+    early = adl._financials_slice('2020-01-01')
+    assert early == {}
+    monkeypatch.setattr(adl, '_FIN_DF', None)

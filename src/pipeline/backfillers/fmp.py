@@ -48,7 +48,12 @@ INSIDER_COLUMNS    = {'insider', 'insider_transactions',
                       'cluster_buy_score', 'form_4'}
 
 FMP_QUARTER_CAP    = 30    # plan's historical limit
-MIN_BACKFILL_CALLS = 0.05  # seconds between ticker calls (soft throttle)
+# Seconds between TICKERS. The financials path now makes 4 API calls per
+# ticker (statements + ratios + key-metrics + balance-sheet); at the old
+# 0.05s the burst rate was ~80 calls/s vs FMP Starter's ~5/s cap — the
+# 2026-07-03 sp500 backfill 429'd on 409/581 tickers. 1.0s keeps the
+# steady-state at ~4 calls/s.
+MIN_BACKFILL_CALLS = 1.0
 
 
 def backfill(column_name: str, from_date: date, to_date: date) -> int:
