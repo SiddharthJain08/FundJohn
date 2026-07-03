@@ -85,3 +85,28 @@ per-bar exceptions and prints a loud WARN (+ `bars_raised` in the sim dict) — 
 100%-raise strategy can no longer masquerade as a clean 0-trade run.
 Post-155-run rerun list: add S_local_global_balance + S_skewness_dispersion_macro
 (their 07-02/07-03 corrected rows are bogus-zero from the bug era).
+
+### 2026-07-03 unlock update — macro loader + financials enrichment LANDED
+
+Operator-directed follow-up to the troubleshooting above (commits c48c877 + af8bc08):
+
+- **Backtest `aux['macro']`** now serves point-in-time VIX/VIX3M/VIX9D/VVIX series
+  (10y depth) mirroring live. **Row 14 (S_tr_01_vvix_early_warning) UNLOCKED** —
+  verified firing on the 2025-04-07 vol spike (VVIX 152.6, z=3.0).
+- **Financials root cause = FMP /stable/ field renames**: both writers (JS collector
+  + fmp.py backfiller) read dead v3 names → roe/roic/de/p_fcf were 0% populated.
+  Fixed stable-first mappings, added key-metrics + balance-sheet fetches, 5 new
+  Altman-Z columns, engine + backtest camelCase aliases, and a point-in-time
+  backtest `aux['financials']` slice. sp500 backfill complete: **573 tickers fully
+  enriched** (2 fetch failures). Verified on the sp500 universe:
+  **Row 1 (S10_quality_value) UNLOCKED — 10 signals** (ADBE/ALL/DECK/PAYX/PGR…);
+  **Row 7 (S_bankruptcy_risk_anomaly) UNLOCKED — 50 signals** (PHM/JBHT/SPGI…).
+- Revised recommendations: rows 1, 7, 14 move STOP → **HOLD for corrected
+  re-backtest** (financials-window caveat: backtest coverage spans the rolling
+  ~4-6 quarters financials.parquet holds, so their corrected metrics are
+  thin-window until history accrues). Row 5 (S_HV17 earnings coverage) and
+  row 15 (S_tr_04 30m bars) remain as before.
+- Post-155-run rerun list is now: S_ivol_cross_section_quintile,
+  S_ivol_mispricing_asymmetry (timeouts), S_local_global_balance,
+  S_skewness_dispersion_macro (bug-era zeros), S_tr_01_vvix_early_warning,
+  S10_quality_value, S_bankruptcy_risk_anomaly (newly unlocked).
