@@ -604,6 +604,8 @@ def _per_bar_simulate(
     trades: list[dict] = []
     days_processed = 0
     days_with_signals = 0
+    bars_raised = 0
+    first_raise: str | None = None
     # Track per-bar universe sizes when resolver is active.
     universe_sizes: list[int] = []
     # Within-run stop-out history: {ticker: last_stop_exit_date}. Built up
@@ -658,9 +660,20 @@ def _per_bar_simulate(
         except TypeError:
             try:
                 signals = instance.generate_signals(prices_to_date, regime_payload, bar_universe)
-            except Exception:
+            except Exception as _e:
+                bars_raised += 1
+                if first_raise is None:
+                    first_raise = f'{type(_e).__name__}: {_e}'
                 continue
-        except Exception:
+        except Exception as _e:
+            # Per-bar resilience is deliberate (one bad bar must not kill a
+            # multi-hour walk) — but a strategy that raises on EVERY bar used
+            # to masquerade as a clean 0-trade run (S_local_global_balance,
+            # 2026-07-03: pandas-3 read-only ValueError swallowed for 70 min,
+            # rc=0). Count + surface instead of vanishing.
+            bars_raised += 1
+            if first_raise is None:
+                first_raise = f'{type(_e).__name__}: {_e}'
             continue
 
         days_processed += 1
@@ -751,11 +764,18 @@ def _per_bar_simulate(
                 'daily_marks':    exit_info.get('daily_marks', []) if _true_mtm else [],
             })
 
+    if bars_raised:
+        total_bars = days_processed + bars_raised
+        print(f'[WARN] generate_signals raised on {bars_raised}/{total_bars} bars '
+              f'(first: {first_raise}) — 0-trade results are NOT trustworthy '
+              f'if this is a large share', file=sys.stderr)
+
     return {
         'trades':           trades,
         'universe_sizes':   universe_sizes,
         'days_processed':   days_processed,
         'days_with_signals': days_with_signals,
+        'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
     }

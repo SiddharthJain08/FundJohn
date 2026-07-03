@@ -64,3 +64,24 @@ Notes:
   registry row (gated /transition path; stamps deprecated_at per the W4 backlog fix), KEEP ⇒
   promote manifest to live so the dashboard matches trading reality.
 - This enrichment doubles as the F2-round-2 triage for these 16 (owed on corrected metrics).
+
+### 2026-07-03 troubleshooting update — why the 7 "dead weight" rows were silent
+
+Per-strategy root causes (probed by direct generate_signals invocation on real data,
+backtest-style AND live-style aux):
+
+| row | strategy | root cause | class | revised recommendation |
+|---|---|---|---|---|
+| 11 | S_local_global_balance | pandas-3 CoW: `np.fill_diagonal(corr.values)` raised ValueError on EVERY bar; unified_backtest's per-bar `except: continue` swallowed it silently (70-min walk, rc=0, 0 trades) + any-NaN `dropna()` row-annihilation | **CODE BUG — FIXED 07-03** | **HOLD** — re-backtest post-fix, decide on real metrics (probe now emits signals) |
+| 13 | S_skewness_dispersion_macro | `pct_change().dropna()` (any-NaN) annihilated every row of the wide returns panel → dispersion history always empty → `len<6` guard fired forever | **CODE BUG — FIXED 07-03** | **HOLD** — re-backtest post-fix (history now builds: 24 pts; today z=−0.23 < 1.0 entry = legitimately quiet) |
+| 14 | S_tr_01_vvix_early_warning | needs `aux['macro']['VVIX']` as a SERIES; backtest aux only has scalar day-values under `vol_indices` → backtest-blind. LIVE works (engine provides 4 macro series; 2 signals/30d) | BACKTEST AUX GAP | keep live if the VVIX warnings are valued — but sizer weight stays 0 until the aux loader exposes macro series (small enhancement: read vol_indices.parquet history) |
+| 15 | S_tr_04_intraday_spy_momentum | needs 30-minute bars; backtest aux has none. LIVE works (engine loads 119-ticker 30m; 3 signals/30d) | BACKTEST AUX GAP | same as #14 but the 30m backtest support is heavier; keep-or-stop by taste (weight stays 0) |
+| 1 | S10_quality_value | reads 6 FMP ratio fields; financials.parquet has 5 of them **all-NULL** (returnOnEquity, returnOnInvestedCapital, debtEquityRatio, enterpriseValueMultiple, priceToFreeCashFlowsRatio) → screens filter everything, live AND backtest | DATA GAP | **STOP** (cannot function anywhere); backlog: enrich the FMP financials collector with ratio fields, then revisit |
+| 7 | S_bankruptcy_risk_anomaly | Altman-Z needs balance-sheet items (retainedEarnings, totalAssets, workingCapital…) absent from financials.parquet → "too few Z-scores: 0", live AND backtest | DATA GAP | **STOP**; same backlog (balance-sheet fetch) |
+| 5 | S_HV17_earnings_straddle_fade | needs earnings_dte in [0,5] + iv_rank: earnings-calendar coverage is ~12 events (live) / 12-of-395 tickers (backtest slice) → near-zero opportunity set; docstring flagged the dependency at birth | DATA GAP | **STOP**; backlog: broaden FMP earnings-calendar coverage (also affects the cohort2026 sibling — all straddle-fade variants show 0 trades) |
+
+Systemic fixes shipped alongside (2026-07-03): unified_backtest now COUNTS swallowed
+per-bar exceptions and prints a loud WARN (+ `bars_raised` in the sim dict) — a
+100%-raise strategy can no longer masquerade as a clean 0-trade run.
+Post-155-run rerun list: add S_local_global_balance + S_skewness_dispersion_macro
+(their 07-02/07-03 corrected rows are bogus-zero from the bug era).

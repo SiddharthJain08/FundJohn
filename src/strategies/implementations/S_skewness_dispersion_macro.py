@@ -64,7 +64,7 @@ class SkewnessDispersionMacro(BaseStrategy):
             return []
 
         window = price_data.iloc[-self.LOOKBACK:]
-        returns = window.pct_change().dropna()
+        returns = window.pct_change().dropna(how='all')
 
         # Compute per-stock skewness over the 252-day window
         skew_series = returns.skew()  # pandas skew per column
@@ -171,7 +171,7 @@ class SkewnessDispersionMacro(BaseStrategy):
         if len(price_data) < self.LOOKBACK + 21:
             return None
 
-        returns = price_data.pct_change().dropna()
+        returns = price_data.pct_change().dropna(how='all')
         # Sample every ~21 trading days (monthly)
         step = 21
         dispersion_vals = []

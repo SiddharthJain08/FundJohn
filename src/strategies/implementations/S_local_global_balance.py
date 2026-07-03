@@ -57,15 +57,25 @@ class LocalGlobalBalance(BaseStrategy):
             return []
 
         # Compute returns
-        returns = window.pct_change().dropna()
+        # how='all': an any-NaN row-drop annihilates every row on a wide
+        # real-world panel (each date has >=1 missing ticker); corr() is
+        # pairwise-NaN-tolerant so partial rows are fine.
+        returns = window.pct_change().dropna(how='all')
         if len(returns) < 20:
             print(f'[debug] signals=0 (return rows={len(returns)} < 20)', file=sys.stderr)
             return []
 
         # --- Correlation network ---
         corr = returns.corr()
-        # Zero self-loops for clean degree computation
-        np.fill_diagonal(corr.values, 0.0)
+        # Zero self-loops for clean degree computation. to_numpy(copy=True):
+        # under pandas>=3 copy-on-write, .values can be a READ-ONLY view and
+        # np.fill_diagonal raises ValueError — which unified_backtest's
+        # per-bar `except Exception: continue` swallowed silently, making
+        # this strategy report 0 trades over a full 70-minute walk (found
+        # 2026-07-03).
+        vals = corr.to_numpy(copy=True)
+        np.fill_diagonal(vals, 0.0)
+        corr = pd.DataFrame(vals, index=corr.index, columns=corr.columns)
 
         # Local balance: signed correlation sum per node (normalized)
         n = len(tickers)
