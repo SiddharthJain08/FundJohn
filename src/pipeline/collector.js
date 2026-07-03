@@ -1291,26 +1291,50 @@ async function runFundamentals(tickers = null) {
       continue;
     }
 
-    // Fetch FMP ratios for ROE, ROIC, D/E, P/FCF — used by S10_quality_value
-    let ratiosData = null;
+    // Fetch FMP ratios + key-metrics + balance-sheet — S10_quality_value
+    // (ROE/ROIC/D-E/EV-mult/P-FCF) and S_bankruptcy_risk_anomaly (Altman-Z
+    // balance-sheet block). NOTE the /stable/ field renames: the old v3
+    // reads (returnOnEquity from ratios, debtEquityRatio,
+    // priceToFreeCashFlowsRatio) matched NOTHING in the stable payloads and
+    // left these columns 0% populated parquet-wide (found 2026-07-03).
+    let ratiosData = null, metricsData = null, balanceData = null;
     try {
       const ratiosUrl = `https://financialmodelingprep.com/stable/ratios?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
       ratiosData = await httpGet(ratiosUrl);
       trackApiCall('fmp');
       await sleep(FMP_INTERVAL);
     } catch { /* non-fatal — ratios are supplemental */ }
+    try {
+      const metricsUrl = `https://financialmodelingprep.com/stable/key-metrics?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
+      metricsData = await httpGet(metricsUrl);
+      trackApiCall('fmp');
+      await sleep(FMP_INTERVAL);
+    } catch { /* non-fatal */ }
+    try {
+      const balanceUrl = `https://financialmodelingprep.com/stable/balance-sheet-statement?symbol=${ticker}&period=quarterly&limit=4&apikey=${FMP_KEY}`;
+      balanceData = await httpGet(balanceUrl);
+      trackApiCall('fmp');
+      await sleep(FMP_INTERVAL);
+    } catch { /* non-fatal */ }
 
-    // Build ratios lookup by period date
-    const ratiosByDate = {};
-    if (Array.isArray(ratiosData)) {
-      for (const r of ratiosData) {
-        if (r.date) ratiosByDate[r.date] = r;
-      }
-    }
+    // Per-period lookups by date
+    const byDate = (arr) => {
+      const out = {};
+      if (Array.isArray(arr)) for (const r of arr) { if (r.date) out[r.date] = r; }
+      return out;
+    };
+    const ratiosByDate  = byDate(ratiosData);
+    const metricsByDate = byDate(metricsData);
+    const balanceByDate = byDate(balanceData);
+    const first = (...vals) => vals.find(v => v !== null && v !== undefined) ?? null;
 
     try {
       const records = data.map(q => {
-        const ratio = ratiosByDate[q.date] || {};
+        const ratio = ratiosByDate[q.date]  || {};
+        const km    = metricsByDate[q.date] || {};
+        const bs    = balanceByDate[q.date] || {};
+        const wcDerived = (bs.totalCurrentAssets != null && bs.totalCurrentLiabilities != null)
+          ? bs.totalCurrentAssets - bs.totalCurrentLiabilities : null;
         return {
           period:             `${q.calendarYear}Q${q.period?.replace('Q', '') || ''}`,
           period_end:         q.date,
@@ -1323,12 +1347,19 @@ async function runFundamentals(tickers = null) {
           operating_margin:   q.operatingIncomeRatio,
           net_margin:         q.netIncomeRatio,
           revenue_growth_yoy: null,
-          pe_ratio:           null,
-          market_cap:         null,
-          roe:                ratio.returnOnEquity              ?? null,
-          roic:               ratio.returnOnInvestedCapital    ?? null,
-          debt_equity_ratio:  ratio.debtEquityRatio            ?? null,
-          p_fcf_ratio:        ratio.priceToFreeCashFlowsRatio  ?? null,
+          pe_ratio:           first(ratio.priceToEarningsRatio, ratio.priceEarningsRatio),
+          market_cap:         km.marketCap ?? null,
+          ev_ebitda:          first(km.evToEBITDA, ratio.enterpriseValueMultiple),
+          ev_revenue:         km.evToSales ?? null,
+          roe:                first(km.returnOnEquity, ratio.returnOnEquity),
+          roic:               first(km.returnOnInvestedCapital, km.returnOnCapitalEmployed),
+          debt_equity_ratio:  first(ratio.debtToEquityRatio, ratio.debtEquityRatio),
+          p_fcf_ratio:        first(ratio.priceToFreeCashFlowRatio, ratio.priceToFreeCashFlowsRatio),
+          total_assets:       bs.totalAssets ?? null,
+          total_liabilities:  bs.totalLiabilities ?? null,
+          retained_earnings:  bs.retainedEarnings ?? null,
+          working_capital:    first(km.workingCapital, wcDerived),
+          operating_income:   q.operatingIncome ?? null,
           source:             'fmp',
         };
       });

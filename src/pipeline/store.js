@@ -240,6 +240,12 @@ async function upsertFundamentals(ticker, records) {
       roic:               r.roic              ?? null,
       debt_equity_ratio:  r.debt_equity_ratio ?? null,
       p_fcf_ratio:        r.p_fcf_ratio       ?? null,
+      // Altman-Z balance-sheet block (S_bankruptcy_risk_anomaly, 2026-07-03)
+      total_assets:       r.total_assets      ?? null,
+      total_liabilities:  r.total_liabilities ?? null,
+      retained_earnings:  r.retained_earnings ?? null,
+      working_capital:    r.working_capital   ?? null,
+      operating_income:   r.operating_income  ?? null,
     });
   }
   return records.length;

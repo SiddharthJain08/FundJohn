@@ -453,6 +453,13 @@ def load_aux_data(universe: list) -> dict:
                     d['debtEquityRatio']             = d.get('debt_equity_ratio')
                     d['enterpriseValueMultiple']     = d.get('ev_ebitda')
                     d['priceToFreeCashFlowsRatio']   = d.get('p_fcf_ratio')
+                    # Altman-Z aliases (S_bankruptcy_risk_anomaly, 2026-07-03)
+                    d['totalAssets']                 = d.get('total_assets')
+                    d['totalLiabilities']            = d.get('total_liabilities')
+                    d['retainedEarnings']            = d.get('retained_earnings')
+                    d['workingCapital']              = d.get('working_capital')
+                    d['operatingIncome']             = d.get('operating_income')
+                    d['marketCap']                   = d.get('market_cap')
                     fin_dict[ticker] = d
             aux['financials'] = fin_dict
             logger.info(f"Financials loaded: {len(fin_dict)} tickers")

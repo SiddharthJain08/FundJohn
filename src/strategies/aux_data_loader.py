@@ -38,6 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 AGG_PATH = ROOT / 'data' / 'master' / 'options_aggregates_enriched.parquet'
 EARNINGS_PATH = ROOT / 'data' / 'master' / 'earnings.parquet'
 VOL_INDICES_PATH = ROOT / 'data' / 'master' / 'vol_indices.parquet'
+MACRO_PATH = ROOT / 'data' / 'master' / 'macro.parquet'
 INSIDER_PATH = ROOT / 'data' / 'master' / 'insider.parquet'
 SENTIMENT_PATH = ROOT / 'data' / 'master' / 'sentiment.parquet'
 
@@ -46,6 +47,7 @@ log = logging.getLogger(__name__)
 _AGG_DF: Optional[pd.DataFrame] = None
 _EARNINGS_DF: Optional[pd.DataFrame] = None
 _VOL_INDICES_DF: Optional[pd.DataFrame] = None
+_MACRO_SERIES: Optional[dict] = None
 _SENT_DF = None
 SENTIMENT_FIELDS = ['news_count_24h', 'news_mean_score', 'news_finbert_pos',
                     'news_finbert_neu', 'news_finbert_neg']
@@ -324,6 +326,57 @@ def _vol_indices_slice(date_str: str) -> dict:
     return out
 
 
+def _load_macro_series() -> dict:
+    """{series_name: pd.Series(DatetimeIndex → value)} — full history, cached.
+
+    Mirrors engine.py's live aux['macro'] construction exactly (macro.parquet
+    long format date/series/value → per-series sorted Series). Strategies like
+    S_tr_01_vvix_early_warning consume aux_data['macro']['VVIX'] as a SERIES
+    (63-day z-window); the scalar vol_indices day-slice above cannot serve
+    that — which made every macro-series strategy backtest-blind until
+    2026-07-03.
+    """
+    global _MACRO_SERIES
+    if _MACRO_SERIES is not None:
+        return _MACRO_SERIES
+    if not MACRO_PATH.exists():
+        log.warning('aux_data_loader: %s missing — macro series unavailable', MACRO_PATH)
+        _MACRO_SERIES = {}
+        return _MACRO_SERIES
+    try:
+        mac = pd.read_parquet(MACRO_PATH)
+        if mac.empty or not {'date', 'series', 'value'}.issubset(mac.columns):
+            log.warning('aux_data_loader: macro.parquet empty/malformed — unavailable')
+            _MACRO_SERIES = {}
+            return _MACRO_SERIES
+        mac['date'] = pd.to_datetime(mac['date'])
+        _MACRO_SERIES = {
+            name: grp.set_index('date')['value'].sort_index().dropna()
+            for name, grp in mac.groupby('series')
+        }
+        log.info('aux_data_loader: macro loaded series=%s', sorted(_MACRO_SERIES))
+    except Exception as e:  # noqa: BLE001 — aux is best-effort, never fatal
+        log.warning('aux_data_loader: macro load failed (%s) — unavailable', e)
+        _MACRO_SERIES = {}
+    return _MACRO_SERIES
+
+
+def _macro_slice(date_str: str) -> dict:
+    """Point-in-time macro: each series truncated to rows <= date (no
+    look-ahead). Empty dict when macro.parquet is absent (fail-open —
+    strategies already guard on missing macro)."""
+    full = _load_macro_series()
+    if not full:
+        return {}
+    ts = pd.to_datetime(date_str)
+    out = {}
+    for name, s in full.items():
+        cut = s.loc[:ts]
+        if len(cut):
+            out[name] = cut
+    return out
+
+
 def _load_sentiment_panel():
     global _SENT_DF
     if _SENT_DF is not None:
@@ -433,6 +486,10 @@ def load_aux_data(
     Returns: {
         'options':              {ticker: {...fields...}},
         'vol_indices':          {vix_close, vvix_close, vix9d_close},
+        'macro':                {series_name: pd.Series(date → value)},
+                                # point-in-time (rows <= date); mirrors the
+                                # live engine.py aux['macro'] format exactly
+                                # (VIX / VIX3M / VIX9D / VVIX from macro.parquet)
         'insider_txns':         {ticker: [{transactionDate, transactionType,
                                            reportingName, value, shares}]},
         'insider_history_long': {ticker: [{transactionDate, transactionType,
@@ -455,6 +512,7 @@ def load_aux_data(
     out = {
         'options':              _day_slice(date_str),
         'vol_indices':          _vol_indices_slice(date_str),
+        'macro':                _macro_slice(date_str),
         'insider_txns':         _insider_slice(date_str),
         'insider_history_long': _insider_long_slice(date_str),
         'sentiment':            _sentiment_day_slice(date_str),
