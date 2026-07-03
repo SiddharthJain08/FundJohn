@@ -524,8 +524,14 @@ def _run_prices(args: argparse.Namespace, pg) -> None:
                 quarantined_total += 1
                 continue
 
-            if df_new.empty:
-                # Already-promoted — Redis-status restore case.
+            if df_new.empty and not (had_overlap and allow_overwrite):
+                # Already-promoted — Redis-status restore case. When the
+                # overwrite gate is ACTIVE, a fully-overlapping chunk must
+                # fall through to the replace branch below — this early-out
+                # used to fire first, so the supersede-recovery flow could
+                # never replace a chunk whose dates all already existed
+                # (2026-07-03 split-recovery bug: 'no new rows' on every
+                # UVIX chunk while the 20x discontinuity stayed in place).
                 print(f'  [{chunk_key}] no new rows; marking promoted')
                 _audit_finish(
                     pg, audit_id, status='promoted',

@@ -172,15 +172,34 @@ def check_alpaca_auth():
 
 @_check('alpaca_aat_plus_tier')
 def _check_alpaca_aat_plus_tier():
-    """Probe SPY 30-DTE chain + 1 news fetch. Confirms paid AAT Plus tier active."""
+    """Probe SPY ~30-DTE ATM chain + 1 news fetch. Confirms paid AAT Plus tier active.
+
+    Window and strike band are computed per run: the original hardcoded
+    June-2026 expiries went stale after mid-June and matched only expired
+    contracts, whose greeks are legitimately zero — a permanent false
+    'AAT Plus inactive' alarm (fixed 2026-07-03; subscription was active).
+    """
+    from datetime import date, timedelta
     try:
+        today = date.today()
+        bars = _run_alpaca_cli([
+            'data', 'bars', '--symbol', 'SPY', '--timeframe', '1D',
+            '--start', (today - timedelta(days=7)).isoformat(),
+        ])
+        rows = bars.get('bars') if isinstance(bars, dict) else bars
+        if isinstance(rows, dict):
+            rows = rows.get('SPY') or []
+        closes = [b.get('c') for b in (rows or []) if b.get('c')]
+        if not closes:
+            return _fail('alpaca_aat_plus_tier', 'no SPY bars — data feed down?')
+        spot = float(closes[-1])
         chain = _run_alpaca_cli([
             'data', 'option', 'chain',
             '--underlying-symbol', 'SPY',
-            '--expiration-date-gte', '2026-06-15',
-            '--expiration-date-lte', '2026-06-30',
-            '--strike-price-gte', '740',
-            '--strike-price-lte', '750',
+            '--expiration-date-gte', (today + timedelta(days=20)).isoformat(),
+            '--expiration-date-lte', (today + timedelta(days=45)).isoformat(),
+            '--strike-price-gte', str(int(spot * 0.99)),
+            '--strike-price-lte', str(int(spot * 1.01)),
             '--type', 'call',
             '--limit', '5',
         ])
@@ -191,9 +210,9 @@ def _check_alpaca_aat_plus_tier():
         )
         if not any_nonzero:
             return _fail('alpaca_aat_plus_tier',
-                         'all SPY 30-DTE ATM greeks zero — AAT Plus may be inactive')
+                         'all SPY ~30-DTE ATM greeks zero — AAT Plus may be inactive')
         _run_alpaca_cli(['data', 'news', '--symbols', 'AAPL', '--limit', '1'])
-        return _ok('alpaca_aat_plus_tier', 'greeks present + news OK')
+        return _ok('alpaca_aat_plus_tier', f'greeks present (spot~{spot:.0f}) + news OK')
     except Exception as exc:
         return _fail('alpaca_aat_plus_tier', str(exc)[:200])
 
