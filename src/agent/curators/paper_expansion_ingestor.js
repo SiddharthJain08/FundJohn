@@ -86,11 +86,24 @@ async function _query(sql, params = []) {
 
 async function _gatherContext() {
   const [portfolio, strategies, recentMemoThemes, recentCorpusVenues, lastExpansion] = await Promise.all([
-    _query(`SELECT id, name, status, tier, universe, signal_frequency,
-                   backtest_sharpe, backtest_return_pct
-              FROM strategy_registry
-             WHERE status IN ('live','monitoring','approved')
-             ORDER BY backtest_sharpe DESC NULLS LAST LIMIT 40`),
+    // backtest_sharpe/return_pct come from canonical strategy_backtest_runs
+    // (latest primary_window=true run per strategy_id == registry id slug),
+    // NOT the strategy_registry mirror (retired as a read-consumer 2026-07-05,
+    // Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+    // Ranking is on canonical total_sharpe with NULLS LAST so unbacktested
+    // strategies don't sort to the top of the paper-expansion context.
+    _query(`SELECT sr.id, sr.name, sr.status, sr.tier, sr.universe, sr.signal_frequency,
+                   bt.backtest_sharpe, bt.backtest_return_pct
+              FROM strategy_registry sr
+              LEFT JOIN LATERAL (
+                SELECT total_sharpe AS backtest_sharpe,
+                       total_return_pct AS backtest_return_pct
+                  FROM strategy_backtest_runs
+                 WHERE strategy_id = sr.id AND primary_window = TRUE
+                 ORDER BY run_at DESC LIMIT 1
+              ) bt ON TRUE
+             WHERE sr.status IN ('live','monitoring','approved')
+             ORDER BY bt.backtest_sharpe DESC NULLS LAST LIMIT 40`),
     _query(`SELECT substring(markdown_body from 1 for 280) AS preview,
                    strategy_id, memo_date
               FROM strategy_memos
