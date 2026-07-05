@@ -141,14 +141,27 @@ def build() -> dict:
              LIMIT 10
             """
         ),
+        # backtest_* comes from canonical strategy_backtest_runs, not the
+        # strategy_registry mirror (retired as a read-consumer 2026-07-05,
+        # Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+        # Joined via sr.id == strategy_backtest_runs.strategy_id (registry
+        # slug; see that doc's ID-namespace caveat).
         "strategies": _rows(
             """
-            SELECT id, name, status, tier, live_days, live_sharpe,
-                   backtest_sharpe, backtest_return_pct, backtest_max_dd_pct,
-                   signal_frequency, universe
-              FROM strategy_registry
-             WHERE status IN ('live','monitoring','candidate','pending_approval')
-             ORDER BY status, id
+            SELECT sr.id, sr.name, sr.status, sr.tier, sr.live_days, sr.live_sharpe,
+                   bt.total_sharpe AS backtest_sharpe,
+                   bt.total_return_pct AS backtest_return_pct,
+                   bt.total_max_dd_pct AS backtest_max_dd_pct,
+                   sr.signal_frequency, sr.universe
+              FROM strategy_registry sr
+              LEFT JOIN LATERAL (
+                SELECT total_sharpe, total_return_pct, total_max_dd_pct
+                  FROM strategy_backtest_runs
+                 WHERE strategy_id = sr.id AND primary_window = TRUE
+                 ORDER BY run_at DESC LIMIT 1
+              ) bt ON TRUE
+             WHERE sr.status IN ('live','monitoring','candidate','pending_approval')
+             ORDER BY sr.status, sr.id
              LIMIT 80
             """
         ),
