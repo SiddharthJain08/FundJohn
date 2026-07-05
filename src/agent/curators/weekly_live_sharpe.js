@@ -43,6 +43,20 @@ async function postDiscord(content) {
   const preMap = {};
   for (const r of pre.rows) preMap[`${r.strategy_id}|${r.regime_state}`] = parseFloat(r.weight);
 
+  // Strategy Activation Slider: refresh strategy_regime_params.eligible from
+  // the freshest corrected per-regime backtest metrics BEFORE the weights
+  // rebuild below, so weights are computed on the up-to-date eligible set.
+  // Non-fatal (log + continue) — a deriver hiccup must not block the weekly
+  // reweight, same posture as the daily_returns/similarity/fold_report steps
+  // further down.
+  console.log('refreshing strategy-regime activation eligibility…');
+  try {
+    execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`,
+      { stdio: 'inherit', env: loadEnv() });
+  } catch (e) {
+    console.error('activation_assigner refresh failed (non-fatal):', e.message);
+  }
+
   // Run the Python rebuild — auto-demote chain is opt-in via OPENCLAW_AUTO_DEMOTE
   console.log('rebuilding strategy_weights via python module…');
   try {
