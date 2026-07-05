@@ -913,6 +913,13 @@ class ResearchOrchestrator {
     const btBreakdown = (btResult.regime_breakdown && typeof btResult.regime_breakdown === 'object')
       ? JSON.stringify(btResult.regime_breakdown)
       : null;
+    // DEPRECATED: registry backtest_* mirror (read-consumers retired 2026-07-05)
+    // Still written here for backward-compat (Option B keeps the write path
+    // intact — append-only, no column drop). Canonical strategy_backtest_runs
+    // is the sole read source now: src/lib/promotion_service.js,
+    // src/research/strategy_forensics.py, src/services/mastermind_chat/snapshot.py,
+    // src/channels/api/routes_research.js, src/channels/discord/relay.js.
+    // See docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
     await this._query(
       `UPDATE strategy_registry
           SET status                    = 'pending_approval',
@@ -1189,6 +1196,11 @@ class ResearchOrchestrator {
         ? spec.regime_conditions.reduce((acc, r) => { acc[r] = true; return acc; }, {})
         : (spec.regime_conditions || {});
 
+      // DEPRECATED: registry backtest_* mirror (read-consumers retired 2026-07-05)
+      // backtest_sharpe seeded here is placeholder-only (initial registration,
+      // pre-first-real-backtest); canonical strategy_backtest_runs is what
+      // every reader now consults. See
+      // docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
       await pool.query(
         `INSERT INTO strategy_registry
            (id, name, description, tier, implementation_path, parameters, regime_conditions, universe, status, backtest_sharpe)
