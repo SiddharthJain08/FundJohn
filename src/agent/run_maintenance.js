@@ -262,11 +262,25 @@ Capture latest run_id. Status values seen in production:
      ORDER BY 1, 3 DESC;
 
     -- Tier-A backtest results landed today
-    SELECT name, status, backtest_sharpe, backtest_return_pct, backtest_max_dd_pct
-      FROM strategy_registry
-     WHERE created_at::date = '{{TODAY_ISO}}'::date
-        OR updated_at::date = '{{TODAY_ISO}}'::date
-     ORDER BY backtest_sharpe DESC NULLS LAST
+    -- backtest metrics come from canonical strategy_backtest_runs (latest
+    -- primary_window=true run per strategy_id == registry id slug), NOT the
+    -- strategy_registry mirror (retired as a read-consumer 2026-07-05,
+    -- Option B). The registry drives the created/updated_at "landed today"
+    -- filter; canonical supplies the honest true-MTM+slippage numbers.
+    SELECT sr.name, sr.status,
+           bt.total_sharpe     AS backtest_sharpe,
+           bt.total_return_pct AS backtest_return_pct,
+           bt.total_max_dd_pct AS backtest_max_dd_pct
+      FROM strategy_registry sr
+      LEFT JOIN LATERAL (
+        SELECT total_sharpe, total_return_pct, total_max_dd_pct
+          FROM strategy_backtest_runs
+         WHERE strategy_id = sr.id AND primary_window = TRUE
+         ORDER BY run_at DESC LIMIT 1
+      ) bt ON TRUE
+     WHERE sr.created_at::date = '{{TODAY_ISO}}'::date
+        OR sr.updated_at::date = '{{TODAY_ISO}}'::date
+     ORDER BY bt.total_sharpe DESC NULLS LAST
      LIMIT 20;
 
 ## Step 3 — Classify
@@ -661,11 +675,25 @@ Capture latest run_id. Status values: 'completed', 'partial', 'abandoned',
      ORDER BY 1, 3 DESC;
 
     -- Tier-A backtest results landed today
-    SELECT name, status, backtest_sharpe, backtest_return_pct, backtest_max_dd_pct
-      FROM strategy_registry
-     WHERE created_at::date = '{{TODAY_ISO}}'::date
-        OR updated_at::date = '{{TODAY_ISO}}'::date
-     ORDER BY backtest_sharpe DESC NULLS LAST
+    -- backtest metrics come from canonical strategy_backtest_runs (latest
+    -- primary_window=true run per strategy_id == registry id slug), NOT the
+    -- strategy_registry mirror (retired as a read-consumer 2026-07-05,
+    -- Option B). The registry drives the created/updated_at "landed today"
+    -- filter; canonical supplies the honest true-MTM+slippage numbers.
+    SELECT sr.name, sr.status,
+           bt.total_sharpe     AS backtest_sharpe,
+           bt.total_return_pct AS backtest_return_pct,
+           bt.total_max_dd_pct AS backtest_max_dd_pct
+      FROM strategy_registry sr
+      LEFT JOIN LATERAL (
+        SELECT total_sharpe, total_return_pct, total_max_dd_pct
+          FROM strategy_backtest_runs
+         WHERE strategy_id = sr.id AND primary_window = TRUE
+         ORDER BY run_at DESC LIMIT 1
+      ) bt ON TRUE
+     WHERE sr.created_at::date = '{{TODAY_ISO}}'::date
+        OR sr.updated_at::date = '{{TODAY_ISO}}'::date
+     ORDER BY bt.total_sharpe DESC NULLS LAST
      LIMIT 20;
 
 ## Step 3 — Classify
