@@ -269,6 +269,11 @@ router.get('/campaigns/:id', async (req, res) => {
   try {
     const [camp, cands] = await Promise.all([
       query(`SELECT * FROM research_campaigns WHERE id = $1`, [req.params.id]),
+      // registry_sharpe is sourced from canonical strategy_backtest_runs, not
+      // the strategy_registry mirror (retired as a read-consumer 2026-07-05,
+      // Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+      // Joined via reg.id == strategy_backtest_runs.strategy_id (registry
+      // slug; see that doc's ID-namespace caveat).
       query(
         `SELECT rc.candidate_id, rc.source_url, rc.status, rc.kind,
                 rc.submitted_at, rc.hunter_result_json->>'strategy_id' AS strategy_id,
@@ -276,10 +281,16 @@ router.get('/campaigns/:id', async (req, res) => {
                 s.id AS staging_id, s.name AS staging_name, s.status AS staging_status,
                 s.quick_backtest_json, s.promoted_strategy_id,
                 reg.status AS registry_status,
-                reg.backtest_sharpe AS registry_sharpe
+                bt.total_sharpe AS registry_sharpe
            FROM research_candidates rc
            LEFT JOIN strategy_staging s ON s.source_paper_id = rc.candidate_id::text
            LEFT JOIN strategy_registry reg ON reg.id = s.promoted_strategy_id
+           LEFT JOIN LATERAL (
+             SELECT total_sharpe
+               FROM strategy_backtest_runs
+              WHERE strategy_id = reg.id AND primary_window = TRUE
+              ORDER BY run_at DESC LIMIT 1
+           ) bt ON TRUE
           WHERE rc.campaign_id = $1
           ORDER BY rc.submitted_at ASC`,
         [req.params.id]
