@@ -49,12 +49,25 @@ async function postDiscord(content) {
   // Non-fatal (log + continue) — a deriver hiccup must not block the weekly
   // reweight, same posture as the daily_returns/similarity/fold_report steps
   // further down.
-  console.log('refreshing strategy-regime activation eligibility…');
-  try {
-    execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`,
-      { stdio: 'inherit', env: loadEnv() });
-  } catch (e) {
-    console.error('activation_assigner refresh failed (non-fatal):', e.message);
+  //
+  // GATED default-OFF (OPENCLAW_ACTIVATION_ASSIGNER, mirrors OPENCLAW_AUTO_DEMOTE
+  // below): the FIRST live application is a large one-time eligibility shift
+  // (~13 strategies dormant at 0.5) and must be operator-controlled — run
+  // `activation_assigner --all` manually, eyeball the diff, THEN flip this flag
+  // to '1' so subsequent weekly cycles auto-refresh. Until then this weekly
+  // job is weights-only (eligibility untouched), and must NOT auto-fire on the
+  // Mon 04:00 timer while the §7 re-backtest of the stale strategies is still
+  // completing (would derive the not-yet-corrected ones on smeared metrics).
+  if (process.env.OPENCLAW_ACTIVATION_ASSIGNER === '1') {
+    console.log('refreshing strategy-regime activation eligibility…');
+    try {
+      execSync(`cd ${ROOT} && PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`,
+        { stdio: 'inherit', env: loadEnv() });
+    } catch (e) {
+      console.error('activation_assigner refresh failed (non-fatal):', e.message);
+    }
+  } else {
+    console.log('activation eligibility refresh SKIPPED (OPENCLAW_ACTIVATION_ASSIGNER!=1); weights-only rebuild');
   }
 
   // Run the Python rebuild — auto-demote chain is opt-in via OPENCLAW_AUTO_DEMOTE
