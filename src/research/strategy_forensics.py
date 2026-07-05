@@ -51,11 +51,37 @@ def build_dossier(strategy_id: str, days: int = 30) -> dict:
             cur,
             "SELECT id, name, status, tier, implementation_path, parameters, "
             "       regime_conditions, universe, signal_frequency, "
-            "       backtest_sharpe, backtest_return_pct, backtest_max_dd_pct, "
             "       created_at, approved_at, deprecated_at, deprecation_reason "
             "  FROM strategy_registry WHERE id = %s",
             (strategy_id,),
         )
+
+        # Canonical backtest metrics (registry backtest_* mirror retired as a
+        # read-consumer 2026-07-05, Option B — see
+        # docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+        # strategy_backtest_runs keys on strategy_id, which for the vast
+        # majority of rows equals the registry `id` slug (see that doc's
+        # ID-namespace caveat). Merged into `registry` under the same field
+        # names so the rest of this function (and MMJ's consumers) are
+        # unaffected by the source-of-truth swap.
+        if registry is not None:
+            canonical_bt = _row(
+                cur,
+                """SELECT total_sharpe AS backtest_sharpe,
+                          total_return_pct AS backtest_return_pct,
+                          total_max_dd_pct AS backtest_max_dd_pct,
+                          total_trades AS backtest_trade_count,
+                          run_at AS backtest_run_at
+                     FROM strategy_backtest_runs
+                    WHERE strategy_id = %s AND primary_window = TRUE
+                    ORDER BY run_at DESC LIMIT 1""",
+                (strategy_id,),
+            )
+            registry["backtest_sharpe"] = canonical_bt.get("backtest_sharpe") if canonical_bt else None
+            registry["backtest_return_pct"] = canonical_bt.get("backtest_return_pct") if canonical_bt else None
+            registry["backtest_max_dd_pct"] = canonical_bt.get("backtest_max_dd_pct") if canonical_bt else None
+            registry["backtest_trade_count"] = canonical_bt.get("backtest_trade_count") if canonical_bt else None
+            registry["backtest_run_at"] = canonical_bt.get("backtest_run_at") if canonical_bt else None
 
         # Recent signals + P&L
         signals = _rows(
