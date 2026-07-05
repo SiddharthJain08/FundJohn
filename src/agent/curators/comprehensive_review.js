@@ -42,25 +42,42 @@ async function _query(sql, params = []) {
   return _query._pool.query(sql, params);
 }
 
+// backtest_sharpe/return_pct/max_dd_pct come from canonical
+// strategy_backtest_runs (latest primary_window=true run per strategy_id ==
+// registry id slug), NOT the strategy_registry mirror (retired as a
+// read-consumer 2026-07-05, Option B — see
+// docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+// So the Saturday memos reason on the honest true-MTM+slippage numbers.
+const _CANONICAL_BT_JOIN = `
+  LEFT JOIN LATERAL (
+    SELECT total_sharpe AS backtest_sharpe,
+           total_return_pct AS backtest_return_pct,
+           total_max_dd_pct AS backtest_max_dd_pct
+      FROM strategy_backtest_runs
+     WHERE strategy_id = sr.id AND primary_window = TRUE
+     ORDER BY run_at DESC LIMIT 1
+  ) bt ON TRUE`;
+
 async function _fetchStrategies(strategyIds) {
   if (strategyIds && strategyIds.length) {
     const { rows } = await _query(
-      `SELECT id, name, description, tier, parameters, regime_conditions,
-              universe, signal_frequency, backtest_sharpe, backtest_return_pct,
-              backtest_max_dd_pct, status, created_at, approved_at
-         FROM strategy_registry WHERE id = ANY($1::text[])`,
+      `SELECT sr.id, sr.name, sr.description, sr.tier, sr.parameters, sr.regime_conditions,
+              sr.universe, sr.signal_frequency, bt.backtest_sharpe, bt.backtest_return_pct,
+              bt.backtest_max_dd_pct, sr.status, sr.created_at, sr.approved_at
+         FROM strategy_registry sr${_CANONICAL_BT_JOIN}
+        WHERE sr.id = ANY($1::text[])`,
       [strategyIds]
     );
     return rows;
   }
   const { rows } = await _query(
-    `SELECT id, name, description, tier, parameters, regime_conditions,
-            universe, signal_frequency, backtest_sharpe, backtest_return_pct,
-            backtest_max_dd_pct, status, created_at, approved_at
-       FROM strategy_registry
-      WHERE status IN ('live','monitoring','approved','pending_approval')
-        AND (deprecated_at IS NULL)
-      ORDER BY id`
+    `SELECT sr.id, sr.name, sr.description, sr.tier, sr.parameters, sr.regime_conditions,
+            sr.universe, sr.signal_frequency, bt.backtest_sharpe, bt.backtest_return_pct,
+            bt.backtest_max_dd_pct, sr.status, sr.created_at, sr.approved_at
+       FROM strategy_registry sr${_CANONICAL_BT_JOIN}
+      WHERE sr.status IN ('live','monitoring','approved','pending_approval')
+        AND (sr.deprecated_at IS NULL)
+      ORDER BY sr.id`
   );
   return rows;
 }
