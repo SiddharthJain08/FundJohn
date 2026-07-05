@@ -586,7 +586,10 @@ def _per_bar_simulate(
         raise ValueError(f'fill_model must be "close" or "open", got {fill_model!r}')
     _price_col = 'open' if fill_model == 'open' else 'close'
     _include_fill_bar = fill_model == 'open'
-    _true_mtm = os.environ.get('OPENCLAW_TRUE_MTM_MARKS') == '1'
+    # 2026-07-05: corrected engine (true MTM) is now the STANDING DEFAULT —
+    # ON unless explicitly disabled with =0 (escape hatch back to the
+    # pre-fix smear-only engine). Was default-OFF (=='1') pre-cutover.
+    _true_mtm = os.environ.get('OPENCLAW_TRUE_MTM_MARKS', '1') != '0'
 
     # Static universe: equity tickers only (no indices, crypto, futures).
     static_universe = [c for c in close_wide.columns
@@ -848,7 +851,10 @@ def run_backtest(strategy_id: str, *,
     strategy_cls = load_strategy_class(filepath)
     _log(f'loaded {strategy_cls.__name__} from {Path(filepath).relative_to(ROOT)}')
     _cost_bps = resolve_cost_model_bps(instrument_class)
-    _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE') == '1'
+    # 2026-07-05: always-adverse slippage is now the STANDING DEFAULT — ON
+    # unless explicitly disabled with =0 (escape hatch). Was default-OFF
+    # (=='1') pre-cutover.
+    _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE', '1') != '0'
     _slippage_bps = _cost_bps if _slippage_on else 0.0
     _log(f'instrument_class={instrument_class} cost_model_bps={_cost_bps} slippage_applied={_slippage_on}')
 

@@ -1,12 +1,35 @@
 """tests/test_adverse_slippage.py — always-adverse per-fill slippage."""
 from __future__ import annotations
-import sys, unittest
+import contextlib, os, sys, unittest
 from pathlib import Path
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
 from backtest import unified_backtest as ub  # noqa: E402
+
+_FLAG_VARS = ('OPENCLAW_TRUE_MTM_MARKS', 'OPENCLAW_BACKTEST_SLIPPAGE')
+
+
+@contextlib.contextmanager
+def _clean_flags(**overrides):
+    """Deterministic env for the two corrected-engine flags: unset both,
+    then apply any explicit overrides (values must be str, e.g. '0').
+    Restores the ambient env on exit (isolates from a live re-backtest
+    process that may have these exported)."""
+    saved = {k: os.environ.get(k) for k in _FLAG_VARS}
+    try:
+        for k in _FLAG_VARS:
+            os.environ.pop(k, None)
+        for k, v in overrides.items():
+            os.environ[k] = v
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _bars(closes, highs=None, lows=None, start='2020-01-02'):
@@ -80,6 +103,56 @@ class TestSlippage(unittest.TestCase):
         self.assertEqual(ub.resolve_cost_model_bps('etp'), 10.0)
         self.assertEqual(ub.resolve_cost_model_bps('option'), 5.0)
         self.assertEqual(ub.resolve_cost_model_bps('crypto'), 25.0)
+
+
+class TestSlippageEnvDefaultOn(unittest.TestCase):
+    """2026-07-05 cutover: OPENCLAW_BACKTEST_SLIPPAGE is now default-ON at
+    the run_backtest env-read site (unified_backtest.py ~line 851) — the
+    instrument's INSTRUMENT_COST_BPS is threaded into simulate_trade's
+    slippage_bps whenever the flag resolves truthy, which is now the case
+    with NO env var set at all. `=0` is the sole escape hatch back to the
+    pre-fix zero-slippage engine. These are ENV-level tests (through
+    run_backtest), distinct from the FUNCTION-level tests above which pass
+    slippage_bps directly to simulate_trade and are unaffected by this flag."""
+
+    def _run(self, **env_overrides):
+        from tests.test_backtest_fill_model import (
+            _make_stub_cls, _run_capture, _trivial_dataset,
+        )
+        close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
+        stub = _make_stub_cls()  # LONG by default
+        with _clean_flags(**env_overrides):
+            return _run_capture(stub, close_wide, bars, regimes)
+
+    def test_default_applies_slippage_vs_disabled(self):
+        trades_on = self._run()                                   # no env -> default ON
+        trades_off = self._run(OPENCLAW_BACKTEST_SLIPPAGE='0')     # escape hatch
+        self.assertTrue(trades_on and trades_off)
+        self.assertEqual(len(trades_on), len(trades_off))
+        checked = 0
+        for t_on, t_off in zip(trades_on, trades_off):
+            self.assertEqual(t_on['exit_date'], t_off['exit_date'])
+            self.assertEqual(t_on['exit_reason'], t_off['exit_reason'])
+            if t_on['holding_days'] <= 0:
+                # zero-holding-day edge case (simulate_trade's empty-window
+                # return bypasses slippage entirely) — identical either way.
+                continue
+            checked += 1
+            # adverse fill on a long: slipped exit is strictly worse (lower)
+            self.assertLess(t_on['exit_price'], t_off['exit_price'])
+            self.assertLess(t_on['pnl_pct'], t_off['pnl_pct'])
+        self.assertGreater(checked, 0, 'fixture should produce at least one held trade to compare')
+
+    def test_explicit_zero_matches_legacy_zero_slippage(self):
+        """OPENCLAW_BACKTEST_SLIPPAGE=0 must reproduce the pre-fix
+        zero-slippage fill exactly (byte-identical escape hatch)."""
+        trades_off = self._run(OPENCLAW_BACKTEST_SLIPPAGE='0')
+        trades_legacy = self._run(OPENCLAW_TRUE_MTM_MARKS='0', OPENCLAW_BACKTEST_SLIPPAGE='0')
+        self.assertTrue(trades_off and trades_legacy)
+        self.assertEqual(len(trades_off), len(trades_legacy))
+        for a, b in zip(trades_off, trades_legacy):
+            self.assertEqual(a['exit_price'], b['exit_price'])
+            self.assertEqual(a['pnl_pct'], b['pnl_pct'])
 
 
 if __name__ == '__main__':
