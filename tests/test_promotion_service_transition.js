@@ -109,5 +109,18 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
     assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'candidate'); // manifest untouched
     fs.unlinkSync(mp);
   }
+  // (h) Option B (2026-07-05): no canonical backtest row at all (registry
+  //     mirror retired as a fallback) -> gate hard-fails 'no_backtest';
+  //     manifest UNCHANGED; NO registry write. Guards against the old
+  //     silent-pass-on-NaN behavior regressing through the transition path.
+  {
+    const mp = tmpManifest('candidate');
+    const q = mkQuery({ runRow: null }); // no strategy_backtest_runs row
+    const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true });
+    assert.strictEqual(r.ok, false); assert.ok(r.failedGates.includes('no_backtest'));
+    assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'candidate');
+    assert.ok(!wroteRegistry(q), 'no registry write when gate hard-fails on no_backtest');
+    fs.unlinkSync(mp);
+  }
   console.log('ok test_promotion_service_transition');
 })().catch(e => { console.error(e); process.exit(1); });

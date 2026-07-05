@@ -24,14 +24,15 @@ async function evaluatePromotionGate({ dbQuery, sid, instrumentClass, force }) {
         ORDER BY run_at DESC LIMIT 1`, [sid]);
     if (ubt.rows[0]) { sharpe = parseFloat(ubt.rows[0].total_sharpe); maxDd = parseFloat(ubt.rows[0].total_max_dd_pct); }
   } catch (_) {}
-  if (isNaN(sharpe) || isNaN(maxDd)) {
-    try {
-      const sr = (await dbQuery(`SELECT backtest_sharpe, backtest_max_dd_pct FROM strategy_registry WHERE id = $1`, [sid])).rows[0] || {};
-      if (isNaN(sharpe)) sharpe = parseFloat(sr.backtest_sharpe);
-      if (isNaN(maxDd))  maxDd  = parseFloat(sr.backtest_max_dd_pct);
-    } catch (_) {}
-  }
+  // Registry backtest_* mirror retired as a read-consumer 2026-07-05 (Option B
+  // — see docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+  // strategy_backtest_runs (canonical) is now the SOLE source for this gate.
+  // A missing/NaN canonical metric MUST be a hard fail, not a silent pass —
+  // the pre-fix code's `if (!isNaN(sharpe) && sharpe < min)` treated NaN as
+  // "no opinion", so a strategy with no valid backtest sailed through. Now it
+  // fails closed via the 'no_backtest' gate. force=true still bypasses.
   const failedGates = [];
+  if (isNaN(sharpe) || isNaN(maxDd)) failedGates.push('no_backtest');
   if (!isNaN(sharpe) && sharpe < thresholds.min_sharpe)    failedGates.push('sharpe');
   if (!isNaN(maxDd)  && maxDd  > thresholds.max_drawdown_pct) failedGates.push('max_dd');
   return { pass: failedGates.length === 0, failedGates, sharpe, maxDd, thresholds };
