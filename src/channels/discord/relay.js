@@ -131,10 +131,24 @@ async function handleStrategistCommand(cmd, args, { workspace, relay, swarm, gen
         }
 
         case '/strategy-review': {
-            // List pending strategies
+            // List pending strategies. Sharpe/return come from canonical
+            // strategy_backtest_runs, not the strategy_registry mirror
+            // (retired as a read-consumer 2026-07-05, Option B — see
+            // docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+            // Joined via sr.id == strategy_backtest_runs.strategy_id
+            // (registry slug; see that doc's ID-namespace caveat).
             const pending = await pgQuery(
-                `SELECT id, name, tier, backtest_sharpe, backtest_return_pct, status, created_at
-                 FROM strategy_registry WHERE status != 'deprecated' ORDER BY status, tier, created_at DESC`
+                `SELECT sr.id, sr.name, sr.tier, sr.status, sr.created_at,
+                        bt.total_sharpe AS backtest_sharpe,
+                        bt.total_return_pct AS backtest_return_pct
+                 FROM strategy_registry sr
+                 LEFT JOIN LATERAL (
+                   SELECT total_sharpe, total_return_pct
+                     FROM strategy_backtest_runs
+                    WHERE strategy_id = sr.id AND primary_window = TRUE
+                    ORDER BY run_at DESC LIMIT 1
+                 ) bt ON TRUE
+                 WHERE sr.status != 'deprecated' ORDER BY sr.status, sr.tier, sr.created_at DESC`
             );
             if (pending.rows.length === 0) {
                 await relay.reply('No strategies in registry.');
