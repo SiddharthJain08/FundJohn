@@ -43,6 +43,17 @@ DUST_FLOOR_USD = 1.0
 SIGNAL_SET_MIN_FLOOR = 10
 SIGNAL_SET_MIN_FRAC = 0.30
 
+# OPENCLAW_FLATTEN_ON_ZERO_CONVICTION (default-OFF operator kill-switch).
+# When '1', a HEALTHY carried set (len(active) >= SIGNAL_SET_MIN_FLOOR) that is
+# FULLY rejected by the corr-conviction gate triggers a FLATTEN of the whole
+# broker book (orphan_close every held position) instead of silently HOLDing —
+# see the `if not ticker_w:` branch in _sharpe_cadence_path and
+# _maybe_flatten_zero_conviction. Fires on the EOD lane ONLY
+# (OPENCLAW_EOD_RECONCILE=1 AND OPENCLAW_INTRADAY_REDEPLOY!=1): an intraday
+# regime-transition redeploy inherits EOD_RECONCILE=1 from the parent env, so the
+# INTRADAY exclusion is load-bearing (an intraday flatten would liquidate on a
+# momentary regime blip). Absent/anything-but-'1' => inert (historical HOLD).
+
 
 def _dust_tickers(target_usd: dict, dust_floor_usd: float = DUST_FLOOR_USD) -> list:
     """Tickers whose absolute target notional is below the hard dust floor.
@@ -334,6 +345,42 @@ def _post_corr_cumsharpe_log(line: str) -> None:
         _ur.urlopen(req, timeout=8).read()
     except Exception as e:
         logger.warning('corr_cumsharpe.live discord post skipped (%s)', e)
+
+
+def _post_flatten_alert(regime_state, active_count: int, broker: dict) -> None:
+    """Loud best-effort #botjohn-log alert when the zero-conviction flatten fires.
+
+    Names the regime, the carried-set size (len(active)), the number of positions
+    flattened, and the total gross USD being liquidated. Reuses the
+    _post_corr_cumsharpe_log webhook pattern (agent_registry
+    webhook_urls->>'botjohn-log', urllib + explicit User-Agent) but is NOT
+    date-gated — a liquidation alert must always fire. NEVER raises: a Discord (or
+    DB) failure must not abort the live flatten, the orders still route."""
+    try:
+        gross = sum(abs(float(v)) for v in broker.values())
+        line = ('\U0001F6A8 ZERO-CONVICTION FLATTEN [%s]: carried set of %d signal(s) '
+                'fully rejected by the corr-conviction floor -> flattening %d '
+                'position(s), $%s gross liquidated.'
+                % (regime_state, active_count, len(broker), '{:,.0f}'.format(gross)))
+        logger.warning(line)
+        import psycopg2
+        url = None
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT webhook_urls->>'botjohn-log' FROM agent_registry "
+                        "WHERE webhook_urls->>'botjohn-log' IS NOT NULL LIMIT 1")
+            wrow = cur.fetchone()
+            url = wrow[0] if wrow else None
+        if not url:
+            return
+        import json as _json
+        import urllib.request as _ur
+        data = _json.dumps({'content': line[:1900]}).encode()
+        req = _ur.Request(url, data=data, method='POST',
+                          headers={'Content-Type': 'application/json',
+                                   'User-Agent': 'fundjohn-sizer/1.0'})
+        _ur.urlopen(req, timeout=8).read()
+    except Exception as e:
+        logger.warning('zero-conviction flatten alert post skipped (%s)', e)
 
 
 def _recent_active_counts(lookback: int = 10) -> list[int]:
@@ -966,6 +1013,56 @@ def _scaled_target_diff(survivors: dict, weight_by_strat: dict, size_scalars: di
     return out
 
 
+def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confirmer,
+                                   _ortho_groups, sharpe_by_strat, eff_weight_by_strat,
+                                   weight_by_strat, account_state, opt_active):
+    """FLATTEN-on-genuine-zero-conviction (EOD lane only).
+
+    Called from the post-conviction-gate empty check (`if not ticker_w:`) when a
+    HEALTHY carried set has been FULLY rejected by the corr-conviction gate.
+
+    Returns a list of orphan_close orders for EVERY held broker position when ALL of
+    the gate conditions below hold; returns None (→ caller keeps the historical
+    HOLD, byte-identical to prior behavior) in EVERY other case:
+
+      1. OPENCLAW_EOD_RECONCILE == '1'         — the EOD lane; AND
+      2. OPENCLAW_INTRADAY_REDEPLOY != '1'     — NEVER on an intraday regime-
+         transition redeploy. That subprocess INHERITS EOD_RECONCILE=1 from the
+         parent env (scripts/redeploy_pipeline.py: `env = {**os.environ}`), so this
+         exclusion is load-bearing — an intraday flatten would liquidate the book on
+         a momentary regime blip; AND
+      3. len(active) >= SIGNAL_SET_MIN_FLOOR   — a healthy carried set (a thin/
+         degenerate ~2-signal day must not trigger a liquidation); AND
+      4. OPENCLAW_FLATTEN_ON_ZERO_CONVICTION == '1' — default-OFF operator kill-
+         switch (this whole feature is inert until the operator flips it).
+
+    Reuses the SAME order-emission tail the normal path uses (_emit_orders_from_targets
+    with target_usd={}), so orphan_close order dicts are field-identical to the normal
+    orphan path — no hand-rolled dicts. opt_active is passed empty."""
+    if not (os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+            and os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1'
+            and os.environ.get('OPENCLAW_FLATTEN_ON_ZERO_CONVICTION') == '1'
+            and len(active) >= SIGNAL_SET_MIN_FLOOR):
+        return None
+    broker = _load_broker_positions_usd()
+    if not broker:
+        # Already flat, or the broker fetch failed (fail-safe: empty dict). Nothing
+        # to flatten and we must not act on an unknown book → HOLD.
+        logger.info('regime_blended_sizer.sharpe_cadence: zero-conviction flatten armed '
+                    '(healthy carried set %d fully gated) but broker book is empty — '
+                    'nothing to flatten', len(active))
+        return None
+    logger.warning('regime_blended_sizer.sharpe_cadence: ZERO-CONVICTION FLATTEN — '
+                   'healthy carried set (%d signal(s)) fully rejected by the corr '
+                   'floor in %s; flattening %d broker position(s)',
+                   len(active), regime_state, len(broker))
+    _post_flatten_alert(regime_state, len(active), broker)
+    _warn_options_dropped_no_equity_scale(opt_active, 'zero-conviction flatten')
+    return _emit_orders_from_targets(
+        {}, ticker_meta, nav, confirmer, _ortho_groups, sharpe_by_strat,
+        eff_weight_by_strat, [], weight_by_strat, 0.0, account_state, broker=broker)
+
+
 def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer):
     """Sharpe × cadence × direction sizer with cadence-window aggregation
     AND broker-position netting.
@@ -1237,6 +1334,22 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
 
     if not ticker_w:
         logger.info('regime_blended_sizer.sharpe_cadence: no tickers cleared cum_sharpe gate')
+        # FLATTEN-ON-ZERO-CONVICTION (EOD lane only, default-OFF kill-switch). A
+        # HEALTHY carried set that is FULLY rejected by the corr-conviction floor
+        # means the book has no conviction behind it — go flat rather than silently
+        # HOLD the inherited positions. (2026-07 incident: ~14% gross was held for 3
+        # days because this early-return fired BEFORE the delta/orphan-close tail.)
+        # _maybe_flatten_zero_conviction returns orphan_close orders for every held
+        # position when armed, else None (→ historical HOLD). The pre-gate empty
+        # check ("no eligible signals after weight filter", above) and the Case-B
+        # empty-carried check are DELIBERATELY untouched — those are data-absence,
+        # not conviction-rejection.
+        _flatten_orders = _maybe_flatten_zero_conviction(
+            active, regime_state, ticker_meta, nav, confirmer, _ortho_groups,
+            sharpe_by_strat, eff_weight_by_strat, weight_by_strat, account_state,
+            opt_active)
+        if _flatten_orders is not None:
+            return _flatten_orders
         _warn_options_dropped_no_equity_scale(opt_active, 'no equity tickers cleared cum_sharpe gate')
         return []
 
@@ -1367,7 +1480,30 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                            len(active), SIGNAL_SET_MIN_FLOOR, SIGNAL_SET_MIN_FRAC*100, _baseline)
             return []
 
-    broker = _load_broker_positions_usd()
+    return _emit_orders_from_targets(
+        target_usd, ticker_meta, nav, confirmer, _ortho_groups,
+        sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
+        scale, account_state)
+
+
+def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
+                              sharpe_by_strat, eff_weight_by_strat, opt_active,
+                              weight_by_strat, scale, account_state, broker=None):
+    """Order-emission tail shared by the normal sizing path AND the zero-conviction
+    flatten path (extracted 2026-07-08, byte-identical to the prior in-line tail).
+
+    Fetches the broker book (unless `broker` is supplied pre-fetched — the flatten
+    path passes it so it can size the alert first), classifies target_usd vs the
+    book into delta/flip/orphan_close emissions via _classify_position_deltas,
+    runs the TradeJohn confirmer over new-exposure emissions only (closes always
+    execute), builds the sized-handoff order dicts, appends option orders, and
+    returns the order list.
+
+    The flatten path calls this with target_usd={} (→ every held ticker becomes an
+    orphan_close), opt_active=[] (a zero-conviction flatten must never OPEN new
+    option structures), scale=0.0 and a pre-fetched non-empty `broker`."""
+    if broker is None:
+        broker = _load_broker_positions_usd()
     emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
     flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
     logger.info(
