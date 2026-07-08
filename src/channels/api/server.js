@@ -7930,9 +7930,19 @@ function _stRenderJobChips() {
   _renderCandidates(rows);
 }
 
-function _inActiveStack(r) { return r.state === 'live' || r.state === 'monitoring'; }
-function _inInactive(r)    { return r.state === 'deprecated' || r.state === 'archived' || r.state === 'orphan'; }
-function _inCandidate(r)   { return r.state === 'paper' || r.state === 'candidate' || r.state === 'staging'; }
+// The engine TRADES by registry status='approved', NOT by manifest state.
+// A row is "trading" iff the registry has approved it; such rows belong in
+// the Active Stack regardless of what the manifest state still says. This is
+// a DISPLAY-ONLY reclassification — it does NOT write manifest.json or the
+// strategy_registry; promoting the manifest is a separate governance decision.
+// The three predicates below are mutually exclusive (each row matches at most
+// one): _isTrading routes to Active Stack and gates the other two off; among
+// non-trading rows the manifest-state sets {live,monitoring} /
+// {deprecated,archived,orphan} / {paper,candidate,staging} are disjoint.
+function _isTrading(r)     { return String(r.registry_status || '').toLowerCase() === 'approved'; }
+function _inActiveStack(r) { return _isTrading(r) || r.state === 'live' || r.state === 'monitoring'; }
+function _inInactive(r)    { return !_isTrading(r) && (r.state === 'deprecated' || r.state === 'archived' || r.state === 'orphan'); }
+function _inCandidate(r)   { return !_isTrading(r) && (r.state === 'paper' || r.state === 'candidate' || r.state === 'staging'); }
 
 // Sub-status for Active Stack rows: 'live' | 'stale' | 'waiting'
 function _activeSub(r) {
@@ -8525,6 +8535,14 @@ function _renderActiveStack(rows) {
       const adrTitle = 'ARR ' + (arr != null ? ((arr >= 0 ? '+' : '') + arr.toFixed(2) + '%') : '—')
                      + ' / ACT ' + (act != null ? act.toFixed(1) + ' days' : '—');
       const actTxt = act != null ? act.toFixed(1) + (act === 1 ? ' day' : ' days') : '—';
+      // Governance lever for rows the engine already trades but the manifest
+      // still files as candidate (drift='trading_not_shown'). This reclass is
+      // display-only; the button reaches the SAME promote path the candidate
+      // "✅ Approve" uses (stApprove → POST /api/strategies/:id/approve, no
+      // gate override) so the operator can reconcile manifest→live when ready.
+      const promoteBtn = r.drift === 'trading_not_shown'
+        ? \`<button class="st-action-btn" onclick="event.stopPropagation();stApprove('\${_escStr(r.strategy_id)}', false)" title="engine already trades this; promote manifest candidate→live to reconcile">⚠️ Promote in manifest</button>\`
+        : '';
       const isOpen = r.strategy_id === expandedSid;
       const expandRow = isOpen ? \`
         <tr class="st-expand-row" data-sid="\${_escStr(r.strategy_id)}">
@@ -8559,7 +8577,7 @@ function _renderActiveStack(rows) {
         <td class="num" style="color:var(--muted)">\${actTxt}</td>
         <td class="num" title="BACKTEST OUE (GBM σ): O=realized>expectation by ≥2σ, U=below, E=within.">\${ourCell}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
-        <td><button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
+        <td>\${promoteBtn}<button class="st-action-btn st-unstack-btn" onclick="event.stopPropagation();stUnstack('\${_escStr(r.strategy_id)}')">Unstack</button></td>
       </tr>\${expandRow}\`;
     }).join('')}
   </table>\${footer}\`;

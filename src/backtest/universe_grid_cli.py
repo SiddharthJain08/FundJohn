@@ -172,6 +172,7 @@ def _simulate_grid(
     from backtest.unified_backtest import (
         load_prices_panels, load_regimes, load_strategy_class,
         find_strategy_file, aggregate_per_regime, _log, _per_bar_simulate,
+        resolve_cost_model_bps, _resolve_instrument_class,
     )
 
     filepath = find_strategy_file(strategy_id)
@@ -184,6 +185,16 @@ def _simulate_grid(
     close_wide, bars_by_ticker = load_prices_panels()
     regimes = load_regimes()
 
+    # §7-corrected cost model: mirror run_backtest's slippage resolution EXACTLY
+    # so grid metrics are comparable to production (true-MTM is already on; this
+    # closes the only remaining gap — always-adverse slippage). Same env-var name
+    # and same default semantics (unset → ON, via the '1' default) as
+    # unified_backtest.run_backtest:857 — must match EXACTLY or the grid diverges.
+    _instrument_class = _resolve_instrument_class(strategy_id, filepath=filepath)
+    _cost_bps = resolve_cost_model_bps(_instrument_class)
+    _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE', '1') != '0'
+    _slippage_bps = _cost_bps if _slippage_on else 0.0
+
     start_dt = pd.Timestamp(start_date)
     end_dt = pd.Timestamp(end_date)
     oos_dates = close_wide.loc[start_dt:end_dt].index
@@ -192,6 +203,7 @@ def _simulate_grid(
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         strategy_id=strategy_id,
         resolver=resolver,
+        slippage_bps=_slippage_bps,
     )
     trades         = sim['trades']
     universe_sizes = sim['universe_sizes']
