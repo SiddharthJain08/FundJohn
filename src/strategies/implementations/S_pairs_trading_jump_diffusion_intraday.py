@@ -54,9 +54,12 @@ def _scan_pairs(recent: np.ndarray, cur_log: np.ndarray, top_k: Optional[int],
         ticks on the window's last bar). Same min-norm form:
         b = c·ȳ/(c²+1), a = ȳ/(c²+1), with ȳ = mean(spread[1:]); the fitted
         value is then the constant ȳ, so std(resid) = std(spread[1:]).
-    Exactness matters: near-constant-but-not-exact columns stay on the regular
-    closed form (lstsq's rcond cutoff at float64 eps only trips on exact rank
-    deficiency; pinned by tests/test_spairs_vectorized_parity.py).
+    Exactness matters: lstsq's rcond cutoff trips whenever the regressor's
+    small/large singular-value ratio falls below eps·max(M,N) ≈ 5.6e-14, not
+    only on exact rank deficiency — but that band is empty for real panels:
+    ffill produces bytewise-identical floats (exactly constant, caught above),
+    while genuinely distinct prices differ by at least a tick (≳1e-4), far
+    above the cutoff; pinned by tests/test_spairs_vectorized_parity.py.
 
     Returns candidates as tuples (kappa, i, j, beta, alpha, mu_eq, sigma_eq,
     zscore), stable-sorted by kappa DESC with ties in (i, j) enumeration order

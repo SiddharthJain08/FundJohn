@@ -14,6 +14,7 @@ Degenerate-design coverage (rank-deficient lstsq min-norm behavior):
 from __future__ import annotations
 
 import sys
+from collections import Counter
 from typing import List
 
 import numpy as np
@@ -541,3 +542,52 @@ class TestBlocking:
         for blk in (1, 2, 3, 7, 16, 33):
             alt = _scan_pairs(recent, cur_log, top_k=None, block=blk)
             assert alt == base, f'block={blk} changed the candidate list'
+
+    def test_multiblock_topk_pruning_matches_unpruned_and_single_block(self):
+        """Every committed test elsewhere runs single-block (m < the 512
+        default) or with top_k=None, so the MULTI-BLOCK + per-block top-k
+        pruning path that fires in production at n≈6300 is otherwise
+        untested. block=8 on a panel with well over 8 complete columns forces
+        several blocks, and a density check below proves pruning actually
+        drops candidates in at least one of them (not just multi-block
+        concatenation with nothing pruned). Per the docstring's
+        pruning-exactness argument (any global top-k element is inside its
+        own block's stable top-k under the same total order), the pruned
+        multi-block result must exactly equal both the fully unpruned scan
+        truncated to top_k, and a single-huge-block top_k scan — same
+        candidates, same fields, same stable kappa-DESC/(i,j) order."""
+        block = 8
+        top_k = 5
+        panel = _build_panel(seed=11, n_rw=40)
+        universe = _universe_for(panel, seed=11)
+        available = [t for t in universe if t in panel.columns]
+        log_px = np.log(panel[available].ffill().dropna(how='all'))
+        recent = log_px.iloc[-252:].values
+        cur_log = log_px.iloc[-1].values
+        complete_idx = np.flatnonzero(~np.isnan(recent).any(axis=0))
+        n_complete = int(complete_idx.size)
+        n_blocks = len(range(0, n_complete - 1, block))
+        assert n_blocks >= 2, (
+            'panel must yield >=2 blocks at block=8 (otherwise this test '
+            'degenerates to single-block)'
+        )
+
+        unpruned = _scan_pairs(recent, cur_log, top_k=None, block=block)
+
+        # Prove pruning is non-vacuous: some block's candidate count must
+        # exceed top_k, else the multi-block/single-block/unpruned outputs
+        # could agree trivially (nothing ever gets pruned) and this test
+        # would pass against a broken per-block top-k selector.
+        pos_of = {int(orig): k for k, orig in enumerate(complete_idx)}
+        per_block_counts = Counter(pos_of[i] // block for (_k, i, _j, *_rest) in unpruned)
+        assert per_block_counts and max(per_block_counts.values()) > top_k, (
+            'no block produced more candidates than top_k — pruning would '
+            'never fire, making this test vacuous'
+        )
+
+        multiblock_pruned = _scan_pairs(recent, cur_log, top_k=top_k, block=block)
+        single_block_pruned = _scan_pairs(recent, cur_log, top_k=top_k, block=10_000)
+
+        assert len(multiblock_pruned) == top_k
+        assert multiblock_pruned == unpruned[:top_k]
+        assert multiblock_pruned == single_block_pruned
