@@ -372,7 +372,9 @@ def _refresh_regime_file(
                 try:
                     pm = {str(k): round(float(v), 4)
                           for k, v in dict(state_probs).items()}
-                except Exception:
+                except Exception as e:
+                    logger.warning('regime file refresh: state_probs not a '
+                                   'labeled mapping (%s) — probs not updated', e)
                     pm = {}
                 if pm:
                     updated['state_probabilities'] = pm
@@ -441,7 +443,9 @@ def _sync_regime_to_consumers(
         try:
             state_probs_map = {str(k): round(float(v), 4)
                                for k, v in dict(state_probs).items()}
-        except Exception:
+        except Exception as e:
+            logger.warning('regime sync: state_probs not a labeled mapping '
+                           '(%s) — writing empty probs map', e)
             state_probs_map = {}
 
     vix_intraday = features.get('vix_synth_30d')

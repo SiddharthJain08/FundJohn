@@ -444,7 +444,9 @@ def _run_tick_with_harness(harness, *, live: bool, force_dry_run=False):
         # 'UNKNOWN'. We need it to be HIGH_VOL so the confirmed-transition
         # path fires. Patch _state_from_hmm + MODEL_PATH.exists True.
         with patch.object(detector, '_state_from_hmm',
-                          return_value=('HIGH_VOL', 0.92, np.array([0.04, 0.04, 0.92, 0.0]))), \
+                          return_value=('HIGH_VOL', 0.92,
+                                        {'LOW_VOL': 0.04, 'TRANSITIONING': 0.04,
+                                         'HIGH_VOL': 0.92, 'CRISIS': 0.0})), \
              patch.object(detector.MODEL_PATH, 'exists', return_value=True), \
              patch('builtins.open', MagicMock()), \
              patch.object(detector.pickle, 'load',
@@ -612,8 +614,8 @@ class TestSyncRegimeHelper:
         assert meta['state_probabilities']['HIGH_VOL'] == 0.92
         assert meta['transition_tag'] == 'INTRADAY_HMM_REDEPLOY_LOW_VOL_HIGH_VOL'
 
-        # regime_latest.json — state-related fields mutated, daily-only
-        # fields preserved
+        # regime_latest.json — state-related fields mutated, retired
+        # daily-only fields purged (2026-07-12)
         updated = json.loads(regime_file.read_text())
         assert updated['state']       == 'HIGH_VOL'
         assert updated['state_raw']   == 'HIGH_VOL'
