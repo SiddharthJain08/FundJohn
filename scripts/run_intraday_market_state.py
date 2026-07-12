@@ -364,10 +364,14 @@ def _refresh_regime_file(
             updated['confidence'] = round(float(confidence), 4)
             updated['prior_state'] = prior_state
             if state_probs is not None:
+                # state_probs is the ALREADY-LABELED {regime_name: prob} map
+                # from _state_from_hmm (2026-07-12 — raw-index labeling here
+                # mislabeled the probs whenever the HMM's internal state order
+                # wasn't vol-ascending).
                 pm = {}
                 try:
-                    for i, p in enumerate(state_probs):
-                        pm[STATE_NAMES_BY_RANK.get(i, f's{i}')] = round(float(p), 4)
+                    pm = {str(k): round(float(v), 4)
+                          for k, v in dict(state_probs).items()}
                 except Exception:
                     pm = {}
                 if pm:
@@ -377,6 +381,20 @@ def _refresh_regime_file(
                     updated['vix_level'] = round(float(vix), 2)
                 except (TypeError, ValueError):
                     pass
+
+        # Retired daily-detector keys (2026-07-12): the daily HMM stopped
+        # writing this file on 2026-06-08 (intraday is the sole regime
+        # authority), so these diagnostics froze at that day's values — a
+        # false-CRISIS artifact (stress_score=82, transition_probs CRISIS
+        # 0.87) that misleads any reader. Nothing maintains them anymore;
+        # drop them so consumers fall back to their explicit no-data paths
+        # (handoff stress→0; dashboard gauges render '—').
+        for _dead in ('date', 'stress_score', 'roro_score',
+                      'transition_probs_tomorrow', 'vix_percentile',
+                      'features', 'days_in_current_state', 'position_scale',
+                      'regime_change_alert', 'refit_performed', 'resync_note',
+                      'notes', 'candidates_identified', 'active_strategies'):
+            updated.pop(_dead, None)
 
         # Freshness markers advance on EVERY call (even UNKNOWN) so the
         # engine's mtime-based stale-gate is satisfied across closed windows.
@@ -398,7 +416,7 @@ def _sync_regime_to_consumers(
     new_state: str,
     prior_state: str | None,
     confidence: float,
-    state_probs: np.ndarray | None,
+    state_probs: dict | None,
     features: dict,
     ts_utc,
     transition_tag: str | None,
@@ -416,11 +434,13 @@ def _sync_regime_to_consumers(
     Both sinks are append/upsert; the next daily HMM run at 9 AM ET will
     overwrite them with the daily-cadence state.
     """
+    # state_probs arrives as the ALREADY-LABELED {regime_name: prob} map from
+    # _state_from_hmm (2026-07-12 fix — see _refresh_regime_file).
     state_probs_map = {}
     if state_probs is not None:
         try:
-            for i, p in enumerate(state_probs):
-                state_probs_map[STATE_NAMES_BY_RANK.get(i, f's{i}')] = round(float(p), 4)
+            state_probs_map = {str(k): round(float(v), 4)
+                               for k, v in dict(state_probs).items()}
         except Exception:
             state_probs_map = {}
 
@@ -455,7 +475,7 @@ def _sync_regime_to_consumers(
         logger.warning('regime sync: market_regime write failed: %s', e)
 
     # The file half of the sync is the shared per-tick refresh: it merge-writes
-    # regime_latest.json from the (raw) state_probs + vix this transition saw.
+    # regime_latest.json from the labeled state_probs + vix this transition saw.
     _refresh_regime_file(
         state=new_state, confidence=confidence, vix=vix_curr,
         prior_state=prior_state, state_probs=state_probs,
@@ -464,10 +484,16 @@ def _sync_regime_to_consumers(
     logger.info('regime sync: regime_latest.json updated → %s', new_state)
 
 
-def _state_from_hmm(model, features: dict) -> tuple[str, float, np.ndarray]:
+def _state_from_hmm(model, features: dict) -> tuple[str, float, dict]:
     """Score one feature dict against the trained HMM.
 
-    Returns (state_name, confidence, state_probs).
+    Returns (state_name, confidence, probs_by_name) where probs_by_name is
+    {regime_name: probability}, labeled via the SAME internal-state→name map
+    used to pick state_name. (Until 2026-07-12 the RAW posterior vector was
+    returned and downstream writers labeled index i as STATE_NAMES_BY_RANK[i]
+    WITHOUT the rank remap — so regime_latest.json / market_regime showed
+    e.g. HIGH_VOL:1.0 while state=LOW_VOL whenever the HMM's internal state
+    order wasn't vol-ascending.)
     NaN feature values are imputed with column means stored on the
     model object (set at training time as `.feature_means_`).
     """
@@ -497,7 +523,9 @@ def _state_from_hmm(model, features: dict) -> tuple[str, float, np.ndarray]:
         name_map = {int(rank_order[i]): STATE_NAMES_BY_RANK[i]
                     for i in range(len(rank_order))}
     state_name = name_map.get(state_raw, 'UNKNOWN')
-    return state_name, confidence, state_probs
+    probs_by_name = {name_map.get(i, f's{i}'): round(float(p), 4)
+                     for i, p in enumerate(state_probs)}
+    return state_name, confidence, probs_by_name
 
 
 def _maybe_apply_confidence_floor(state_name: str, confidence: float) -> str:

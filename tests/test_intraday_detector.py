@@ -560,9 +560,9 @@ class TestSyncRegimeHelper:
                                                        monkeypatch):
         ts = pd.Timestamp('2026-05-21 22:10:00', tz='UTC')
         regime_file = tmp_path / 'regime_latest.json'
-        # Seed an existing file representing the daily-HMM-written state,
-        # so we can verify the merge preserves daily-only fields like
-        # stress_score / roro_score.
+        # Seed an existing file carrying frozen daily-HMM fields, so we
+        # can verify the merge PURGES them (2026-07-12: the daily detector
+        # no longer writes this file, so those keys can only ever be stale).
         regime_file.write_text(json.dumps({
             'date':         '2026-05-21',
             'state':        'LOW_VOL',
@@ -583,7 +583,10 @@ class TestSyncRegimeHelper:
         conn = MagicMock()
         conn.cursor.return_value = cur
 
-        state_probs = np.array([0.04, 0.04, 0.92, 0.0])
+        # Labeled map, as _state_from_hmm now returns (2026-07-12 fix —
+        # raw vectors were previously mislabeled by index downstream).
+        state_probs = {'LOW_VOL': 0.04, 'TRANSITIONING': 0.04,
+                       'HIGH_VOL': 0.92, 'CRISIS': 0.0}
         detector._sync_regime_to_consumers(
             conn=conn,
             new_state='HIGH_VOL',
@@ -617,9 +620,12 @@ class TestSyncRegimeHelper:
         assert updated['confidence']  == 0.92
         assert updated['prior_state'] == 'LOW_VOL'
         assert updated['vix_level']   == 22.5
-        # Daily fields kept intact
-        assert updated['stress_score'] == 37
-        assert updated['roro_score']   == 2.9
+        # Retired daily fields PURGED (frozen since 2026-06-08 — nothing
+        # maintains them; consumers have explicit no-data fallbacks)
+        assert 'stress_score' not in updated
+        assert 'roro_score' not in updated
+        assert 'date' not in updated
+        assert updated['state_probabilities']['HIGH_VOL'] == 0.92
         # Intraday provenance stamped
         assert updated['intraday_source'] == 'intraday_hmm'
         assert updated['intraday_transition'] == (

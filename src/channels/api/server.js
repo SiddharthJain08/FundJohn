@@ -5123,15 +5123,22 @@ function _renderRegimeStructure(intraday, daily) {
     return \`<span class="regime-spark-tick" style="background:\${color};opacity:\${op}" title="\${tt}"></span>\`;
   }).join('');
 
-  // Daily-only fields kept on the card.
+  // Daily-only fields kept on the card. Since 2026-07-12 the intraday
+  // detector PURGES the retired daily keys (stress_score/roro_score/features
+  // froze at the 2026-06-08 false-CRISIS values once the daily HMM stopped
+  // writing the file) — absent keys must render as '—', not as a
+  // current-looking 0/green gauge.
   const df = dly ? (dly.features || {}) : {};
-  const stress    = Math.min(100, Math.max(0, dly ? (dly.stress_score ?? 0) : 0));
-  const stressClr = stress >= 70 ? 'var(--red)' : stress >= 40 ? 'var(--orange)' : 'var(--green)';
-  const roro      = dly ? Math.min(50, Math.max(-50, dly.roro_score ?? 0)) : 0;
-  const roroPct   = (Math.abs(roro)/50*50).toFixed(1);
+  const _hasStress = dly != null && dly.stress_score != null;
+  const _hasRoro   = dly != null && dly.roro_score != null;
+  const stress    = _hasStress ? Math.min(100, Math.max(0, dly.stress_score)) : 0;
+  const stressLbl = _hasStress ? \`\${stress}/100\` : '—';
+  const stressClr = !_hasStress ? 'var(--dim)' : stress >= 70 ? 'var(--red)' : stress >= 40 ? 'var(--orange)' : 'var(--green)';
+  const roro      = _hasRoro ? Math.min(50, Math.max(-50, dly.roro_score)) : 0;
+  const roroPct   = _hasRoro ? (Math.abs(roro)/50*50).toFixed(1) : 0;
   const roroLeft  = roro < 0 ? \`left:\${50-roroPct}%;width:\${roroPct}%\` : \`left:50%;width:\${roroPct}%\`;
-  const roroClr   = roro >= 0 ? 'var(--green)' : 'var(--red)';
-  const roroLbl   = dly == null ? '—' : (roro >= 0 ? \`+\${(dly.roro_score||0).toFixed(1)} risk-on\` : \`\${(dly.roro_score||0).toFixed(1)} risk-off\`);
+  const roroClr   = !_hasRoro ? 'var(--dim)' : roro >= 0 ? 'var(--green)' : 'var(--red)';
+  const roroLbl   = !_hasRoro ? '—' : (roro >= 0 ? \`+\${(dly.roro_score||0).toFixed(1)} risk-on\` : \`\${(dly.roro_score||0).toFixed(1)} risk-off\`);
 
   // Daily-block freshness: flag frozen date/stress/roro so the gauge greys them
   // instead of presenting stale values as current (e.g. 2026-06-08 operator resync).
@@ -5199,7 +5206,7 @@ function _renderRegimeStructure(intraday, daily) {
         <div class="regime-section">
           <div class="regime-section-header">Market Stress\${_stale ? \` <span style="font-size:9px;color:var(--dim);text-transform:none;font-weight:normal;letter-spacing:0">\${_asOf}</span>\` : ''}</div>
           <div class="regime-bar-group" style="margin-bottom:12px">
-            <div class="regime-bar-label" style="\${_stale ? 'color:var(--dim)' : ''}"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stress}/100</span></div>
+            <div class="regime-bar-label" style="\${_stale ? 'color:var(--dim)' : ''}"><span>Stress <span style="text-transform:none;letter-spacing:0;color:var(--dim);font-weight:normal">(daily percentile of VIX, credit spread, momentum)</span></span><span>\${stressLbl}</span></div>
             <div class="regime-bar-track"><div class="regime-bar-fill" style="width:\${stress}%;background:\${stressClrEff}"></div></div>
           </div>
           <div class="regime-bar-group">
