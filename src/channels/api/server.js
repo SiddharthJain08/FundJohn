@@ -11,6 +11,7 @@ const { runAlpaca } = require('./alpaca_cli');
 const { groupByStrategy, computeDayPnlUsd } = require('./positions_grouped');
 const { buildStrategyRow } = require('./strategy_row');
 const { blendScope } = require('./blend_scope');
+const { parseActivationDryRun } = require('./activation_preview');
 const { isRegimeEligibleNow, regimeForStrategy } = require('./regime_active');
 const { regimeFreshness } = require('./regime_freshness');
 const { realizedLeverage } = require('./leverage');
@@ -535,6 +536,139 @@ app.put('/api/config/asset-corr-thr', async (req, res) => {
     `, [String(v)]);
     res.json({ value: v });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Strategy Activation threshold + dry-run preview ─────────────────────────
+// Slider band for pipeline_config.strategy_activation_min_sharpe — the min
+// per-regime backtest Sharpe the activation assigner
+// (src/backtest/activation_assigner.py) requires before a (strategy, regime)
+// sizer-eligibility cell passes (MIN_TRADES=20 is a fixed code constant, not
+// dashboard-controlled). The assigner reads this key fresh on every run and
+// fail-safes to 0.5 when the row is absent/malformed — the GET mirrors that
+// exact fallback so slider and assigner can never disagree about the default.
+// ⚠️ OPERATOR GATE (Phase 1e, binding): the LIVE eligibility write is HELD.
+// This dashboard only (a) sets the threshold and (b) previews via --dry-run.
+// The server MUST NEVER invoke the assigner without --dry-run — see the
+// hard-coded argv + guard in POST /api/activation/dry-run below.
+const ACTIVATION_MIN_SHARPE_MIN     = 0.0;
+const ACTIVATION_MIN_SHARPE_MAX     = 3.0;
+const ACTIVATION_MIN_SHARPE_DEFAULT = 0.5;   // mirrors the assigner's fail-safe
+const ACTIVATION_DRY_RUN_TIMEOUT_MS = 120_000;
+
+app.get('/api/config/activation-min-sharpe', async (req, res) => {
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_min_sharpe'");
+    const row = r.rows[0];
+    const raw = row ? parseFloat(row.value) : NaN;
+    res.json({
+      value:      isFinite(raw)
+                    ? Math.max(ACTIVATION_MIN_SHARPE_MIN, Math.min(raw, ACTIVATION_MIN_SHARPE_MAX))
+                    : ACTIVATION_MIN_SHARPE_DEFAULT,
+      min:        ACTIVATION_MIN_SHARPE_MIN, max: ACTIVATION_MIN_SHARPE_MAX,
+      default:    ACTIVATION_MIN_SHARPE_DEFAULT,
+      row_exists: !!row,
+      updated_at: row ? row.updated_at : null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/activation-min-sharpe', async (req, res) => {
+  const v = parseFloat(req.body && req.body.value);
+  if (!isFinite(v) || v < ACTIVATION_MIN_SHARPE_MIN || v > ACTIVATION_MIN_SHARPE_MAX) {
+    return res.status(400).json({ error: `value must be a number in [${ACTIVATION_MIN_SHARPE_MIN}, ${ACTIVATION_MIN_SHARPE_MAX}]` });
+  }
+  try {
+    // Upsert — the row may not exist yet (the assigner fail-safes to 0.5
+    // when absent, so first write creates it with a description).
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('strategy_activation_min_sharpe', $1, 'Min per-regime backtest Sharpe for sizer eligibility (activation_assigner; MIN_TRADES=20 fixed). Range [0.0, 3.0]; assigner fail-safe default 0.5. Live eligibility write is Phase 1e-gated — dashboard slider sets threshold + dry-run preview only. Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(v)]);
+    res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// POST /api/activation/dry-run — on-demand hypothetical preview of what the
+// activation assigner WOULD do at the currently-saved threshold. Shells out
+// to `nice -n 19 python3 -m backtest.activation_assigner --all --dry-run`
+// (VPS is 2-core — always nice heavy python) with the server's own env
+// (dotenv already loaded POSTGRES_URI at boot) + PYTHONPATH=src, then parses
+// the line-oriented diff via activation_preview.parseActivationDryRun.
+// --dry-run performs ZERO database writes (the assigner's write helper is
+// never called) — this endpoint is safe to hit at any time. Synchronous
+// (~seconds for ~150 strategies) with a hard 120s kill; one at a time via a
+// simple in-memory busy flag (second caller gets 409).
+let _activationDryRunBusy = false;
+app.post('/api/activation/dry-run', (req, res) => {
+  if (_activationDryRunBusy) {
+    return res.status(409).json({ error: 'an activation dry-run is already running — try again in a moment' });
+  }
+  _activationDryRunBusy = true;
+
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const rootDir = path.resolve(__dirname, '../../..');
+  // HARD INVARIANT (Phase 1e gate): --dry-run is non-negotiable. The argv is
+  // a hard-coded literal (no request-derived args) and the belt-and-braces
+  // guard below refuses to spawn if a future edit ever drops the flag.
+  const args = ['-n', '19', 'python3', '-m', 'backtest.activation_assigner', '--all', '--dry-run'];
+  if (!args.includes('--dry-run')) {
+    _activationDryRunBusy = false;
+    return res.status(500).json({ error: 'refusing to run activation assigner without --dry-run' });
+  }
+
+  const started = Date.now();
+  let child;
+  try {
+    child = spawn('nice', args, {
+      cwd:   rootDir,
+      env:   { ...process.env, PYTHONPATH: 'src' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (e) {
+    _activationDryRunBusy = false;
+    return res.status(500).json({ error: `assigner spawn failed: ${e.message}` });
+  }
+
+  let out = '', errOut = '', responded = false;
+  const finish = (status, body) => {
+    if (responded) return;
+    responded = true;
+    clearTimeout(killTimer);
+    _activationDryRunBusy = false;
+    res.status(status).json(body);
+  };
+  const killTimer = setTimeout(() => {
+    try { child.kill('SIGKILL'); } catch (_) { /* already gone */ }
+    finish(504, { error: `activation dry-run timed out after ${ACTIVATION_DRY_RUN_TIMEOUT_MS / 1000}s` });
+  }, ACTIVATION_DRY_RUN_TIMEOUT_MS);
+
+  child.stdout.on('data', d => { out += d; });
+  child.stderr.on('data', d => { errOut += d; });
+  child.on('error', e => finish(500, { error: `assigner spawn error: ${e.message}` }));
+  child.on('close', (code) => {
+    if (responded) return;
+    const parsed = parseActivationDryRun(out);
+    // Exit 1 with a parsable summary = per-strategy errors (assigner still
+    // summarises; `errors` is surfaced in the payload). No summary at all =
+    // hard failure (e.g. POSTGRES_URI missing, import error) → 500 with tails.
+    if (!parsed.summary_found) {
+      return finish(500, {
+        error:       'activation assigner produced no parsable dry-run summary',
+        exit_code:   code,
+        stdout_tail: out.slice(-2000),
+        stderr_tail: errOut.slice(-2000),
+      });
+    }
+    finish(200, {
+      ok:          true,
+      dry_run:     true,   // always — this endpoint never performs the live write
+      exit_code:   code,
+      duration_ms: Date.now() - started,
+      ...parsed,
+    });
+  });
 });
 
 // Risk & Sizing — bundled config for the Portfolio page control panel.
@@ -3036,6 +3170,29 @@ body.rs-chat-locked{overflow:hidden}
 .st-sharpe-card-empty{grid-column:1/-1;text-align:center;color:var(--muted);font-size:11px;padding:18px}
 @media(max-width:920px){.st-sharpe-grid{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:560px){.st-sharpe-grid{grid-template-columns:1fr}}
+/* Strategy Activation card — threshold slider + assigner dry-run preview.
+   Reuses the conviction-gate slider visual language (st-sharpe-card). The
+   note is deliberately loud: the live eligibility write is Phase 1e-gated,
+   so everything this card does is config + hypothetical preview. */
+.st-act-note{margin:8px 4px 0;padding:8px 12px;border:1px solid rgba(250,204,21,0.4);border-left:3px solid var(--yellow);border-radius:6px;background:rgba(250,204,21,0.07);color:var(--yellow);font-size:11px;line-height:1.5}
+.st-act-grid{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:14px;padding:10px 4px 4px;align-items:stretch}
+.st-act-preview{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.st-act-preview-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.st-act-preview-bar .st-action-btn{font-size:11px;padding:5px 12px;color:var(--text);border-color:var(--blue)}
+.st-act-preview-bar .st-action-btn:hover{color:var(--blue)}
+.st-act-preview-bar .st-action-btn:disabled{opacity:.5;cursor:wait}
+.st-act-preview-empty{color:var(--muted);font-size:11px;padding:6px 2px}
+.st-act-summary{font-size:11px;color:var(--text);line-height:1.7}
+.st-act-summary .st-act-hypo{color:var(--yellow);font-weight:700;letter-spacing:.06em;font-size:9px;text-transform:uppercase;border:1px solid rgba(250,204,21,0.5);border-radius:3px;padding:1px 6px;margin-right:8px;white-space:nowrap}
+.st-act-table{border-collapse:collapse;width:100%;font-size:11px;font-variant-numeric:tabular-nums}
+.st-act-table th{padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:var(--muted);font-size:10px;font-weight:600}
+.st-act-table th:first-child,.st-act-table td:first-child{text-align:left}
+.st-act-table td{padding:5px 8px;border-bottom:1px dashed var(--border2);text-align:right;color:var(--text)}
+.st-act-table td.st-act-up{color:var(--green)}
+.st-act-table td.st-act-down{color:var(--red)}
+.st-act-dormant{max-height:140px;overflow-y:auto;border:1px solid var(--border2);border-radius:6px;padding:8px 10px;background:var(--bg);font-family:'SF Mono',monospace;font-size:10px;line-height:1.9}
+.st-act-dormant span{display:inline-block;margin-right:10px;color:var(--red)}
+@media(max-width:920px){.st-act-grid{grid-template-columns:1fr}}
 
 .st-tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:4px}
 .st-tile{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px 16px}
@@ -3976,6 +4133,39 @@ body.rs-chat-locked{overflow:hidden}
       </div>
       <div class="st-sharpe-grid" id="st-sharpe-gates">
         <div class="st-sharpe-card-empty">Loading conviction gates…</div>
+      </div>
+    </div>
+
+    <!-- Strategy Activation threshold slider + assigner dry-run preview.
+         Slider binds pipeline_config.strategy_activation_min_sharpe via
+         debounced PUT /api/config/activation-min-sharpe (same UX as the
+         conviction gates above). Preview POSTs /api/activation/dry-run —
+         the server only ever runs the assigner in dry-run mode; the live
+         eligibility write is operator-gated (Phase 1e). -->
+    <div class="pf-section">
+      <div class="pf-section-header">
+        <span>🎚️ Strategy Activation <span class="st-sub-label">min per-regime backtest Sharpe for sizer eligibility (trade count ≥ 20 fixed)</span></span>
+      </div>
+      <div class="st-act-note">⚠️ Live eligibility write is gated (Phase 1e) — this slider sets the threshold and previews only. Weekly assigner armed via OPENCLAW_ACTIVATION_ASSIGNER (currently default-OFF).</div>
+      <div class="st-act-grid">
+        <div class="st-sharpe-card">
+          <div class="st-sharpe-card-head">
+            <span class="st-sharpe-card-regime">Activation min Sharpe</span>
+            <span class="st-sub-label">pipeline_config</span>
+          </div>
+          <div class="st-sharpe-card-value" id="st-act-val">—</div>
+          <input type="range" class="st-sharpe-card-slider" id="st-act-slider"
+                 min="0" max="3" step="0.05" value="0.5" disabled />
+          <div class="st-sharpe-card-range"><span>0.00</span><span>3.00</span></div>
+          <div class="st-sharpe-card-status" id="st-act-status"></div>
+        </div>
+        <div class="st-act-preview">
+          <div class="st-act-preview-bar">
+            <button class="st-action-btn" id="st-act-preview-btn" onclick="_actPreviewDryRun()">Preview (dry-run)</button>
+            <span class="st-sub-label">hypothetical — zero DB writes; compares current eligible flags (DB reality) vs what the assigner would set at the saved threshold</span>
+          </div>
+          <div id="st-act-preview-out"><div class="st-act-preview-empty">No preview yet — set the threshold, then run a dry-run preview.</div></div>
+        </div>
       </div>
     </div>
 
@@ -7844,6 +8034,165 @@ async function _corrSharpeGatePut(regime, value, statEl) {
   }
 }
 
+// ── Strategy Activation slider + dry-run preview ────────────────────────────
+// Slider binds pipeline_config.strategy_activation_min_sharpe (debounced PUT,
+// same UX as the conviction gates above). The Preview button POSTs
+// /api/activation/dry-run — the server only ever shells the assigner with
+// --dry-run (live eligibility write is Phase 1e-gated), and we render the
+// parsed prior→new eligibility diff: per-regime "eligible now" is DB
+// reality, everything else is hypothetical.
+let _actSaveTimer   = null;
+let _actPutInflight = false;
+let _actWired       = false;
+
+async function _loadActivationCard() {
+  const slider = document.getElementById('st-act-slider');
+  const valEl  = document.getElementById('st-act-val');
+  const statEl = document.getElementById('st-act-status');
+  if (!slider || !valEl) return;
+  let cfg;
+  try {
+    const r = await fetch('/api/config/activation-min-sharpe');
+    cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.error || r.statusText);
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ load failed: ' + (e.message || 'network error');
+    return;
+  }
+  const v = (cfg.value != null && isFinite(cfg.value)) ? Number(cfg.value) : 0.5;
+  slider.value    = v;
+  slider.disabled = false;
+  valEl.textContent = v.toFixed(2);
+  if (statEl && !statEl.textContent) {
+    statEl.textContent = cfg.row_exists
+      ? (cfg.updated_at ? 'last set ' + new Date(cfg.updated_at).toLocaleString() : '')
+      : 'row not set — assigner fail-safe default 0.50';
+  }
+  if (_actWired) return;   // re-loads refresh the value; listeners wire once
+  _actWired = true;
+  slider.addEventListener('input', () => {
+    valEl.textContent = parseFloat(slider.value).toFixed(2);
+  });
+  slider.addEventListener('change', () => {
+    if (_actSaveTimer) clearTimeout(_actSaveTimer);
+    _actSaveTimer = setTimeout(() => {
+      _actSaveTimer = null;
+      _actPut(parseFloat(slider.value), statEl);
+    }, 300);
+  });
+}
+
+async function _actPut(value, statEl) {
+  if (_actPutInflight) return;
+  _actPutInflight = true;
+  if (statEl) statEl.textContent = 'saving…';
+  try {
+    const resp = await fetch('/api/config/activation-min-sharpe', {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ value }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
+    } else if (statEl) {
+      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · live write stays Phase 1e-gated';
+      setTimeout(() => {
+        if (statEl && statEl.textContent.indexOf('✓') === 0) statEl.textContent = '';
+      }, 5000);
+    }
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
+  } finally {
+    _actPutInflight = false;
+  }
+}
+
+async function _actPreviewDryRun() {
+  const btn = document.getElementById('st-act-preview-btn');
+  const out = document.getElementById('st-act-preview-out');
+  if (!btn || !out || btn.disabled) return;
+  // Flush any pending debounced threshold save first — the assigner reads
+  // pipeline_config fresh, so the preview must reflect the slider position.
+  const slider = document.getElementById('st-act-slider');
+  const statEl = document.getElementById('st-act-status');
+  if (_actSaveTimer) {
+    clearTimeout(_actSaveTimer);
+    _actSaveTimer = null;
+    if (slider && !slider.disabled) await _actPut(parseFloat(slider.value), statEl);
+  }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'running dry-run…';
+  out.innerHTML = '<div class="st-act-preview-empty">Running assigner --dry-run over all strategies (nice -19, hard 120s cap)…</div>';
+  try {
+    const resp = await fetch('/api/activation/dry-run', { method: 'POST' });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      out.innerHTML = '<div class="st-act-preview-empty">✗ ' + escapeHtml(data.error || resp.statusText) +
+        (data.stderr_tail ? '<br><span style="color:var(--dim)">' + escapeHtml(String(data.stderr_tail).slice(-300)) + '</span>' : '') +
+        '</div>';
+      return;
+    }
+    _actRenderPreview(data, out);
+  } catch (e) {
+    out.innerHTML = '<div class="st-act-preview-empty">✗ ' + escapeHtml(e.message || 'network error') + '</div>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+// Coerce a server-supplied count to a finite number for safe HTML
+// interpolation (everything else goes through escapeHtml).
+function _actNum(v, fallback) {
+  const n = Number(v);
+  return isFinite(n) ? n : fallback;
+}
+
+function _actRenderPreview(data, host) {
+  const regs = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
+  const pr = data.per_regime || {};
+  const rows = regs.map(r => {
+    const c = pr[r] || {};
+    const act   = _actNum(c.activated, 0);
+    const deact = _actNum(c.deactivated, 0);
+    const eligNow  = _actNum(c.eligible_now, null);
+    const eligPrev = _actNum(c.eligible_preview, null);
+    return '<tr><td>' + r + '</td>' +
+      '<td>' + (eligNow  != null ? eligNow  : '—') + '</td>' +
+      '<td>' + (eligPrev != null ? eligPrev : '—') + '</td>' +
+      '<td class="' + (act ? 'st-act-up' : '') + '">'   + (act   ? '+' + act : '0') + '</td>' +
+      '<td class="' + (deact ? 'st-act-down' : '') + '">' + (deact ? '−' + deact : '0') + '</td></tr>';
+  }).join('');
+  const nd    = Array.isArray(data.newly_dormant) ? data.newly_dormant : [];
+  const ndCnt = _actNum(data.newly_dormant_count, nd.length);
+  const cells = data.cells || {};
+  const errs  = _actNum(data.errors, 0);
+  const warns = (data.warnings || []).length
+    ? '<div class="st-act-preview-empty">⚠ ' + escapeHtml((data.warnings || []).join(' · ')) + '</div>' : '';
+  host.innerHTML =
+    '<div class="st-act-summary"><span class="st-act-hypo">Preview — hypothetical, nothing written</span>' +
+      'threshold <b>' + (data.threshold != null ? _actNum(data.threshold, 0).toFixed(2) : '?') + '</b> · ' +
+      _actNum(data.evaluated, 0) + ' evaluated · ' +
+      _actNum(data.skipped, 0) + ' skipped (no corrected backtest) · ' +
+      '<span style="color:var(--green)">' + _actNum(cells.activated, 0) + ' cells would activate</span> · ' +
+      '<span style="color:var(--red)">' + _actNum(cells.deactivated, 0) + ' would deactivate</span> · ' +
+      '<b>' + ndCnt + '</b> strateg' + (ndCnt === 1 ? 'y' : 'ies') + ' newly fully-dormant' +
+      (errs ? ' · <span style="color:var(--red)">' + errs + ' assigner errors</span>' : '') +
+      ' · ' + Math.round(_actNum(data.duration_ms, 0) / 1000) + 's</div>' +
+    '<table class="st-act-table"><thead><tr>' +
+      '<th>Regime</th><th>eligible now (DB reality)</th><th>eligible after (preview)</th>' +
+      '<th>would activate</th><th>would deactivate</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table>' +
+    '<div class="st-sub-label">counts cover evaluated strategies only — skipped strategies keep their current rows untouched</div>' +
+    (nd.length
+      ? '<div class="st-sub-label">Newly fully-dormant (' + nd.length + ') — eligible somewhere today, would lose all 4 regimes:</div>' +
+        '<div class="st-act-dormant">' + nd.map(s => '<span>' + escapeHtml(s) + '</span>').join('') + '</div>'
+      : '<div class="st-act-preview-empty">No strategy would go fully dormant at this threshold.</div>') +
+    warns;
+}
+
 async function loadStrategies() {
   try {
     const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp] = await Promise.all([
@@ -7858,6 +8207,7 @@ async function loadStrategies() {
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
+    _loadActivationCard();
     _rpRender(proposals?.proposals || []);
     _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
