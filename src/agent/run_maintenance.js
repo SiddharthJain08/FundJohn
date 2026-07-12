@@ -265,21 +265,24 @@ Capture latest run_id. Status values seen in production:
     -- backtest metrics come from canonical strategy_backtest_runs (latest
     -- primary_window=true run per strategy_id == registry id slug), NOT the
     -- strategy_registry mirror (retired as a read-consumer 2026-07-05,
-    -- Option B). The registry drives the created/updated_at "landed today"
-    -- filter; canonical supplies the honest true-MTM+slippage numbers.
+    -- Option B). "Landed today" is driven by canonical bt.run_at — post-
+    -- Option B the registry's updated_at is NOT touched by backtest
+    -- completion (it only moves on lifecycle/status edits), so filtering on
+    -- it silently missed every fresh backtest landing. sr.created_at still
+    -- catches strategies registered today that have no run yet.
     SELECT sr.name, sr.status,
            bt.total_sharpe     AS backtest_sharpe,
            bt.total_return_pct AS backtest_return_pct,
            bt.total_max_dd_pct AS backtest_max_dd_pct
       FROM strategy_registry sr
       LEFT JOIN LATERAL (
-        SELECT total_sharpe, total_return_pct, total_max_dd_pct
+        SELECT run_at, total_sharpe, total_return_pct, total_max_dd_pct
           FROM strategy_backtest_runs
          WHERE strategy_id = sr.id AND primary_window = TRUE
          ORDER BY run_at DESC LIMIT 1
       ) bt ON TRUE
      WHERE sr.created_at::date = '{{TODAY_ISO}}'::date
-        OR sr.updated_at::date = '{{TODAY_ISO}}'::date
+        OR bt.run_at::date = '{{TODAY_ISO}}'::date
      ORDER BY bt.total_sharpe DESC NULLS LAST
      LIMIT 20;
 
@@ -678,21 +681,24 @@ Capture latest run_id. Status values: 'completed', 'partial', 'abandoned',
     -- backtest metrics come from canonical strategy_backtest_runs (latest
     -- primary_window=true run per strategy_id == registry id slug), NOT the
     -- strategy_registry mirror (retired as a read-consumer 2026-07-05,
-    -- Option B). The registry drives the created/updated_at "landed today"
-    -- filter; canonical supplies the honest true-MTM+slippage numbers.
+    -- Option B). "Landed today" is driven by canonical bt.run_at — post-
+    -- Option B the registry's updated_at is NOT touched by backtest
+    -- completion (it only moves on lifecycle/status edits), so filtering on
+    -- it silently missed every fresh backtest landing. sr.created_at still
+    -- catches strategies registered today that have no run yet.
     SELECT sr.name, sr.status,
            bt.total_sharpe     AS backtest_sharpe,
            bt.total_return_pct AS backtest_return_pct,
            bt.total_max_dd_pct AS backtest_max_dd_pct
       FROM strategy_registry sr
       LEFT JOIN LATERAL (
-        SELECT total_sharpe, total_return_pct, total_max_dd_pct
+        SELECT run_at, total_sharpe, total_return_pct, total_max_dd_pct
           FROM strategy_backtest_runs
          WHERE strategy_id = sr.id AND primary_window = TRUE
          ORDER BY run_at DESC LIMIT 1
       ) bt ON TRUE
      WHERE sr.created_at::date = '{{TODAY_ISO}}'::date
-        OR sr.updated_at::date = '{{TODAY_ISO}}'::date
+        OR bt.run_at::date = '{{TODAY_ISO}}'::date
      ORDER BY bt.total_sharpe DESC NULLS LAST
      LIMIT 20;
 

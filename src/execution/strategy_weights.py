@@ -331,7 +331,7 @@ def _clamp_bt_sharpes(out: dict, cap: float) -> list:
 
 def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str], dict]:
     """Most-recent per-(strategy, regime) sharpe + trade_count, with a
-    three-tier fallback so newly promoted strategies aren't immediately
+    two-tier fallback so newly promoted strategies aren't immediately
     auto-demoted for lack of a backtest snapshot.
 
     Source priority (2026-05-14, post-unified-backtest cutover):
@@ -341,9 +341,13 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
       2. strategy_regime_backtests — legacy regime-partitioned backtester
          (auto_backtest backfill path). Kept as fallback until every live
          strategy has a unified_backtest row.
-      3. strategy_registry.backtest_sharpe × strategy_regime_params eligible
-         regimes — single-overall-sharpe spread across declared regimes for
-         strategies absent from both per-regime tables.
+
+    The former Tier 3 (strategy_registry.backtest_sharpe × eligible regimes)
+    was RETIRED 2026-07-12 (Option B follow-up): the registry mirror stopped
+    being written 2026-07-05, so that fallback could only serve frozen,
+    §7-inflated pre-correction values. Strategies absent from both tiers now
+    get NO bt entry (they ride live sharpe in _effective_sharpe or are
+    excluded) and are logged loudly instead of silently mis-weighted.
     """
     if not strategy_ids:
         return {}
@@ -401,23 +405,16 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
             }
             seen_strats.add(r['strategy_id'])
 
-    # Tier 3: strategy_registry overall sharpe ⨯ eligible regimes.
+    # Former Tier 3 (strategy_registry.backtest_sharpe mirror) RETIRED
+    # 2026-07-12 — the mirror is no longer written (Option B, 2026-07-05), so
+    # it could only serve stale §7-inflated values. Strategies with no rows in
+    # either tier get no bt entry; log the gap loudly instead.
     still_missing = [s for s in strategy_ids if s not in seen_strats]
     if still_missing:
-        cur.execute('''
-            SELECT srp.strategy_id, srp.regime_state,
-                   sr.backtest_sharpe, sr.backtest_trade_count
-            FROM strategy_regime_params srp
-            JOIN strategy_registry sr ON sr.id = srp.strategy_id
-            WHERE srp.strategy_id = ANY(%s)
-              AND srp.eligible = TRUE
-              AND sr.backtest_sharpe IS NOT NULL
-        ''', (still_missing,))
-        for r in cur:
-            out[(r['strategy_id'], r['regime_state'])] = {
-                'bt_sharpe': float(r['backtest_sharpe']),
-                'bt_n':      int(r['backtest_trade_count']) if r['backtest_trade_count'] is not None else None,
-            }
+        logger.warning(
+            'strategy_weights: %d strategies have NO canonical/legacy backtest '
+            'rows (no bt term; live-sharpe only or excluded): %s',
+            len(still_missing), ', '.join(sorted(still_missing)))
     cap = _get_bt_sharpe_cap(cur)
     clamped = _clamp_bt_sharpes(out, cap)
     if clamped:
