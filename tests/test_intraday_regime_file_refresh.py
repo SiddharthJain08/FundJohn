@@ -51,10 +51,11 @@ class TestRefreshRegimeFile:
     def _seed(self, d: Path, payload: dict):
         (d / 'regime_latest.json').write_text(json.dumps(payload))
 
-    def test_writes_valid_state_and_preserves_other_fields(self, tmp_path, monkeypatch):
+    def test_writes_valid_state_and_purges_retired_daily_fields(self, tmp_path, monkeypatch):
         monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path)
         self._seed(tmp_path, {'state': 'CRISIS', 'state_raw': 'CRISIS',
-                              'stress_score': 82, 'position_scale': 0.15})
+                              'stress_score': 82, 'position_scale': 0.15,
+                              'custom_operator_note': 'kept'})
         detector._refresh_regime_file(
             state='LOW_VOL', confidence=0.999, vix=18.65,
             prior_state='LOW_VOL', state_probs=None,
@@ -65,7 +66,11 @@ class TestRefreshRegimeFile:
         assert j['state_raw'] == 'LOW_VOL'
         assert j['confidence'] == pytest.approx(0.999)
         assert j['vix_level'] == pytest.approx(18.65)
-        assert j['stress_score'] == 82          # unrelated field preserved
+        # 2026-07-12: retired daily-detector keys are PURGED (frozen since the
+        # daily HMM stopped writing this file); unrecognized keys still merge.
+        assert 'stress_score' not in j
+        assert 'position_scale' not in j
+        assert j['custom_operator_note'] == 'kept'
         assert j['intraday_source'] == 'intraday_hmm'
 
     def test_unknown_state_does_not_clobber_existing_state(self, tmp_path, monkeypatch):

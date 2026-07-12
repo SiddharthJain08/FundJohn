@@ -39,6 +39,18 @@ detector = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(detector)
 
 
+# ── Test isolation (2026-07-12) ──────────────────────────────────────────────
+# A live-tree pytest run of this file CLOBBERED the real regime-of-record
+# (.agents/market-state/regime_latest.json) with harness fixture state: paths
+# through run_one_tick/_carry_forward_tick call _refresh_regime_file, which
+# writes detector.MODEL_DIR — the LIVE directory unless redirected. Redirect
+# it for EVERY test; tests that patch MODEL_DIR themselves simply override.
+
+@pytest.fixture(autouse=True)
+def _isolate_model_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path / 'model-dir-isolated')
+
+
 # June 2026 is EDT (UTC-4): 9:30 ET = 13:30 UTC, 16:15 ET = 20:15 UTC.
 def _ts(utc_str: str) -> pd.Timestamp:
     return pd.Timestamp(utc_str, tz='UTC')

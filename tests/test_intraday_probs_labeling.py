@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 # Load the script directly via importlib (it's a script, not a package).
 _spec = importlib.util.spec_from_file_location(
@@ -25,6 +26,18 @@ _spec = importlib.util.spec_from_file_location(
 detector = importlib.util.module_from_spec(_spec)
 sys.modules['run_intraday_market_state'] = detector
 _spec.loader.exec_module(detector)
+
+
+# ── Test isolation (2026-07-12) ──────────────────────────────────────────────
+# A live-tree pytest run of this file CLOBBERED the real regime-of-record
+# (.agents/market-state/regime_latest.json) with harness fixture state: paths
+# through run_one_tick/_carry_forward_tick call _refresh_regime_file, which
+# writes detector.MODEL_DIR — the LIVE directory unless redirected. Redirect
+# it for EVERY test; tests that patch MODEL_DIR themselves simply override.
+
+@pytest.fixture(autouse=True)
+def _isolate_model_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(detector, 'MODEL_DIR', tmp_path / 'model-dir-isolated')
 
 
 class _StubModel:
