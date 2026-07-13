@@ -1,0 +1,6 @@
+{
+  "strategy_id": "S_same_month_seasonality",
+  "instrument_class": "equity",
+  "required": ["prices"],
+  "optional": []
+}

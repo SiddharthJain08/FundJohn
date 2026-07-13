@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_vwap_closing_pressure",
+  "required": ["prices"],
+  "optional": []
+}

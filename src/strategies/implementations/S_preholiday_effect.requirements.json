@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_preholiday_effect",
+  "required": ["prices"],
+  "optional": []
+}

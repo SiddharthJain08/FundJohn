@@ -1,0 +1,7 @@
+{
+  "strategy_id": "S_crisis_quality_rebound",
+  "instrument_class": "equity",
+  "active_in_regimes": ["HIGH_VOL", "CRISIS"],
+  "required": ["prices", "financials"],
+  "optional": []
+}

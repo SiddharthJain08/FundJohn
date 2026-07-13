@@ -1642,6 +1642,10 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
     reason: reason || STRATEGY_VALID_TRANSITIONS.get(tKey),
     instrumentClass,
     gateApplies: (tKey === 'candidate:live'),
+    // Per-activated-regime Sharpe gate (2026-07-13): the picker's chosen set
+    // is the activation the gate judges; absent → transitionStrategy derives
+    // it from the assigner's manifest metadata.
+    eligibleRegimes,
     // Dashboard-only manifest mutation, run inside the same lock: drop the
     // now-DB-owned eligible_regimes copy (else the doctor's
     // manifest_eligibility_drift check FAILs) and fold before/after into the
