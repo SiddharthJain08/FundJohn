@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_volume_shock_overnight_drift",
+  "required": ["prices"],
+  "optional": []
+}

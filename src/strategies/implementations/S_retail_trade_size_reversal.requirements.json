@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_retail_trade_size_reversal",
+  "required": ["prices"],
+  "optional": []
+}

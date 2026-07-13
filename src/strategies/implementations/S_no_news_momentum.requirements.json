@@ -1,0 +1,6 @@
+{
+  "strategy_id": "S_no_news_momentum",
+  "instrument_class": "equity",
+  "required": ["prices", "sentiment"],
+  "optional": []
+}

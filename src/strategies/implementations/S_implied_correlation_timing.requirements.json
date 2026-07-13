@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_implied_correlation_timing",
+  "required": ["prices", "options_eod"],
+  "optional": []
+}

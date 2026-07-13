@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_overnight_intraday_tug_of_war",
+  "required": ["prices"],
+  "optional": []
+}
