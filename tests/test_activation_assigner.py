@@ -70,8 +70,9 @@ class FakeConn:
         return self.cur.executed
 
 
-def _regime_row(regime, sharpe, trade_count):
-    return {'regime_state': regime, 'sharpe': sharpe, 'trade_count': trade_count}
+def _regime_row(regime, sharpe, trade_count, max_dd_pct=10.0):
+    return {'regime_state': regime, 'sharpe': sharpe, 'trade_count': trade_count,
+            'max_dd_pct': max_dd_pct}
 
 
 def _prior_row(regime, eligible, size_scalar=None, stop_pct=None, target_pct=None, max_hold_days=None):
@@ -135,12 +136,48 @@ class TestComputeEligible(unittest.TestCase):
         self.assertTrue(eligible['LOW_VOL'])     # exactly at threshold -> eligible (>=)
         self.assertFalse(eligible['CRISIS'])     # just below -> not eligible
 
+    def test_slider_zero_requires_strictly_positive_sharpe(self):
+        # 2026-07-13 v2: slider at 0 activates exactly the QUALIFYING regimes
+        # (sharpe strictly > 0) -- a 0.0 sleeve stays dormant.
+        rows = [_regime_row('LOW_VOL', 0.0, 100), _regime_row('CRISIS', 0.01, 100)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0)
+        self.assertFalse(eligible['LOW_VOL'])
+        self.assertTrue(eligible['CRISIS'])
+
     def test_trade_count_guard_boundary(self):
         rows = [_regime_row('LOW_VOL', 1.0, 20), _regime_row('HIGH_VOL', 1.0, 19)]
         conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5, min_trades=20)
-        self.assertTrue(eligible['LOW_VOL'])     # n==20 -> passes (>=)
+        self.assertTrue(eligible['LOW_VOL'])     # n==20 -> passes (>=, explicit override)
         self.assertFalse(eligible['HIGH_VOL'])   # n==19 -> fails
+
+    def test_trade_count_gate_default_100(self):
+        # Default trade floor comes from the shared per-regime gate (100).
+        rows = [_regime_row('LOW_VOL', 1.0, 100), _regime_row('HIGH_VOL', 1.0, 99)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        self.assertTrue(eligible['LOW_VOL'])
+        self.assertFalse(eligible['HIGH_VOL'])
+
+    def test_sleeve_dd_ceiling_class_aware(self):
+        # Per-regime sleeve DD gates: equity ceiling 20, option 30.
+        rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0),
+                _regime_row('CRISIS', 1.0, 100, max_dd_pct=15.0)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        self.assertFalse(eligible['LOW_VOL'])    # dd 25 > equity 20
+        self.assertTrue(eligible['CRISIS'])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0)]])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5,
+                                             instrument_class='option')
+        self.assertTrue(eligible['LOW_VOL'])     # dd 25 <= option 30
+
+    def test_null_dd_fails_closed(self):
+        rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=None)]
+        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        self.assertFalse(eligible['LOW_VOL'])
 
     def test_null_sharpe_excludes(self):
         rows = [_regime_row('LOW_VOL', None, 200)]

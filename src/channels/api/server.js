@@ -539,17 +539,20 @@ app.put('/api/config/asset-corr-thr', async (req, res) => {
 });
 
 // ── Strategy Activation threshold + dry-run preview ─────────────────────────
-// Slider band for pipeline_config.strategy_activation_min_sharpe — the min
-// per-regime backtest Sharpe the activation assigner
-// (src/backtest/activation_assigner.py) requires before a (strategy, regime)
-// sizer-eligibility cell passes (MIN_TRADES=20 is a fixed code constant, not
-// dashboard-controlled). The assigner reads this key fresh on every run and
-// fail-safes to 0.5 when the row is absent/malformed — the GET mirrors that
-// exact fallback so slider and assigner can never disagree about the default.
-// ⚠️ OPERATOR GATE (Phase 1e, binding): the LIVE eligibility write is HELD.
-// This dashboard only (a) sets the threshold and (b) previews via --dry-run.
-// The server MUST NEVER invoke the assigner without --dry-run — see the
-// hard-coded argv + guard in POST /api/activation/dry-run below.
+// Slider band for pipeline_config.strategy_activation_min_sharpe — the extra
+// sharpe floor the activation assigner (src/backtest/activation_assigner.py)
+// applies ON TOP of the shared per-regime qualification gate (>0 sharpe,
+// class-DD sleeve ceiling, ≥100 trades — regime_qualification.py /
+// promotion_service.js, policy 2026-07-13 v2). Slider at 0 → a strategy is
+// active in exactly its qualifying regimes. The assigner reads this key fresh
+// on every run and fail-safes to 0.5 when the row is absent/malformed — the
+// GET mirrors that exact fallback so slider and assigner can never disagree.
+// LIVE since 2026-07-13 (OPENCLAW_ACTIVATION_ASSIGNER=1): the Mon 00:00 ET
+// weekly_live_sharpe.js run applies this threshold to
+// strategy_regime_params.eligible before the weights rebuild. This dashboard
+// endpoint itself still only (a) sets the threshold and (b) previews via
+// --dry-run — the server MUST NEVER invoke the assigner without --dry-run;
+// see the hard-coded argv + guard in POST /api/activation/dry-run below.
 const ACTIVATION_MIN_SHARPE_MIN     = 0.0;
 const ACTIVATION_MIN_SHARPE_MAX     = 3.0;
 const ACTIVATION_MIN_SHARPE_DEFAULT = 0.5;   // mirrors the assigner's fail-safe
@@ -582,7 +585,7 @@ app.put('/api/config/activation-min-sharpe', async (req, res) => {
     // when absent, so first write creates it with a description).
     await dbQuery(`
       INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('strategy_activation_min_sharpe', $1, 'Min per-regime backtest Sharpe for sizer eligibility (activation_assigner; MIN_TRADES=20 fixed). Range [0.0, 3.0]; assigner fail-safe default 0.5. Live eligibility write is Phase 1e-gated — dashboard slider sets threshold + dry-run preview only. Adjustable via dashboard.', NOW())
+      VALUES ('strategy_activation_min_sharpe', $1, 'Activation min-Sharpe slider: extra per-regime sharpe floor on top of the qualification gate (>0 sharpe, class-DD sleeve, >=100 trades). 0 = trade in exactly the qualifying regimes. Range [0.0, 3.0]; assigner fail-safe default 0.5. LIVE weekly enforcement via activation_assigner (Mon 00:00 ET, OPENCLAW_ACTIVATION_ASSIGNER=1). Adjustable via dashboard.', NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
@@ -1559,6 +1562,16 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   const force   = req.body && req.body.force === true;
   const reason  = (req.body && req.body.reason) || '';
   const actor   = (req.body && req.body.actor)  || 'manual:dashboard';
+  // Batch callers (Sunday auto-approval / backlog flush) promote many
+  // strategies in a loop and trigger ONE weights rebuild at the end —
+  // per-transition fire-and-forget rebuilds racing each other corrupted the
+  // is_current snapshot generation (2026-07-13 lesson: 247 duplicated pairs).
+  const skipWeightsRebuild = req.body && req.body.skip_weights_rebuild === true;
+  // sid feeds a shell one-liner below (activation chain) — hard-validate the
+  // charset even though unknown sids 404 against the manifest first.
+  if (!/^[A-Za-z0-9_.\-]+$/.test(String(sid || ''))) {
+    return res.status(400).json({ error: 'invalid strategy id' });
+  }
   // Optional: caller (typically the approval picker on the dashboard) can
   // overwrite the strategy's manifest.eligible_regimes atomically with the
   // state transition. NULL/undefined → leave existing eligible_regimes
@@ -1685,8 +1698,15 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // matches the operator's intent. We upsert all 4 canonical regimes per
   // call so deselecting LOW_VOL (for example) explicitly flips
   // eligible=False, rather than leaving a stale True from a prior approval.
-  if (eligibleRegimes) {
-    const chosen = new Set(eligibleRegimes);
+  // Auto mode (2026-07-13 v2): when the caller named no set, the gate's
+  // qualifying-regime set (returned by transitionStrategy) is the activation
+  // — sync it identically so the sizer funds exactly the regimes that earned
+  // promotion.
+  const syncRegimes = eligibleRegimes ||
+    (Array.isArray(result.qualifyingRegimes) && result.qualifyingRegimes.length > 0 && tKey === 'candidate:live'
+      ? result.qualifyingRegimes : null);
+  if (syncRegimes) {
+    const chosen = new Set(syncRegimes);
     try {
       for (const rg of _CANON_REGIMES) {
         const isElig = chosen.has(rg);
@@ -1758,21 +1778,36 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // Strategy-weights rebuild: any transition that adds or removes the
   // strategy from the active stack (live/monitoring) invalidates the
   // current strategy_weights_by_regime snapshot. Fire-and-forget — the
-  // response doesn't block on the ~5s python invocation; the next
-  // pipeline cycle reads the refreshed table. The service computes whether
-  // the active stack changed (same ACTIVE={live,monitoring} XOR logic).
-  if (result.weights_rebuild_triggered) {
+  // response doesn't block on the python invocation; the next pipeline
+  // cycle reads the refreshed table. The service computes whether the
+  // active stack changed (same ACTIVE={live,monitoring} XOR logic).
+  // skip_weights_rebuild lets batch callers suppress the per-transition
+  // spawn and run ONE rebuild at the end (racing rebuilds corrupt the
+  // is_current snapshot generation — 2026-07-13 lesson).
+  // candidate→live promotions first apply the activation min-Sharpe slider
+  // to the just-synced strategy_regime_params rows (activation_assigner
+  // --strategy-id: qualification gate AND slider) so a sub-slider sleeve
+  // never carries weight even transiently before the Monday refresh.
+  if (result.weights_rebuild_triggered && !skipWeightsRebuild) {
     const { spawn } = require('child_process');
     const path = require('path');
     const rootDir = path.join(__dirname, '../../..');
-    const child = spawn('/usr/bin/python3', ['-m', 'execution.strategy_weights', '--rebuild', '--trigger=lifecycle_change'],
+    const rebuildCmd = 'nice -n 19 python3 -m execution.strategy_weights --rebuild --trigger=lifecycle_change';
+    const cmd = (tKey === 'candidate:live')
+      ? `nice -n 19 python3 -m backtest.activation_assigner --strategy-id '${sid}' ; ${rebuildCmd}`
+      : rebuildCmd;
+    const child = spawn('/bin/bash', ['-c', cmd],
       { cwd: rootDir, env: { ...process.env, PYTHONPATH: 'src' }, detached: true, stdio: 'ignore' });
     child.unref();
-    console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState + ')');
+    console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState +
+                (tKey === 'candidate:live' ? ', activation slider applied first' : '') + ')');
+  } else if (result.weights_rebuild_triggered) {
+    console.log('[lifecycle] weights rebuild SKIPPED by caller (' + sid + ': ' + fromState + '→' + toState + ') — batch finale owns it');
   }
 
   res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: result.event.timestamp,
-             weights_rebuild_triggered: result.weights_rebuild_triggered });
+             weights_rebuild_triggered: result.weights_rebuild_triggered,
+             qualifying_regimes: result.qualifyingRegimes || null });
 });
 
 // ── Manual backtest rerun ────────────────────────────────────────────────────
@@ -3177,7 +3212,7 @@ body.rs-chat-locked{overflow:hidden}
 @media(max-width:560px){.st-sharpe-grid{grid-template-columns:1fr}}
 /* Strategy Activation card — threshold slider + assigner dry-run preview.
    Reuses the conviction-gate slider visual language (st-sharpe-card). The
-   note is deliberately loud: the live eligibility write is Phase 1e-gated,
+   note states the LIVE weekly enforcement (armed 2026-07-13),
    so everything this card does is config + hypothetical preview. */
 .st-act-note{margin:8px 4px 0;padding:8px 12px;border:1px solid rgba(250,204,21,0.4);border-left:3px solid var(--yellow);border-radius:6px;background:rgba(250,204,21,0.07);color:var(--yellow);font-size:11px;line-height:1.5}
 .st-act-grid{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:14px;padding:10px 4px 4px;align-items:stretch}
@@ -3375,6 +3410,7 @@ body.rs-chat-locked{overflow:hidden}
 .st-data-warn{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
 /* Manifest↔registry drift badge — additive, never replaces the primary status. */
 .st-drift-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
+.st-fresh-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--green);border:1px solid var(--green);background:transparent;cursor:help;vertical-align:middle}
 .st-drift-header{font-size:11px;color:var(--yellow);padding:4px 6px 8px;letter-spacing:.03em}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -4145,13 +4181,14 @@ body.rs-chat-locked{overflow:hidden}
          Slider binds pipeline_config.strategy_activation_min_sharpe via
          debounced PUT /api/config/activation-min-sharpe (same UX as the
          conviction gates above). Preview POSTs /api/activation/dry-run —
-         the server only ever runs the assigner in dry-run mode; the live
-         eligibility write is operator-gated (Phase 1e). -->
+         the server only ever runs the assigner in dry-run mode; the LIVE
+         apply happens in the weekly Mon 00:00 ET weekly_live_sharpe.js run
+         (OPENCLAW_ACTIVATION_ASSIGNER=1, armed 2026-07-13). -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎚️ Strategy Activation <span class="st-sub-label">min per-regime backtest Sharpe for sizer eligibility (trade count ≥ 20 fixed)</span></span>
+        <span>🎚️ Strategy Activation <span class="st-sub-label">extra per-regime Sharpe floor on top of the qualification gate (&gt;0 Sharpe · class max-DD · ≥100 trades per regime)</span></span>
       </div>
-      <div class="st-act-note">⚠️ Live eligibility write is gated (Phase 1e) — this slider sets the threshold and previews only. Weekly assigner armed via OPENCLAW_ACTIVATION_ASSIGNER (currently default-OFF).</div>
+      <div class="st-act-note">✅ LIVE — applied weekly (Mon 00:00 ET) to strategy_regime_params.eligible, then the weights rebuild. Slider at 0 activates every strategy in exactly its qualifying regimes; higher values narrow within them.</div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
           <div class="st-sharpe-card-head">
@@ -8050,7 +8087,7 @@ async function _corrSharpeGatePut(regime, value, statEl) {
 // Slider binds pipeline_config.strategy_activation_min_sharpe (debounced PUT,
 // same UX as the conviction gates above). The Preview button POSTs
 // /api/activation/dry-run — the server only ever shells the assigner with
-// --dry-run (live eligibility write is Phase 1e-gated), and we render the
+// --dry-run (the LIVE apply is the weekly Mon 00:00 ET run), and we render the
 // parsed prior→new eligibility diff: per-regime "eligible now" is DB
 // reality, everything else is hypothetical.
 let _actSaveTimer   = null;
@@ -8108,7 +8145,7 @@ async function _actPut(value, statEl) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
     } else if (statEl) {
-      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · live write stays Phase 1e-gated';
+      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · applies at the next weekly refresh (Mon 00:00 ET)';
       setTimeout(() => {
         if (statEl && statEl.textContent.indexOf('✓') === 0) statEl.textContent = '';
       }, 5000);
@@ -8338,16 +8375,20 @@ function _renderStrategyPage() {
   document.getElementById('st-data-tile').textContent = paramCount || '—';
   document.getElementById('st-data-sub').textContent  = 'financial parameters ingested';
 
-  // Drift summary header: counts across all sections.
+  // Drift + fresh summary header: counts across all sections.
   const n_trading_not_shown     = rows.filter(r => r.drift === 'trading_not_shown').length;
   const n_shown_live_not_trading = rows.filter(r => r.drift === 'shown_live_not_trading').length;
+  const n_fresh                 = rows.filter(r => r.fresh).length;
   const driftSummaryEl = document.getElementById('st-drift-summary');
   if (driftSummaryEl) {
+    const parts = [];
     if (n_trading_not_shown > 0 || n_shown_live_not_trading > 0) {
-      driftSummaryEl.innerHTML = '<div class="st-drift-header">⚠️ ' + n_trading_not_shown + ' trading but not shown live \xb7 ' + n_shown_live_not_trading + ' shown live but not trading</div>';
-    } else {
-      driftSummaryEl.innerHTML = '';
+      parts.push('<div class="st-drift-header">⚠️ ' + n_trading_not_shown + ' trading but not shown live \xb7 ' + n_shown_live_not_trading + ' shown live but not trading</div>');
     }
+    if (n_fresh > 0) {
+      parts.push('<div class="st-drift-header" style="color:var(--green);border-color:var(--green)">✨ ' + n_fresh + ' fresh strateg' + (n_fresh === 1 ? 'y' : 'ies') + ' (live < 1 week)</div>');
+    }
+    driftSummaryEl.innerHTML = parts.join('');
   }
 
   _renderActiveStack(active);
@@ -8564,6 +8605,12 @@ function _escStr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').
 // r.drift is one of 'none' | 'trading_not_shown' | 'shown_live_not_trading'.
 // The manifest state (r.state) remains the PRIMARY displayed status; this
 // badge is purely additive.
+function _freshBadge(r) {
+  // ✨ fresh — went live within the last 7 days (auto-promotion batch).
+  // Additive, same pattern as the drift badge; self-expires via state_since.
+  if (!r.fresh) return '';
+  return '<span class="st-fresh-badge" title="Newly promoted — live for less than a week (auto-approval batch)">✨ fresh</span>';
+}
 function _driftBadge(r) {
   if (!r.drift || r.drift === 'none') return '';
   if (r.drift === 'trading_not_shown') {
@@ -8928,7 +8975,7 @@ function _renderActiveStack(rows) {
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
           <span class="st-chevron">▶</span>\${r.strategy_id}
         </td>
-        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}</td>
+        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimeBreakdown(r)}</td>
         <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
         <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
@@ -9192,7 +9239,7 @@ function _renderInactiveStack(rows) {
     \${shown.map(r => {
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimesCell(r)}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
@@ -9320,7 +9367,7 @@ function _renderCandidates(rows) {
         : '';
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimeBacktestSharpe(r)}</td>
         <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
         <td class="num">\${_fmtNum(sortino)}</td>

@@ -281,17 +281,19 @@ No hedge language. Every claim must cite a number from the data.
 
 // SP-4: mirror of lifecycle.py PROMOTION_THRESHOLDS (keep in sync). Used to
 // tell the reviewer the correct per-class promotion floor for this strategy.
+// Policy 2026-07-13 v2: per-regime strictly-positive Sharpe + 100-trade
+// minimum; DD ceilings per class, judged per regime sleeve.
 const PROMOTION_THRESHOLDS = {
-  equity: { min_sharpe: 0.5,  max_drawdown: 0.20 },
-  etp:    { min_sharpe: 0.5,  max_drawdown: 0.20 },
-  option: { min_sharpe: 0.80, max_drawdown: 0.30 },
-  crypto: { min_sharpe: 0.50, max_drawdown: 0.70 },
+  equity: { min_sharpe: 0, max_drawdown: 0.20, min_trades: 100 },
+  etp:    { min_sharpe: 0, max_drawdown: 0.20, min_trades: 100 },
+  option: { min_sharpe: 0, max_drawdown: 0.30, min_trades: 100 },
+  crypto: { min_sharpe: 0, max_drawdown: 0.70, min_trades: 100 },
 };
 
 function buildStrategyPrompt(strategy, tradePack, counterfactuals) {
   const ic = strategy.instrument_class || 'equity';
   const thr = PROMOTION_THRESHOLDS[ic] || PROMOTION_THRESHOLDS.equity;
-  const classLine = `Instrument class: ${ic} (promotion floor: Sharpe ≥ ${thr.min_sharpe.toFixed(2)}, MaxDD ≤ ${(thr.max_drawdown * 100).toFixed(0)}%)`;
+  const classLine = `Instrument class: ${ic} (promotion floor per regime sleeve: Sharpe > ${thr.min_sharpe.toFixed(2)}, MaxDD ≤ ${(thr.max_drawdown * 100).toFixed(0)}%, trades ≥ ${thr.min_trades})`;
   return `${MEMO_SYSTEM_PREAMBLE}
 
 Strategy: ${strategy.id} (${strategy.name})

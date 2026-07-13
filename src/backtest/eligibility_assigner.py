@@ -2,10 +2,13 @@
 """eligibility_assigner.py — auto-set strategy.metadata.eligible_regimes
 from the latest unified_backtest output.
 
-Rule (default, configurable via env):
+Rule (2026-07-13 v2 — aligned with the shared per-regime qualification gate
+in regime_qualification.py / promotion_service.js; sharpe/trades env-tunable):
     eligible_regimes = { r ∈ CANONICAL_REGIMES
-                         |  trade_count[r] >= MIN_TRADES (default 20)
-                         AND sharpe[r] >= MIN_SHARPE  (default 0.4) }
+                         |  sharpe[r] > MIN_SHARPE          (default 0.0, STRICT)
+                         AND trade_count[r] >= MIN_TRADES   (default 100)
+                         AND max_dd_pct[r] <= class ceiling (equity/etp 20,
+                             option 30, crypto 70 — from PROMOTION_THRESHOLDS) }
 
 If the strategy fired no regime that clears the bar, the previous
 eligible_regimes value is preserved (refuse to wipe to empty — that
@@ -39,8 +42,20 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
-MIN_SHARPE_DEFAULT  = float(os.environ.get('ELIGIBILITY_MIN_SHARPE', '0.4'))
-MIN_TRADES_DEFAULT  = int(os.environ.get('ELIGIBILITY_MIN_TRADES', '20'))
+MIN_SHARPE_DEFAULT  = float(os.environ.get('ELIGIBILITY_MIN_SHARPE', '0.0'))
+MIN_TRADES_DEFAULT  = int(os.environ.get('ELIGIBILITY_MIN_TRADES', '100'))
+
+from backtest.regime_qualification import class_thresholds  # noqa: E402
+
+
+def _instrument_class_map() -> dict:
+    """sid → instrument_class from the manifest (default equity)."""
+    try:
+        m = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json').read_text())
+        return {sid: (rec.get('instrument_class') or 'equity')
+                for sid, rec in (m.get('strategies') or {}).items()}
+    except Exception:
+        return {}
 
 
 def _log(msg: str) -> None:
@@ -49,7 +64,8 @@ def _log(msg: str) -> None:
 
 def compute_eligible(conn, strategy_id: str,
                      min_sharpe: float = MIN_SHARPE_DEFAULT,
-                     min_trades: int = MIN_TRADES_DEFAULT) -> tuple[list[str], dict]:
+                     min_trades: int = MIN_TRADES_DEFAULT,
+                     instrument_class: str = 'equity') -> tuple[list[str], dict]:
     """Return (eligible_regimes_list, per_regime_diagnostics_dict).
 
     Reads the latest primary_window=true run for the strategy. If no run
@@ -66,19 +82,26 @@ def compute_eligible(conn, strategy_id: str,
         return [], {}
     run_id = row['run_id']
     cur.execute("""
-        SELECT regime_state, sharpe, trade_count
+        SELECT regime_state, sharpe, trade_count, max_dd_pct
         FROM strategy_backtest_regimes
         WHERE run_id = %s
     """, (run_id,))
+    gate = class_thresholds(instrument_class)
     diag: dict[str, dict] = {}
     eligible: list[str] = []
     for r in cur:
         s     = r['sharpe']
         n     = r['trade_count'] or 0
-        passes = (s is not None and s >= min_sharpe and n >= min_trades)
+        dd    = r.get('max_dd_pct') if hasattr(r, 'get') else r['max_dd_pct']
+        # Sharpe is a STRICT exceed (policy 2026-07-13 v2: "positive Sharpe");
+        # the sleeve's own max-DD gates against the class ceiling.
+        passes = (s is not None and dd is not None
+                  and s > min_sharpe and n >= min_trades
+                  and float(dd) <= gate['max_dd_pct'])
         diag[r['regime_state']] = {
             'sharpe':      s,
             'trade_count': n,
+            'max_dd_pct':  dd,
             'eligible':    passes,
         }
         if passes:
@@ -111,12 +134,14 @@ def update_manifest(strategy_id: str, new_eligible: list[str],
 
 def apply_one(strategy_id: str, conn, dry_run: bool = False,
               min_sharpe: float = MIN_SHARPE_DEFAULT,
-              min_trades: int = MIN_TRADES_DEFAULT) -> dict:
+              min_trades: int = MIN_TRADES_DEFAULT,
+              instrument_class: str = 'equity') -> dict:
     """Apply eligibility derivation to one strategy. Returns summary dict
     with keys: status ('ok'|'no_run'|'no_pass'|'no_manifest'), eligible,
     prior, diag.
     """
-    eligible, diag = compute_eligible(conn, strategy_id, min_sharpe, min_trades)
+    eligible, diag = compute_eligible(conn, strategy_id, min_sharpe, min_trades,
+                                      instrument_class=instrument_class)
     if not diag:
         return {'status': 'no_run', 'eligible': [], 'prior': None, 'diag': {}}
     if not eligible:
@@ -145,9 +170,12 @@ def main() -> int:
         _log('POSTGRES_URI not set'); return 1
     conn = psycopg2.connect(uri)
 
+    classes = _instrument_class_map()
+
     if args.strategy_id:
         result = apply_one(args.strategy_id, conn, dry_run=args.dry_run,
-                           min_sharpe=args.min_sharpe, min_trades=args.min_trades)
+                           min_sharpe=args.min_sharpe, min_trades=args.min_trades,
+                           instrument_class=classes.get(args.strategy_id, 'equity'))
         diag_str = ', '.join(f'{r}: sharpe={d["sharpe"]} n={d["trade_count"]}{"✓" if d["eligible"] else ""}'
                              for r, d in result['diag'].items())
         _log(f'{args.strategy_id}: status={result["status"]} prior={result["prior"]} '
@@ -163,7 +191,8 @@ def main() -> int:
         n_changed = n_nopass = n_unchanged = 0
         for sid in sids:
             result = apply_one(sid, conn, dry_run=args.dry_run,
-                               min_sharpe=args.min_sharpe, min_trades=args.min_trades)
+                               min_sharpe=args.min_sharpe, min_trades=args.min_trades,
+                               instrument_class=classes.get(sid, 'equity'))
             if result['status'] == 'ok':
                 if set(result['eligible']) != set(result['prior'] or []):
                     n_changed += 1

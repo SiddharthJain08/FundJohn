@@ -31,15 +31,39 @@ def _mock_conn(run_id='run-uuid', regime_rows=None):
 class TestComputeEligible(unittest.TestCase):
     def test_picks_only_regimes_clearing_both_thresholds(self):
         rows = [
-            {'regime_state': 'LOW_VOL',       'sharpe': 0.5,  'trade_count': 100},
-            {'regime_state': 'TRANSITIONING', 'sharpe': 0.3,  'trade_count': 100},  # fails sharpe
-            {'regime_state': 'HIGH_VOL',      'sharpe': 0.8,  'trade_count': 10},   # fails trades
-            {'regime_state': 'CRISIS',        'sharpe': 1.2,  'trade_count': 60},   # passes
+            {'regime_state': 'LOW_VOL',       'sharpe': 0.5,  'trade_count': 100, 'max_dd_pct': 10.0},
+            {'regime_state': 'TRANSITIONING', 'sharpe': 0.3,  'trade_count': 100, 'max_dd_pct': 10.0},  # fails sharpe (override 0.4)
+            {'regime_state': 'HIGH_VOL',      'sharpe': 0.8,  'trade_count': 10,  'max_dd_pct': 10.0},  # fails trades
+            {'regime_state': 'CRISIS',        'sharpe': 1.2,  'trade_count': 60,  'max_dd_pct': 10.0},  # passes
         ]
         conn = _mock_conn(regime_rows=rows)
         eligible, diag = ea.compute_eligible(conn, 'S_test', min_sharpe=0.4, min_trades=20)
         # Canonical order: LOW_VOL, TRANSITIONING, HIGH_VOL, CRISIS
         self.assertEqual(eligible, ['LOW_VOL', 'CRISIS'])
+
+    def test_default_rule_positive_sharpe_100_trades(self):
+        # 2026-07-13 v2 defaults: sharpe strictly > 0, trades >= 100.
+        rows = [
+            {'regime_state': 'LOW_VOL',  'sharpe': 0.01, 'trade_count': 100, 'max_dd_pct': 10.0},
+            {'regime_state': 'HIGH_VOL', 'sharpe': 0.0,  'trade_count': 500, 'max_dd_pct': 10.0},  # sharpe not > 0
+            {'regime_state': 'CRISIS',   'sharpe': 2.0,  'trade_count': 99,  'max_dd_pct': 10.0},  # trades < 100
+        ]
+        conn = _mock_conn(regime_rows=rows)
+        eligible, diag = ea.compute_eligible(conn, 'S_test')
+        self.assertEqual(eligible, ['LOW_VOL'])
+
+    def test_sleeve_dd_ceiling_class_aware(self):
+        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 1.0, 'trade_count': 200, 'max_dd_pct': 25.0}]
+        conn = _mock_conn(regime_rows=rows)
+        eligible, _ = ea.compute_eligible(conn, 'S_test')  # equity ceiling 20
+        self.assertEqual(eligible, [])
+        conn = _mock_conn(regime_rows=rows)
+        eligible, _ = ea.compute_eligible(conn, 'S_test', instrument_class='option')  # 30
+        self.assertEqual(eligible, ['LOW_VOL'])
+        rows2 = [{'regime_state': 'LOW_VOL', 'sharpe': 1.0, 'trade_count': 200, 'max_dd_pct': None}]
+        conn = _mock_conn(regime_rows=rows2)
+        eligible, diag = ea.compute_eligible(conn, 'S_test')  # NULL dd fails closed
+        self.assertEqual(eligible, [])
 
     def test_no_run_returns_empty(self):
         conn = _mock_conn(run_id=None)
@@ -48,14 +72,19 @@ class TestComputeEligible(unittest.TestCase):
         self.assertEqual(diag, {})
 
     def test_null_sharpe_excludes(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': None, 'trade_count': 200}]
+        rows = [{'regime_state': 'LOW_VOL', 'sharpe': None, 'trade_count': 200, 'max_dd_pct': 10.0}]
         conn = _mock_conn(regime_rows=rows)
         eligible, diag = ea.compute_eligible(conn, 'S_test')
         self.assertEqual(eligible, [])
         self.assertFalse(diag['LOW_VOL']['eligible'])
 
-    def test_threshold_boundaries_inclusive(self):
-        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 0.4, 'trade_count': 20}]
+    def test_sharpe_boundary_strict_trades_inclusive(self):
+        # Sharpe must STRICTLY exceed min_sharpe; trade floor stays inclusive.
+        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 0.4, 'trade_count': 20, 'max_dd_pct': 10.0}]
+        conn = _mock_conn(regime_rows=rows)
+        eligible, diag = ea.compute_eligible(conn, 'S_test', min_sharpe=0.4, min_trades=20)
+        self.assertEqual(eligible, [])
+        rows = [{'regime_state': 'LOW_VOL', 'sharpe': 0.41, 'trade_count': 20, 'max_dd_pct': 10.0}]
         conn = _mock_conn(regime_rows=rows)
         eligible, diag = ea.compute_eligible(conn, 'S_test', min_sharpe=0.4, min_trades=20)
         self.assertEqual(eligible, ['LOW_VOL'])

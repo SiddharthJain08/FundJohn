@@ -26,10 +26,10 @@ function mkQuery({ runRow, throwRegistry } = {}) {
 const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UPDATE strategy_registry/.test(s));
 
 (async () => {
-  // (a) gate-fail (candidate:live, sub-floor, !force) -> ok:false+failedGates; manifest UNCHANGED; NO registry write
+  // (a) gate-fail (candidate:live, non-positive total sharpe, !force) -> ok:false+failedGates; manifest UNCHANGED; NO registry write
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ runRow: { total_sharpe: 0.3, total_max_dd_pct: 5 } });
+    const q = mkQuery({ runRow: { total_sharpe: -0.3, total_max_dd_pct: 5, total_trades: 500 } });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true });
     assert.strictEqual(r.ok, false); assert.ok(r.failedGates.includes('sharpe'));
     assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'candidate');
@@ -39,7 +39,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
   // (b) registry-sync throw -> ok:false+error; manifest UNCHANGED (C7 invariant)
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5 }, throwRegistry: true });
+    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5, total_trades: 500 }, throwRegistry: true });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true });
     assert.strictEqual(r.ok, false); assert.ok(/registry sync/.test(r.error));
     assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'candidate');
@@ -48,7 +48,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
   // (c) happy path candidate->live -> ok; manifest state=live + 1 history; registry synced; weights flag true
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5 } });
+    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5, total_trades: 500 } });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: true });
     assert.strictEqual(r.ok, true); assert.strictEqual(r.weights_rebuild_triggered, true);
     const m = JSON.parse(fs.readFileSync(mp));
@@ -59,7 +59,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
   // (d) force bypasses the gate (sub-floor but force=true) -> ok
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ runRow: { total_sharpe: -2, total_max_dd_pct: 90 } });
+    const q = mkQuery({ runRow: { total_sharpe: -2, total_max_dd_pct: 90, total_trades: 500 } });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate', force: true, actor: 't', instrumentClass: 'equity', gateApplies: true });
     assert.strictEqual(r.ok, true);
     fs.unlinkSync(mp);
@@ -67,7 +67,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
   // (e) non-gated transition (gateApplies:false) skips the gate even with bad metrics
   {
     const mp = tmpManifest('live');
-    const q = mkQuery({ runRow: { total_sharpe: -2, total_max_dd_pct: 90 } });
+    const q = mkQuery({ runRow: { total_sharpe: -2, total_max_dd_pct: 90, total_trades: 500 } });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'deprecated', fromState: 'live', force: false, actor: 't', instrumentClass: 'equity', gateApplies: false });
     assert.strictEqual(r.ok, true); assert.strictEqual(JSON.parse(fs.readFileSync(mp)).strategies.X.state, 'deprecated');
     assert.strictEqual(r.weights_rebuild_triggered, true); // live -> deprecated removes from active stack
@@ -80,7 +80,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
     fs.writeFileSync(mp, JSON.stringify({ strategies: { X: { state: 'candidate', history: [], foo: 'bar' } } }, null, 2));
     const lifecycleCalls = [];
     const q = async (sql, params) => {
-      if (/strategy_backtest_runs/.test(sql)) return { rows: [{ total_sharpe: 0.9, total_max_dd_pct: 5 }] };
+      if (/strategy_backtest_runs/.test(sql)) return { rows: [{ total_sharpe: 0.9, total_max_dd_pct: 5, total_trades: 500 }] };
       if (/strategy_registry/.test(sql))      return { rows: [] };
       if (/lifecycle_events/.test(sql))       lifecycleCalls.push({ sql, params });
       return { rows: [] };
@@ -99,7 +99,7 @@ const wroteRegistry = (q) => q.calls.some(s => /INSERT INTO strategy_registry|UP
   //     and NO manifest write; consistent failure shape carries fromState/toState.
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5 } });
+    const q = mkQuery({ runRow: { total_sharpe: 0.9, total_max_dd_pct: 5, total_trades: 500 } });
     const r = await transitionStrategy({ dbQuery: q, manifestPath: mp, sid: 'X', toState: 'bogus_state', fromState: 'candidate', force: false, actor: 't', instrumentClass: 'equity', gateApplies: false });
     assert.strictEqual(r.ok, false);
     assert.ok(/unknown toState/.test(r.error));
