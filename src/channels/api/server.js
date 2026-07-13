@@ -3867,7 +3867,7 @@ body.rs-chat-locked{overflow:hidden}
   /* Inner wrappers must NOT have their own scroll context — collapses the
    * nested-scroll problem that was eating the swipe gesture. */
   #pf-positions, #pf-history,
-  #st-active-wrap, #st-inactive-wrap, #st-candidate-wrap {
+  #st-active-wrap, #st-inactive-wrap {
     overflow: visible !important;
     width: max-content;
     min-width: 100%;
@@ -4126,7 +4126,7 @@ body.rs-chat-locked{overflow:hidden}
       <div class="st-tile"><div class="st-tile-label">Total</div><div class="st-tile-value" id="st-total">—</div></div>
       <div class="st-tile"><div class="st-tile-label">Active Stack</div><div class="st-tile-value" id="st-active-tile">—</div><div class="st-tile-sub" id="st-active-sub">— live / — stale / — waiting</div></div>
       <div class="st-tile"><div class="st-tile-label">Inactive Stack</div><div class="st-tile-value" id="st-inactive-tile">—</div><div class="st-tile-sub">decommissioned</div></div>
-      <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">awaiting approval</div></div>
+      <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">in pipeline (auto-gated weekly)</div></div>
       <div class="st-tile"><div class="st-tile-label">Data</div><div class="st-tile-value" id="st-data-tile">—</div><div class="st-tile-sub" id="st-data-sub">financial parameters ingested</div><a class="st-tile-link" id="st-data-usage-link" onclick="_stOpenDataUsage()">View Data Usage →</a></div>
     </div>
 
@@ -4241,14 +4241,13 @@ body.rs-chat-locked{overflow:hidden}
       <div class="pf-section-body"><div id="st-inactive-wrap"><div class="empty">Loading...</div></div></div>
     </div>
 
-    <!-- Section 3: Research Candidates (paper / candidate) -->
-    <div class="pf-section">
-      <div class="pf-section-header">
-        <span>Research Candidates <span class="st-sub-label">(passed research + coder + backtest — awaiting approval)</span></span>
-        <span id="st-candidate-count" class="st-sub-label"></span>
-      </div>
-      <div class="pf-section-body"><div id="st-candidate-wrap"><div class="empty">Loading...</div></div></div>
-    </div>
+    <!-- Research Candidates section REMOVED 2026-07-13 (operator directive):
+         approvals are fully automatic now — candidates flow through the
+         per-regime qualification gate every Sunday (auto_approval.js) and on
+         every fused staging approval; newly promoted strategies surface via
+         the ✨ fresh badge in the Active Stack. The tile above keeps the
+         pipeline count visible; the Research tab's queue card still shows
+         the research_candidates paper pipeline. -->
   </div>
 </div><!-- #strategies-page -->
 
@@ -8324,9 +8323,8 @@ function _stFailureBannerHTML(sid) {
 }
 
 function _stRenderJobChips() {
-  // Re-render the candidates section so chips update in place.
-  const rows = strategiesData.filter(_inCandidate);
-  _renderCandidates(rows);
+  // Candidates section removed 2026-07-13 — approval-job progress now only
+  // reaches the operator via toasts + the SSE log; nothing to re-render.
 }
 
 // The engine TRADES by registry status='approved', NOT by manifest state.
@@ -8367,7 +8365,6 @@ function _renderStrategyPage() {
   document.getElementById('st-candidate-tile').textContent= candidate.length;
   document.getElementById('st-active-count').textContent  = active.length + ' strategies';
   document.getElementById('st-inactive-count').textContent= inactive.length + ' strategies';
-  document.getElementById('st-candidate-count').textContent = candidate.length + ' strategies';
 
   // Data tile: count of fine-grained financial parameters ingested
   // (open, close, implied_volatility, ebitda, …) from /api/data/usage.
@@ -8393,7 +8390,7 @@ function _renderStrategyPage() {
 
   _renderActiveStack(active);
   _renderInactiveStack(inactive);
-  _renderCandidates(candidate);
+  // Candidates section removed 2026-07-13 — auto-approval owns the flow.
 }
 
 // ── Data Usage (ranked horizontal bar list, modal) ────────────────────────
@@ -9251,137 +9248,11 @@ function _renderInactiveStack(rows) {
 
 // ── Section 3: Research Candidates ─────────────────────────────────────────
 // Gate warning when backtest Sharpe < 0.5 or Max DD > 20%.
-function _renderCandidates(rows) {
-  const el = document.getElementById('st-candidate-wrap');
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty">No candidates awaiting approval.</div>';
-    return;
-  }
-  // Derived rank for the Status column: Staging < Candidate < Paper.
-  const enriched = rows.map(r => Object.assign({}, r, {
-    _state_rank: _candidateRankFor(r),
-  }));
-  let sorted;
-  const s = _sortState['st-candidate-wrap'];
-  if (s && s.key) {
-    sorted = _applySort('st-candidate-wrap', enriched);
-  } else {
-    _tableDataCache['st-candidate-wrap'] = enriched;
-    sorted = enriched.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
-  }
-  const { shown, footer } = _collapseRows('st-candidate-wrap', sorted);
-  el.innerHTML = \`<table class="db-table" style="min-width:1000px">
-    <tr>
-      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
-      <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Small dot = current market regime, blue border = declared eligible. Color = sign of Sharpe.">By Regime</th>
-      <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
-      <th class="num" data-sort-key="backtest_sortino" data-sort-type="num" title="Backtest Sortino — downside-deviation-adjusted return (unified_backtest)">BT Sortino</th>
-      <th class="num" data-sort-key="backtest_calmar" data-sort-type="num" title="Backtest Calmar — annualized return / max drawdown">BT Calmar</th>
-      <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
-      <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
-      <th class="num" data-sort-key="backtest_trade_count" data-sort-type="num">Backtest Trades</th>
-      <th>Actions</th>
-    </tr>
-    \${shown.map(r => {
-      const sharpe = r.backtest_sharpe;
-      const maxDd  = r.backtest_max_dd_pct;
-      const ret    = r.backtest_return_pct;
-      const sortino = r.backtest_sortino;
-      const calmar  = r.backtest_calmar;
-      // Backtest trade count from the convergence run, NOT live trade count
-      // (which is r.total_count). 0 = strategy ran but emitted no signals;
-      // null = never backtested. Both render as "—" but mean different
-      // things — distinguish in the title.
-      const trades = r.backtest_trade_count;
-      const sharpeFail = sharpe != null && parseFloat(sharpe) < 0.5;
-      const ddFail     = maxDd  != null && Math.abs(parseFloat(maxDd)) > 20;
-      const gateWarn   = sharpeFail || ddFail;
-      // Per-regime breakdown tooltip — built from backtest_regime_breakdown
-      // (regime-stratified). Strategies without a breakdown render with a
-      // generic tooltip; v1 metrics have been purged (NULL'd) elsewhere.
-      const breakdown = r.backtest_regime_breakdown;
-      const _bdLine = (lbl, b) => {
-        if (!b) return lbl + ': —';
-        if (b.note === 'not_declared') return lbl + ': not declared';
-        if (b.note === 'no_oos_window') return lbl + ': no historical window meeting min_days';
-        const sh = b.sharpe ?? 0;
-        const dd = b.max_dd != null ? (b.max_dd * 100).toFixed(1) + '%' : '—';
-        const tc = b.trade_count ?? 0;
-        const od = b.oos_days ?? 0;
-        return lbl + ': sharpe=' + (typeof sh === 'number' ? sh.toFixed(2) : sh)
-                  + '  dd=' + dd + '  trades=' + tc + '  (' + od + ' OOS days)';
-      };
-      const sharpeTitle = breakdown
-        ? ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS']
-            .map(k => _bdLine(k.padEnd(14, ' '), breakdown[k]))
-            .join('\\n')
-        : 'No regime breakdown available';
-      // Per-state approve button emoticon + label + click handler.
-      // Under the fused-staging-approval lifecycle (2026-04-27):
-      //   staging   → 📡 starts the fused worker (backfill + strategycoder + backtest;
-      //                  auto-promotes to CANDIDATE on success)
-      //   candidate → ✅ promotes to LIVE (synchronous /transition with sharpe/dd gate;
-      //                  ⚠ on failing metrics — operator can override with force=true)
-      //   paper     → legacy/frozen; no automatic Approve. Operator can archive via /transition.
-      //   last failure? → ❌ Retry (tooltip carries the reason)
-      const lastFail = _stLastFailures[r.strategy_id];
-      const approveLbl = lastFail
-        ? '❌ Retry'
-        : (r.state === 'staging'   ? '📡 Approve'
-        :  gateWarn                ? '⚠ Approve'
-                                   : '✅ Approve');
-      const approveTitle = lastFail
-        ? ('Last run failed: ' + (lastFail.reason || lastFail) + '. Click to retry.')
-        : (r.state === 'staging'
-            ? 'Run fused approval: backfill required data + invoke StrategyCoder + 3-window convergence backtest. Auto-promotes to CANDIDATE on pass.'
-            : r.state === 'candidate'
-              ? (gateWarn
-                  ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
-                  : 'Promote candidate → live (Alpaca paper/live trading).')
-              : 'Promote to Active Stack');
-      const approveCls = lastFail
-        ? 'st-action-btn st-approve-btn st-approve-retry'
-        : (r.state === 'staging'
-            ? 'st-action-btn st-approve-btn st-approve-async'
-            : 'st-action-btn st-approve-btn');
-      const approveOnClick = r.state === 'staging'
-        ? \`stApproveGated('\${r.strategy_id}', '\${r.state}')\`
-        : \`stApprove('\${r.strategy_id}', \${gateWarn})\`;
-      const jobChip = _stJobChipHTML(r.strategy_id);
-      const failBanner = _stFailureBannerHTML(r.strategy_id);
-      const actionsCell = jobChip
-        ? jobChip
-        : (failBanner +
-           \`<button class="\${approveCls}" title="\${_escStr(approveTitle)}" onclick="\${approveOnClick}">\${approveLbl}</button>
-            <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>\`);
-      // Warning badge for staging strategies whose Saturday-brain-planned
-      // data columns include something no collector/provider can backfill.
-      // The staging worker would reject Approve with unsupported_source.
-      const dataWarn = (r.state === 'staging'
-                       && Array.isArray(r.unsupported_sources)
-                       && r.unsupported_sources.length > 0)
-        ? \` <span class="st-data-warn" title="\${_escStr(
-            'No collector/provider registered for: ' + r.unsupported_sources.join(', ')
-            + '. Approve would fail with unsupported_source.\\nAdd these to data/master/schema_registry.json or data_columns first.')}">⚠ data</span>\`
-        : '';
-      return \`<tr>
-        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
-        <td>\${_regimeBacktestSharpe(r)}</td>
-        <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
-        <td class="num">\${_fmtNum(sortino)}</td>
-        <td class="num">\${_fmtNum(calmar)}</td>
-        <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
-        <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
-        <td class="num" style="color:var(--muted)" title="\${trades == null ? 'Never backtested' : (trades === 0 ? 'Backtest ran but emitted no signals' : trades + ' trades across the regime-stratified backtest windows')}">\${trades != null ? trades : '—'}</td>
-        <td>\${actionsCell}</td>
-      </tr>\`;
-    }).join('')}
-  </table>\${footer}\`;
-  _bindSortable('st-candidate-wrap', _renderCandidates);
-  _bindCollapse('st-candidate-wrap', _renderCandidates);
-}
+// _renderCandidates removed 2026-07-13 (operator directive): the Research
+// Candidates approval table is gone — candidate→live flows through the
+// automatic per-regime qualification gate (auto_approval.js Sunday stage +
+// staging_approver finalize hook). Action-handler API wrappers (stApprove /
+// stApproveGated / stReject) are retained for console/manual use.
 
 // ── Action handlers ────────────────────────────────────────────────────────
 
@@ -9611,8 +9482,6 @@ async function stApproveGated(sid, state) {
 async function stDismissFailure(sid) {
   const fail = _stLastFailures[sid];
   delete _stLastFailures[sid];
-  const rows = strategiesData.filter(_inCandidate);
-  _renderCandidates(rows);
   // Persist the dismissal server-side so it also survives the next reload.
   if (fail && fail.job_id) {
     try {
