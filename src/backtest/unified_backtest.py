@@ -819,11 +819,34 @@ def _resolve_instrument_class(strategy_id: str, filepath: Optional[str] = None) 
 
 # ── Main run ─────────────────────────────────────────────────────────────────
 
+def _configured_max_hold_days(strategy_id: str) -> int:
+    """Strategy-configured hold horizon for backtests (2026-07-14 operator
+    directive: max_hold is strategy config and is BAKED INTO every backtest —
+    curation and adjustment re-tests alike — unless the caller pins one
+    explicitly). Reads the per-regime strategy_regime_params rows through the
+    live resolver (coupling writes one value across all eligible regimes; MAX
+    of the non-null per-regime values decides the single simulate horizon).
+    DEFAULT_MAX_HOLD_DAYS when unset, on lookup failure (logged), or when the
+    coupling gate is OFF (byte-identical legacy, mirrors the stop/target
+    override gating)."""
+    if not regime_param_override.gate_on():
+        return DEFAULT_MAX_HOLD_DAYS
+    try:
+        from execution import regime_param_resolver as rpr
+        vals = [rpr.max_hold_days_override(strategy_id, r) for r in CANONICAL_REGIMES]
+        vals = [v for v in vals if v]
+        return max(vals) if vals else DEFAULT_MAX_HOLD_DAYS
+    except Exception as e:
+        _log(f'{strategy_id}: configured max_hold lookup failed '
+             f'({type(e).__name__}: {e}); using default {DEFAULT_MAX_HOLD_DAYS}')
+        return DEFAULT_MAX_HOLD_DAYS
+
+
 def run_backtest(strategy_id: str, *,
                  filepath: Optional[str] = None,
                  start_date: str = DEFAULT_START_DATE,
                  end_date: Optional[str] = None,
-                 max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+                 max_hold_days: Optional[int] = None,
                  conn: Optional[psycopg2.extensions.connection] = None,
                  commit: bool = True,
                  resolver=None,
@@ -844,7 +867,13 @@ def run_backtest(strategy_id: str, *,
     on the resolver object after the run, and also returned via the
     ``run_backtest_grid`` wrapper. When resolver is None the function is
     byte-identical to the pre-resolver implementation.
+
+    max_hold_days=None (the default) resolves the STRATEGY-CONFIGURED horizon
+    from strategy_regime_params (2026-07-14 operator directive: config max_hold
+    is baked into every backtest); pass an int to pin it (coupling candidates do).
     """
+    if max_hold_days is None:
+        max_hold_days = _configured_max_hold_days(strategy_id)
     filepath = filepath or find_strategy_file(strategy_id)
     if not filepath:
         raise FileNotFoundError(f'no implementation file for {strategy_id}')
@@ -1064,7 +1093,10 @@ def main() -> int:
                    help='Run for all live + candidate + staging strategies')
     ap.add_argument('--start-date', default=DEFAULT_START_DATE)
     ap.add_argument('--end-date',   default=None)
-    ap.add_argument('--max-hold-days', type=int, default=DEFAULT_MAX_HOLD_DAYS)
+    ap.add_argument('--max-hold-days', type=int, default=None,
+                    help='Pin the hold horizon; default resolves each strategy\'s '
+                         'configured max_hold from strategy_regime_params '
+                         f'(falls back to {DEFAULT_MAX_HOLD_DAYS}).')
     args = ap.parse_args()
 
     if args.all_live:

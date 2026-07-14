@@ -155,14 +155,13 @@ def test_run_metrics_passes_max_hold(monkeypatch):
 
     bc._run_metrics('S_x', None)                       # no max_hold → not forwarded
     bc._run_metrics('S_x', {'LOW_VOL': {}}, max_hold_days=30)  # forwarded
-    bc._run_metrics('S_x', None, end_date='2026-07-08')  # window pin forwarded
+    bc._run_metrics('S_x', None, commit=True)          # persisting baseline
 
     assert 'max_hold_days' not in calls[0]
-    assert 'end_date' not in calls[0]
     assert calls[1]['max_hold_days'] == 30
-    assert calls[2]['end_date'] == '2026-07-08'
-    # all always pass commit=False + return_metrics=True
-    assert all(c.get('commit') is False and c.get('return_metrics') is True for c in calls)
+    assert calls[0].get('commit') is False and calls[1].get('commit') is False
+    assert calls[2].get('commit') is True              # fallback baseline persists
+    assert all(c.get('return_metrics') is True for c in calls)
 
 
 class _FakeOneCursor:
@@ -194,7 +193,7 @@ def test_stored_baseline_reads_canonical_row(monkeypatch):
     import datetime
     import psycopg2
     results = [
-        ('run-1', 1.23, datetime.date(2026, 7, 8), {'max_hold_days': 21}, False),
+        ('run-1', 1.23, datetime.date(2026, 7, 8), {'max_hold_days': 21}),
         (0.06, 0.09),
     ]
     monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
@@ -209,7 +208,7 @@ def test_stored_baseline_parses_config_json_string(monkeypatch):
     import datetime
     import psycopg2
     results = [
-        ('run-1', 0.5, datetime.date(2026, 7, 8), '{"max_hold_days": 34}', False),
+        ('run-1', 0.5, datetime.date(2026, 7, 8), '{"max_hold_days": 34}'),
         (None, None),
     ]
     monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
@@ -219,60 +218,127 @@ def test_stored_baseline_parses_config_json_string(monkeypatch):
     assert base['median_stop_pct'] is None
 
 
-def test_stored_baseline_none_when_missing_or_stale(monkeypatch):
-    import datetime
+def test_stored_baseline_none_only_when_missing(monkeypatch):
+    # No staleness fallback under the no-refresh regime: an old canonical row
+    # just means nothing changed since — it is still the baseline.
     import psycopg2
     monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
-    # no canonical row at all
     monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn([None]))
     assert bc._stored_baseline('S_new') is None
-    # row exists but refresh is presumed dead (stale flag from SQL age check)
-    stale = [('run-0', 1.0, datetime.date(2026, 5, 1), {}, True)]
-    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn(stale))
-    assert bc._stored_baseline('S_old') is None
 
 
-def test_run_single_backtest_per_rec(monkeypatch):
-    # 2026-07-14 operator directive: ONE backtest per rec — the candidate,
-    # window-pinned to the stored baseline's end_date. No fresh baseline run.
-    import datetime
+class _CandConn:
+    """Deferred-commit candidate connection stub."""
+    def __init__(self):
+        self.committed = False
+        self.rolled_back = False
+        self.closed = False
+        self.executed = []
+    def cursor(self):
+        conn = self
+        class _Cur:
+            def execute(self, sql, params=None):
+                conn.executed.append((sql, params))
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+        return _Cur()
+    def commit(self):
+        self.committed = True
+    def rollback(self):
+        self.rolled_back = True
+    def close(self):
+        self.closed = True
+
+
+def _wire_run(monkeypatch, *, baseline, cand_metrics, conn):
     monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
     monkeypatch.setattr(bc, '_load_recs', lambda rec_date=None: [
         {'id': 1, 'strategy_id': 'S_x', 'stop_delta_pct': 0.10,
          'target_delta_pct': None, 'hold_days_delta': None}])
     monkeypatch.setattr(bc, '_eligible_regimes', lambda sid: ['LOW_VOL'])
-    monkeypatch.setattr(bc, '_stored_baseline', lambda sid: {
-        'sharpe': 1.0, 'median_stop_pct': 0.05, 'median_target_pct': 0.08,
-        'end_date': datetime.date(2026, 7, 8), 'max_hold_days': 21})
-    calls = []
-    def _fake_metrics(sid, override, max_hold_days=None, end_date=None):
-        calls.append({'override': override, 'max_hold_days': max_hold_days,
-                      'end_date': end_date})
-        return {'sharpe': 1.2, 'total_trades': 100}
-    monkeypatch.setattr(bc, '_run_metrics', _fake_metrics)
+    monkeypatch.setattr(bc, '_stored_baseline', lambda sid: baseline)
+    cand_calls = []
+    def _fake_candidate(sid, override, max_hold_days=None):
+        cand_calls.append({'override': override, 'max_hold_days': max_hold_days})
+        return conn, 'cand-run-id', cand_metrics
+    monkeypatch.setattr(bc, '_run_candidate', _fake_candidate)
+    return cand_calls
+
+
+_BASE = {'sharpe': 1.0, 'median_stop_pct': 0.05, 'median_target_pct': 0.08,
+         'end_date': None, 'max_hold_days': 21}
+
+
+def test_run_single_backtest_per_rec_dry_run_rolls_back(monkeypatch):
+    # ONE backtest per rec (the candidate); dry-run never persists it.
+    conn = _CandConn()
+    calls = _wire_run(monkeypatch, baseline=_BASE,
+                      cand_metrics={'sharpe': 1.2, 'total_trades': 100}, conn=conn)
     out = bc.run(dry_run=True, log=lambda *_: None)
     assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
     assert len(calls) == 1                                    # candidate only
-    assert calls[0]['end_date'] == datetime.date(2026, 7, 8)  # window-pinned
     assert calls[0]['override'] == {'LOW_VOL': {'stop_pct': pytest.approx(0.055)}}
+    assert conn.rolled_back and not conn.committed and conn.closed
 
 
-def test_run_falls_back_to_fresh_baseline_when_no_stored(monkeypatch):
-    # New strategy / dead refresh → 2 runs for that rec only (baseline + candidate).
-    monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
-    monkeypatch.setattr(bc, '_load_recs', lambda rec_date=None: [
-        {'id': 1, 'strategy_id': 'S_new', 'stop_delta_pct': 0.10,
-         'target_delta_pct': None, 'hold_days_delta': None}])
-    monkeypatch.setattr(bc, '_eligible_regimes', lambda sid: ['LOW_VOL'])
-    monkeypatch.setattr(bc, '_stored_baseline', lambda sid: None)
-    calls = []
-    def _fake_metrics(sid, override, max_hold_days=None, end_date=None):
-        calls.append({'override': override, 'end_date': end_date})
-        return {'sharpe': 1.0 if override is None else 1.2, 'total_trades': 100,
+def test_run_reject_rolls_back_candidate(monkeypatch):
+    conn = _CandConn()
+    _wire_run(monkeypatch, baseline=_BASE,
+              cand_metrics={'sharpe': 0.9, 'total_trades': 100}, conn=conn)
+    marks = []
+    monkeypatch.setattr(bc, '_mark_outcome', lambda rid, o, n: marks.append(o))
+    out = bc.run(dry_run=False, log=lambda *_: None)
+    assert out == {'applied': 0, 'rejected': 1, 'scanned': 1}
+    assert conn.rolled_back and not conn.committed and conn.closed
+    assert marks == ['rejected']
+
+
+def test_run_apply_commits_candidate_as_canonical(monkeypatch):
+    # APPLY: set_params first, then the candidate run is tagged + COMMITTED —
+    # it becomes the canonical primary_window row (no weekly refresh needed).
+    import sys, types
+    conn = _CandConn()
+    _wire_run(monkeypatch, baseline=_BASE,
+              cand_metrics={'sharpe': 1.2, 'total_trades': 100}, conn=conn)
+    set_calls = []
+    fake_em = types.ModuleType('strategies.eligibility_manager')
+    fake_em.set_params = lambda **kw: set_calls.append(kw)
+    monkeypatch.setitem(sys.modules, 'strategies.eligibility_manager', fake_em)
+    import strategies as _s
+    monkeypatch.setattr(_s, 'eligibility_manager', fake_em, raising=False)
+    fake_panel = types.ModuleType('backtest.backtest_panel')
+    fake_panel.rebuild = lambda sid: None
+    monkeypatch.setitem(sys.modules, 'backtest.backtest_panel', fake_panel)
+    import backtest as _b
+    monkeypatch.setattr(_b, 'backtest_panel', fake_panel, raising=False)
+    marks = []
+    monkeypatch.setattr(bc, '_mark_outcome', lambda rid, o, n: marks.append(o))
+    monkeypatch.setattr(bc, '_replace_stops_for_applied',
+                        lambda sid, sp, log: {'attempted': 0, 'replaced': 0, 'failed': 0})
+    out = bc.run(dry_run=False, log=lambda *_: None)
+    assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
+    assert conn.committed and not conn.rolled_back and conn.closed
+    assert len(set_calls) == 1 and set_calls[0]['stop_pct'] == pytest.approx(0.055)
+    # the run row is tagged as a coupling apply before commit
+    assert any('notes' in sql and params[1] == 'cand-run-id'
+               for sql, params in conn.executed)
+    assert marks == ['applied']
+
+
+def test_run_falls_back_to_persisting_baseline_when_no_stored(monkeypatch):
+    # Never-backtested strategy → baseline runs WITH commit=True (self-heals
+    # the canonical store), then the single candidate as usual.
+    conn = _CandConn()
+    _wire_run(monkeypatch, baseline=None,
+              cand_metrics={'sharpe': 1.2, 'total_trades': 100}, conn=conn)
+    base_calls = []
+    def _fake_metrics(sid, override, max_hold_days=None, commit=False):
+        base_calls.append({'override': override, 'commit': commit})
+        return {'sharpe': 1.0, 'total_trades': 80,
                 'median_stop_pct': 0.05, 'median_target_pct': 0.08}
     monkeypatch.setattr(bc, '_run_metrics', _fake_metrics)
     out = bc.run(dry_run=True, log=lambda *_: None)
     assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
-    assert len(calls) == 2
-    assert calls[0]['override'] is None       # fresh baseline first
-    assert calls[1]['end_date'] is None       # full window (matches baseline)
+    assert base_calls == [{'override': None, 'commit': True}]

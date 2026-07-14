@@ -39,18 +39,35 @@ candidate tuner → weights → panels → ladder sentinel. The timer is current
 (`candidate_sharpe − baseline_sharpe > 0`); `MIN_TRADES = 30` unchanged. The
 backtest is the sole arbiter for stop/target/max-hold — confidence is irrelevant here.
 
-**One backtest per rec** (operator directive, same day): the baseline is no longer
-re-run. It is read from the canonical `strategy_backtest_runs` row
-(`primary_window = TRUE` — the weekly refresh persists the byte-identical
-`_run_metrics(sid, None)` computation), with the `median_stop_pct` /
-`median_target_pct` anchors recomputed in SQL from that run's persisted
-`strategy_backtest_trades` (same truthy filters + midpoint interpolation as the
-in-memory version). The single candidate backtest is **window-pinned** to the
-stored baseline's `end_date` so the strict ΔSharpe > 0 gate compares identical
-windows, and the max-hold candidate anchors to the stored run's
-`config_json.max_hold_days`. Fallback to a fresh baseline run (2 backtests for
-that rec only) when no canonical row exists or it is older than
-`MAX_BASELINE_AGE_DAYS = 30` (refresh-timer-dead guard — the 06-28…07-14 outage).
+**One backtest per rec + NO weekly refresh** (operator directives, same day): the
+baseline is read from the canonical `strategy_backtest_runs` row
+(`primary_window = TRUE`), with the `median_stop_pct` / `median_target_pct`
+anchors recomputed in SQL from that run's persisted `strategy_backtest_trades`
+(same truthy filters + midpoint interpolation as the in-memory version) and the
+max-hold anchor from its `config_json`. The single candidate backtest runs
+full-window on a **deferred-commit connection**: on APPLY it is committed —
+tagged `saturday_coupling apply: …` — and becomes the new canonical primary row
+(run_backtest's demotion UPDATE rides the same transaction), so stored metrics
+always reflect the last adjustment determined helpful. On reject/dry-run it
+rolls back untouched. Fresh baseline (also persisted → self-healing) only when
+no canonical row exists. There is no staleness guard: under the no-refresh
+regime an old canonical row just means nothing changed since.
+
+**Weekly fleet re-backtest RETIRED**: `weekend_saturday.sh` step 5 now runs only
+`eligibility_assigner --all` (DB-only; picks up the per-regime rows coupling
+just committed); `refresh_backtests.sh` is kept on disk as a manual tool (e.g.
+after an engine change that shifts metric semantics fleet-wide); the standalone
+`openclaw-strategy-backtest-refresh.timer` (Sunday live-states sleeve refresh)
+is **disabled**.
+
+**max_hold is strategy config, baked into every backtest**:
+`unified_backtest.run_backtest(max_hold_days=None)` (new default) resolves the
+configured horizon from `strategy_regime_params` via the live resolver (MAX of
+non-null per-regime values; `DEFAULT_MAX_HOLD_DAYS=21` when unset; gate-OFF →
+legacy default, no DB touch). Curation backtests, coupling baselines/candidates,
+and manual CLI runs all inherit it; explicit ints still pin (coupling hold-delta
+probes). Applied hold changes therefore compound via the stored `config_json`
+anchor.
 
 ### 1b. Stop replacement moves *after* coupling, with correct geometry
 - `position_recommender._applyStopReplacements` becomes permanently report-only
