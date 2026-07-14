@@ -34,7 +34,11 @@ function resolveScript(step, runDate, env = process.env, root = DEFAULT_ROOT) {
     return { argv: maybeDry(['python3', pyPipe, '--date', runDate]), timeoutSec: 600 };
   }
   if (fs.existsSync(jsPipe)) {
-    return { argv: maybeDry(['node', jsPipe]), timeoutSec: 5400 };
+    // The collect step buffers up to 12k+ tickers' price rows before the
+    // mid-flush checkpoint; raise the V8 heap limit so the Node process
+    // does not get OOM-killed before it can flush.
+    const nodeFlags = step === 'run_collector_once' ? ['--max-old-space-size=4096'] : [];
+    return { argv: maybeDry(['node', ...nodeFlags, jsPipe]), timeoutSec: 5400 };
   }
   if (fs.existsSync(pyExec)) {
     let timeoutSec = 300;

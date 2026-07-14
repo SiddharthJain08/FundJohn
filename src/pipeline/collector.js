@@ -602,9 +602,26 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
     if (totalWritten > 0) {
       await store.logRun(ticker, 'prices', 'success', totalWritten, null, Date.now() - start, gaps.length);
     }
+
+    // Periodic flush every 1000 tickers to bound in-memory buffer size.
+    // On large universes (12k+ tickers) the buffer can grow to several
+    // hundred MB before the end-of-phase flush; a SIGKILL from the OS OOM
+    // killer loses everything.  Flushing mid-loop writes partial progress to
+    // disk and keeps peak heap modest.  Non-fatal — a flush error here is
+    // logged but does not abort the loop (the final flush below still runs).
+    if ((i + 1) % 1000 === 0) {
+      try {
+        const mid = await store.flushPrices();
+        if (mid && mid.flushed) {
+          console.log(`[collector] Prices mid-flush @ticker ${i + 1}: ${mid.flushed} rows → prices.parquet`);
+        }
+      } catch (e) {
+        console.error(`[collector] Prices mid-flush FAILED (non-fatal): ${e.message}`);
+      }
+    }
   }
 
-  // Flush buffered rows to prices.parquet in one atomic write.
+  // Final flush — picks up any rows written since the last mid-flush.
   try {
     const flushed = await store.flushPrices();
     if (flushed && flushed.flushed) {
