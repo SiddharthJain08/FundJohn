@@ -27,7 +27,22 @@ step "3/8 position-recs"
 node src/agent/curators/run_mastermind.js --mode position-recs 2>&1 | tee -a "$LOG" || step "WARN position-recs rc=$?"
 
 step "4/8 backtest-coupling"
+# 2026-07-14 (full-auto): accepts ANY strict Sharpe improvement (was >= +0.10),
+# also bracket-couples low-confidence 'noted' recs, and re-anchors broker stops
+# on open positions for coupling-approved stop changes.
 python3 -m execution.backtest_coupled_recs $DRY 2>&1 | tee -a "$LOG" || step "WARN coupling rc=$?"
+
+step "4b proposal auto-apply (confidence > 0.8 applies; rest noted — operator directive 2026-07-14)"
+# Size/eligibility proposals from tonight's review: strictly > 0.8 confidence
+# auto-approves through the same set_params path as a dashboard click
+# (source='auto-approval'); lower/missing confidence parks as 'noted' for the
+# dashboard + next-Saturday re-evaluation. Runs before weights (step 6) so new
+# scalars/eligibility flow into this weekend's rebuild. Skips $DRY runs.
+if [ -z "$DRY" ]; then
+  python3 -m strategies.proposal_manager --auto-apply-batch 2>&1 | tee -a "$LOG" || step "WARN auto-apply rc=$?"
+else
+  step "4b skipped (dry-run)"
+fi
 
 step "5/8 full backtest refresh (internally time-bounded; WARN-and-continue)"
 bash src/maintenance/refresh_backtests.sh 2>&1 | tee -a "$LOG"

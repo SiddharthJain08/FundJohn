@@ -4,7 +4,14 @@ parameter changes.
 
 Lifecycle:
   Mastermind comprehensive-review -> insert_proposal() with status='pending'
+  Saturday auto-apply (2026-07-14)-> auto_apply_batch(): confidence > 0.8 is
+                                     auto-approved (source='auto-approval');
+                                     everything else -> status='noted' (kept
+                                     visible on the dashboard; superseded by
+                                     next Saturday's fresh proposal = the
+                                     re-evaluation loop)
   Operator (dashboard/CLI)        -> approve() / reject() / modify()
+                                     ('noted' rows stay operator-decidable)
   Approve/modify path             -> calls eligibility_manager.set_params,
                                      captures applied_row, marks status
 
@@ -121,8 +128,10 @@ def insert_proposal(*, proposer: str, strategy_id: str, regime_state: str,
 
 def supersede_pending(strategy_id: str, regime_state: str,
                       new_proposer: str) -> int:
-    """Mark all still-pending proposals for (strategy, regime) as superseded.
-    Called by Mastermind before inserting a new proposal for the same pair.
+    """Mark all still-open (pending OR noted) proposals for (strategy, regime)
+    as superseded. Called by Mastermind before inserting a new proposal for the
+    same pair — this is how low-confidence 'noted' items get re-evaluated: the
+    next weekly review re-proposes (or drops) them with fresh evidence.
     Returns the number of rows superseded."""
     with _connect() as conn:
         with conn.cursor() as cur:
@@ -133,7 +142,7 @@ def supersede_pending(strategy_id: str, regime_state: str,
                        decided_by = %s,
                        decision_reason = 'auto-superseded by newer proposal'
                  WHERE strategy_id = %s AND regime_state = %s
-                   AND status = 'pending'
+                   AND status IN ('pending', 'noted')
             """, (new_proposer, strategy_id, regime_state))
             n = cur.rowcount
         conn.commit()
@@ -161,8 +170,10 @@ def _lock_for_decision(cur, proposal_id: int):
     row = cur.fetchone()
     if row is None:
         raise KeyError(f'proposal {proposal_id} not found')
-    if row[3] != 'pending':
-        raise ValueError(f'proposal {proposal_id} is not pending (status={row[3]!r})')
+    # 'noted' (low-confidence, auto-parked 2026-07-14) stays operator-decidable
+    # from the dashboard until superseded by the next weekly review.
+    if row[3] not in ('pending', 'noted'):
+        raise ValueError(f'proposal {proposal_id} is not decidable (status={row[3]!r})')
     return dict(zip(_PENDING_COLS, row))
 
 
@@ -356,6 +367,70 @@ def auto_approve(*, proposal_id: int) -> dict:
                     overrides=None, terminal_status='approved')
 
 
+def _mark_noted(proposal_id: int, reason: str) -> None:
+    """Park a pending proposal as 'noted' (low confidence / rail-skipped).
+    Noted rows stay visible on the dashboard Strategy Adjustments tab, remain
+    operator-decidable, and are superseded by next Saturday's fresh proposal."""
+    with _connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE strategy_regime_param_proposals
+                   SET status = 'noted',
+                       decided_at = NOW(),
+                       decided_by = 'saturday_auto',
+                       decision_reason = %s
+                 WHERE id = %s AND status = 'pending'
+            """, (reason, proposal_id))
+        conn.commit()
+
+
+def auto_apply_batch(*, threshold: Optional[float] = None, limit: int = 500,
+                     log=logger.info) -> dict:
+    """Saturday full-auto pass over ALL pending proposals (2026-07-14 operator
+    directive): confidence strictly > threshold (default 0.8, env
+    OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE) routes through auto_approve()
+    (same set_params path as a dashboard click, source='auto-approval');
+    everything else — low/missing confidence or a rail skip inside
+    auto_approve — is parked as 'noted' with the reason recorded.
+
+    Requires OPENCLAW_PROPOSAL_AUTOAPPROVE=1 (same master gate as
+    auto_approve); returns a summary dict either way.
+    """
+    if os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE') != '1':
+        log('[auto-apply] OPENCLAW_PROPOSAL_AUTOAPPROVE != 1 — skipping (no-op).')
+        return {'skipped': True, 'approved': 0, 'noted': 0, 'errors': 0}
+    thr = threshold if threshold is not None else float(
+        os.environ.get('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.8'))
+    approved = noted = errors = 0
+    for prop in list_proposals(status='pending', limit=limit):
+        pid = prop['id']
+        conf = prop['confidence']
+        try:
+            if conf is None or float(conf) <= thr:
+                _mark_noted(pid, f'confidence {conf} <= {thr} — noted for '
+                                 f're-evaluation by next weekly review')
+                noted += 1
+                continue
+            result = auto_approve(proposal_id=pid)
+            if result.get('status') == 'approved':
+                approved += 1
+                log(f"[auto-apply] #{pid} {prop['strategy_id']}/{prop['regime_state']} "
+                    f'approved (confidence {float(conf):.2f})')
+            else:
+                _mark_noted(pid, f"auto-apply rail skip: {result.get('reason', '?')}")
+                noted += 1
+                log(f"[auto-apply] #{pid} {prop['strategy_id']}/{prop['regime_state']} "
+                    f"noted ({result.get('reason', '?')})")
+        except Exception as e:
+            errors += 1
+            log(f'[auto-apply] #{pid} failed: {e}')
+    summary = {'skipped': False, 'approved': approved, 'noted': noted,
+               'errors': errors, 'threshold': thr}
+    log(f'[auto-apply] done: {approved} approved, {noted} noted, {errors} errors '
+        f'(threshold {thr}, strict >)')
+    return summary
+
+
 def list_proposals(*, status: str = 'pending', limit: int = 50,
                    strategy_id: Optional[str] = None) -> list[dict]:
     sql = """
@@ -390,6 +465,12 @@ def main():
     sub.add_argument('--approve', type=int, metavar='PROPOSAL_ID')
     sub.add_argument('--reject', type=int, metavar='PROPOSAL_ID')
     sub.add_argument('--modify', type=int, metavar='PROPOSAL_ID')
+    sub.add_argument('--auto-apply-batch', action='store_true',
+                     help='Saturday full-auto: approve pending proposals with '
+                          'confidence strictly > threshold; note the rest.')
+    p.add_argument('--threshold', type=float, default=None,
+                   help='confidence threshold for --auto-apply-batch '
+                        '(default env OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE or 0.8)')
     p.add_argument('--status', default='pending')
     p.add_argument('--actor', default='cli')
     p.add_argument('--reason', default='')
@@ -404,6 +485,10 @@ def main():
                     action='store_const', const=False)
     args = p.parse_args()
 
+    if args.auto_apply_batch:
+        result = auto_apply_batch(threshold=args.threshold, log=print)
+        print(json.dumps(result, indent=2, default=str))
+        return 0 if not result.get('errors') else 1
     if args.list:
         rows = list_proposals(status=args.status)
         for r in rows:

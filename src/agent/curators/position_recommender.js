@@ -15,13 +15,21 @@
  * execution_signals history), produces concrete old → new numbers, and
  * writes rows that trade_handoff_builder.py picks up Monday morning.
  *
- * Stop-replacement application: when a memo carries a non-zero
- * stop_delta_pct, the recommender shells to
- * `python3 src/execution/alpaca_replace_stop.py` per currently-filled
- * Alpaca position for that strategy. The Python helper itself is gated
- * by OPENCLAW_ALPACA_LIVE_REPLACE — if unset (default), it dry-logs the
- * intended replacement and exits clean. Set the env var only after a
- * dedicated review of the proposed deltas.
+ * Stop-replacement preview: when a memo carries a non-zero stop_delta_pct,
+ * the recommender computes the planned (coid, old_stop, new_stop) tuples for
+ * the digest — REPORT-ONLY since 2026-07-14. Live replacement moved to the
+ * Saturday backtest-coupling step (execution/backtest_coupled_recs.py), which
+ * re-anchors stops to the backtest-VALIDATED distance from entry, and only
+ * for recs whose candidate improved Sharpe. (The old pre-validation path here
+ * also multiplied the stop PRICE by (1+δ), which tightens a long stop for a
+ * positive "widen" δ — distance semantics now live in the coupling step.)
+ *
+ * Confidence gating (2026-07-14, full-auto Saturday): each rec persists the
+ * memo's confidence; rows with confidence > 0.8 insert as action_taken=
+ * 'pending' (consumed by Monday's trade_handoff_builder), everything else as
+ * 'noted' (visible on the dashboard Strategy Adjustments tab, re-evaluated by
+ * next Saturday's review; excluded from the handoff). Bracket deltas are
+ * backtested by the coupling step regardless of confidence.
  */
 
 const fs = require('fs');
@@ -173,7 +181,7 @@ function _formatDigest(rows) {
     const why   = (r.reasoning || '').slice(0, 80).replace(/\|/g, '\\|');
     return `| \`${r.strategy_id}\` | ${cur} | ${rec} | ${dS} | ${dStp} | ${dTgt} | ${dHold} | ${why} |`;
   }).join('\n');
-  return header + body + '\n\n_TradeJohn will pick these up in Monday\'s handoff. Reply `approve <strategy_id>` / `reject <strategy_id>` to override._';
+  return header + body + '\n\n_Confidence > 0.8 → auto-flows to Monday\'s handoff; lower confidence is **noted** (dashboard → Strategy Adjustments) and re-evaluated next Saturday. Stop/TP/hold deltas are backtest-coupled tonight and applied only on a Sharpe improvement._';
 }
 
 async function _postToDiscord(channelName, text) {
@@ -277,37 +285,39 @@ async function run({ dryRun = false, notify = () => {}, maxMemoAgeHours = 24 } =
       continue;
     }
 
+    // Confidence gate (2026-07-14): strictly > 0.8 flows to Monday's handoff
+    // ('pending'); lower / missing confidence is 'noted' — kept for the
+    // dashboard + next-Saturday re-evaluation, never applied to sizing.
+    const conf = typeof memo.recommendations?.confidence === 'number'
+      ? Number(memo.recommendations.confidence) : null;
+    const actionTaken = (conf != null && conf > 0.8) ? 'pending' : 'noted';
+
     const { rows } = await _query(
       `INSERT INTO strategy_sizing_recommendations
          (strategy_id, memo_id, current_size_pct, recommended_size_pct,
           size_delta_pct, stop_delta_pct, target_delta_pct, hold_days_delta,
-          reasoning)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          reasoning, confidence, action_taken)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [memo.strategy_id, memo.id,
        deltas.current_size_pct, deltas.recommended_size_pct,
        deltas.size_delta_pct, deltas.stop_delta_pct,
        deltas.target_delta_pct, deltas.hold_days_delta,
-       deltas.reasoning],
+       deltas.reasoning, conf, actionTaken],
     );
-    persisted.push({ strategy_id: memo.strategy_id, rec_id: rows[0].id, instrument_class: instrumentClass, ...deltas });
+    persisted.push({ strategy_id: memo.strategy_id, rec_id: rows[0].id, instrument_class: instrumentClass, confidence: conf, action_taken: actionTaken, ...deltas });
   }
 
   const digest = _formatDigest(persisted);
   notify(`writing digest — ${digest.length} chars`);
 
-  // Apply stop replacements per recommendation (gated default-OFF in the
-  // Python helper itself via OPENCLAW_ALPACA_LIVE_REPLACE). Any rec with
-  // a non-trivial stop_delta_pct (|x| >= 0.005, ie 0.5%) gets each
-  // currently-filled Alpaca position for that strategy snapped to a new
-  // stop = current_stop * (1 + stop_delta_pct).
-  //
-  // Even in dry-run mode we compute the proposed (coid, old_stop, new_stop)
-  // tuples — the operator wants to SEE what would change before flipping
-  // OPENCLAW_ALPACA_LIVE_REPLACE=1. reportOnly=true skips the Python
-  // subprocess spawn (no broker calls) and emits only the planned deltas.
+  // Stop-replacement PREVIEW only (2026-07-14): live replacement moved to the
+  // Saturday backtest-coupling step, which fires only for recs whose candidate
+  // improved backtest Sharpe and re-anchors to the validated distance from
+  // entry. Here we always run reportOnly — the planned tuples still surface in
+  // the digest so the operator sees what the coupling step may change.
   const stopReplacements = await _applyStopReplacements(persisted, notify,
-                                                        { reportOnly: dryRun });
+                                                        { reportOnly: true });
   if (stopReplacements.length) {
     const live   = stopReplacements.filter(r => r.status === 'replaced').length;
     const dryLog = stopReplacements.filter(r => r.status === 'skipped_dry_run').length;
@@ -415,8 +425,9 @@ async function _applyStopReplacements(persisted, notify, { reportOnly = false } 
         new_stop:    newStop,
       };
       if (reportOnly) {
-        // Skip the Python subprocess entirely. Useful for `--dry-run`
-        // operator review before flipping OPENCLAW_ALPACA_LIVE_REPLACE=1.
+        // Always taken since 2026-07-14 (preview values only — the coupling
+        // step owns live replacement with entry-anchored distance math; the
+        // price-relative newStop here is just an indicative digest figure).
         all.push({ ...base, status: 'planned_dry_run' });
         continue;
       }

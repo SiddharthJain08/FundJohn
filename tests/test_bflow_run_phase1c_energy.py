@@ -14,10 +14,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-WORKTREE = "/root/.config/superpowers/worktrees/sp6-bflow-phase1-oracle"
+# 2026-07-14: was the sp6-bflow-phase1-oracle worktree path — pruned in the W8
+# cleanup, which broke collection. The script has long been merged to the repo.
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SPEC = importlib.util.spec_from_file_location(
     "run_bflow_phase1c_energy",
-    os.path.join(WORKTREE, "scripts", "run_bflow_phase1c_energy.py"))
+    os.path.join(_REPO, "scripts", "run_bflow_phase1c_energy.py"))
 runner = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(runner)
 

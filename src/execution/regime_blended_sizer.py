@@ -1483,12 +1483,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     return _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
-        scale, account_state)
+        scale, account_state, gate_net_sharpe=gate_net_sharpe)
 
 
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
-                              weight_by_strat, scale, account_state, broker=None):
+                              weight_by_strat, scale, account_state, broker=None,
+                              gate_net_sharpe=None):
     """Order-emission tail shared by the normal sizing path AND the zero-conviction
     flatten path (extracted 2026-07-08, byte-identical to the prior in-line tail).
 
@@ -1595,6 +1596,11 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
                                            ticker_meta[tkr]['strategies'],
                                            ticker_meta[tkr]['directions'],
                                            eff_weight_by_strat),
+            # Signed per-ticker corr-adjusted cumulative Sharpe (S_adj) — the
+            # conviction this emission was gated/sized at. Persisted to
+            # cycle_contributing_strategies for the dashboard position tiles
+            # (2026-07-14). None for closes of tickers outside today's targets.
+            'corr_cum_sharpe':         (gate_net_sharpe or {}).get(tkr),
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         }

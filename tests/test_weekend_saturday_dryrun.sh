@@ -9,6 +9,12 @@ grep -q 'execution.backtest_coupled_recs' "$SCRIPT"
 grep -q 'refresh_backtests.sh' "$SCRIPT"
 grep -q 'weekly_live_sharpe.js' "$SCRIPT"
 grep -q 'backtest_panel --rebuild' "$SCRIPT"
-grep -q 'mode universe-recs' "$SCRIPT"
+# Step 8 = SP-7 ladder sentinel (replaced legacy universe-recs 2026-06-06).
+grep -q 'check_ladder_saturday' "$SCRIPT"
+# Step 4b = Saturday confidence auto-apply (2026-07-14 full-auto directive).
+grep -q 'proposal_manager --auto-apply-batch' "$SCRIPT"
 awk '/backtest_coupled_recs/{c=NR} /refresh_backtests.sh/{r=NR} END{exit !(c<r)}' "$SCRIPT"
+# Auto-apply must land between coupling (step 4) and the weights rebuild (step 6)
+# so fresh scalars/eligibility flow into the same weekend's weights.
+awk '/backtest_coupled_recs/{c=NR} /auto-apply-batch/{a=NR} /weekly_live_sharpe.js/{w=NR} END{exit !(c<a && a<w)}' "$SCRIPT"
 echo "OK test_weekend_saturday_dryrun"

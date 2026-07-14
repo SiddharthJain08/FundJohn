@@ -341,6 +341,23 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
     } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
 
+    // Per-ticker corr-adjusted cumulative Sharpe (S_adj) — the conviction the
+    // position was last sized at (stamped by the sizer each cycle into
+    // cycle_contributing_strategies, 2026-07-14). Latest non-null row per
+    // ticker; best-effort (tiles render an em-dash without it).
+    const sadjByTicker = {};
+    try {
+      const sadjRes = await dbQuery(`
+        SELECT DISTINCT ON (ticker) ticker,
+               corr_cum_sharpe::float AS corr_cum_sharpe,
+               run_date               AS corr_cum_sharpe_asof
+          FROM cycle_contributing_strategies
+         WHERE corr_cum_sharpe IS NOT NULL
+         ORDER BY ticker, run_date DESC
+      `);
+      for (const r of sadjRes.rows) sadjByTicker[r.ticker] = r;
+    } catch (_) { /* column may predate migration 143 on a fresh clone */ }
+
     // Active positions = broker truth. execution_signals carries every
     // strategy's *intent*, including stale rows the reconcile sweep hasn't
     // closed yet (phantoms). The dashboard's "Active Positions" panel must
@@ -360,6 +377,10 @@ app.get('/api/portfolio/positions', async (req, res) => {
           nav,
         }),
         broker_position: brokerPositions[r.ticker] || null,
+        corr_cum_sharpe: sadjByTicker[r.ticker]
+          ? sadjByTicker[r.ticker].corr_cum_sharpe : null,
+        corr_cum_sharpe_asof: sadjByTicker[r.ticker]
+          ? sadjByTicker[r.ticker].corr_cum_sharpe_asof : null,
       }));
 
     if (req.query.group_by === 'strategy') {
@@ -3609,6 +3630,11 @@ body.rs-chat-locked{overflow:hidden}
 .pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;line-height:1.1}
 .pf-postile-pnl{font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
 .pf-postile-share{opacity:0.8}
+.pf-postile-sadj{opacity:0.85;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
+.pf-postile[data-size="small"] .pf-postile-sadj,.pf-postile[data-size="tiny"] .pf-postile-sadj{display:none}
+.tk-sadj{font-weight:600}
+.pf-tile.pf-tile-small .pf-tile-strip .tk-sadj{display:none}
+.pf-tile.pf-tile-tiny .pf-tile-strip .tk-sadj{display:none}
 /* Per-size typography — JS sets data-size based on min(width,height) so
    text scales with tile area. Tiny tiles drop text entirely (color +
    tooltip carry the meaning). */
@@ -4133,21 +4159,21 @@ body.rs-chat-locked{overflow:hidden}
     <div class="pf-section" id="rp-section" style="display:none">
       <div class="pf-section-header">
         <span>⚙️ Strategy Adjustments</span>
-        <span class="st-sub-label">backtest-applied stop/TP/max-hold changes + pending size/eligibility proposals</span>
+        <span class="st-sub-label">fully-automatic Saturdays: brackets apply on a backtest Sharpe gain; size/eligibility auto-applies at confidence &gt; 0.8; the rest is noted below</span>
       </div>
-      <div class="st-sub-label" style="margin:4px 0">Applied this week <span id="sa-applied-count">—</span></div>
+      <div class="st-sub-label" style="margin:4px 0">Recent changes (7d) <span id="sa-applied-count">—</span></div>
       <table id="sa-applied-table" style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:14px">
         <thead><tr style="text-align:left;color:var(--muted);font-size:11px">
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Regime</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Stop →</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Target →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Via</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Change</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">ΔSharpe</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Trades</th>
         </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="st-sub-label" style="margin:4px 0">Pending proposals <span class="st-sub-label" id="rp-count">—</span></div>
+      <div class="st-sub-label" style="margin:4px 0">Noted — low-confidence, re-evaluated next Saturday <span class="st-sub-label" id="rp-count">—</span></div>
       <table id="rp-table" style="border-collapse:collapse;width:100%;font-size:12px">
         <thead>
           <tr style="text-align:left;color:var(--muted);font-size:11px">
@@ -6940,6 +6966,11 @@ function _groupByTicker(rows, mode) {
       ? g.broker.unrealized_plpc         // broker-truth unrealized P/L %
       : (pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null);
     if (g.broker && g.broker.market_value != null) g.market_value = g.broker.market_value;
+    // Corr-adjusted cumulative Sharpe (S_adj) at last sizing — attached
+    // per-ticker by /api/portfolio/positions (all rows carry the same value).
+    const _sadj = g.signals[0] && g.signals[0].corr_cum_sharpe != null
+      ? parseFloat(g.signals[0].corr_cum_sharpe) : null;
+    g.corr_cum_sharpe = (_sadj != null && isFinite(_sadj)) ? _sadj : null;
     g.avg_days = daysN > 0 ? daysSum / daysN : null;
     g.is_open = isOpen;
     g.wins = wins;
@@ -7087,6 +7118,13 @@ function _buildAlphaBarsHtml(group) {
     const netTxt = (net >= 0 ? '+' : '') + net.toFixed(2) + '%';
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge = \`<span class="ab-badge">net contrib = <span class="\${netCls}">\${netTxt}</span></span>\`;
+  }
+  // Corr-adjusted cumulative Sharpe (S_adj) the position was last sized at —
+  // the sole conviction gate quantity, stamped per cycle by the sizer.
+  if (group.corr_cum_sharpe != null && isFinite(group.corr_cum_sharpe)) {
+    const sv = group.corr_cum_sharpe;
+    const sCls = sv >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+    badge += \` <span class="ab-badge" title="corr-adjusted cumulative Sharpe (S_adj) at last sizing cycle">S_adj = <span class="\${sCls}">\${sv.toFixed(2)}</span></span>\`;
   }
   return \`<div class="alpha-bars">
     \${priceHdr}
@@ -7266,11 +7304,14 @@ function _populateTreemap(container, label) {
     const isSel = g.ticker === selectedTicker;
     const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
     const sizeClass = _sizeClassForTile(g.w, g.h);
-    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+    const sadj = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
+      ? g.corr_cum_sharpe : null;
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
     return \`<div class="pf-postile\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" data-size="\${sizeClass}" style="left:\${g.x.toFixed(1)}px;top:\${g.y.toFixed(1)}px;width:\${g.w.toFixed(1)}px;height:\${g.h.toFixed(1)}px;background:\${_pnlColor(pnl)}" title="\${tip}">
       <div class="pf-postile-sym">\${g.ticker}</div>
       <div class="pf-postile-bottom">
         <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+        \${sadj != null ? '<span class="pf-postile-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
         <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
       </div>
     </div>\`;
@@ -7326,7 +7367,9 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const tier  = side >= 140 ? 'large' : side >= 100 ? 'medium' : side >= 70 ? 'small' : 'tiny';
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
-      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      const sadj  = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
+                      ? g.corr_cum_sharpe : null;
+      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
       // data-side carries the computed side length for the client-side
       // shelf packer (_packHeatmapShelves) to read after DOM insertion.
       // Position becomes absolute via packer; until then tiles render
@@ -7345,6 +7388,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
         </div>
         <div class="pf-tile-strip">
           <span class="tk-share">\${sharePct.toFixed(1)}%</span>
+          \${sadj != null ? '<span class="tk-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
           <span class="tk-days">\${days}</span>
         </div>
       </div>\`;
@@ -8241,7 +8285,7 @@ function _actRenderPreview(data, host) {
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp, notedResp] = await Promise.all([
       _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
       _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
       _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
@@ -8249,12 +8293,13 @@ async function loadStrategies() {
       _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
       _safeFetch('/api/regime-proposals/applied?days=7', { applied: [] }, { label: 'applied adjustments' }),
+      _safeFetch('/api/regime-proposals/noted?days=21', { proposals: [], sizing_recs: [] }, { label: 'noted adjustments' }),
     ]);
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
     _loadActivationCard();
-    _rpRender(proposals?.proposals || []);
+    _rpRender(proposals?.proposals || [], notedResp || {});
     _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
     // edits Mastermind's weekly prompt — research-page-only entry).
@@ -8679,34 +8724,69 @@ function _rdDriftFor(strategyId, regime) {
   return _rdSignals[strategyId + '|' + regime] || null;
 }
 
-// Phase 2B — render pending Mastermind proposals
-function _rpRender(proposals) {
+// Phase 2B / 2026-07-14 full-auto Saturday — render the suggestion queue:
+// pending proposals (transient — the Saturday auto-apply decides them within
+// the run) + noted low-confidence proposals (operator-decidable until the
+// next weekly review supersedes them) + noted low-confidence sizing recs
+// (informational; their brackets are still backtest-coupled).
+function _rpRender(proposals, noted) {
   const section = document.getElementById('rp-section');
   const tbody = document.querySelector('#rp-table tbody');
   const countEl = document.getElementById('rp-count');
   if (!section || !tbody) return;
   section.style.display = '';
-  if (countEl) countEl.textContent = proposals.length ? '(' + proposals.length + ' awaiting decision)' : '(none)';
+  const notedProps = (noted && noted.proposals) || [];
+  const notedRecs  = (noted && noted.sizing_recs) || [];
+  const total = proposals.length + notedProps.length + notedRecs.length;
+  if (countEl) countEl.textContent = total ? '(' + total + ')' : '(none)';
   tbody.innerHTML = '';
-  for (const p of proposals) {
+  const _badge = (txt, bg) =>
+    '<span style="padding:1px 6px;border-radius:3px;font-size:10px;background:' + bg + ';color:#fff">' + txt + '</span> ';
+  const _row = (p, kind) => {
     const tr = document.createElement('tr');
-    // Pending proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
-    // max_hold are decided by the backtest-coupling step, not approved here, so
-    // they are no longer rendered (the columns would always be empty).
+    // Proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
+    // max_hold are decided by the backtest-coupling step, never approved here.
     const proposedBits = [];
     if (p.proposed_eligible !== null && p.proposed_eligible !== undefined) proposedBits.push('elig=' + p.proposed_eligible);
-    if (p.proposed_size_scalar !== null) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
+    if (p.proposed_size_scalar !== null && p.proposed_size_scalar !== undefined) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
     const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '?';
+    const why = escapeHtml((p.reasoning || '') + (p.decision_reason ? ' — ' + p.decision_reason : ''));
     tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + p.strategy_id + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + p.regime_state + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + proposedBits.join(' · ') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(p.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + escapeHtml(p.regime_state) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' +
+        (kind === 'pending' ? _badge('PENDING', '#b08800') : _badge('NOTED', '#57606a')) + proposedBits.join(' · ') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + why + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
       '</td>';
+    tbody.appendChild(tr);
+  };
+  for (const p of proposals) _row(p, 'pending');
+  for (const p of notedProps) _row(p, 'noted');
+  for (const r of notedRecs) {
+    // Sizing recs have no approve path (size only flows at confidence > 0.8);
+    // shown so the operator sees what was suggested + the coupling outcome.
+    const tr = document.createElement('tr');
+    const bits = [];
+    if (r.size_delta_pct != null)   bits.push('Δsize=' + Number(r.size_delta_pct).toFixed(3) + '%');
+    if (r.stop_delta_pct != null)   bits.push('Δstop=' + Number(r.stop_delta_pct).toFixed(3));
+    if (r.target_delta_pct != null) bits.push('Δtgt=' + Number(r.target_delta_pct).toFixed(3));
+    if (r.hold_days_delta != null)  bits.push('Δhold=' + r.hold_days_delta + 'd');
+    const conf = r.confidence != null ? Number(r.confidence).toFixed(2) : '?';
+    const cpl = r.coupling_outcome
+      ? ' · brackets ' + (r.coupling_outcome === 'applied' ? 'APPLIED via backtest' : 'rejected by backtest')
+      : '';
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(r.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--muted)">all</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' +
+        _badge('NOTED · SIZING', '#57606a') + bits.join(' · ') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + escapeHtml((r.reasoning || '').slice(0, 160)) + cpl + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:var(--muted);font-size:11px">re-eval Sat</td>';
     tbody.appendChild(tr);
   }
   // Wire buttons
@@ -8722,20 +8802,35 @@ function _saRenderApplied(applied) {
   tbody.innerHTML = '';
   if (countEl) countEl.textContent = '(' + applied.length + ')';
   if (!applied.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No stop/TP changes applied in the last 7 days.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No adjustments applied in the last 7 days.</td></tr>';
     return;
   }
   const fmt = (v) => (v == null ? '—' : Number(v).toFixed(3));
+  const _delta = (label, b, af, f) => {
+    if (af == null || String(b) === String(af)) return null;
+    return label + ' ' + f(b) + ' → ' + f(af);
+  };
   for (const a of applied) {
     const d = (a.bt_sharpe_after != null && a.bt_sharpe_before != null)
       ? (a.bt_sharpe_after - a.bt_sharpe_before) : null;
+    // One compact string listing only what actually changed.
+    const changes = [
+      _delta('stop',   a.stop_before,     a.stop_after,     fmt),
+      _delta('target', a.target_before,   a.target_after,   fmt),
+      _delta('size',   a.size_before,     a.size_after,     (v) => (v == null ? '—' : Number(v).toFixed(2))),
+      _delta('hold',   a.hold_before,     a.hold_after,     (v) => (v == null ? '—' : v + 'd')),
+      _delta('elig',   a.eligible_before, a.eligible_after, (v) => (v == null ? '—' : String(v))),
+    ].filter(Boolean).join(' · ') || '(no field delta)';
+    const via = a.source === 'saturday_coupling' ? ['backtest', '#1f6feb']
+      : a.source === 'auto-approval' ? ['auto conf', '#8250df']
+      : ['manual', '#57606a'];
     const tr = document.createElement('tr');
     tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + a.strategy_id + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + a.regime_state + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.stop_before) + ' → ' + fmt(a.stop_after) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.target_before) + ' → ' + fmt(a.target_after) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(a.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + escapeHtml(a.regime_state) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)"><span style="padding:1px 6px;border-radius:3px;font-size:10px;background:' + via[1] + ';color:#fff">' + via[0] + '</span></td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(changes) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '" title="backtest Sharpe ' + fmt(a.bt_sharpe_before) + ' → ' + fmt(a.bt_sharpe_after) + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right">' + (a.bt_n_trades != null ? a.bt_n_trades : '—') + '</td>';
     tbody.appendChild(tr);
   }

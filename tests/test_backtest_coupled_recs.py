@@ -23,11 +23,75 @@ def test_candidate_pct_noise_delta_returns_none():
     assert bc.candidate_pct(base=0.07, delta=0.004, default=0.07) is None
 
 
-def test_accept_rule():
+def test_accept_rule_any_strict_improvement():
+    # 2026-07-14: gate = ANY strictly-positive Sharpe improvement (was >= +0.10).
     assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.61, candidate_n_trades=30) is True
-    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.59, candidate_n_trades=30) is False
+    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.59, candidate_n_trades=30) is True
+    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.501, candidate_n_trades=30) is True
+    # No improvement / regression → reject.
+    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.50, candidate_n_trades=100) is False
+    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.49, candidate_n_trades=100) is False
+    # Trade floor unchanged.
     assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.61, candidate_n_trades=29) is False
-    assert bc.qualifies(baseline_sharpe=0.50, candidate_sharpe=0.65, candidate_n_trades=100) is True
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+    def execute(self, *a, **k):
+        pass
+    def fetchall(self):
+        return self._rows
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+    def cursor(self):
+        return _FakeCursor(self._rows)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_replace_stops_anchors_to_entry_distance(monkeypatch):
+    # long @ entry 200 with validated stop distance 6% → 188.0;
+    # short @ entry 50 → 53.0. The OLD price-relative math would have produced
+    # old_stop·(1+δ) — tightening the long for a positive "widen" δ.
+    import psycopg2
+    from execution import alpaca_replace_stop as ars
+    rows = [
+        ('coid-long',  'AAPL', 'long',  200.0, 190.0),
+        ('coid-short', 'XYZ',  'short',  50.0,  52.0),
+        ('coid-noent', 'BAD',  'long',   None,  10.0),   # no entry → skipped
+    ]
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeConn(rows))
+    calls = []
+    monkeypatch.setattr(ars, 'replace_stop_for_coid',
+                        lambda coid, ns: calls.append((coid, ns)) or
+                                         {'status': 'replaced', 'coid': coid})
+    out = bc._replace_stops_for_applied('S_x', 0.06, log=lambda *_: None)
+    assert out == {'attempted': 2, 'replaced': 2, 'failed': 0}
+    assert ('coid-long', 188.0) in calls
+    assert ('coid-short', 53.0) in calls
+
+
+def test_replace_stops_counts_broker_rejects(monkeypatch):
+    import psycopg2
+    from execution import alpaca_replace_stop as ars
+    rows = [('c1', 'AAPL', 'long', 100.0, 95.0)]
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeConn(rows))
+    monkeypatch.setattr(ars, 'replace_stop_for_coid',
+                        lambda coid, ns: {'status': 'replace_failed'})
+    out = bc._replace_stops_for_applied('S_x', 0.05, log=lambda *_: None)
+    assert out == {'attempted': 1, 'replaced': 0, 'failed': 1}
 
 
 def test_has_actionable_delta():
