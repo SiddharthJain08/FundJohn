@@ -126,8 +126,14 @@ async function reapCandidates(opts = {}) {
            JSON.stringify({ age_days: age, state_since: rec.state_since || null })]);
       } catch (e) { log(`  ${sid}: lifecycle_events insert skipped (${e.message})`); }
       // 2. Registry tombstone (flag, never DELETE — FK + audit doctrine).
+      //    NOTE: strategy_registry has NO updated_at column — use the
+      //    dedicated deprecated_at/deprecation_reason columns.
       await _query(
-        `UPDATE strategy_registry SET status='deprecated', updated_at=NOW() WHERE id=$1`, [sid]
+        `UPDATE strategy_registry
+            SET status='deprecated', deprecated_at=NOW(),
+                deprecation_reason=$2
+          WHERE id=$1`,
+        [sid, `candidate-reaper: ${age}d in candidate without live promotion (3-weekend rule)`]
       ).catch(e => log(`  ${sid}: registry tombstone skipped (${e.message})`));
       // 3. Sizer params gone.
       await _query(`DELETE FROM strategy_regime_params WHERE strategy_id=$1`, [sid]);
