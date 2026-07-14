@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks",
+  "required": ["prices"],
+  "optional": []
+}

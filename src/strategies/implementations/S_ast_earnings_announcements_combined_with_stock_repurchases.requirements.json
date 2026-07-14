@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_earnings_announcements_combined_with_stock_repurchases",
+  "required": ["prices", "earnings"],
+  "optional": ["insider", "financials"]
+}

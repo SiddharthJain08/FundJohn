@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_gold_trend_momentum_vol_target",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

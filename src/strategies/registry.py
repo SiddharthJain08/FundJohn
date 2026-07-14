@@ -198,6 +198,8 @@ _IMPL_MAP = {
     'S_ast_trend_following_effect_in_stocks': ('strategies.implementations.S_ast_trend_following_effect_in_stocks', 'AstTrendFollowingEffectInStocks'),
     # Quantpedia: Short-Term Reversal in Stocks — weekly long/short cross-sectional reversal
     'S_ast_short_term_reversal_in_stocks': ('strategies.implementations.S_ast_short_term_reversal_in_stocks', 'AstShortTermReversalInStocks'),
+    # Quantpedia: Momentum and Reversal combined with Volatility — long/short intersection of top-quintile 6M return + top-quintile realized vol
+    'S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks': ('strategies.implementations.S_ast_momentum_and_reversal_combined_with_volatility_effect_in_stocks', 'AstMomentumAndReversalCombinedWithVolatilityEffectInStocks'),
     # Quantpedia: Sector Momentum Rotational System — monthly top-3 252-day ROC rotation across 10 sector ETFs
     'S_ast_sector_momentum_rotational_system': ('strategies.implementations.S_ast_sector_momentum_rotational_system', 'SectorMomentumRotationalSystem'),
     # Oxford/blueprint batch — impl files + manifest entries existed but _IMPL_MAP
@@ -265,6 +267,44 @@ _IMPL_MAP = {
     'S_ast_option_expiration_week_effect': ('strategies.implementations.S_ast_option_expiration_week_effect', 'OptionExpirationWeekEffect'),
     # Quantpedia: Momentum in Mutual Fund Returns — quarterly top-decile 6-month momentum rotation across broad ETF proxy basket
     'S_ast_momentum_in_mutual_fund_returns': ('strategies.implementations.S_ast_momentum_in_mutual_fund_returns', 'MomentumInMutualFundReturns'),
+    # Quantpedia: Momentum Factor Effect in Stocks — monthly long top-quintile / short bottom-quintile UMD portfolio (Jegadeesh & Titman)
+    'S_ast_momentum_factor_effect_in_stocks': ('strategies.implementations.S_ast_momentum_factor_effect_in_stocks', 'AstMomentumFactorEffectInStocks'),
+    # Quantpedia: Momentum Factor and Style Rotation Effect — monthly long winner / short loser across 6 Russell/S&P style ETFs
+    'S_ast_momentum_factor_and_style_rotation_effect': ('strategies.implementations.S_ast_momentum_factor_and_style_rotation_effect', 'MomentumFactorStyleRotation'),
+    # Quantpedia: Momentum Effect in Commodities — monthly long/short quintile on 252-day ROC across commodity ETF proxies
+    'S_ast_momentum_effect_in_commodities': ('strategies.implementations.S_ast_momentum_effect_in_commodities', 'AstMomentumEffectInCommodities'),
+    # Quantpedia: Market Sentiment and Overnight Anomaly — SPY overnight hold scaled by SPY/VIX SMA conditions
+    'S_ast_market_sentiment_and_an_overnight_anomaly': ('strategies.implementations.S_ast_market_sentiment_and_an_overnight_anomaly', 'MarketSentimentOvernightAnomaly'),
+    # Singha, Aguilera-Toste & Lahiri 2025: forecast-to-fill EMA trend + momentum z-score on GLD, vol-targeted Kelly
+    'S_gold_trend_momentum_vol_target': ('strategies.implementations.S_gold_trend_momentum_vol_target', 'GoldTrendMomentumVolTarget'),
+    # Quantpedia: Low Volatility Factor Effect in Stocks — monthly long bottom-quartile (lowest 3yr weekly vol) large-cap equities
+    'S_ast_low_volatility_factor_effect_in_stocks': ('strategies.implementations.S_ast_low_volatility_factor_effect_in_stocks', 'AstLowVolatilityFactorEffectInStocks'),
+    # Aarab 2025: Aligned Economic Index market timing under yield-curve state-switching
+    'S_aligned_economic_index_regime_timing': ('strategies.implementations.S_aligned_economic_index_regime_timing', 'AlignedEconomicIndexRegimeTiming'),
+    # Quantpedia: Asset Growth Effect — annual June long/short decile sort on YoY total-asset growth
+    'S_ast_asset_growth_effect': ('strategies.implementations.S_ast_asset_growth_effect', 'AssetGrowthEffect'),
+    # Quantpedia: ROA Effect Within Stocks — monthly long/short decile sort by trailing ROA within large/small-cap halves
+    'S_ast_roa_effect_within_stocks': ('strategies.implementations.S_ast_roa_effect_within_stocks', 'AstROAEffectWithinStocks'),
+    # Quantpedia: Accrual Anomaly (Sloan 1996) — annual May long/short decile on balance-sheet accruals
+    'S_accrual_anomaly': ('strategies.implementations.S_accrual_anomaly', 'AccrualAnomaly'),
+    # Quantpedia: Combining F-Score and Short-Term Reversals — monthly long past losers (F≥7) / short past winners (F≤3)
+    'S_ast_combining_fundamental_fscore_and_equity_short_term_reversals': ('strategies.implementations.S_ast_combining_fundamental_fscore_and_equity_short_term_reversals', 'AstCombiningFscoreShortTermReversals'),
+    # Quantpedia: Earnings Announcement Premium — long high-VCR expected announcers / short non-announcers, monthly
+    'S_ast_earnings_announcement_premium': ('strategies.implementations.S_ast_earnings_announcement_premium', 'EarningsAnnouncementPremium'),
+    # Quantpedia: Earnings Quality Factor — composite quality score long/short, annual rebalance end of June
+    'S_ast_earnings_quality_factor': ('strategies.implementations.S_ast_earnings_quality_factor', 'EarningsQualityFactor'),
+    # Quantpedia: Earnings Announcements + Buybacks — long upcoming-earnings stocks with prior insider-buy signal
+    'S_ast_earnings_announcements_combined_with_stock_repurchases': ('strategies.implementations.S_ast_earnings_announcements_combined_with_stock_repurchases', 'AstEarningsAnnouncementsCombinedWithStockRepurchases'),
+    # Quantpedia: FED Model — yield-gap OLS predictor for SPY vs SHY rotation
+    'S_ast_fed_model':                                               ('strategies.implementations.S_ast_fed_model',                                               'AstFedModel'),
+    # Quantpedia: Momentum Factor Combined with Asset Growth Effect — monthly long/short within highest-asset-growth decile
+    'S_ast_momentum_factor_combined_with_asset_growth_effect': ('strategies.implementations.S_ast_momentum_factor_combined_with_asset_growth_effect', 'MomentumFactorCombinedWithAssetGrowthEffect'),
+    # Quantpedia: R&D Expenditures and Stock Returns — annual April long/short quintile on 5yr decay-weighted R&D-to-MarketCap
+    'S_ast_rd_expenditures_and_stock_returns': ('strategies.implementations.S_ast_rd_expenditures_and_stock_returns', 'RDExpendituresAndStockReturns'),
+    # Quantpedia: Residual Momentum Factor — OLS-orthogonalized 12-1M score long/short decile (Blitz, Huij & Martens 2011)
+    'S_ast_residual_momentum_factor': ('strategies.implementations.S_ast_residual_momentum_factor', 'AstResidualMomentumFactor'),
+    # Quantpedia: Value Book-to-Market Factor — long bottom-quintile P/B (value), short top-quintile P/B (growth), annual December rebalance
+    'S_ast_value_book_to_market_factor': ('strategies.implementations.S_ast_value_book_to_market_factor', 'AstValueBookToMarketFactor'),
 }
 
 

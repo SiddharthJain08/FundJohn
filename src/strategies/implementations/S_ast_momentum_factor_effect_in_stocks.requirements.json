@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_momentum_factor_effect_in_stocks",
+  "required": ["prices"],
+  "optional": []
+}

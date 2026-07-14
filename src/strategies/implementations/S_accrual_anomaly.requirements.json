@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_accrual_anomaly",
+  "required": ["prices", "financials"],
+  "optional": []
+}

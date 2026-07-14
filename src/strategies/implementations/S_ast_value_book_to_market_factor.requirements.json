@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_value_book_to_market_factor",
+  "required": ["prices", "financials"],
+  "optional": []
+}

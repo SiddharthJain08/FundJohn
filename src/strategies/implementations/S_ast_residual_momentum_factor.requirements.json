@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_residual_momentum_factor",
+  "required": ["prices"],
+  "optional": ["financials"]
+}
