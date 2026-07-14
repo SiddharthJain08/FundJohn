@@ -81,7 +81,10 @@ const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // Memory guard (2026-07-14 lesson: the first staging pass collided with the
 // EOD window on the 8GB no-swap box — the OOM killer took the coder children
 // AND johnbot itself). Don't kick a build unless MemAvailable clears the bar.
-const MIN_FREE_GB = 2.5;
+// 4.0 not 2.5: a wide-universe (6495-ticker) unified_backtest inside the
+// fused pipeline peaks 3-4GB on its own INSIDE johnbot's cgroup — at 2.5GB
+// headroom the second OOM (07:04Z) still took johnbot down mid-backtest.
+const MIN_FREE_GB = 4.0;
 function _memAvailableGb() {
   try {
     const m = /MemAvailable:\s+(\d+) kB/.exec(fs.readFileSync('/proc/meminfo', 'utf8'));
