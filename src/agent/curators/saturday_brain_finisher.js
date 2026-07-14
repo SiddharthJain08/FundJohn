@@ -280,7 +280,11 @@ async function main() {
         m.strategies[sid] = {
           state: 'staging', state_since: now,
           metadata: {
-            canonical_file: `${sid.toLowerCase()}.py`,
+            // Exact-case: strategycoder writes `${sid}.py` and the auto
+            // orchestrator's register step records the same — a lowercased
+            // canonical_file here made every Tier-B build fail validation on
+            // a stale path (2026-07-14).
+            canonical_file: `${sid}.py`,
             class:          sid,
             description:    (hunterResult.hypothesis_one_liner || sid).slice(0, 280),
           },
