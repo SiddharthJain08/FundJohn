@@ -3214,7 +3214,6 @@ body.rs-chat-locked{overflow:hidden}
    Reuses the conviction-gate slider visual language (st-sharpe-card). The
    note states the LIVE weekly enforcement (armed 2026-07-13),
    so everything this card does is config + hypothetical preview. */
-.st-act-note{margin:8px 4px 0;padding:8px 12px;border:1px solid rgba(250,204,21,0.4);border-left:3px solid var(--yellow);border-radius:6px;background:rgba(250,204,21,0.07);color:var(--yellow);font-size:11px;line-height:1.5}
 .st-act-grid{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:14px;padding:10px 4px 4px;align-items:stretch}
 .st-act-preview{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
 .st-act-preview-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -4188,7 +4187,6 @@ body.rs-chat-locked{overflow:hidden}
       <div class="pf-section-header">
         <span>🎚️ Strategy Activation <span class="st-sub-label">extra per-regime Sharpe floor on top of the qualification gate (&gt;0 Sharpe · class max-DD · ≥100 trades per regime)</span></span>
       </div>
-      <div class="st-act-note">✅ LIVE — applied weekly (Mon 00:00 ET) to strategy_regime_params.eligible, then the weights rebuild. Slider at 0 activates every strategy in exactly its qualifying regimes; higher values narrow within them.</div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
           <div class="st-sharpe-card-head">
