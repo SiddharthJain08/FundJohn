@@ -4,9 +4,17 @@
 When multiple strategies co-fire on a ticker, combine their exit brackets instead
 of picking one (the legacy regime_blended_sizer._select_bracket max-weight pick):
   * within a correlated factor block -> the top-effective-sharpe member's bracket
-  * across uncorrelated blocks        -> take the MAX take-profit (the most ambitious
-                                         single reachable block target, NOT the
-                                         cumulative sum), keep the tightest (min) stop.
+  * across uncorrelated blocks        -> effective-Sharpe-weighted mean of the
+                                         block reps' stop/tp gaps (2026-07-14;
+                                         replaced the max-take/min-stop combine).
+
+Why the weighted mean: the merged position is the sum of sub-positions the sizer
+allocates in proportion to effective Sharpe. If sub-position r (dollar size
+q_r ∝ s_r) exits at level L_r, aggregate exit proceeds are Σ q_r·L_r = Q·Σ ω_r·L_r
+— the single bracket that replicates the aggregate exit value is exactly the
+size-weighted mean of the individual levels. All levels share one entry anchor,
+so weighting pct-gaps ≡ weighting levels. Negative-Sharpe reps get zero exit
+influence, matching their entry influence.
 
 Pure: no I/O, no DB. Returns the SAME dict shape as
 regime_blended_sizer._select_bracket (entry/stop/t1/t2/weight/direction) so the
@@ -14,6 +22,7 @@ downstream order builder is unchanged. {} means "no usable bracket" -> caller
 falls back to _select_bracket.
 
 Spec: docs/superpowers/specs/2026-05-29-block-stacked-brackets-design.md
+      docs/superpowers/specs/2026-07-14-saturday-auto-adjustment-design.md (§W2)
 """
 from __future__ import annotations
 import math
@@ -51,6 +60,26 @@ def _pick_top_sharpe(members: list[dict], eff_sharpe: dict[str, float]) -> dict:
     strategy_similarity.representatives determinism)."""
     return max(sorted(members, key=lambda m: str(m['sid'] or '')),
                key=lambda m: eff_sharpe.get(m['sid'], float('-inf')))
+
+
+def _sharpe_weights(reps: list[dict], eff_sharpe: dict[str, float]) -> list[float]:
+    """Normalized non-negative effective-Sharpe weights across block reps.
+    Negative/missing Sharpe clamps to 0 (no exit influence, matching the rep's
+    deflated entry influence); all-zero mass degrades to equal weights."""
+    raw = []
+    for r in reps:
+        s = eff_sharpe.get(r['sid'])
+        try:
+            s = float(s)
+        except (TypeError, ValueError):
+            s = 0.0
+        if not math.isfinite(s) or s < 0.0:
+            s = 0.0
+        raw.append(s)
+    total = sum(raw)
+    if total <= 0.0:
+        return [1.0 / len(reps)] * len(reps)
+    return [s / total for s in raw]
 
 
 def daily_normalized_levels(entry, stop, t1, t2, cadence_days):
@@ -112,11 +141,14 @@ def stacked_bracket(brackets: list[dict], dir_sign: int,
     # 3. Per-block representative = top-effective-sharpe member.
     reps = [_pick_top_sharpe(members, eff_sharpe) for members in groups.values()]
 
-    # 4. Combine across blocks: stop = tightest; tp = MAX across blocks (the most
-    #    ambitious single REACHABLE block target, NOT the cumulative sum -> a take
-    #    that actually fires, so winners get banked instead of riding into reversals).
-    stop_total = min(r['stop_pct'] for r in reps)
-    tp_total = max(r['tp_pct'] for r in reps)
+    # 4. Combine across blocks: effective-Sharpe-weighted mean of the reps'
+    #    stop/tp gaps (value replication: the single bracket that reproduces the
+    #    aggregate exit value of the Sharpe-proportional sub-positions is the
+    #    size-weighted mean of their levels). 2026-07-14 — replaced the former
+    #    min-stop / max-tp combine.
+    omega = _sharpe_weights(reps, eff_sharpe)
+    stop_total = sum(w * r['stop_pct'] for w, r in zip(omega, reps))
+    tp_total = sum(w * r['tp_pct'] for w, r in zip(omega, reps))
 
     # 5. Anchor to the highest-sharpe block rep; rebuild absolute levels.
     anchor = _pick_top_sharpe(reps, eff_sharpe)
@@ -127,17 +159,37 @@ def stacked_bracket(brackets: list[dict], dir_sign: int,
     else:
         stop = entry * (1.0 + stop_total)
         t1 = entry * (1.0 - tp_total)
-    _t2 = anchor['t2']
-    if not _finite(_t2):
+
+    # t2: weighted mean over reps carrying a non-degenerate t2 (gap measured
+    # from each rep's own entry; weights renormalized over that subset), then
+    # clamped so it never inverts past the stacked t1.
+    t2_terms = []
+    for w, r in zip(omega, reps):
+        if not (_finite(r.get('t2')) and _finite(r.get('entry'))):
+            continue
+        e_r = float(r['entry'])
+        if e_r <= 0:
+            continue
+        t2_pct = (float(r['t2']) - e_r) / e_r * (1 if dir_sign > 0 else -1)
+        if t2_pct <= 0:                    # wrong side of entry -> degenerate
+            continue
+        t2_terms.append((w, t2_pct))
+    if not t2_terms:
         t2_out = None
-    elif dir_sign > 0:
-        t2_out = max(float(_t2), t1)
     else:
-        t2_out = min(float(_t2), t1)
+        wsum = sum(w for w, _ in t2_terms)
+        if wsum <= 0.0:                    # all mass on zero-Sharpe reps
+            t2_pct_total = sum(p for _, p in t2_terms) / len(t2_terms)
+        else:
+            t2_pct_total = sum(w * p for w, p in t2_terms) / wsum
+        if dir_sign > 0:
+            t2_out = max(entry * (1.0 + t2_pct_total), t1)
+        else:
+            t2_out = min(entry * (1.0 - t2_pct_total), t1)
     return {
         'entry': entry, 'stop': stop, 't1': t1, 't2': t2_out,
         'weight': max(r['weight'] for r in reps),
         'direction': dir_sign, 'n_blocks': len(reps),
-        'why': (f'stacked tp={tp_total:.4f}(max-of-blocks) '
-                f'stop={stop_total:.4f} blocks={len(reps)}'),
+        'why': (f'stacked tp={tp_total:.4f} stop={stop_total:.4f} '
+                f'(sharpe-wtd mean over {len(reps)} blocks)'),
     }

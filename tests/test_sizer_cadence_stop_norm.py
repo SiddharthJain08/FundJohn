@@ -74,8 +74,8 @@ def test_gate_off_is_byte_identical_raw_levels(monkeypatch):
     orders = _drive(monkeypatch, gate_on=False)
     o = _order_for(orders)
     assert o['entry'] == 100.0
-    assert o['stop'] == 95.0
-    assert o['t1'] == 110.0
+    assert abs(o['stop'] - 95.0) < 1e-9
+    assert abs(o['t1'] - 110.0) < 1e-9   # float noise from pct-space round-trip
 
 
 def test_gate_on_normalizes_stop_and_t1(monkeypatch):
@@ -100,13 +100,14 @@ def test_gate_on_daily_cadence_is_noop(monkeypatch):
 # Strategy A: cadence 1  (daily),   entry=100, stop=95  (5% gap),  t1=110
 # Strategy B: cadence 21 (monthly), entry=100, stop=90  (10% gap), t1=110
 #
-# Gate OFF: stacked min(stop_pct) = min(5%, 10%) = 5% → combined stop = 95.0 (A wins)
-#           stacked tp sum = 10% + 10% = 20% (< 3× cap of 30%) → t1 = 120.0
+# Combine = effective-Sharpe-weighted mean over singleton blocks (2026-07-14);
+# equal eff Sharpe here → plain mean of the (possibly normalized) pct gaps.
 #
-# Gate ON:  A stop_pct unchanged (cadence 1 no-op) → 5%
-#           B stop_pct: 10% / √21 ≈ 2.182% → TIGHTER → min = 2.182%
-#           combined stop = 100 * (1 - 10/100/√21) = 100 - 10/√21 ≈ 97.8178 (B wins)
-#           Normalization flips which strategy's stop wins.
+# Gate OFF: stop = mean(5%, 10%) = 7.5% → 92.5;  tp = mean(10%, 10%) = 10% → 110.
+# Gate ON:  A unchanged (cadence 1); B gaps ÷√21 → stop 2.1822%, tp 2.1822%.
+#           stop = mean(5%, 10/√21 %) → 100·(1 − (0.05 + 0.10/√21)/2) ≈ 96.4089
+#           tp   = mean(10%, 10/√21 %) → ≈ 106.0911
+#           Normalization shifts the weighted stop toward B's tighter gap.
 
 def _weights_row_for(sid, cadence, daily_weight=5.0, effective_sharpe=5.0):
     return {'strategy_id': sid, 'daily_weight': daily_weight,
@@ -145,25 +146,31 @@ def _drive_two(monkeypatch, gate_on: bool):
         )
 
 
-def test_stacked_combine_picks_tighter_normalized_stop(monkeypatch):
+def test_stacked_combine_weights_normalized_stops(monkeypatch):
     import math
 
-    # Gate OFF: A's stop wins (5% < 10%); stacked tp sums to 20% -> t1=120.0 proves stacking fired
+    # Gate OFF: equal-Sharpe weighted mean — stop mean(5%,10%)=7.5% → 92.5;
+    # tp mean(10%,10%)=10% → 110. (A 92.5 stop proves the stacked combine fired:
+    # a single-bracket pick would give 95.0 or 90.0.)
     o_off = _order_for(_drive_two(monkeypatch, gate_on=False))
-    assert abs(o_off['stop'] - 95.0) < 1e-6, f"gate-OFF stop should be 95.0, got {o_off['stop']}"
-    assert abs(o_off['t1'] - 120.0) < 1e-6, (
-        f"gate-OFF t1 should be 120.0 (stacked sum 10%+10%), got {o_off['t1']} — "
-        "if 110.0 then stacking didn't fire (check BRACKET_STACK env or load_groups patch)"
+    assert abs(o_off['stop'] - 92.5) < 1e-6, f"gate-OFF stop should be 92.5, got {o_off['stop']}"
+    assert abs(o_off['t1'] - 110.0) < 1e-6, (
+        f"gate-OFF t1 should be 110.0 (weighted tp mean), got {o_off['t1']} — "
+        "if not, stacking didn't fire (check BRACKET_STACK env or load_groups patch)"
     )
 
-    # Gate ON: B's 10% gap normalizes to 10%/√21 ≈ 2.182% (tighter) → B wins the stop combine
+    # Gate ON: B's gaps normalize ÷√21 → stop mean(5%, 10/√21 %) ≈ 3.5911%
     o_on = _order_for(_drive_two(monkeypatch, gate_on=True))
-    expected_stop_on = 100.0 - 10.0 / math.sqrt(21.0)  # ≈ 97.8178
+    expected_stop_on = 100.0 * (1.0 - (0.05 + 0.10 / math.sqrt(21.0)) / 2.0)  # ≈ 96.4089
+    expected_t1_on = 100.0 * (1.0 + (0.10 + 0.10 / math.sqrt(21.0)) / 2.0)    # ≈ 106.0911
     assert abs(o_on['stop'] - expected_stop_on) < 1e-6, (
         f"gate-ON stop should be {expected_stop_on:.6f}, got {o_on['stop']}"
     )
+    assert abs(o_on['t1'] - expected_t1_on) < 1e-6, (
+        f"gate-ON t1 should be {expected_t1_on:.6f}, got {o_on['t1']}"
+    )
 
-    # Normalization changed the combine outcome (the flip)
+    # Normalization changed the combine outcome (the shift)
     assert o_on['stop'] != o_off['stop'], (
         f"gate-ON and gate-OFF should differ; both gave {o_off['stop']}"
     )

@@ -30,8 +30,10 @@ def test_choose_bracket_gate_on_stacks(monkeypatch):
     monkeypatch.setenv('OPENCLAW_STRATEGY_BRACKET_STACK', '1')
     out = rbs._choose_bracket(_candidates(), 1, _GROUPS, _SHARPE)
     assert out['n_blocks'] == 2
-    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # MAX(5%,5%) = +5%, NOT the +10% sum
-    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)  # tightest (block A, 2%) -> distinguishes from B-pick (96)
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # both takes 5% -> weighted mean 5%
+    # sharpe-wtd mean stop: ω=(2/3,1/3) -> 2%·⅔ + 4%·⅓ = 8/3 % -> 97.333…
+    # (distinguishes from B-pick 96 AND from the old min-stop 98)
+    assert math.isclose(out['stop'], 100.0 * (1.0 - 0.08 / 3.0), rel_tol=1e-9)
 
 
 def test_choose_bracket_gate_on_no_substrate_falls_back(monkeypatch):
