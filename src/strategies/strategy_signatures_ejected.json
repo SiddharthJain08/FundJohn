@@ -1285,5 +1285,24 @@
     ],
     "ejected": true,
     "ejected_at": "2026-07-14"
+  },
+  "S_short_straddle_vrp": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atm",
+      "delta",
+      "regime",
+      "rv",
+      "straddle",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
   }
 }

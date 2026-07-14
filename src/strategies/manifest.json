@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-14T09:05:00.488Z",
+  "updated_at": "2026-07-14T16:59:10.173Z",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -3332,23 +3332,6 @@
         }
       ],
       "instrument_class": "crypto"
-    },
-    "S_short_straddle_vrp": {
-      "state": "candidate",
-      "state_since": "2026-05-27T05:03:48.950915Z",
-      "metadata": {
-        "canonical_file": "S_short_straddle_vrp.py",
-        "class": "ShortStraddleVRP",
-        "description": "Delta-hedged short ATM straddle on SPY harvesting the volatility risk premium; reference option strategy.",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING"
-        ],
-        "reaper_exempt": true,
-        "reaper_exempt_reason": "SP-4 options-lane reference strategy — candidate-only by design (pipeline proof, not an alpha)"
-      },
-      "history": [],
-      "instrument_class": "option"
     },
     "S15_insider_opportunistic_short": {
       "state": "candidate",
