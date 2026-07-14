@@ -22,11 +22,13 @@ WorkingDirectory=/root/openclaw
 # MasterMind (Opus) re-examines RECENT candidate implementations (incl. those
 # coded by the 14:00 ET finisher slot) for IMPLEMENTATION-LOGIC bugs; candidates
 # with <30 trades get a "bug vs genuinely rare" diagnosis. REPORT-ONLY (operator
-# decision 2026-06-08: candidate gated auto-apply — apply→re-backtest→keep-if-
+# decision 2026-06-08, SUPERSEDED for candidates 2026-07-14: the Saturday
+# weekend chain (weekend_saturday.sh step 5b) now runs the gated auto-apply —
+# apply→re-backtest→keep-if-
 # non-regressing — is a separate, backtest-guarded upgrade). Best-effort: the
 # leading '-' means a review hiccup does not fail the run. --limit 30 caps Opus
 # calls to avoid runaway spend on weeks with many new candidates.
-ExecStart=-/usr/bin/node /root/openclaw/src/agent/curators/mastermind_code_review.js --state candidate --recent-days 14 --include-low-trade --concurrency 3 --limit 30 --out logs/code_review_candidates_sunday.md
+ExecStart=-/usr/bin/node /root/openclaw/src/agent/curators/mastermind_code_review.js --state candidate --recent-days 22 --include-low-trade --concurrency 3 --limit 30 --out logs/code_review_candidates_sunday.md
 
 StandardOutput=journal
 StandardError=journal

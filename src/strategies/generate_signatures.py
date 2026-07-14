@@ -76,8 +76,25 @@ def main() -> None:
             'regimes':          regimes,
         }
 
+    # Merge the EJECTED-strategy signature archive (candidate reaper,
+    # 2026-07-14): ejected strategies have their implementation files
+    # DELETED, so a pure on-disk regen would erase their fingerprints and
+    # re-enable the research pipeline to mint near-duplicates. The archive
+    # preserves them forever; on-disk entries win on key collision (a live
+    # re-implementation supersedes its ejected ancestor's snapshot).
+    ejected_path = Path(__file__).parent / 'strategy_signatures_ejected.json'
+    n_ejected = 0
+    try:
+        ejected = json.loads(ejected_path.read_text())
+        for sid, entry in ejected.items():
+            if sid not in sigs:
+                sigs[sid] = entry
+                n_ejected += 1
+    except FileNotFoundError:
+        pass
+
     SIG_OUT.write_text(json.dumps(sigs, indent=2) + '\n')
-    print(f'Wrote {len(sigs)} entries to {SIG_OUT}')
+    print(f'Wrote {len(sigs)} entries to {SIG_OUT} ({n_ejected} from the ejected archive)')
 
 
 if __name__ == '__main__':

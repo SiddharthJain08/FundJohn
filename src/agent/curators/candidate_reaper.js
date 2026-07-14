@@ -79,6 +79,29 @@ function _implFiles(sid, rec) {
   return out.filter(p => fs.existsSync(p));
 }
 
+// Copy the strategy's fingerprint from strategy_signatures.json into the
+// ejected archive (strategy_signatures_ejected.json). Key matching is
+// alphanumeric-normalized — signature keys are file stems, which drift in
+// case/underscores from strategy ids (S_HV10… vs shv10…).
+function _archiveSignature(sid, rec) {
+  const sigPath = path.join(OPENCLAW_DIR, 'src/strategies/strategy_signatures.json');
+  const arcPath = path.join(OPENCLAW_DIR, 'src/strategies/strategy_signatures_ejected.json');
+  const norm = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const sigs = JSON.parse(fs.readFileSync(sigPath, 'utf8'));
+  let entry = sigs[sid];
+  if (!entry) {
+    const want = norm(sid);
+    for (const k of Object.keys(sigs)) if (norm(k) === want) { entry = sigs[k]; break; }
+  }
+  if (!entry) return;
+  let arc = {};
+  try { arc = JSON.parse(fs.readFileSync(arcPath, 'utf8')); } catch (_) {}
+  if (!arc[sid]) {
+    arc[sid] = Object.assign({}, entry, { ejected: true, ejected_at: new Date().toISOString().slice(0, 10) });
+    fs.writeFileSync(arcPath, JSON.stringify(arc, null, 2) + '\n');
+  }
+}
+
 async function reapCandidates(opts = {}) {
   const log        = opts.log || ((m) => console.error(`[candidate_reaper] ${m}`));
   const dryRun     = !!opts.dryRun;
@@ -137,7 +160,13 @@ async function reapCandidates(opts = {}) {
       ).catch(e => log(`  ${sid}: registry tombstone skipped (${e.message})`));
       // 3. Sizer params gone.
       await _query(`DELETE FROM strategy_regime_params WHERE strategy_id=$1`, [sid]);
-      // 4. Implementation files gone (git history retains them).
+      // 4. Preserve the dedup fingerprint BEFORE the file goes away —
+      //    strategy_signatures.json is regenerated weekly from on-disk .py
+      //    files, so without this archive an ejected formula could be
+      //    re-minted by the next similar paper. generate_signatures.py
+      //    merges the archive back in on every regen.
+      try { _archiveSignature(sid, rec); } catch (e) { log(`  ${sid}: signature archive failed (${e.message})`); }
+      // 5. Implementation files gone (git history retains them).
       for (const f of _implFiles(sid, rec)) {
         try { fs.unlinkSync(f); } catch (e) { log(`  ${sid}: unlink ${path.basename(f)} failed (${e.message})`); }
       }

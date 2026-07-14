@@ -39,6 +39,21 @@ BT_RC=${PIPESTATUS[0]}
 # repeatedly needing manual rebuilds.
 [ "$BT_RC" -ne 0 ] && step "WARN backtest refresh rc=$BT_RC — continuing to weights/panels on last-known backtests"
 
+step "5b candidate tuner (Sharpe-seeking auto-apply; operator directive 2026-07-14)"
+# Runs the code-review APPLY path on CANDIDATES only (applyAndValidate
+# hard-refuses live): Opus proposes a corrected implementation, an ephemeral
+# re-backtest measures it, and the fix is kept ONLY if Sharpe does not
+# regress (byte-revert otherwise). Uses the fresh step-5 backtests. This is
+# the alteration half of the 3-weekend candidate lifecycle — Sunday
+# investigates + re-offers the gate, the reaper ejects after 3 missed
+# weekends. --recent-days 22 covers the full lifecycle; the low-trade union
+# pulls in every <30-trade candidate regardless of age. Capped (2-core box).
+node src/agent/curators/mastermind_code_review.js \
+  --state candidate --recent-days 22 --include-low-trade \
+  --apply --limit 12 \
+  --out logs/code_review_candidate_tuner_saturday.md 2>&1 | tee -a "$LOG" \
+  || step "WARN candidate-tuner rc=$?"
+
 step "6/8 weekly strategy weights"
 node src/agent/curators/weekly_live_sharpe.js 2>&1 | tee -a "$LOG" || step "WARN weights rc=$?"
 

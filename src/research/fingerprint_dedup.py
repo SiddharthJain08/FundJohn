@@ -104,7 +104,13 @@ def _fetch_existing_names() -> dict[str, list[str]]:
     """Return {registry: [ids], staging: [names]} — case-insensitive."""
     with psycopg2.connect(PG_URI, connect_timeout=5) as conn, \
          conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute("SELECT id, name FROM strategy_registry WHERE COALESCE(deprecated_at, 'epoch'::timestamptz) < NOW() - INTERVAL '999 years' OR deprecated_at IS NULL")
+        # A strategy id is taken FOREVER once a registry row exists — the row
+        # is never deleted (lifecycle_events FK; deprecation is a flag), so a
+        # new candidate must never reuse the slug of a deprecated/ejected
+        # ancestor. The old filter (deprecated_at IS NULL, via a vacuous
+        # 999-year COALESCE branch) silently re-opened slugs the moment
+        # deprecated_at was stamped (candidate reaper does stamp it).
+        cur.execute("SELECT id, name FROM strategy_registry")
         reg = [(r["id"], r["name"]) for r in cur.fetchall()]
         cur.execute(
             "SELECT id::text AS id, name FROM strategy_staging "
