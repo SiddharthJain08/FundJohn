@@ -78,6 +78,27 @@ async function _post(apiBase, route, body) {
 
 const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// Memory guard (2026-07-14 lesson: the first staging pass collided with the
+// EOD window on the 8GB no-swap box — the OOM killer took the coder children
+// AND johnbot itself). Don't kick a build unless MemAvailable clears the bar.
+const MIN_FREE_GB = 2.5;
+function _memAvailableGb() {
+  try {
+    const m = /MemAvailable:\s+(\d+) kB/.exec(fs.readFileSync('/proc/meminfo', 'utf8'));
+    return m ? parseInt(m[1], 10) / 1048576 : null;
+  } catch (_) { return null; }
+}
+async function _waitForMemory(log, maxWaitMs) {
+  const t0 = Date.now();
+  for (;;) {
+    const gb = _memAvailableGb();
+    if (gb == null || gb >= MIN_FREE_GB) return true;
+    if (Date.now() - t0 > maxWaitMs) return false;
+    log(`  memory guard: ${gb.toFixed(1)}GB available < ${MIN_FREE_GB}GB — waiting 2m`);
+    await _sleep(120_000);
+  }
+}
+
 // ── Pass A: candidate sweep ─────────────────────────────────────────────────
 async function sweepCandidates({ log, dryRun, apiBase }) {
   const strategies = _manifestStrategies();
@@ -144,6 +165,13 @@ async function processStaging({ log, dryRun, apiBase, budgetMs, perJobTimeoutMs 
   const t0 = Date.now();
   for (const sid of staging) {
     if (Date.now() - t0 > budgetMs) { deferred.push(sid); continue; }
+    // Never kick a coder/backfill/backtest chain into a memory-starved box —
+    // the OOM killer takes the children (and once took johnbot itself).
+    if (!(await _waitForMemory(log, 60 * 60_000))) {
+      deferred.push(sid);
+      log(`  ${sid}: deferred — memory never freed above ${MIN_FREE_GB}GB within 1h`);
+      continue;
+    }
     try {
       const kick = await _post(apiBase, `/api/strategies/${encodeURIComponent(sid)}/approve`, {
         actor: 'system:sunday-auto-approval',
@@ -159,13 +187,15 @@ async function processStaging({ log, dryRun, apiBase, budgetMs, perJobTimeoutMs 
         }
       }
       // Poll the job to terminal state — SERIAL by design (2-core VPS).
+      // Table columns are started_at/finished_at (NOT created_at — the
+      // 2026-07-13 flush failed every poll on that and burst-kicked jobs).
       const jt0 = Date.now();
       let terminal = null;
       while (Date.now() - jt0 < perJobTimeoutMs) {
         await _sleep(30_000);
         const { rows } = await _query(
           `SELECT status, phase FROM strategy_approval_jobs
-            WHERE strategy_id = $1 ORDER BY created_at DESC LIMIT 1`, [sid]);
+            WHERE strategy_id = $1 ORDER BY started_at DESC LIMIT 1`, [sid]);
         const j = rows[0];
         if (!j) break;
         if (j.status === 'succeeded' || j.status === 'failed' || j.status === 'cancelled') {
@@ -185,8 +215,13 @@ async function processStaging({ log, dryRun, apiBase, budgetMs, perJobTimeoutMs 
         break;
       }
     } catch (e) {
+      // Infrastructure error (DB poll, network) — the job may STILL be
+      // running inside johnbot. Kicking the next one anyway would stack
+      // concurrent builds on the 2-core box, so HALT the pass; leftovers
+      // roll to the next Sunday.
       failed.push({ sid, error: e.message });
-      log(`  ${sid}: ${e.message}`);
+      log(`  ${sid}: ${e.message} — halting staging pass (job may still be running)`);
+      break;
     }
   }
   // Anything we never reached.
