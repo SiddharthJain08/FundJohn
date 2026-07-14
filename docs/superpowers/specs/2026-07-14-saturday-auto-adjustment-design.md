@@ -39,6 +39,19 @@ candidate tuner → weights → panels → ladder sentinel. The timer is current
 (`candidate_sharpe − baseline_sharpe > 0`); `MIN_TRADES = 30` unchanged. The
 backtest is the sole arbiter for stop/target/max-hold — confidence is irrelevant here.
 
+**One backtest per rec** (operator directive, same day): the baseline is no longer
+re-run. It is read from the canonical `strategy_backtest_runs` row
+(`primary_window = TRUE` — the weekly refresh persists the byte-identical
+`_run_metrics(sid, None)` computation), with the `median_stop_pct` /
+`median_target_pct` anchors recomputed in SQL from that run's persisted
+`strategy_backtest_trades` (same truthy filters + midpoint interpolation as the
+in-memory version). The single candidate backtest is **window-pinned** to the
+stored baseline's `end_date` so the strict ΔSharpe > 0 gate compares identical
+windows, and the max-hold candidate anchors to the stored run's
+`config_json.max_hold_days`. Fallback to a fresh baseline run (2 backtests for
+that rec only) when no canonical row exists or it is older than
+`MAX_BASELINE_AGE_DAYS = 30` (refresh-timer-dead guard — the 06-28…07-14 outage).
+
 ### 1b. Stop replacement moves *after* coupling, with correct geometry
 - `position_recommender._applyStopReplacements` becomes permanently report-only
   (digest preview retained).

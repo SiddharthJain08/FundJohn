@@ -23,6 +23,15 @@ included. The decision lands in the new `coupling_outcome` column; action_taken
 candidate, currently-open positions get their broker stop re-anchored to the
 validated distance from the original entry (alpaca_replace_stop; still gated by
 OPENCLAW_ALPACA_LIVE_REPLACE inside that module).
+
+ONE backtest per rec (2026-07-14 operator directive): the baseline is READ from
+the canonical primary_window strategy_backtest_runs row (the weekly refresh
+persists the byte-identical computation `_run_metrics(sid, None)` used to redo
+here), with the median stop/target anchors recomputed in SQL from that run's
+persisted trades. The candidate backtest is pinned to the stored baseline's
+end_date so the strict dSharpe > 0 gate compares identical windows. A fresh
+baseline run happens ONLY when no stored row exists or it is older than
+MAX_BASELINE_AGE_DAYS (refresh timer dead — the 06-28..07-14 outage lesson).
 """
 from __future__ import annotations
 import os
@@ -40,6 +49,9 @@ CLAMP_LO, CLAMP_HI = 0.01, 0.30
 MAX_HOLD_LO, MAX_HOLD_HI = 1, 250
 DEFAULT_MAX_HOLD = 21  # mirrors unified_backtest.DEFAULT_MAX_HOLD_DAYS
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
+# Stored-baseline freshness ceiling: past this the weekly refresh is presumed
+# dead and a fresh baseline backtest runs instead (2 runs for that rec only).
+MAX_BASELINE_AGE_DAYS = 30
 
 
 def gate_on() -> bool:
@@ -89,21 +101,71 @@ def _eligible_regimes(strategy_id) -> list:
     return elig or list(CANONICAL_REGIMES)
 
 
-def _run_metrics(strategy_id, param_override, max_hold_days=None) -> dict:
+def _run_metrics(strategy_id, param_override, max_hold_days=None, end_date=None) -> dict:
     """Ephemeral backtest → metrics dict. commit=False (own-conn) so probe runs
     roll back — never persist nor rebuild the dashboard panel.
 
     ``max_hold_days`` (when not None) overrides the backtest's top-level hold
     horizon so a candidate max_hold can be evaluated against baseline. Stop/target
-    candidates still ride ``param_override`` (per-regime). When max_hold_days is
-    None, run_backtest uses its own DEFAULT_MAX_HOLD_DAYS — byte-identical to the
-    pre-max-hold-coupling behaviour."""
+    candidates still ride ``param_override`` (per-regime). ``end_date`` (when not
+    None, ISO string) pins the candidate window to the stored baseline's window
+    end so the paired comparison is window-identical."""
     from backtest import unified_backtest as ub
     kwargs = dict(commit=False, param_override=param_override, return_metrics=True)
     if max_hold_days is not None:
         kwargs['max_hold_days'] = int(max_hold_days)
+    if end_date is not None:
+        kwargs['end_date'] = str(end_date)
     _run_id, metrics = ub.run_backtest(strategy_id, **kwargs)
     return metrics
+
+
+def _stored_baseline(strategy_id) -> Optional[dict]:
+    """Baseline from the canonical primary_window backtest row instead of a
+    fresh run — the weekly refresh already persists the byte-identical
+    computation. Median stop/target anchors are recomputed from that run's
+    persisted trades with the same filters as run_backtest's in-memory version
+    (truthy signal_stop/signal_target AND truthy entry_price; percentile_cont
+    interpolates the even-count midpoint exactly like statistics.median).
+
+    Returns None (→ caller runs a fresh baseline) when no primary row exists or
+    the row is older than MAX_BASELINE_AGE_DAYS (refresh presumed dead)."""
+    import json
+    import psycopg2
+    with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+        cur.execute("""
+            SELECT run_id, total_sharpe, end_date, config_json,
+                   (now() - run_at) > (%s * interval '1 day') AS stale
+              FROM strategy_backtest_runs
+             WHERE strategy_id = %s AND primary_window = TRUE
+             ORDER BY run_at DESC
+             LIMIT 1
+        """, (MAX_BASELINE_AGE_DAYS, strategy_id))
+        row = cur.fetchone()
+        if row is None or row[4]:
+            return None
+        run_id, sharpe, end_date, config_json = row[0], row[1], row[2], row[3]
+        cur.execute("""
+            SELECT percentile_cont(0.5) WITHIN GROUP
+                     (ORDER BY abs(entry_price - signal_stop) / entry_price)
+                     FILTER (WHERE signal_stop IS NOT NULL AND signal_stop <> 0
+                               AND entry_price IS NOT NULL AND entry_price <> 0),
+                   percentile_cont(0.5) WITHIN GROUP
+                     (ORDER BY abs(signal_target - entry_price) / entry_price)
+                     FILTER (WHERE signal_target IS NOT NULL AND signal_target <> 0
+                               AND entry_price IS NOT NULL AND entry_price <> 0)
+              FROM strategy_backtest_trades
+             WHERE run_id = %s
+        """, (run_id,))
+        med_stop, med_target = cur.fetchone()
+    cfg = config_json if isinstance(config_json, dict) else json.loads(config_json or '{}')
+    return {
+        'sharpe': sharpe,
+        'median_stop_pct': med_stop,
+        'median_target_pct': med_target,
+        'end_date': end_date,
+        'max_hold_days': cfg.get('max_hold_days'),
+    }
 
 
 def _load_recs(rec_date=None) -> list:
@@ -217,22 +279,32 @@ def run(rec_date=None, dry_run: bool = False, log=print) -> dict:
         sid = rec['strategy_id']
         if not has_actionable_delta(rec):
             continue
-        base = _run_metrics(sid, None)
+        base = _stored_baseline(sid)
+        base_end = None
+        if base is None:
+            # No canonical row (new strategy) or refresh stale — fresh baseline.
+            log(f'[coupling] {sid}: no fresh stored baseline — running one')
+            base = _run_metrics(sid, None)
+        else:
+            base_end = base.get('end_date')
         base_sharpe = float(base.get('sharpe') or 0.0)
         cand_stop = candidate_pct(base.get('median_stop_pct'), rec.get('stop_delta_pct'), DEFAULT_STOP_PCT)
         cand_tgt = candidate_pct(base.get('median_target_pct'), rec.get('target_delta_pct'), DEFAULT_TARGET_PCT)
-        # max_hold candidate is anchored to DEFAULT_MAX_HOLD so it compares against
-        # the same horizon the baseline backtest used (_run_metrics(None) → default).
-        cand_hold = candidate_max_hold(DEFAULT_MAX_HOLD, rec.get('hold_days_delta'))
+        # max_hold candidate anchors to the horizon the baseline actually ran
+        # with (stored config_json; DEFAULT_MAX_HOLD when absent) so the
+        # before/after horizons are comparable.
+        cand_hold = candidate_max_hold(base.get('max_hold_days') or DEFAULT_MAX_HOLD,
+                                       rec.get('hold_days_delta'))
         if cand_stop is None and cand_tgt is None and cand_hold is None:
             continue
         regimes = _eligible_regimes(sid)
         # Stop/target ride the per-regime param_override; max_hold is a single
-        # top-level run_backtest arg. One candidate backtest evaluates the whole
-        # config change together (keeps it to 1 extra backtest per rec).
+        # top-level run_backtest arg. ONE candidate backtest evaluates the whole
+        # config change together, window-pinned to the stored baseline's end_date
+        # so the strict >0 gate never pays for days the baseline didn't see.
         cand_map = {r: {k: v for k, v in (('stop_pct', cand_stop), ('target_pct', cand_tgt)) if v is not None}
                     for r in regimes}
-        cand = _run_metrics(sid, cand_map, max_hold_days=cand_hold)
+        cand = _run_metrics(sid, cand_map, max_hold_days=cand_hold, end_date=base_end)
         cand_sharpe = float(cand.get('sharpe') or 0.0)
         cand_n = int(cand.get('total_trades') or 0)
         ok = qualifies(baseline_sharpe=base_sharpe, candidate_sharpe=cand_sharpe, candidate_n_trades=cand_n)

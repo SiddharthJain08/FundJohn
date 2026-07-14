@@ -155,8 +155,124 @@ def test_run_metrics_passes_max_hold(monkeypatch):
 
     bc._run_metrics('S_x', None)                       # no max_hold → not forwarded
     bc._run_metrics('S_x', {'LOW_VOL': {}}, max_hold_days=30)  # forwarded
+    bc._run_metrics('S_x', None, end_date='2026-07-08')  # window pin forwarded
 
     assert 'max_hold_days' not in calls[0]
+    assert 'end_date' not in calls[0]
     assert calls[1]['max_hold_days'] == 30
-    # both always pass commit=False + return_metrics=True
+    assert calls[2]['end_date'] == '2026-07-08'
+    # all always pass commit=False + return_metrics=True
     assert all(c.get('commit') is False and c.get('return_metrics') is True for c in calls)
+
+
+class _FakeOneCursor:
+    """Cursor whose successive fetchone() calls pop from a queue (one per execute)."""
+    def __init__(self, results):
+        self._results = list(results)
+    def execute(self, *a, **k):
+        pass
+    def fetchone(self):
+        return self._results.pop(0)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeOneConn:
+    def __init__(self, results):
+        self._results = results
+    def cursor(self):
+        return _FakeOneCursor(self._results)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_stored_baseline_reads_canonical_row(monkeypatch):
+    import datetime
+    import psycopg2
+    results = [
+        ('run-1', 1.23, datetime.date(2026, 7, 8), {'max_hold_days': 21}, False),
+        (0.06, 0.09),
+    ]
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn(results))
+    base = bc._stored_baseline('S_x')
+    assert base == {'sharpe': 1.23, 'median_stop_pct': 0.06,
+                    'median_target_pct': 0.09,
+                    'end_date': datetime.date(2026, 7, 8), 'max_hold_days': 21}
+
+
+def test_stored_baseline_parses_config_json_string(monkeypatch):
+    import datetime
+    import psycopg2
+    results = [
+        ('run-1', 0.5, datetime.date(2026, 7, 8), '{"max_hold_days": 34}', False),
+        (None, None),
+    ]
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn(results))
+    base = bc._stored_baseline('S_x')
+    assert base['max_hold_days'] == 34
+    assert base['median_stop_pct'] is None
+
+
+def test_stored_baseline_none_when_missing_or_stale(monkeypatch):
+    import datetime
+    import psycopg2
+    monkeypatch.setenv('POSTGRES_URI', 'postgresql://stub')
+    # no canonical row at all
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn([None]))
+    assert bc._stored_baseline('S_new') is None
+    # row exists but refresh is presumed dead (stale flag from SQL age check)
+    stale = [('run-0', 1.0, datetime.date(2026, 5, 1), {}, True)]
+    monkeypatch.setattr(psycopg2, 'connect', lambda uri: _FakeOneConn(stale))
+    assert bc._stored_baseline('S_old') is None
+
+
+def test_run_single_backtest_per_rec(monkeypatch):
+    # 2026-07-14 operator directive: ONE backtest per rec — the candidate,
+    # window-pinned to the stored baseline's end_date. No fresh baseline run.
+    import datetime
+    monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
+    monkeypatch.setattr(bc, '_load_recs', lambda rec_date=None: [
+        {'id': 1, 'strategy_id': 'S_x', 'stop_delta_pct': 0.10,
+         'target_delta_pct': None, 'hold_days_delta': None}])
+    monkeypatch.setattr(bc, '_eligible_regimes', lambda sid: ['LOW_VOL'])
+    monkeypatch.setattr(bc, '_stored_baseline', lambda sid: {
+        'sharpe': 1.0, 'median_stop_pct': 0.05, 'median_target_pct': 0.08,
+        'end_date': datetime.date(2026, 7, 8), 'max_hold_days': 21})
+    calls = []
+    def _fake_metrics(sid, override, max_hold_days=None, end_date=None):
+        calls.append({'override': override, 'max_hold_days': max_hold_days,
+                      'end_date': end_date})
+        return {'sharpe': 1.2, 'total_trades': 100}
+    monkeypatch.setattr(bc, '_run_metrics', _fake_metrics)
+    out = bc.run(dry_run=True, log=lambda *_: None)
+    assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
+    assert len(calls) == 1                                    # candidate only
+    assert calls[0]['end_date'] == datetime.date(2026, 7, 8)  # window-pinned
+    assert calls[0]['override'] == {'LOW_VOL': {'stop_pct': pytest.approx(0.055)}}
+
+
+def test_run_falls_back_to_fresh_baseline_when_no_stored(monkeypatch):
+    # New strategy / dead refresh → 2 runs for that rec only (baseline + candidate).
+    monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
+    monkeypatch.setattr(bc, '_load_recs', lambda rec_date=None: [
+        {'id': 1, 'strategy_id': 'S_new', 'stop_delta_pct': 0.10,
+         'target_delta_pct': None, 'hold_days_delta': None}])
+    monkeypatch.setattr(bc, '_eligible_regimes', lambda sid: ['LOW_VOL'])
+    monkeypatch.setattr(bc, '_stored_baseline', lambda sid: None)
+    calls = []
+    def _fake_metrics(sid, override, max_hold_days=None, end_date=None):
+        calls.append({'override': override, 'end_date': end_date})
+        return {'sharpe': 1.0 if override is None else 1.2, 'total_trades': 100,
+                'median_stop_pct': 0.05, 'median_target_pct': 0.08}
+    monkeypatch.setattr(bc, '_run_metrics', _fake_metrics)
+    out = bc.run(dry_run=True, log=lambda *_: None)
+    assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
+    assert len(calls) == 2
+    assert calls[0]['override'] is None       # fresh baseline first
+    assert calls[1]['end_date'] is None       # full window (matches baseline)
