@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_abnormal_accruals_earnings_quality",
-  "required": ["prices", "financials"],
-  "optional": []
-}

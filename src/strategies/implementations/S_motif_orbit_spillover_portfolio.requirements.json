@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_motif_orbit_spillover_portfolio",
-  "required": ["prices"],
-  "optional": ["macro"]
-}

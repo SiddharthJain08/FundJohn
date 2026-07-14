@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-14T08:38:12.624Z",
+  "updated_at": "2026-07-14T09:05:00.488Z",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -88,105 +88,6 @@
       },
       "history": [],
       "instrument_class": "etp"
-    },
-    "S_abnormal_accruals_earnings_quality": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:27:32.597444+00:00",
-      "metadata": {
-        "canonical_file": "S_abnormal_accruals_earnings_quality.py",
-        "class": "AbnormalAccrualsEarningsQuality",
-        "description": "Firms with high positive abnormal accruals (estimated via modified Cross-Sectional Jones model) overstate earnings, creating a mean-reversion opportunity; LONG low-accrual (high earnings quality) firms, SHORT high-accrual firms."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-02T22:08:38.804Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-11-19",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "38419c4a-2ea6-4848-9666-a1d4053ff5ab"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:27:32.597444+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_ap_tree_cross_section_sdf": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:33:55.877425+00:00",
-      "metadata": {
-        "canonical_file": "S_ap_tree_cross_section_sdf.py",
-        "class": "APTreeCrossSectionSDF",
-        "description": "Decision trees (AP-Trees) optimally partition stocks into characteristic-sorted leaf portfolios that span the stochastic discount factor, capturing characteristic interactions to produce interpretable cross-sections with up to 3x higher OOS Sharpe ratios than single/double sorts "
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-02T22:08:38.804Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-11-19",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "395d7f51-e338-47cc-8eba-37bbc64d6a3d"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:30:54.764751+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
     },
     "S_transitioning_overbought_revert": {
       "state": "deprecated",
@@ -415,58 +316,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_thgnn_correlation_basket": {
-      "state": "candidate",
-      "state_since": "2026-05-03T21:54:02.099277+00:00",
-      "metadata": {
-        "canonical_file": "s_thgnn_correlation_basket.py",
-        "class": "S_thgnn_correlation_basket",
-        "description": "A Transformer-GNN hybrid (THGNN) predicts 10-day-ahead pairwise correlations for S&P 500 stocks by learning residual deviations from a rolling Fisher-z baseline; superior correlation forecasts produce tighter spectral-clustering baskets enabling contrarian within-basket positioni"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-02T22:08:38.804Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "log_returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "macro: reachable but not backfilled (providers yfinance)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-12-14",
-                  "gap_to": "2026-05-02"
-                }
-              ]
-            },
-            "candidate_id": "62abc5f2-0249-47c2-9184-2a3e24a14088"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-03T21:53:31.201407+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_ptree_panel_tangency": {
       "state": "live",
       "state_since": "2026-05-19T06:36:12.343Z",
@@ -535,53 +384,6 @@
               "CRISIS"
             ]
           }
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_constrained_gmv_vcv_dynamics": {
-      "state": "candidate",
-      "state_since": "2026-05-14T05:23:21.360200+00:00",
-      "metadata": {
-        "canonical_file": "S_constrained_gmv_vcv_dynamics.py",
-        "class": "ConstrainedGMVVCVDynamics",
-        "description": "Constrained long-only GMV with EWMA volatility dynamics: asset-level position caps substitute VCV shrinkage while EWMA time-series vol is retained on diagonal."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-12T19:24:52.679Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.710245+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-14T05:23:20.728Z",
-          "actor": "test:smoke",
-          "reason": "smoke test rebuild on stack-entry",
-          "metadata": {
-            "override": true,
-            "failed_gates": []
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T05:23:21.360200+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -669,17 +471,6 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "equity"
-    },
-    "S_crisp_signal_aware_hrp": {
-      "state": "candidate",
-      "state_since": "2026-05-02T21:42:45.206068+00:00",
-      "metadata": {
-        "canonical_file": "S_crisp_signal_aware_hrp.py",
-        "class": "CrispSignalAwareHRP",
-        "description": "CRISP shrinkage (P_γ·w=μ) with 12-1 month momentum alpha, all-regime allocation"
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_vp_macd_index_sensitivity": {
@@ -938,73 +729,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_institutional_lead_lag": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_institutional_lead_lag.py",
-        "class": "InstitutionalLeadLag",
-        "description": "Lagged returns of high-inst-ownership stocks predict low-inst-ownership stocks via informed-trader lead-lag effect."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_least_squares_risk_parity": {
-      "state": "candidate",
-      "state_since": "2026-04-27T02:56:07.804646+00:00",
-      "metadata": {
-        "canonical_file": "S_least_squares_risk_parity.py",
-        "class": "LeastSquaresRiskParity",
-        "description": "Risk parity portfolios equalize each asset marginal risk contribution via least-squares alternating linearization."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-26T22:39:13.386738+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T02:56:07.804646+00:00",
-          "actor": "migration:fused_approval",
-          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_daily_high_ml_classifier": {
-      "state": "candidate",
-      "state_since": "2026-04-27T02:56:07.804646+00:00",
-      "metadata": {
-        "canonical_file": "S_daily_high_ml_classifier.py",
-        "class": "DailyHighMLClassifier",
-        "description": "Predict next-day high direction using lagged OHLCV features; go long equal-weight portfolio of predicted-UP stocks daily."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-26T21:38:54.302014+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T02:56:07.804646+00:00",
-          "actor": "migration:fused_approval",
-          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S5_max_pain": {
       "state": "deprecated",
       "state_since": "2026-05-12T23:24:18.195Z",
@@ -1075,26 +799,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S10_quality_value": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.733413+00:00",
-      "metadata": {
-        "canonical_file": "s10_quality_value.py",
-        "class": "QualityValue",
-        "description": "Quality-value factor composite score"
-      },
-      "history": [
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.733413+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S12_insider": {
       "state": "live",
       "state_since": "2025-01-01T00:00:00+00:00",
@@ -1106,27 +810,6 @@
         "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [],
-      "instrument_class": "equity"
-    },
-    "S15_iv_rv_arb": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.747032+00:00",
-      "metadata": {
-        "canonical_file": "s15_iv_rv_arb.py",
-        "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage — implied vs realised volatility",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
-      },
-      "history": [
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.747032+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        }
-      ],
       "instrument_class": "equity"
     },
     "S_custom_jt_momentum_12mo": {
@@ -1224,35 +907,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_HV7_iv_crush_fade": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.758439+00:00",
-      "metadata": {
-        "canonical_file": "shv7_iv_crush_fade.py",
-        "class": "IVCrushFade",
-        "description": "IV Crush Fade  sell vol after peak iv_rank declines (Stein 1989)",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T17:22:48.098Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.758439+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_HV8_gamma_theta_carry": {
       "state": "live",
       "state_since": "2026-04-22T05:18:07.798201+00:00",
@@ -1311,86 +965,6 @@
           "timestamp": "2026-05-25T08:01:16.214Z",
           "actor": "manual:dashboard",
           "reason": "Manual unstack via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV10_triple_gate_fear": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:59:12.670628+00:00",
-      "metadata": {
-        "canonical_file": "shv10_triple_gate_fear.py",
-        "class": "TripleGateFear",
-        "description": "Triple-Gate Fear  STAGING: awaiting unusual_flow data (Whaley 2000)"
-      },
-      "history": [
-        {
-          "from_state": "staging",
-          "to_state": "live",
-          "timestamp": "2026-04-22T17:23:07.050Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "staging",
-          "timestamp": "2026-04-22T17:31:05.162573+00:00",
-          "actor": "manual:dashboard",
-          "reason": "Revert: staging shouldn't have been directly approvable — awaiting data import gate",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:53:41.673419+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -1.42, DD 27.2%, trades 1870",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-05-19T06:58:50.171Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:59:12.670628+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -1.42, DD 27.2%, trades 1870",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV11_cross_stock_dispersion": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.770008+00:00",
-      "metadata": {
-        "canonical_file": "shv11_cross_stock_dispersion.py",
-        "class": "CrossStockDispersion",
-        "description": "Cross-Stock Dispersion  decorrelated high-IV stocks (Drechsler 2011)"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T20:10:21.031Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.770008+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
           "metadata": {}
         }
       ],
@@ -1491,34 +1065,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_HV15_iv_term_structure": {
-      "state": "candidate",
-      "state_since": "2026-05-24T10:00:00.925631+00:00",
-      "metadata": {
-        "canonical_file": "shv15_iv_term_structure.py",
-        "class": "IVTermStructure",
-        "description": "IV term structure backwardation/contango signal"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T17:22:24.876Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-24T10:00:00.925631+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_HV16_gex_regime": {
       "state": "candidate",
       "state_since": "2026-06-26T23:00:05.289608+00:00",
@@ -1545,34 +1091,6 @@
           "timestamp": "2026-06-26T23:00:05.289608+00:00",
           "actor": "strategy_weights_engine",
           "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV17_earnings_straddle_fade": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.782494+00:00",
-      "metadata": {
-        "canonical_file": "shv17_earnings_straddle_fade.py",
-        "class": "EarningsStraddleFade",
-        "description": "SELL_VOL implied > 1.20x realized near earnings (Muravyev & Pearson 2020 JFE). staging: needs earnings_dte in engine.py"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T20:10:35.189Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.782494+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
           "metadata": {}
         }
       ],
@@ -1660,34 +1178,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S1_event_driven_new_news": {
-      "state": "candidate",
-      "state_since": "2026-04-30T18:03:59.558241+00:00",
-      "metadata": {
-        "canonical_file": "s1_event_driven_new_news.py",
-        "class": "EventDrivenNewNews",
-        "description": "IV term structure crush + post-event momentum on SP500 catalyst events"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-04-27T04:02:11.214Z",
-          "actor": "manual:operator",
-          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T18:03:59.558241+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_markov_frontier_regimes": {
       "state": "live",
       "state_since": "2026-05-19T07:21:46.445Z",
@@ -1745,45 +1235,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_regime_specialist_vol": {
-      "state": "candidate",
-      "state_since": "2026-05-24T10:00:00.946194+00:00",
-      "metadata": {
-        "canonical_file": "S_regime_specialist_vol.py",
-        "class": "RegimeSpecialistVol",
-        "description": "IF HIGH_VOL: GARCH-t/FIGARCH/HAR-RV; ELSE GRU/HAR-RV/XGBoost vol ensemble"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-18T08:30:28.841439+00:00",
-          "actor": "system",
-          "reason": "Auto-promoted: passed convergence gate (2/3 windows)",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T05:18:07.798201+00:00",
-          "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
-          "metadata": {
-            "option": "A",
-            "preserve_execution": true
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-24T10:00:00.946194+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_epistemic_rank_gate": {
       "state": "live",
       "state_since": "2026-04-22T20:11:46.200Z",
@@ -1813,34 +1264,6 @@
           "timestamp": "2026-04-22T20:11:46.200Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_tr_01_vvix_early_warning": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.817618+00:00",
-      "metadata": {
-        "canonical_file": "S_tr_01_vvix_early_warning.py",
-        "class": "VVIXEarlyWarning",
-        "description": "VVIX-conditioned VIX-spike early warning — SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-23T20:20:01.238Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.817618+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
           "metadata": {}
         }
       ],
@@ -1901,34 +1324,6 @@
             "option": "A",
             "preserve_execution": true
           }
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_tr_04_intraday_spy_momentum": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.832520+00:00",
-      "metadata": {
-        "canonical_file": "S_tr_04_intraday_spy_momentum.py",
-        "class": "IntradaySPYMomentum",
-        "description": "Zarattini noise-boundary intraday SPY momentum; S-TR-05 VWAP exit merged as confidence filter (Zarattini & Staley 2023)"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-23T20:20:03.583Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.832520+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -2029,78 +1424,6 @@
           "timestamp": "2026-05-25T13:15:27.847Z",
           "actor": "manual:dashboard",
           "reason": "Manual unstack via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_skewness_dispersion_macro": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.845742+00:00",
-      "metadata": {
-        "canonical_file": "S_skewness_dispersion_macro.py",
-        "class": "SkewnessDispersionMacro",
-        "description": "LONG/SHORT based on cross-sectional realized-skewness dispersion z-score, monthly cadence"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-25T01:43:05.201612+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-25T01:43:13.063Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.845742+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_quantum_rebalance_qaoa": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.861159+00:00",
-      "metadata": {
-        "canonical_file": "S_quantum_rebalance_qaoa.py",
-        "class": "QuantumRebalanceQAOA",
-        "description": "Ledoit-Wolf shrinkage + hierarchical clustering + entropy-weighted inv-vol rebalance"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-23T17:38:21.270788+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-23T20:19:54.939Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.861159+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
           "metadata": {}
         }
       ],
@@ -2212,42 +1535,6 @@
           "timestamp": "2026-04-22T20:14:43.863Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_local_global_balance": {
-      "state": "candidate",
-      "state_since": "2026-05-14T04:34:27.876520+00:00",
-      "metadata": {
-        "canonical_file": "S_local_global_balance.py",
-        "class": "LocalGlobalBalance",
-        "description": "rank_by(abs(local_balance_node - global_balance_network)); LONG top_decile in HIGH_VOL"
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-22T20:12:53.840946+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T20:14:47.137Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.876520+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
           "metadata": {}
         }
       ],
@@ -2391,68 +1678,6 @@
           "timestamp": "2026-04-25T02:08:21.080Z",
           "actor": "manual:dashboard",
           "reason": "Manual approve via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV13_call_put_iv_spread_cohort2026": {
-      "state": "candidate",
-      "state_since": "2026-04-30T16:14:19.212028+00:00",
-      "metadata": {
-        "canonical_file": "shv13_call_put_iv_spread_cohort2026.py",
-        "class": "CallPutIVSpread",
-        "description": "Call-Put IV Spread (put-call parity deviation, Cremers & Weinbaum 2010)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "equity_cross_sectional",
-        "horizon_days": 7,
-        "targets_regimes": [
-          "HIGH_VOL",
-          "NEUTRAL",
-          "LOW_VOL"
-        ],
-        "academic_ref": "Cremers & Weinbaum (2010) JFQA 45(2)",
-        "data_dependencies": [
-          "opts_map[ticker].iv_spread_atm_oi_weighted",
-          "opts_map[ticker].iv_rank",
-          "opts_map[ticker].last_price",
-          "opts_map[ticker].rv20"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T16:14:19.212028+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -8.43, DD 2.2%, trades 60",
           "metadata": {}
         }
       ],
@@ -2650,354 +1875,6 @@
           "timestamp": "2026-05-25T07:54:38.457Z",
           "actor": "manual:dashboard",
           "reason": "Manual unstack via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV17_earnings_straddle_fade_cohort2026": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:38:43.666881+00:00",
-      "metadata": {
-        "canonical_file": "shv17_earnings_straddle_fade_cohort2026.py",
-        "class": "EarningsStraddleFade",
-        "description": "Earnings straddle fade / implied-move sell (Gao et al. 2018)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "options_vol_single_name",
-        "horizon_days": 1,
-        "targets_regimes": [
-          "NEUTRAL",
-          "LOW_VOL"
-        ],
-        "academic_ref": "Gao et al. (2018) implied-vs-realised move ratios",
-        "data_dependencies": [
-          "opts_map[ticker].atm_iv_30d",
-          "opts_map[ticker].earnings_implied_move",
-          "opts_map[ticker].hist_post_earnings_move",
-          "opts_map[ticker].atm_bid_ask_spread_pct",
-          "opts_map[ticker].next_earnings_date"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T18:04:07.058847+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-04-30T18:17:27.020Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:38:13.927844+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV20_iv_dispersion_reversion_cohort2026": {
-      "state": "candidate",
-      "state_since": "2026-04-30T16:09:37.346940+00:00",
-      "metadata": {
-        "canonical_file": "shv20_iv_dispersion_reversion_cohort2026.py",
-        "class": "IVDispersionReversion",
-        "description": "IV dispersion / index-component mean reversion (Driessen-Maenhout-Vilkov 2009)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "options_vol_portfolio",
-        "horizon_days": 10,
-        "targets_regimes": [
-          "HIGH_VOL",
-          "NEUTRAL"
-        ],
-        "academic_ref": "Driessen, Maenhout & Vilkov (2009) JF 64(3)",
-        "data_dependencies": [
-          "market_data.spx_iv_30d",
-          "opts_map[ticker].iv_30d",
-          "market_data.spx_close"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T16:09:37.346940+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_TR01_vvix_early_warning": {
-      "state": "candidate",
-      "state_since": "2026-05-03T21:50:48.540285+00:00",
-      "metadata": {
-        "canonical_file": "str01_vvix_early_warning.py",
-        "class": "VVIXEarlyWarning",
-        "description": "VVIX percentile early-warning regime classifier (Thrasher 2017)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "regime_classifier",
-        "horizon_days": 10,
-        "targets_regimes": [
-          "LOW_VOL",
-          "NEUTRAL"
-        ],
-        "academic_ref": "Thrasher (2017) SSRN 3010912",
-        "data_dependencies": [
-          "market_data.vvix_close",
-          "market_data.vvix_history",
-          "market_data.vix_close"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T16:18:04.269986+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-04-30T18:17:43.253Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T18:18:41.098015+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-04-30T18:18:59.615Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-03T21:50:48.540285+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_TR02_hurst_regime_flip": {
-      "state": "candidate",
-      "state_since": "2026-04-30T16:09:51.451361+00:00",
-      "metadata": {
-        "canonical_file": "str02_hurst_regime_flip.py",
-        "class": "HurstRegimeFlip",
-        "description": "Hurst exponent regime flip on SPY 60-day rolling H (Vogl 2022)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "regime_classifier",
-        "horizon_days": 20,
-        "targets_regimes": [
-          "HIGH_VOL",
-          "NEUTRAL",
-          "LOW_VOL"
-        ],
-        "academic_ref": "Vogl (2022) Physica A 595",
-        "data_dependencies": [
-          "market_data.spy_close_history (>=120)"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T16:09:51.451361+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_TR03_bocpd": {
-      "state": "candidate",
-      "state_since": "2026-04-30T16:10:13.062061+00:00",
-      "metadata": {
-        "canonical_file": "str03_bocpd.py",
-        "class": "BOCPDDetector",
-        "description": "Bayesian online change-point detection on SPY returns (Adams-MacKay 2007)",
-        "cohort": "top10_cohort_2026_04",
-        "phase_label": "shadow",
-        "source": "top10_cohort_2026_04",
-        "archetype": "regime_classifier",
-        "horizon_days": 10,
-        "targets_regimes": [
-          "HIGH_VOL",
-          "NEUTRAL",
-          "LOW_VOL"
-        ],
-        "academic_ref": "Adams & MacKay (2007) BOCPD",
-        "data_dependencies": [
-          "market_data.spy_close_history (>=200)"
-        ],
-        "promotion_criteria": {
-          "shadow_to_paper": {
-            "min_shadow_days": 20,
-            "min_signals": 30,
-            "zero_crash_sessions": 20
-          },
-          "paper_to_live": {
-            "min_paper_days": 60,
-            "min_paper_sharpe": 0.7,
-            "max_paper_drawdown_pct": 8,
-            "min_paper_trades": 40
-          },
-          "live_to_paused": {
-            "live_drawdown_pct_trigger": 12,
-            "live_drawdown_period_days": 90
-          }
-        }
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-23T18:26:37.540793+00:00",
-          "actor": "cohort-onboarding:top10_cohort_2026_04",
-          "reason": "Top-10 cohort 2026-04 onboarded at staging per shimmering-skipping-engelbart plan",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T16:10:13.062061+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 1",
           "metadata": {}
         }
       ],
@@ -3416,45 +2293,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_volume_return_autocorr_lmsw": {
-      "state": "candidate",
-      "state_since": "2026-04-27T02:56:07.804646+00:00",
-      "metadata": {
-        "canonical_file": "S_volume_return_autocorr_lmsw.py",
-        "class": "VolumeReturnAutocorrLMSW",
-        "description": "LMSW (2002): C2 coefficient from volume-interacted return regression ranks stocks for long/short."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "paper",
-          "timestamp": "2026-04-26T21:41:58.293080+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "paper",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T02:56:07.804646+00:00",
-          "actor": "migration:fused_approval",
-          "reason": "paper renamed to candidate (fused-approval lifecycle 2026-04-27)",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_fama_french_five_factor": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_fama_french_five_factor.py",
-        "class": "FamaFrenchFiveFactor",
-        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile — Fama & French (2015)"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_sparse_cca_mean_revert": {
       "state": "live",
       "state_since": "2026-07-13T03:47:55.899Z",
@@ -3530,88 +2368,6 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "equity"
-    },
-    "S_pairs_cointegration_copula": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_pairs_cointegration_copula.py",
-        "class": "PairsCointegrationCopula",
-        "description": "Statistical arbitrage in US equity pairs via cointegration z-score entry/exit."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_quality_adjusted_size": {
-      "state": "candidate",
-      "state_since": "2026-04-27T03:40:19.455243+00:00",
-      "metadata": {
-        "canonical_file": "S_quality_adjusted_size.py",
-        "class": "QualityAdjustedSize",
-        "description": "The size premium is robust and stable once you control for quality (junk) factor, as low-quality small firms contaminate the raw size signal and prior critiques vanish after this adjustment."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2021-04-27",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "b464d5b8-a977-42bf-83bb-065cf6eeac5c"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T03:40:03.612367+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_bankruptcy_risk_anomaly": {
-      "state": "candidate",
-      "state_since": "2026-04-27T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_bankruptcy_risk_anomaly.py",
-        "class": "BankruptcyRiskAnomaly",
-        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score — Dichev (1998)"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_fear_index_return_prediction": {
-      "state": "candidate",
-      "state_since": "2026-04-30T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_fear_index_return_prediction.py",
-        "class": "FearIndexReturnPrediction",
-        "description": "LONG when VIX z-score (252d) > 1.5 — fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_industry_momentum_moskowitz": {
@@ -3699,117 +2455,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_path_dependent_vol_pdv": {
-      "state": "candidate",
-      "state_since": "2026-04-30T15:19:40.525376+00:00",
-      "metadata": {
-        "canonical_file": "S_path_dependent_vol_pdv.py",
-        "class": "PathDependentVolPDV",
-        "description": "Up to 90% of equity index implied volatility variance is explained endogenously by a deterministic path-dependent function of past returns (power-law weighted sums of past returns and squared returns capturing short+long memory), enabling systematic options mispricing trades when"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yahoo",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2024-12-08",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "2a7c9c79-b9cc-49f3-84c2-3945e75e9554"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T15:18:58.458235+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_vix_conditioned_short_reversal": {
-      "state": "candidate",
-      "state_since": "2026-04-30T15:16:52.324688+00:00",
-      "metadata": {
-        "canonical_file": "S_vix_conditioned_short_reversal.py",
-        "class": "VixConditionedShortReversal",
-        "description": "Short-term reversal scaled by VIX/median-VIX — liquidity-provision risk premium is elevated when market makers are constrained (Nagel 2012)"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_q_theory_investment_growth": {
-      "state": "candidate",
-      "state_since": "2026-04-30T15:20:42.650788+00:00",
-      "metadata": {
-        "canonical_file": "S_q_theory_investment_growth.py",
-        "class": "QTheoryInvestmentGrowth",
-        "description": "LONG low-IGR / SHORT high-IGR quintiles — Q-theory rational discount-rate explanation for value premium (Xing 2007)"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-11-13",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "039d731c-1813-47d6-836e-17cf2ce9ca26"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-30T15:17:24.801624+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_macro_risk_momentum_ip_beta": {
       "state": "live",
       "state_since": "2026-05-19T06:00:26.092Z",
@@ -3843,119 +2488,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_risk_neutral_skew_cross_section": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:29:08.737477+00:00",
-      "metadata": {
-        "canonical_file": "S_risk_neutral_skew_cross_section.py",
-        "class": "RiskNeutralSkewCrossSection",
-        "description": "Stocks with anomalously negative residual risk-neutral skewness (after controlling for beta, market volatility, index skewness, firm size, and trading volume) have systematically overpriced downside protection exploitable via cross-sectional put-spread selling."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-04-26T22:09:55.422Z",
-          "actor": "saturday_brain_finisher",
-          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "financials: backfilled (2023-06-30→2026-02-28, providers fmp/yahoo)"
-              ],
-              "missing_columns": [
-                "options_eod"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yahoo",
-                  "column": "options_eod",
-                  "data_type": "options",
-                  "gap_from": "2024-12-08",
-                  "gap_to": "2026-04-08"
-                }
-              ]
-            },
-            "candidate_id": "6e8482dd-b0c7-48a3-9ca4-86b4ebf2c7dc"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-04-27T03:42:33.531888+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe 0.00, DD 0.0%, trades 0",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-04-27T03:56:40.164Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard (override)",
-          "metadata": {
-            "override": true,
-            "failed_gates": []
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-14T04:34:27.914649+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_manual",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-16T21:10:14.752Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-05-16T21:10:15.430285+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_lifecycle_change",
-          "metadata": {}
-        },
-        {
-          "from_state": "candidate",
-          "to_state": "staging",
-          "timestamp": "2026-05-18T12:57:30.173Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual reject via dashboard",
-          "metadata": {}
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:29:08.737477+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_renko_kagi_pairs_spread": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_renko_kagi_pairs_spread.py",
-        "class": "RenkoKagiPairsSpread",
-        "description": "Pairs trading via renko/kagi chart reversals on vol-calibrated spread bricks"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_expected_idiosyncratic_skewness": {
       "state": "live",
       "state_since": "2026-07-13T12:52:56.608Z",
@@ -3983,17 +2515,6 @@
           }
         }
       ],
-      "instrument_class": "equity"
-    },
-    "S_partial_cointegration_pairs": {
-      "state": "candidate",
-      "state_since": "2026-04-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_partial_cointegration_pairs.py",
-        "class": "PartialCointegrationPairs",
-        "description": "Partial cointegration pairs: Kalman-filter spread decomposition, trade mean-reverting z-score."
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_pairs_trading_min_distance": {
@@ -4076,17 +2597,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_motif_orbit_spillover_portfolio": {
-      "state": "candidate",
-      "state_since": "2026-05-09T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_motif_orbit_spillover_portfolio.py",
-        "class": "MotifOrbitSpilloverPortfolio",
-        "description": "Orbit-position diversity score via quantile connectedness entropy; long top-quintile risk-transmitters, short bottom-quintile receivers, monthly rebalance."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_btc_gold_dual_momentum_rotation": {
       "state": "deprecated",
       "state_since": "2026-06-30T16:13:12.816Z",
@@ -4123,115 +2633,6 @@
           "timestamp": "2026-06-30T16:13:12.816Z",
           "actor": "manual:botjohn-f2",
           "reason": "W4 F2 sub-floor sign-off (operator 2026-06-30): backtest Sharpe -0.007/thin below 0.5 floor, no live track record",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_estimation_risk_three_fund": {
-      "state": "candidate",
-      "state_since": "2026-05-19T06:01:51.816884+00:00",
-      "metadata": {
-        "canonical_file": "s_estimation_risk_three_fund.py",
-        "class": "S_estimation_risk_three_fund",
-        "description": "Under parameter uncertainty, the analytically optimal portfolio combines the riskless asset, the sample tangency portfolio, and the sample global minimum-variance (GMV) portfolio with shrinkage weights, reducing estimation-error-driven out-of-sample losses versus the classical 2-"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-16T14:51:57.154Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "returns: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
-                "prices: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage)",
-                "macro: reachable but not backfilled (providers yfinance)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2022-12-03",
-                  "gap_to": "2026-05-16"
-                }
-              ]
-            },
-            "candidate_id": "c976e385-c86a-4da2-ad0a-92d96f772b24"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T06:01:51.816884+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_earnings_news_specific_momentum": {
-      "state": "candidate",
-      "state_since": "2026-05-19T03:12:17.050555+00:00",
-      "metadata": {
-        "canonical_file": "s_earnings_news_specific_momentum.py",
-        "class": "S_earnings_news_specific_momentum",
-        "description": "Stock prices systematically under-react to firm-level earnings news, producing a durable stock-specific momentum component that generates cleaner alpha with lower risk than broad cross-sectional price momentum."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-16T14:51:57.154Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-14; needs ≥ 2024-12-28)",
-                "returns: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-14; needs ≥ 2024-12-28)"
-              ],
-              "missing_columns": [
-                "earnings",
-                "earnings_calendar"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2024-12-28",
-                  "gap_to": "2025-03-31"
-                },
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2024-12-28",
-                  "gap_to": "2025-03-31"
-                }
-              ]
-            },
-            "candidate_id": "d8e1f1c1-83d2-4028-8e9b-e1e081d907cd"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-19T03:12:17.050555+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
           "metadata": {}
         }
       ],
@@ -4324,17 +2725,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_p_index_eef_weekly_rotation": {
-      "state": "candidate",
-      "state_since": "2026-05-16T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_p_index_eef_weekly_rotation.py",
-        "class": "PIndexEEFWeeklyRotation",
-        "description": "EEF p-index weekly rotation — LONG top-decile stocks by mean-variance efficiency score (Li et al. 2025)"
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_prism_vq_cross_section_factor": {
       "state": "live",
       "state_since": "2026-05-19T06:01:01.507Z",
@@ -4410,17 +2800,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_tda_topological_risk_portfolio": {
-      "state": "candidate",
-      "state_since": "2026-05-02T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_tda_topological_risk_portfolio.py",
-        "class": "TdaTopologicalRiskPortfolio",
-        "description": "Persistence-landscape Topological Risk (L1-norm of 1D sublevel-set PD) minimum-risk weighting over S&P 500; monthly rebalance, 252-day lookback."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_price_filter_rule_trend": {
       "state": "live",
       "state_since": "2026-05-24T15:32:46.669Z",
@@ -4450,298 +2829,6 @@
               "CRISIS"
             ]
           }
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_ivol_cross_section_quintile": {
-      "state": "candidate",
-      "state_since": "2026-05-23T14:41:09.036437+00:00",
-      "metadata": {
-        "canonical_file": "S_ivol_cross_section_quintile.py",
-        "class": "IvolCrossSectionQuintile",
-        "description": "LONG bottom-quintile low-IVOL stocks, SHORT top-quintile high-IVOL stocks based on trailing-22-day FF3 residual volatility (Bali & Cakici 2008)."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_financial_constraint_kz_factor": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:50:08.241688+00:00",
-      "metadata": {
-        "canonical_file": "S_financial_constraint_kz_factor.py",
-        "class": "FinancialConstraintKZFactor",
-        "description": "Financially constrained firms share a priced systematic risk factor that produces anomalously low returns, so long-unconstrained / short-constrained portfolios based on the KZ index capture a distinct constraint risk premium not explained by size, value, or momentum."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T14:47:24.934Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-10",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "46b71290-bac8-4f9b-94fe-0e2fb58fcdae"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:48:59.247622+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_fama_french_three_factor_composite": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:49:30.954705+00:00",
-      "metadata": {
-        "canonical_file": "S_fama_french_three_factor_composite.py",
-        "class": "FamaFrenchThreeFactorComposite",
-        "description": "Small-cap and high book-to-market stocks earn persistent excess returns; composite SMB+HML z-score rank: LONG top tercile, SHORT bottom tercile.",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING"
-        ]
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
-    "S_january_btm_size_seasonal": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:49:49.582601+00:00",
-      "metadata": {
-        "canonical_file": "S_january_btm_size_seasonal.py",
-        "class": "S_january_btm_size_seasonal",
-        "description": "The book-to-market premium in U.S. equities is a January seasonal concentrated in small/young/growth stocks — not a pervasive cross-sectional factor — enabling a size-filtered value long-short timed around the turn of year."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T14:47:24.934Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-10",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "0be87f14-834c-4b00-b324-958d86536402"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:49:49.582601+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_bm_divy_market_timing": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:31:46.947120+00:00",
-      "metadata": {
-        "canonical_file": "s_bm_divy_market_timing.py",
-        "class": "S_bm_divy_market_timing",
-        "description": "Aggregate book-to-market ratio and dividend yield of the equal-weighted market index predict time-series variation in real expected market returns, with high B/M or high D/P signalling elevated risk premia that the market will subsequently compensate."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T14:47:24.934Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "macro: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials",
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-10",
-                  "gap_to": "2023-06-30"
-                },
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2022-12-10",
-                  "gap_to": "2026-05-23"
-                }
-              ]
-            },
-            "candidate_id": "4badd41f-af8e-4520-8833-de4c5fa2bdd7"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:31:46.947120+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_rd_intensity_intangible_factor": {
-      "state": "candidate",
-      "state_since": "2026-05-29T06:15:08.267881+00:00",
-      "metadata": {
-        "canonical_file": "s_rd_intensity_intangible_factor.py",
-        "class": "S_rd_intensity_intangible_factor",
-        "description": "Stocks with high R&D expenditure relative to market cap (beaten-down, poor-past-return firms) earn large excess returns because GAAP expensing of intangibles causes systematic market undervaluation of future economic benefits from innovation."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T14:47:24.934Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-10",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "e07db140-be94-456f-a86a-1acae5d63a6d"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T06:15:08.267881+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_growth_defensive_smooth_score_timing": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:33:03.951508+00:00",
-      "metadata": {
-        "canonical_file": "s_growth_defensive_smooth_score_timing.py",
-        "class": "S_growth_defensive_smooth_score_timing",
-        "description": "A continuous smooth-score function combining rate relief, SPY drawdown depth, VIX stress relief, and growth-crowding penalty — mapped via tanh to G/D weights with EWMA smoothing — improves risk-adjusted returns over static growth or balanced ETF allocations by dynamically timing "
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T14:47:24.934Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "macro: reachable but not backfilled (providers yfinance)",
-                "vol_indices: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "macro",
-                "vol_indices"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2024-04-27",
-                  "gap_to": "2026-05-23"
-                },
-                {
-                  "provider": "yfinance",
-                  "column": "vol_indices",
-                  "gap_from": "2024-04-27",
-                  "gap_to": "2026-05-23"
-                }
-              ]
-            },
-            "candidate_id": "b2932b31-f388-406c-b18f-c8aa1ec6dc00"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:33:03.951508+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -4931,62 +3018,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_spx_death_cross_contrarian_fade": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:50:27.188585+00:00",
-      "metadata": {
-        "canonical_file": "S_spx_death_cross_contrarian_fade.py",
-        "class": "SpxDeathCrossContrarianFade",
-        "description": "Contrarian long SPY when 50-day SMA crosses below 200-day SMA; exit at Golden Cross or -20% hard stop. 73.5% win rate over 97 years.",
-        "eligible_regimes": [
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
-        ],
-        "eligible_regimes_source": "literature_override",
-        "eligible_regimes_note": "97-year study (1928-2025) n=49 trades; modern 8y window yields ~4 events — too sparse for regime_partition auto-derivation. Regimes set from thesis: Death Crosses occur in elevated-stress environments."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-23T20:24:40.454Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "macro: reachable but not backfilled (providers yfinance)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2025-01-04",
-                  "gap_to": "2026-05-23"
-                }
-              ]
-            },
-            "candidate_id": "a2645236-9918-4681-b390-8dc8f78642cd"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:50:27.188585+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe -1.94, DD 4.1%, trades 4",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_growth_inflation_sector_timing": {
       "state": "deprecated",
       "state_since": "2026-06-30T16:13:18.045Z",
@@ -5022,155 +3053,6 @@
           "timestamp": "2026-06-30T16:13:18.045Z",
           "actor": "manual:botjohn-f2",
           "reason": "W4 F2 sub-floor sign-off (operator 2026-06-30): backtest Sharpe +0.34/DD42.7 below 0.5 floor, no live track record",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_tactical_yield_credit_term_premium": {
-      "state": "candidate",
-      "state_since": "2026-05-29T05:02:16.637378+00:00",
-      "metadata": {
-        "canonical_file": "S_tactical_yield_credit_term_premium.py",
-        "class": "S_tactical_yield_credit_term_premium",
-        "description": "Allocate to US Treasuries (IEF) and/or IG corporate bonds (LQD) only when the respective yield premium (term or credit spread over T-Bills) ranks in the top half of its full expanding historical distribution, otherwise hold cash; this systematically avoids bond exposure when carr"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T08:06:56.453Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "macro: reachable but not backfilled (providers yfinance)",
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)"
-              ],
-              "missing_columns": [
-                "macro"
-              ],
-              "provider_route": [
-                {
-                  "provider": "yfinance",
-                  "column": "macro",
-                  "data_type": "macro",
-                  "gap_from": "2022-12-12",
-                  "gap_to": "2026-05-25"
-                }
-              ]
-            },
-            "candidate_id": "1eceaad4-6c5f-4bd7-8bf0-bfff61b06118"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T05:02:16.637378+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_book_to_market_value_premium": {
-      "state": "candidate",
-      "state_since": "2026-05-29T05:05:06.010429+00:00",
-      "metadata": {
-        "canonical_file": "S_book_to_market_value_premium.py",
-        "class": "BookToMarketValuePremium",
-        "description": "High book-to-market equity stocks earn a robust value premium over low B/M stocks across all US market eras because elevated B/M proxies for priced distress risk that factor covariance exposure — not mere characteristic compensation — explains."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T14:46:13.679Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-12",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "25c871cc-b8ad-4bff-b033-a81d1dab35db"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T05:01:47.808933+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_fama_french_three_factor_anomalies": {
-      "state": "candidate",
-      "state_since": "2026-05-29T05:01:30.172730+00:00",
-      "metadata": {
-        "canonical_file": "S_fama_french_three_factor_anomalies.py",
-        "class": "S_fama_french_three_factor_anomalies",
-        "description": "Most cross-sectional return anomalies tied to size, book-to-market, earnings/price, cashflow/price, sales growth, and long-term reversal are captured by a three-factor model (market, SMB, HML), implying rational ICAPM/APT risk compensation — with excess returns in high-B/M small-"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T14:46:13.679Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-12",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "32bf5a47-8aca-4cd8-ab97-9731f79b293e"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T05:01:30.172730+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
           "metadata": {}
         }
       ],
@@ -5244,173 +3126,6 @@
               "CRISIS"
             ]
           }
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_earnings_distraction_pead": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:59:24.849409+00:00",
-      "metadata": {
-        "canonical_file": "S_earnings_distraction_pead.py",
-        "class": "S_earnings_distraction_pead",
-        "description": "When many firms announce earnings simultaneously, investors suffer attention overload and underreact to individual earnings surprises, creating stronger post-announcement drift that can be exploited by trading in the direction of the surprise on high-distraction days."
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T14:46:13.679Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "earnings",
-                "earnings_calendar"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2025-01-06",
-                  "gap_to": "2025-03-31"
-                },
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2025-01-06",
-                  "gap_to": "2025-03-31"
-                }
-              ]
-            },
-            "candidate_id": "1abd9832-2508-4654-ad22-49f38c04f070"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:54:02.915250+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_daniel_titman_characteristics_cross_section": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:53:46.057589+00:00",
-      "metadata": {
-        "canonical_file": "S_daniel_titman_characteristics_cross_section.py",
-        "class": "S_daniel_titman_characteristics_cross_section",
-        "description": "Small-cap and high book-to-market stocks earn persistent return premia because of their observable characteristics directly rather than their comovement with systematic risk factors, making a long-short portfolio ranked by size and B/M viable independent of factor-loading control"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T14:46:13.679Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)"
-              ],
-              "missing_columns": [
-                "financials"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "financials",
-                  "data_type": "fundamentals",
-                  "gap_from": "2022-12-12",
-                  "gap_to": "2023-06-30"
-                }
-              ]
-            },
-            "candidate_id": "d8f5d99b-f7b8-4544-8695-f77d2c5e0556"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:53:46.057589+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_friday_earnings_inattention_drift": {
-      "state": "candidate",
-      "state_since": "2026-05-29T04:53:28.961803+00:00",
-      "metadata": {
-        "canonical_file": "S_friday_earnings_inattention_drift.py",
-        "class": "S_friday_earnings_inattention_drift",
-        "description": "Earnings announced on Fridays receive 15% less immediate market attention and generate 70% more post-announcement drift, because investor inattention on Fridays causes systematic underreaction that can be harvested by going long positive-surprise and short negative-surprise Frida"
-      },
-      "history": [
-        {
-          "from_state": null,
-          "to_state": "staging",
-          "timestamp": "2026-05-25T14:46:13.679Z",
-          "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
-          "metadata": {
-            "decision": {
-              "tier": "B",
-              "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
-              ],
-              "missing_columns": [
-                "earnings",
-                "earnings_calendar"
-              ],
-              "provider_route": [
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2025-01-06",
-                  "gap_to": "2025-03-31"
-                },
-                {
-                  "provider": "fmp",
-                  "column": "earnings",
-                  "data_type": "fundamentals",
-                  "gap_from": "2025-01-06",
-                  "gap_to": "2025-03-31"
-                }
-              ]
-            },
-            "candidate_id": "983e909d-ccf3-4cee-bba1-309cc0e6fcee"
-          }
-        },
-        {
-          "from_state": "staging",
-          "to_state": "candidate",
-          "timestamp": "2026-05-29T04:53:28.961803+00:00",
-          "actor": "auto_backtest",
-          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
-          "metadata": {}
         }
       ],
       "instrument_class": "equity"
@@ -5628,7 +3343,9 @@
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING"
-        ]
+        ],
+        "reaper_exempt": true,
+        "reaper_exempt_reason": "SP-4 options-lane reference strategy — candidate-only by design (pipeline proof, not an alpha)"
       },
       "history": [],
       "instrument_class": "option"
@@ -5840,17 +3557,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_ast_betting_against_beta_factor_in_stocks": {
-      "state": "candidate",
-      "state_since": "2026-06-16T17:08:57.863252+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_betting_against_beta_factor_in_stocks.py",
-        "class": "BettingAgainstBetaFactorInStocks",
-        "description": "Long lowest-beta decile, short highest-beta decile; both rescaled to beta≈1 for a zero-beta spread (Frazzini & Pedersen 2014)."
-      },
-      "history": [],
-      "instrument_class": "equity"
-    },
     "S_ast_asset_class_trend_following": {
       "state": "live",
       "state_since": "2026-06-19T17:57:11.909Z",
@@ -5874,17 +3580,6 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "etp"
-    },
-    "S_ast_value_factor_effect_within_countries": {
-      "state": "candidate",
-      "state_since": "2026-06-21T18:08:57.218286+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_value_factor_effect_within_countries.py",
-        "class": "AstValueFactorEffectWithinCountries",
-        "description": "Annual cross-country CAPE value rotation: invest equally in the bottom tercile of country ETFs with Shiller CAPE below 15, rebalanced every December."
-      },
-      "history": [],
       "instrument_class": "etp"
     },
     "S_ast_value_and_momentum_factors_across_asset_classes": {
@@ -5916,21 +3611,6 @@
           }
         }
       ],
-      "instrument_class": "etp"
-    },
-    "S_ast_turn_of_the_month_in_equity_indexes": {
-      "state": "candidate",
-      "state_since": "2026-06-21T18:26:49.425144+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_turn_of_the_month_in_equity_indexes.py",
-        "class": "AstTurnOfTheMonthInEquityIndexes",
-        "description": "Long SPY on last trading day of each month; exit on 3rd trading day of next month.",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING"
-        ]
-      },
-      "history": [],
       "instrument_class": "etp"
     },
     "S_ast_trend_following_effect_in_stocks": {
@@ -6005,72 +3685,6 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "etp"
-    },
-    "oxf_aroon_breakout": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.601933+00:00",
-      "metadata": {
-        "canonical_file": "oxf_aroon_breakout.py",
-        "class": "OxfAroonBreakout",
-        "description": "Aroon up/down breakout on liquid ETFs (oxfordstrat aroon-indicator-breakout-1). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_bollinger_momentum": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.606280+00:00",
-      "metadata": {
-        "canonical_file": "oxf_bollinger_momentum.py",
-        "class": "OxfBollingerMomentum",
-        "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_bull_oops": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.610426+00:00",
-      "metadata": {
-        "canonical_file": "oxf_bull_oops.py",
-        "class": "OxfBullOops",
-        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_donchian_breakout": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.615350+00:00",
-      "metadata": {
-        "canonical_file": "oxf_donchian_breakout.py",
-        "class": "OxfDonchianBreakout",
-        "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_dow_theory": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.619477+00:00",
-      "metadata": {
-        "canonical_file": "oxf_dow_theory.py",
-        "class": "OxfDowTheory",
-        "description": "Dow-theory swing-pivot breakout on liquid ETFs (oxfordstrat dow-theory-trend). Close breaks the most-recent pivot. Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_dual_momentum_roc": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.624216+00:00",
-      "metadata": {
-        "canonical_file": "oxf_dual_momentum_roc.py",
-        "class": "OxfDualMomentumRoc",
-        "description": "Dual rate-of-change momentum filter (fast = half slow) on liquid ETFs (oxfordstrat dual-momentum-rate-of-change). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
       "instrument_class": "etp"
     },
     "oxf_false_breakout": {
@@ -6249,28 +3863,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_hook": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.650111+00:00",
-      "metadata": {
-        "canonical_file": "oxf_hook.py",
-        "class": "OxfHook",
-        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_hull_ma": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.655071+00:00",
-      "metadata": {
-        "canonical_file": "oxf_hull_ma.py",
-        "class": "OxfHullMa",
-        "description": "Dual Hull-MA trend filter on liquid ETFs (oxfordstrat hull-moving-average). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "oxf_keltner": {
       "state": "deprecated",
       "state_since": "2026-06-30T16:13:11.234Z",
@@ -6351,17 +3943,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_livermore": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.672538+00:00",
-      "metadata": {
-        "canonical_file": "oxf_livermore.py",
-        "class": "OxfLivermore",
-        "description": "Livermore pivotal-point breakout on liquid ETFs (oxfordstrat livermore-system-1). Penetrates 2 most-recent swing pivots by >= noise. Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "oxf_macd_zero": {
       "state": "deprecated",
       "state_since": "2026-06-30T16:13:11.329Z",
@@ -6402,17 +3983,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_nr7": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.687388+00:00",
-      "metadata": {
-        "canonical_file": "oxf_nr7.py",
-        "class": "OxfNR7",
-        "description": "NR7 narrow-range breakout on liquid ETFs — daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "oxf_orbp_momentum": {
       "state": "live",
       "state_since": "2026-07-13T12:52:59.307Z",
@@ -6440,28 +4010,6 @@
           }
         }
       ],
-      "instrument_class": "etp"
-    },
-    "oxf_price_momentum": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.702818+00:00",
-      "metadata": {
-        "canonical_file": "oxf_price_momentum.py",
-        "class": "OxfPriceMomentum",
-        "description": "Dual absolute price-momentum (close minus close-lag) trend filter on liquid ETFs (oxfordstrat price-momentum-model). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_ross_hook": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.711126+00:00",
-      "metadata": {
-        "canonical_file": "oxf_ross_hook.py",
-        "class": "OxfRossHook",
-        "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill."
-      },
-      "history": [],
       "instrument_class": "etp"
     },
     "oxf_rsi2_meanrev": {
@@ -6615,28 +4163,6 @@
       ],
       "instrument_class": "etp"
     },
-    "oxf_welles_wilder_breakout": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.775977+00:00",
-      "metadata": {
-        "canonical_file": "oxf_welles_wilder_breakout.py",
-        "class": "OxfWellesWilderBreakout",
-        "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "oxf_wyckoff_meanrev": {
-      "state": "candidate",
-      "state_since": "2026-06-16T04:24:34.784801+00:00",
-      "metadata": {
-        "canonical_file": "oxf_wyckoff_meanrev.py",
-        "class": "OxfWyckoffMeanrev",
-        "description": "Wyckoff trap mean-reversion on liquid ETFs — swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "oxf_zero_lag_ma": {
       "state": "deprecated",
       "state_since": "2026-06-30T16:13:17.759Z",
@@ -6711,38 +4237,6 @@
       ],
       "instrument_class": "etp"
     },
-    "S_ast_time_series_momentum_effect": {
-      "state": "candidate",
-      "state_since": "2026-06-21T19:01:36.297290+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_time_series_momentum_effect.py",
-        "class": "AstTimeSeriesMomentumEffect",
-        "description": "Monthly 12-month trailing return signal across 24 multi-asset ETFs; LONG when return > 0, inverse-vol sized to target 10% annualized portfolio vol.",
-        "eligible_regimes": [
-          "LOW_VOL",
-          "TRANSITIONING",
-          "HIGH_VOL",
-          "CRISIS"
-        ]
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "S_ast_skewness_effect_in_commodities": {
-      "state": "candidate",
-      "state_since": "2026-06-21T19:27:28.576363+00:00",
-      "metadata": {
-        "canonical_file": "S_ast_skewness_effect_in_commodities.py",
-        "class": "AstSkewnessEffectInCommodities",
-        "description": "Monthly quintile sort on 252-day log-return skewness across commodity ETFs; long bottom quintile (most negatively skewed), flat top quintile.",
-        "eligible_regimes": [
-          "TRANSITIONING",
-          "HIGH_VOL"
-        ]
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
     "S_triangulated_stat_arb_triplets": {
       "state": "live",
       "state_since": "2026-07-13T20:51:57.289Z",
@@ -6772,17 +4266,6 @@
           }
         }
       ],
-      "instrument_class": "equity"
-    },
-    "S_trend_vol_quadratic_forecast": {
-      "state": "candidate",
-      "state_since": "2026-06-21T19:56:52.410252+00:00",
-      "metadata": {
-        "canonical_file": "S_trend_vol_quadratic_forecast.py",
-        "class": "TrendVolQuadraticForecast",
-        "description": "Quadratic polynomial of trend strength predicts next-day vol; long top-trend stocks, short bottom-trend stocks, vol-targeted sizing."
-      },
-      "history": [],
       "instrument_class": "equity"
     },
     "S_schur_damped_minvar_shrinkage": {

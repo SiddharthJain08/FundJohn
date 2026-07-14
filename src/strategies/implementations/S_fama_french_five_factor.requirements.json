@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_fama_french_five_factor",
-  "required": ["prices", "financials"],
-  "optional": ["macro"]
-}

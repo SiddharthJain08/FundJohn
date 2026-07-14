@@ -371,6 +371,22 @@ async function main() {
     log(`auto-approve: FAILED (non-fatal): ${e.message}`);
   }
 
+  // Phase 10 — CANDIDATE REAPER (operator directive 2026-07-14): candidates
+  // get three weekend cycles of investigation (Sunday code review),
+  // alteration (Saturday review/refresh) and gate re-offers (Phase 9 above);
+  // whatever still hasn't earned a live promotion is ejected — manifest
+  // entry + implementation files + regime params removed, registry
+  // tombstoned 'deprecated', dedup traces preserved so the pipeline never
+  // re-mints it. Runs AFTER Phase 9 so a third-weekend qualifier promotes
+  // before the reaper sees it. Non-fatal.
+  let reaped = null;
+  try {
+    const { reapCandidates } = require('./candidate_reaper');
+    reaped = await reapCandidates({ log: (m) => log(`reaper: ${m}`), dryRun });
+  } catch (e) {
+    log(`reaper: FAILED (non-fatal): ${e.message}`);
+  }
+
   await _markRunComplete(dryRun, log, {
     coded, codedFailed: failed,
     tierA: tiers.A.length, tierB: tiers.B.length, tierC: tiers.C.length,
@@ -392,6 +408,9 @@ async function main() {
       staging_completed: autoApproval.staging_completed,
       staging_deferred:  autoApproval.staging_deferred.length,
       finale_ok:         autoApproval.finale_ok,
+    },
+    reaper:               reaped && {
+      ejected: reaped.ejected.length, exempt: reaped.exempt, errors: reaped.errors.length,
     },
   }, null, 2));
   log('Finisher complete.');
