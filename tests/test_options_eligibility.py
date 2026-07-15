@@ -3,12 +3,25 @@ from src.pipeline import options_eligibility as oe
 
 def test_parse_underlyings_extracts_distinct():
     page = {'option_contracts': [
-        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101C1'},
-        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101P1'},
-        {'underlying_symbol': 'MSFT', 'symbol': 'MSFT260101C1'},
-        {'symbol': 'NOUNDERLYING'},          # missing field → skipped
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101C1', 'tradable': True},
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101P1', 'tradable': True},
+        {'underlying_symbol': 'MSFT', 'symbol': 'MSFT260101C1', 'tradable': True},
+        {'symbol': 'NOUNDERLYING', 'tradable': True},   # missing field → skipped
     ]}
     assert oe._parse_underlyings(page) == {'AAPL', 'MSFT'}
+
+
+def test_parse_underlyings_skips_non_tradable_contracts():
+    # `--status active` still returns non-tradable contracts (~1.9% live). A name
+    # is eligible only via a TRADABLE contract; ZZZZ (all contracts non-tradable)
+    # must not appear, while AAPL survives on its one tradable leg.
+    page = {'option_contracts': [
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101C1', 'tradable': False},
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101P1', 'tradable': True},
+        {'underlying_symbol': 'ZZZZ', 'symbol': 'ZZZZ260101C1', 'tradable': False},
+        {'underlying_symbol': 'YYYY', 'symbol': 'YYYY260101C1'},   # absent → not tradable
+    ]}
+    assert oe._parse_underlyings(page) == {'AAPL'}
 
 
 def test_parse_underlyings_empty_page():
@@ -26,9 +39,9 @@ def _pager(pages):
 
 def test_enumerate_paginates_to_terminal():
     pages = [
-        {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 't1'},
-        {'option_contracts': [{'underlying_symbol': 'AAPL'}], 'next_page_token': 't2'},
-        {'option_contracts': [{'underlying_symbol': 'MSFT'}], 'next_page_token': None},
+        {'option_contracts': [{'underlying_symbol': 'AA', 'tradable': True}], 'next_page_token': 't1'},
+        {'option_contracts': [{'underlying_symbol': 'AAPL', 'tradable': True}], 'next_page_token': 't2'},
+        {'option_contracts': [{'underlying_symbol': 'MSFT', 'tradable': True}], 'next_page_token': None},
     ]
     optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=_pager(pages))
     assert optionable == {'AA', 'AAPL', 'MSFT'}
@@ -56,7 +69,8 @@ def test_enumerate_incomplete_on_budget():
 def test_fetch_contracts_page_parses_stdout(monkeypatch):
     class _R:
         returncode = 0
-        stdout = '{"option_contracts": [{"underlying_symbol": "AAPL"}], "next_page_token": null}'
+        stdout = ('{"option_contracts": [{"underlying_symbol": "AAPL", "tradable": true}], '
+                  '"next_page_token": null}')
         stderr = ''
     monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
     page = oe._fetch_contracts_page()
@@ -212,7 +226,8 @@ def test_enumerate_incomplete_on_midsweep_error_keeps_partial():
     def fetch(_token):
         calls['n'] += 1
         if calls['n'] == 1:
-            return {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 't1'}
+            return {'option_contracts': [{'underlying_symbol': 'AA', 'tradable': True}],
+                    'next_page_token': 't1'}
         raise RuntimeError('envelope error')
     optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
     assert completed is False          # mid-sweep failure -> prior kept by caller

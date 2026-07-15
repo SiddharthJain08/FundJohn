@@ -6,6 +6,11 @@ data/.cache/options_eligibility.json ({symbol: True} for eligible names),
 which src/pipeline/run_ticker_metadata_step.py reads to set the
 ticker_metadata_snapshots.options_eligible column.
 
+Eligible = has >= 1 ACTIVE and TRADABLE contract. `--status active` filters on
+contract status only and still returns non-tradable contracts (~1.9% of the
+sweep on 2026-07-15), so tradability is filtered here — without it 34 names
+whose every contract is non-tradable would be marked eligible.
+
 Safety: a COMPLETE + plausibly-sized sweep full-replaces the cache; any
 failure (partial sweep, API outage, degenerate result) keeps the prior
 cache, so eligibility is never silently wiped. Inert to land — no live
@@ -31,10 +36,13 @@ CACHE_PATH = Path(os.environ.get(
     '/root/openclaw/data/.cache/options_eligibility.json'))
 PAGE_LIMIT = int(os.environ.get('OPTIONS_ELIGIBILITY_PAGE_LIMIT', '10000'))
 SOFT_BUDGET_S = int(os.environ.get('OPTIONS_ELIGIBILITY_BUDGET_S', '1800'))
-# Sanity floor: secondary guard (the primary guard is completed=False -> keep-prior).
-# Observed ~676 Alpaca-tradable underlyings on 2026-06-08 (option contracts --status
-# active is Alpaca's TRADABLE options set, a curated ~682 names, NOT all OPRA-listed).
-# 400 sits comfortably below 676 yet catches a degenerate near-empty sweep.
+# Sanity floor: secondary guard (the primary guard is completed=False -> keep-prior;
+# the tighter one is decide_write's 50%-of-prior, which is 2900+ once a cache exists).
+# 2026-07-15 full-sweep measurement: 30 pages -> 5,897 tradable-optionable underlyings
+# in our 14,112-name universe. This supersedes the 2026-06-08 "~676 curated names"
+# reading, which was an artifact of that sweep, not Alpaca's real coverage.
+# 400 only ever binds on the FIRST write (empty prior); it stays low so a genuine
+# broker-side contraction never silently freezes the cache.
 ABS_FLOOR = int(os.environ.get('OPTIONS_ELIGIBILITY_MIN_FLOOR', '400'))
 WEBHOOK_URL = os.environ.get('OPENCLAW_OPTIONS_ELIGIBILITY_WEBHOOK', '')
 
@@ -71,9 +79,11 @@ def _fetch_contracts_page(page_token: str | None = None, limit: int = PAGE_LIMIT
 
 
 def _parse_underlyings(page: dict) -> set[str]:
+    """Distinct underlyings of the page's TRADABLE contracts (see module docstring
+    — `--status active` alone still returns non-tradable contracts)."""
     return {c.get('underlying_symbol')
             for c in (page.get('option_contracts') or [])
-            if c.get('underlying_symbol')}
+            if c.get('underlying_symbol') and c.get('tradable')}
 
 
 def enumerate_optionable_underlyings(fetch_page=_fetch_contracts_page,

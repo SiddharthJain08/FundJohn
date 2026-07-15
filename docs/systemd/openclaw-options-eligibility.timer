@@ -1,0 +1,18 @@
+[Unit]
+Description=Weekly options_eligible refresh — Sat 06:00 UTC
+
+[Timer]
+# Sat 06:00 UTC placement (re-verified 2026-07-15): upstream of the DAILY
+# openclaw-tradable-universe-refresh (13:30 UTC), which is the cache's only
+# consumer (run_ticker_metadata_step -> ticker_metadata_snapshots), so a fresh
+# sweep lands the same Saturday; and clear of openclaw-weekend-saturday
+# (12:00 UTC) on the 2-core box. The sweep is ~20s/30 pages, read-only.
+OnCalendar=Sat *-*-* 06:00:00 UTC
+# Persistent=true: a missed week catches up on boot. NOTE for whoever enables
+# this: touch /var/lib/systemd/timers/stamp-openclaw-options-eligibility.timer
+# BEFORE `enable --now`, or the catch-up fires the sweep immediately.
+Persistent=true
+Unit=openclaw-options-eligibility.service
+
+[Install]
+WantedBy=timers.target
