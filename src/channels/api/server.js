@@ -341,6 +341,55 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
     } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
 
+    // Resting exit legs at the broker (2026-07-15), keyed by symbol. This is
+    // exit TRUTH — the stop/take-profit orders that will actually fire — as
+    // opposed to execution_signals.stop_loss/target_1, which records each
+    // strategy's *intent* and says nothing about whether a bracket is live.
+    // A position with no resting stop is unprotected however good the intent
+    // was, so the panel must be able to report that rather than draw a level
+    // that exists only in the DB.
+    //
+    // pending_cancel legs are excluded: openclaw-afterhours-tp-rth-reconcile
+    // cancels the extended-hours TPs at 13:30 UTC and those rows linger in the
+    // list while the cancel settles — counting them would show a take-profit
+    // that is on its way out.
+    // brokerBracketsOk separates "asked the broker, this position has no stop"
+    // from "could not ask the broker". Both would otherwise arrive at the panel
+    // as an absent block and render as "none" — turning a degraded API leg into
+    // a false report that the ENTIRE book is unprotected, which is the exact
+    // alarm an operator would act on. Fetch failure must read as unknown.
+    // --nested is REQUIRED, not a nicety: an OCO exit is ONE order whose
+    // take-profit shows at the top level while its protective stop hides in
+    // `legs[]` (status 'held' until the sibling cancels). Reading only
+    // top-level stop_price finds 3 stops across this book; reading the legs
+    // finds 9 — i.e. the flat read invents unprotected positions that are in
+    // fact bracketed, which is a worse lie than showing nothing.
+    //
+    // --limit 500 is the API max (default 50). At 14 positions the default
+    // would do, but a silently truncated page would drop real brackets and
+    // report them as absent — the same false alarm, arriving later and only
+    // once the book grows.
+    const brokerBrackets = {};
+    let brokerBracketsOk = false;
+    const absorbLeg = (o) => {
+      if (!o || !o.symbol || o.status === 'pending_cancel') return;
+      const leg = brokerBrackets[o.symbol]
+        || (brokerBrackets[o.symbol] = { stop: null, target: null });
+      const sp = parseFloat(o.stop_price);
+      const lp = parseFloat(o.limit_price);
+      if (Number.isFinite(sp)) leg.stop = sp;
+      if (Number.isFinite(lp)) leg.target = lp;
+      for (const child of (o.legs || [])) absorbLeg(child);
+    };
+    try {
+      const ordersResp = await runAlpaca(
+        ['order', 'list', '--nested', '--limit', '500'], { timeout: 10_000 });
+      if (ordersResp && ordersResp.ok && Array.isArray(ordersResp.payload)) {
+        brokerBracketsOk = true;
+        for (const o of ordersResp.payload) absorbLeg(o);
+      }
+    } catch (_) { /* brokerBracketsOk stays false — panel renders brackets as unknown */ }
+
     // Per-ticker corr-adjusted cumulative Sharpe (S_adj) — the conviction the
     // position was last sized at (stamped by the sizer each cycle into
     // cycle_contributing_strategies, 2026-07-14). Latest non-null row per
@@ -377,6 +426,10 @@ app.get('/api/portfolio/positions', async (req, res) => {
           nav,
         }),
         broker_position: brokerPositions[r.ticker] || null,
+        // Present-and-empty = genuinely no resting leg; null = broker unreachable.
+        broker_bracket: brokerBracketsOk
+          ? (brokerBrackets[r.ticker] || { stop: null, target: null })
+          : null,
         corr_cum_sharpe: sadjByTicker[r.ticker]
           ? sadjByTicker[r.ticker].corr_cum_sharpe : null,
         corr_cum_sharpe_asof: sadjByTicker[r.ticker]
@@ -3665,6 +3718,12 @@ body.rs-chat-locked{overflow:hidden}
 .ab-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;padding-bottom:6px;border-bottom:1px dotted var(--border2)}
 .ab-title .ab-ticker{font-size:14px;font-weight:700;color:var(--blue);letter-spacing:.05em}
 .ab-title .ab-meta{font-size:10px;color:var(--muted);letter-spacing:.02em}
+/* Price/bracket header. These classes were emitted since the panel shipped but
+   never had rules — the row rendered as unstyled inline spans. */
+.ab-prices{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.ab-px{letter-spacing:.02em}
+.ab-px b{color:var(--text);font-weight:600;margin-left:2px}
+.ab-px-none b{color:var(--red);font-weight:600}
 .ab-bars{display:flex;flex-direction:column;gap:3px}
 .ab-row{display:flex;align-items:center;gap:8px;padding:1px 0;font-size:10.5px;min-height:18px}
 .ab-label{width:240px;flex-shrink:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;letter-spacing:.01em}
@@ -6958,6 +7017,12 @@ function _groupByTicker(rows, mode) {
     // broker stays null and the parent row falls back to intent rollup
     // (legacy behaviour, for stale 'open' rows still in the table).
     g.broker = (g.signals[0] && g.signals[0].broker_position) || null;
+    // Resting exit legs, attached per-ticker by /api/portfolio/positions. Same
+    // representative-row contract as broker_position: every signal for a ticker
+    // carries the identical block, because the broker holds ONE consolidated
+    // position per ticker and therefore ONE bracket — no matter how many
+    // strategies want a piece of it.
+    g.broker_bracket = (g.signals[0] && g.signals[0].broker_bracket) || null;
     g.total_size_pct = (g.broker && g.broker.size_pct != null)
       ? g.broker.size_pct                // broker-truth $ size / NAV
       : totalSize;                       // fallback to summed intents
@@ -7072,14 +7137,47 @@ function _buildAlphaBarsHtml(group) {
   const entry  = group.avg_entry != null ? parseFloat(group.avg_entry) : null;
   const nowPx  = group.price != null ? parseFloat(group.price) : null;  // already resolved: current if open, close if closed
   const pxFmt  = (v) => v == null || !isFinite(v) ? '—' : '$' + v.toFixed(2);
+  // Exit legs — broker truth (what will actually fire), not strategy intent.
+  // The % is measured from ENTRY, so it reads as the bracket's designed shape
+  // (the -8%/+5% the sizer chose) and stays put as the market moves; a
+  // current-price gap would drift every tick and never match the sizer's numbers.
+  // Sign is raw price direction (stop below a long = negative), so a long reads
+  // stop −8% / target +5% and a short reads stop +8% / target −5%.
+  // null bracket = the broker leg failed, so we do not KNOW; an empty-but-present
+  // bracket = we asked and there is genuinely nothing resting. Never render the
+  // former as "none" — that would invent an unprotected book out of an API blip.
+  const bracket = group.broker_bracket || null;
+  const bracketKnown = bracket != null;
+  const legPct  = (lvl) => (entry != null && isFinite(entry) && entry !== 0)
+    ? ((lvl - entry) / entry) * 100 : null;
+  const legHtml = (label, lvl, title) => {
+    if (!bracketKnown) {
+      return \`<span class="ab-px" title="could not read resting orders from the broker — \${label} unknown, not necessarily absent">\${label} <b>—</b></span>\`;
+    }
+    if (lvl == null || !isFinite(lvl)) {
+      // Absence IS the finding — an unprotected position must not render as a
+      // blank gap that reads like "nothing to report".
+      return \`<span class="ab-px ab-px-none" title="no resting \${label} order at the broker for \${escapeHtml(group.ticker)} — this position is not bracketed">\${label} <b>none</b></span>\`;
+    }
+    const gap = legPct(lvl);
+    const gapTxt = gap == null ? '' :
+      \` <span class="\${gap >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg'}">\${gap >= 0 ? '+' : ''}\${gap.toFixed(1)}%</span>\`;
+    return \`<span class="ab-px" title="\${title}">\${label} <b>\${pxFmt(lvl)}</b>\${gapTxt}</span>\`;
+  };
+  const bracketHdr = !isOpen ? '' :
+    legHtml('stop', bracket && bracket.stop,
+            'stop-loss resting at the broker · % is measured from the entry price')
+    + legHtml('target', bracket && bracket.target,
+              'take-profit resting at the broker · % is measured from the entry price');
   const priceHdr = \`<div class="ab-prices">
       <span class="ab-px">entry <b>\${pxFmt(entry)}</b></span>
       <span class="ab-px">\${isOpen ? 'current' : 'close'} <b>\${pxFmt(nowPx)}</b></span>
+      \${bracketHdr}
     </div>\`;
 
   if (!contributions.length) {
     return \`<div class="alpha-bars">\${priceHdr}
-      <div class="alpha-bars empty">No strategy signals recorded for <b>\${group.ticker}</b>.</div>
+      <div class="alpha-bars empty">No strategy signals recorded for <b>\${escapeHtml(group.ticker)}</b>.</div>
     </div>\`;
   }
   const haveValues = contributions.some(c => c.contribution != null && isFinite(c.contribution));
@@ -7125,10 +7223,16 @@ function _buildAlphaBarsHtml(group) {
     const sv = group.corr_cum_sharpe;
     const sCls = sv >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge += \` <span class="ab-badge" title="corr-adjusted cumulative Sharpe (S_adj) at last sizing cycle">S_adj = <span class="\${sCls}">\${sv.toFixed(2)}</span></span>\`;
+  } else if (isOpen) {
+    // Render the gap rather than dropping the badge. The sizer stamps S_adj
+    // only on cycles that emit orders, so a silently absent badge is
+    // indistinguishable from "this feature was never built" — which is exactly
+    // how it read when the sizer went several cycles without emitting.
+    badge += \` <span class="ab-badge ab-badge-warn" title="no S_adj stamped for \${escapeHtml(group.ticker)}: the sizer records it only on cycles that emit orders, so this position has not been re-sized since the stamp was added">S_adj = —</span>\`;
   }
   return \`<div class="alpha-bars">
     \${priceHdr}
-    <div class="ab-title"><span class="ab-ticker">\${group.ticker}</span>\${badge}</div>
+    <div class="ab-title"><span class="ab-ticker">\${escapeHtml(group.ticker)}</span>\${badge}</div>
     \${rows}
   </div>\`;
 }
