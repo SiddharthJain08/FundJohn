@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-06-30T16:13:20.400Z",
+  "updated_at": "2026-07-12T22:35:36.809039Z",
   "strategies": {
     "S_market_rank_indicator_timing": {
       "state": "candidate",
@@ -35,8 +35,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)"
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "financials"
@@ -84,9 +84,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -169,8 +169,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
                 "vol_indices: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -271,9 +271,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-03-31; needs ≥ 2024-12-14)"
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-03-31; needs \u2265 2024-12-14)"
               ],
               "missing_columns": [
                 "earnings"
@@ -361,10 +361,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "log_returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "log_returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -419,9 +419,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "returns: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
-                "prices: backfilled (2016-04-10→2026-05-01, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-11-19)"
+                "returns: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-01, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-11-19)"
               ],
               "missing_columns": [
                 "financials"
@@ -542,7 +542,7 @@
           "to_state": "monitoring",
           "timestamp": "2026-05-14T05:22:23.258Z",
           "actor": "test:smoke",
-          "reason": "verify rebuild on live→mon",
+          "reason": "verify rebuild on live\u2192mon",
           "metadata": {}
         },
         {
@@ -604,7 +604,7 @@
       "metadata": {
         "canonical_file": "S_crisp_signal_aware_hrp.py",
         "class": "CrispSignalAwareHRP",
-        "description": "CRISP shrinkage (P_γ·w=μ) with 12-1 month momentum alpha, all-regime allocation"
+        "description": "CRISP shrinkage (P_\u03b3\u00b7w=\u03bc) with 12-1 month momentum alpha, all-regime allocation"
       },
       "history": [],
       "instrument_class": "equity"
@@ -615,7 +615,7 @@
       "metadata": {
         "canonical_file": "S_vp_macd_index_sensitivity.py",
         "class": "VPMACDIndexSensitivity",
-        "description": "VP-MACD with volume-volatility-intraday-weighted price input and λ-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)",
+        "description": "VP-MACD with volume-volatility-intraday-weighted price input and \u03bb-adjusted crossover threshold for SPY/QQQ/DIA (Lin et al. 2026)",
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
@@ -655,7 +655,7 @@
       "metadata": {
         "canonical_file": "S_3d_pca_characteristic_factors.py",
         "class": "ThreeDPCACharacteristicFactors",
-        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly — Lettau (2024)",
+        "description": "Proportionality-restricted PCA on 3D double-sorted characteristic portfolios; rank by PC1 score; LONG top decile, SHORT bottom decile, monthly \u2014 Lettau (2024)",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -674,8 +674,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -785,9 +785,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-08-07→2026-02-19; needs ≥ 2024-12-08)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-08-07\u21922026-02-19; needs \u2265 2024-12-08)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "earnings"
@@ -920,7 +920,7 @@
       "metadata": {
         "canonical_file": "s5_max_pain.py",
         "class": "MaxPainGravity",
-        "description": "Max-pain gravity — options-derived price attractor signal"
+        "description": "Max-pain gravity \u2014 options-derived price attractor signal"
       },
       "history": [
         {
@@ -1010,7 +1010,7 @@
       "metadata": {
         "canonical_file": "s12_insider.py",
         "class": "InsiderClusterBuy",
-        "description": "Insider cluster-buy signal — SEC Form 4 aggregation",
+        "description": "Insider cluster-buy signal \u2014 SEC Form 4 aggregation",
         "regime_agnostic_sharpe": true,
         "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
@@ -1023,7 +1023,7 @@
       "metadata": {
         "canonical_file": "s15_iv_rv_arb.py",
         "class": "IVRVArb",
-        "description": "IV/RV spread arbitrage — implied vs realised volatility",
+        "description": "IV/RV spread arbitrage \u2014 implied vs realised volatility",
         "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
@@ -1044,7 +1044,7 @@
       "metadata": {
         "canonical_file": "S_custom_jt_momentum_12mo.py",
         "class": "JTMomentum12Mo",
-        "description": "Jegadeesh-Titman 12-month momentum — custom implementation",
+        "description": "Jegadeesh-Titman 12-month momentum \u2014 custom implementation",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -1061,7 +1061,7 @@
       "metadata": {
         "canonical_file": "S23_regime_momentum.py",
         "class": "RegimeMomentumStrategy",
-        "description": "Regime-conditioned momentum — HIGH_VOL / LOW_VOL switching",
+        "description": "Regime-conditioned momentum \u2014 HIGH_VOL / LOW_VOL switching",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL",
@@ -1110,7 +1110,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual-momentum v2 — successor candidate to S9",
+        "description": "Dual-momentum v2 \u2014 successor candidate to S9",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -1124,7 +1124,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1182,7 +1182,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1208,7 +1208,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1247,7 +1247,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-22T17:31:05.162573+00:00",
           "actor": "manual:dashboard",
-          "reason": "Revert: staging shouldn't have been directly approvable — awaiting data import gate",
+          "reason": "Revert: staging shouldn't have been directly approvable \u2014 awaiting data import gate",
           "metadata": {}
         },
         {
@@ -1442,7 +1442,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1506,7 +1506,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1575,7 +1575,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-27T04:02:11.214Z",
           "actor": "manual:operator",
-          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
+          "reason": "Regress for re-approval \u2014 no implementation file; needs re-coding via fused approval",
           "metadata": {}
         },
         {
@@ -1668,7 +1668,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1725,7 +1725,7 @@
       "metadata": {
         "canonical_file": "S_tr_01_vvix_early_warning.py",
         "class": "VVIXEarlyWarning",
-        "description": "VVIX-conditioned VIX-spike early warning — SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
+        "description": "VVIX-conditioned VIX-spike early warning \u2014 SELL_VOL + hedge in TRANSITIONING regime (Whaley 2009)"
       },
       "history": [
         {
@@ -1753,7 +1753,7 @@
       "metadata": {
         "canonical_file": "S_tr_02_hurst_regime_flip.py",
         "class": "HurstRegimeFlip",
-        "description": "Hurst R/S regime flip — LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime",
+        "description": "Hurst R/S regime flip \u2014 LONG trending (H>0.53), SHORT mean-reverting (H<0.47) in TRANSITIONING regime",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -1767,7 +1767,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1782,7 +1782,7 @@
       "metadata": {
         "canonical_file": "S_tr_06_eod_reversal.py",
         "class": "EODCrossSectionalReversal",
-        "description": "Cross-sectional EOD return reversal — ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)",
+        "description": "Cross-sectional EOD return reversal \u2014 ROD3 proxy using daily prices; short winners, long losers (Zarattini 2023)",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -1797,7 +1797,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1840,7 +1840,7 @@
       "metadata": {
         "canonical_file": "S_tr_03_bocpd_change_point.py",
         "class": "BOCPDChangePoint",
-        "description": "BOCPD change-point detection (Adams & MacKay 2007) — trade post-break direction in TRANSITIONING regime",
+        "description": "BOCPD change-point detection (Adams & MacKay 2007) \u2014 trade post-break direction in TRANSITIONING regime",
         "eligible_regimes": [
           "LOW_VOL",
           "HIGH_VOL",
@@ -1853,7 +1853,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1876,7 +1876,7 @@
           "to_state": "paper",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was already firing this strategy, promoting through paper",
+          "reason": "Reconcile \u2014 pipeline was already firing this strategy, promoting through paper",
           "metadata": {}
         },
         {
@@ -1884,7 +1884,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -1899,7 +1899,7 @@
       "metadata": {
         "canonical_file": "S_robust_minimum_variance_hedge.py",
         "class": "RobustMinimumVarianceHedge",
-        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box → SHORT high-vol outliers",
+        "description": "Robust min-var hedge: inv-vol rank + vol-excess uncertainty box \u2192 SHORT high-vol outliers",
         "eligible_regimes": [
           "CRISIS"
         ]
@@ -1910,7 +1910,7 @@
           "to_state": "live",
           "timestamp": "2026-04-22T05:18:07.798201+00:00",
           "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
+          "reason": "Reconcile \u2014 pipeline was firing this strategy while manifest said paper/candidate",
           "metadata": {
             "option": "A",
             "preserve_execution": true
@@ -2005,7 +2005,7 @@
       "metadata": {
         "canonical_file": "S_alpha191_lasso_crossmarket.py",
         "class": "Alpha191LassoCrossMarket",
-        "description": "Alpha191 factor matrix + LASSO selection → LONG top-decile SHORT bottom-decile",
+        "description": "Alpha191 factor matrix + LASSO selection \u2192 LONG top-decile SHORT bottom-decile",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL",
@@ -2187,7 +2187,7 @@
       "metadata": {
         "canonical_file": "S21_iv_hv_spread.py",
         "class": "IVHVSpread",
-        "description": "IV/HV Spread Vol Arb — sell expensive IV, buy cheap IV vs realized vol",
+        "description": "IV/HV Spread Vol Arb \u2014 sell expensive IV, buy cheap IV vs realized vol",
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
@@ -2203,7 +2203,7 @@
       "metadata": {
         "canonical_file": "S22_quality_momentum.py",
         "class": "S22QualityMomentum",
-        "description": "Quality-Filtered Momentum — top-N JT momentum gated by gross-margin quality screen",
+        "description": "Quality-Filtered Momentum \u2014 top-N JT momentum gated by gross-margin quality screen",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -2225,7 +2225,7 @@
           "to_state": "staging",
           "timestamp": "2026-04-27T04:02:11.248Z",
           "actor": "manual:operator",
-          "reason": "Regress for re-approval — no implementation file; needs re-coding via fused approval",
+          "reason": "Regress for re-approval \u2014 no implementation file; needs re-coding via fused approval",
           "metadata": {}
         },
         {
@@ -2253,7 +2253,7 @@
       "metadata": {
         "canonical_file": "S25_dual_momentum.py",
         "class": "DualMomentum",
-        "description": "Dual Momentum (12-1mo skip, Top 7) — cross-asset momentum rotation",
+        "description": "Dual Momentum (12-1mo skip, Top 7) \u2014 cross-asset momentum rotation",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -3070,7 +3070,7 @@
       "metadata": {
         "canonical_file": "S_cross_sectional_price_momentum.py",
         "class": "CrossSectionalPriceMomentum",
-        "description": "J&T cross-sectional momentum — LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)",
+        "description": "J&T cross-sectional momentum \u2014 LONG 12-1mo winners, SHORT losers (Jegadeesh & Titman 1993)",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL",
@@ -3301,7 +3301,7 @@
       "metadata": {
         "canonical_file": "S_fama_french_five_factor.py",
         "class": "FamaFrenchFiveFactor",
-        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile — Fama & French (2015)"
+        "description": "RMW+CMA composite rank: LONG top quintile, SHORT bottom quintile \u2014 Fama & French (2015)"
       },
       "history": [],
       "instrument_class": "equity"
@@ -3350,7 +3350,7 @@
       "metadata": {
         "canonical_file": "S_long_term_price_reversal.py",
         "class": "LongTermPriceReversal",
-        "description": "LONG 36-month prior losers, SHORT prior winners — behavioral overreaction reversal (De Bondt & Thaler 1985)",
+        "description": "LONG 36-month prior losers, SHORT prior winners \u2014 behavioral overreaction reversal (De Bondt & Thaler 1985)",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL",
@@ -3399,8 +3399,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -3435,7 +3435,7 @@
       "metadata": {
         "canonical_file": "S_bankruptcy_risk_anomaly.py",
         "class": "BankruptcyRiskAnomaly",
-        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score — Dichev (1998)"
+        "description": "LONG low-distress / SHORT high-distress quintiles via Altman Z-score \u2014 Dichev (1998)"
       },
       "history": [],
       "instrument_class": "equity"
@@ -3446,7 +3446,7 @@
       "metadata": {
         "canonical_file": "S_fear_index_return_prediction.py",
         "class": "FearIndexReturnPrediction",
-        "description": "LONG when VIX z-score (252d) > 1.5 — fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
+        "description": "LONG when VIX z-score (252d) > 1.5 \u2014 fear-driven risk premium compresses over 20-60 days (Rubbaniy 2014)"
       },
       "history": [],
       "instrument_class": "equity"
@@ -3457,7 +3457,7 @@
       "metadata": {
         "canonical_file": "S_industry_momentum_moskowitz.py",
         "class": "IndustryMomentumMoskowitz",
-        "description": "Industry-level momentum drives the majority of individual stock momentum — buying stocks from past winning industries and shorting stocks from past losing industries earns significant risk-adjusted returns because slow information diffusion causes industry return continuation."
+        "description": "Industry-level momentum drives the majority of individual stock momentum \u2014 buying stocks from past winning industries and shorting stocks from past losing industries earns significant risk-adjusted returns because slow information diffusion causes industry return continuation."
       },
       "history": [
         {
@@ -3470,9 +3470,9 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2021-04-27)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2021-04-27)"
               ],
               "missing_columns": [
                 "financials"
@@ -3555,10 +3555,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)"
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "options_eod: backfilled but insufficient (2026-04-08\u21922026-04-21; needs \u2265 2024-12-08)"
               ],
               "missing_columns": [
                 "options_eod"
@@ -3593,7 +3593,7 @@
       "metadata": {
         "canonical_file": "S_vix_conditioned_short_reversal.py",
         "class": "VixConditionedShortReversal",
-        "description": "Short-term reversal scaled by VIX/median-VIX — liquidity-provision risk premium is elevated when market makers are constrained (Nagel 2012)"
+        "description": "Short-term reversal scaled by VIX/median-VIX \u2014 liquidity-provision risk premium is elevated when market makers are constrained (Nagel 2012)"
       },
       "history": [],
       "instrument_class": "equity"
@@ -3604,7 +3604,7 @@
       "metadata": {
         "canonical_file": "S_q_theory_investment_growth.py",
         "class": "QTheoryInvestmentGrowth",
-        "description": "LONG low-IGR / SHORT high-IGR quintiles — Q-theory rational discount-rate explanation for value premium (Xing 2007)"
+        "description": "LONG low-IGR / SHORT high-IGR quintiles \u2014 Q-theory rational discount-rate explanation for value premium (Xing 2007)"
       },
       "history": [
         {
@@ -3617,8 +3617,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "financials: backfilled but insufficient (2023-06-30→2026-02-28; needs ≥ 2022-11-13)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)"
+                "financials: backfilled but insufficient (2023-06-30\u21922026-02-28; needs \u2265 2022-11-13)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "financials"
@@ -3699,10 +3699,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "options_eod: backfilled but insufficient (2026-04-08→2026-04-21; needs ≥ 2024-12-08)",
-                "prices: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
-                "financials: backfilled (2023-06-30→2026-02-28, providers fmp/yahoo)"
+                "options_eod: backfilled but insufficient (2026-04-08\u21922026-04-21; needs \u2265 2024-12-08)",
+                "prices: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-04-24, providers polygon/yahoo/alpha_vantage/computed)",
+                "financials: backfilled (2023-06-30\u21922026-02-28, providers fmp/yahoo)"
               ],
               "missing_columns": [
                 "options_eod"
@@ -3821,7 +3821,7 @@
       "metadata": {
         "canonical_file": "S_pairs_trading_min_distance.py",
         "class": "PairsTradingMinDistance",
-        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2σ, exit at zero-crossing.",
+        "description": "Gatev-Goetzmann-Rouwenhorst minimum-distance pairs: normalized cumulative-return spread entry at 2\u03c3, exit at zero-crossing.",
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
@@ -3961,13 +3961,13 @@
           "to_state": "staging",
           "timestamp": "2026-05-16T14:51:57.154Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "returns: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
-                "prices: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -4011,15 +4011,15 @@
           "to_state": "staging",
           "timestamp": "2026-05-16T14:51:57.154Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-14; needs ≥ 2024-12-28)",
-                "returns: backfilled (2016-04-10→2026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-14; needs ≥ 2024-12-28)"
+                "prices: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-05-14; needs \u2265 2024-12-28)",
+                "returns: backfilled (2016-04-10\u21922026-05-15, providers polygon/yahoo/alpha_vantage/computed)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31\u21922026-05-14; needs \u2265 2024-12-28)"
               ],
               "missing_columns": [
                 "earnings",
@@ -4084,7 +4084,7 @@
       "metadata": {
         "canonical_file": "S_mvgarch_nig_crra_portfolio.py",
         "class": "MvGarchNigCrraPortfolio",
-        "description": "EWMA-GARCH conditional covariance (λ=0.94) drives CRRA-optimal GMV portfolio weights on 30 DJIA names; NIG tail awareness via heavy decay."
+        "description": "EWMA-GARCH conditional covariance (\u03bb=0.94) drives CRRA-optimal GMV portfolio weights on 30 DJIA names; NIG tail awareness via heavy decay."
       },
       "history": [],
       "instrument_class": "equity"
@@ -4095,7 +4095,7 @@
       "metadata": {
         "canonical_file": "S_p_index_eef_weekly_rotation.py",
         "class": "PIndexEEFWeeklyRotation",
-        "description": "EEF p-index weekly rotation — LONG top-decile stocks by mean-variance efficiency score (Li et al. 2025)"
+        "description": "EEF p-index weekly rotation \u2014 LONG top-decile stocks by mean-variance efficiency score (Li et al. 2025)"
       },
       "history": [],
       "instrument_class": "equity"
@@ -4106,7 +4106,7 @@
       "metadata": {
         "canonical_file": "S_prism_vq_cross_section_factor.py",
         "class": "PrismVQCrossSectionFactor",
-        "description": "VQ-inspired discrete factor encoding + regime-conditioned MoE weights; LONG top decile, SHORT bottom decile — rebalance every 5 trading days",
+        "description": "VQ-inspired discrete factor encoding + regime-conditioned MoE weights; LONG top decile, SHORT bottom decile \u2014 rebalance every 5 trading days",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -4141,7 +4141,7 @@
       "metadata": {
         "canonical_file": "S_visibility_graph_rsi.py",
         "class": "VisibilityGraphRSI",
-        "description": "Backward-visibility graph RSI oscillator: LONG on oversold cross-up (VGRSI<30→>30), SHORT on overbought cross-down (VGRSI>70→<70).",
+        "description": "Backward-visibility graph RSI oscillator: LONG on oversold cross-up (VGRSI<30\u2192>30), SHORT on overbought cross-down (VGRSI>70\u2192<70).",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL",
@@ -4184,7 +4184,7 @@
       "metadata": {
         "canonical_file": "S_price_filter_rule_trend.py",
         "class": "PriceFilterRuleTrend",
-        "description": "Filter-rule momentum: buy ½%-above trough, sell ½%-below peak — Sweeney (1988)",
+        "description": "Filter-rule momentum: buy \u00bd%-above trough, sell \u00bd%-below peak \u2014 Sweeney (1988)",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -4236,14 +4236,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T14:47:24.934Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-10)",
+                "returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -4293,7 +4293,7 @@
       "metadata": {
         "canonical_file": "S_january_btm_size_seasonal.py",
         "class": "S_january_btm_size_seasonal",
-        "description": "The book-to-market premium in U.S. equities is a January seasonal concentrated in small/young/growth stocks — not a pervasive cross-sectional factor — enabling a size-filtered value long-short timed around the turn of year."
+        "description": "The book-to-market premium in U.S. equities is a January seasonal concentrated in small/young/growth stocks \u2014 not a pervasive cross-sectional factor \u2014 enabling a size-filtered value long-short timed around the turn of year."
       },
       "history": [
         {
@@ -4301,13 +4301,13 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T14:47:24.934Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)"
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-10)"
               ],
               "missing_columns": [
                 "financials"
@@ -4350,15 +4350,15 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T14:47:24.934Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-10)",
                 "macro: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+                "returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials",
@@ -4409,14 +4409,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T14:47:24.934Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-10)",
+                "returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -4451,7 +4451,7 @@
       "metadata": {
         "canonical_file": "s_growth_defensive_smooth_score_timing.py",
         "class": "S_growth_defensive_smooth_score_timing",
-        "description": "A continuous smooth-score function combining rate relief, SPY drawdown depth, VIX stress relief, and growth-crowding penalty — mapped via tanh to G/D weights with EWMA smoothing — improves risk-adjusted returns over static growth or balanced ETF allocations by dynamically timing "
+        "description": "A continuous smooth-score function combining rate relief, SPY drawdown depth, VIX stress relief, and growth-crowding penalty \u2014 mapped via tanh to G/D weights with EWMA smoothing \u2014 improves risk-adjusted returns over static growth or balanced ETF allocations by dynamically timing "
       },
       "history": [
         {
@@ -4459,15 +4459,15 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T14:47:24.934Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
                 "macro: reachable but not backfilled (providers yfinance)",
                 "vol_indices: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+                "returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "macro",
@@ -4544,7 +4544,7 @@
       "metadata": {
         "canonical_file": "S_fomc_presell_spy_long.py",
         "class": "FomcPresellSpyLong",
-        "description": "Long SPY at close of session before FOMC when SPY is ≥1% down and closing in the bottom half of its daily range; forced pre-Fed selling reverses on resolution.",
+        "description": "Long SPY at close of session before FOMC when SPY is \u22651% down and closing in the bottom half of its daily range; forced pre-Fed selling reverses on resolution.",
         "eligible_regimes": [
           "LOW_VOL",
           "TRANSITIONING",
@@ -4625,16 +4625,16 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T20:24:40.454Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-10)",
-                "returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
-                "log_returns: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
-                "realized_vol: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-10)",
+                "returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
+                "log_returns: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -4701,7 +4701,7 @@
           "CRISIS"
         ],
         "eligible_regimes_source": "literature_override",
-        "eligible_regimes_note": "97-year study (1928-2025) n=49 trades; modern 8y window yields ~4 events — too sparse for regime_partition auto-derivation. Regimes set from thesis: Death Crosses occur in elevated-stress environments."
+        "eligible_regimes_note": "97-year study (1928-2025) n=49 trades; modern 8y window yields ~4 events \u2014 too sparse for regime_partition auto-derivation. Regimes set from thesis: Death Crosses occur in elevated-stress environments."
       },
       "history": [
         {
@@ -4709,12 +4709,12 @@
           "to_state": "staging",
           "timestamp": "2026-05-23T20:24:40.454Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)",
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -4750,7 +4750,7 @@
       "metadata": {
         "canonical_file": "S_growth_inflation_sector_timing.py",
         "class": "GrowthInflationSectorTiming",
-        "description": "Rotate into one sector ETF based on growth×inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength.",
+        "description": "Rotate into one sector ETF based on growth\u00d7inflation macro quadrant; growth proxy = SPY vs SMA(252); inflation proxy = inflation-beta sector strength.",
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
@@ -4798,13 +4798,13 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T08:06:56.453Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
                 "macro: reachable but not backfilled (providers yfinance)",
-                "prices: backfilled (2016-04-10→2026-05-22, providers polygon/yahoo/alpha_vantage)"
+                "prices: backfilled (2016-04-10\u21922026-05-22, providers polygon/yahoo/alpha_vantage)"
               ],
               "missing_columns": [
                 "macro"
@@ -4839,7 +4839,7 @@
       "metadata": {
         "canonical_file": "S_book_to_market_value_premium.py",
         "class": "BookToMarketValuePremium",
-        "description": "High book-to-market equity stocks earn a robust value premium over low B/M stocks across all US market eras because elevated B/M proxies for priced distress risk that factor covariance exposure — not mere characteristic compensation — explains."
+        "description": "High book-to-market equity stocks earn a robust value premium over low B/M stocks across all US market eras because elevated B/M proxies for priced distress risk that factor covariance exposure \u2014 not mere characteristic compensation \u2014 explains."
       },
       "history": [
         {
@@ -4847,14 +4847,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-12)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -4889,7 +4889,7 @@
       "metadata": {
         "canonical_file": "S_fama_french_three_factor_anomalies.py",
         "class": "S_fama_french_three_factor_anomalies",
-        "description": "Most cross-sectional return anomalies tied to size, book-to-market, earnings/price, cashflow/price, sales growth, and long-term reversal are captured by a three-factor model (market, SMB, HML), implying rational ICAPM/APT risk compensation — with excess returns in high-B/M small-"
+        "description": "Most cross-sectional return anomalies tied to size, book-to-market, earnings/price, cashflow/price, sales growth, and long-term reversal are captured by a three-factor model (market, SMB, HML), implying rational ICAPM/APT risk compensation \u2014 with excess returns in high-B/M small-"
       },
       "history": [
         {
@@ -4897,14 +4897,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-12)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -4953,14 +4953,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-12)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -5019,15 +5019,15 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-05-21; needs \u2265 2025-01-06)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31\u21922026-05-21; needs \u2265 2025-01-06)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "earnings",
@@ -5078,13 +5078,13 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-12)"
               ],
               "missing_columns": [
                 "financials"
@@ -5127,15 +5127,15 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "earnings_calendar: backfilled but insufficient (2025-03-31→2026-05-21; needs ≥ 2025-01-06)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-05-21; needs \u2265 2025-01-06)",
+                "earnings_calendar: backfilled but insufficient (2025-03-31\u21922026-05-21; needs \u2265 2025-01-06)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "earnings",
@@ -5192,14 +5192,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-03-31; needs ≥ 2022-12-12)",
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-03-31; needs \u2265 2022-12-12)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "financials"
@@ -5249,7 +5249,7 @@
       "metadata": {
         "canonical_file": "s_idiosyncratic_vol_puzzle.py",
         "class": "S_idiosyncratic_vol_puzzle",
-        "description": "Stocks with high idiosyncratic volatility — measured as the std-dev of daily Fama-French three-factor residuals over the prior month — earn anomalously low subsequent returns that cannot be explained by size, book-to-market, momentum, or liquidity, enabling a long low-IVOL / shor",
+        "description": "Stocks with high idiosyncratic volatility \u2014 measured as the std-dev of daily Fama-French three-factor residuals over the prior month \u2014 earn anomalously low subsequent returns that cannot be explained by size, book-to-market, momentum, or liquidity, enabling a long low-IVOL / shor",
         "eligible_regimes": [
           "HIGH_VOL",
           "CRISIS"
@@ -5262,14 +5262,14 @@
           "to_state": "staging",
           "timestamp": "2026-05-25T14:46:13.679Z",
           "actor": "saturday_brain",
-          "reason": "Tier-B: data fetchable but not backfilled — awaiting operator approval",
+          "reason": "Tier-B: data fetchable but not backfilled \u2014 awaiting operator approval",
           "metadata": {
             "decision": {
               "tier": "B",
               "reasons": [
-                "returns: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
-                "prices: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
+                "returns: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-05-25, providers polygon/yahoo/alpha_vantage/computed)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -5396,7 +5396,7 @@
       "metadata": {
         "canonical_file": "s15_insider_opportunistic_short.py",
         "class": "OpportunisticInsiderShort",
-        "description": "Opportunistic insider cluster SHORT — Cohen-Malloy-Pomorski 2012 classifier",
+        "description": "Opportunistic insider cluster SHORT \u2014 Cohen-Malloy-Pomorski 2012 classifier",
         "spec": "docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md",
         "added": "2026-05-28",
         "regime_agnostic_sharpe": true,
@@ -5548,10 +5548,10 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-12, providers polygon/yahoo/alpha_vantage)",
-                "realized_vol: backfilled (2016-04-10→2026-06-12, providers polygon/yahoo/alpha_vantage/computed)",
+                "prices: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage)",
+                "realized_vol: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage/computed)",
                 "macro: reachable but not backfilled (providers yfinance)",
-                "returns: backfilled (2016-04-10→2026-06-12, providers polygon/yahoo/alpha_vantage/computed)"
+                "returns: backfilled (2016-04-10\u21922026-06-12, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "macro"
@@ -5586,7 +5586,7 @@
       "metadata": {
         "canonical_file": "S_ast_betting_against_beta_factor_in_stocks.py",
         "class": "BettingAgainstBetaFactorInStocks",
-        "description": "Long lowest-beta decile, short highest-beta decile; both rescaled to beta≈1 for a zero-beta spread (Frazzini & Pedersen 2014)."
+        "description": "Long lowest-beta decile, short highest-beta decile; both rescaled to beta\u22481 for a zero-beta spread (Frazzini & Pedersen 2014)."
       },
       "history": [],
       "instrument_class": "equity"
@@ -5735,7 +5735,7 @@
       "metadata": {
         "canonical_file": "oxf_bull_oops.py",
         "class": "OxfBullOops",
-        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill."
+        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -5779,7 +5779,7 @@
       "metadata": {
         "canonical_file": "oxf_false_breakout.py",
         "class": "OxfFalseBreakout",
-        "description": "Failed channel-breakout fade on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat false-breakout-1). Buy a failed downside breakout: new N-bar low with the prior N-bar low >=5 bars earlier, then a confirmed recovery pierce on signal-day OHLC; close[t+1] fill. Page-faithful (single channel, drops plan ch2)."
+        "description": "Failed channel-breakout fade on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat false-breakout-1). Buy a failed downside breakout: new N-bar low with the prior N-bar low >=5 bars earlier, then a confirmed recovery pierce on signal-day OHLC; close[t+1] fill. Page-faithful (single channel, drops plan ch2)."
       },
       "history": [
         {
@@ -5857,7 +5857,7 @@
       "metadata": {
         "canonical_file": "oxf_gap_a.py",
         "class": "OxfGapA",
-        "description": "Full-gap continuation in trend direction on liquid ETFs — confirmed daily-bar adaptation (oxfordstrat gap-pattern). Full gap + Donchian trend filter confirmed on signal-day OHLC; close[t+1] fill."
+        "description": "Full-gap continuation in trend direction on liquid ETFs \u2014 confirmed daily-bar adaptation (oxfordstrat gap-pattern). Full gap + Donchian trend filter confirmed on signal-day OHLC; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -5868,7 +5868,7 @@
       "metadata": {
         "canonical_file": "oxf_greatest_swing_value.py",
         "class": "OxfGreatestSwingValue",
-        "description": "GSV greatest-swing-value volatility breakout with trend filter on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat greatest-swing-value-trend). Buy stop at Open+GSV confirmed on signal-day OHLC; close[t+1] fill."
+        "description": "GSV greatest-swing-value volatility breakout with trend filter on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat greatest-swing-value-trend). Buy stop at Open+GSV confirmed on signal-day OHLC; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -5919,7 +5919,7 @@
       "metadata": {
         "canonical_file": "oxf_hook.py",
         "class": "OxfHook",
-        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill."
+        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6072,7 +6072,7 @@
       "metadata": {
         "canonical_file": "oxf_nr7.py",
         "class": "OxfNR7",
-        "description": "NR7 narrow-range breakout on liquid ETFs — daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill."
+        "description": "NR7 narrow-range breakout on liquid ETFs \u2014 daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6083,7 +6083,7 @@
       "metadata": {
         "canonical_file": "oxf_orbp_momentum.py",
         "class": "OxfOrbpMomentum",
-        "description": "ORBP opening-range-breakout-preference with momentum trend filter on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat orbp-trend). Buy stop at Open+Stretch confirmed on signal-day OHLC; close[t+1] fill."
+        "description": "ORBP opening-range-breakout-preference with momentum trend filter on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat orbp-trend). Buy stop at Open+Stretch confirmed on signal-day OHLC; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6105,7 +6105,7 @@
       "metadata": {
         "canonical_file": "oxf_ross_hook.py",
         "class": "OxfRossHook",
-        "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill."
+        "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6176,7 +6176,7 @@
       "metadata": {
         "canonical_file": "oxf_smash_day_b.py",
         "class": "OxfSmashDayB",
-        "description": "Smash-day B1 reversal on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat smash-day-pattern-b1). Prior-bar smash setup + trend filter, prior-high pierce confirmed on signal-day OHLC; close[t+1] fill."
+        "description": "Smash-day B1 reversal on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat smash-day-pattern-b1). Prior-bar smash setup + trend filter, prior-high pierce confirmed on signal-day OHLC; close[t+1] fill."
       },
       "history": [
         {
@@ -6249,7 +6249,7 @@
       "metadata": {
         "canonical_file": "oxf_welles_wilder_breakout.py",
         "class": "OxfWellesWilderBreakout",
-        "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill."
+        "description": "Welles Wilder volatility breakout on liquid ETFs \u2014 confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6260,7 +6260,7 @@
       "metadata": {
         "canonical_file": "oxf_wyckoff_meanrev.py",
         "class": "OxfWyckoffMeanrev",
-        "description": "Wyckoff trap mean-reversion on liquid ETFs — swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill."
+        "description": "Wyckoff trap mean-reversion on liquid ETFs \u2014 swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6360,7 +6360,7 @@
       "metadata": {
         "canonical_file": "S_triangulated_stat_arb_triplets.py",
         "class": "TriangulatedStatArbTriplets",
-        "description": "Triangulated stat arb across stock triplets — OLS hedge ratio z-score mean reversion."
+        "description": "Triangulated stat arb across stock triplets \u2014 OLS hedge ratio z-score mean reversion."
       },
       "history": [],
       "instrument_class": "equity"
@@ -6393,7 +6393,7 @@
       "metadata": {
         "canonical_file": "S_ast_short_term_reversal_in_stocks.py",
         "class": "AstShortTermReversalInStocks",
-        "description": "Large-cap stocks that underperformed last week mean-revert upward, while last month's winners revert downward — exploiting short-term price reversal in the top 100 US stocks by market cap.",
+        "description": "Large-cap stocks that underperformed last week mean-revert upward, while last month's winners revert downward \u2014 exploiting short-term price reversal in the top 100 US stocks by market cap.",
         "eligible_regimes": [
           "TRANSITIONING",
           "HIGH_VOL"
@@ -6482,7 +6482,7 @@
       "metadata": {
         "canonical_file": "S_ast_paired_switching.py",
         "class": "AstPairedSwitching",
-        "description": "Hold 100% in whichever of SPY or AGG had higher trailing-quarter return; switch quarterly — exploiting the negative equity/bond correlation to rotate into the recent winner."
+        "description": "Hold 100% in whichever of SPY or AGG had higher trailing-quarter return; switch quarterly \u2014 exploiting the negative equity/bond correlation to rotate into the recent winner."
       },
       "history": [],
       "instrument_class": "etp"
@@ -6493,7 +6493,7 @@
       "metadata": {
         "canonical_file": "S_microcap_insider_purchase_momentum.py",
         "class": "MicrocapInsiderPurchaseMomentum",
-        "description": "Momentum-confirmed insider open-market purchases in microcaps ($30M–$500M) proxy for slow information incorporation in illiquid markets."
+        "description": "Momentum-confirmed insider open-market purchases in microcaps ($30M\u2013$500M) proxy for slow information incorporation in illiquid markets."
       },
       "history": [],
       "instrument_class": "equity"
@@ -6515,7 +6515,7 @@
       "metadata": {
         "canonical_file": "S_ast_option_expiration_week_effect.py",
         "class": "OptionExpirationWeekEffect",
-        "description": "Long OEF (S&P 100 ETF) during Mon–Thu of monthly options-expiration week; cash on expiration Friday and all other days.",
+        "description": "Long OEF (S&P 100 ETF) during Mon\u2013Thu of monthly options-expiration week; cash on expiration Friday and all other days.",
         "eligible_regimes": [
           "LOW_VOL"
         ]
@@ -6554,8 +6554,8 @@
               "tier": "B",
               "reasons": [
                 "macro: reachable but not backfilled (providers yfinance)",
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "returns: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage/computed)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "returns: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage/computed)"
               ],
               "missing_columns": [
                 "macro"
@@ -6582,7 +6582,7 @@
       "metadata": {
         "canonical_file": "s_ast_value_book_to_market_factor.py",
         "class": "S_ast_value_book_to_market_factor",
-        "description": "Stocks with low price-to-book ratios (cheap/value) outperform stocks with high price-to-book ratios (expensive/growth) — the HML factor — when held in an equal-weighted long-short portfolio rebalanced monthly."
+        "description": "Stocks with low price-to-book ratios (cheap/value) outperform stocks with high price-to-book ratios (expensive/growth) \u2014 the HML factor \u2014 when held in an equal-weighted long-short portfolio rebalanced monthly."
       },
       "history": [
         {
@@ -6595,8 +6595,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6636,8 +6636,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6677,8 +6677,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6718,8 +6718,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6759,8 +6759,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6800,7 +6800,7 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
                 "macro: reachable but not backfilled (providers yfinance)"
               ],
               "missing_columns": [
@@ -6841,8 +6841,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -6869,7 +6869,7 @@
       "metadata": {
         "canonical_file": "s_ast_earnings_announcements_combined_with_stock_repurchases.py",
         "class": "S_ast_earnings_announcements_combined_with_stock_repurchases",
-        "description": "Stocks announcing buybacks (≥5% of shares) in the 30-to-15 days window before an earnings announcement outperform around the announcement window (-10 to +15 days), as the combined signal of shareholder-friendly capital allocation and upcoming earnings creates a positive drift."
+        "description": "Stocks announcing buybacks (\u22655% of shares) in the 30-to-15 days window before an earnings announcement outperform around the announcement window (-10 to +15 days), as the combined signal of shareholder-friendly capital allocation and upcoming earnings creates a positive drift."
       },
       "history": [
         {
@@ -6882,8 +6882,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-06-25; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-06-25; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "earnings"
@@ -6923,8 +6923,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "earnings: backfilled but insufficient (2025-03-31→2026-06-25; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "earnings: backfilled but insufficient (2025-03-31\u21922026-06-25; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "earnings"
@@ -6964,8 +6964,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -7005,8 +7005,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -7046,8 +7046,8 @@
             "decision": {
               "tier": "B",
               "reasons": [
-                "prices: backfilled (2016-04-10→2026-06-26, providers polygon/yahoo/alpha_vantage)",
-                "financials: backfilled but insufficient (2023-06-30→2026-05-10; needs ≥ 2021-06-29)"
+                "prices: backfilled (2016-04-10\u21922026-06-26, providers polygon/yahoo/alpha_vantage)",
+                "financials: backfilled but insufficient (2023-06-30\u21922026-05-10; needs \u2265 2021-06-29)"
               ],
               "missing_columns": [
                 "financials"
@@ -7067,6 +7067,382 @@
         }
       ],
       "instrument_class": "equity"
+    },
+    "S_overnight_intraday_tug_of_war": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:07:49.422640+00:00",
+      "metadata": {
+        "canonical_file": "S_overnight_intraday_tug_of_war.py",
+        "class": "OvernightIntradayTugOfWar",
+        "description": "Cross-sectional overnight-vs-intraday return decomposition (Lou-Polk-Skouras 2019): LONG top decile trailing 60d overnight-minus-intraday spread, SHORT bottom decile, monthly.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_volume_shock_overnight_drift": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:20.898033+00:00",
+      "metadata": {
+        "canonical_file": "S_volume_shock_overnight_drift.py",
+        "class": "VolumeShockOvernightDrift",
+        "description": "Volume z-score > 2.5 vs 60d on an up-day with day return > +2% -> LONG next-day drift continuation; daily scan, 5-session per-name cooldown, <=15 signals/day.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_retail_trade_size_reversal": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:21.609590+00:00",
+      "metadata": {
+        "canonical_file": "S_retail_trade_size_reversal.py",
+        "class": "RetailTradeSizeReversal",
+        "description": "Avg trade size = volume/transactions; 20d z of its daily change < -1.5 on a +8% 10d run -> SHORT reversal (retail herding); mirror LONG on rising prints into -8%. Weekly, <=10/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_vwap_closing_pressure": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:22.292190+00:00",
+      "metadata": {
+        "canonical_file": "S_vwap_closing_pressure.py",
+        "class": "VwapClosingPressure",
+        "description": "10d mean of (close-vwap)/vwap: LONG top decile (accumulation into the close), SHORT bottom decile (distribution); refreshed every 2 weeks, <=10/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_amihud_illiquidity_premium": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:22.981724+00:00",
+      "metadata": {
+        "canonical_file": "S_amihud_illiquidity_premium.py",
+        "class": "AmihudIlliquidityPremium",
+        "description": "Amihud ILLIQ = |ret|/(close*volume), 60d mean ranked within the liquid-500 pool: LONG most-illiquid quintile, SHORT least-illiquid; monthly, <=12/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_max_lottery_demand_reversal": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:24.008323+00:00",
+      "metadata": {
+        "canonical_file": "S_max_lottery_demand_reversal.py",
+        "class": "MaxLotteryDemandReversal",
+        "description": "Cross-sectional lottery anomaly (Bali-Cakici-Whitelaw 2011): MAX5 = mean of the 5 largest daily returns in trailing 21d; SHORT top decile, LONG bottom decile, monthly.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_downside_beta_premium": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:24.627442+00:00",
+      "metadata": {
+        "canonical_file": "S_downside_beta_premium.py",
+        "class": "DownsideBetaPremium",
+        "description": "Ang-Chen-Xing 2006 downside risk: beta on SPY-down days minus beta on SPY-up days over 252d; LONG top quintile of the spread, SHORT bottom quintile; monthly, <=12/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_52wk_low_capitulation_reversal": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:25.270580+00:00",
+      "metadata": {
+        "canonical_file": "S_52wk_low_capitulation_reversal.py",
+        "class": "FiftyTwoWeekLowCapitulationReversal",
+        "description": "Close within 5% of the 252d low + volume z>2 + first up-close after >=3 down days -> LONG capitulation reversal; <=10/day, 21d per-name cooldown.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_same_month_seasonality": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:25.824144+00:00",
+      "metadata": {
+        "canonical_file": "S_same_month_seasonality.py",
+        "class": "SameMonthSeasonality",
+        "description": "Heston-Sadka same-calendar-month seasonality: LONG top decile of mean same-month return over prior years (>=4 obs) at month start; no short leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_breadth_divergence_timing": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:26.502998+00:00",
+      "metadata": {
+        "canonical_file": "S_breadth_divergence_timing.py",
+        "class": "BreadthDivergenceTiming",
+        "description": "SPY timer: SHORT on 20d SPY strength (+2%) with breadth <45% (3-day confirmation); LONG on first 5-day breadth improvement after a <15% washout. Breadth = % of liquid pool above 50d SMA. 10d cooldown.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_no_news_momentum": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:27.135035+00:00",
+      "metadata": {
+        "canonical_file": "S_no_news_momentum.py",
+        "class": "NoNewsMomentum",
+        "description": "Hong-Lim-Stein: 12-1 momentum long/short ONLY within the lowest tercile of trailing 60d news coverage (sum news_count_24h); monthly, <=10/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_sentiment_price_divergence": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:27.970943+00:00",
+      "metadata": {
+        "canonical_file": "S_sentiment_price_divergence.py",
+        "class": "SentimentPriceDivergence",
+        "description": "20d news_mean_score slope z > +1 while 20d price return < 0 -> LONG (delayed incorporation); mirror SHORT; weekly, <=8/leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_insider_drawdown_confirmation": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:28.790239+00:00",
+      "metadata": {
+        "canonical_file": "S_insider_drawdown_confirmation.py",
+        "class": "InsiderDrawdownConfirmation",
+        "description": "Price >=30% below 252d high + trailing 45d net insider buys >= $200k across >=2 distinct insiders -> LONG informed bottom-fishing; <=8/day, 21d per-name cooldown.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_insider_seller_strike": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:29.415362+00:00",
+      "metadata": {
+        "canonical_file": "S_insider_seller_strike.py",
+        "class": "InsiderSellerStrike",
+        "description": "Routine insider sellers (sells in >=5 distinct months of t-15m..t-3m) with ZERO sells in the trailing 90d -> LONG (seller silence = private good news; Gao-Ma-Ng). Monthly, <=10 names.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_pre_earnings_vol_runup": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:30.214765+00:00",
+      "metadata": {
+        "canonical_file": "S_pre_earnings_vol_runup.py",
+        "class": "PreEarningsVolRunup",
+        "description": "BUY_VOL when earnings_dte in [5,12] and iv_rank < 40 \u2014 harvest the pre-earnings IV ramp while vol is still cheap (Dubinsky-Johannes). One shot per name per earnings cycle, <=8/day.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_implied_correlation_timing": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:31.049452+00:00",
+      "metadata": {
+        "canonical_file": "S_implied_correlation_timing.py",
+        "class": "ImpliedCorrelationTiming",
+        "description": "Implied-corr proxy = SPY iv30^2 / mean single-name iv30^2; >80th pctile of trailing 252 obs for 3 consecutive days -> SHORT SPY, <20th -> LONG SPY; weekly.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_vix_term_structure_regime_timing": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:31.905556+00:00",
+      "metadata": {
+        "canonical_file": "S_vix_term_structure_regime_timing.py",
+        "class": "VixTermStructureRegimeTiming",
+        "description": "VIX9D/VIX and VIX/VIX3M both <0.95 for 3 days (full contango) -> LONG SPY; both >1.02 for 3 days (backwardation) -> LONG XLP+XLU defensive pair; edge-triggered with 10d cooldown.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_preholiday_effect": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:32.880944+00:00",
+      "metadata": {
+        "canonical_file": "S_preholiday_effect.py",
+        "class": "PreholidayEffect",
+        "description": "LONG SPY 2 trading days before each NYSE holiday (Ariel 1990; Lakonishok-Smidt 1988); deterministic in-code exchange-rule holiday set; exits via brackets/hold.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_quarter_end_rebalancing_flows": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:33.794482+00:00",
+      "metadata": {
+        "canonical_file": "S_quarter_end_rebalancing_flows.py",
+        "class": "QuarterEndRebalancingFlows",
+        "description": "QTD return spread SPY-IEF > +5% entering the last 5 sessions of a quarter -> SHORT SPY + LONG IEF (institutional rebalancing pressure); mirror when < -5%. ~2-4 trades/yr.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_eth_btc_relative_momentum": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:34.437697+00:00",
+      "metadata": {
+        "canonical_file": "S_eth_btc_relative_momentum.py",
+        "class": "EthBtcRelativeMomentum",
+        "description": "Weekly BTC-USD vs ETH-USD rotation: hold whichever coin has the higher trailing 90d return iff positive, else flat; 20% vol-target sizing.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "crypto"
+    },
+    "S_btc_equity_spillover": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:35.324905+00:00",
+      "metadata": {
+        "canonical_file": "S_btc_equity_spillover.py",
+        "class": "BtcEquitySpillover",
+        "description": "BTC-USD trailing 10d return > +15% -> LONG top-decile 120d-BTC-correlated liquid names; < -15% -> SHORT them. Weekly, max 8 per leg.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING",
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_regime_age_momentum": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:36.162894+00:00",
+      "metadata": {
+        "canonical_file": "S_regime_age_momentum.py",
+        "class": "RegimeAgeMomentum",
+        "description": "Self-computed regime age from historical_regimes.parquet: fresh regime (age <= 10d) -> LONG top-decile 6m momentum; LOW_VOL aged > 60d -> LONG bottom-decile 5d reversal picks. Weekly, max 10.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "CRISIS"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_crisis_quality_rebound": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:36.670255+00:00",
+      "metadata": {
+        "canonical_file": "S_crisis_quality_rebound.py",
+        "class": "CrisisQualityRebound",
+        "description": "HIGH_VOL/CRISIS only: LONG quality names (roe > 15%, D/E < 1) trading >= 25% below their 252d high whose 5d realized vol is declining; max 10/day, 10d per-name cooldown.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_factor_momentum_rotation": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:37.423145+00:00",
+      "metadata": {
+        "canonical_file": "S_factor_momentum_rotation.py",
+        "class": "FactorMomentumRotation",
+        "description": "Internal price factors (12-1 momentum, low-vol, 5d reversal) as daily top-minus-bottom-decile spread series; monthly LONG the current top-decile names of each factor whose trailing 63d spread return > 0. Max 15.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "HIGH_VOL"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_earnings_sue_pead": {
+      "state": "candidate",
+      "state_since": "2026-07-12T12:08:38.359600+00:00",
+      "metadata": {
+        "canonical_file": "S_earnings_sue_pead.py",
+        "class": "EarningsSuePead",
+        "description": "True SUE = (eps_actual - eps_estimated)/|eps_estimated| from earnings.parquet; first bar after report: LONG SUE > +10% in the trailing top quintile, SHORT < -10% in the bottom quintile. Max 10/day.",
+        "origin": "manual_research_2026_07_12",
+        "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
+      },
+      "history": [],
+      "instrument_class": "equity"
     }
   },
   "decommissioned": {
@@ -7075,35 +7451,35 @@
       "original_file": "implementations/decommissioned/dual_momentum.py",
       "replaced_by": "S9_dual_momentum",
       "canonical_file": "s09_dual_momentum.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "quality_value_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/quality_value.py",
       "replaced_by": "S10_quality_value",
       "canonical_file": "s10_quality_value.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "insider_cluster_buy_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/insider_cluster_buy.py",
       "replaced_by": "S12_insider",
       "canonical_file": "s12_insider.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "iv_rv_arb_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/iv_rv_arb.py",
       "replaced_by": "S15_iv_rv_arb",
       "canonical_file": "s15_iv_rv_arb.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     },
     "max_pain_original": {
       "archived_at": "2026-04-13T00:00:00+00:00",
       "original_file": "implementations/decommissioned/max_pain.py",
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
-      "reason": "R3 canonicalisation — numbered sXX_ version designated canonical"
+      "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
     }
   }
 }

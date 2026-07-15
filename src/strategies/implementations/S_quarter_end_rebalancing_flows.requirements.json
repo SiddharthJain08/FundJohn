@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_quarter_end_rebalancing_flows",
+  "required": ["prices"],
+  "optional": []
+}

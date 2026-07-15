@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_max_lottery_demand_reversal",
+  "required": ["prices"],
+  "optional": []
+}

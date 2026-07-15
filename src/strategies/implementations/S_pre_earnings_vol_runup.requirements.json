@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_pre_earnings_vol_runup",
+  "required": ["prices", "options_eod", "earnings"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_downside_beta_premium",
+  "required": ["prices"],
+  "optional": []
+}

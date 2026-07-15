@@ -1,0 +1,6 @@
+{
+  "strategy_id": "S_earnings_sue_pead",
+  "instrument_class": "equity",
+  "required": ["prices", "earnings"],
+  "optional": []
+}
