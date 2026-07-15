@@ -1,0 +1,262 @@
+from src.pipeline import options_eligibility as oe
+
+
+def test_parse_underlyings_extracts_distinct():
+    page = {'option_contracts': [
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101C1', 'tradable': True},
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101P1', 'tradable': True},
+        {'underlying_symbol': 'MSFT', 'symbol': 'MSFT260101C1', 'tradable': True},
+        {'symbol': 'NOUNDERLYING', 'tradable': True},   # missing field → skipped
+    ]}
+    assert oe._parse_underlyings(page) == {'AAPL', 'MSFT'}
+
+
+def test_parse_underlyings_skips_non_tradable_contracts():
+    # `--status active` still returns non-tradable contracts (~1.9% live). A name
+    # is eligible only via a TRADABLE contract; ZZZZ (all contracts non-tradable)
+    # must not appear, while AAPL survives on its one tradable leg.
+    page = {'option_contracts': [
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101C1', 'tradable': False},
+        {'underlying_symbol': 'AAPL', 'symbol': 'AAPL260101P1', 'tradable': True},
+        {'underlying_symbol': 'ZZZZ', 'symbol': 'ZZZZ260101C1', 'tradable': False},
+        {'underlying_symbol': 'YYYY', 'symbol': 'YYYY260101C1'},   # absent → not tradable
+    ]}
+    assert oe._parse_underlyings(page) == {'AAPL'}
+
+
+def test_parse_underlyings_empty_page():
+    assert oe._parse_underlyings({'option_contracts': []}) == set()
+    assert oe._parse_underlyings({}) == set()
+
+
+def _pager(pages):
+    """Return a fetch_page(token) that walks a list of page dicts in order."""
+    seq = iter(pages)
+    def fetch(_token):
+        return next(seq)
+    return fetch
+
+
+def test_enumerate_paginates_to_terminal():
+    pages = [
+        {'option_contracts': [{'underlying_symbol': 'AA', 'tradable': True}], 'next_page_token': 't1'},
+        {'option_contracts': [{'underlying_symbol': 'AAPL', 'tradable': True}], 'next_page_token': 't2'},
+        {'option_contracts': [{'underlying_symbol': 'MSFT', 'tradable': True}], 'next_page_token': None},
+    ]
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=_pager(pages))
+    assert optionable == {'AA', 'AAPL', 'MSFT'}
+    assert completed is True
+    assert n == 3
+
+
+def test_enumerate_incomplete_on_page_error():
+    def fetch(_token):
+        raise RuntimeError('boom')
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
+    assert completed is False
+    assert optionable == set()
+
+
+def test_enumerate_incomplete_on_budget():
+    pages = [{'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 't1'}] * 5
+    # clock jumps past the deadline immediately on the first budget check
+    ticks = iter([0, 1000, 1001, 1002, 1003, 1004])
+    optionable, completed, n = oe.enumerate_optionable_underlyings(
+        fetch_page=_pager(pages), budget_s=10, clock=lambda: next(ticks))
+    assert completed is False
+
+
+def test_fetch_contracts_page_parses_stdout(monkeypatch):
+    class _R:
+        returncode = 0
+        stdout = ('{"option_contracts": [{"underlying_symbol": "AAPL", "tradable": true}], '
+                  '"next_page_token": null}')
+        stderr = ''
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    page = oe._fetch_contracts_page()
+    assert oe._parse_underlyings(page) == {'AAPL'}
+
+
+def test_fetch_contracts_page_raises_on_nonzero(monkeypatch):
+    class _R:
+        returncode = 1
+        stdout = ''
+        stderr = 'unauthorized'
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    import pytest
+    with pytest.raises(RuntimeError):
+        oe._fetch_contracts_page()
+
+
+def test_fetch_contracts_page_builds_pagetoken_args(monkeypatch):
+    seen = {}
+    class _R:
+        returncode = 0
+        stdout = '{"option_contracts": []}'
+        stderr = ''
+    def fake_run(args, **k):
+        seen['args'] = args
+        return _R()
+    monkeypatch.setattr(oe.subprocess, 'run', fake_run)
+    oe._fetch_contracts_page(page_token='abc', limit=500)
+    assert '--page-token' in seen['args'] and 'abc' in seen['args']
+    assert '--status' in seen['args'] and 'active' in seen['args']
+    assert '500' in seen['args']
+
+
+def test_load_prior_cache_missing_returns_empty(tmp_path):
+    assert oe._load_prior_cache(tmp_path / 'nope.json') == {}
+
+
+def test_atomic_write_and_reload_roundtrip(tmp_path):
+    p = tmp_path / 'sub' / 'cache.json'      # parent dir does not exist yet
+    oe._atomic_write_cache({'AAPL': True, 'MSFT': True}, p)
+    assert oe._load_prior_cache(p) == {'AAPL': True, 'MSFT': True}
+    # no leftover temp file
+    assert list(p.parent.glob('*.tmp')) == []
+
+
+def test_atomic_write_replaces_existing(tmp_path):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'OLD': True}, p)
+    oe._atomic_write_cache({'NEW': True}, p)
+    assert oe._load_prior_cache(p) == {'NEW': True}
+
+
+def test_build_eligibility_intersects_and_trues_only():
+    optionable = {'AAPL', 'MSFT', 'SPX', 'TSLA'}     # SPX not in our universe
+    universe = {'AAPL', 'MSFT', 'TSLA', 'KO'}        # KO not optionable
+    out = oe.build_eligibility(optionable, universe)
+    assert out == {'AAPL': True, 'MSFT': True, 'TSLA': True}   # KO absent, SPX dropped
+
+
+def test_decide_write_incomplete_never_writes():
+    ok, reason = oe.decide_write({'AAPL': True}, {}, completed=False)
+    assert ok is False and 'incomplete' in reason
+
+
+def test_decide_write_first_run_above_abs_floor():
+    new = {f'S{i}': True for i in range(1500)}        # 1500 >= 1000
+    ok, _ = oe.decide_write(new, {}, completed=True, abs_floor=1000)
+    assert ok is True
+
+
+def test_decide_write_below_abs_floor_keeps_prior():
+    new = {f'S{i}': True for i in range(500)}         # 500 < 1000
+    ok, reason = oe.decide_write(new, {}, completed=True, abs_floor=1000)
+    assert ok is False and 'floor' in reason
+
+
+def test_decide_write_relative_floor_blocks_implausible_shrink():
+    prior = {f'S{i}': True for i in range(5000)}
+    new = {f'S{i}': True for i in range(2000)}        # 2000 < 0.5*5000=2500
+    ok, reason = oe.decide_write(new, prior, completed=True, abs_floor=1000)
+    assert ok is False and 'floor' in reason
+
+
+def test_format_summary_contains_counts():
+    s = oe._format_summary({'eligible': 4200, 'universe': 13845, 'pages': 132,
+                            'added': 10, 'removed': 3, 'secs': 640.0, 'action': 'WROTE'})
+    assert '4200' in s and '13845' in s and '132' in s and 'WROTE' in s
+
+
+def test_post_summary_noop_when_no_url(monkeypatch):
+    called = {'n': 0}
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', lambda *a, **k: called.__setitem__('n', called['n'] + 1))
+    oe._post_summary('hi', webhook_url='')
+    assert called['n'] == 0
+
+
+def test_post_summary_failopen(monkeypatch):
+    import urllib.request
+    def boom(*a, **k):
+        raise OSError('network down')
+    monkeypatch.setattr(urllib.request, 'urlopen', boom)
+    oe._post_summary('hi', webhook_url='https://example/wh')   # must not raise
+
+
+def test_main_writes_cache_on_complete_sweep(tmp_path, monkeypatch):
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings',
+                        lambda **k: ({f'S{i}' for i in range(2000)} | {'AAPL'}, True, 5))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {f'S{i}' for i in range(2000)} | {'AAPL', 'KO'})
+    rc = oe.main([])
+    assert rc == 0
+    data = oe._load_prior_cache(tmp_path / 'cache.json')
+    assert data.get('AAPL') is True and 'KO' not in data
+    assert sum(1 for v in data.values() if v) == 2001
+
+
+def test_main_keeps_prior_on_incomplete_sweep(tmp_path, monkeypatch):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'PRIOR': True}, p)
+    monkeypatch.setattr(oe, 'CACHE_PATH', p)
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: (set(), False, 1))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {'PRIOR', 'X'})
+    rc = oe.main([])
+    assert rc == 1
+    assert oe._load_prior_cache(p) == {'PRIOR': True}   # untouched
+
+
+def test_main_keeps_prior_below_floor(tmp_path, monkeypatch):
+    p = tmp_path / 'cache.json'
+    oe._atomic_write_cache({'PRIOR': True}, p)
+    monkeypatch.setattr(oe, 'CACHE_PATH', p)
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: ({'AAPL'}, True, 3))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {'AAPL', 'PRIOR'})
+    rc = oe.main([])
+    assert rc == 1
+    assert oe._load_prior_cache(p) == {'PRIOR': True}   # below abs_floor → kept
+
+
+def test_fetch_contracts_page_raises_on_rc0_error_envelope(monkeypatch):
+    class _R:
+        returncode = 0
+        stdout = '{"code":0,"error":"authentication required","hint":"","status":0}'
+        stderr = ''
+    monkeypatch.setattr(oe.subprocess, 'run', lambda *a, **k: _R())
+    import pytest
+    with pytest.raises(RuntimeError):
+        oe._fetch_contracts_page()
+
+
+def test_enumerate_incomplete_on_midsweep_error_keeps_partial():
+    calls = {'n': 0}
+    def fetch(_token):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return {'option_contracts': [{'underlying_symbol': 'AA', 'tradable': True}],
+                    'next_page_token': 't1'}
+        raise RuntimeError('envelope error')
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
+    assert completed is False          # mid-sweep failure -> prior kept by caller
+    assert 'AA' in optionable          # partial accumulation, but not committed
+
+
+def test_enumerate_aborts_on_repeating_token():
+    def fetch(_token):
+        return {'option_contracts': [{'underlying_symbol': 'AA'}], 'next_page_token': 'SAME'}
+    optionable, completed, n = oe.enumerate_optionable_underlyings(fetch_page=fetch)
+    assert completed is False          # repeated token -> abort, not infinite loop
+
+
+def test_main_writes_at_alpaca_tradable_scale(tmp_path, monkeypatch):
+    # ~676 Alpaca-tradable underlyings must clear the recalibrated floor (400);
+    # this would have FAILED under the old 1000 floor.
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings',
+                        lambda **k: ({f'U{i}' for i in range(676)}, True, 10))
+    monkeypatch.setattr(oe, '_load_universe', lambda: {f'U{i}' for i in range(676)})
+    assert oe.main([]) == 0
+    assert sum(oe._load_prior_cache(tmp_path / 'cache.json').values()) == 676
+
+
+def test_main_returns_1_on_load_universe_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(oe, 'CACHE_PATH', tmp_path / 'cache.json')
+    monkeypatch.setattr(oe, 'enumerate_optionable_underlyings', lambda **k: ({'AAPL'}, True, 5))
+    def boom():
+        raise KeyError('POSTGRES_URI')
+    monkeypatch.setattr(oe, '_load_universe', boom)
+    assert oe.main([]) == 1                              # never raises; returns 1
+    assert not (tmp_path / 'cache.json').exists()        # nothing written

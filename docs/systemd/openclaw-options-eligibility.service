@@ -1,0 +1,29 @@
+[Unit]
+Description=SP-7 D1 options_eligible producer (weekly bulk chain-probe)
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+Group=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+# data/ is root-owned, so claudebot cannot create data/.cache itself: the
+# producer's mkdir would PermissionError, and its never-raise contract turns
+# that into exit 1 (== KEPT-PRIOR), which SuccessExitStatus below reports as a
+# clean run — a silent no-op. Create + chown the dir as root first (+ is
+# best-effort so a pre-existing dir never fails the unit). 2026-07-15.
+ExecStartPre=+/bin/mkdir -p /root/openclaw/data/.cache
+ExecStartPre=+/bin/chown claudebot:claudebot /root/openclaw/data/.cache
+ExecStart=/usr/bin/python3 -m src.pipeline.options_eligibility
+StandardOutput=append:/var/log/openclaw-options-eligibility.log
+StandardError=append:/var/log/openclaw-options-eligibility.log
+# exit 1 == deliberate KEPT-PRIOR (incomplete sweep / sanity floor), not a crash.
+# A genuinely broken producer surfaces via the options_eligibility_freshness
+# system_check (cache missing/stale/too-small), not via unit state.
+SuccessExitStatus=0 1
+TimeoutStartSec=2400
+
+[Install]
+WantedBy=multi-user.target
