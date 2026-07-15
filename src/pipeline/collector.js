@@ -224,6 +224,60 @@ async function adoptedUnionScope(configTickers, dateStr) {
   }
 }
 
+// ── EOD freshness SCOPE (2026-07-15 incident) ────────────────────────────────
+// The freshness gate asks one question: "is the panel `signals` reads fresh?"
+// It is NOT "is every ticker we opportunistically fetch fresh?". Those are
+// different sets, and conflating them halted the fund for five days.
+//
+// The price fetch runs on the wide resolver envelope BY DESIGN (SP-7 C2) so
+// history keeps accruing for names a strategy may adopt later. Reusing that same
+// wide list as the gate's denominator drags in thousands of instruments no
+// strategy trades — dead OTC ADRs Alpaca's SIP feed cannot carry, delisted
+// names, sporadic SPAC units — which can never be fresh at 16:15 ET. Measured on
+// the real 07-14 cohort:
+//
+//   priceEquityTickers (envelope) 12,699  stale 706  94.44%  FAIL  <- the halt
+//   universe_config equity         5,082  stale 174  96.58%  pass
+//   live-strategy union            7,004  stale  56  99.20%  pass  <- 4.2pp room
+//
+// 650 of the 706 stale names were consumed by no live strategy. Fetch wide, gate
+// narrow.
+async function _signalsConsumedScope(configEquityTickers, priceEquityTickers, dateStr, {
+  unionFn = null,
+} = {}) {
+  const fetchable = new Set(priceEquityTickers);
+  // Intersect with what we actually fetch: demanding freshness for a ticker no
+  // phase ever fetches is an unsatisfiable gate that would halt every cycle.
+  // The resolver emits dot-form share classes (BRK.B) while universe_config
+  // stores dash-form (BRK-B) — bridge with the same anchored single-letter rule
+  // used at :190/:217 so the name doesn't silently drop out of the scope.
+  const scope = (list) => [...new Set(list.map(t => t.replace(/^([A-Z]+)\.([A-Z])$/, '$1-$2')))]
+    .filter(t => fetchable.has(t)).sort();
+
+  try {
+    const readUnion = unionFn || (async () => {
+      const { getClient } = require('../database/redis');
+      return readUnionUniverseFromRedis(getClient(), dateStr, 'live', 'union');
+    });
+    const union = await readUnion();
+    if (union && union.length) {
+      const scoped = scope(union);
+      if (scoped.length) return scoped;
+      console.warn('[collector] freshness scope: union resolved but nothing intersects the fetch set — falling back to universe_config');
+    } else {
+      console.warn('[collector] freshness scope: live-strategy union unavailable — falling back to universe_config');
+    }
+  } catch (e) {
+    console.warn(`[collector] freshness scope: union read failed (${e.message}) — falling back to universe_config`);
+  }
+
+  // Degraded fallback is universe_config — NEVER priceEquityTickers. The wide
+  // envelope is the exact denominator this gate exists to avoid; falling back to
+  // it would silently reinstate the halt on the one day the resolver is down.
+  // Config still reflects panel health (96.58% on the 07-14 cohort, i.e. pass).
+  return scope(configEquityTickers);
+}
+
 // ── Market-hours detection (ET, Mon–Fri 9:30–16:00) ─────────────────────────
 function isMarketHours() {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -654,7 +708,22 @@ async function fillPricesAlpaca(ticker, fromDate, toDate) {
   // Share-class separator: universe convention is `BRK-B` (yfinance style);
   // Alpaca expects `BRK.B`. Translate the API symbol only — rows stay keyed
   // by the universe ticker so downstream consumers don't drift.
-  const apiSymbol = /^[A-Z]+-[A-Z]$/.test(ticker) ? ticker.replace('-', '.') : ticker;
+  //
+  // This was anchored to a SINGLE trailing letter (`/^[A-Z]+-[A-Z]$/`), which
+  // silently 400'd every multi-char class suffix. 72 dash-form names that Alpaca
+  // reports `active`+`tradable` on a lit exchange — mostly preferred (`AGM-PRI`,
+  // `ALL-PRH`, `BA-PRA`, `BAC-PRQ`, `C-PRN`) — never received a bar and sat
+  // permanently stale in data_coverage, dragging the EOD freshness gate down.
+  // The failure was invisible: the 400 hit fillPricesAlpaca's invalid-symbol
+  // branch (warn + return 0), and updateCoverage then CORRECTLY refused to
+  // advance on a zero-row fetch — so the fetch "succeeded", coverage stayed
+  // honest, and nothing ever alerted. Measured 2026-07-15 — every suffix class
+  // resolves as dot-form and 400s as dash-form:
+  //   BRK-B / AGM-PRI / AKO-A / AIIA-U / ALUB-WS / OXY-WS / AHT-PRF
+  //   → dash = "invalid symbol", dot = real bars (AGM.PRI current through today)
+  // so the bridge is unconditional on the first separator. Crypto (`BTC-USD`)
+  // never reaches here — it routes to fillPricesAlpacaCrypto.
+  const apiSymbol = ticker.replace('-', '.');
 
   const baseArgs = [
     'data', 'bars',
@@ -1928,7 +1997,14 @@ async function runDailyCollection() {
   // a substantially stale panel THROWS → run_collector_once exits non-zero →
   // the cycle aborts BEFORE the signals step (strict exit codes).
   if (eodCtx.requireToday && cfg.collect_prices !== 'false') {
-    await _verifyEquityFreshness(priceEquityTickers, eodCtx.todayEt, {
+    // Gate on what `signals` CONSUMES, not on everything we fetched. See
+    // _signalsConsumedScope: the wide fetch envelope is deliberate (history for
+    // future adoptions) but as a health denominator it drags in ~5.7k names no
+    // strategy trades and halts the fund over them.
+    const gateScope = await _signalsConsumedScope(
+      equityTickers, priceEquityTickers, eodCtx.todayEt);
+    notify(`🔎 EOD freshness scope: ${gateScope.length} consumed (of ${priceEquityTickers.length} fetched)`);
+    await _verifyEquityFreshness(gateScope, eodCtx.todayEt, {
       refetchFn: (stale) => runHistoricalPrices(historyDays, stale),
     });
     notify(`✅ EOD freshness gate passed — equity panel current through ${eodCtx.todayEt}`);
@@ -2232,4 +2308,4 @@ async function runIntegrityCheck() {
   }
 }
 
-module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };
+module.exports = { start, pause, resume, isRunning, isSleeping, getNextRun, getStats, setBroadcast, setDiscordHooks, loadConfig, runSnapshots, runHistoricalPrices, runOptions, fetchOptionsChain, runFundamentals, runInsiderTransactions, runNewsCollection, runIntegrityCheck, runDailyCollection, runEodRefresh, readUnionUniverseFromRedis, applyResolverEnvelope, adoptedUnionScope, _signalsConsumedScope, fillPricesAlpaca, fillPricesAlpacaCrypto, fillPricesFmpHistorical, runIntradaySnapshotPrices, _snapshotToPriceRow, loadQuarantineSet, isQuarantined, _quarantineSet, _eodFreshnessContext, _verifyEquityFreshness, _etParts, _optionsFlushThreshold, _shouldFlushOptions };
