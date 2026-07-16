@@ -189,37 +189,58 @@ def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str,
       - bars_by_ticker: {ticker: DataFrame indexed by date with open/high/low/close}
         for the bracket walk-forward
     """
-    # Column-pruned + categorical ticker (2026-07-16). This used to be a bare
-    # pd.read_parquet(PRICES_PARQUET) pulling ALL 10 columns; only OHLC is ever
-    # used (close_wide takes `close`; bars_by_ticker takes open/high/low/close),
-    # so volume/vwap/transactions/source were materialised and discarded —
-    # `source` alone is an object column ~900MB across the panel. After the
-    # 5-year history backfill doubled prices.parquet (9.5M → 18.7M rows) the old
-    # load OOM-killed outright (anon-rss 5.8GB, rc=137) on this 2-core/8GB
-    # no-swap box, i.e. the fleet re-backtest could not load its input at all.
-    # Pruning + a categorical ticker brings the peak to ~4.0GB. Measured, not
-    # assumed. See reference_vps_two_core_cpu: never load the whole parquet.
+    # Column-pruned + pyarrow-DICTIONARY read (2026-07-16). Two same-day evolutions,
+    # both forced by the 5-year backfill doubling prices.parquet (9.5M → 18.7M rows),
+    # which OOM-killed the bare pd.read_parquet(PRICES_PARQUET) outright (anon-rss
+    # 5.8GB, rc=137) on this 2-core/8GB no-swap box:
+    #   1. Prune to OHLC — the bare read pulled all 10 columns; `source` alone is a
+    #      ~900MB object column, materialised only to be discarded.
+    #   2. MEASURED (per-phase VmRSS probe): even pruned, the in-pandas
+    #      float32/categorical path peaked at ~2.05GB AT READ, because
+    #      pd.read_parquet materialises 18.7M object-dtype ticker strings (~640MB)
+    #      AND object-dtype date strings (~750MB) AND float64 OHLC (~285MB) before
+    #      any of them is compacted a few lines later. That transient — not the sim
+    #      loop — is what OOM-killed the heavy cross-sectionals (low_volatility_us
+    #      died at 18s, INSIDE this read). ticker AND date are BOTH
+    #      string+RLE_DICTIONARY on disk, so read_dictionary reads their codes
+    #      directly (no plain-string decode) and OHLC is cast to float32 IN ARROW;
+    #      to_pandas then yields a categorical+float32 panel with no fat pandas
+    #      transient. Read peak 2.05GB → 0.99GB, whole-load peak → ~1.15GB (now at
+    #      the sort), both measured live on the fleet.
+    # Output is byte-identical to the old path, verified by
+    # tests/test_arrow_dictionary_read_equivalence.py (close_wide values + column
+    # order + bars_by_ticker; exercises multi-row-group dictionary unification and
+    # the two traps: a categorical sort reorders columns, and a fully-quarantined
+    # ticker can leave a phantom pivot column). Only unified_backtest reads this
+    # (fleet/coupling/manual) — NOT the live daily sizer. float32 carries ~7 sig
+    # figs (ample for OHLC + stop/target tests; numpy upcasts in mean/std so Sharpe
+    # is unaffected). See reference_vps_two_core_cpu: never load the whole parquet.
     _COLS = ['ticker', 'date', 'open', 'high', 'low', 'close']
-    p = pd.read_parquet(PRICES_PARQUET, columns=_COLS)
-    # float32 OHLC (2026-07-16). After the 5-year backfill even the pruned panel
-    # peaks ~4.0GB, and with the ~4GB panel resident a cross-sectional strategy's
-    # own ranking arrays (12,508-wide) tip the 8GB no-swap box into OOM — measured:
-    # S22/S23/S24 (momentum/cross-sectional) all rc=137 with a clean 5GB box.
-    # Downcasting prices float64→float32 drops the panel peak to ~3.0GB (measured),
-    # restoring ~1GB of per-strategy headroom. float32 carries ~7 significant
-    # digits — ample for OHLC and for stop/target hit tests; numpy upcasts to
-    # float64 inside mean/std so Sharpe is unaffected beyond ~1e-6 relative. Only
-    # unified_backtest reads this (fleet/coupling/manual) — NOT the live daily sizer.
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    _tbl = pq.read_table(PRICES_PARQUET, columns=_COLS, read_dictionary=['ticker', 'date'])
     for _c in ('open', 'high', 'low', 'close'):
-        p[_c] = p[_c].astype('float32')
-    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows before any
-    # downstream conversion. Filter expects string dates (compares against
-    # PG affected_date::TEXT), so it must run BEFORE pd.to_datetime below.
+        _i = _tbl.schema.get_field_index(_c)
+        _tbl = _tbl.set_column(_i, _c, _tbl.column(_c).cast(pa.float32()))
+    p = _tbl.to_pandas()
+    del _tbl
+    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows. filter_quarantined
+    # is categorical-safe (empty set → returns df untouched; else .astype(str) on
+    # the key col). Runs BEFORE the category normalisation below so a fully-
+    # quarantined ticker cannot leave a phantom all-NaN pivot column, and BEFORE
+    # pd.to_datetime — it stringifies date to match PG affected_date::TEXT, and here
+    # date is still categorical-of-strings, which .astype(str) resolves correctly.
     from src.pipeline.quarantine_filter import filter_quarantined
     p = filter_quarantined(p, 'prices.parquet')
-    # Categorical AFTER the quarantine filter (it compares raw ticker strings).
-    # This is the single biggest saving: 18.7M object strings → int32 codes.
-    p['ticker'] = p['ticker'].astype('category')
+    # ticker is ALREADY categorical (from the dictionary read). Normalise it to
+    # EXACTLY reproduce the old object-dtype path: drop unused categories (phantom
+    # guard) then reorder to sorted, so the categorical sort_values + pivot below
+    # yield lexicographic row/column order identical to pre-rewrite. date needs no
+    # reorder — it becomes datetime64 before sort/pivot, so its category order is
+    # irrelevant.
+    if str(p['ticker'].dtype) == 'category':
+        p['ticker'] = p['ticker'].cat.remove_unused_categories()
+        p['ticker'] = p['ticker'].cat.reorder_categories(sorted(p['ticker'].cat.categories))
     p['date'] = pd.to_datetime(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
