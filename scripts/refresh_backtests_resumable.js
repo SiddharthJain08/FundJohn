@@ -97,9 +97,18 @@ function waitForMemory(sid) {
 
 function allStrategies() {
   const m = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/strategies/manifest.json'), 'utf8'));
+  // LIVE-FIRST ordering (2026-07-16). On this box the 10y re-backtest is a
+  // multi-day run, so front-load the strategies that drive the CURRENT book's
+  // sizing + the conviction-floor recheck (state='live'); candidates (needed only
+  // for NEW activation decisions) and staging trail. Alphabetical within each
+  // tier for a stable, resumable order. This only changes ORDER — every strategy
+  // still runs exactly once; the checkpoint is by strategy_id, order-independent.
+  const RANK = { live: 0, candidate: 1, staging: 2 };
   return Object.entries(m.strategies || {})
-    .filter(([, e]) => ['live', 'candidate', 'staging'].includes(e.state))
-    .map(([sid]) => sid).sort();
+    .filter(([, e]) => e.state in RANK)
+    .sort(([aSid, aE], [bSid, bE]) =>
+      (RANK[aE.state] - RANK[bE.state]) || aSid.localeCompare(bSid))
+    .map(([sid]) => sid);
 }
 
 (async () => {
