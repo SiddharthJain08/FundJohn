@@ -109,6 +109,37 @@ class TestGetActivationThreshold(unittest.TestCase):
         self.assertEqual(aa.get_activation_threshold(FakeCur0(raise_on_execute=True)), 0.5)
 
 
+class TestGetActivationMinTrades(unittest.TestCase):
+    """min_trades is a dashboard-adjustable activation parameter (2026-07-16).
+
+    It was enforced at a fixed 100 from regime_qualification.class_thresholds with
+    no config key, so the sample-size floor could not be tuned without a code
+    change — unlike its sibling min-Sharpe slider. Same fail-safe contract:
+    missing / malformed / query error → None, which makes compute_eligible fall
+    back to the per-class gate rather than silently loosening the floor to 0.
+    """
+    def test_present_value_parsed(self):
+        self.assertEqual(aa.get_activation_min_trades(FakeCur0(row=('250',))), 250)
+
+    def test_zero_is_honoured_not_treated_as_absent(self):
+        # 0 = "no sample-size floor" and is a legitimate operator choice; it must
+        # not be confused with an unset key (which defers to the class gate).
+        self.assertEqual(aa.get_activation_min_trades(FakeCur0(row=('0',))), 0)
+
+    def test_absent_key_defers_to_class_gate(self):
+        self.assertIsNone(aa.get_activation_min_trades(FakeCur0(row=None)))
+
+    def test_malformed_value_defers_to_class_gate(self):
+        self.assertIsNone(aa.get_activation_min_trades(FakeCur0(row=('abc',))))
+
+    def test_negative_value_defers_to_class_gate(self):
+        # A negative floor would activate everything — never honour it.
+        self.assertIsNone(aa.get_activation_min_trades(FakeCur0(row=('-5',))))
+
+    def test_query_error_defers_to_class_gate(self):
+        self.assertIsNone(aa.get_activation_min_trades(FakeCur0(raise_on_execute=True)))
+
+
 # ── compute_eligible ─────────────────────────────────────────────────────────
 class TestComputeEligible(unittest.TestCase):
     def test_no_primary_window_run_returns_none(self):

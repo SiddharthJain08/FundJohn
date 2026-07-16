@@ -78,9 +78,14 @@ CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
 CONFIG_KEY = 'strategy_activation_min_sharpe'
 DEFAULT_MIN_SHARPE = 0.5
-# min_trades now comes from the shared per-regime gate (regime_qualification
-# class_thresholds → 100) unless explicitly overridden via the min_trades
-# parameter / --min-trades flag. The old fixed MIN_TRADES=20 is retired.
+# min_trades resolution order (most specific wins):
+#   explicit min_trades= / --min-trades  >  pipeline_config  >  class gate (100)
+# The pipeline_config key makes the sample-size floor dashboard-adjustable, like
+# its min-Sharpe sibling (operator directive 2026-07-16): it was previously
+# reachable only from the shared per-regime gate (regime_qualification
+# class_thresholds → 100) or a CLI flag, so tuning it needed a code change.
+# The old fixed MIN_TRADES=20 is retired.
+CONFIG_KEY_MIN_TRADES = 'strategy_activation_min_trades'
 
 ACTOR = 'activation_assigner'
 
@@ -124,6 +129,33 @@ def get_activation_threshold(cur) -> float:
     except Exception:
         pass
     return DEFAULT_MIN_SHARPE
+
+
+def get_activation_min_trades(cur) -> Optional[int]:
+    """Read strategy_activation_min_trades from pipeline_config.
+
+    Returns None when unset/unreadable, which makes compute_eligible fall back to
+    the per-class gate (regime_qualification.class_thresholds → 100). Fail-SAFE
+    direction matters: a malformed value must defer to the class floor, never
+    loosen to 0 — a 0 floor would activate regimes on a 1-trade sample.
+
+    0 IS honoured when explicitly configured (a deliberate "no sample floor"),
+    which is why this returns Optional[int] rather than using 0 as the sentinel.
+    Negative values are rejected (they would activate everything).
+
+    Same transaction caveat as get_activation_threshold: callers must rollback
+    after a failure before further statements.
+    """
+    try:
+        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (CONFIG_KEY_MIN_TRADES,))
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            n = int(row[0])
+            if n >= 0:
+                return n
+    except Exception:
+        pass
+    return None
 
 
 # ── Eligibility computation ─────────────────────────────────────────────────
@@ -400,6 +432,16 @@ def main() -> int:
         # whether the config read above succeeded or raised.
         conn.rollback()
 
+    # min_trades: explicit --min-trades > pipeline_config > per-class gate (None
+    # here → compute_eligible applies class_thresholds). Resolved once per run so
+    # the dashboard slider takes effect without a deploy, mirroring min-Sharpe.
+    resolved_min_trades = args.min_trades
+    if resolved_min_trades is None:
+        cur1 = conn.cursor()
+        resolved_min_trades = get_activation_min_trades(cur1)
+        cur1.close()
+        conn.rollback()   # same clean-transaction guarantee as above
+
     if args.strategy_id:
         sids = [args.strategy_id]
     else:
@@ -414,7 +456,8 @@ def main() -> int:
     # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable.
     # min_trades is uniform across classes (gate floor 100), so one number
     # remains printable even though the rule is class-aware.
-    eff_min_trades = args.min_trades if args.min_trades is not None else class_thresholds('equity')['min_trades']
+    eff_min_trades = (resolved_min_trades if resolved_min_trades is not None
+                      else class_thresholds('equity')['min_trades'])
     _log(f'threshold={threshold} min_trades={eff_min_trades} dry_run={args.dry_run} '
         f'strategies={len(sids)}')
 
@@ -423,7 +466,7 @@ def main() -> int:
     for sid in sids:
         try:
             r = apply_one(conn, sid, threshold, dry_run=args.dry_run,
-                          min_trades=args.min_trades,
+                          min_trades=resolved_min_trades,
                           instrument_class=classes.get(sid, 'equity'))
         except Exception as e:
             _log(f'  ERROR {sid}: {e}')

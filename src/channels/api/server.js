@@ -666,6 +666,56 @@ app.put('/api/config/activation-min-sharpe', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── Activation min-TRADES slider ────────────────────────────────────────────
+// Sibling of the min-Sharpe slider above, for the per-regime SAMPLE-SIZE floor:
+// a regime only activates when its backtest produced >= this many trades in that
+// regime. Previously reachable only from regime_qualification.class_thresholds
+// (a hardcoded 100) or the assigner's --min-trades flag, so tuning it needed a
+// code change; operator directive 2026-07-16 made it dashboard-adjustable.
+//
+// Fail-safe direction is the OPPOSITE of a normal slider and deliberately so:
+// when the row is ABSENT the assigner defers to the per-class gate (100) rather
+// than loosening to 0 — an unset key must never activate a regime on a 1-trade
+// sample. So `row_exists:false` reports the class floor, not a stored value.
+// 0 IS a legal explicit choice ("no sample floor") and is honoured once written.
+const ACTIVATION_MIN_TRADES_MIN     = 0;
+const ACTIVATION_MIN_TRADES_MAX     = 1000;
+const ACTIVATION_MIN_TRADES_DEFAULT = 100;   // == regime_qualification class gate
+
+app.get('/api/config/activation-min-trades', async (req, res) => {
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_min_trades'");
+    const row = r.rows[0];
+    const raw = row ? parseInt(row.value, 10) : NaN;
+    // Mirror the assigner's resolution exactly so slider and assigner can never
+    // disagree: unset/malformed/negative -> the class gate.
+    const usable = Number.isInteger(raw) && raw >= ACTIVATION_MIN_TRADES_MIN;
+    res.json({
+      value:      usable ? Math.min(raw, ACTIVATION_MIN_TRADES_MAX) : ACTIVATION_MIN_TRADES_DEFAULT,
+      min:        ACTIVATION_MIN_TRADES_MIN, max: ACTIVATION_MIN_TRADES_MAX,
+      default:    ACTIVATION_MIN_TRADES_DEFAULT,
+      row_exists: !!row,
+      source:     usable ? 'pipeline_config' : 'class_gate',
+      updated_at: row ? row.updated_at : null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/activation-min-trades', async (req, res) => {
+  const v = parseInt(req.body && req.body.value, 10);
+  if (!Number.isInteger(v) || v < ACTIVATION_MIN_TRADES_MIN || v > ACTIVATION_MIN_TRADES_MAX) {
+    return res.status(400).json({ error: `value must be an integer in [${ACTIVATION_MIN_TRADES_MIN}, ${ACTIVATION_MIN_TRADES_MAX}]` });
+  }
+  try {
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('strategy_activation_min_trades', $1, 'Activation min-TRADES slider: per-regime sample-size floor — a regime activates only when its backtest produced >= this many trades in that regime. Resolution order: --min-trades flag > this key > regime_qualification class gate (100). Range [0, 1000]; 0 = no sample floor. When ABSENT the assigner defers to the class gate (100), never to 0. Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(v)]);
+    res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // POST /api/activation/dry-run — on-demand hypothetical preview of what the
 // activation assigner WOULD do at the currently-saved threshold. Shells out
 // to `nice -n 19 python3 -m backtest.activation_assigner --all --dry-run`
@@ -4270,7 +4320,7 @@ body.rs-chat-locked{overflow:hidden}
          (OPENCLAW_ACTIVATION_ASSIGNER=1, armed 2026-07-13). -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎚️ Strategy Activation <span class="st-sub-label">extra per-regime Sharpe floor on top of the qualification gate (&gt;0 Sharpe · class max-DD · ≥100 trades per regime)</span></span>
+        <span>🎚️ Strategy Activation <span class="st-sub-label">per-regime floors applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
       </div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
@@ -4283,6 +4333,23 @@ body.rs-chat-locked{overflow:hidden}
                  min="0" max="3" step="0.05" value="0.5" disabled />
           <div class="st-sharpe-card-range"><span>0.00</span><span>3.00</span></div>
           <div class="st-sharpe-card-status" id="st-act-status"></div>
+        </div>
+        <!-- Sample-size floor. Was hardcoded at 100 in
+             regime_qualification.class_thresholds (tunable only via the
+             assigner's --min-trades flag); made dashboard-adjustable
+             2026-07-16. Unset => the assigner defers to the class gate (100),
+             NOT to 0 — an absent key must never activate a regime on a
+             1-trade sample, so the status line names which source is live. -->
+        <div class="st-sharpe-card">
+          <div class="st-sharpe-card-head">
+            <span class="st-sharpe-card-regime">Activation min trades</span>
+            <span class="st-sub-label">per regime</span>
+          </div>
+          <div class="st-sharpe-card-value" id="st-actn-val">—</div>
+          <input type="range" class="st-sharpe-card-slider" id="st-actn-slider"
+                 min="0" max="1000" step="10" value="100" disabled />
+          <div class="st-sharpe-card-range"><span>0</span><span>1000</span></div>
+          <div class="st-sharpe-card-status" id="st-actn-status"></div>
         </div>
         <div class="st-act-preview">
           <div class="st-act-preview-bar">
@@ -8239,6 +8306,75 @@ let _actSaveTimer   = null;
 let _actPutInflight = false;
 let _actWired       = false;
 
+// ── Activation min-TRADES slider ────────────────────────────────────────────
+// Sibling of the min-Sharpe slider: the per-regime SAMPLE-SIZE floor. Own
+// timer/inflight/wired state so a save on one card can't cancel the other's.
+let _actnSaveTimer   = null;
+let _actnPutInflight = false;
+let _actnWired       = false;
+
+async function _loadActivationTradesCard() {
+  const slider = document.getElementById('st-actn-slider');
+  const valEl  = document.getElementById('st-actn-val');
+  const statEl = document.getElementById('st-actn-status');
+  if (!slider || !valEl) return;
+  let cfg;
+  try {
+    const r = await fetch('/api/config/activation-min-trades');
+    cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.error || r.statusText);
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ load failed: ' + (e.message || 'network error');
+    return;
+  }
+  const v = Number.isFinite(Number(cfg.value)) ? Math.round(Number(cfg.value)) : 100;
+  slider.value    = v;
+  slider.disabled = false;
+  valEl.textContent = String(v);
+  if (statEl && !statEl.textContent) {
+    // Name the live SOURCE. An unset key is not "0" — the assigner defers to the
+    // class gate, and saying so prevents reading the slider as an active floor
+    // that was never written.
+    statEl.textContent = cfg.row_exists && cfg.source === 'pipeline_config'
+      ? (cfg.updated_at ? 'last set ' + new Date(cfg.updated_at).toLocaleString() : '')
+      : 'row not set — assigner defers to the class gate (100)';
+  }
+  if (_actnWired) return;
+  _actnWired = true;
+  slider.addEventListener('input', () => { valEl.textContent = String(parseInt(slider.value, 10)); });
+  slider.addEventListener('change', () => {
+    if (_actnSaveTimer) clearTimeout(_actnSaveTimer);
+    _actnSaveTimer = setTimeout(() => {
+      _actnSaveTimer = null;
+      _actnPut(parseInt(slider.value, 10), statEl);
+    }, 300);
+  });
+}
+
+async function _actnPut(value, statEl) {
+  if (_actnPutInflight) return;
+  _actnPutInflight = true;
+  if (statEl) statEl.textContent = 'saving…';
+  try {
+    const resp = await fetch('/api/config/activation-min-trades', {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ value }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
+    } else if (statEl) {
+      statEl.textContent = '✓ saved ' + value + ' · applies at the next weekly refresh (Mon 00:00 ET)';
+      setTimeout(() => { if (statEl.textContent.startsWith('✓')) statEl.textContent = ''; }, 4000);
+    }
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
+  } finally {
+    _actnPutInflight = false;
+  }
+}
+
 async function _loadActivationCard() {
   const slider = document.getElementById('st-act-slider');
   const valEl  = document.getElementById('st-act-val');
@@ -8403,6 +8539,7 @@ async function loadStrategies() {
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
     _loadActivationCard();
+    _loadActivationTradesCard();
     _rpRender(proposals?.proposals || [], notedResp || {});
     _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
