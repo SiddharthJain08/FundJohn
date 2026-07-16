@@ -57,6 +57,43 @@ const FAILED     = CKPT + '.failed';
 const DEADLINE   = String(arg('deadline', '2026-07-18T06:00'));   // UTC, well clear of Sat 12:00
 const PER_TIMEOUT_S = parseInt(arg('per-timeout', '3600'), 10);   // 1h/strategy
 const LIMIT      = parseInt(arg('limit', '0'), 10);
+// Memory-settle gate (2026-07-16). load_prices_panels peaks ~4.0GB per strategy
+// on this 8GB no-swap box; spawning the NEXT strategy the instant the previous
+// subprocess EXITS caused an OOM CASCADE — a heavy strategy OOMs, its pages
+// aren't reclaimed yet, the next spawn collides and OOMs in seconds, and so on
+// (observed: 1 ok / 5 fail in a row). Before each spawn, wait until the OS
+// actually has room. Give each strategy the whole box: one process at a time.
+const MEM_FLOOR_MB = parseInt(arg('mem-floor', '5000'), 10);      // require this avail before spawning
+const MEM_WAIT_MAX_S = parseInt(arg('mem-wait', '180'), 10);      // cap the wait so a stuck box can't hang the fleet
+
+function availMB() {
+  // MemAvailable is the honest "can allocate without swapping" figure; free's
+  // "used" is not (it counts reclaimable cache). No swap here, so this is firm.
+  try {
+    const m = fs.readFileSync('/proc/meminfo', 'utf8').match(/MemAvailable:\s+(\d+) kB/);
+    return m ? Math.round(parseInt(m[1], 10) / 1024) : null;
+  } catch { return null; }
+}
+// Shell-free blocking sleep: spawnSync with an argument array (no command
+// string, no injection surface). This is a deliberately synchronous driver.
+const sleepSec = (s) => spawnSync('sleep', [String(s)]);
+function waitForMemory(sid) {
+  const t0 = Date.now();
+  let waited = false;
+  for (;;) {
+    const a = availMB();
+    if (a === null || a >= MEM_FLOOR_MB) {
+      if (waited) console.log(`[rebt]   memory recovered to ${a}MB — spawning ${sid}`);
+      return;
+    }
+    if ((Date.now() - t0) / 1000 >= MEM_WAIT_MAX_S) {
+      console.log(`[rebt]   ⚠️ memory still ${a}MB < ${MEM_FLOOR_MB}MB after ${MEM_WAIT_MAX_S}s — spawning ${sid} anyway`);
+      return;
+    }
+    if (!waited) { console.log(`[rebt]   waiting for memory: ${a}MB < ${MEM_FLOOR_MB}MB floor (let the prior peak reclaim)…`); waited = true; }
+    sleepSec(3);
+  }
+}
 
 function allStrategies() {
   const m = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/strategies/manifest.json'), 'utf8'));
@@ -90,6 +127,9 @@ function allStrategies() {
       console.log(`[rebt] DEADLINE ${DEADLINE}Z reached — stopping cleanly. Re-run with --resume to continue.`);
       break;
     }
+    // Don't spawn into a memory-pressured box — this prevents the OOM cascade
+    // where one heavy strategy's death takes the next few with it.
+    waitForMemory(sid);
     const s0 = Date.now();
     // Fresh subprocess per strategy: releases the ~4GB panel peak back to the
     // OS and contains an OOM to this strategy instead of the whole fleet.

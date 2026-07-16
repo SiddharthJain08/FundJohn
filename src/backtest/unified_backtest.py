@@ -201,6 +201,17 @@ def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str,
     # assumed. See reference_vps_two_core_cpu: never load the whole parquet.
     _COLS = ['ticker', 'date', 'open', 'high', 'low', 'close']
     p = pd.read_parquet(PRICES_PARQUET, columns=_COLS)
+    # float32 OHLC (2026-07-16). After the 5-year backfill even the pruned panel
+    # peaks ~4.0GB, and with the ~4GB panel resident a cross-sectional strategy's
+    # own ranking arrays (12,508-wide) tip the 8GB no-swap box into OOM — measured:
+    # S22/S23/S24 (momentum/cross-sectional) all rc=137 with a clean 5GB box.
+    # Downcasting prices float64→float32 drops the panel peak to ~3.0GB (measured),
+    # restoring ~1GB of per-strategy headroom. float32 carries ~7 significant
+    # digits — ample for OHLC and for stop/target hit tests; numpy upcasts to
+    # float64 inside mean/std so Sharpe is unaffected beyond ~1e-6 relative. Only
+    # unified_backtest reads this (fleet/coupling/manual) — NOT the live daily sizer.
+    for _c in ('open', 'high', 'low', 'close'):
+        p[_c] = p[_c].astype('float32')
     # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows before any
     # downstream conversion. Filter expects string dates (compares against
     # PG affected_date::TEXT), so it must run BEFORE pd.to_datetime below.
