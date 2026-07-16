@@ -189,21 +189,43 @@ def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str,
       - bars_by_ticker: {ticker: DataFrame indexed by date with open/high/low/close}
         for the bracket walk-forward
     """
-    p = pd.read_parquet(PRICES_PARQUET)
+    # Column-pruned + categorical ticker (2026-07-16). This used to be a bare
+    # pd.read_parquet(PRICES_PARQUET) pulling ALL 10 columns; only OHLC is ever
+    # used (close_wide takes `close`; bars_by_ticker takes open/high/low/close),
+    # so volume/vwap/transactions/source were materialised and discarded —
+    # `source` alone is an object column ~900MB across the panel. After the
+    # 5-year history backfill doubled prices.parquet (9.5M → 18.7M rows) the old
+    # load OOM-killed outright (anon-rss 5.8GB, rc=137) on this 2-core/8GB
+    # no-swap box, i.e. the fleet re-backtest could not load its input at all.
+    # Pruning + a categorical ticker brings the peak to ~4.0GB. Measured, not
+    # assumed. See reference_vps_two_core_cpu: never load the whole parquet.
+    _COLS = ['ticker', 'date', 'open', 'high', 'low', 'close']
+    p = pd.read_parquet(PRICES_PARQUET, columns=_COLS)
     # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows before any
     # downstream conversion. Filter expects string dates (compares against
     # PG affected_date::TEXT), so it must run BEFORE pd.to_datetime below.
     from src.pipeline.quarantine_filter import filter_quarantined
     p = filter_quarantined(p, 'prices.parquet')
+    # Categorical AFTER the quarantine filter (it compares raw ticker strings).
+    # This is the single biggest saving: 18.7M object strings → int32 codes.
+    p['ticker'] = p['ticker'].astype('category')
     p['date'] = pd.to_datetime(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
     close_wide = p.pivot(index='date', columns='ticker', values='close')
+    # Restore a plain string Index: pivoting on a categorical yields a
+    # CategoricalIndex, and strategies treat close_wide.columns as ordinary
+    # labels (set ops / isin / reindex). Keeping the panel's public shape
+    # identical to before means the memory fix cannot change any result.
+    close_wide.columns = pd.Index(close_wide.columns.astype(str), name='ticker')
     close_wide.index.name = 'date'
     if calendar == 'equity':
         close_wide = _apply_equity_calendar(close_wide)
-    bars_by_ticker = {t: g.set_index('date')[['open','high','low','close']]
-                      for t, g in p.groupby('ticker')}
+    # observed=True: with a categorical key, groupby would otherwise iterate
+    # every category. Every category here comes from the data so the set is the
+    # same, but this keeps it explicit (and silences the pandas 2.x default change).
+    bars_by_ticker = {str(t): g.set_index('date')[['open','high','low','close']]
+                      for t, g in p.groupby('ticker', observed=True)}
     return close_wide, bars_by_ticker
 
 
