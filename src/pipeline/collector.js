@@ -1010,10 +1010,13 @@ async function runIntradaySnapshotPrices(tickers = null) {
       for (let i = 0; i < buckets.etf.length; i += CHUNK) {
         const chunk = buckets.etf.slice(i, i + CHUNK);
         // Mirror fillPricesAlpaca's share-class normalization (BRK-B → BRK.B).
+        // Unconditional on the first separator, for the same reason as :721 —
+        // the old `/^[A-Z]+-[A-Z]$/` anchor only converted single-letter classes,
+        // so every multi-char suffix (-PRI, -PRH, -WS, -U) was sent verbatim and
+        // 400'd. Alpaca accepts ONLY the dot form for all of them.
         const fwd = new Map(); // apiSymbol → universe ticker
         for (const t of chunk) {
-          const api = /^[A-Z]+-[A-Z]$/.test(t) ? t.replace('-', '.') : t;
-          fwd.set(api, t);
+          fwd.set(t.replace('-', '.'), t);
         }
         const symbolsArg = [...fwd.keys()].join(',');
         const r = await runAlpaca(
