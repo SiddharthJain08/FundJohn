@@ -640,8 +640,11 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 
     for (const gap of gaps) {
       try {
+        // NO updateCoverage here. `written` counts rows BUFFERED, not stored, and
+        // this passed `gap.to` (the range REQUESTED) rather than the max bar
+        // returned — so coverage claimed data the parquet never received. Coverage
+        // is now derived from durable rows inside store.flushPrices().
         const written = await fillPricesAlpaca(ticker, gap.from, gap.to);
-        await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
         totalWritten += written;
         totalCalls++;
       } catch (err) {
@@ -1077,8 +1080,10 @@ async function runIntradaySnapshotPrices(tickers = null) {
   let written = 0;
   for (const row of rows) {
     try {
+      // Coverage intentionally NOT written here — upsertPrices only buffers, so
+      // claiming coverage now would lie if the flush below never lands.
+      // store.flushPrices() commits it from the rows it actually wrote.
       const n = await store.upsertPrices(row.ticker, [row], 'alpaca-snapshot');
-      await store.updateCoverage(row.ticker, 'prices', row.date, row.date, n);
       written += n;
     } catch (err) {
       _stats.errors++;
@@ -1559,8 +1564,10 @@ async function runMarketPricesNonEquity(tickers, historyDays = 3650) {
     let totalWritten = 0;
     for (const gap of gaps) {
       try {
+        // Coverage NOT written here — same buffered-vs-durable lie as the equity
+        // path; these writers share _buffers.prices, so store.flushPrices()
+        // commits coverage from the rows it actually wrote.
         const written = await _fillMarketTicker(category, ticker, gap.from, gap.to);
-        await store.updateCoverage(ticker, 'prices', gap.from, gap.to, written);
         totalWritten += written;
         totalCalls++;
       } catch (err) {

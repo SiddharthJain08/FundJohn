@@ -31,7 +31,9 @@ async function _flush(name, writer) {
   }
   try {
     const after = await writer(rows);
-    return { flushed: rows.length, total_after: after };
+    // `rows` are now DURABLE — callers may derive coverage from them, and only
+    // from them. See _commitPriceCoverage.
+    return { flushed: rows.length, total_after: after, rows };
   } catch (err) {
     // On failure, put rows back so a retry can flush them.
     _buffers[name] = rows.concat(_buffers[name]);
@@ -39,7 +41,46 @@ async function _flush(name, writer) {
   }
 }
 
-async function flushPrices()       { return _flush('prices',       parquetStore.writePrices); }
+// ── Coverage is DERIVED from durable rows (2026-07-15) ───────────────────────
+// data_coverage and prices.parquet are two stores; without 2PC they cannot be
+// updated atomically. So this CHOOSES THE SKEW DIRECTION: coverage is committed
+// only AFTER the parquet writer resolves, from the rows it actually wrote.
+//
+// A crash then leaves parquet >= coverage, and getGaps simply re-fetches the
+// difference (idempotent, harmless). The old order produced the opposite skew —
+// coverage >= parquet — which is a SILENT PERMANENT HOLE: getGaps trusts
+// coverage, sees the ticker "covered", and never re-fetches it.
+//
+// Measured on the live panel before this fix: 131 tickers had a coverage row and
+// ZERO parquet rows (the 07-13 OOM killed the process between buffer-push and
+// flush), and 390 claimed a date_to NEWER than any bar they hold — because the
+// caller passed the REQUESTED range (`gap.to`) rather than the max bar returned.
+// The freshness gate reads data_coverage, so it passed on that lie: claimed
+// 12,157/12,699 = 95.73% PASS when the truth was 11,848 = 93.30% FAIL.
+//
+// Deriving date_from/date_to from the rows themselves fixes both defects at once.
+async function _commitPriceCoverage(rows) {
+  const spans = new Map(); // ticker → {min, max, n}
+  for (const r of rows) {
+    if (!r || !r.ticker || !r.date) continue;
+    const e = spans.get(r.ticker);
+    if (!e) { spans.set(r.ticker, { min: r.date, max: r.date, n: 1 }); continue; }
+    if (r.date < e.min) e.min = r.date;
+    if (r.date > e.max) e.max = r.date;
+    e.n++;
+  }
+  for (const [ticker, e] of spans) {
+    await updateCoverage(ticker, 'prices', e.min, e.max, e.n);
+  }
+}
+
+async function flushPrices() {
+  const res = await _flush('prices', parquetStore.writePrices);
+  // Only after the writer resolved. A throw above propagates and coverage stays
+  // where it was — the rows are back in the buffer for the next attempt.
+  if (res && res.rows && res.rows.length) await _commitPriceCoverage(res.rows);
+  return res;
+}
 async function flushOptions()      { return _flush('options',      parquetStore.writeOptions); }
 async function flushFundamentals() { return _flush('fundamentals', parquetStore.writeFundamentals); }
 async function flushInsider()      { return _flush('insider',      parquetStore.writeInsider); }
