@@ -118,19 +118,38 @@ def corr_adjusted_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
 
 
 # ---------------------------------------------------------------------------
-# Grinold breadth weight factor (2026-07-01): √(ln N / ln anchor), applied to
-# each strategy's weight in the corr-adjusted cum-Sharpe calc. Broader universe
-# (larger N) → larger factor → more weight (fundamental law of active mgmt:
-# IR = IC·√breadth). Anchored at the sp500 baseline so a ~sp500-breadth strategy
-# is unchanged. N is regime-independent, stored per strategy (strategy_universe_sizes).
+# Per-regime trade-count weight factor (2026-07-16, operator directive):
+# √(ln n / ln anchor), applied to each strategy's weight in the corr-adjusted
+# cum-Sharpe calc. n = that strategy's backtest trade count IN THE CURRENT REGIME
+# (strategy_backtest_regimes.trade_count → strategy_weights_by_regime.bt_n).
+#
+# REPLACES the regime-independent Grinold breadth factor √(ln N_universe / ln 500).
+# Rationale (operator): trade count is the REALIZED, PER-REGIME version of breadth
+# — universe size N is only the opportunity set (a strategy can span 12k names yet
+# rarely fire), whereas n counts the bets it actually made, and it varies by regime
+# (trust a strategy's CRISIS Sharpe less if it made 40 CRISIS trades vs 5000 in
+# LOW_VOL). It also folds in estimation confidence: a Sharpe over n heavily
+# CORRELATED trades carries far fewer than n independent observations, so log(n)
+# deflates the raw count to ~effective independent bets and √(·) converts that to a
+# Sharpe-confidence multiplier — the same √(log·) / fundamental-law lineage as the
+# breadth factor it replaces.
+#
+# Anchored (default ≈ median regime trade count) so factors STRADDLE 1 and the
+# aggregate S_adj scale — and thus the conviction floors — are approximately
+# preserved (a uniform factor c scales S_adj by c: num→c², den→c). The tilt is
+# gentle: with eligibility forcing n≥100, the practical range is ~0.82–1.25.
+# The anchor is the calibration knob (pipeline_config), paired with a floor recheck.
 # ---------------------------------------------------------------------------
-BREADTH_ANCHOR_N = 500   # sp500 baseline (scale anchor; floors are re-tuned to it)
+TRADE_FACTOR_ANCHOR_N = 1000   # ≈ median per-regime trade count; scale anchor
 
 
-def breadth_weight_factor(n, anchor: int = BREADTH_ANCHOR_N) -> float:
-    """√(ln N / ln anchor). Fail-safe to 1.0 (no reweight) when N<=1, N is
-    missing/non-numeric, or the anchor is degenerate — mirrors the guard in the
-    SP-7 breadth_factor and avoids ln<=0 / div-by-zero."""
+def trade_weight_factor(n, anchor: int = TRADE_FACTOR_ANCHOR_N) -> float:
+    """√(ln n / ln anchor). Fail-safe to 1.0 (NEUTRAL — never 0) when n is
+    missing/None/non-numeric/≤1 or the anchor is degenerate. The neutral-on-missing
+    guard is load-bearing: a strategy with no bt_n for the current regime (e.g. its
+    fleet re-backtest hasn't landed) must keep its raw weight, NOT be silently zeroed
+    (ln 1 = 0 → factor 0 would drop it from the book). A genuinely low but valid n
+    (≥2) DOES down-weight, which is the intended low-confidence penalty."""
     try:
         n = int(n)
     except (TypeError, ValueError):

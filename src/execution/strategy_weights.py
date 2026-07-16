@@ -759,8 +759,11 @@ def load_current(regime_state: str) -> list[dict]:
     conn = _db()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        # bt_n = per-regime backtest trade count; feeds the sizer's trade-count
+        # weight factor (√(ln n / ln anchor)), which replaced the √(ln N) breadth
+        # factor 2026-07-16. NULL/missing → factor 1.0 in the sizer (neutral).
         cur.execute('''
-            SELECT strategy_id, cadence_days, effective_sharpe, weight, daily_weight
+            SELECT strategy_id, cadence_days, effective_sharpe, weight, daily_weight, bt_n
             FROM strategy_weights_by_regime
             WHERE regime_state = %s AND is_current
         ''', (regime_state,))
