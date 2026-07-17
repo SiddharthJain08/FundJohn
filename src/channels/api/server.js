@@ -3733,11 +3733,6 @@ body.rs-chat-locked{overflow:hidden}
 .pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;line-height:1.1}
 .pf-postile-pnl{font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
 .pf-postile-share{opacity:0.8}
-.pf-postile-sadj{opacity:0.85;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
-.pf-postile[data-size="small"] .pf-postile-sadj,.pf-postile[data-size="tiny"] .pf-postile-sadj{display:none}
-.tk-sadj{font-weight:600}
-.pf-tile.pf-tile-small .pf-tile-strip .tk-sadj{display:none}
-.pf-tile.pf-tile-tiny .pf-tile-strip .tk-sadj{display:none}
 /* Per-size typography — JS sets data-size based on min(width,height) so
    text scales with tile area. Tiny tiles drop text entirely (color +
    tooltip carry the meaning). */
@@ -7284,18 +7279,23 @@ function _buildAlphaBarsHtml(group) {
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge = \`<span class="ab-badge">net contrib = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
-  // Corr-adjusted cumulative Sharpe (S_adj) the position was last sized at —
-  // the sole conviction gate quantity, stamped per cycle by the sizer.
+  // Conviction the position was last sized at = |S_adj|, the MAGNITUDE of the
+  // correlation-adjusted cumulative Sharpe. S_adj itself is signed by trade
+  // direction (long +, short −), but the conviction gate compares |S_adj|
+  // against the per-regime floor, and the row is already visibly long/short —
+  // so a signed value here only reads as a spurious "negative Sharpe". Show the
+  // magnitude, and label it "conviction" so it is never mistaken for a raw
+  // Sharpe ratio. (Kept in this expanded per-position view only; the main
+  // heatmap/treemap tiles no longer carry it — declutter, 2026-07-17.)
   if (group.corr_cum_sharpe != null && isFinite(group.corr_cum_sharpe)) {
-    const sv = group.corr_cum_sharpe;
-    const sCls = sv >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    badge += \` <span class="ab-badge" title="corr-adjusted cumulative Sharpe (S_adj) at last sizing cycle">S_adj = <span class="\${sCls}">\${sv.toFixed(2)}</span></span>\`;
+    const conv = Math.abs(group.corr_cum_sharpe);
+    badge += \` <span class="ab-badge" title="conviction |S_adj| — magnitude of the correlation-adjusted cumulative Sharpe the position was last sized at; the sizer gates this against the per-regime floor">conviction |S_adj| = \${conv.toFixed(2)}</span>\`;
   } else if (isOpen) {
     // Render the gap rather than dropping the badge. The sizer stamps S_adj
     // only on cycles that emit orders, so a silently absent badge is
     // indistinguishable from "this feature was never built" — which is exactly
     // how it read when the sizer went several cycles without emitting.
-    badge += \` <span class="ab-badge ab-badge-warn" title="no S_adj stamped for \${escapeHtml(group.ticker)}: the sizer records it only on cycles that emit orders, so this position has not been re-sized since the stamp was added">S_adj = —</span>\`;
+    badge += \` <span class="ab-badge ab-badge-warn" title="no S_adj stamped for \${escapeHtml(group.ticker)}: the sizer records it only on cycles that emit orders, so this position has not been re-sized since the stamp was added">conviction |S_adj| = —</span>\`;
   }
   return \`<div class="alpha-bars">
     \${priceHdr}
@@ -7475,14 +7475,11 @@ function _populateTreemap(container, label) {
     const isSel = g.ticker === selectedTicker;
     const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
     const sizeClass = _sizeClassForTile(g.w, g.h);
-    const sadj = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
-      ? g.corr_cum_sharpe : null;
-    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
     return \`<div class="pf-postile\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" data-size="\${sizeClass}" style="left:\${g.x.toFixed(1)}px;top:\${g.y.toFixed(1)}px;width:\${g.w.toFixed(1)}px;height:\${g.h.toFixed(1)}px;background:\${_pnlColor(pnl)}" title="\${tip}">
       <div class="pf-postile-sym">\${g.ticker}</div>
       <div class="pf-postile-bottom">
         <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
-        \${sadj != null ? '<span class="pf-postile-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
         <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
       </div>
     </div>\`;
@@ -7538,9 +7535,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const tier  = side >= 140 ? 'large' : side >= 100 ? 'medium' : side >= 70 ? 'small' : 'tiny';
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
-      const sadj  = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
-                      ? g.corr_cum_sharpe : null;
-      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
+      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
       // data-side carries the computed side length for the client-side
       // shelf packer (_packHeatmapShelves) to read after DOM insertion.
       // Position becomes absolute via packer; until then tiles render
@@ -7559,7 +7554,6 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
         </div>
         <div class="pf-tile-strip">
           <span class="tk-share">\${sharePct.toFixed(1)}%</span>
-          \${sadj != null ? '<span class="tk-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
           <span class="tk-days">\${days}</span>
         </div>
       </div>\`;
