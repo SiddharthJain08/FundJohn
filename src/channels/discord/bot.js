@@ -815,7 +815,6 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
             `**Price history** | ${(cov?.price_rows_total ?? 0).toLocaleString()} rows | ${cov?.price_earliest ?? '?'} → ${cov?.price_latest ?? '?'}`,
             ``,
             `**API calls today** (from DB — survives restarts):`,
-            `  Polygon/Massive: **${apiStats.polygon.toLocaleString()} calls** | ${polyUnlimited ? 'unlimited plan' : `${cfg.polygon_req_per_min}/min`}`,
             `  FMP: **${apiStats.fmp.toLocaleString()} calls** | ${fmpPerMin}/min | ${fmpPerDay.toLocaleString()}/day limit`,
             `  Rows written today: **${apiStats.rows.toLocaleString()}** | Errors: ${apiStats.errors}`,
             ``,

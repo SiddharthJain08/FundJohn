@@ -656,8 +656,9 @@ function start(swarm, generateId, notifyDiscord) {
             log(`strategy_signatures regeneration error: ${e.message}`);
         }
 
-        // Sync full ticker universe from FMP + Polygon into universe_config
-        log('Universe sync starting (FMP + Polygon)...');
+        // Sync full ticker universe from FMP into universe_config
+        // (sync_universe_to_db is FMP-only; Polygon was removed in SP-1)
+        log('Universe sync starting (FMP)...');
         try {
             const syncOut = runPython('src/ingestion/run_universe_sync.py');
             log(`Universe sync complete: ${syncOut.slice(0, 200)}`);

@@ -257,7 +257,7 @@ CANONICAL_TEMPLATES = {
 def _load_prices() -> pd.DataFrame:
     """Load prices.parquet. Set OPENCLAW_APPLY_SPLIT_ADJUSTMENT=1 to apply
     forward/reverse split adjustments via the corporate_actions parquet.
-    Default OFF: yfinance/Polygon already return auto-adjusted close
+    Default OFF: upstream bars (Alpaca --adjustment all since SP-1; formerly yfinance/Polygon) are already adjusted close
     prices, so applying our adjuster on top would double-adjust pre-split
     data. Master parquet is never mutated — adjustments are read-side."""
     long = pd.read_parquet(os.path.join(PARQUET_ROOT, "prices.parquet"))

@@ -101,7 +101,7 @@ def _load_prices() -> pd.DataFrame:
 
     Set OPENCLAW_APPLY_SPLIT_ADJUSTMENT=1 to apply forward/reverse split
     adjustments via `src/backtest/adjust_for_corporate_actions.adjust_dataframe`.
-    Default OFF: the current upstream sources (yfinance / Polygon) return
+    Default OFF: upstream bar sources (Alpaca --adjustment all since SP-1; formerly yfinance/Polygon) return
     auto-adjusted close prices, so applying our adjuster on top would
     DOUBLE-adjust and corrupt pre-split data. The wire-up exists so that
     (a) raw unadjusted sources (e.g. Alpaca data bars) can opt in, and

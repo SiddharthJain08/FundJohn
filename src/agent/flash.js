@@ -372,7 +372,7 @@ async function handleCycles([nArg]) {
     );
   }
   lines.push('```');
-  lines.push(`*Showing last ${cycles.length} cycle(s). API columns: Polygon / FMP / YFinance calls.*`);
+  lines.push(`*Showing last ${cycles.length} cycle(s). API columns: legacy polygon / FMP / yfinance call counters (Alpaca is primary since SP-1 2026-05-22 and is not metered here).*`);
   return lines.join('\n');
 }
 

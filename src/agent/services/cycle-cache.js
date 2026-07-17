@@ -6,7 +6,7 @@ const { getClient } = require('../../database/redis');
  * Cross-subagent per-cycle data cache (JS side — secondary path).
  *
  * The PRIMARY cycle cache is Python-side, in workspace/tools/_rate_limiter.py
- * (_cycle_cache_get / _cycle_cache_set), because all FMP/Polygon/EDGAR/etc.
+ * (_cycle_cache_get / _cycle_cache_set), because all FMP/EDGAR/etc. (formerly Polygon)
  * tools run inside Python subagent processes spawned by swarm.js. That's
  * where the real cross-subagent dedup happens.
  *
