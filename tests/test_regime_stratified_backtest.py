@@ -38,6 +38,11 @@ from strategies.auto_backtest import (  # noqa: E402
 )
 from strategies.historical_regimes import regime_for_date, find_regime_windows  # noqa: E402
 
+# Integration/heavy: loads the full prices panel (18.7M rows after the
+# 2026-07-15 backfill) — OOMs a 2.8GB-capped process. Needs the parquet
+# store plus real memory headroom (or the pyarrow-dictionary read path).
+pytestmark = pytest.mark.integration
+
 
 # ── Synthetic strategy fixtures ─────────────────────────────────────────────
 #

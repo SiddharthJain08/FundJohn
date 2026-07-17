@@ -66,8 +66,14 @@ def test_driver_refuses_v2_without_gate():
     assert 'REFUSED' in combined
 
 
+@pytest.mark.integration
 def test_driver_accepts_v2_with_gate():
     """With OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1, the gate must let v2 past.
+
+    Marked integration: past the gate, the driver's main() connects to
+    Postgres (POSTGRES_URI) before reaching the dry-run branch, so this needs
+    a live DB + the env var. The REFUSED-path tests above exit pre-connect
+    and stay unit-safe.
 
     Task 9 implemented --target options, so all three runners are now real
     (no more NotImplementedError stub to lean on). We assert the gate is

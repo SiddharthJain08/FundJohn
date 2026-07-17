@@ -2,6 +2,10 @@
 import os
 import pandas as pd
 import pytest
+
+# Integration/heavy: replays multi-GB live price panels (OOMs a capped test
+# process); needs the production parquet store present.
+pytestmark = pytest.mark.integration
 from src.strategies.implementations.s15_insider_opportunistic_short import (
     OpportunisticInsiderShort,
 )

@@ -10,9 +10,13 @@ from src.maintenance.doctor import (
 from src.maintenance import doctor
 
 
+# The check gained a leading SPY-bars probe (2026-07-03 fix: window/strike
+# band computed per run from spot) — the mock must feed bars, chain, news.
 @patch('src.maintenance.doctor._run_alpaca_cli')
 def test_aat_plus_tier_passes_when_chain_returns_greeks(mock_cli):
     mock_cli.side_effect = [
+        # spot probe
+        {'bars': {'SPY': [{'c': 600.0}]}},
         # chain probe
         {'snapshots': {'SPY260618C00742000': {'greeks': {'delta': 0.5, 'gamma': 0.01, 'theta': -0.2, 'vega': 0.8, 'rho': 0.3}}}},
         # news probe
@@ -25,6 +29,7 @@ def test_aat_plus_tier_passes_when_chain_returns_greeks(mock_cli):
 @patch('src.maintenance.doctor._run_alpaca_cli')
 def test_aat_plus_tier_fails_when_all_greeks_zero(mock_cli):
     mock_cli.side_effect = [
+        {'bars': {'SPY': [{'c': 600.0}]}},
         {'snapshots': {'SPY260618C00742000': {'greeks': {'delta': 0, 'gamma': 0, 'theta': 0, 'vega': 0, 'rho': 0}}}},
         {'news': []},
     ]

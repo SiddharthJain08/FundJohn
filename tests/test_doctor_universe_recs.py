@@ -14,6 +14,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -156,7 +157,8 @@ def test_system_check_cli_gate_off_exits_zero():
          '--check', 'universe_recs_health', '--json'],
         capture_output=True, text=True,
         env=full_env,
-        cwd='/root/openclaw/.claude/worktrees/sp2-phase-c',
+        # cwd must be the repo root (was a long-dead authoring-worktree path)
+        cwd=str(Path(__file__).resolve().parents[1]),
     )
     assert proc.returncode == 0, (
         f'expected exit 0, got {proc.returncode}\n'

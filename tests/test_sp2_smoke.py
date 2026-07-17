@@ -23,6 +23,10 @@ from datetime import date
 
 import pytest
 
+# Integration: every test here execs live entry points (doctor, resolver CLI,
+# pipeline dry-run, system_checks) against the running box state.
+pytestmark = pytest.mark.integration
+
 
 def test_doctor_passes():
     out = subprocess.run(

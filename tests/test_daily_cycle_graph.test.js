@@ -11,9 +11,11 @@ const NODE_PATH        = path.join(ROOT, 'src/agent/graphs/daily_cycle_node.js')
 const LOGGING_PATH     = path.join(ROOT, 'src/execution/pipeline_logging.js');
 const TRACEBUS_PATH    = path.join(ROOT, 'src/agent/traceBus.js');
 
+// Must mirror STEPS_IN_ORDER in src/agent/graphs/daily-cycle.js
+// (option_hedge + stop_reattach were added after the original 11-node graph).
 const STEPS_IN_ORDER = [
-  'collect', 'sentiment', 'signals', 'ic_gate', 'handoff',
-  'trade', 'alpaca', 'reconcile', 'report',
+  'collect', 'sentiment', 'signals', 'option_hedge', 'ic_gate', 'handoff',
+  'trade', 'alpaca', 'reconcile', 'stop_reattach', 'report',
   'pyportfolioopt_shadow', 'health',
 ];
 
@@ -60,12 +62,12 @@ function makeStubbed({ abortAt = null } = {}) {
   return { mod, visited };
 }
 
-test('Full happy path: all 11 nodes visited in canonical order, status ok', async () => {
+test('Full happy path: all 13 nodes visited in canonical order, status ok', async () => {
   const { mod, visited } = makeStubbed();
   const out = await mod.runDailyCycleGraph({ runDate: '2026-05-21', reason: 'test' });
   assert.deepEqual(visited, STEPS_IN_ORDER);
   assert.equal(out.status, 'ok');
-  assert.equal(out.completedSteps.length, 11);
+  assert.equal(out.completedSteps.length, 13);
 });
 
 test('Subset request: graph runs without throwing (subset filtering tested in Task 4)', async () => {
@@ -75,7 +77,7 @@ test('Subset request: graph runs without throwing (subset filtering tested in Ta
     reason:  'regime_transition',
     requestedSteps: ['signals', 'handoff', 'trade', 'alpaca', 'reconcile'],
   });
-  // All 11 nodes still visit (test stub doesn't honor subset internally),
+  // All 13 nodes still visit (test stub doesn't honor subset internally),
   // but graph runs cleanly — assert no throw + status set.
   assert.ok(out.status === 'ok' || out.status === 'aborted');
 });
@@ -105,6 +107,6 @@ test('Concurrent runs on different runDates have isolated state', async () => {
     mod.runDailyCycleGraph({ runDate: '2026-05-24', reason: 'test' }),
   ]);
   assert.notEqual(a.threadId, b.threadId);
-  assert.equal(a.completedSteps.length, 11);
-  assert.equal(b.completedSteps.length, 11);
+  assert.equal(a.completedSteps.length, 13);
+  assert.equal(b.completedSteps.length, 13);
 });

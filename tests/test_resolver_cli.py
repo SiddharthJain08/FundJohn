@@ -1,6 +1,11 @@
 import json
 import os
 import subprocess
+import pytest
+
+# Integration/heavy: spawns the real universe_resolver CLI over the live
+# metadata snapshots — memory-heavy and data-dependent.
+pytestmark = pytest.mark.integration
 
 def test_resolver_cli_returns_json():
     env = {**os.environ}

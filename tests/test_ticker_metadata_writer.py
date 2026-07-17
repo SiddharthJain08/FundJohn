@@ -34,6 +34,7 @@ def test_build_metadata_rows(fake_sources):
     assert r["in_sp500"] is True  # SP500_SET contains AAPL
 
 
+@pytest.mark.integration  # writes to live Postgres; needs POSTGRES_URI
 def test_idempotent_write_db(fake_sources):
     rows = build_metadata_rows(date(2026, 5, 22), *fake_sources, source_tag="test_idem")
     n1 = write_snapshots(os.environ["POSTGRES_URI"], rows)

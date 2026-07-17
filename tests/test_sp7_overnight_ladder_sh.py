@@ -15,8 +15,13 @@ def test_backfill_priority_guard():
 
 
 def test_window_discipline():
-    assert 'timeout --signal=TERM' in SH and 'nice -n 19' in SH
-    assert '13:00' in SH and 'rc -eq 124' in SH.replace('$', '')
+    # CONTINUOUS MODE (operator directive 2026-06-10): the 13:00 UTC window
+    # cap and in-script `timeout --signal=TERM` were removed — discipline is
+    # now the 20-min resurrection timer + the backfill-yield guard, with the
+    # driver always niced below live work.
+    assert 'nice -n 19' in SH
+    assert 'timeout --signal=TERM' not in SH
+    assert 'CONTINUOUS MODE' in SH
 
 
 def test_done_grep_matches_driver_output():

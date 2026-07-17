@@ -36,11 +36,15 @@ sys.path.insert(0, str(ROOT / 'src'))
 
 from execution.handoff import read_handoff  # noqa: E402
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
-except Exception:
-    pass
+def _load_env():
+    # Entry-point only (called from __main__): importing this module must not
+    # inject the production .env into the process — doing so at import time
+    # flipped feature gates inside the test runner for every later test.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
+    except Exception:
+        pass
 
 
 def _get_webhook_urls(agent_id: str) -> dict:
@@ -668,4 +672,5 @@ def main() -> int:
 
 
 if __name__ == '__main__':
+    _load_env()
     sys.exit(main())

@@ -7,7 +7,12 @@ import os
 import psycopg2
 import pytest
 
-DSN = os.environ["POSTGRES_URI"]
+# Integration: needs live Postgres + POSTGRES_URI in the environment.
+# (Previously "worked" unmarked only because another test module's import-time
+# load_dotenv leaked the production .env into the test process.)
+pytestmark = pytest.mark.integration
+
+DSN = os.environ.get("POSTGRES_URI", "")
 
 
 def test_table_exists():

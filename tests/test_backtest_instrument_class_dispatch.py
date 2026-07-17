@@ -47,19 +47,28 @@ def test_default_equity_when_nothing(tmp_path, monkeypatch):
     assert ub._resolve_instrument_class('S_x') == 'equity'
 
 
-def test_live_manifest_reference_option_strategy():
-    # No monkeypatch: against the real worktree manifest.
-    assert ub._resolve_instrument_class('S_short_straddle_vrp') == 'option'
+# NOTE: these used to assert against the live manifest via S_short_straddle_vrp
+# (the SP-4 reference option strategy). The candidate reaper removed it
+# (commit 1c2a17f), which is a legitimate lifecycle event — so the tests now
+# pin the resolution path with a fake manifest instead of depending on any
+# specific live strategy surviving.
+
+def test_manifest_reference_option_strategy(tmp_path, monkeypatch):
+    monkeypatch.setattr(ub, 'ROOT', _fake_root(
+        tmp_path, {'S_opt_ref': {'instrument_class': 'option'}}))
+    assert ub._resolve_instrument_class('S_opt_ref') == 'option'
 
 
-def test_main_strategy_id_threads_instrument_class(monkeypatch):
+def test_main_strategy_id_threads_instrument_class(tmp_path, monkeypatch):
+    monkeypatch.setattr(ub, 'ROOT', _fake_root(
+        tmp_path, {'S_opt_ref': {'instrument_class': 'option'}}))
     captured = {}
     monkeypatch.setattr(ub, 'run_backtest',
                         lambda sid, **kw: captured.update({'sid': sid, **kw}) or 'run-id')
-    monkeypatch.setattr(sys, 'argv', ['prog', '--strategy-id', 'S_short_straddle_vrp'])
+    monkeypatch.setattr(sys, 'argv', ['prog', '--strategy-id', 'S_opt_ref'])
     assert ub.main() == 0
-    assert captured['sid'] == 'S_short_straddle_vrp'
-    assert captured['instrument_class'] == 'option'   # from the live manifest
+    assert captured['sid'] == 'S_opt_ref'
+    assert captured['instrument_class'] == 'option'   # from the (fake) manifest
 
 
 def test_main_strategy_file_uses_module_const(tmp_path, monkeypatch):
@@ -74,19 +83,23 @@ def test_main_strategy_file_uses_module_const(tmp_path, monkeypatch):
     assert captured['instrument_class'] == 'option'
 
 
-def test_main_all_live_threads_per_strategy(monkeypatch):
-    monkeypatch.setattr(ub, '_all_live_strategies', lambda: ['S_short_straddle_vrp'])
+def test_main_all_live_threads_per_strategy(tmp_path, monkeypatch):
+    monkeypatch.setattr(ub, 'ROOT', _fake_root(
+        tmp_path, {'S_opt_ref': {'instrument_class': 'option'}}))
+    monkeypatch.setattr(ub, '_all_live_strategies', lambda: ['S_opt_ref'])
     seen = []
     monkeypatch.setattr(ub, 'run_backtest',
                         lambda sid, **kw: seen.append((sid, kw.get('instrument_class'))) or 'run-id')
     monkeypatch.setattr(sys, 'argv', ['prog', '--all-live'])
     assert ub.main() == 0
-    assert ('S_short_straddle_vrp', 'option') in seen
+    assert ('S_opt_ref', 'option') in seen
 
 
-def test_resolution_composes_with_dispatch():
+def test_resolution_composes_with_dispatch(tmp_path, monkeypatch):
     # End-to-end link without running a backtest: resolved class -> correct sim fn.
-    assert ub._simulate_for(ub._resolve_instrument_class('S_short_straddle_vrp')) is options_backtest.simulate
+    monkeypatch.setattr(ub, 'ROOT', _fake_root(
+        tmp_path, {'S_opt_ref': {'instrument_class': 'option'}}))
+    assert ub._simulate_for(ub._resolve_instrument_class('S_opt_ref')) is options_backtest.simulate
 
 
 def test_equity_strategy_resolves_equity_and_dispatches_per_bar():

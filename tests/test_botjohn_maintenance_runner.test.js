@@ -209,7 +209,9 @@ test('buildPrompt: mode=saturday selects research-maintenance template', () => {
     'saturday mode must reference the surgical Phase-6 lever');
   assert.ok(out.includes('saturday_brain_retry_failed.js'),
     'saturday mode must reference the fetch-failed retry lever');
-  assert.ok(out.includes('systemctl start openclaw-saturday-brain.service'),
+  // The re-trigger lever moved to the sunday-research split (the legacy
+  // openclaw-saturday-brain timer is installed-but-disabled).
+  assert.ok(out.includes('systemctl start openclaw-sunday-research-ingest.service'),
     'saturday mode must reference the full re-trigger lever');
   assert.ok(out.includes('curated_candidates'),
     'saturday mode must query bucket distribution');

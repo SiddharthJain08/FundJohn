@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/channels/discord/bot.js",
     "test": "npm run test:js && npm run test:py",
-    "test:js": "node --test tests/",
+    "test:js": "node --test 'tests/**/*.test.js'",
     "test:py": "pytest -m 'not integration' -q",
     "dev": "node --watch src/channels/discord/bot.js",
     "db:migrate": "node -e \"require('./src/database/postgres').migrate()\"",

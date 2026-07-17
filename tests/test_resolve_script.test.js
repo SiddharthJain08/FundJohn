@@ -30,7 +30,9 @@ test('Python script in src/pipeline resolves with --date and 600s timeout', () =
 test('Node script in src/pipeline resolves without --date and 5400s timeout', () => {
   const root = makeFixture();
   const { argv, timeoutSec } = resolveScript('run_collector_once', '2026-05-21', {}, root);
-  assert.deepEqual(argv, ['node', path.join(root, 'src/pipeline/run_collector_once.js')]);
+  // run_collector_once gets a raised V8 heap limit (OOM hardening — see
+  // src/execution/resolve_script.js).
+  assert.deepEqual(argv, ['node', '--max-old-space-size=4096', path.join(root, 'src/pipeline/run_collector_once.js')]);
   assert.equal(timeoutSec, 5400);
 });
 
