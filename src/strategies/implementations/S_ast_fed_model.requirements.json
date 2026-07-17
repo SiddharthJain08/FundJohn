@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_fed_model",
+  "required": ["prices"],
+  "optional": ["macro"]
+}

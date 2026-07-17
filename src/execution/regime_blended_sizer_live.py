@@ -343,6 +343,14 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
     contribs_by_ticker = _collapse_contributions(orders)
     if not by_ticker:
         return 0
+    # Per-ticker signed S_adj stamped by the sizer (2026-07-14) — surfaced on
+    # the dashboard position tiles. Closes of out-of-target tickers carry None.
+    sadj_by_ticker = {}
+    for o in orders:
+        tk = o.get('ticker')
+        v = o.get('corr_cum_sharpe')
+        if tk and v is not None:
+            sadj_by_ticker[tk] = v
     uri = os.environ.get('POSTGRES_URI')
     if not uri:
         return 0
@@ -355,15 +363,19 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
             cur.execute(
                 """
                 INSERT INTO cycle_contributing_strategies
-                    (run_date, ticker, strategies, contributions, updated_at)
-                VALUES (%s, %s, %s, %s, NOW())
+                    (run_date, ticker, strategies, contributions,
+                     corr_cum_sharpe, updated_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (run_date, ticker) DO UPDATE SET
                     strategies = EXCLUDED.strategies,
                     contributions = EXCLUDED.contributions,
+                    corr_cum_sharpe = COALESCE(EXCLUDED.corr_cum_sharpe,
+                                               cycle_contributing_strategies.corr_cum_sharpe),
                     updated_at = NOW()
                 """,
                 (run_date_str, tk, list(strats),
-                 json.dumps(contribs) if contribs is not None else None),
+                 json.dumps(contribs) if contribs is not None else None,
+                 sadj_by_ticker.get(tk)),
             )
             n += 1
         conn.commit()

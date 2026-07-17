@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_earnings_quality_factor",
+  "required": ["prices", "financials"],
+  "optional": []
+}

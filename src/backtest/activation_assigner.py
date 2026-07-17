@@ -6,14 +6,19 @@ eligible` — the column `strategy_weights._load_active_strategies` reads)
 from each strategy's latest `primary_window=TRUE` unified_backtest run.
 
 Design: docs/superpowers/specs/2026-07-05-strategy-activation-slider-design.md
-Operator directive (2026-07-05, confirmed):
-  eligible[r] = (sharpe[r] is not None
-                 AND sharpe[r] >= threshold
-                 AND trade_count[r] >= MIN_TRADES)
+Operator directive (2026-07-13 v2, supersedes 2026-07-05):
+  eligible[r] = QUALIFIES[r] AND sharpe[r] >= threshold
+  where QUALIFIES[r] is the shared per-regime promotion/activation rule
+  (backtest.regime_qualification / promotion_service.js judgeRegimeSleeve):
+      sharpe[r] STRICTLY > 0
+      AND max_dd_pct[r] <= class ceiling (equity/etp 20, option 30, crypto 70)
+      AND trade_count[r] >= 100
   threshold = pipeline_config.strategy_activation_min_sharpe (dashboard-
               controlled; default 0.5; read fresh every run; fail-safe to
               0.5 on any read error / missing key / malformed value).
-  MIN_TRADES = 20 (fixed constant — not operator/dashboard controlled).
+  Slider at 0 therefore activates a strategy in exactly its QUALIFYING
+  regimes; a higher slider only narrows within that set. Instrument class
+  comes from the manifest (default equity).
 
 Unlike the legacy manifest-writing `eligibility_assigner` (which REFUSES to
 wipe `eligible_regimes` to empty), this deriver is authoritative for the
@@ -67,13 +72,34 @@ import psycopg2.extras
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
+from backtest.regime_qualification import class_thresholds  # noqa: E402
+
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
 CONFIG_KEY = 'strategy_activation_min_sharpe'
 DEFAULT_MIN_SHARPE = 0.5
-MIN_TRADES = 20
+# min_trades resolution order (most specific wins):
+#   explicit min_trades= / --min-trades  >  pipeline_config  >  class gate (100)
+# The pipeline_config key makes the sample-size floor dashboard-adjustable, like
+# its min-Sharpe sibling (operator directive 2026-07-16): it was previously
+# reachable only from the shared per-regime gate (regime_qualification
+# class_thresholds → 100) or a CLI flag, so tuning it needed a code change.
+# The old fixed MIN_TRADES=20 is retired.
+CONFIG_KEY_MIN_TRADES = 'strategy_activation_min_trades'
 
 ACTOR = 'activation_assigner'
+
+
+def _load_instrument_classes() -> dict:
+    """sid → instrument_class from the manifest (default equity). Read once
+    per process; a missing/unreadable manifest degrades to all-equity, which
+    only loosens nothing (equity has the tightest DD ceiling)."""
+    try:
+        m = json.loads((ROOT / 'src' / 'strategies' / 'manifest.json').read_text())
+        return {sid: (rec.get('instrument_class') or 'equity')
+                for sid, rec in (m.get('strategies') or {}).items()}
+    except Exception:
+        return {}
 
 
 def _log(msg: str) -> None:
@@ -105,9 +131,37 @@ def get_activation_threshold(cur) -> float:
     return DEFAULT_MIN_SHARPE
 
 
+def get_activation_min_trades(cur) -> Optional[int]:
+    """Read strategy_activation_min_trades from pipeline_config.
+
+    Returns None when unset/unreadable, which makes compute_eligible fall back to
+    the per-class gate (regime_qualification.class_thresholds → 100). Fail-SAFE
+    direction matters: a malformed value must defer to the class floor, never
+    loosen to 0 — a 0 floor would activate regimes on a 1-trade sample.
+
+    0 IS honoured when explicitly configured (a deliberate "no sample floor"),
+    which is why this returns Optional[int] rather than using 0 as the sentinel.
+    Negative values are rejected (they would activate everything).
+
+    Same transaction caveat as get_activation_threshold: callers must rollback
+    after a failure before further statements.
+    """
+    try:
+        cur.execute("SELECT value FROM pipeline_config WHERE key=%s", (CONFIG_KEY_MIN_TRADES,))
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            n = int(row[0])
+            if n >= 0:
+                return n
+    except Exception:
+        pass
+    return None
+
+
 # ── Eligibility computation ─────────────────────────────────────────────────
 def compute_eligible(conn, strategy_id: str, threshold: float,
-                     min_trades: int = MIN_TRADES) -> tuple[Optional[dict], dict]:
+                     min_trades: Optional[int] = None,
+                     instrument_class: str = 'equity') -> tuple[Optional[dict], dict]:
     """Return (eligible_by_regime, diag) for strategy_id's latest
     primary_window=TRUE run.
 
@@ -121,6 +175,8 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     actually present in strategy_backtest_regimes (used for the prior->new
     diff report and the audit-row bt_sharpe_after/bt_n_trades columns).
     """
+    gate = class_thresholds(instrument_class)
+    eff_min_trades = gate['min_trades'] if min_trades is None else min_trades
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cur.execute("""
         SELECT run_id FROM strategy_backtest_runs
@@ -132,7 +188,7 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
         return None, {}
     run_id = row['run_id']
     cur.execute("""
-        SELECT regime_state, sharpe, trade_count
+        SELECT regime_state, sharpe, trade_count, max_dd_pct
         FROM strategy_backtest_regimes
         WHERE run_id = %s
     """, (run_id,))
@@ -140,8 +196,16 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     for r in cur:
         s = r['sharpe']
         n = r['trade_count'] if r['trade_count'] is not None else 0
-        passes = (s is not None and s >= threshold and n >= min_trades)
-        diag[r['regime_state']] = {'sharpe': s, 'trade_count': n, 'eligible': passes}
+        dd = r['max_dd_pct']
+        # QUALIFIES (shared per-regime gate: >0 sharpe, class DD ceiling on
+        # the SLEEVE, trade floor) AND the slider's sharpe dial on top.
+        passes = (s is not None and dd is not None
+                  and s > gate['min_sharpe']
+                  and float(dd) <= gate['max_dd_pct']
+                  and n >= eff_min_trades
+                  and s >= threshold)
+        diag[r['regime_state']] = {'sharpe': s, 'trade_count': n,
+                                   'max_dd_pct': dd, 'eligible': passes}
     if not diag:
         # primary_window run exists but has zero strategy_backtest_regimes
         # rows (malformed/partial write) -- treat identically to "no run":
@@ -193,7 +257,9 @@ def _classify_action(before_eligible: Optional[bool], new_eligible: bool) -> str
 
 def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
                   prior: dict, sharpe: Optional[float], trade_count: Optional[int],
-                  threshold: float, min_trades: int) -> str:
+                  threshold: float, min_trades: int,
+                  max_dd_pct: Optional[float] = None,
+                  instrument_class: str = 'equity') -> str:
     """Write one (strategy, regime) row IFF it actually changes (or has no
     prior row yet). Returns the action taken/would-be-taken. Exact upsert
     pattern matched from eligibility_manager.py / server.js: 4-column
@@ -219,7 +285,9 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
     before_json = _row_json(before_eligible) if before is not None else None
     after_json = _row_json(new_eligible)
     reason = (f'activation_assigner: sharpe={sharpe} n={trade_count} '
-             f'threshold={threshold} min_trades={min_trades}')
+             f'dd={max_dd_pct} class={instrument_class} '
+             f'threshold={threshold} min_trades={min_trades} '
+             f'rule=qualifies(>0·classDD·trades)+slider')
 
     cur.execute("""
         INSERT INTO strategy_regime_param_changes
@@ -241,7 +309,8 @@ def _apply_regime(cur, strategy_id: str, regime_state: str, new_eligible: bool,
 
 
 def apply_one(conn, strategy_id: str, threshold: float,
-             dry_run: bool = False, min_trades: int = MIN_TRADES) -> dict:
+             dry_run: bool = False, min_trades: Optional[int] = None,
+             instrument_class: str = 'equity') -> dict:
     """Compute + (unless dry_run) write eligibility for one strategy.
 
     Returns: {status: 'ok'|'skipped_no_run', strategy_id, prior, new, diag,
@@ -250,7 +319,8 @@ def apply_one(conn, strategy_id: str, threshold: float,
     prior/new/diag/actions are all {} and NOTHING is touched in the DB —
     not even a read of strategy_regime_params.
     """
-    eligible_by_regime, diag = compute_eligible(conn, strategy_id, threshold, min_trades)
+    eligible_by_regime, diag = compute_eligible(conn, strategy_id, threshold, min_trades,
+                                                instrument_class=instrument_class)
     if eligible_by_regime is None:
         return {'status': 'skipped_no_run', 'strategy_id': strategy_id,
                 'prior': {}, 'new': {}, 'diag': {}, 'actions': {}}
@@ -266,12 +336,14 @@ def apply_one(conn, strategy_id: str, threshold: float,
     else:
         cur = conn.cursor()
         try:
+            eff_min_trades = class_thresholds(instrument_class)['min_trades'] if min_trades is None else min_trades
             for r in CANONICAL_REGIMES:
                 d = diag.get(r, {})
                 actions[r] = _apply_regime(
                     cur, strategy_id, r, eligible_by_regime[r], prior_rows,
                     sharpe=d.get('sharpe'), trade_count=d.get('trade_count'),
-                    threshold=threshold, min_trades=min_trades)
+                    threshold=threshold, min_trades=eff_min_trades,
+                    max_dd_pct=d.get('max_dd_pct'), instrument_class=instrument_class)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -337,6 +409,9 @@ def main() -> int:
                     help='Compute + print prior->new diff only; NO writes')
     ap.add_argument('--min-sharpe', type=float, default=None,
                     help='Override the pipeline_config threshold for this run')
+    ap.add_argument('--min-trades', type=int, default=None,
+                    help='Override the per-class gate trade floor (default: '
+                         'regime_qualification class_thresholds, 100)')
     ap.add_argument('--notify', action='store_true',
                     help="Post the newly-dormant + net-change summary to "
                          "#botjohn-log (default off so tests/dry-runs stay silent)")
@@ -357,6 +432,16 @@ def main() -> int:
         # whether the config read above succeeded or raised.
         conn.rollback()
 
+    # min_trades: explicit --min-trades > pipeline_config > per-class gate (None
+    # here → compute_eligible applies class_thresholds). Resolved once per run so
+    # the dashboard slider takes effect without a deploy, mirroring min-Sharpe.
+    resolved_min_trades = args.min_trades
+    if resolved_min_trades is None:
+        cur1 = conn.cursor()
+        resolved_min_trades = get_activation_min_trades(cur1)
+        cur1.close()
+        conn.rollback()   # same clean-transaction guarantee as above
+
     if args.strategy_id:
         sids = [args.strategy_id]
     else:
@@ -365,14 +450,24 @@ def main() -> int:
         sids = sorted(r[0] for r in cur.fetchall())
         cur.close()
 
-    _log(f'threshold={threshold} min_trades={MIN_TRADES} dry_run={args.dry_run} '
+    classes = _load_instrument_classes()
+    # NOTE: header + summary line formats are PINNED by activation_preview.js
+    # (HEADER_RE / SUMMARY_RE, consumed by the dashboard dry-run endpoint) —
+    # keep `threshold=… min_trades=… dry_run=… strategies=…` byte-stable.
+    # min_trades is uniform across classes (gate floor 100), so one number
+    # remains printable even though the rule is class-aware.
+    eff_min_trades = (resolved_min_trades if resolved_min_trades is not None
+                      else class_thresholds('equity')['min_trades'])
+    _log(f'threshold={threshold} min_trades={eff_min_trades} dry_run={args.dry_run} '
         f'strategies={len(sids)}')
 
     results = []
     n_errors = 0
     for sid in sids:
         try:
-            r = apply_one(conn, sid, threshold, dry_run=args.dry_run)
+            r = apply_one(conn, sid, threshold, dry_run=args.dry_run,
+                          min_trades=resolved_min_trades,
+                          instrument_class=classes.get(sid, 'equity'))
         except Exception as e:
             _log(f'  ERROR {sid}: {e}')
             try:
@@ -410,7 +505,7 @@ def main() -> int:
         f'{activated_cells} cell(s) activated, {deactivated_cells} cell(s) deactivated, '
         f'{len(newly_dormant)} newly-dormant strateg{"y" if len(newly_dormant) == 1 else "ies"}'
         + (f' ({", ".join(newly_dormant)})' if newly_dormant else '')
-        + f', threshold={threshold}, min_trades={MIN_TRADES}, dry_run={args.dry_run}, errors={n_errors}'
+        + f', threshold={threshold}, min_trades={eff_min_trades}, dry_run={args.dry_run}, errors={n_errors}'
     )
     _log(summary)
 

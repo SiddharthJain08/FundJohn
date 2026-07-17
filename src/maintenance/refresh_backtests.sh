@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 #
-# Weekly backtest refresh — runs unified_backtest on every live/candidate/
-# staging strategy and then refreshes their eligible_regimes from the
-# discovered per-regime metrics.
+# MANUAL-ONLY full backtest refresh — runs unified_backtest on every live/
+# candidate/staging strategy and then refreshes their eligible_regimes from
+# the discovered per-regime metrics.
 #
-# Invoked as step 5 of weekend_saturday.sh (Sat 08:00 ET). The standalone
-# openclaw-backtest-refresh.timer (Sat 06:00 UTC) is DISABLED, so this is the
-# sole Saturday caller. Logs to /var/log/openclaw/backtest_refresh_*.log.
+# RETIRED from the weekly schedule 2026-07-14 (operator directive): canonical
+# strategy_backtest_runs rows are maintained by the Saturday coupling step —
+# an APPLIED candidate backtest is committed as the new primary_window row, so
+# no fleet-wide re-measurement is needed. Keep this script for one-off rebuilds
+# (e.g. after an engine change that shifts metric semantics fleet-wide).
+# Logs to /var/log/openclaw/backtest_refresh_*.log.
 
 set -euo pipefail
 

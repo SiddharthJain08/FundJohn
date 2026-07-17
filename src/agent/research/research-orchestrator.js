@@ -636,7 +636,8 @@ class ResearchOrchestrator {
     // Resolve the implementation path via manifest.canonical_file when set,
     // mirroring src/agent/approvals/staging_approver.js::readRequirements.
     // Falls back to "${stratId}.py" only when no canonical_file is recorded.
-    const implPath = _resolveImplPath(stratId);
+    // `let`, not `const` — re-resolved after strategycoder runs (below).
+    let implPath = _resolveImplPath(stratId);
     const onPhase = typeof opts.onPhase === 'function' ? opts.onPhase : () => {};
 
     await this._query(
@@ -675,6 +676,15 @@ class ResearchOrchestrator {
         return { promoted: false, reasonCode: 'coding_failed', error: e.message };
       }
     }
+
+    // Re-resolve the path after strategycoder ran: the coder writes
+    // `${stratId}.py` (exact case) while a finisher-staged manifest may carry
+    // a LOWERCASED canonical_file — the pre-coding resolution predates the
+    // file's existence, so _resolveImplPath's case-toggle fallback couldn't
+    // fire and validation checked a stale, nonexistent lowercase path
+    // (2026-07-14: 4 staging builds quarantined as contract_violation this
+    // way despite freshly-written working code).
+    if (!skipCoding) implPath = _resolveImplPath(stratId);
 
     // ── Phase 1: Contract validation ─────────────────────────────────────────
     // validate_strategy.py exits 0 on valid, 1 on invalid. Use async spawn so

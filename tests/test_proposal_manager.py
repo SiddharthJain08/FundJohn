@@ -74,7 +74,7 @@ def test_approve_rejects_already_decided(monkeypatch):
                    False, None, None, None, None, 0.5, 'na', None)
     conn = FakeConn(rows_by_call=[decided_row])
     monkeypatch.setattr(pm, '_connect', lambda: conn)
-    with pytest.raises(ValueError, match='not pending'):
+    with pytest.raises(ValueError, match='not decidable'):
         pm.approve(proposal_id=42, actor='operator:t', reason='', source='cli')
 
 

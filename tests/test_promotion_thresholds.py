@@ -14,13 +14,28 @@ def _sm(tmp_path, instrument_class):
     return LifecycleStateMachine.from_manifest(p)
 
 
-def test_equity_threshold_unchanged(tmp_path):
+def test_equity_threshold_positive_sharpe(tmp_path):
+    # Policy 2026-07-13 v2: sharpe must STRICTLY EXCEED 0.
     sm = _sm(tmp_path, 'equity')
     ok, _ = sm.can_transition('s1', StrategyState.LIVE,
-                              {'sharpe': 0.49, 'max_drawdown': 0.10})
+                              {'sharpe': 0.0, 'max_drawdown': 0.10})
     assert ok is False
     ok, _ = sm.can_transition('s1', StrategyState.LIVE,
-                              {'sharpe': 0.51, 'max_drawdown': 0.10})
+                              {'sharpe': -0.2, 'max_drawdown': 0.10})
+    assert ok is False
+    ok, _ = sm.can_transition('s1', StrategyState.LIVE,
+                              {'sharpe': 0.01, 'max_drawdown': 0.10})
+    assert ok is True
+
+
+def test_equity_trades_floor(tmp_path):
+    # min_trades 100: enforced when the caller supplies 'trades'.
+    sm = _sm(tmp_path, 'equity')
+    ok, msg = sm.can_transition('s1', StrategyState.LIVE,
+                                {'sharpe': 0.6, 'max_drawdown': 0.10, 'trades': 42})
+    assert ok is False and 'trades' in msg
+    ok, _ = sm.can_transition('s1', StrategyState.LIVE,
+                              {'sharpe': 0.6, 'max_drawdown': 0.10, 'trades': 100})
     assert ok is True
 
 
@@ -29,3 +44,6 @@ def test_etp_uses_its_own_row(tmp_path):
     ok, _ = sm.can_transition('s1', StrategyState.LIVE,
                               {'sharpe': 0.51, 'max_drawdown': 0.19})
     assert ok is True
+    ok, _ = sm.can_transition('s1', StrategyState.LIVE,
+                              {'sharpe': 0.51, 'max_drawdown': 0.21})
+    assert ok is False

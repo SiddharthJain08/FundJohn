@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_earnings_announcement_premium",
+  "required": ["prices", "earnings"],
+  "optional": ["financials"]
+}

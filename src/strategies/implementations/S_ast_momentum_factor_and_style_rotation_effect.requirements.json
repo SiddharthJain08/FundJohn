@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_momentum_factor_and_style_rotation_effect",
+  "required": ["prices"],
+  "optional": []
+}

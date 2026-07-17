@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_roa_effect_within_stocks",
+  "required": ["prices", "financials"],
+  "optional": []
+}

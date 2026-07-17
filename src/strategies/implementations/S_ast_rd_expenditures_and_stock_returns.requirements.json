@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_rd_expenditures_and_stock_returns",
+  "required": ["prices", "financials"],
+  "optional": []
+}

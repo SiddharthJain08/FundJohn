@@ -1,0 +1,1308 @@
+{
+  "S10_quality_value": {
+    "regime_set_hash": "19c75c513791104b",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "quality",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S15_iv_rv_arb": {
+    "regime_set_hash": "19c75c513791104b",
+    "direction_hash": "cbbf9f7724c8d435",
+    "formula_tokens": [
+      "atr",
+      "hv",
+      "regime",
+      "rv",
+      "straddle",
+      "strangle"
+    ],
+    "regimes": [
+      "LOW_VOL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S1_event_driven_new_news": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "fb68b393d8dc6940",
+    "formula_tokens": [
+      "atm",
+      "atr",
+      "earnings",
+      "iv_rank",
+      "momentum",
+      "regime",
+      "straddle",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV10_triple_gate_fear": {
+    "regime_set_hash": "900af3274024f50d",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "hv",
+      "iv_rank",
+      "regime",
+      "unusual_flow",
+      "value",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV11_cross_stock_dispersion": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "dispersion",
+      "hv",
+      "iv_rank",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV13_call_put_iv_spread_cohort2026": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atm",
+      "call_put",
+      "delta",
+      "hv",
+      "iv_rank",
+      "iv_spread",
+      "regime",
+      "rv",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV15_iv_term_structure": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atr",
+      "backwardation",
+      "contango",
+      "hv",
+      "iv_rank",
+      "iv_term_structure",
+      "regime",
+      "reversion",
+      "rv",
+      "term_structure",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV17_earnings_straddle_fade": {
+    "regime_set_hash": "79e6f3c736746fa9",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "earnings",
+      "hv",
+      "iv_rank",
+      "regime",
+      "straddle",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV17_earnings_straddle_fade_cohort2026": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atm",
+      "delta",
+      "earnings",
+      "hv",
+      "regime",
+      "straddle"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV20_iv_dispersion_reversion_cohort2026": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atm",
+      "correlation",
+      "dispersion",
+      "hv",
+      "regime",
+      "reversion",
+      "vega"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_HV7_iv_crush_fade": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "cbbf9f7724c8d435",
+    "formula_tokens": [
+      "atr",
+      "hv",
+      "iv_crush",
+      "iv_rank",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_TR01_vvix_early_warning": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "regime",
+      "reversion",
+      "straddle",
+      "strangle",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_TR02_hurst_regime_flip": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_TR03_bocpd": {
+    "regime_set_hash": "b8a3364f2537aa69",
+    "direction_hash": "86e26d7bd66bbf63",
+    "formula_tokens": [
+      "beta",
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_abnormal_accruals_earnings_quality": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "delta",
+      "earnings",
+      "quality",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ap_tree_cross_section_sdf": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ast_betting_against_beta_factor_in_stocks": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "beta",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ast_skewness_effect_in_commodities": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "f2a0793adc86d594",
+    "formula_tokens": [
+      "beta",
+      "regime",
+      "skew"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ast_time_series_momentum_effect": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ast_turn_of_the_month_in_equity_indexes": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "f2a0793adc86d594",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ast_value_factor_effect_within_countries": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_bankruptcy_risk_anomaly": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "earnings",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_bm_divy_market_timing": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_book_to_market_value_premium": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_constrained_gmv_vcv_dynamics": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "correlation",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_crisp_signal_aware_hrp": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "correlation",
+      "gamma",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_daily_high_ml_classifier": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "correlation",
+      "regime",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_daniel_titman_characteristics_cross_section": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_earnings_distraction_pead": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "delta",
+      "earnings",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_earnings_news_specific_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "earnings",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_estimation_risk_three_fund": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_fama_french_five_factor": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "gex",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_fama_french_three_factor_anomalies": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_fama_french_three_factor_composite": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_fear_index_return_prediction": {
+    "regime_set_hash": "900af3274024f50d",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "regime",
+      "rv",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_financial_constraint_kz_factor": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_friday_earnings_inattention_drift": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "earnings",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_growth_defensive_smooth_score_timing": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_institutional_lead_lag": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_ivol_cross_section_quintile": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_january_btm_size_seasonal": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "c65c9aa02b36a104",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_least_squares_risk_parity": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_local_global_balance": {
+    "regime_set_hash": "900af3274024f50d",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_motif_orbit_spillover_portfolio": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "correlation",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_p_index_eef_weekly_rotation": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_pairs_cointegration_copula": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "beta",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_partial_cointegration_pairs": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "correlation",
+      "regime",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_path_dependent_vol_pdv": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atm",
+      "gamma",
+      "regime",
+      "rv",
+      "straddle",
+      "value",
+      "weighted",
+      "zscore"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_q_theory_investment_growth": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_quality_adjusted_size": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "beta",
+      "earnings",
+      "quality",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_quantum_rebalance_qaoa": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "momentum",
+      "regime",
+      "rv",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_rd_intensity_intangible_factor": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "rv"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_regime_specialist_vol": {
+    "regime_set_hash": "169a8bbb4e444919",
+    "direction_hash": "40d20ac9c3105dc3",
+    "formula_tokens": [
+      "atr",
+      "momentum",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_renko_kagi_pairs_spread": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "correlation",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_risk_neutral_skew_cross_section": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "atm",
+      "beta",
+      "delta",
+      "otm",
+      "regime",
+      "rv",
+      "skew",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_skewness_dispersion_macro": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "dispersion",
+      "regime",
+      "reversion",
+      "skew",
+      "value",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_spx_death_cross_contrarian_fade": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_tactical_yield_credit_term_premium": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_thgnn_correlation_basket": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_tr_01_vvix_early_warning": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "48cc186c8b1aabe2",
+    "formula_tokens": [
+      "regime",
+      "reversion",
+      "straddle",
+      "strangle",
+      "zscore"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_tr_04_intraday_spy_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_trend_vol_quadratic_forecast": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "regime",
+      "rv",
+      "value",
+      "weighted"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_vix_conditioned_short_reversal": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_volume_return_autocorr_lmsw": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "beta",
+      "correlation",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_aroon_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_bollinger_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_bull_oops": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_donchian_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_dow_theory": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_dual_momentum_roc": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "dual_momentum",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_hook": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_hull_ma": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_livermore": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_nr7": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_price_momentum": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_ross_hook": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_welles_wilder_breakout": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "oxf_wyckoff_meanrev": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  },
+  "S_short_straddle_vrp": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a67f845068dd6361",
+    "formula_tokens": [
+      "atm",
+      "delta",
+      "regime",
+      "rv",
+      "straddle",
+      "vrp"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ],
+    "ejected": true,
+    "ejected_at": "2026-07-14"
+  }
+}

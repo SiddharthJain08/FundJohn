@@ -85,8 +85,15 @@ VALID_TRANSITIONS: Dict[Tuple[StrategyState, StrategyState], str] = {
 }
 
 # Backtest thresholds required for candidate → live promotion (formerly paper → live).
-CANDIDATE_TO_LIVE_MIN_SHARPE:   float = 0.5
+# Policy 2026-07-13 v2 (operator): Sharpe must STRICTLY EXCEED min_sharpe
+# (0.0 → "positive Sharpe"); the authoritative gate is PER-REGIME-SLEEVE and
+# lives in src/lib/promotion_service.js (sharpe>0 AND sleeve max-DD within the
+# class ceiling AND sleeve trades >= 100, promoting into exactly the
+# qualifying regimes). This python mirror judges caller-supplied totals
+# defensively — keep the VALUES in sync with promotion_service.js.
+CANDIDATE_TO_LIVE_MIN_SHARPE:   float = 0.0
 CANDIDATE_TO_LIVE_MAX_DRAWDOWN: float = 0.20   # 20 %
+CANDIDATE_TO_LIVE_MIN_TRADES:   int   = 100
 # Back-compat aliases — old names still imported by some callers.
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
@@ -95,23 +102,22 @@ PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 # legacy values. option + crypto calibrated in SP-4 (2026-05-27), operator-signed-off.
 PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     "equity": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
-               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
     "etp":    {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
-               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN},
-    # option: conservative bar — HIGHER than equity's 0.5 — because the options
-    # backtest is a VIX-anchored SYNTHETIC engine (in-regime IV-MAE ~0.082 on the
-    # supported index/ETF-ATM envelope; cross-regime trusted via VIX being real
-    # 30d implied vol). Operator sign-off SP-4 2026-05-27; refine as Phase C
-    # accrues real option candidates. Trusted underlyings live in
-    # backtest.vol_index.VALID_OPTION_UNDERLYINGS (index/ETF only for now).
-    "option": {"min_sharpe": 0.80,
-               "max_drawdown": 0.30},
-    # crypto: 0.50 min_sharpe FLOOR — only one live strategy so far
-    # (S_btc_momentum, backtest Sharpe 1.02 / MaxDD 65% over 10y), so no
-    # population to calibrate against yet; revisit when one exists.
-    # max_drawdown 0.70 operator sign-off 2026-05-26 (BTC is a 60-80% DD asset).
-    "crypto": {"min_sharpe": 0.50,
-               "max_drawdown": 0.70},
+               "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+    # option/crypto keep their looser DD ceilings (VIX-anchored SYNTHETIC
+    # options engine — SP-4 2026-05-27; BTC is a 60-80% DD asset — SP-3.1
+    # 2026-05-26). The Sharpe floor is the shared strictly-positive 0.0 as of
+    # policy 2026-07-13 v2; the option engine's uncertainty is carried by the
+    # activation min-Sharpe slider, not the entry gate.
+    "option": {"min_sharpe": 0.0,
+               "max_drawdown": 0.30,
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+    "crypto": {"min_sharpe": 0.0,
+               "max_drawdown": 0.70,
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
 }
 
 
@@ -119,7 +125,8 @@ def _promotion_threshold(instrument_class: str) -> dict[str, float]:
     return PROMOTION_THRESHOLDS.get(
         instrument_class,
         {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
-         "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN})
+         "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
+         "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES})
 
 
 # SP-3 instrument-class taxonomy. VALID = accepted by validation;
@@ -495,14 +502,23 @@ class LifecycleStateMachine:
                     "candidate→live requires metadata keys 'sharpe' and 'max_drawdown'"
                 )
             thr = _promotion_threshold(rec.instrument_class)
-            if sharpe < thr["min_sharpe"]:
+            # Policy 2026-07-13 v2: sharpe must STRICTLY EXCEED min_sharpe
+            # (0.0 → positive-Sharpe gate). The authoritative per-regime gate
+            # lives in promotion_service.js; this guard judges the totals the
+            # caller supplies.
+            if sharpe <= thr["min_sharpe"]:
                 return False, (
-                    f"candidate→live blocked: sharpe {sharpe:.2f} < "
+                    f"candidate→live blocked: sharpe {sharpe:.2f} <= "
                     f"minimum {thr['min_sharpe']} (instrument_class={rec.instrument_class})")
             if drawdown > thr["max_drawdown"]:
                 return False, (
                     f"candidate→live blocked: max_drawdown {drawdown:.2%} > "
                     f"limit {thr['max_drawdown']:.0%} (instrument_class={rec.instrument_class})")
+            trades = md.get("trades")
+            if trades is not None and trades < thr["min_trades"]:
+                return False, (
+                    f"candidate→live blocked: trades {trades} < "
+                    f"minimum {thr['min_trades']} (instrument_class={rec.instrument_class})")
 
         # Guard: candidate → staging requires regime eligibility
         # Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md

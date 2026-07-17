@@ -4,10 +4,23 @@ Implements the formulas from
 docs/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
-    effective_sharpe = (bt_n × bt_sharpe + live_n × live_sharpe)
-                       / (bt_n + live_n)
+    effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below
     weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
     daily_weight  = weight / sqrt(cadence_days(s))
+
+effective_sharpe was a sample-size blend of backtest and LIVE Sharpe until
+2026-07-16 (`(bt_n×bt_sharpe + live_n×live_sharpe)/(bt_n+live_n)`). Retired by
+operator directive: a per-strategy LIVE Sharpe is not a real measurement here.
+The book takes AGGREGATED positions — many strategies signal one ticker, the
+broker holds ONE position, and it exits through ONE Sharpe-weighted stacked
+bracket — so every contributing strategy is booked that shared blended exit and
+none of their own stops/targets ever ran. (The units differed too: bt_sharpe is
+an annualized daily-return Sharpe, live_sharpe a raw per-trade ratio.) The blend
+could let live data RESCUE a failing backtest: bt −0.40 + live 3.00 → +2.81, sized.
+live_sharpe/live_n are still computed and persisted for observability and a future
+PORTFOLIO-level Sharpe, which is measurable because it needs no per-strategy
+attribution. Measuring strategies live would require a separate paper account
+where each fires its own brackets. See _effective_sharpe.
 
 `weight` is the raw effective Sharpe — NOT a normalised fraction.
 The sizer's downstream renormalisation (scale = λ·NAV / Σ|ticker_w|)
@@ -547,25 +560,46 @@ def _load_live_sharpe(conn, strategy_ids: list[str], regime_by_date: dict) -> di
 
 
 def _effective_sharpe(bt: dict | None, live: dict | None):
-    """Sample-size weighted blend.
+    """effective_sharpe = bt_sharpe. live_sharpe is RECORDED, never blended.
 
     Returns (effective_sharpe, bt_sharpe, bt_n, live_sharpe, live_n).
-    Each element may be None if data is absent. effective_sharpe is None
-    iff neither bt nor live yields a usable Sharpe.
+
+    This was a sample-size blend
+    `(bt_n*bt_sharpe + live_n*live_sharpe)/(bt_n+live_n)` until 2026-07-16.
+    Retired by operator directive, for two independent reasons:
+
+    1. ATTRIBUTION. The book takes AGGREGATED positions: many strategies signal
+       the same ticker and the broker holds ONE position exiting through ONE
+       Sharpe-weighted stacked bracket. If S1 wants stop -5%/target +3% and S2
+       wants -8%/+6%, the live exit fires at the blended level and BOTH are
+       booked that shared outcome — neither strategy's own rule ever ran. So a
+       per-strategy live pnl_pct measures the blend, not the strategy. Measuring
+       a strategy live would need a separate paper account where each fires its
+       own brackets independently; we do not have one.
+    2. UNITS. bt_sharpe is an ANNUALIZED daily-return Sharpe
+       ((mean-rf)/std*sqrt(252)); live_sharpe is a RAW per-trade ratio
+       (mu/sigma over pnl_pct) with no time basis. The blend averaged two
+       different quantities as though they were one.
+
+    Concretely, the blend let live data RESCUE a failing backtest: bt -0.40 with
+    live 3.00 over 500 trades produced +2.81 and got sized. Now it stays -0.40
+    and is excluded.
+
+    live_sharpe/live_n remain computed and persisted: as active portfolio days
+    accumulate they can feed a PORTFOLIO-level Sharpe, which IS measurable
+    precisely because it needs no per-strategy attribution.
+
+    effective_sharpe is None unless a backtest Sharpe exists — a live-only
+    strategy is NOT sizeable, deliberately (sizing it would size on the blend).
+    Measured at the change: 0 of 70 current rows were live-only, so nothing
+    deactivated.
     """
     bt_s = bt['bt_sharpe'] if (bt and bt['bt_sharpe'] is not None) else None
     bt_n = bt['bt_n']      if (bt and bt['bt_n']      is not None) else None
     lv_s = live['live_sharpe'] if (live and live['live_sharpe'] is not None) else None
     lv_n = live['live_n']      if (live and live['live_n']      is not None) else None
 
-    if bt_n and bt_s is not None and lv_n and lv_s is not None:
-        eff = (bt_n * bt_s + lv_n * lv_s) / (bt_n + lv_n)
-    elif bt_n and bt_s is not None:
-        eff = bt_s
-    elif lv_n and lv_s is not None and lv_n > 0:
-        eff = lv_s
-    else:
-        eff = None
+    eff = bt_s if (bt_n and bt_s is not None) else None
     return eff, bt_s, bt_n, lv_s, lv_n
 
 
@@ -725,8 +759,11 @@ def load_current(regime_state: str) -> list[dict]:
     conn = _db()
     try:
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        # bt_n = per-regime backtest trade count; feeds the sizer's trade-count
+        # weight factor (√(ln n / ln anchor)), which replaced the √(ln N) breadth
+        # factor 2026-07-16. NULL/missing → factor 1.0 in the sizer (neutral).
         cur.execute('''
-            SELECT strategy_id, cadence_days, effective_sharpe, weight, daily_weight
+            SELECT strategy_id, cadence_days, effective_sharpe, weight, daily_weight, bt_n
             FROM strategy_weights_by_regime
             WHERE regime_state = %s AND is_current
         ''', (regime_state,))

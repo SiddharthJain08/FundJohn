@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_earnings_distraction_pead",
-  "required": ["prices", "earnings"],
-  "optional": ["financials"]
-}

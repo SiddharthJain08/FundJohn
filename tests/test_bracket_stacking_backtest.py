@@ -20,7 +20,7 @@ def _bars():
 
 def test_compare_event_distinguishes_policies():
     # Two uncorrelated blocks, both long. Max-weight pick (B) carries tp 5%; the OTHER
-    # block (A) carries the larger 8% take -> MAX-stacked takes 8% with the tightest stop.
+    # block (A) carries the larger 8% take -> sharpe-wtd stacked take = 8%·⅔+5%·⅓ = 7%.
     cands = [
         {'sid': 'A', 'direction': 1, 'weight': 5.0, 'entry': 100.0,
          'stop': 98.0, 't1': 108.0, 't2': None},   # block1: stop 2%, tp 8% (the max take)
@@ -35,7 +35,7 @@ def test_compare_event_distinguishes_policies():
     # current = max-weight pick (B): tp 105 -> target hit day2 (high 108>=105) -> +5%.
     assert res['current']['exit_reason'] == 'target'
     assert abs(res['current']['pnl_pct'] - 0.05) < 1e-9
-    # stacked: tp = MAX(8%,5%) = +8% (108) -> target hit day2 (high 108) -> +8%;
-    # stop tightest 98 (never hit). NOT the old +10% cumulative sum.
+    # stacked: tp = sharpe-wtd mean = +7% (107) -> target hit day2 (high 108) -> +7%;
+    # stop = 2%·⅔ + 4%·⅓ = 8/3 % (97.33, never hit).
     assert res['stacked']['exit_reason'] == 'target'
-    assert abs(res['stacked']['pnl_pct'] - 0.08) < 1e-9
+    assert abs(res['stacked']['pnl_pct'] - 0.07) < 1e-9

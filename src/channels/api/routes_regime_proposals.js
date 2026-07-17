@@ -75,27 +75,74 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Applied-this-week: stop/target overrides auto-applied by the Saturday
-// backtest-coupling step (source='saturday_coupling'), with the ΔSharpe that
-// justified each. Read-only; powers "Strategy Adjustments → Applied this week".
+// Recent changes: every applied per-(strategy, regime) param change in the
+// window — Saturday backtest-coupling (with the ΔSharpe that justified it),
+// Saturday confidence auto-approval, and any manual dashboard/CLI decisions.
+// Read-only; powers "Strategy Adjustments → Recent changes".
 router.get('/applied', async (req, res) => {
   const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
   try {
     const result = await query(`
-      SELECT id, changed_at, strategy_id, regime_state,
-             (before_row->>'stop_pct')::float   AS stop_before,
-             (after_row ->>'stop_pct')::float    AS stop_after,
-             (before_row->>'target_pct')::float  AS target_before,
-             (after_row ->>'target_pct')::float  AS target_after,
-             bt_sharpe_before::float             AS bt_sharpe_before,
-             bt_sharpe_after::float              AS bt_sharpe_after,
+      SELECT id, changed_at, strategy_id, regime_state, source, actor,
+             (before_row->>'stop_pct')::float     AS stop_before,
+             (after_row ->>'stop_pct')::float      AS stop_after,
+             (before_row->>'target_pct')::float    AS target_before,
+             (after_row ->>'target_pct')::float    AS target_after,
+             (before_row->>'size_scalar')::float   AS size_before,
+             (after_row ->>'size_scalar')::float   AS size_after,
+             (before_row->>'max_hold_days')::int   AS hold_before,
+             (after_row ->>'max_hold_days')::int   AS hold_after,
+             (before_row->>'eligible')::boolean    AS eligible_before,
+             (after_row ->>'eligible')::boolean    AS eligible_after,
+             bt_sharpe_before::float               AS bt_sharpe_before,
+             bt_sharpe_after::float                AS bt_sharpe_after,
              bt_n_trades, reason
         FROM strategy_regime_param_changes
-       WHERE source = 'saturday_coupling'
+       WHERE source IN ('saturday_coupling', 'auto-approval', 'dashboard', 'cli')
          AND changed_at >= NOW() - ($1 || ' days')::interval
        ORDER BY changed_at DESC, strategy_id, regime_state
     `, [String(days)]);
     res.json({ applied: result.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Noted (2026-07-14 full-auto Saturday): low-confidence suggestions parked
+// instead of applied — regime param proposals (status='noted', still
+// operator-decidable) plus low-confidence sizing recs (action_taken='noted').
+// Superseded/re-evaluated by the next weekly review.
+router.get('/noted', async (req, res) => {
+  const days = Math.min(parseInt(req.query.days, 10) || 21, 90);
+  try {
+    const [props, recs] = await Promise.all([
+      query(`
+        SELECT p.id, p.proposed_at, p.strategy_id, p.regime_state,
+               p.proposed_eligible,
+               p.proposed_size_scalar::float AS proposed_size_scalar,
+               p.confidence::float           AS confidence,
+               p.reasoning, p.decision_reason
+          FROM strategy_regime_param_proposals p
+         WHERE p.status = 'noted'
+           AND p.proposed_at >= NOW() - ($1 || ' days')::interval
+         ORDER BY p.proposed_at DESC
+         LIMIT 200
+      `, [String(days)]),
+      query(`
+        SELECT id, rec_date, strategy_id,
+               size_delta_pct::float   AS size_delta_pct,
+               stop_delta_pct::float   AS stop_delta_pct,
+               target_delta_pct::float AS target_delta_pct,
+               hold_days_delta, confidence::float AS confidence,
+               coupling_outcome, reasoning
+          FROM strategy_sizing_recommendations
+         WHERE action_taken = 'noted'
+           AND rec_date >= CURRENT_DATE - ($1 || ' days')::interval
+         ORDER BY rec_date DESC, strategy_id
+         LIMIT 200
+      `, [String(days)]),
+    ]);
+    res.json({ proposals: props.rows, sizing_recs: recs.rows });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }

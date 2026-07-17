@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_fear_index_return_prediction",
-  "required": ["prices", "macro"],
-  "optional": []
-}

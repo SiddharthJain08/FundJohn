@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_ast_betting_against_beta_factor_in_stocks",
-  "required": ["prices"],
-  "optional": []
-}

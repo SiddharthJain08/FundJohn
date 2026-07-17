@@ -105,3 +105,69 @@ def test_auto_approve_eligibility_only_passes(monkeypatch):
                         lambda **kw: {'after': {'eligible': True}})
     result = pm.auto_approve(proposal_id=10)
     assert result['status'] == 'approved'
+
+
+# ── auto_apply_batch (2026-07-14 Saturday full-auto) ────────────────────────
+
+def _batch_props(*specs):
+    """specs: (pid, confidence) tuples → minimal list_proposals row dicts."""
+    return [{'id': pid, 'strategy_id': f's{pid}', 'regime_state': 'LOW_VOL',
+             'confidence': conf} for pid, conf in specs]
+
+
+def test_auto_apply_batch_gate_off(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_PROPOSAL_AUTOAPPROVE', raising=False)
+    monkeypatch.setattr(pm, 'list_proposals',
+                        lambda **kw: (_ for _ in ()).throw(AssertionError('must not query')))
+    out = pm.auto_apply_batch(log=lambda *_: None)
+    assert out == {'skipped': True, 'approved': 0, 'noted': 0, 'errors': 0}
+
+
+def test_auto_apply_batch_strict_threshold_split(monkeypatch):
+    """conf 0.9 → approved; conf 0.8 (== threshold, strict >) → noted;
+    conf None → noted; rail-skip inside auto_approve → noted."""
+    monkeypatch.setenv('OPENCLAW_PROPOSAL_AUTOAPPROVE', '1')
+    monkeypatch.setenv('OPENCLAW_PROPOSAL_AUTOAPPROVE_MIN_CONFIDENCE', '0.8')
+    monkeypatch.setattr(pm, 'list_proposals', lambda **kw: _batch_props(
+        (1, 0.9), (2, 0.8), (3, None), (4, 0.95)))
+    approved_ids, noted = [], {}
+    def _fake_auto(proposal_id):
+        if proposal_id == 4:                       # rail skip
+            return {'id': proposal_id, 'status': 'skipped', 'reason': 'size delta too big'}
+        approved_ids.append(proposal_id)
+        return {'id': proposal_id, 'status': 'approved'}
+    monkeypatch.setattr(pm, 'auto_approve', _fake_auto)
+    monkeypatch.setattr(pm, '_mark_noted', lambda pid, reason: noted.__setitem__(pid, reason))
+    out = pm.auto_apply_batch(log=lambda *_: None)
+    assert approved_ids == [1]
+    assert set(noted) == {2, 3, 4}
+    assert 'rail skip' in noted[4]
+    assert out['approved'] == 1 and out['noted'] == 3 and out['errors'] == 0
+    assert out['threshold'] == 0.8
+
+
+def test_auto_apply_batch_counts_errors(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_PROPOSAL_AUTOAPPROVE', '1')
+    monkeypatch.setattr(pm, 'list_proposals', lambda **kw: _batch_props((7, 0.99)))
+    def _boom(proposal_id):
+        raise RuntimeError('db down')
+    monkeypatch.setattr(pm, 'auto_approve', _boom)
+    out = pm.auto_apply_batch(threshold=0.8, log=lambda *_: None)
+    assert out['errors'] == 1 and out['approved'] == 0
+
+
+def test_supersede_covers_noted_rows(monkeypatch):
+    """supersede_pending must sweep BOTH 'pending' and 'noted' — the noted
+    re-evaluation loop depends on it."""
+    conn = FakeConn()
+    monkeypatch.setattr(pm, '_connect', lambda: conn)
+    pm.supersede_pending('s1', 'LOW_VOL', 'mastermind:review-2026-07-14')
+    sql = conn.cur.executed[0][0]
+    assert "IN ('pending', 'noted')" in sql
+
+
+def test_lock_for_decision_accepts_noted():
+    cur = FakeCursor(rows=[(10, 's1', 'LOW_VOL', 'noted', True, 0.2,
+                            None, None, None, 0.5, 'meh', None)])
+    prop = pm._lock_for_decision(cur, 10)
+    assert prop['status'] == 'noted'

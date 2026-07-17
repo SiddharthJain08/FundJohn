@@ -544,11 +544,70 @@ async function _phaseCodeAndBacktest(job, ctx) {
       }
     }
 
-    await finishJob(job.job_id, 'succeeded', { backtest: outcome.backtest_result });
+    // Universe selection — AUTOMATIC (operator directive 2026-07-13): every
+    // fused approval leaves the strategy with an EXPLICIT universe. Prefer
+    // the PaperHunter-inferred predicate (validated against the real
+    // CANDIDATE_PREDICATES); otherwise stamp the default sp500 explicitly so
+    // no strategy rides the silent fallback. lifecycle.register()'s AST
+    // detect already covers coder-emitted module-scope imports — this is the
+    // backstop for everything else. Never fatal.
+    try {
+      const { _validateInferredFilter } = require('../research/research-orchestrator');
+      const inferred = _validateInferredFilter(spec.inferred_universe_filter ?? null);
+      const predicate = inferred || 'sp500';
+      const { withManifestLock } = require('../../lib/manifest_lock');
+      await withManifestLock(MANIFEST_PATH, (m) => {
+        const r = (m.strategies || {})[job.strategy_id];
+        if (!r) throw new Error('not in manifest');
+        r.metadata = r.metadata || {};
+        if (!r.metadata.universe_filter_ref) {
+          r.metadata.universe_filter_ref = `src.strategies.universe_default:${predicate}`;
+          r.metadata.universe_filter_source = inferred
+            ? 'paperhunter_inferred' : 'fused_approval_default';
+          m.updated_at = new Date().toISOString();
+        }
+        return m;
+      }, { actor: 'system:fused_staging_approval.universe' });
+      console.log(`[staging_approver] ${job.strategy_id}: universe_filter_ref ensured (${predicate})`);
+    } catch (e) {
+      console.warn('[staging_approver] universe stamp failed (non-fatal):', e.message);
+    }
+
+    // Fully-automatic pipeline (operator directive 2026-07-13): continue
+    // candidate → live through the per-regime qualification gate. Goes via
+    // the HTTP route (same process, :3000) so registry-first sync,
+    // strategy_regime_params, activation slider and the weights rebuild all
+    // run exactly as an operator approval would. A 422 (no qualifying
+    // regime) leaves the strategy candidate — the Sunday sweep re-offers it
+    // whenever a fresh backtest lands.
+    let promotion = null;
+    try {
+      const resp = await fetch(
+        `http://127.0.0.1:${process.env.PORT || 3000}/api/strategies/${encodeURIComponent(job.strategy_id)}/transition`,
+        {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            to_state: 'live',
+            actor:    'system:auto-promotion',
+            reason:   'auto-promotion after fused staging approval (per-regime qualification gate)',
+          }),
+        });
+      const body = await resp.json().catch(() => ({}));
+      promotion = { status: resp.status, ok: resp.status === 200 && !!body.ok,
+                    qualifying_regimes: body.qualifying_regimes || null,
+                    failed_gates: body.failed_gates || null };
+      console.log(`[staging_approver] ${job.strategy_id}: auto-promotion ${promotion.ok
+        ? `→ LIVE in [${(promotion.qualifying_regimes || []).join(', ')}]`
+        : `blocked (${resp.status}: ${(body.failed_gates || [body.error]).join(', ')})`}`);
+    } catch (e) {
+      console.warn('[staging_approver] auto-promotion attempt failed (stays candidate):', e.message);
+    }
+
+    await finishJob(job.job_id, 'succeeded', { backtest: outcome.backtest_result, promotion });
     emit({
       type: 'approval_job', job_id: job.job_id, strategy_id: job.strategy_id,
       status: 'succeeded', phase: 'done', progress: 100,
-      result: { backtest: outcome.backtest_result },
+      result: { backtest: outcome.backtest_result, promotion },
     });
   } catch (e) {
     await failJob(job, { error: e.message });

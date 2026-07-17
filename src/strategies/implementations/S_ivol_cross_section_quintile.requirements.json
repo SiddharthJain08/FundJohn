@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_ivol_cross_section_quintile",
-  "required": ["prices"],
-  "optional": ["financials"]
-}

@@ -189,21 +189,75 @@ def load_prices_panels(calendar: str = 'union') -> tuple[pd.DataFrame, dict[str,
       - bars_by_ticker: {ticker: DataFrame indexed by date with open/high/low/close}
         for the bracket walk-forward
     """
-    p = pd.read_parquet(PRICES_PARQUET)
-    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows before any
-    # downstream conversion. Filter expects string dates (compares against
-    # PG affected_date::TEXT), so it must run BEFORE pd.to_datetime below.
+    # Column-pruned + pyarrow-DICTIONARY read (2026-07-16). Two same-day evolutions,
+    # both forced by the 5-year backfill doubling prices.parquet (9.5M → 18.7M rows),
+    # which OOM-killed the bare pd.read_parquet(PRICES_PARQUET) outright (anon-rss
+    # 5.8GB, rc=137) on this 2-core/8GB no-swap box:
+    #   1. Prune to OHLC — the bare read pulled all 10 columns; `source` alone is a
+    #      ~900MB object column, materialised only to be discarded.
+    #   2. MEASURED (per-phase VmRSS probe): even pruned, the in-pandas
+    #      float32/categorical path peaked at ~2.05GB AT READ, because
+    #      pd.read_parquet materialises 18.7M object-dtype ticker strings (~640MB)
+    #      AND object-dtype date strings (~750MB) AND float64 OHLC (~285MB) before
+    #      any of them is compacted a few lines later. That transient — not the sim
+    #      loop — is what OOM-killed the heavy cross-sectionals (low_volatility_us
+    #      died at 18s, INSIDE this read). ticker AND date are BOTH
+    #      string+RLE_DICTIONARY on disk, so read_dictionary reads their codes
+    #      directly (no plain-string decode) and OHLC is cast to float32 IN ARROW;
+    #      to_pandas then yields a categorical+float32 panel with no fat pandas
+    #      transient. Read peak 2.05GB → 0.99GB, whole-load peak → ~1.15GB (now at
+    #      the sort), both measured live on the fleet.
+    # Output is byte-identical to the old path, verified by
+    # tests/test_arrow_dictionary_read_equivalence.py (close_wide values + column
+    # order + bars_by_ticker; exercises multi-row-group dictionary unification and
+    # the two traps: a categorical sort reorders columns, and a fully-quarantined
+    # ticker can leave a phantom pivot column). Only unified_backtest reads this
+    # (fleet/coupling/manual) — NOT the live daily sizer. float32 carries ~7 sig
+    # figs (ample for OHLC + stop/target tests; numpy upcasts in mean/std so Sharpe
+    # is unaffected). See reference_vps_two_core_cpu: never load the whole parquet.
+    _COLS = ['ticker', 'date', 'open', 'high', 'low', 'close']
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    _tbl = pq.read_table(PRICES_PARQUET, columns=_COLS, read_dictionary=['ticker', 'date'])
+    for _c in ('open', 'high', 'low', 'close'):
+        _i = _tbl.schema.get_field_index(_c)
+        _tbl = _tbl.set_column(_i, _c, _tbl.column(_c).cast(pa.float32()))
+    p = _tbl.to_pandas()
+    del _tbl
+    # SP-2 Phase B Task 5: drop quarantined (ticker, date) rows. filter_quarantined
+    # is categorical-safe (empty set → returns df untouched; else .astype(str) on
+    # the key col). Runs BEFORE the category normalisation below so a fully-
+    # quarantined ticker cannot leave a phantom all-NaN pivot column, and BEFORE
+    # pd.to_datetime — it stringifies date to match PG affected_date::TEXT, and here
+    # date is still categorical-of-strings, which .astype(str) resolves correctly.
     from src.pipeline.quarantine_filter import filter_quarantined
     p = filter_quarantined(p, 'prices.parquet')
+    # ticker is ALREADY categorical (from the dictionary read). Normalise it to
+    # EXACTLY reproduce the old object-dtype path: drop unused categories (phantom
+    # guard) then reorder to sorted, so the categorical sort_values + pivot below
+    # yield lexicographic row/column order identical to pre-rewrite. date needs no
+    # reorder — it becomes datetime64 before sort/pivot, so its category order is
+    # irrelevant.
+    if str(p['ticker'].dtype) == 'category':
+        p['ticker'] = p['ticker'].cat.remove_unused_categories()
+        p['ticker'] = p['ticker'].cat.reorder_categories(sorted(p['ticker'].cat.categories))
     p['date'] = pd.to_datetime(p['date'])
     p = p.sort_values(['ticker', 'date'])
     # Close panel (wide). Strategies expect index = date, columns = ticker, values = close.
     close_wide = p.pivot(index='date', columns='ticker', values='close')
+    # Restore a plain string Index: pivoting on a categorical yields a
+    # CategoricalIndex, and strategies treat close_wide.columns as ordinary
+    # labels (set ops / isin / reindex). Keeping the panel's public shape
+    # identical to before means the memory fix cannot change any result.
+    close_wide.columns = pd.Index(close_wide.columns.astype(str), name='ticker')
     close_wide.index.name = 'date'
     if calendar == 'equity':
         close_wide = _apply_equity_calendar(close_wide)
-    bars_by_ticker = {t: g.set_index('date')[['open','high','low','close']]
-                      for t, g in p.groupby('ticker')}
+    # observed=True: with a categorical key, groupby would otherwise iterate
+    # every category. Every category here comes from the data so the set is the
+    # same, but this keeps it explicit (and silences the pandas 2.x default change).
+    bars_by_ticker = {str(t): g.set_index('date')[['open','high','low','close']]
+                      for t, g in p.groupby('ticker', observed=True)}
     return close_wide, bars_by_ticker
 
 
@@ -819,11 +873,34 @@ def _resolve_instrument_class(strategy_id: str, filepath: Optional[str] = None) 
 
 # ── Main run ─────────────────────────────────────────────────────────────────
 
+def _configured_max_hold_days(strategy_id: str) -> int:
+    """Strategy-configured hold horizon for backtests (2026-07-14 operator
+    directive: max_hold is strategy config and is BAKED INTO every backtest —
+    curation and adjustment re-tests alike — unless the caller pins one
+    explicitly). Reads the per-regime strategy_regime_params rows through the
+    live resolver (coupling writes one value across all eligible regimes; MAX
+    of the non-null per-regime values decides the single simulate horizon).
+    DEFAULT_MAX_HOLD_DAYS when unset, on lookup failure (logged), or when the
+    coupling gate is OFF (byte-identical legacy, mirrors the stop/target
+    override gating)."""
+    if not regime_param_override.gate_on():
+        return DEFAULT_MAX_HOLD_DAYS
+    try:
+        from execution import regime_param_resolver as rpr
+        vals = [rpr.max_hold_days_override(strategy_id, r) for r in CANONICAL_REGIMES]
+        vals = [v for v in vals if v]
+        return max(vals) if vals else DEFAULT_MAX_HOLD_DAYS
+    except Exception as e:
+        _log(f'{strategy_id}: configured max_hold lookup failed '
+             f'({type(e).__name__}: {e}); using default {DEFAULT_MAX_HOLD_DAYS}')
+        return DEFAULT_MAX_HOLD_DAYS
+
+
 def run_backtest(strategy_id: str, *,
                  filepath: Optional[str] = None,
                  start_date: str = DEFAULT_START_DATE,
                  end_date: Optional[str] = None,
-                 max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
+                 max_hold_days: Optional[int] = None,
                  conn: Optional[psycopg2.extensions.connection] = None,
                  commit: bool = True,
                  resolver=None,
@@ -844,7 +921,13 @@ def run_backtest(strategy_id: str, *,
     on the resolver object after the run, and also returned via the
     ``run_backtest_grid`` wrapper. When resolver is None the function is
     byte-identical to the pre-resolver implementation.
+
+    max_hold_days=None (the default) resolves the STRATEGY-CONFIGURED horizon
+    from strategy_regime_params (2026-07-14 operator directive: config max_hold
+    is baked into every backtest); pass an int to pin it (coupling candidates do).
     """
+    if max_hold_days is None:
+        max_hold_days = _configured_max_hold_days(strategy_id)
     filepath = filepath or find_strategy_file(strategy_id)
     if not filepath:
         raise FileNotFoundError(f'no implementation file for {strategy_id}')
@@ -1064,7 +1147,10 @@ def main() -> int:
                    help='Run for all live + candidate + staging strategies')
     ap.add_argument('--start-date', default=DEFAULT_START_DATE)
     ap.add_argument('--end-date',   default=None)
-    ap.add_argument('--max-hold-days', type=int, default=DEFAULT_MAX_HOLD_DAYS)
+    ap.add_argument('--max-hold-days', type=int, default=None,
+                    help='Pin the hold horizon; default resolves each strategy\'s '
+                         'configured max_hold from strategy_regime_params '
+                         f'(falls back to {DEFAULT_MAX_HOLD_DAYS}).')
     args = ap.parse_args()
 
     if args.all_live:

@@ -52,8 +52,20 @@ function buildStrategyRow(x) {
     // ── Registry drift (read-only; never writes to manifest/registry) ──
     registry_status: x.registryStatus ?? null,
     drift: classifyDrift(x.rec?.state, x.registryStatus),
+    // ── Fresh marker (2026-07-13): went live within the last 7 days —
+    // newly auto-promoted strategies wear a ✨ fresh badge in the status
+    // column (same additive pattern as the drift badge) until the next
+    // weekly batch supersedes them. Pure manifest derivation (state_since),
+    // so it self-expires with no state to maintain.
+    fresh: freshFlag(x.rec),
     // ── Live (the ONLY live fields) ──
     last_signal_date: x.lastSignalDate ?? null,
   };
+}
+const FRESH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+function freshFlag(rec) {
+  if (!rec || (rec.state !== 'live' && rec.state !== 'monitoring')) return false;
+  const t = Date.parse(rec.state_since || '');
+  return Number.isFinite(t) && (Date.now() - t) < FRESH_WINDOW_MS;
 }
 module.exports = { buildStrategyRow };

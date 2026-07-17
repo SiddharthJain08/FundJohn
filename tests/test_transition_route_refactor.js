@@ -4,9 +4,9 @@
 // server.js is heavy; instead we drive the SAME promotion-service contract the
 // route calls and assert (1) the exact 422 object the route builds from a gate
 // failure, and (2) the class-aware delta: a Sharpe 0.6 / DD 50 fixture FAILS the
-// equity gate (DD>20) but PASSES the crypto gate (DD<=70) — the one intended
-// behavior change. Equity gate decision is byte-identical to the deleted inline
-// CANDIDATE_TO_LIVE_* constants (0.5 / 20).
+// equity gate (DD>20) but PASSES the crypto gate (DD<=70). Fixtures use the
+// legacy total-window fallback (no per-regime sleeves recorded) under the
+// 2026-07-13 v2 policy: sharpe must be >0, DD within class ceiling, >=100 trades.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -48,13 +48,13 @@ function route422(result) {
   //     C7 registry-first invariant means NOTHING is written.
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ total_sharpe: 0.3, total_max_dd_pct: 5 }); // sub-0.5 Sharpe
+    const q = mkQuery({ total_sharpe: -0.3, total_max_dd_pct: 5, total_trades: 500 }); // non-positive Sharpe
     const result = await transitionStrategy({
       dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate',
       force: false, actor: 'manual:dashboard', reason: 'promote to live after passing backtest guards',
       instrumentClass: 'equity', gateApplies: true,
     });
-    assert.strictEqual(result.ok, false, 'equity sub-floor blocked');
+    assert.strictEqual(result.ok, false, 'equity non-positive-sharpe blocked');
     assert.ok(result.failedGates && result.failedGates.includes('sharpe'));
     // The route maps this to status 422 with EXACTLY this body:
     assert.deepStrictEqual(route422(result), {
@@ -70,7 +70,7 @@ function route422(result) {
   // (2a) Sharpe 0.6 / DD 50 under EQUITY → blocked on max_dd (DD 50 > 20).
   {
     const mp = tmpManifest('candidate');
-    const q = mkQuery({ total_sharpe: 0.6, total_max_dd_pct: 50 });
+    const q = mkQuery({ total_sharpe: 0.6, total_max_dd_pct: 50, total_trades: 500 });
     const result = await transitionStrategy({
       dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate',
       force: false, actor: 'manual:dashboard', reason: 'x', instrumentClass: 'equity', gateApplies: true,
@@ -86,10 +86,10 @@ function route422(result) {
   }
 
   // (2b) SAME metrics under CRYPTO (instrument_class) → PASSES (DD 50 <= 70,
-  //      Sharpe 0.6 >= 0.50). The transition completes; manifest flips to live.
+  //      Sharpe 0.6 > 0). The transition completes; manifest flips to live.
   {
     const mp = tmpManifest('candidate', { instrument_class: 'crypto' });
-    const q = mkQuery({ total_sharpe: 0.6, total_max_dd_pct: 50 });
+    const q = mkQuery({ total_sharpe: 0.6, total_max_dd_pct: 50, total_trades: 500 });
     const result = await transitionStrategy({
       dbQuery: q, manifestPath: mp, sid: 'X', toState: 'live', fromState: 'candidate',
       force: false, actor: 'manual:dashboard', reason: 'x', instrumentClass: 'crypto', gateApplies: true,

@@ -1,9 +1,0 @@
-{
-  "strategy_id": "s15_iv_rv_arb",
-  "required": [
-    "macro",
-    "options_eod",
-    "prices"
-  ],
-  "optional": []
-}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_market_sentiment_and_an_overnight_anomaly",
+  "required": ["prices"],
+  "optional": []
+}

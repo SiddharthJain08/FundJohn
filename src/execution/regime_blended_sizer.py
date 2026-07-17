@@ -238,6 +238,30 @@ def _resolve_min_corr_cum_sharpe(params: dict | None, default: float = 1.0) -> f
     return default
 
 
+def _load_trade_factor_anchor(default: int = None) -> int:
+    """Anchor for the trade-count weight factor √(ln n / ln anchor). Reads
+    pipeline_config['strategy_trade_factor_anchor'] (dashboard-tunable, the scale
+    knob), falling back to orthogonalization.TRADE_FACTOR_ANCHOR_N (≈ median
+    per-regime trade count). Fail-safe: any read error / missing / ≤1 → the module
+    default, so the factor can never divide by ln(≤1). Read fresh each cycle."""
+    from execution import orthogonalization as _og
+    if default is None:
+        default = _og.TRADE_FACTOR_ANCHOR_N
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT value FROM pipeline_config WHERE key = 'strategy_trade_factor_anchor'")
+                row = cur.fetchone()
+                if row is not None:
+                    v = int(float(row[0]))
+                    if v > 1:
+                        return v
+    except Exception:
+        pass
+    return default
+
+
 def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
     """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
     Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
@@ -1098,6 +1122,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     weight_by_strat   = {r['strategy_id']: float(r['daily_weight']) for r in rows}
     sharpe_by_strat   = {r['strategy_id']: float(r['effective_sharpe']) for r in rows}
     cadence_by_strat  = {r['strategy_id']: float(r['cadence_days']) for r in rows}
+    # Per-regime backtest trade count for the trade-count weight factor (replaced
+    # the √(ln N) breadth factor 2026-07-16). None/missing → passed through as-is;
+    # trade_weight_factor maps it to a NEUTRAL 1.0 (never zeroes the weight).
+    trade_count_by_strat = {r['strategy_id']: r.get('bt_n') for r in rows}
     # size_scalar wiring (default-OFF). Approved per-(strategy,regime) scalars
     # (raw; missing → 1.0) multiply daily_weight = the ALLOCATION term only;
     # the cum-sharpe gate (sharpe_by_strat) + fold representative stay raw.
@@ -1114,20 +1142,17 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         logger.warning('size_scalar: load failed (%s); treating all as 1.0', e)
         _size_scalars = {}
     eff_weight_by_strat = _apply_size_scalars(weight_by_strat, _size_scalars, _size_scalar_on)
-    # Breadth weight factor (default-OFF). √(ln N / ln anchor) upweights strategies
-    # acting on a broader universe N (Grinold: IR = IC·√breadth). Applied ONLY inside
-    # the corr cum-Sharpe calc below (both gate + sizing weights), NOT to the global
-    # weight_by_strat/eff_weight_by_strat — so FOLD + bracket-leader stay on raw
-    # conviction (mirrors size_scalar's scope). N per strategy is regime-independent
-    # (strategy_universe_sizes, migration 141), refreshed out-of-band.
-    _breadth_weight_on = _ortho_enabled('OPENCLAW_STRATEGY_BREADTH_WEIGHT')
-    _universe_size_by_strat: dict = {}
-    if _breadth_weight_on:
-        try:
-            _universe_size_by_strat = _sw.load_universe_sizes()
-        except Exception as e:
-            logger.warning('breadth_weight: universe-size load failed (%s); factors default to 1.0', e)
-            _universe_size_by_strat = {}
+    # Trade-count weight factor (DEFAULT-ON; operator directive 2026-07-16).
+    # √(ln n / ln anchor) upweights strategies whose per-regime Sharpe rests on more
+    # backtest trades (realized breadth + estimation confidence). REPLACES the
+    # regime-independent √(ln N_universe) breadth factor. Applied ONLY inside the
+    # corr cum-Sharpe calc below (both gate + sizing weights), NOT to the global
+    # weight_by_strat/eff_weight_by_strat — FOLD + bracket-leader stay on raw
+    # conviction (mirrors the breadth factor's old scope). n per (strategy,regime)
+    # comes from strategy_weights_by_regime.bt_n (loaded above); missing → 1.0.
+    # Anchor is dashboard-tunable (pipeline_config, default ≈ median regime count);
+    # it is the scale knob paired with a conviction-floor recheck.
+    _trade_factor_anchor = _load_trade_factor_anchor()
     # Effective leverage = global λ × per-regime liquidity_param.
     # liquidity_param is a per-regime DAMPENER (∈ [0, 1.0]); paired with
     # lam_global ∈ [0.10, 2.00] this guarantees effective lam ≤ 2.0 (Reg T
@@ -1271,21 +1296,19 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # equity_gate_floor drop below) AND the sizing weight (ticker_w is rebuilt
     # from S_adj).
     _sim = (_ortho_groups or {}).get('matrix') or {}
-    # Breadth-scale the weights fed to the corr calc (default-OFF). Scoped here so
-    # only the corr gate+sizing see the √(ln N) factor; FOLD/bracket stay raw.
-    _cw_gate, _cw_size = weight_by_strat, eff_weight_by_strat
-    if _breadth_weight_on:
-        from execution import orthogonalization as _ogbw
-        # Anchor = live resolver-computed sp500 set size (reserved row, refreshed
-        # nightly); falls back to the module constant if not yet populated.
-        _anchor = _universe_size_by_strat.get('__anchor_sp500__') or _ogbw.BREADTH_ANCHOR_N
-        _bwf = {sid: _ogbw.breadth_weight_factor(_universe_size_by_strat.get(sid), anchor=_anchor)
-                for sid in set(weight_by_strat) | set(eff_weight_by_strat)}
-        _cw_gate = {sid: w * _bwf.get(sid, 1.0) for sid, w in weight_by_strat.items()}
-        _cw_size = {sid: w * _bwf.get(sid, 1.0) for sid, w in eff_weight_by_strat.items()}
-        _n_bw = sum(1 for f in _bwf.values() if abs(f - 1.0) > 1e-9)
-        logger.info('breadth_weight: applied √(ln N) factor to %d/%d strategies (anchor N=%d)',
-                    _n_bw, len(_bwf), _anchor)
+    # Trade-count-scale the weights fed to the corr calc (DEFAULT-ON). Scoped here
+    # so only the corr gate+sizing see the √(ln n) factor; FOLD/bracket stay raw.
+    # Folding f into the weight vector makes the existing quadratic form correct
+    # with NO special-casing: num = Σ f²w²d, q = Σ fᵢfⱼwᵢwⱼdᵢdⱼρ — i.e. (f∘w) in
+    # the same form. A missing bt_n → factor 1.0 (neutral), never 0.
+    from execution import orthogonalization as _ogtf
+    _twf = {sid: _ogtf.trade_weight_factor(trade_count_by_strat.get(sid), anchor=_trade_factor_anchor)
+            for sid in set(weight_by_strat) | set(eff_weight_by_strat)}
+    _cw_gate = {sid: w * _twf.get(sid, 1.0) for sid, w in weight_by_strat.items()}
+    _cw_size = {sid: w * _twf.get(sid, 1.0) for sid, w in eff_weight_by_strat.items()}
+    _n_tf = sum(1 for f in _twf.values() if abs(f - 1.0) > 1e-9)
+    logger.info('trade_weight: applied √(ln n) factor to %d/%d strategies (anchor n=%d)',
+                _n_tf, len(_twf), _trade_factor_anchor)
     gate_net_sharpe, _size_adj, _nb_g, _nb_s = _corr_adjusted_maps(
         ticker_meta, _cw_gate, _cw_size, _sim)
     # Equity conviction gate reads the per-regime corr floor (scale matches S_adj).
@@ -1483,12 +1506,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     return _emit_orders_from_targets(
         target_usd, ticker_meta, nav, confirmer, _ortho_groups,
         sharpe_by_strat, eff_weight_by_strat, opt_active, weight_by_strat,
-        scale, account_state)
+        scale, account_state, gate_net_sharpe=gate_net_sharpe)
 
 
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
-                              weight_by_strat, scale, account_state, broker=None):
+                              weight_by_strat, scale, account_state, broker=None,
+                              gate_net_sharpe=None):
     """Order-emission tail shared by the normal sizing path AND the zero-conviction
     flatten path (extracted 2026-07-08, byte-identical to the prior in-line tail).
 
@@ -1595,6 +1619,11 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
                                            ticker_meta[tkr]['strategies'],
                                            ticker_meta[tkr]['directions'],
                                            eff_weight_by_strat),
+            # Signed per-ticker corr-adjusted cumulative Sharpe (S_adj) — the
+            # conviction this emission was gated/sized at. Persisted to
+            # cycle_contributing_strategies for the dashboard position tiles
+            # (2026-07-14). None for closes of tickers outside today's targets.
+            'corr_cum_sharpe':         (gate_net_sharpe or {}).get(tkr),
             'flip_action':             kind if kind in ('flip_close', 'flip_open') else None,
             'action':                  _derive_action(kind, out_current, out_target, dir_sign),
         }

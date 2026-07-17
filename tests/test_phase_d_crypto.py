@@ -17,8 +17,9 @@ def test_crypto_promotion_threshold_present():
     from strategies.lifecycle import PROMOTION_THRESHOLDS, _promotion_threshold
     thr = PROMOTION_THRESHOLDS.get('crypto')
     assert thr is not None
-    assert thr['min_sharpe'] == 0.5
+    assert thr['min_sharpe'] == 0.0   # policy 2026-07-13 v2: strictly-positive gate
     assert thr['max_drawdown'] == 0.70
+    assert thr['min_trades'] == 100
     assert _promotion_threshold('crypto') == thr
 
 

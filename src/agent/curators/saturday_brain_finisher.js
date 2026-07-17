@@ -280,7 +280,11 @@ async function main() {
         m.strategies[sid] = {
           state: 'staging', state_since: now,
           metadata: {
-            canonical_file: `${sid.toLowerCase()}.py`,
+            // Exact-case: strategycoder writes `${sid}.py` and the auto
+            // orchestrator's register step records the same — a lowercased
+            // canonical_file here made every Tier-B build fail validation on
+            // a stale path (2026-07-14).
+            canonical_file: `${sid}.py`,
             class:          sid,
             description:    (hunterResult.hypothesis_one_liner || sid).slice(0, 280),
           },
@@ -346,6 +350,43 @@ async function main() {
   }
   log(`Vault: ${paperNotes} paper, ${deferred} deferred, ${strategyNotes} strategy notes.`);
 
+  // Phase 9 — AUTO-APPROVAL (operator directive 2026-07-13: fully-automatic,
+  // inherently regime-based research system). Offers every candidate to the
+  // per-regime qualification gate (>0 sharpe · class max-DD · ≥100 trades per
+  // sleeve; promotes into exactly the qualifying regimes), then serially
+  // pushes staging strategies through the fused build+backtest pipeline
+  // within a time budget (leftovers roll to next Sunday), then runs ONE
+  // activation-slider apply + ONE weights rebuild. Never blocks phases 5–8:
+  // any failure here is logged and the run still closes out.
+  let autoApproval = null;
+  try {
+    const { runAutoApproval } = require('./auto_approval');
+    autoApproval = await runAutoApproval({
+      log: (m) => log(`auto-approve: ${m}`),
+      dryRun,
+      stagingBudgetMs: parseInt(getArg('--staging-budget-mins', '90'), 10) * 60_000,
+      trigger: 'sunday_auto_approval',
+    });
+  } catch (e) {
+    log(`auto-approve: FAILED (non-fatal): ${e.message}`);
+  }
+
+  // Phase 10 — CANDIDATE REAPER (operator directive 2026-07-14): candidates
+  // get three weekend cycles of investigation (Sunday code review),
+  // alteration (Saturday review/refresh) and gate re-offers (Phase 9 above);
+  // whatever still hasn't earned a live promotion is ejected — manifest
+  // entry + implementation files + regime params removed, registry
+  // tombstoned 'deprecated', dedup traces preserved so the pipeline never
+  // re-mints it. Runs AFTER Phase 9 so a third-weekend qualifier promotes
+  // before the reaper sees it. Non-fatal.
+  let reaped = null;
+  try {
+    const { reapCandidates } = require('./candidate_reaper');
+    reaped = await reapCandidates({ log: (m) => log(`reaper: ${m}`), dryRun });
+  } catch (e) {
+    log(`reaper: FAILED (non-fatal): ${e.message}`);
+  }
+
   await _markRunComplete(dryRun, log, {
     coded, codedFailed: failed,
     tierA: tiers.A.length, tierB: tiers.B.length, tierC: tiers.C.length,
@@ -361,6 +402,16 @@ async function main() {
     deferred_tier_c:      deferred,
     new_strategies:       [...tierAStrategies.map(s => s.strategy_id),
                            ...tiers.B.map(t => t.hunterResult.strategy_id)],
+    auto_approval:        autoApproval && {
+      promoted:          autoApproval.promoted.map(p => p.sid),
+      gate_blocked:      autoApproval.gate_blocked,
+      staging_completed: autoApproval.staging_completed,
+      staging_deferred:  autoApproval.staging_deferred.length,
+      finale_ok:         autoApproval.finale_ok,
+    },
+    reaper:               reaped && {
+      ejected: reaped.ejected.length, exempt: reaped.exempt, errors: reaped.errors.length,
+    },
   }, null, 2));
   log('Finisher complete.');
   process.exit(0);

@@ -341,6 +341,72 @@ app.get('/api/portfolio/positions', async (req, res) => {
       }
     } catch (_) { /* broker leg degraded — rows ship without broker_position */ }
 
+    // Resting exit legs at the broker (2026-07-15), keyed by symbol. This is
+    // exit TRUTH — the stop/take-profit orders that will actually fire — as
+    // opposed to execution_signals.stop_loss/target_1, which records each
+    // strategy's *intent* and says nothing about whether a bracket is live.
+    // A position with no resting stop is unprotected however good the intent
+    // was, so the panel must be able to report that rather than draw a level
+    // that exists only in the DB.
+    //
+    // pending_cancel legs are excluded: openclaw-afterhours-tp-rth-reconcile
+    // cancels the extended-hours TPs at 13:30 UTC and those rows linger in the
+    // list while the cancel settles — counting them would show a take-profit
+    // that is on its way out.
+    // brokerBracketsOk separates "asked the broker, this position has no stop"
+    // from "could not ask the broker". Both would otherwise arrive at the panel
+    // as an absent block and render as "none" — turning a degraded API leg into
+    // a false report that the ENTIRE book is unprotected, which is the exact
+    // alarm an operator would act on. Fetch failure must read as unknown.
+    // --nested is REQUIRED, not a nicety: an OCO exit is ONE order whose
+    // take-profit shows at the top level while its protective stop hides in
+    // `legs[]` (status 'held' until the sibling cancels). Reading only
+    // top-level stop_price finds 3 stops across this book; reading the legs
+    // finds 9 — i.e. the flat read invents unprotected positions that are in
+    // fact bracketed, which is a worse lie than showing nothing.
+    //
+    // --limit 500 is the API max (default 50). At 14 positions the default
+    // would do, but a silently truncated page would drop real brackets and
+    // report them as absent — the same false alarm, arriving later and only
+    // once the book grows.
+    const brokerBrackets = {};
+    let brokerBracketsOk = false;
+    const absorbLeg = (o) => {
+      if (!o || !o.symbol || o.status === 'pending_cancel') return;
+      const leg = brokerBrackets[o.symbol]
+        || (brokerBrackets[o.symbol] = { stop: null, target: null });
+      const sp = parseFloat(o.stop_price);
+      const lp = parseFloat(o.limit_price);
+      if (Number.isFinite(sp)) leg.stop = sp;
+      if (Number.isFinite(lp)) leg.target = lp;
+      for (const child of (o.legs || [])) absorbLeg(child);
+    };
+    try {
+      const ordersResp = await runAlpaca(
+        ['order', 'list', '--nested', '--limit', '500'], { timeout: 10_000 });
+      if (ordersResp && ordersResp.ok && Array.isArray(ordersResp.payload)) {
+        brokerBracketsOk = true;
+        for (const o of ordersResp.payload) absorbLeg(o);
+      }
+    } catch (_) { /* brokerBracketsOk stays false — panel renders brackets as unknown */ }
+
+    // Per-ticker corr-adjusted cumulative Sharpe (S_adj) — the conviction the
+    // position was last sized at (stamped by the sizer each cycle into
+    // cycle_contributing_strategies, 2026-07-14). Latest non-null row per
+    // ticker; best-effort (tiles render an em-dash without it).
+    const sadjByTicker = {};
+    try {
+      const sadjRes = await dbQuery(`
+        SELECT DISTINCT ON (ticker) ticker,
+               corr_cum_sharpe::float AS corr_cum_sharpe,
+               run_date               AS corr_cum_sharpe_asof
+          FROM cycle_contributing_strategies
+         WHERE corr_cum_sharpe IS NOT NULL
+         ORDER BY ticker, run_date DESC
+      `);
+      for (const r of sadjRes.rows) sadjByTicker[r.ticker] = r;
+    } catch (_) { /* column may predate migration 143 on a fresh clone */ }
+
     // Active positions = broker truth. execution_signals carries every
     // strategy's *intent*, including stale rows the reconcile sweep hasn't
     // closed yet (phantoms). The dashboard's "Active Positions" panel must
@@ -360,6 +426,14 @@ app.get('/api/portfolio/positions', async (req, res) => {
           nav,
         }),
         broker_position: brokerPositions[r.ticker] || null,
+        // Present-and-empty = genuinely no resting leg; null = broker unreachable.
+        broker_bracket: brokerBracketsOk
+          ? (brokerBrackets[r.ticker] || { stop: null, target: null })
+          : null,
+        corr_cum_sharpe: sadjByTicker[r.ticker]
+          ? sadjByTicker[r.ticker].corr_cum_sharpe : null,
+        corr_cum_sharpe_asof: sadjByTicker[r.ticker]
+          ? sadjByTicker[r.ticker].corr_cum_sharpe_asof : null,
       }));
 
     if (req.query.group_by === 'strategy') {
@@ -539,17 +613,20 @@ app.put('/api/config/asset-corr-thr', async (req, res) => {
 });
 
 // ── Strategy Activation threshold + dry-run preview ─────────────────────────
-// Slider band for pipeline_config.strategy_activation_min_sharpe — the min
-// per-regime backtest Sharpe the activation assigner
-// (src/backtest/activation_assigner.py) requires before a (strategy, regime)
-// sizer-eligibility cell passes (MIN_TRADES=20 is a fixed code constant, not
-// dashboard-controlled). The assigner reads this key fresh on every run and
-// fail-safes to 0.5 when the row is absent/malformed — the GET mirrors that
-// exact fallback so slider and assigner can never disagree about the default.
-// ⚠️ OPERATOR GATE (Phase 1e, binding): the LIVE eligibility write is HELD.
-// This dashboard only (a) sets the threshold and (b) previews via --dry-run.
-// The server MUST NEVER invoke the assigner without --dry-run — see the
-// hard-coded argv + guard in POST /api/activation/dry-run below.
+// Slider band for pipeline_config.strategy_activation_min_sharpe — the extra
+// sharpe floor the activation assigner (src/backtest/activation_assigner.py)
+// applies ON TOP of the shared per-regime qualification gate (>0 sharpe,
+// class-DD sleeve ceiling, ≥100 trades — regime_qualification.py /
+// promotion_service.js, policy 2026-07-13 v2). Slider at 0 → a strategy is
+// active in exactly its qualifying regimes. The assigner reads this key fresh
+// on every run and fail-safes to 0.5 when the row is absent/malformed — the
+// GET mirrors that exact fallback so slider and assigner can never disagree.
+// LIVE since 2026-07-13 (OPENCLAW_ACTIVATION_ASSIGNER=1): the Mon 00:00 ET
+// weekly_live_sharpe.js run applies this threshold to
+// strategy_regime_params.eligible before the weights rebuild. This dashboard
+// endpoint itself still only (a) sets the threshold and (b) previews via
+// --dry-run — the server MUST NEVER invoke the assigner without --dry-run;
+// see the hard-coded argv + guard in POST /api/activation/dry-run below.
 const ACTIVATION_MIN_SHARPE_MIN     = 0.0;
 const ACTIVATION_MIN_SHARPE_MAX     = 3.0;
 const ACTIVATION_MIN_SHARPE_DEFAULT = 0.5;   // mirrors the assigner's fail-safe
@@ -582,7 +659,57 @@ app.put('/api/config/activation-min-sharpe', async (req, res) => {
     // when absent, so first write creates it with a description).
     await dbQuery(`
       INSERT INTO pipeline_config (key, value, description, updated_at)
-      VALUES ('strategy_activation_min_sharpe', $1, 'Min per-regime backtest Sharpe for sizer eligibility (activation_assigner; MIN_TRADES=20 fixed). Range [0.0, 3.0]; assigner fail-safe default 0.5. Live eligibility write is Phase 1e-gated — dashboard slider sets threshold + dry-run preview only. Adjustable via dashboard.', NOW())
+      VALUES ('strategy_activation_min_sharpe', $1, 'Activation min-Sharpe slider: extra per-regime sharpe floor on top of the qualification gate (>0 sharpe, class-DD sleeve, >=100 trades). 0 = trade in exactly the qualifying regimes. Range [0.0, 3.0]; assigner fail-safe default 0.5. LIVE weekly enforcement via activation_assigner (Mon 00:00 ET, OPENCLAW_ACTIVATION_ASSIGNER=1). Adjustable via dashboard.', NOW())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    `, [String(v)]);
+    res.json({ value: v });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Activation min-TRADES slider ────────────────────────────────────────────
+// Sibling of the min-Sharpe slider above, for the per-regime SAMPLE-SIZE floor:
+// a regime only activates when its backtest produced >= this many trades in that
+// regime. Previously reachable only from regime_qualification.class_thresholds
+// (a hardcoded 100) or the assigner's --min-trades flag, so tuning it needed a
+// code change; operator directive 2026-07-16 made it dashboard-adjustable.
+//
+// Fail-safe direction is the OPPOSITE of a normal slider and deliberately so:
+// when the row is ABSENT the assigner defers to the per-class gate (100) rather
+// than loosening to 0 — an unset key must never activate a regime on a 1-trade
+// sample. So `row_exists:false` reports the class floor, not a stored value.
+// 0 IS a legal explicit choice ("no sample floor") and is honoured once written.
+const ACTIVATION_MIN_TRADES_MIN     = 0;
+const ACTIVATION_MIN_TRADES_MAX     = 1000;
+const ACTIVATION_MIN_TRADES_DEFAULT = 100;   // == regime_qualification class gate
+
+app.get('/api/config/activation-min-trades', async (req, res) => {
+  try {
+    const r = await dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'strategy_activation_min_trades'");
+    const row = r.rows[0];
+    const raw = row ? parseInt(row.value, 10) : NaN;
+    // Mirror the assigner's resolution exactly so slider and assigner can never
+    // disagree: unset/malformed/negative -> the class gate.
+    const usable = Number.isInteger(raw) && raw >= ACTIVATION_MIN_TRADES_MIN;
+    res.json({
+      value:      usable ? Math.min(raw, ACTIVATION_MIN_TRADES_MAX) : ACTIVATION_MIN_TRADES_DEFAULT,
+      min:        ACTIVATION_MIN_TRADES_MIN, max: ACTIVATION_MIN_TRADES_MAX,
+      default:    ACTIVATION_MIN_TRADES_DEFAULT,
+      row_exists: !!row,
+      source:     usable ? 'pipeline_config' : 'class_gate',
+      updated_at: row ? row.updated_at : null,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/config/activation-min-trades', async (req, res) => {
+  const v = parseInt(req.body && req.body.value, 10);
+  if (!Number.isInteger(v) || v < ACTIVATION_MIN_TRADES_MIN || v > ACTIVATION_MIN_TRADES_MAX) {
+    return res.status(400).json({ error: `value must be an integer in [${ACTIVATION_MIN_TRADES_MIN}, ${ACTIVATION_MIN_TRADES_MAX}]` });
+  }
+  try {
+    await dbQuery(`
+      INSERT INTO pipeline_config (key, value, description, updated_at)
+      VALUES ('strategy_activation_min_trades', $1, 'Activation min-TRADES slider: per-regime sample-size floor — a regime activates only when its backtest produced >= this many trades in that regime. Resolution order: --min-trades flag > this key > regime_qualification class gate (100). Range [0, 1000]; 0 = no sample floor. When ABSENT the assigner defers to the class gate (100), never to 0. Adjustable via dashboard.', NOW())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
     `, [String(v)]);
     res.json({ value: v });
@@ -1559,6 +1686,16 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   const force   = req.body && req.body.force === true;
   const reason  = (req.body && req.body.reason) || '';
   const actor   = (req.body && req.body.actor)  || 'manual:dashboard';
+  // Batch callers (Sunday auto-approval / backlog flush) promote many
+  // strategies in a loop and trigger ONE weights rebuild at the end —
+  // per-transition fire-and-forget rebuilds racing each other corrupted the
+  // is_current snapshot generation (2026-07-13 lesson: 247 duplicated pairs).
+  const skipWeightsRebuild = req.body && req.body.skip_weights_rebuild === true;
+  // sid feeds a shell one-liner below (activation chain) — hard-validate the
+  // charset even though unknown sids 404 against the manifest first.
+  if (!/^[A-Za-z0-9_.\-]+$/.test(String(sid || ''))) {
+    return res.status(400).json({ error: 'invalid strategy id' });
+  }
   // Optional: caller (typically the approval picker on the dashboard) can
   // overwrite the strategy's manifest.eligible_regimes atomically with the
   // state transition. NULL/undefined → leave existing eligible_regimes
@@ -1685,8 +1822,15 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // matches the operator's intent. We upsert all 4 canonical regimes per
   // call so deselecting LOW_VOL (for example) explicitly flips
   // eligible=False, rather than leaving a stale True from a prior approval.
-  if (eligibleRegimes) {
-    const chosen = new Set(eligibleRegimes);
+  // Auto mode (2026-07-13 v2): when the caller named no set, the gate's
+  // qualifying-regime set (returned by transitionStrategy) is the activation
+  // — sync it identically so the sizer funds exactly the regimes that earned
+  // promotion.
+  const syncRegimes = eligibleRegimes ||
+    (Array.isArray(result.qualifyingRegimes) && result.qualifyingRegimes.length > 0 && tKey === 'candidate:live'
+      ? result.qualifyingRegimes : null);
+  if (syncRegimes) {
+    const chosen = new Set(syncRegimes);
     try {
       for (const rg of _CANON_REGIMES) {
         const isElig = chosen.has(rg);
@@ -1758,21 +1902,36 @@ app.post('/api/strategies/:id/transition', async (req, res) => {
   // Strategy-weights rebuild: any transition that adds or removes the
   // strategy from the active stack (live/monitoring) invalidates the
   // current strategy_weights_by_regime snapshot. Fire-and-forget — the
-  // response doesn't block on the ~5s python invocation; the next
-  // pipeline cycle reads the refreshed table. The service computes whether
-  // the active stack changed (same ACTIVE={live,monitoring} XOR logic).
-  if (result.weights_rebuild_triggered) {
+  // response doesn't block on the python invocation; the next pipeline
+  // cycle reads the refreshed table. The service computes whether the
+  // active stack changed (same ACTIVE={live,monitoring} XOR logic).
+  // skip_weights_rebuild lets batch callers suppress the per-transition
+  // spawn and run ONE rebuild at the end (racing rebuilds corrupt the
+  // is_current snapshot generation — 2026-07-13 lesson).
+  // candidate→live promotions first apply the activation min-Sharpe slider
+  // to the just-synced strategy_regime_params rows (activation_assigner
+  // --strategy-id: qualification gate AND slider) so a sub-slider sleeve
+  // never carries weight even transiently before the Monday refresh.
+  if (result.weights_rebuild_triggered && !skipWeightsRebuild) {
     const { spawn } = require('child_process');
     const path = require('path');
     const rootDir = path.join(__dirname, '../../..');
-    const child = spawn('/usr/bin/python3', ['-m', 'execution.strategy_weights', '--rebuild', '--trigger=lifecycle_change'],
+    const rebuildCmd = 'nice -n 19 python3 -m execution.strategy_weights --rebuild --trigger=lifecycle_change';
+    const cmd = (tKey === 'candidate:live')
+      ? `nice -n 19 python3 -m backtest.activation_assigner --strategy-id '${sid}' ; ${rebuildCmd}`
+      : rebuildCmd;
+    const child = spawn('/bin/bash', ['-c', cmd],
       { cwd: rootDir, env: { ...process.env, PYTHONPATH: 'src' }, detached: true, stdio: 'ignore' });
     child.unref();
-    console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState + ')');
+    console.log('[lifecycle] strategy_weights rebuild triggered (' + sid + ': ' + fromState + '→' + toState +
+                (tKey === 'candidate:live' ? ', activation slider applied first' : '') + ')');
+  } else if (result.weights_rebuild_triggered) {
+    console.log('[lifecycle] weights rebuild SKIPPED by caller (' + sid + ': ' + fromState + '→' + toState + ') — batch finale owns it');
   }
 
   res.json({ ok: true, strategy_id: sid, from_state: fromState, to_state: toState, at: result.event.timestamp,
-             weights_rebuild_triggered: result.weights_rebuild_triggered });
+             weights_rebuild_triggered: result.weights_rebuild_triggered,
+             qualifying_regimes: result.qualifyingRegimes || null });
 });
 
 // ── Manual backtest rerun ────────────────────────────────────────────────────
@@ -3177,9 +3336,8 @@ body.rs-chat-locked{overflow:hidden}
 @media(max-width:560px){.st-sharpe-grid{grid-template-columns:1fr}}
 /* Strategy Activation card — threshold slider + assigner dry-run preview.
    Reuses the conviction-gate slider visual language (st-sharpe-card). The
-   note is deliberately loud: the live eligibility write is Phase 1e-gated,
+   note states the LIVE weekly enforcement (armed 2026-07-13),
    so everything this card does is config + hypothetical preview. */
-.st-act-note{margin:8px 4px 0;padding:8px 12px;border:1px solid rgba(250,204,21,0.4);border-left:3px solid var(--yellow);border-radius:6px;background:rgba(250,204,21,0.07);color:var(--yellow);font-size:11px;line-height:1.5}
 .st-act-grid{display:grid;grid-template-columns:minmax(230px,300px) 1fr;gap:14px;padding:10px 4px 4px;align-items:stretch}
 .st-act-preview{background:rgba(15,20,28,0.5);border:1px solid var(--border2);border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
 .st-act-preview-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -3375,6 +3533,7 @@ body.rs-chat-locked{overflow:hidden}
 .st-data-warn{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
 /* Manifest↔registry drift badge — additive, never replaces the primary status. */
 .st-drift-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
+.st-fresh-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--green);border:1px solid var(--green);background:transparent;cursor:help;vertical-align:middle}
 .st-drift-header{font-size:11px;color:var(--yellow);padding:4px 6px 8px;letter-spacing:.03em}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -3574,6 +3733,11 @@ body.rs-chat-locked{overflow:hidden}
 .pf-postile-bottom{display:flex;justify-content:space-between;align-items:baseline;gap:4px;font-variant-numeric:tabular-nums;line-height:1.1}
 .pf-postile-pnl{font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
 .pf-postile-share{opacity:0.8}
+.pf-postile-sadj{opacity:0.85;font-weight:600;text-shadow:0 1px 1px rgba(0,0,0,0.55)}
+.pf-postile[data-size="small"] .pf-postile-sadj,.pf-postile[data-size="tiny"] .pf-postile-sadj{display:none}
+.tk-sadj{font-weight:600}
+.pf-tile.pf-tile-small .pf-tile-strip .tk-sadj{display:none}
+.pf-tile.pf-tile-tiny .pf-tile-strip .tk-sadj{display:none}
 /* Per-size typography — JS sets data-size based on min(width,height) so
    text scales with tile area. Tiny tiles drop text entirely (color +
    tooltip carry the meaning). */
@@ -3604,6 +3768,12 @@ body.rs-chat-locked{overflow:hidden}
 .ab-title{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;padding-bottom:6px;border-bottom:1px dotted var(--border2)}
 .ab-title .ab-ticker{font-size:14px;font-weight:700;color:var(--blue);letter-spacing:.05em}
 .ab-title .ab-meta{font-size:10px;color:var(--muted);letter-spacing:.02em}
+/* Price/bracket header. These classes were emitted since the panel shipped but
+   never had rules — the row rendered as unstyled inline spans. */
+.ab-prices{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:8px;font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.ab-px{letter-spacing:.02em}
+.ab-px b{color:var(--text);font-weight:600;margin-left:2px}
+.ab-px-none b{color:var(--red);font-weight:600}
 .ab-bars{display:flex;flex-direction:column;gap:3px}
 .ab-row{display:flex;align-items:center;gap:8px;padding:1px 0;font-size:10.5px;min-height:18px}
 .ab-label{width:240px;flex-shrink:0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:500;letter-spacing:.01em}
@@ -3831,7 +4001,7 @@ body.rs-chat-locked{overflow:hidden}
   /* Inner wrappers must NOT have their own scroll context — collapses the
    * nested-scroll problem that was eating the swipe gesture. */
   #pf-positions, #pf-history,
-  #st-active-wrap, #st-inactive-wrap, #st-candidate-wrap {
+  #st-active-wrap, #st-inactive-wrap {
     overflow: visible !important;
     width: max-content;
     min-width: 100%;
@@ -4090,7 +4260,7 @@ body.rs-chat-locked{overflow:hidden}
       <div class="st-tile"><div class="st-tile-label">Total</div><div class="st-tile-value" id="st-total">—</div></div>
       <div class="st-tile"><div class="st-tile-label">Active Stack</div><div class="st-tile-value" id="st-active-tile">—</div><div class="st-tile-sub" id="st-active-sub">— live / — stale / — waiting</div></div>
       <div class="st-tile"><div class="st-tile-label">Inactive Stack</div><div class="st-tile-value" id="st-inactive-tile">—</div><div class="st-tile-sub">decommissioned</div></div>
-      <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">awaiting approval</div></div>
+      <div class="st-tile"><div class="st-tile-label">Research Candidates</div><div class="st-tile-value" id="st-candidate-tile">—</div><div class="st-tile-sub">in pipeline (auto-gated weekly)</div></div>
       <div class="st-tile"><div class="st-tile-label">Data</div><div class="st-tile-value" id="st-data-tile">—</div><div class="st-tile-sub" id="st-data-sub">financial parameters ingested</div><a class="st-tile-link" id="st-data-usage-link" onclick="_stOpenDataUsage()">View Data Usage →</a></div>
     </div>
 
@@ -4098,21 +4268,21 @@ body.rs-chat-locked{overflow:hidden}
     <div class="pf-section" id="rp-section" style="display:none">
       <div class="pf-section-header">
         <span>⚙️ Strategy Adjustments</span>
-        <span class="st-sub-label">backtest-applied stop/TP/max-hold changes + pending size/eligibility proposals</span>
+        <span class="st-sub-label">fully-automatic Saturdays: brackets apply on a backtest Sharpe gain; size/eligibility auto-applies at confidence &gt; 0.8; the rest is noted below</span>
       </div>
-      <div class="st-sub-label" style="margin:4px 0">Applied this week <span id="sa-applied-count">—</span></div>
+      <div class="st-sub-label" style="margin:4px 0">Recent changes (7d) <span id="sa-applied-count">—</span></div>
       <table id="sa-applied-table" style="border-collapse:collapse;width:100%;font-size:12px;margin-bottom:14px">
         <thead><tr style="text-align:left;color:var(--muted);font-size:11px">
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Strategy</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Regime</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Stop →</th>
-          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Target →</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Via</th>
+          <th style="padding:6px 8px;border-bottom:1px solid var(--border2)">Change</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">ΔSharpe</th>
           <th style="padding:6px 8px;border-bottom:1px solid var(--border2);text-align:right">Trades</th>
         </tr></thead>
         <tbody></tbody>
       </table>
-      <div class="st-sub-label" style="margin:4px 0">Pending proposals <span class="st-sub-label" id="rp-count">—</span></div>
+      <div class="st-sub-label" style="margin:4px 0">Noted — low-confidence, re-evaluated next Saturday <span class="st-sub-label" id="rp-count">—</span></div>
       <table id="rp-table" style="border-collapse:collapse;width:100%;font-size:12px">
         <thead>
           <tr style="text-align:left;color:var(--muted);font-size:11px">
@@ -4145,13 +4315,13 @@ body.rs-chat-locked{overflow:hidden}
          Slider binds pipeline_config.strategy_activation_min_sharpe via
          debounced PUT /api/config/activation-min-sharpe (same UX as the
          conviction gates above). Preview POSTs /api/activation/dry-run —
-         the server only ever runs the assigner in dry-run mode; the live
-         eligibility write is operator-gated (Phase 1e). -->
+         the server only ever runs the assigner in dry-run mode; the LIVE
+         apply happens in the weekly Mon 00:00 ET weekly_live_sharpe.js run
+         (OPENCLAW_ACTIVATION_ASSIGNER=1, armed 2026-07-13). -->
     <div class="pf-section">
       <div class="pf-section-header">
-        <span>🎚️ Strategy Activation <span class="st-sub-label">min per-regime backtest Sharpe for sizer eligibility (trade count ≥ 20 fixed)</span></span>
+        <span>🎚️ Strategy Activation <span class="st-sub-label">per-regime floors applied on top of the qualification gate (&gt;0 Sharpe · class max-DD)</span></span>
       </div>
-      <div class="st-act-note">⚠️ Live eligibility write is gated (Phase 1e) — this slider sets the threshold and previews only. Weekly assigner armed via OPENCLAW_ACTIVATION_ASSIGNER (currently default-OFF).</div>
       <div class="st-act-grid">
         <div class="st-sharpe-card">
           <div class="st-sharpe-card-head">
@@ -4163,6 +4333,23 @@ body.rs-chat-locked{overflow:hidden}
                  min="0" max="3" step="0.05" value="0.5" disabled />
           <div class="st-sharpe-card-range"><span>0.00</span><span>3.00</span></div>
           <div class="st-sharpe-card-status" id="st-act-status"></div>
+        </div>
+        <!-- Sample-size floor. Was hardcoded at 100 in
+             regime_qualification.class_thresholds (tunable only via the
+             assigner's --min-trades flag); made dashboard-adjustable
+             2026-07-16. Unset => the assigner defers to the class gate (100),
+             NOT to 0 — an absent key must never activate a regime on a
+             1-trade sample, so the status line names which source is live. -->
+        <div class="st-sharpe-card">
+          <div class="st-sharpe-card-head">
+            <span class="st-sharpe-card-regime">Activation min trades</span>
+            <span class="st-sub-label">per regime</span>
+          </div>
+          <div class="st-sharpe-card-value" id="st-actn-val">—</div>
+          <input type="range" class="st-sharpe-card-slider" id="st-actn-slider"
+                 min="0" max="1000" step="10" value="100" disabled />
+          <div class="st-sharpe-card-range"><span>0</span><span>1000</span></div>
+          <div class="st-sharpe-card-status" id="st-actn-status"></div>
         </div>
         <div class="st-act-preview">
           <div class="st-act-preview-bar">
@@ -4204,14 +4391,13 @@ body.rs-chat-locked{overflow:hidden}
       <div class="pf-section-body"><div id="st-inactive-wrap"><div class="empty">Loading...</div></div></div>
     </div>
 
-    <!-- Section 3: Research Candidates (paper / candidate) -->
-    <div class="pf-section">
-      <div class="pf-section-header">
-        <span>Research Candidates <span class="st-sub-label">(passed research + coder + backtest — awaiting approval)</span></span>
-        <span id="st-candidate-count" class="st-sub-label"></span>
-      </div>
-      <div class="pf-section-body"><div id="st-candidate-wrap"><div class="empty">Loading...</div></div></div>
-    </div>
+    <!-- Research Candidates section REMOVED 2026-07-13 (operator directive):
+         approvals are fully automatic now — candidates flow through the
+         per-regime qualification gate every Sunday (auto_approval.js) and on
+         every fused staging approval; newly promoted strategies surface via
+         the ✨ fresh badge in the Active Stack. The tile above keeps the
+         pipeline count visible; the Research tab's queue card still shows
+         the research_candidates paper pipeline. -->
   </div>
 </div><!-- #strategies-page -->
 
@@ -6898,6 +7084,12 @@ function _groupByTicker(rows, mode) {
     // broker stays null and the parent row falls back to intent rollup
     // (legacy behaviour, for stale 'open' rows still in the table).
     g.broker = (g.signals[0] && g.signals[0].broker_position) || null;
+    // Resting exit legs, attached per-ticker by /api/portfolio/positions. Same
+    // representative-row contract as broker_position: every signal for a ticker
+    // carries the identical block, because the broker holds ONE consolidated
+    // position per ticker and therefore ONE bracket — no matter how many
+    // strategies want a piece of it.
+    g.broker_bracket = (g.signals[0] && g.signals[0].broker_bracket) || null;
     g.total_size_pct = (g.broker && g.broker.size_pct != null)
       ? g.broker.size_pct                // broker-truth $ size / NAV
       : totalSize;                       // fallback to summed intents
@@ -6906,6 +7098,11 @@ function _groupByTicker(rows, mode) {
       ? g.broker.unrealized_plpc         // broker-truth unrealized P/L %
       : (pnlSizeDen > 0 ? sizeWPnlSum / pnlSizeDen : null);
     if (g.broker && g.broker.market_value != null) g.market_value = g.broker.market_value;
+    // Corr-adjusted cumulative Sharpe (S_adj) at last sizing — attached
+    // per-ticker by /api/portfolio/positions (all rows carry the same value).
+    const _sadj = g.signals[0] && g.signals[0].corr_cum_sharpe != null
+      ? parseFloat(g.signals[0].corr_cum_sharpe) : null;
+    g.corr_cum_sharpe = (_sadj != null && isFinite(_sadj)) ? _sadj : null;
     g.avg_days = daysN > 0 ? daysSum / daysN : null;
     g.is_open = isOpen;
     g.wins = wins;
@@ -7007,14 +7204,47 @@ function _buildAlphaBarsHtml(group) {
   const entry  = group.avg_entry != null ? parseFloat(group.avg_entry) : null;
   const nowPx  = group.price != null ? parseFloat(group.price) : null;  // already resolved: current if open, close if closed
   const pxFmt  = (v) => v == null || !isFinite(v) ? '—' : '$' + v.toFixed(2);
+  // Exit legs — broker truth (what will actually fire), not strategy intent.
+  // The % is measured from ENTRY, so it reads as the bracket's designed shape
+  // (the -8%/+5% the sizer chose) and stays put as the market moves; a
+  // current-price gap would drift every tick and never match the sizer's numbers.
+  // Sign is raw price direction (stop below a long = negative), so a long reads
+  // stop −8% / target +5% and a short reads stop +8% / target −5%.
+  // null bracket = the broker leg failed, so we do not KNOW; an empty-but-present
+  // bracket = we asked and there is genuinely nothing resting. Never render the
+  // former as "none" — that would invent an unprotected book out of an API blip.
+  const bracket = group.broker_bracket || null;
+  const bracketKnown = bracket != null;
+  const legPct  = (lvl) => (entry != null && isFinite(entry) && entry !== 0)
+    ? ((lvl - entry) / entry) * 100 : null;
+  const legHtml = (label, lvl, title) => {
+    if (!bracketKnown) {
+      return \`<span class="ab-px" title="could not read resting orders from the broker — \${label} unknown, not necessarily absent">\${label} <b>—</b></span>\`;
+    }
+    if (lvl == null || !isFinite(lvl)) {
+      // Absence IS the finding — an unprotected position must not render as a
+      // blank gap that reads like "nothing to report".
+      return \`<span class="ab-px ab-px-none" title="no resting \${label} order at the broker for \${escapeHtml(group.ticker)} — this position is not bracketed">\${label} <b>none</b></span>\`;
+    }
+    const gap = legPct(lvl);
+    const gapTxt = gap == null ? '' :
+      \` <span class="\${gap >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg'}">\${gap >= 0 ? '+' : ''}\${gap.toFixed(1)}%</span>\`;
+    return \`<span class="ab-px" title="\${title}">\${label} <b>\${pxFmt(lvl)}</b>\${gapTxt}</span>\`;
+  };
+  const bracketHdr = !isOpen ? '' :
+    legHtml('stop', bracket && bracket.stop,
+            'stop-loss resting at the broker · % is measured from the entry price')
+    + legHtml('target', bracket && bracket.target,
+              'take-profit resting at the broker · % is measured from the entry price');
   const priceHdr = \`<div class="ab-prices">
       <span class="ab-px">entry <b>\${pxFmt(entry)}</b></span>
       <span class="ab-px">\${isOpen ? 'current' : 'close'} <b>\${pxFmt(nowPx)}</b></span>
+      \${bracketHdr}
     </div>\`;
 
   if (!contributions.length) {
     return \`<div class="alpha-bars">\${priceHdr}
-      <div class="alpha-bars empty">No strategy signals recorded for <b>\${group.ticker}</b>.</div>
+      <div class="alpha-bars empty">No strategy signals recorded for <b>\${escapeHtml(group.ticker)}</b>.</div>
     </div>\`;
   }
   const haveValues = contributions.some(c => c.contribution != null && isFinite(c.contribution));
@@ -7054,9 +7284,22 @@ function _buildAlphaBarsHtml(group) {
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     badge = \`<span class="ab-badge">net contrib = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
+  // Corr-adjusted cumulative Sharpe (S_adj) the position was last sized at —
+  // the sole conviction gate quantity, stamped per cycle by the sizer.
+  if (group.corr_cum_sharpe != null && isFinite(group.corr_cum_sharpe)) {
+    const sv = group.corr_cum_sharpe;
+    const sCls = sv >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
+    badge += \` <span class="ab-badge" title="corr-adjusted cumulative Sharpe (S_adj) at last sizing cycle">S_adj = <span class="\${sCls}">\${sv.toFixed(2)}</span></span>\`;
+  } else if (isOpen) {
+    // Render the gap rather than dropping the badge. The sizer stamps S_adj
+    // only on cycles that emit orders, so a silently absent badge is
+    // indistinguishable from "this feature was never built" — which is exactly
+    // how it read when the sizer went several cycles without emitting.
+    badge += \` <span class="ab-badge ab-badge-warn" title="no S_adj stamped for \${escapeHtml(group.ticker)}: the sizer records it only on cycles that emit orders, so this position has not been re-sized since the stamp was added">S_adj = —</span>\`;
+  }
   return \`<div class="alpha-bars">
     \${priceHdr}
-    <div class="ab-title"><span class="ab-ticker">\${group.ticker}</span>\${badge}</div>
+    <div class="ab-title"><span class="ab-ticker">\${escapeHtml(group.ticker)}</span>\${badge}</div>
     \${rows}
   </div>\`;
 }
@@ -7232,11 +7475,14 @@ function _populateTreemap(container, label) {
     const isSel = g.ticker === selectedTicker;
     const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
     const sizeClass = _sizeClassForTile(g.w, g.h);
-    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+    const sadj = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
+      ? g.corr_cum_sharpe : null;
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
     return \`<div class="pf-postile\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" data-size="\${sizeClass}" style="left:\${g.x.toFixed(1)}px;top:\${g.y.toFixed(1)}px;width:\${g.w.toFixed(1)}px;height:\${g.h.toFixed(1)}px;background:\${_pnlColor(pnl)}" title="\${tip}">
       <div class="pf-postile-sym">\${g.ticker}</div>
       <div class="pf-postile-bottom">
         <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+        \${sadj != null ? '<span class="pf-postile-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
         <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
       </div>
     </div>\`;
@@ -7292,7 +7538,9 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const tier  = side >= 140 ? 'large' : side >= 100 ? 'medium' : side >= 70 ? 'small' : 'tiny';
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
-      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      const sadj  = (g.corr_cum_sharpe != null && isFinite(g.corr_cum_sharpe))
+                      ? g.corr_cum_sharpe : null;
+      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\${sadj != null ? ' · S_adj ' + sadj.toFixed(2) + ' (corr-adj cum Sharpe at last sizing)' : ''}\`;
       // data-side carries the computed side length for the client-side
       // shelf packer (_packHeatmapShelves) to read after DOM insertion.
       // Position becomes absolute via packer; until then tiles render
@@ -7311,6 +7559,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
         </div>
         <div class="pf-tile-strip">
           <span class="tk-share">\${sharePct.toFixed(1)}%</span>
+          \${sadj != null ? '<span class="tk-sadj" title="corr-adjusted cum Sharpe (S_adj) at last sizing">S ' + sadj.toFixed(1) + '</span>' : ''}
           <span class="tk-days">\${days}</span>
         </div>
       </div>\`;
@@ -8050,12 +8299,81 @@ async function _corrSharpeGatePut(regime, value, statEl) {
 // Slider binds pipeline_config.strategy_activation_min_sharpe (debounced PUT,
 // same UX as the conviction gates above). The Preview button POSTs
 // /api/activation/dry-run — the server only ever shells the assigner with
-// --dry-run (live eligibility write is Phase 1e-gated), and we render the
+// --dry-run (the LIVE apply is the weekly Mon 00:00 ET run), and we render the
 // parsed prior→new eligibility diff: per-regime "eligible now" is DB
 // reality, everything else is hypothetical.
 let _actSaveTimer   = null;
 let _actPutInflight = false;
 let _actWired       = false;
+
+// ── Activation min-TRADES slider ────────────────────────────────────────────
+// Sibling of the min-Sharpe slider: the per-regime SAMPLE-SIZE floor. Own
+// timer/inflight/wired state so a save on one card can't cancel the other's.
+let _actnSaveTimer   = null;
+let _actnPutInflight = false;
+let _actnWired       = false;
+
+async function _loadActivationTradesCard() {
+  const slider = document.getElementById('st-actn-slider');
+  const valEl  = document.getElementById('st-actn-val');
+  const statEl = document.getElementById('st-actn-status');
+  if (!slider || !valEl) return;
+  let cfg;
+  try {
+    const r = await fetch('/api/config/activation-min-trades');
+    cfg = await r.json();
+    if (!r.ok) throw new Error(cfg.error || r.statusText);
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ load failed: ' + (e.message || 'network error');
+    return;
+  }
+  const v = Number.isFinite(Number(cfg.value)) ? Math.round(Number(cfg.value)) : 100;
+  slider.value    = v;
+  slider.disabled = false;
+  valEl.textContent = String(v);
+  if (statEl && !statEl.textContent) {
+    // Name the live SOURCE. An unset key is not "0" — the assigner defers to the
+    // class gate, and saying so prevents reading the slider as an active floor
+    // that was never written.
+    statEl.textContent = cfg.row_exists && cfg.source === 'pipeline_config'
+      ? (cfg.updated_at ? 'last set ' + new Date(cfg.updated_at).toLocaleString() : '')
+      : 'row not set — assigner defers to the class gate (100)';
+  }
+  if (_actnWired) return;
+  _actnWired = true;
+  slider.addEventListener('input', () => { valEl.textContent = String(parseInt(slider.value, 10)); });
+  slider.addEventListener('change', () => {
+    if (_actnSaveTimer) clearTimeout(_actnSaveTimer);
+    _actnSaveTimer = setTimeout(() => {
+      _actnSaveTimer = null;
+      _actnPut(parseInt(slider.value, 10), statEl);
+    }, 300);
+  });
+}
+
+async function _actnPut(value, statEl) {
+  if (_actnPutInflight) return;
+  _actnPutInflight = true;
+  if (statEl) statEl.textContent = 'saving…';
+  try {
+    const resp = await fetch('/api/config/activation-min-trades', {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ value }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
+    } else if (statEl) {
+      statEl.textContent = '✓ saved ' + value + ' · applies at the next weekly refresh (Mon 00:00 ET)';
+      setTimeout(() => { if (statEl.textContent.startsWith('✓')) statEl.textContent = ''; }, 4000);
+    }
+  } catch (e) {
+    if (statEl) statEl.textContent = '✗ ' + (e.message || 'network error');
+  } finally {
+    _actnPutInflight = false;
+  }
+}
 
 async function _loadActivationCard() {
   const slider = document.getElementById('st-act-slider');
@@ -8108,7 +8426,7 @@ async function _actPut(value, statEl) {
       const err = await resp.json().catch(() => ({}));
       if (statEl) statEl.textContent = '✗ ' + (err.error || resp.statusText);
     } else if (statEl) {
-      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · live write stays Phase 1e-gated';
+      statEl.textContent = '✓ saved ' + value.toFixed(2) + ' · applies at the next weekly refresh (Mon 00:00 ET)';
       setTimeout(() => {
         if (statEl && statEl.textContent.indexOf('✓') === 0) statEl.textContent = '';
       }, 5000);
@@ -8207,7 +8525,7 @@ function _actRenderPreview(data, host) {
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp, notedResp] = await Promise.all([
       _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
       _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
       _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
@@ -8215,12 +8533,14 @@ async function loadStrategies() {
       _safeFetch('/api/regime-proposals?status=pending', { proposals: [] }, { label: 'regime proposals' }),
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
       _safeFetch('/api/regime-proposals/applied?days=7', { applied: [] }, { label: 'applied adjustments' }),
+      _safeFetch('/api/regime-proposals/noted?days=21', { proposals: [], sizing_recs: [] }, { label: 'noted adjustments' }),
     ]);
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
     _loadActivationCard();
-    _rpRender(proposals?.proposals || []);
+    _loadActivationTradesCard();
+    _rpRender(proposals?.proposals || [], notedResp || {});
     _saRenderApplied(appliedResp?.applied || []);
     // 2026-05-19: calibration-addenda panel removed (operator no longer
     // edits Mastermind's weekly prompt — research-page-only entry).
@@ -8287,9 +8607,8 @@ function _stFailureBannerHTML(sid) {
 }
 
 function _stRenderJobChips() {
-  // Re-render the candidates section so chips update in place.
-  const rows = strategiesData.filter(_inCandidate);
-  _renderCandidates(rows);
+  // Candidates section removed 2026-07-13 — approval-job progress now only
+  // reaches the operator via toasts + the SSE log; nothing to re-render.
 }
 
 // The engine TRADES by registry status='approved', NOT by manifest state.
@@ -8330,7 +8649,6 @@ function _renderStrategyPage() {
   document.getElementById('st-candidate-tile').textContent= candidate.length;
   document.getElementById('st-active-count').textContent  = active.length + ' strategies';
   document.getElementById('st-inactive-count').textContent= inactive.length + ' strategies';
-  document.getElementById('st-candidate-count').textContent = candidate.length + ' strategies';
 
   // Data tile: count of fine-grained financial parameters ingested
   // (open, close, implied_volatility, ebitda, …) from /api/data/usage.
@@ -8338,21 +8656,25 @@ function _renderStrategyPage() {
   document.getElementById('st-data-tile').textContent = paramCount || '—';
   document.getElementById('st-data-sub').textContent  = 'financial parameters ingested';
 
-  // Drift summary header: counts across all sections.
+  // Drift + fresh summary header: counts across all sections.
   const n_trading_not_shown     = rows.filter(r => r.drift === 'trading_not_shown').length;
   const n_shown_live_not_trading = rows.filter(r => r.drift === 'shown_live_not_trading').length;
+  const n_fresh                 = rows.filter(r => r.fresh).length;
   const driftSummaryEl = document.getElementById('st-drift-summary');
   if (driftSummaryEl) {
+    const parts = [];
     if (n_trading_not_shown > 0 || n_shown_live_not_trading > 0) {
-      driftSummaryEl.innerHTML = '<div class="st-drift-header">⚠️ ' + n_trading_not_shown + ' trading but not shown live \xb7 ' + n_shown_live_not_trading + ' shown live but not trading</div>';
-    } else {
-      driftSummaryEl.innerHTML = '';
+      parts.push('<div class="st-drift-header">⚠️ ' + n_trading_not_shown + ' trading but not shown live \xb7 ' + n_shown_live_not_trading + ' shown live but not trading</div>');
     }
+    if (n_fresh > 0) {
+      parts.push('<div class="st-drift-header" style="color:var(--green);border-color:var(--green)">✨ ' + n_fresh + ' fresh strateg' + (n_fresh === 1 ? 'y' : 'ies') + ' (live < 1 week)</div>');
+    }
+    driftSummaryEl.innerHTML = parts.join('');
   }
 
   _renderActiveStack(active);
   _renderInactiveStack(inactive);
-  _renderCandidates(candidate);
+  // Candidates section removed 2026-07-13 — auto-approval owns the flow.
 }
 
 // ── Data Usage (ranked horizontal bar list, modal) ────────────────────────
@@ -8564,6 +8886,12 @@ function _escStr(s) { return String(s == null ? '' : s).replace(/"/g, '&quot;').
 // r.drift is one of 'none' | 'trading_not_shown' | 'shown_live_not_trading'.
 // The manifest state (r.state) remains the PRIMARY displayed status; this
 // badge is purely additive.
+function _freshBadge(r) {
+  // ✨ fresh — went live within the last 7 days (auto-promotion batch).
+  // Additive, same pattern as the drift badge; self-expires via state_since.
+  if (!r.fresh) return '';
+  return '<span class="st-fresh-badge" title="Newly promoted — live for less than a week (auto-approval batch)">✨ fresh</span>';
+}
 function _driftBadge(r) {
   if (!r.drift || r.drift === 'none') return '';
   if (r.drift === 'trading_not_shown') {
@@ -8637,34 +8965,69 @@ function _rdDriftFor(strategyId, regime) {
   return _rdSignals[strategyId + '|' + regime] || null;
 }
 
-// Phase 2B — render pending Mastermind proposals
-function _rpRender(proposals) {
+// Phase 2B / 2026-07-14 full-auto Saturday — render the suggestion queue:
+// pending proposals (transient — the Saturday auto-apply decides them within
+// the run) + noted low-confidence proposals (operator-decidable until the
+// next weekly review supersedes them) + noted low-confidence sizing recs
+// (informational; their brackets are still backtest-coupled).
+function _rpRender(proposals, noted) {
   const section = document.getElementById('rp-section');
   const tbody = document.querySelector('#rp-table tbody');
   const countEl = document.getElementById('rp-count');
   if (!section || !tbody) return;
   section.style.display = '';
-  if (countEl) countEl.textContent = proposals.length ? '(' + proposals.length + ' awaiting decision)' : '(none)';
+  const notedProps = (noted && noted.proposals) || [];
+  const notedRecs  = (noted && noted.sizing_recs) || [];
+  const total = proposals.length + notedProps.length + notedRecs.length;
+  if (countEl) countEl.textContent = total ? '(' + total + ')' : '(none)';
   tbody.innerHTML = '';
-  for (const p of proposals) {
+  const _badge = (txt, bg) =>
+    '<span style="padding:1px 6px;border-radius:3px;font-size:10px;background:' + bg + ';color:#fff">' + txt + '</span> ';
+  const _row = (p, kind) => {
     const tr = document.createElement('tr');
-    // Pending proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
-    // max_hold are decided by the backtest-coupling step, not approved here, so
-    // they are no longer rendered (the columns would always be empty).
+    // Proposals carry ONLY size + eligibility (2026-05-31). Stop/target/
+    // max_hold are decided by the backtest-coupling step, never approved here.
     const proposedBits = [];
     if (p.proposed_eligible !== null && p.proposed_eligible !== undefined) proposedBits.push('elig=' + p.proposed_eligible);
-    if (p.proposed_size_scalar !== null) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
+    if (p.proposed_size_scalar !== null && p.proposed_size_scalar !== undefined) proposedBits.push('size=' + Number(p.proposed_size_scalar).toFixed(2));
     const conf = p.confidence != null ? Number(p.confidence).toFixed(2) : '?';
+    const why = escapeHtml((p.reasoning || '') + (p.decision_reason ? ' — ' + p.decision_reason : ''));
     tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + p.strategy_id + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + p.regime_state + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + proposedBits.join(' · ') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(p.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + escapeHtml(p.regime_state) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' +
+        (kind === 'pending' ? _badge('PENDING', '#b08800') : _badge('NOTED', '#57606a')) + proposedBits.join(' · ') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + (p.reasoning || '') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + why + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;white-space:nowrap">' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="approve" style="padding:3px 8px;font-size:11px;background:#2ea043;color:white;border:none;border-radius:3px;cursor:pointer;margin-right:4px">Approve</button>' +
         '<button class="rp-btn" data-id="' + p.id + '" data-action="reject" style="padding:3px 8px;font-size:11px;background:#a04040;color:white;border:none;border-radius:3px;cursor:pointer">Reject</button>' +
       '</td>';
+    tbody.appendChild(tr);
+  };
+  for (const p of proposals) _row(p, 'pending');
+  for (const p of notedProps) _row(p, 'noted');
+  for (const r of notedRecs) {
+    // Sizing recs have no approve path (size only flows at confidence > 0.8);
+    // shown so the operator sees what was suggested + the coupling outcome.
+    const tr = document.createElement('tr');
+    const bits = [];
+    if (r.size_delta_pct != null)   bits.push('Δsize=' + Number(r.size_delta_pct).toFixed(3) + '%');
+    if (r.stop_delta_pct != null)   bits.push('Δstop=' + Number(r.stop_delta_pct).toFixed(3));
+    if (r.target_delta_pct != null) bits.push('Δtgt=' + Number(r.target_delta_pct).toFixed(3));
+    if (r.hold_days_delta != null)  bits.push('Δhold=' + r.hold_days_delta + 'd');
+    const conf = r.confidence != null ? Number(r.confidence).toFixed(2) : '?';
+    const cpl = r.coupling_outcome
+      ? ' · brackets ' + (r.coupling_outcome === 'applied' ? 'APPLIED via backtest' : 'rejected by backtest')
+      : '';
+    tr.innerHTML =
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(r.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);color:var(--muted)">all</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' +
+        _badge('NOTED · SIZING', '#57606a') + bits.join(' · ') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + conf + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-size:11px;color:var(--muted)">' + escapeHtml((r.reasoning || '').slice(0, 160)) + cpl + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:var(--muted);font-size:11px">re-eval Sat</td>';
     tbody.appendChild(tr);
   }
   // Wire buttons
@@ -8680,20 +9043,35 @@ function _saRenderApplied(applied) {
   tbody.innerHTML = '';
   if (countEl) countEl.textContent = '(' + applied.length + ')';
   if (!applied.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No stop/TP changes applied in the last 7 days.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" style="padding:6px 8px;color:var(--muted)">No adjustments applied in the last 7 days.</td></tr>';
     return;
   }
   const fmt = (v) => (v == null ? '—' : Number(v).toFixed(3));
+  const _delta = (label, b, af, f) => {
+    if (af == null || String(b) === String(af)) return null;
+    return label + ' ' + f(b) + ' → ' + f(af);
+  };
   for (const a of applied) {
     const d = (a.bt_sharpe_after != null && a.bt_sharpe_before != null)
       ? (a.bt_sharpe_after - a.bt_sharpe_before) : null;
+    // One compact string listing only what actually changed.
+    const changes = [
+      _delta('stop',   a.stop_before,     a.stop_after,     fmt),
+      _delta('target', a.target_before,   a.target_after,   fmt),
+      _delta('size',   a.size_before,     a.size_after,     (v) => (v == null ? '—' : Number(v).toFixed(2))),
+      _delta('hold',   a.hold_before,     a.hold_after,     (v) => (v == null ? '—' : v + 'd')),
+      _delta('elig',   a.eligible_before, a.eligible_after, (v) => (v == null ? '—' : String(v))),
+    ].filter(Boolean).join(' · ') || '(no field delta)';
+    const via = a.source === 'saturday_coupling' ? ['backtest', '#1f6feb']
+      : a.source === 'auto-approval' ? ['auto conf', '#8250df']
+      : ['manual', '#57606a'];
     const tr = document.createElement('tr');
     tr.innerHTML =
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + a.strategy_id + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + a.regime_state + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.stop_before) + ' → ' + fmt(a.stop_after) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + fmt(a.target_before) + ' → ' + fmt(a.target_after) + '</td>' +
-      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(a.strategy_id) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)">' + escapeHtml(a.regime_state) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2)"><span style="padding:1px 6px;border-radius:3px;font-size:10px;background:' + via[1] + ';color:#fff">' + via[0] + '</span></td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);font-family:ui-monospace,Menlo,monospace;font-size:11px">' + escapeHtml(changes) + '</td>' +
+      '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right;color:' + (d != null && d >= 0 ? '#2ea043' : 'var(--muted)') + '" title="backtest Sharpe ' + fmt(a.bt_sharpe_before) + ' → ' + fmt(a.bt_sharpe_after) + '">' + (d != null ? (d >= 0 ? '+' : '') + d.toFixed(2) : '—') + '</td>' +
       '<td style="padding:5px 8px;border-bottom:1px solid var(--border2);text-align:right">' + (a.bt_n_trades != null ? a.bt_n_trades : '—') + '</td>';
     tbody.appendChild(tr);
   }
@@ -8928,7 +9306,7 @@ function _renderActiveStack(rows) {
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
           <span class="st-chevron">▶</span>\${r.strategy_id}
         </td>
-        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}</td>
+        <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimeBreakdown(r)}</td>
         <td class="num">\${sh != null ? parseFloat(sh).toFixed(2) : '—'}</td>
         <td class="num">\${esh != null ? parseFloat(esh).toFixed(2) : '—'}</td>
@@ -9192,7 +9570,7 @@ function _renderInactiveStack(rows) {
     \${shown.map(r => {
       return \`<tr>
         <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
+        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimesCell(r)}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
       </tr>\`;
@@ -9204,137 +9582,11 @@ function _renderInactiveStack(rows) {
 
 // ── Section 3: Research Candidates ─────────────────────────────────────────
 // Gate warning when backtest Sharpe < 0.5 or Max DD > 20%.
-function _renderCandidates(rows) {
-  const el = document.getElementById('st-candidate-wrap');
-  if (!rows.length) {
-    el.innerHTML = '<div class="empty">No candidates awaiting approval.</div>';
-    return;
-  }
-  // Derived rank for the Status column: Staging < Candidate < Paper.
-  const enriched = rows.map(r => Object.assign({}, r, {
-    _state_rank: _candidateRankFor(r),
-  }));
-  let sorted;
-  const s = _sortState['st-candidate-wrap'];
-  if (s && s.key) {
-    sorted = _applySort('st-candidate-wrap', enriched);
-  } else {
-    _tableDataCache['st-candidate-wrap'] = enriched;
-    sorted = enriched.slice().sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)));
-  }
-  const { shown, footer } = _collapseRows('st-candidate-wrap', sorted);
-  el.innerHTML = \`<table class="db-table" style="min-width:1000px">
-    <tr>
-      <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
-      <th data-sort-key="_state_rank" data-sort-type="num" title="Sort: Staging → Candidate → Paper (ascending)">Status</th>
-      <th title="Per-regime BACKTEST Sharpe (from strategy_backtest_regimes via unified_backtest). Mirrors the Active Stack 'By Regime' column. Small dot = current market regime, blue border = declared eligible. Color = sign of Sharpe.">By Regime</th>
-      <th class="num" data-sort-key="backtest_sharpe" data-sort-type="num">BT Sharpe</th>
-      <th class="num" data-sort-key="backtest_sortino" data-sort-type="num" title="Backtest Sortino — downside-deviation-adjusted return (unified_backtest)">BT Sortino</th>
-      <th class="num" data-sort-key="backtest_calmar" data-sort-type="num" title="Backtest Calmar — annualized return / max drawdown">BT Calmar</th>
-      <th class="num" data-sort-key="backtest_return_pct" data-sort-type="num">BT Return</th>
-      <th class="num" data-sort-key="backtest_max_dd_pct" data-sort-type="num">BT Max DD</th>
-      <th class="num" data-sort-key="backtest_trade_count" data-sort-type="num">Backtest Trades</th>
-      <th>Actions</th>
-    </tr>
-    \${shown.map(r => {
-      const sharpe = r.backtest_sharpe;
-      const maxDd  = r.backtest_max_dd_pct;
-      const ret    = r.backtest_return_pct;
-      const sortino = r.backtest_sortino;
-      const calmar  = r.backtest_calmar;
-      // Backtest trade count from the convergence run, NOT live trade count
-      // (which is r.total_count). 0 = strategy ran but emitted no signals;
-      // null = never backtested. Both render as "—" but mean different
-      // things — distinguish in the title.
-      const trades = r.backtest_trade_count;
-      const sharpeFail = sharpe != null && parseFloat(sharpe) < 0.5;
-      const ddFail     = maxDd  != null && Math.abs(parseFloat(maxDd)) > 20;
-      const gateWarn   = sharpeFail || ddFail;
-      // Per-regime breakdown tooltip — built from backtest_regime_breakdown
-      // (regime-stratified). Strategies without a breakdown render with a
-      // generic tooltip; v1 metrics have been purged (NULL'd) elsewhere.
-      const breakdown = r.backtest_regime_breakdown;
-      const _bdLine = (lbl, b) => {
-        if (!b) return lbl + ': —';
-        if (b.note === 'not_declared') return lbl + ': not declared';
-        if (b.note === 'no_oos_window') return lbl + ': no historical window meeting min_days';
-        const sh = b.sharpe ?? 0;
-        const dd = b.max_dd != null ? (b.max_dd * 100).toFixed(1) + '%' : '—';
-        const tc = b.trade_count ?? 0;
-        const od = b.oos_days ?? 0;
-        return lbl + ': sharpe=' + (typeof sh === 'number' ? sh.toFixed(2) : sh)
-                  + '  dd=' + dd + '  trades=' + tc + '  (' + od + ' OOS days)';
-      };
-      const sharpeTitle = breakdown
-        ? ['LOW_VOL','TRANSITIONING','HIGH_VOL','CRISIS']
-            .map(k => _bdLine(k.padEnd(14, ' '), breakdown[k]))
-            .join('\\n')
-        : 'No regime breakdown available';
-      // Per-state approve button emoticon + label + click handler.
-      // Under the fused-staging-approval lifecycle (2026-04-27):
-      //   staging   → 📡 starts the fused worker (backfill + strategycoder + backtest;
-      //                  auto-promotes to CANDIDATE on success)
-      //   candidate → ✅ promotes to LIVE (synchronous /transition with sharpe/dd gate;
-      //                  ⚠ on failing metrics — operator can override with force=true)
-      //   paper     → legacy/frozen; no automatic Approve. Operator can archive via /transition.
-      //   last failure? → ❌ Retry (tooltip carries the reason)
-      const lastFail = _stLastFailures[r.strategy_id];
-      const approveLbl = lastFail
-        ? '❌ Retry'
-        : (r.state === 'staging'   ? '📡 Approve'
-        :  gateWarn                ? '⚠ Approve'
-                                   : '✅ Approve');
-      const approveTitle = lastFail
-        ? ('Last run failed: ' + (lastFail.reason || lastFail) + '. Click to retry.')
-        : (r.state === 'staging'
-            ? 'Run fused approval: backfill required data + invoke StrategyCoder + 3-window convergence backtest. Auto-promotes to CANDIDATE on pass.'
-            : r.state === 'candidate'
-              ? (gateWarn
-                  ? 'Metrics below gate thresholds (Sharpe ≥ 0.5, |Max DD| ≤ 20%) — approving will log an override.'
-                  : 'Promote candidate → live (Alpaca paper/live trading).')
-              : 'Promote to Active Stack');
-      const approveCls = lastFail
-        ? 'st-action-btn st-approve-btn st-approve-retry'
-        : (r.state === 'staging'
-            ? 'st-action-btn st-approve-btn st-approve-async'
-            : 'st-action-btn st-approve-btn');
-      const approveOnClick = r.state === 'staging'
-        ? \`stApproveGated('\${r.strategy_id}', '\${r.state}')\`
-        : \`stApprove('\${r.strategy_id}', \${gateWarn})\`;
-      const jobChip = _stJobChipHTML(r.strategy_id);
-      const failBanner = _stFailureBannerHTML(r.strategy_id);
-      const actionsCell = jobChip
-        ? jobChip
-        : (failBanner +
-           \`<button class="\${approveCls}" title="\${_escStr(approveTitle)}" onclick="\${approveOnClick}">\${approveLbl}</button>
-            <button class="st-action-btn st-reject-btn" onclick="stReject('\${r.strategy_id}')">Reject</button>\`);
-      // Warning badge for staging strategies whose Saturday-brain-planned
-      // data columns include something no collector/provider can backfill.
-      // The staging worker would reject Approve with unsupported_source.
-      const dataWarn = (r.state === 'staging'
-                       && Array.isArray(r.unsupported_sources)
-                       && r.unsupported_sources.length > 0)
-        ? \` <span class="st-data-warn" title="\${_escStr(
-            'No collector/provider registered for: ' + r.unsupported_sources.join(', ')
-            + '. Approve would fail with unsupported_source.\\nAdd these to data/master/schema_registry.json or data_columns first.')}">⚠ data</span>\`
-        : '';
-      return \`<tr>
-        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${dataWarn}</td>
-        <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}</td>
-        <td>\${_regimeBacktestSharpe(r)}</td>
-        <td class="num\${sharpeFail ? ' st-gate-fail' : ''}" title="\${_escStr(sharpeTitle)}">\${_fmtNum(sharpe)}</td>
-        <td class="num">\${_fmtNum(sortino)}</td>
-        <td class="num">\${_fmtNum(calmar)}</td>
-        <td class="num">\${ret != null ? (parseFloat(ret) >= 0 ? '+' : '') + parseFloat(ret).toFixed(2) + '%' : '—'}</td>
-        <td class="num\${ddFail ? ' st-gate-fail' : ''}">\${maxDd != null ? parseFloat(maxDd).toFixed(2) + '%' : '—'}</td>
-        <td class="num" style="color:var(--muted)" title="\${trades == null ? 'Never backtested' : (trades === 0 ? 'Backtest ran but emitted no signals' : trades + ' trades across the regime-stratified backtest windows')}">\${trades != null ? trades : '—'}</td>
-        <td>\${actionsCell}</td>
-      </tr>\`;
-    }).join('')}
-  </table>\${footer}\`;
-  _bindSortable('st-candidate-wrap', _renderCandidates);
-  _bindCollapse('st-candidate-wrap', _renderCandidates);
-}
+// _renderCandidates removed 2026-07-13 (operator directive): the Research
+// Candidates approval table is gone — candidate→live flows through the
+// automatic per-regime qualification gate (auto_approval.js Sunday stage +
+// staging_approver finalize hook). Action-handler API wrappers (stApprove /
+// stApproveGated / stReject) are retained for console/manual use.
 
 // ── Action handlers ────────────────────────────────────────────────────────
 
@@ -9564,8 +9816,6 @@ async function stApproveGated(sid, state) {
 async function stDismissFailure(sid) {
   const fail = _stLastFailures[sid];
   delete _stLastFailures[sid];
-  const rows = strategiesData.filter(_inCandidate);
-  _renderCandidates(rows);
   // Persist the dismissal server-side so it also survives the next reload.
   if (fail && fail.job_id) {
     try {

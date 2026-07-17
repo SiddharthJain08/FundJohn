@@ -1,7 +1,0 @@
-{
-  "strategy_id": "S_local_global_balance",
-  "required": [
-    "prices"
-  ],
-  "optional": []
-}
