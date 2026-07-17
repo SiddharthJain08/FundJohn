@@ -149,6 +149,37 @@ class TransitionEvent:
     reason:     str
     metadata:   dict = field(default_factory=dict)
 
+    # Accepted aliases for hand-written / script-written history rows. A single
+    # malformed row must NOT be able to brick from_manifest() — that throws
+    # inside the engine's instrument_class_for() and silently starves EVERY
+    # strategy (near-miss 2026-07-17). from_row normalizes known aliases,
+    # drops unknown keys, and returns None for an unsalvageable row.
+    _ALIASES = {'at': 'timestamp', 'from': 'from_state', 'to': 'to_state', 'ts': 'timestamp'}
+    _FIELDS = {'from_state', 'to_state', 'timestamp', 'actor', 'reason', 'metadata'}
+
+    @classmethod
+    def from_row(cls, e: dict) -> Optional["TransitionEvent"]:
+        if not isinstance(e, dict):
+            logger.warning("dropping non-dict history row: %r", e)
+            return None
+        norm = {}
+        for k, v in e.items():
+            key = cls._ALIASES.get(k, k)
+            if key in cls._FIELDS:
+                norm[key] = v
+        try:
+            return cls(
+                from_state=norm.get('from_state', ''),
+                to_state=norm.get('to_state', ''),
+                timestamp=norm.get('timestamp', ''),
+                actor=norm.get('actor', ''),
+                reason=norm.get('reason', ''),
+                metadata=norm.get('metadata', {}) or {},
+            )
+        except Exception as exc:  # never let a history row abort a manifest load
+            logger.warning("dropping unparseable history row %r: %s", e, exc)
+            return None
+
 
 @dataclass
 class StrategyRecord:
@@ -352,7 +383,7 @@ class LifecycleStateMachine:
                 raise ValueError(
                     f"strategy {sid!r}: unknown instrument_class {_ic!r}; "
                     f"valid={sorted(VALID_INSTRUMENT_CLASSES)}")
-            history = [TransitionEvent(**e) for e in rec.get("history", [])]
+            history = [ev for ev in (TransitionEvent.from_row(e) for e in rec.get("history", [])) if ev is not None]
             records[sid] = StrategyRecord(
                 strategy_id=sid,
                 state=StrategyState(rec["state"]),
@@ -370,7 +401,7 @@ class LifecycleStateMachine:
             if state in {'live', 'candidate', 'staging', 'monitoring'} and sid not in records:
                 # Misrouted active strategy — recover into _records.
                 try:
-                    history = [TransitionEvent(**e) for e in rec.get("history", [])]
+                    history = [ev for ev in (TransitionEvent.from_row(e) for e in rec.get("history", [])) if ev is not None]
                     records[sid] = StrategyRecord(
                         strategy_id=sid,
                         state=StrategyState(state),
