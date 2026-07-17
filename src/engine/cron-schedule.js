@@ -250,7 +250,7 @@ function start(swarm, generateId, notifyDiscord) {
     // computes at ~3:10pm ET (close[t]-proxy signals) and executes market orders
     // into the ~3:55pm close to mirror the backtests' close[t] fill, plus a
     // 9:35am dashboard-only SOD refresh. When OFF, the legacy 10:00am cycle runs
-    // unchanged. Spec: docs/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
+    // unchanged. Spec: docs/archive/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
     const closeExecLive       = process.env.OPENCLAW_CLOSE_EXEC_LIVE       === '1';
     const eodSignalRegister   = process.env.OPENCLAW_EOD_SIGNAL_REGISTER   === '1';
 
@@ -346,7 +346,7 @@ function start(swarm, generateId, notifyDiscord) {
     // executed into close[T+1] at 3:55 PM[T+1].
     // Mutual exclusion with OPENCLAW_CLOSE_EXEC_LIVE is enforced at registration
     // (throw above). Gate-OFF = zero new crons registered (byte-identical to pre-SP6).
-    // Spec: docs/superpowers/specs/2026-05-31-sp6-phase-a-eod-open-execution-design.md §4/§12
+    // Spec: docs/archive/superpowers/specs/2026-05-31-sp6-phase-a-eod-open-execution-design.md §4/§12
     if (eodSignalRegister) {
         const dispatchCycle = (reason, steps) => {
             const today = new Date().toISOString().slice(0, 10);

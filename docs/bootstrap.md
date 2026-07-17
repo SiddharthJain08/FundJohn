@@ -59,7 +59,7 @@ core invariant in CLAUDE.md: never delete/truncate). On a fresh box you must
 either restore these from a backup of the production box or re-backfill:
 
 - prices/metadata: SP-2 backfill machinery (`scripts/backfill_universe_5y.py`,
-  `docs/sp2-backfill-runbook.md`)
+  `docs/runbooks/sp2-backfill-runbook.md`)
 - options EOD: self-archives daily going forward (16:30 ET timer); history
   before your bootstrap date is not recoverable from providers
 - crypto bars: `src/ingestion/crypto_bars.py` backfill

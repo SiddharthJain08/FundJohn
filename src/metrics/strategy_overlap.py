@@ -6,7 +6,7 @@ count the overlap and compute Jaccard index. Populates
 `strategy_signal_overlap` nightly. Surface for future correlation-adjusted
 sizing (out of scope in 2D).
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
 """
 from __future__ import annotations
 

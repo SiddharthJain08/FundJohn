@@ -1,9 +1,0 @@
-[Unit]
-Description=OpenClaw weekend — Saturday 08:00 ET strategy-adjustment + backtest pipeline
-
-[Timer]
-OnCalendar=Sat *-*-* 08:00:00 America/New_York
-Persistent=true
-
-[Install]
-WantedBy=timers.target

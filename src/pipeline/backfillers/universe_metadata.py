@@ -22,7 +22,7 @@ Sources & deviations from spec (2026-05-22-sp2-phase-b-5y-backfill.md):
     adv_usd_20d (row is still kept; ranking pool excludes it).
 
   * FMP `historical-market-capitalization` → market_cap
-    DEVIATION: 2026-05-22 probe (docs/superpowers/specs/sp2-fmp-mktcap-probe.md)
+    DEVIATION: 2026-05-22 probe (docs/archive/superpowers/specs/sp2-fmp-mktcap-probe.md)
     showed this endpoint returns 403 on our Starter tier. Decision recorded:
     FALLBACK:prices_x_shares — but a historical shares-outstanding feed is not
     yet wired (FMP `profile` only returns *current* sharesOutstanding). For

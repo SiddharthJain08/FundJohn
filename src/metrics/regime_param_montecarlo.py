@@ -16,7 +16,7 @@ Caveats (read before trusting):
    strategy's true distribution differs from the sample (regime shift,
    etc.), CI is misleading.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
 """
 from __future__ import annotations
 

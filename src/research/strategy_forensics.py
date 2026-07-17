@@ -58,7 +58,7 @@ def build_dossier(strategy_id: str, days: int = 30) -> dict:
 
         # Canonical backtest metrics (registry backtest_* mirror retired as a
         # read-consumer 2026-07-05, Option B — see
-        # docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+        # docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
         # strategy_backtest_runs keys on strategy_id, which for the vast
         # majority of rows equals the registry `id` slug (see that doc's
         # ID-namespace caveat). Merged into `registry` under the same field

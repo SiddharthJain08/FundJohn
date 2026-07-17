@@ -143,7 +143,7 @@ def build() -> dict:
         ),
         # backtest_* comes from canonical strategy_backtest_runs, not the
         # strategy_registry mirror (retired as a read-consumer 2026-07-05,
-        # Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+        # Option B — docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
         # Joined via sr.id == strategy_backtest_runs.strategy_id (registry
         # slug; see that doc's ID-namespace caveat).
         "strategies": _rows(

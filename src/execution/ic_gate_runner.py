@@ -26,7 +26,7 @@ Decision flow for one signal:
                                 (then re-mark as TIMED_OUT — treated as VETO
                                 downstream, fail-SAFE).
 
-Spec: docs/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
+Spec: docs/archive/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
 """
 from __future__ import annotations
 

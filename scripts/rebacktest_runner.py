@@ -2,7 +2,7 @@
 """Resumable, memory-safe, per-strategy re-backtest driver (Phase 1b).
 Runs each live-relevant strategy as its own MemoryMax-capped systemd-run unit
 with OPENCLAW_TRUE_MTM_MARKS=1, sequential, resumable via run_at. See
-docs/superpowers/specs/2026-07-01-rebacktest-harness-design.md."""
+docs/archive/superpowers/specs/2026-07-01-rebacktest-harness-design.md."""
 import argparse, json, os, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path

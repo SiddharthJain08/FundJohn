@@ -7,11 +7,11 @@ patterns but NOT in published topics.
 Constants here are the canonical names used by the DataHub facade. Code
 that still writes to non-conforming keys (`agent_status:{id}` vs
 `subagent:{id}` etc.) is enumerated in
-`docs/superpowers/specs/datahub-inventory-2026-05-18.md` and will be
+`docs/archive/superpowers/specs/datahub-inventory-2026-05-18.md` and will be
 migrated per-caller in follow-up commits.
 
 When you add a new topic, append a constant here and document its
-producer + consumer pair in `docs/datahub.md`.
+producer + consumer pair in `docs/reference/datahub.md`.
 """
 
 from __future__ import annotations

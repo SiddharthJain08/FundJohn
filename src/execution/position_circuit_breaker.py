@@ -8,7 +8,7 @@ closes via _close_symbol().
 Independent-mode positions (HIGH_VOL/CRISIS) are skipped — strategy-level
 brackets are their cutoff.
 
-Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §"position_circuit_breaker"
+Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §"position_circuit_breaker"
 """
 from __future__ import annotations
 

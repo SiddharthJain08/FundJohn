@@ -7,7 +7,7 @@ window for the same (strategy, regime). Persists to
 `mastermind_proposal_outcomes`. Reports Brier score + confidence-bucket
 match rates.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2d-design.md
 """
 from __future__ import annotations
 

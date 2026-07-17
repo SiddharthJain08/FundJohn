@@ -19,7 +19,7 @@ State→classification map (matches src/strategies/lifecycle.py StrategyState):
   (unknown / missing)        → VETOED with reason="unknown_strategy" /
                                                  "missing_state"
 
-Spec: docs/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
+Spec: docs/archive/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
 """
 from __future__ import annotations
 

@@ -21,8 +21,8 @@ regime_blended_sizer._select_bracket (entry/stop/t1/t2/weight/direction) so the
 downstream order builder is unchanged. {} means "no usable bracket" -> caller
 falls back to _select_bracket.
 
-Spec: docs/superpowers/specs/2026-05-29-block-stacked-brackets-design.md
-      docs/superpowers/specs/2026-07-14-saturday-auto-adjustment-design.md (§W2)
+Spec: docs/archive/superpowers/specs/2026-05-29-block-stacked-brackets-design.md
+      docs/archive/superpowers/specs/2026-07-14-saturday-auto-adjustment-design.md (§W2)
 """
 from __future__ import annotations
 import math

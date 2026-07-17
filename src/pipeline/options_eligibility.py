@@ -16,7 +16,7 @@ failure (partial sweep, API outage, degenerate result) keeps the prior
 cache, so eligibility is never silently wiped. Inert to land — no live
 strategy reads an options predicate and the resolver/archive gates are OFF.
 
-Spec: docs/superpowers/specs/2026-06-08-sp7-phase-d1-options-eligible-producer-design.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp7-phase-d1-options-eligible-producer-design.md
 """
 from __future__ import annotations
 

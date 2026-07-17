@@ -46,7 +46,7 @@ async function _query(sql, params = []) {
 // strategy_backtest_runs (latest primary_window=true run per strategy_id ==
 // registry id slug), NOT the strategy_registry mirror (retired as a
 // read-consumer 2026-07-05, Option B — see
-// docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+// docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
 // So the Saturday memos reason on the honest true-MTM+slippage numbers.
 const _CANONICAL_BT_JOIN = `
   LEFT JOIN LATERAL (

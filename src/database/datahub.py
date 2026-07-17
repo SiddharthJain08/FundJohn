@@ -6,7 +6,7 @@ soft-fail rate-limit, and payload-size cap.
 
 Ships ALONGSIDE the existing scattered ``redis.publish`` / ``redis.set``
 callers across the codebase (see
-``docs/superpowers/specs/datahub-inventory-2026-05-18.md``). Per
+``docs/archive/superpowers/specs/datahub-inventory-2026-05-18.md``). Per
 Phase 2B's hard constraints, callers are migrated incrementally in
 follow-up commits; none are deleted in this phase.
 

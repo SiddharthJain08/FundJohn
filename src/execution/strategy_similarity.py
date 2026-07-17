@@ -6,7 +6,7 @@ holdings co-firing Jaccard over (ISO-week, ticker, direction) emissions; blended
 with return-correlation under a data-adaptive weight that rises from 0 as joint
 history accrues. Reuses correlation_matrix's clip/sparse conventions.
 
-Spec: docs/superpowers/specs/2026-05-29-strategy-orthogonalization-design.md
+Spec: docs/archive/superpowers/specs/2026-05-29-strategy-orthogonalization-design.md
 """
 from __future__ import annotations
 

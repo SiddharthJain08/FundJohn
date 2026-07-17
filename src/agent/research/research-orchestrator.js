@@ -929,7 +929,7 @@ class ResearchOrchestrator {
     // is the sole read source now: src/lib/promotion_service.js,
     // src/research/strategy_forensics.py, src/services/mastermind_chat/snapshot.py,
     // src/channels/api/routes_research.js, src/channels/discord/relay.js.
-    // See docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
+    // See docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
     await this._query(
       `UPDATE strategy_registry
           SET status                    = 'pending_approval',
@@ -1210,7 +1210,7 @@ class ResearchOrchestrator {
       // backtest_sharpe seeded here is placeholder-only (initial registration,
       // pre-first-real-backtest); canonical strategy_backtest_runs is what
       // every reader now consults. See
-      // docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
+      // docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md.
       await pool.query(
         `INSERT INTO strategy_registry
            (id, name, description, tier, implementation_path, parameters, regime_conditions, universe, status, backtest_sharpe)

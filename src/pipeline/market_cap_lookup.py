@@ -3,7 +3,7 @@
 The FMP profile source never delivered (403 / empty cache since inception —
 see /root/universe_expansion_audit_2026-06-04.md §2). This module is the
 prices_x_shares fallback the 2026-05-22 probe selected
-(docs/superpowers/specs/sp2-fmp-mktcap-probe.md: FALLBACK:prices_x_shares).
+(docs/archive/superpowers/specs/sp2-fmp-mktcap-probe.md: FALLBACK:prices_x_shares).
 """
 from __future__ import annotations
 

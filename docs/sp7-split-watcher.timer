@@ -1,9 +1,0 @@
-[Unit]
-Description=Daily 21:15 UTC split-watcher
-
-[Timer]
-OnCalendar=Mon-Fri 21:15 UTC
-Persistent=false
-
-[Install]
-WantedBy=timers.target

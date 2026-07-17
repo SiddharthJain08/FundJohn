@@ -21,7 +21,7 @@ Concurrency:
 - The downstream `eligibility_manager.set_params` uses its own SELECT FOR
   UPDATE on `strategy_regime_params` for the same reason.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2b-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2b-design.md
 """
 from __future__ import annotations
 

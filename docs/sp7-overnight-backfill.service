@@ -1,7 +1,0 @@
-[Unit]
-Description=SP-7 liquid-5k overnight price backfill window (armed via data/.sp7_backfill_armed)
-
-[Service]
-Type=oneshot
-WorkingDirectory=/root/openclaw
-ExecStart=/bin/bash /root/openclaw/scripts/overnight_backfill.sh

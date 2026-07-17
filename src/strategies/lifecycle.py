@@ -440,7 +440,7 @@ class LifecycleStateMachine:
         Auto-derives from backtest_results.eligible_regimes_proposed if available;
         otherwise raises requires_regime_qualification.
 
-        Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
+        Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
         §"Strategy creation pipeline changes – A. PaperHunter → StrategyCoder → Promotion"
         """
         record = self._records.get(strategy_id)
@@ -521,7 +521,7 @@ class LifecycleStateMachine:
                     f"minimum {thr['min_trades']} (instrument_class={rec.instrument_class})")
 
         # Guard: candidate → staging requires regime eligibility
-        # Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
+        # Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
         # §"Strategy creation pipeline changes"
         if key == (StrategyState.CANDIDATE, StrategyState.STAGING):
             ok, reason = self.validate_regime_eligibility_present(strategy_id)

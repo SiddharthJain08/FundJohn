@@ -9,7 +9,7 @@ WARN  = un-adopted drift found (data semantics — diagnose via
         <60 bars in prices.parquet (clamp keeps them, the resolver floor
         excludes them; they can't fill strategy lookbacks so the spec's
         zero-SIGNAL-delta still holds). Classification SQL + decision
-        rule: docs/sp7-phase-c-runbook.md §3. Verified-empty 2026-06-07.
+        rule: docs/runbooks/sp7-phase-c-runbook.md §3. Verified-empty 2026-06-07.
 FAIL  = resolve_error rows present (the builder failed-open — code bug).
 SKIP  = gate off / no DB.
 

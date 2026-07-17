@@ -16,7 +16,7 @@ Caveats (read before relying on output):
 - No regime conditioning. Future Phase 2H could compute per-regime
   matrices and interpolate by current state.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2g-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2g-design.md
 """
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ DEFAULT_BLEND_ALPHA = 0.6   # weight on PnL correlation; (1-alpha) on overlap
 
 # Phase 2H (2026-05-13): per-regime correlation matrices + state-probability blend.
 # Defaults are env-overridable; documented in
-# docs/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2h-design.md
+# docs/archive/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2h-design.md
 REGIME_STATES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 CRISIS_CORRELATION_PRIOR = float(os.environ.get('OPENCLAW_CRISIS_CORRELATION_PRIOR', '0.7'))
 # Phase 2H coverage gate: regimes with > 0 trades among requested tickers

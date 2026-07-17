@@ -46,7 +46,7 @@ Gate B (Phase 3 LIVE-flip prerequisite) — revised 2026-05-12 (Path C/B hybrid)
   - blended.strategy_count_LOW_VOL >= 1                (sanity: not a degenerate filter)
 
   The tolerance is documented in spec:
-  docs/superpowers/specs/2026-05-12-regime-backtest-backfill-spec.md (Phase F).
+  docs/archive/superpowers/specs/2026-05-12-regime-backtest-backfill-spec.md (Phase F).
 """
 from __future__ import annotations
 import json

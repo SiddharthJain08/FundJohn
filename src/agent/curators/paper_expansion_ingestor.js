@@ -89,7 +89,7 @@ async function _gatherContext() {
     // backtest_sharpe/return_pct come from canonical strategy_backtest_runs
     // (latest primary_window=true run per strategy_id == registry id slug),
     // NOT the strategy_registry mirror (retired as a read-consumer 2026-07-05,
-    // Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+    // Option B — docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
     // Ranking is on canonical total_sharpe with NULLS LAST so unbacktested
     // strategies don't sort to the top of the paper-expansion context.
     _query(`SELECT sr.id, sr.name, sr.status, sr.tier, sr.universe, sr.signal_frequency,

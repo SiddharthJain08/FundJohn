@@ -10,7 +10,7 @@ Real cache pass is OPERATOR-ONLY; tests use synthetic in-memory frames.
 Usage:
   python3 scripts/run_deep_dip_buy_feasibility.py [--limit N] [--analysis-dir X] ...
 
-Spec: docs/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md
 """
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def _t_fmt(t: float) -> str:
 def render_report(per_dip: dict, n_sessions: int, verd: str) -> str:
     L = []
     L.append("# SP-6 Deep-Dip Buy-Leg Feasibility Study\n")
-    L.append("**Prereg**: docs/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md\n")
+    L.append("**Prereg**: docs/archive/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md\n")
     L.append(
         "Deep-THROUGH buy limit (50 bps below the open). Unlike the at-touch "
         "passive sell, a fill here is genuine (the market crosses the level), so "

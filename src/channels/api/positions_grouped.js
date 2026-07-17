@@ -51,7 +51,7 @@ function computeDayPnlUsd({ today_pnl_pct, prev_pnl_pct, position_size_pct, nav 
  * Preserves input order within each group.  Adds subtotal_day_pnl_usd.
  *
  * Concept lifted from achannarasappa/ticker AssetGroup primitive — see
- * docs/superpowers/plans/2026-05-15-fincept-imports-master-plan.md (1E).
+ * docs/archive/superpowers/plans/2026-05-15-fincept-imports-master-plan.md (1E).
  *
  * @param {Array<{symbol:string, day_pnl_usd?:number, strategy_id?:string|null}>} positions
  * @returns {Array<{strategy_id:string, positions:Array, subtotal_day_pnl_usd:number}>}

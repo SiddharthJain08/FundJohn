@@ -10,7 +10,7 @@ against:
 Emits one drift signal per (strategy, regime) where at least one baseline
 is present and live trade_count >= MIN_TRADES.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2c-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2c-design.md
 """
 from __future__ import annotations
 

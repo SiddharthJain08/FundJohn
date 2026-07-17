@@ -9,7 +9,7 @@ set_params() which:
   4. Upserts the params row
   5. Commits, then invalidates the resolver cache
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 

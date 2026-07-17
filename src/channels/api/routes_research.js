@@ -271,7 +271,7 @@ router.get('/campaigns/:id', async (req, res) => {
       query(`SELECT * FROM research_campaigns WHERE id = $1`, [req.params.id]),
       // registry_sharpe is sourced from canonical strategy_backtest_runs, not
       // the strategy_registry mirror (retired as a read-consumer 2026-07-05,
-      // Option B — docs/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
+      // Option B — docs/archive/superpowers/specs/2026-07-05-option-b-mirror-retirement-design.md).
       // Joined via reg.id == strategy_backtest_runs.strategy_id (registry
       // slug; see that doc's ID-namespace caveat).
       query(

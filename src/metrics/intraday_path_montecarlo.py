@@ -18,7 +18,7 @@ Dispatch: tickers with ≥20 30m bars in the window get empirical; others
 get GBM. A `path_source` field on the persisted run records which
 generator (or 'hybrid' if a strategy's trade pool mixes both) was used.
 
-Spec: docs/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2e-design.md
+Spec: docs/archive/superpowers/specs/2026-05-13-regime-blended-sizer-phase-2e-design.md
 """
 from __future__ import annotations
 

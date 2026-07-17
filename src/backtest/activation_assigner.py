@@ -5,7 +5,7 @@ Derives per-(strategy, regime) SIZER eligibility (`strategy_regime_params.
 eligible` — the column `strategy_weights._load_active_strategies` reads)
 from each strategy's latest `primary_window=TRUE` unified_backtest run.
 
-Design: docs/superpowers/specs/2026-07-05-strategy-activation-slider-design.md
+Design: docs/archive/superpowers/specs/2026-07-05-strategy-activation-slider-design.md
 Operator directive (2026-07-13 v2, supersedes 2026-07-05):
   eligible[r] = QUALIFIES[r] AND sharpe[r] >= threshold
   where QUALIFIES[r] is the shared per-regime promotion/activation rule

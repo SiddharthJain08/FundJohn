@@ -16,7 +16,7 @@ hiccup would be worse than running it; the doctor check
 `strategy_regime_params_consistency` + cycle preflight surfaces the
 underlying problem.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 

@@ -20,7 +20,7 @@
  * here). Keeping the SQL out of bot.js means the channel can be tested
  * end-to-end with just a Postgres connection — no Discord client required.
  *
- * Spec: docs/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
+ * Spec: docs/archive/superpowers/plans/2026-05-15-fincept-imports-phase-2-master-plan.md
  * (Project 2A — task A2.6.)
  */
 

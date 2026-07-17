@@ -4,7 +4,7 @@ SHORT-only standalone strategy. Filters insider sell-clusters through an
 opportunistic-vs-routine classifier (Cohen-Malloy-Pomorski 2012).
 Independent of S12_insider — separate file, ID, params, cooldown.
 
-Spec: docs/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md
+Spec: docs/archive/superpowers/specs/2026-05-28-s15-insider-opportunistic-short-design.md
 """
 
 from __future__ import annotations

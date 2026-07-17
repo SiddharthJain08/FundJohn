@@ -7,7 +7,7 @@ Conviction gate: corr_adjusted_net_sharpe (the live Sharpe-weighted combination 
 The legacy Tier-2 deflation gate (k_eff / block_conviction / deflated_net_sharpe) was
 retired 2026-07-01.
 
-Spec: docs/superpowers/specs/2026-05-29-strategy-orthogonalization-design.md
+Spec: docs/archive/superpowers/specs/2026-05-29-strategy-orthogonalization-design.md
 """
 from __future__ import annotations
 import math

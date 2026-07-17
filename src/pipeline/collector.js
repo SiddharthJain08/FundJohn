@@ -698,7 +698,7 @@ async function runHistoricalPrices(daysBack = 3650, tickers = null) {
 // SP-7 A3: canonical price convention = SPLIT-ADJUSTED ONLY (matches the
 // Phase-B backfiller). Dividend adjustment restates all history on every
 // dividend — incompatible with the append-only master store. Dividends are
-// explicit in corporate_actions.parquet; see docs/sp7-adjustment-convention.md.
+// explicit in corporate_actions.parquet; see docs/reference/sp7-adjustment-convention.md.
 // Caller (runHistoricalPrices) owns the flush via store.flushPrices() — we
 // only buffer via store.upsertPrices.
 //

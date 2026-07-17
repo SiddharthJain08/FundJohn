@@ -12,7 +12,7 @@ Backward-compat semantics:
 - size_scalar/stop_pct/target_pct/max_hold_days are NULL by default — the
   *_override getters return None and callers fall back to existing logic.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2a-design.md
 """
 from __future__ import annotations
 

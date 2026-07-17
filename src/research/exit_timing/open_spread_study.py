@@ -5,7 +5,7 @@ Pure-function core + helpers for measuring incremental NBBO half-spread
 exits. The runner (scripts/run_open_spread_study.py) handles PG load, CLI
 pulls, and output.
 
-Spec: docs/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md
 """
 from __future__ import annotations
 

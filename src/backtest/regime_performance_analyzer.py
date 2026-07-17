@@ -10,7 +10,7 @@ Used by:
   - lifecycle.validate_regime_eligibility_present() at candidate→staging
   - comprehensive_review.js Saturday refresh
 
-Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
+Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md
 """
 from __future__ import annotations
 import math

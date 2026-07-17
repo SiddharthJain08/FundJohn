@@ -15,7 +15,7 @@ ticker in response) defaults the affected ticker to keep so the
 formula-result rides through. The cycle continues; a :warning: is
 posted to #botjohn-log for operator awareness.
 
-Spec: docs/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §11
+Spec: docs/archive/superpowers/specs/2026-05-11-regime-blended-position-sizing-design.md §11
 """
 from __future__ import annotations
 import json

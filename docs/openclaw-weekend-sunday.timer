@@ -1,9 +1,0 @@
-[Unit]
-Description=OpenClaw weekend — Sunday 08:00 ET research run (saturday-brain)
-
-[Timer]
-OnCalendar=Sun *-*-* 08:00:00 America/New_York
-Persistent=true
-
-[Install]
-WantedBy=timers.target

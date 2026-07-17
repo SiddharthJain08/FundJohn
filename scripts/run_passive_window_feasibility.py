@@ -10,7 +10,7 @@ Real cache pass is OPERATOR-ONLY; tests use synthetic in-memory frames.
 Usage:
   python3 scripts/run_passive_window_feasibility.py [--limit N] [--analysis-dir X] ...
 
-Spec: docs/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md
 """
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def render_report(
 ) -> str:
     lines = []
     lines.append("# SP-6 Passive Window Feasibility Study\n")
-    lines.append("**Prereg**: docs/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md\n")
+    lines.append("**Prereg**: docs/archive/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md\n")
     lines.append(
         "Kill-only instrument: minute bars over-fill passive limits and cannot "
         "see adverse selection or queue position.  A NEGATIVE result is a "

@@ -2,7 +2,7 @@
 
 Pure-function core (compute_probe) + helpers. The runner (scripts/
 run_intraday_session_probe.py) supplies the data. Spec:
-docs/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md
+docs/archive/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md
 """
 from __future__ import annotations
 

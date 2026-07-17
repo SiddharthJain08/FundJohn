@@ -7,7 +7,7 @@
 #   2. Dry-run iron condor (construction-only re-test; live confirmation deferred).
 #   3. L1 hierarchy test: 1-contract cash-secured short put, non-marketable limit, then cancel.
 #   4. Verify clean state (no leftover sp5* orders/positions).
-#   5. Append results to docs/superpowers/specs/2026-05-27-sp5-alpaca-options-snapshot.md.
+#   5. Append results to docs/archive/superpowers/specs/2026-05-27-sp5-alpaca-options-snapshot.md.
 #   6. Best-effort Discord post if DISCORD_GROUNDING_WEBHOOK is set (no-op otherwise).
 #
 # Idempotent: re-running with positions already flat just logs no-ops.
@@ -18,7 +18,7 @@ set -u  # not -e: we want to capture per-step failures and continue
 cd /root/openclaw || { echo "[sp5-cleanup] FATAL: cd /root/openclaw failed"; exit 2; }
 
 BIN=/root/go/bin/alpaca
-SNAPSHOT=/root/openclaw/docs/superpowers/specs/2026-05-27-sp5-alpaca-options-snapshot.md
+SNAPSHOT=/root/openclaw/docs/archive/superpowers/specs/2026-05-27-sp5-alpaca-options-snapshot.md
 LOG_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 log()  { echo "[sp5-cleanup $(date -u +%H:%M:%SZ)] $*"; }

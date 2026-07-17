@@ -5,7 +5,7 @@ Sparse: populated only for pairs where research or operator has set an
 expected baseline (Sharpe, win-rate, avg pnl). Consumed by the drift
 detector to compare live performance against the prior.
 
-Spec: docs/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2c-design.md
+Spec: docs/archive/superpowers/specs/2026-05-12-regime-blended-sizer-phase-2c-design.md
 """
 from __future__ import annotations
 

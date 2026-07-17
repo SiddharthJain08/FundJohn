@@ -2,7 +2,7 @@
 compute_probe, writes analysis/exit_timing_probe/{report.md,rows.parquet}.
 
 NO-PEEK: progress prints counts only; the verdict block is the first look.
-Spec: docs/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def render_report(res: dict) -> str:
         return f"- {name}: mean {d['mean']*1e4:+.4f} bps | t {tt} | n_days {d['n']}"
     out = []
     out.append("# Probe ① — Intraday-Session Return (longs-only open-exit gate)\n")
-    out.append("**Spec**: docs/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md\n")
+    out.append("**Spec**: docs/archive/superpowers/specs/2026-06-08-sp6-longs-open-exit-probe-design.md\n")
     out.append("Quantity: intraday_return=(close-open)/open on max_hold-LONG exit days. "
                "Open-exit edge for a long = -E[intraday_return]. Asymmetric veto.\n")
     out.append("## Headline (day-clustered)\n")

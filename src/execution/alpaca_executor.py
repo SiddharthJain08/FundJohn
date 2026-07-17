@@ -1225,7 +1225,7 @@ def _alpaca_crypto_symbol(raw: str) -> str:
 
 
 # SP-3.1 Phase A: crypto order params. Confirmed by Task 0 spike
-# (docs/superpowers/specs/sp3.1-task0-crypto-cli-snapshot.md).
+# (docs/archive/superpowers/specs/sp3.1-task0-crypto-cli-snapshot.md).
 _CRYPTO_TIF = 'gtc'        # crypto rejects 'day'/'opg'; a market order rests-then-fills
 _CRYPTO_QTY_DECIMALS = 9   # Alpaca BTC qty precision (Task 0 confirms min order size)
 
@@ -1391,7 +1391,7 @@ def _submit_crypto_stop(api_symbol: str, stop_price: float, qty: float,
     sits BELOW the stop so the order is marketable on a downward break.
     Returns a small result dict on success, or None on failure / invalid input
     (the caller keeps the entry result — fail-safe, never unwinds the entry).
-    Shape per docs/superpowers/specs/sp3.1-phase-d-crypto-stop-snapshot.md."""
+    Shape per docs/archive/superpowers/specs/sp3.1-phase-d-crypto-stop-snapshot.md."""
     if not (stop_price and stop_price > 0 and qty and qty > 0):
         return None
     limit_price = round(stop_price * 0.995, 2)   # 0.5% below stop → marketable

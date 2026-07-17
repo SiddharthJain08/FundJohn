@@ -199,7 +199,7 @@ def main() -> int:
             lines.append(
                 f"\U0001fa93 Split EFFECTIVE on covered ticker(s): **{syms}** — "
                 f"history is now stale-adjusted. Queue written to {PENDING}. "
-                f"Run the supersede re-backfill per docs/sp2-backfill-runbook.md (v2 path).")
+                f"Run the supersede re-backfill per docs/runbooks/sp2-backfill-runbook.md (v2 path).")
 
     if upcoming:
         held = held_tickers()

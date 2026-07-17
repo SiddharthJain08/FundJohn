@@ -1,9 +1,0 @@
-[Unit]
-Description=OpenClaw weekend — Sunday 20:00 ET maintenance (audit research run)
-
-[Timer]
-OnCalendar=Sun *-*-* 20:00:00 America/New_York
-Persistent=true
-
-[Install]
-WantedBy=timers.target

@@ -2,7 +2,7 @@
 
 Catches the v1/v2 ghost-row class (mega-caps absent from rank tiers) and
 degenerate daily snapshots (rank flags never computed). See spec
-docs/superpowers/specs/2026-06-06-sp7-phase-b-tier-ladder-design.md §3.
+docs/archive/superpowers/specs/2026-06-06-sp7-phase-b-tier-ladder-design.md §3.
 """
 from __future__ import annotations
 import os

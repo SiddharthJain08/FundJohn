@@ -3,7 +3,7 @@
 Pure-function core. The runner (scripts/run_deep_dip_buy_feasibility.py)
 supplies the data.
 
-Prereg: docs/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md
+Prereg: docs/archive/superpowers/specs/2026-06-08-sp6-deep-dip-buy-feasibility-prereg.md
 
 Isolates the ONE genuinely-measurable, genuinely-untested leg of the operator's
 "final structure": a BUY limit 50 bps below the open, resting until 1:30 PM,

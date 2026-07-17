@@ -3,7 +3,7 @@
 Pure-function core. The runner (scripts/run_passive_window_feasibility.py)
 supplies the data.
 
-Prereg: docs/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md
+Prereg: docs/archive/superpowers/specs/2026-06-08-sp6-passive-window-feasibility-prereg.md
 
 Kill-only: minute bars over-fill passive limits; can't see adverse selection.
 A positive sell-side result is INCONCLUSIVE, not a green light.

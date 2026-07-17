@@ -1,7 +1,7 @@
 """strategy_weights.py — per-(strategy, regime) weight engine.
 
 Implements the formulas from
-docs/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
+docs/archive/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below

@@ -7,7 +7,7 @@ OPERATOR NOTE: Do NOT run the pull step yourself — it is slow and paced.
 The operator invokes this script; the real CLI pull is the operator's step.
 
 NO-PEEK: progress prints counts only; spread values are NEVER printed mid-run.
-Spec: docs/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md
+Spec: docs/archive/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md
 """
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def render_report(agg: dict, v: dict) -> str:
     """Render the final analysis report as Markdown."""
     lines = []
     lines.append("# SP-6 — Open-Window Spread-Cost Study\n")
-    lines.append("**Spec**: docs/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md\n")
+    lines.append("**Spec**: docs/archive/superpowers/specs/2026-06-08-sp6-open-spread-cost-study-prereg.md\n")
     lines.append(
         "Quantity: incremental NBBO half-spread (open 09:31-09:32 ET vs close 15:55-15:56 ET) "
         "on max_hold exits. incr = open_hs − close_hs. "
