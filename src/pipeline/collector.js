@@ -3,25 +3,25 @@
 /**
  * OpenClaw Background Data Collector
  *
- * Continuously collects OHLCV, snapshots, options Greeks, and fundamentals
- * for the resolved union universe (fallback: S&P 500) using a rate-limited queue.
+ * Collects OHLCV (EOD + intraday snapshots) and fundamentals for the resolved
+ * union universe using a rate-limited queue. Since the SP-1 provider cutover
+ * (2026-05-22) the sources are:
+ *   - Alpaca (AAT Plus): equity/ETF bars via fillPricesAlpaca (--adjustment
+ *     all), crypto bars via fillPricesAlpacaCrypto, intraday snapshots.
+ *     Symbol bridge: dash-form share classes (BRK-B) normalize to Alpaca's
+ *     dot form at the API boundary — applied at BOTH the EOD and intraday
+ *     fill sites (multi-char suffixes included; fixed 2026-07-15).
+ *   - FMP: index/FX historical prices via fillPricesFmpHistorical, plus
+ *     fundamentals (bounded per ticker per day).
+ *   Polygon/Massive/Yahoo/AlphaVantage are GONE (SP-1 + AV purge); legacy
+ *   polygon_* config knobs below survive only as inert defaults.
  *
- * Rate limits (Massive/Polygon — Options Starter tier):
- *   - Unlimited API calls; burst throttle at ~300 req/min sustained
- *   - Stock snapshots: NOT included (Options Starter only) — derived from stored prices
- *   - Historical OHLCV (/v2/aggs): included
- *   - Options chains (/v3/snapshot/options): included (primary path)
- *   - Technical indicators (/v1/indicators): included
- *
- * Strategy:
- *   Phase 1 (every 5 min during market hours): Multi-ticker snapshot (1 call)
- *   Phase 2 (daily, staggered): Historical prices (100 calls over ~20 min)
- *   Phase 3 (daily, after Phase 2): Options chains (100 calls over ~20 min)
- *   Phase 4 (daily, FMP): Fundamentals (limited to ~2 per ticker per day)
- *
- * NOTE: Technicals (RSI, SMA) were removed. They were computed from stored prices
- * but never consumed by any live strategy. They cost 4+ hours per night due to
- * Polygon 429 retries (Options Starter plan) in the compute fallback path.
+ * Freshness gate: the EOD lane verifies equity freshness against the
+ * strategy-CONSUMED scope (_signalsConsumedScope — union of live-strategy
+ * universes ∩ fetchable), NOT the wide SP-7 resolver envelope; degraded
+ * paths fall back to universe_config, never the envelope (2026-07-15
+ * starvation fix). Coverage rows (data_coverage) advance only after parquet
+ * writes durably commit (store._commitPriceCoverage).
  */
 
 const https = require('https');

@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 """SP-2 Phase B — 5-year universe backfill driver.
 
+⚠️ SUPERSEDED FOR PRICE BACKFILLS (2026-07-15): use
+scripts/backfill_price_history.js instead. This driver's per-(ticker,year)
+read-concat-rewrite pattern rereads the whole master parquet per chunk —
+at the current ~18.7M-row scale that OOMs the 8GB box (observed at 62,155
+chunks). The JS driver reuses the collector's DuckDB-bounded append path
+(12k tickers / 9.2M rows in ~40 min, <270MB RSS). This file remains the
+metadata/options backfill harness and the historical record of the SP-2
+machinery.
+
 Scaffold/harness only (Task 6). Per-target implementations land in:
   - prices   : Task 7  (_run_prices)
   - metadata : Task 8  (_run_metadata)
@@ -49,10 +58,11 @@ CHECKPOINTS = ROOT / 'data' / '.checkpoints' / 'backfill_5y'
 UNIVERSE_FILE = ROOT / 'data' / '.backfill_universe_v1.txt'
 
 # Master parquet path is a module constant so tests can monkeypatch it. We
-# follow the existing single-file pattern (alpaca_options.py:_append_parquet,
-# run_tier_b.py:305 — read-concat-dedupe-rewrite). The spec (§2.1) called for
+# follow the existing single-file pattern (alpaca_options.py:_append_parquet —
+# read-concat-dedupe-rewrite). The spec (§2.1) called for
 # pyarrow.parquet.write_to_dataset partitioned by (year, ticker), but the live
-# file is a single 394k-row parquet that every reader treats as a file via
+# file is a SINGLE parquet (394k rows when this was written, ~18.7M rows as of
+# 2026-07-15 — the pattern no longer scales, see the header) read via
 # pd.read_parquet(path). Migrating to a partitioned dataset would change the
 # file→directory shape mid-flight and risk silent reader-behavior changes
 # across the live pipeline. Spec deviation flagged in DONE report.

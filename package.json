@@ -2,9 +2,13 @@
   "name": "openclaw",
   "version": "2.0.0",
   "description": "OpenClaw — AI Hedge Fund System (BotJohn PTC Architecture)",
+  "license": "MIT",
   "main": "src/channels/discord/bot.js",
   "scripts": {
     "start": "node src/channels/discord/bot.js",
+    "test": "npm run test:js && npm run test:py",
+    "test:js": "node --test tests/",
+    "test:py": "pytest -m 'not integration' -q",
     "dev": "node --watch src/channels/discord/bot.js",
     "db:migrate": "node -e \"require('./src/database/postgres').migrate()\"",
     "workspace:init": "node -e \"require('./src/workspace/manager').initDefault()\"",

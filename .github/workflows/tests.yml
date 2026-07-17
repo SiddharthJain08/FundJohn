@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  js-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --test tests/
+
+  py-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      # requirements-ci.txt = requirements.txt minus torch/transformers
+      # (~2GB of wheels). The sentiment tests need torch and run only on the
+      # VPS, so CI skips tests/sentiment. Integration-marked tests need live
+      # Postgres/Redis and are excluded too.
+      - run: pip install -r requirements-ci.txt
+      - run: pytest -m 'not integration' --ignore=tests/sentiment -q

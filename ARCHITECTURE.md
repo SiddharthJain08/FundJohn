@@ -1,560 +1,158 @@
 # FundJohn — System Architecture
 
-> **System**: FundJohn / OpenClaw v2.0
-> **Last verified**: 2026-04-18 against HEAD `beea4cd`
-> **Companion docs**: [PIPELINE.md](PIPELINE.md) · [LEARNINGS.md](LEARNINGS.md) · [README.md](README.md)
+> **System**: FundJohn / OpenClaw v2.0 · **Last verified**: 2026-07-17
+> Companion docs: [README.md](README.md) · [docs/bootstrap.md](docs/bootstrap.md) ·
+> [AGENTS.md](AGENTS.md) · historical: [LEARNINGS.md](LEARNINGS.md),
+> [docs/archive/changelog.md](docs/archive/changelog.md)
 
-This is the technical deep-dive. Every module, file, connection, MCP, database table, Discord channel, and cron job is listed here with its purpose and its path on the VPS (`/root/openclaw/`).
+## 1. Topology
 
----
+```
+                        ┌──────────────────────────┐
+                        │         OPERATOR         │
+                        │  Discord · :80 dashboard │
+                        │  :7870 control room      │
+                        └───────────┬──────────────┘
+                                    │
+   ┌────────────────────────────────┼─────────────────────────────────┐
+   │  johnbot.service (ROOT USER SCOPE — the only always-on brain)    │
+   │  src/channels/discord/bot.js                                     │
+   │   ├─ Discord command routing (flash.js quick lane / main.js PTC) │
+   │   ├─ hosts the :3000 API+dashboard (src/channels/api/server.js,  │
+   │   │   nginx :80 → :3000, SSE)                                    │
+   │   ├─ node-cron scheduler (src/engine/cron-schedule.js)           │
+   │   └─ LangGraph graphs (src/agent/graphs/, PostgresSaver ckpts)   │
+   └──────────────────────────────────────────────────────────────────┘
+        │                    │                        │
+        ▼                    ▼                        ▼
+  fundjohn-dashboard   mastermind-chat         finbert-sentiment
+  :7870 (root)         :7871 (claudebot)       :7872 (claudebot)
+        │
+        ▼
+  ~40 openclaw-* system-scope services/timers (docs/systemd/ snapshot)
+        │
+        ▼
+  Docker: openclaw-postgres (pgvector/pgvector:pg16) + openclaw-redis (redis:7)
+  Broker: Alpaca paper API via the alpaca CLI (/root/go/bin/alpaca)
+```
 
-## 1. Stack at a glance
+Everything runs from the working tree at `/root/openclaw` on branch `main`
+(every unit sets `WorkingDirectory=/root/openclaw`). Long-running services
+pick up code on restart; timer-spawned scripts pick up the tree on next fire.
 
-| Layer | Technology | Location on VPS |
+## 2. Agents
+
+Model wiring: `src/agent/config/models.js` + `src/agent/config/subagent-types.json`.
+
+| Agent | Model | Surface |
 |---|---|---|
-| Host | Hostinger VPS, Ubuntu 22.04 | `/root/openclaw` |
-| Process supervisor | systemd | `johnbot.service` |
-| Orchestrator runtime | Node 20+ | `src/agent/`, `src/channels/`, `src/engine/` |
-| Execution runtime | Python 3.11 | `src/execution/`, `src/strategies/`, `scripts/`, `workspaces/default/tools/` |
-| LLM | Claude CLI (`claude-bin`) running as uid 1001 (`claudebot`) | spawned by `src/agent/subagents/swarm.js` |
-| Persistent store | PostgreSQL 16 | docker-compose, host `:5432` |
-| Cache & queues | Redis 7 | docker-compose, host `:6379` |
-| Message bus | Discord (discord.js) | `src/channels/discord/bot.js` |
-| Market data | 6 MCP providers | `src/agent/tools/mcp/*.js` |
-
-Container wiring lives in `docker-compose.yml`. Migrations are mounted into the Postgres container at `/docker-entrypoint-initdb.d`.
-
----
-
-## 2. Agent topology (3 agents + hardcoded DataPipeline)
-
-v2.0 reduced the agent count from four to three. DataJohn (the LLM data collector) was removed in commit `ef8e2cf` and replaced by hardcoded collectors under `src/ingestion/` and the Python signal stage. See [LEARNINGS.md §3](LEARNINGS.md).
-
-```
-                      ┌──────────────────┐
-                      │     OPERATOR     │  (Discord chat, web dashboard)
-                      └────────┬─────────┘
-                               │
-                               ▼
-                 ┌─────────────────────────────┐
-                 │   BotJohn 🦞                │  claude-opus-4-6
-                 │   Orchestrator / PM         │  iteration cap 40, $1.00 budget
-                 │   Veto authority            │  modes: PM_TASK
-                 └─────────┬─────────┬─────────┘
-                           │         │
-              spawns       │         │  spawns
-                           ▼         ▼
-         ┌──────────────────────┐   ┌──────────────────────┐
-         │  ResearchJohn        │   │  TradeJohn           │
-         │  claude-sonnet-4-6   │   │  claude-sonnet-4-6   │
-         │  Reads memos →       │   │  Reads research →    │
-         │  research report     │   │  sized signals       │
-         │  iter 15, $0.30      │   │  iter 15, $0.30      │
-         └──────────────────────┘   └──────────────────────┘
-
-         ┌──────────────────────────────────────────────────┐
-         │   DataPipeline  (hardcoded, no LLM)              │
-         │   src/ingestion/* + 6 MCP providers              │
-         │   runs continuously; meets 16:20 ET deadline     │
-         └──────────────────────────────────────────────────┘
-```
-
-### 2.1 Agent configs
-
-Authoritative configuration: **`src/agent/config/subagent-types.json`**.
-
-| Agent | Prompt file | Tools allowlist | Iter cap | $ cap | Veto |
-|---|---|---|---|---|---|
-| `botjohn` | `src/agent/prompts/subagents/botjohn.md` | all 6 MCPs | 40 | $1.00 | ✅ |
-| `researchjohn` | `src/agent/prompts/subagents/researchjohn.md` | none (reads files only) | 15 | $0.30 | ❌ |
-| `tradejohn` | `src/agent/prompts/subagents/tradejohn.md` | none (reads files only) | 15 | $0.30 | ❌ |
-
-Model wiring: **`src/agent/config/models.js`** — `MODELS.orchestrator = claude-opus-4-6`, `MODELS.primary = claude-sonnet-4-6`, `MODELS.fast = claude-haiku-4-5-20251001`. The `fast` model is used for session pruning and context compaction only.
-
-Session pruning: every subagent invocation has `maxToolResultTokens: 2000` and `maxToolResultAge: 10` — keeps long-running agents' context bounded.
-
-### 2.2 Agent identity and rules
-
-Repo root `.md` files define behaviour:
-
-- **`IDENTITY.md`** — BotJohn's identity doc.
-- **`AGENTS.md`** — Standing Orders SO-1 through SO-6 (see §3).
-- **`CLAUDE.md`** — 3-agent overview, context retention rules, VPS paths, deployment workflow.
-- **`MEMORY.md`** — BotJohn's persistent memory (preferences, architecture decisions).
-- **`SOUL.md`** — Operator-facing philosophy / tone.
-- **`SYSTEM_REPORT.md`** — 33KB legacy system report (preserved for historical context; supersedes points are captured here).
-- **`USER.md`** — Operator profile.
-
-Per-agent identity:
-
-- `agents/botjohn/IDENTITY.md` + `agents/botjohn/PROMPT.md`
-- `agents/researchjohn/PROMPT.md`
-- `agents/tradejohn/PROMPT.md`
-- `agents/datajohn/*` — **DEPRECATED** (retained only for history; no runtime reference)
-
----
-
-## 3. Standing Orders (behavioural contract)
-
-`AGENTS.md` defines six standing orders every agent obeys:
-
-| Order | Rule | Enforced in |
-|---|---|---|
-| SO-1 | Budget gate — no LLM call if `budget:mode == RED` | `pipeline_orchestrator.py`, `swarm.init()` |
-| SO-2 | Lifecycle gate — only approved strategies reach `trade_agent.py`; paper/monitoring sized at 50% | `trade_agent.py`, `registry.py::get_approved_strategies` |
-| SO-3 | Research gate — `trade_agent` runs only after `research_report` succeeds | `pipeline_orchestrator.py` step ordering |
-| SO-4 | Negative EV auto-veto — if expected-value < 0, BotJohn skips without prompting | `trade_agent.py`, BotJohn prompt |
-| SO-5 | Max-DD escalation — strategy with DD > 20% is auto-demoted live → monitoring | `lifecycle.py` + report triggers |
-| SO-6 | Memo format — strategy memos follow the canonical schema (lifecycle, regime, signal, targets, params) | `post_memos.py` |
-
----
-
-## 4. Middleware stack (9 layers)
-
-Loaded in order by `src/agent/middleware/index.js` and wrapped around every LLM call:
-
-| # | File | Purpose |
-|---|---|---|
-| 1 | `cache-control.js` | Marks long-lived prompt blocks with `cache_control: {type: "ephemeral"}` |
-| 2 | `secret-redaction.js` | Redacts API keys and tokens before they enter a prompt |
-| 3 | `steering.js` | Injects operator steering (e.g. "hold all new positions today") |
-| 4 | `skills-loader.js` | Loads the requested skill's SKILL.md into context if referenced |
-| 5 | `workspace-context.js` | Attaches the current workspace directory listing |
-| 6 | `context-management.js` | Summarises older turns when context window tightens |
-| 7 | `large-result-eviction.js` | Evicts >2KB tool results older than 10 turns |
-| 8 | `multimodal-injection.js` | Injects chart PNGs and tables as messages rather than text |
-| 9 | `hitl.js` | Human-in-the-loop gate — surfaces high-impact actions to operator |
-
-Adjacent but not part of the 9-layer stack:
-
-- **`deployment-gate.js`** — governs **subagent** spawning only; does not apply to BotJohn's direct responses. The top-level constant `PERMITTED_MODES = new Set(['DEPLOY', 'REPORT'])` is the default allow-list, but `validateInvocation(agentType, mode, prompt)` branches by agent type to also admit: `PM_TASK` (BotJohn himself, always allowed), `SIGNAL_PROCESSING` (compute / equity-analyst / research processing a confluence candidate), `MARKET_STATE` (scheduled data-prep), `RISK_SCAN` (emergency strategist), `STRATEGY_PERFORMANCE` + `TRADE` (report-builder). Everything else — including `TIER_A`/`TIER_B` data-prep and direct research invocation — is rejected. Prompts are additionally scanned against `BLOCKED_PATTERNS` (regex list for deprecated phrases like `run.*signal`, `fetch.*data`, `diligence`, etc.).
-- **`pipeline-activity.js`** — writes heartbeat to Redis so the dashboard can show live pipeline state.
-- **`token-budget.js`** — updates the `budget:mode` Redis key on each spawn.
-
-`src/agent/subagents/swarm.js::init()` runs the deployment gate first, then applies the 9-layer stack, then spawns `claude-bin` as uid 1001 with the computed prompt. `swarm.js` also injects the current token-budget constraint into the system prompt.
-
----
-
-## 5. Workflow state machine
-
-`src/agent/graph/workflow.js` implements a four-stage graph:
-
-```
- plan ─▶ validate ─▶ execute ─▶ report
-  │                    │           │
-  └── rejection ◀──────┘           │
-                                   ▼
-                                done
-```
-
-`runDailyClose()` in `workflow.js` delegates to `src/execution/runner.js::runDailyClose()`. Rejection loops back to `plan` and re-enters `validate` — used for SO-3 research-gate failures.
-
----
-
-## 6. Data providers (market data layer) — post-SP-1
-
-> **SP-1 cutover shipped 2026-05-22.** Polygon, Massive S3, and Yahoo Finance (except CBOE vol indices) are fully removed. Alpaca AAT Plus is now P1 for most data. FMP Starter is P2 for fundamentals + macro. yfinance is bounded to a single file by CI lint.
-
-| Data type | P1 source | P2 / fallback | Notes |
-|---|---|---|---|
-| Equity real-time quotes | **Alpaca AAT Plus** | FMP | Alpaca `GET /v2/stocks/quotes/latest` |
-| Options chain + greeks | **Alpaca CLI** (`alpaca option chain`) | — | OPTIONS_DATA_SOURCE env var removed; no more provider dispatch |
-| Historical options EOD | **Alpaca self-archive** (daily 16:30 ET via `openclaw-options-archive.timer`) | — | Massive S3 flatfiles retired; archive writes `options_eod.parquet` |
-| CBOE vol indices (VIX/VVIX/VIX3M/VIX9D) | **yfinance** via `src/ingestion/cboe_vol_indices.py` | — | Only file allowed to import yfinance (CI lint `scripts/lint_provider_guards.py`, blocking GHA gate) |
-| Macro daily series (TLT/HYG/GLD/DXY) | **FMP** | — | No yfinance fallback post-SP-1 |
-| Fundamentals / ratios / earnings | **FMP Starter** | — | Unchanged from pre-SP-1 |
-| Insider flags (Form 4) | **FMP** | — | SEC EDGAR direct for full text |
-| Universe ref (S&P 500) | **FMP** | — | Universe expansion is SP-2 scope |
-| News (ticker-attributed) | **Alpaca News API** | — | Stored in `ticker_sentiment_daily.alpaca_news_*` (migration 109) |
-| Screener / corp-actions / watchlist | **Alpaca CLI** | — | Unchanged from pre-SP-1 |
-| Filings (10-K/10-Q/8-K/Form 4 text) | **SEC EDGAR** | — | Unchanged |
-
-> ⚠️ **Greeks-validity filter**: zero-greek options rows are filtered at two boundaries — JS inline (`src/pipeline/alpaca_options.js:_optionsGreeksValid`) at live chain pull, and Python read (`src/execution/engine.py:_drop_zero_greeks`) at `options_eod.parquet` load. The archive intentionally keeps all rows; consumers filter at read.
-
-> ⚠️ **Known gap (Task 14a)**: `collector.js:runMarketPricesYFinance` and `runNewsCollection` are STUBBED. Index/ETF bars and `market_news` table population are paused until Alpaca-bars wiring is added in a follow-up.
-
-Each provider has a Node-side generator at `src/agent/tools/mcp/<name>.js`. `generatePython(server)` produces a Python module (`tools/<name>.py`) exporting rate-limited callables. All providers share `tools/_rate_limiter.py` which enforces per-provider token-bucket limits via `_acquire_token(_PROVIDER)`.
-
-Generation entry point: `src/agent/tools/registry.js::generateToolModules(workspaceDir)`. Called at startup; writes to `workspaces/default/tools/`.
-
-### 6.1 Environment variables (`.env`) — post-SP-1
-
-**LLM**: `ANTHROPIC_API_KEY`.
-
-**Data providers**: `FMP_API_KEY`, `TAVILY_API_KEY`, `SEC_USER_AGENT`. **Removed**: `POLYGON_API_KEY`, `ALPHA_VANTAGE_API_KEY`, `MASSIVE_SECRET_KEY`, `MASSIVE_WS_REALTIME_BASE`, `MASSIVE_WS_DELAYED_BASE`, `OPTIONS_DATA_SOURCE`, `OPENCLAW_OPTIONS_BACKFILL_DAYS`.
-
-**Infra**: `POSTGRES_URI`, `REDIS_URL`, `DISCORD_BOT_TOKEN`, `WORKSPACE_ID`.
-
-**Broker (Alpaca)**: `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`.
-
-**SP-1 gates**: `ALPACA_NEWS_INGEST=1`, `ALPACA_OPTIONS_ARCHIVE=1`, `ALPACA_DATA_TIER=algo_trader_plus`, `ALPACA_SOAK_MODE_UNTIL=2026-05-30` (tightened alert thresholds during soak window).
-
----
-
-## 7. Strategies — taxonomy
-
-Full list at `src/strategies/manifest.json`. Grouped by origin:
-
-### 7.1 Authoritative inventory
-
-The strategy roster drifts fast — pinning specific IDs and counts in this file goes stale within weeks. **Read `src/strategies/manifest.json`** for the current set, per-strategy lifecycle state, regime eligibility, and parameter values. The manifest is the file-system source of truth, dual-written to Postgres `strategy_registry` via `LifecycleStateMachine.transition()`.
-
-### 7.2 Lifecycle
-
-`staging → candidate → live → monitoring → deprecated → archived`. `paper` is a frozen legacy state since 2026-04-27 (fused-approval rewrite) — every former PAPER row was migrated to CANDIDATE; the only outbound transition remaining is a safety-valve `paper → archived`.
-
-**Promotion gate** (candidate → live): Sharpe ≥ 0.5 AND max drawdown ≤ 20%. Enforced in `src/strategies/lifecycle.py::LifecycleStateMachine`; operator approves on the dashboard.
-
-### 7.3 Decommissioned predecessors
-
-- `decommissioned/`: `dual_momentum.py`, `quality_value.py`, `insider_cluster_buy.py`, `iv_rv_arb.py`, `max_pain.py` — predecessors of the canonical `sXX_` versions. Retained for backtest reproducibility only; not imported anywhere.
-
-### 7.5 Execution math (engine vs trade_agent split)
-
-Two files share the execution-side math; keep their roles clear.
-
-**`src/execution/engine.py`** — master execution engine. Runs the strategy loop, persists raw `Signal` rows to Postgres, and detects **cross-strategy confluence**: `detect_confluence()` writes to the `confluence_signals` table when ≥ `CONFLUENCE_MIN` (default `2`) strategies agree on the same ticker and direction. `combined_size_pct` per confluence row is used downstream by reporting.
-
-**`src/execution/trade_agent.py`** — the Kelly-sizing layer. Reads today's signal rows (including confluence metadata when relevant) and runs:
-
-- GBM two-barrier probability `p_hit_upper(entry, stop, target, mu_daily, sigma_daily)` for each T1/T2/T3 exit.
-- `kelly_raw = (p·R - (1-p)) / R`, then `kelly_net = kelly_raw × HALF_KELLY (0.50)`.
-- `kelly_pos = clip(kelly_net, 0, MAX_POSITION_PCT)` where `MAX_POSITION_PCT = 0.05`.
-- Keeps the best (target, Kelly) pair per signal. GREEN if `kelly_net > MIN_KELLY (0.005)`.
-- Slippage haircut: multiplies reward by `CAPTURE_RATIO (0.80)`.
-- Post: condensed green summary to `#trade-signals`; no-action diagnostic otherwise.
-- **Alpaca** (2026-04-16): `execute_alpaca_orders(green, run_date)` submits bracket orders (market + TP + SL) sized `kelly_pos × equity`; `build_alpaca_post()` appends the order receipt to the Discord message.
-
-Regime scaling is applied at signal-generation time in `BaseStrategy.regime_position_scale()` — *not* inside `trade_agent.py`. `trade_agent.py` treats the incoming position sizes as already regime-adjusted and applies only Kelly + MAX_POSITION_PCT on top.
-
-### 7.6 Strategy contract (recap)
-
-Every strategy inherits `BaseStrategy` from `src/strategies/base.py` and implements:
-
-```python
-def generate_signals(
-    self,
-    prices:   pd.DataFrame,   # wide: date × ticker closes
-    regime:   dict,           # regime JSON
-    universe: List[str],      # tickers to consider
-    aux_data: dict = None,    # optional: financials, options, earnings, insider
-) -> List[Signal]
-```
-
-`Signal` is a dataclass with `ticker`, `direction` (LONG / SHORT / SELL_VOL / BUY_VOL / FLAT), `entry_price`, `stop_loss`, three targets, `position_size_pct`, `confidence` (HIGH / MED / LOW), and a free-form `signal_params` dict.
-
-Regime position scaling (applied downstream by `trade_agent.py`):
-
-```python
-REGIME_POSITION_SCALE = {
-    'LOW_VOL':       1.00,
-    'TRANSITIONING': 0.55,
-    'HIGH_VOL':      0.35,
-    'CRISIS':        0.15,
-}
-```
-
-### 7.7 Per-Strategy Universe Resolution (SP-2 Phase A)
-
-Each strategy can declare its own ticker universe by implementing:
-
-```python
-def universe_filter(meta: TickerMetadata, as_of: date) -> bool:
-```
-
-Strategies that do not override the method inherit the default `sp500` predicate. The `(meta, as_of)` signature is mandatory — all predicates must be point-in-time safe (no live clock reads).
-
-**`TickerMetadata`** is a frozen dataclass (`src/strategies/universe_metadata.py`) capturing the fields stored in the `ticker_metadata_snapshots` table (migration 111): ticker, name, exchange, sector, industry, market_cap, shares_outstanding, avg_volume_20d, sp500_member, options_eligible, as_of date. The table is append-only; each daily snapshot is a new row, enabling exact point-in-time reconstruction.
-
-**`UniverseResolver`** (`src/strategies/universe_resolver.py`) takes `(strategy_records, as_of)` and, for each strategy, selects the metadata snapshot with `snapshot_date ≤ as_of` (latest available) and runs the strategy's predicate against it. It returns a per-strategy dict of ticker lists. `union_universe(as_of, lifecycle_states)` aggregates across all strategies in the given states (e.g. `['live']`) to produce the broadest envelope needed for any given day.
-
-**Look-ahead defences** operate at two layers:
-
-- **Static lint** (`src/strategies/universe_lint.py`, CI gate `.github/workflows/lint-universe-predicates.yml`): enforces the `(meta, as_of)` signature; bans `import datetime`, `import time`, and `import os` inside any predicate module. Runs on every PR as a blocking gate.
-- **Lifecycle sandbox check**: at each `candidate → live` (or any forward) transition, `LifecycleStateMachine` runs the predicate twice — once with a frozen clock (`as_of = fixed_past_date`) and once with `datetime.today()`. If the outputs differ, the transition is rejected and the operator sees an explicit error.
-
-**Daily cycle integration**: `union_universe(today, ['live'])` is computed at the start of the daily pipeline and passed as the data-fetch envelope into:
-
-- `collector.js` — equity bar and quote collection scope
-- `alpaca_options.js` — options-chain archive scope
-- News and sentiment ingestion (`run_sentiment_step.py`, Alpaca News ingest)
-- Per-strategy backtest runs — each backtest engine (`unified`, `quick`, `regime_blended`, `intraday_regime`, `regime_performance_analyzer`) accepts the resolver and calls it per bar with the bar date as `as_of`, so simulated universes are point-in-time correct throughout the backtest.
-
-**Candidate predicate catalogue** (`src/strategies/universe_default.py`): 12 built-in predicates — `sp500`, `large_cap`, `mid_cap`, `small_cap`, `etfs_only`, `options_eligible`, `high_vol_20d`, `tech_sector`, `value_quintile`, `momentum_quintile`, `low_corr`, `defensive`. All 102 existing strategies default to `sp500`; byte-identical behavior at deploy.
-
-**Doctor checks** (added migrations 112-114): `metadata_snapshot_freshness` (asserts daily snapshot landed) and `union_universe_size` (`slow=True`, asserts count ≥ `UNIVERSE_RESOLVER_MIN_LIVE_TICKERS`). Two new `system_checks`: `universe_resolution` (pipeline tag, 15 s latency gate) and `metadata_snapshot_freshness` (strategies tag). Dashboard endpoints: operator `/api/universe-slice`, user `/api/pipelines/universe-inflation`.
-
-Phase B (5-year historical backfill of `ticker_metadata_snapshots`), Phase C (Mastermind universe-recs feeding `OPENCLAW_UNIVERSE_RECS`), and Phase D (research hooks) are out of scope for Phase A and follow on separate plans. Spec: `docs/superpowers/specs/2026-05-22-sp2-universe-expansion-design.md`.
-
-### Historical Backfill (SP-2 Phase B)
-
-Phase B (shipped 2026-05-22, branch `feat/sp2-phase-b-5y-backfill`, PR #9) supplies the 5-year depth of `ticker_metadata_snapshots` plus narrow `prices.parquet` / `options_eod.parquet` gap-fills that Phase A's daily writer cannot itself produce. The operator-invoked driver `scripts/backfill_universe_5y.py` walks each `--target` (`prices` | `metadata` | `options`) through a per-chunk **stage → validate → promote** loop with Redis checkpointing and a durable `backfill_audit` row (migration 115) for every chunk attempt. Resume is idempotent: re-invocation skips chunks already at `status='promoted'`, and validation rejects (rather than promotes) any chunk that disagrees with the live row on more than 0.1%. Quarantine recovery is the **only sanctioned relaxation of the append-only invariant** on `data/master/` — `_promote_chunk` may overwrite an existing `(symbol, date)` row only when the `_existing_dates_for` precondition reports zero overlap OR the operator has set `OPENCLAW_BACKFILL_ALLOW_OVERWRITE=1` and is supplying a `--source-tag backfill_5y_vN` (N > 1) paired with `--supersede-quarantine`. Rows that slip past validation are recovered at READ time via `src/pipeline/quarantine_filter.py`, wired into the resolver coverage check, `unified_backtest.load_prices_panels`, `quick_backtest._load_prices`, and `collector.js`'s startup hook; three engines (`regime_blended`, `intraday_regime`, `regime_performance_analyzer`) are documented as unfilterable because they read no parquets or read non-`(symbol, date)`-keyed parquets. Surfaces: doctor checks `_check_backfill_progress` and `_check_backfill_universe_coverage` (both `slow=True`); `system_checks` `backfill_progress` (storage tag) and `ticker_metadata_history_depth` (strategies tag); operator dashboard tile at `:7870` `/api/backfill-progress`; user dashboard panel at `:3000` `/api/pipelines/backfill-history`. Runbook: `docs/sp2-backfill-runbook.md`. Spec: `docs/superpowers/specs/2026-05-22-sp2-phase-b-5y-backfill-design.md`.
-
-#### Re-evaluation Loop — Mastermind universe-recs (SP-2 Phase C)
-
-Phase C (shipped 2026-05-24, branch `feat/sp2-phase-c-mastermind-universe-recs`, PR #10) closes the feedback loop by having MastermindJohn (Opus 4.7, 1M ctx) recommend the best universe predicate for each live strategy on a weekly cadence.
-
-**Timer**: `docs/universe-recs.{service,timer}` fires every Saturday at 20:00 ET (installed as `openclaw-universe-recs.*`). Gated: `OPENCLAW_UNIVERSE_RECS=1` (default OFF); `--dry-run` bypasses the gate and builds grids without LLM spend or DB writes.
-
-**Grid construction**: for each manifest-`state='live'` strategy (~52), `src/backtest/universe_grid_cli.py` runs a 12-month regime-blended backtest against each of the 4 cap-independent candidate predicates (`sp500`, `no_adr`, `no_otc`, `options_eligible_only`). The grid uses a `MockResolver` (added to `universe_resolver.py`) so each backtest run uses the candidate predicate in place of the strategy's current one, with all other parameters identical (same seed 42, same engine). Three new metrics are emitted by `aggregate_metrics`: `sortino`, `calmar`, and `mean_universe_size`. The 8 cap-gated candidates (`r1000`, `r3000`, `large_cap`, etc.) are excluded from the grid until the shares-outstanding backfill resolves the FMP Starter 403 — they are marked `cap_unverified` in the registry.
-
-**Determinism contract**: each recommendation row stores `grid_sha256` (SHA-256 of the serialised grid), `prompt_template_sha256`, and `model_id` so any rec can be reproduced or audited offline.
-
-**Opus decision**: the grid is rendered into `src/agent/prompts/subagents/universe-recommender.md` (Handlebars-style `{{placeholders}}`). Opus returns strict JSON `{choice, rationale, confidence, expected_uplift_sharpe, risks}`. `choice` is one of the candidate names or `"no_change"`. A switch is only recommended when uplift ≥ +0.15 Sharpe and the new predicate passes the operator-preference gates (Sharpe ≥ 0.5, MaxDD ≤ 20%, simpler predicate preferred). Results are persisted to `strategy_universe_recommendations` and posted to Discord `#universe-recs`.
-
-**Operator adoption flow**: Discord ✅/❌/⏸ reactions are handled by `messageReactionAdd` in `bot.js` (numeric `Partials` enum — string partials are no-ops in discord.js v14). Reactions route to dashboard :7870 `POST /api/universe-recs/:id/:action`, which calls `lifecycle_universe_adoption.adopt_universe_recommendation`. Adoption is atomic via a two-phase write: manifest.tmp + fsync → DB transaction (UPDATE rec, INSERT `lifecycle_audit_log`) → `os.rename(manifest.tmp, manifest)` → commit. The manifest field written is `strategies[sid].metadata.universe_filter_ref = "src.strategies.universe_default:<candidate>"` — the resolver-loadable `module:attr` form. ⏸ applies a 28-day skip window. The dashboard :7870 tile (last 14 days) also exposes bypass-Discord approve/reject buttons.
-
-**Revert path**: `lifecycle_universe_adoption.revert_universe_recommendation(strategy_id=...)` reads the most recent `universe_filter_adopted` audit row, restores `before_state`, appends a `universe_filter_reverted` row, and renames the manifest atomically. Audit rows are never deleted.
-
-**Migration 117** adds `lifecycle_audit_log` (migration 116 was taken by market_news). Doctor check `universe_recs_freshness` and system_check `universe_recs_health` are both gated on `OPENCLAW_UNIVERSE_RECS=1`. Spec: `docs/superpowers/specs/2026-05-22-sp2-phase-c-mastermind-universe-recs-design.md`. Plan: `docs/superpowers/plans/2026-05-22-sp2-phase-c-mastermind-universe-recs.md`.
-
-#### Predicate-at-mint (SP-2 Phase D)
-
-Phase D (shipped 2026-05-25, branch `feat/sp2-phase-d-research-hooks`, PR #11) closes the A→D loop by stamping a universe predicate onto each strategy at the moment it is minted from a research paper.
-
-**Flow**: PaperHunter (`src/agent/prompts/subagents/paperhunter.md`, §5 "Infer universe slice") picks ONE of the 12 `CANDIDATE_PREDICATES` whose scope best matches the paper's thesis and writes it as `inferred_universe_filter` into `research_candidates.hunter_result_json` (JSONB — no schema migration). The research orchestrator (`src/agent/research/research-orchestrator.js`, `_validateInferredFilter`) validates the name against the Python whitelist (falls back to `null` on unknown or when the gate is off) and threads it into the StrategyCoder context. StrategyCoder (`src/agent/prompts/subagents/strategycoder.md`, §"Universe predicate") emits a module-scope import when a filter is provided:
-
-```python
-from src.strategies.universe_default import <name> as universe_filter
-```
-
-At `lifecycle.register()` time, `_detect_module_predicate` AST-parses the strategy file for this top-level import and sets `metadata.universe_filter_ref = "src.strategies.universe_default:<name>"` in the manifest (the resolver-loadable `module:attr` form). Strategies without the import inherit the default `sp500`.
-
-**Gate**: `OPENCLAW_PHASE_D_PREDICATE_AT_MINT` — absent variable is treated as OFF; the live VPS `.env` must contain `=1` to activate. System_check `papermint_predicate_coverage` (agents + strategies tag) tracks 30-day coverage; day-1 reading will be 0% (all pre-Phase-D candidates have null) — see runbook for the expected burn-in period.
-
-Runbook: `docs/sp2-papermint-runbook.md`. Spec: `docs/superpowers/specs/2026-05-22-sp2-phase-d-research-hooks-design.md`. Plan: `docs/superpowers/plans/2026-05-22-sp2-phase-d-research-hooks.md`.
-
----
-
-## 8. Database schema
-
-Postgres 16 in docker. All tables created in order by `src/database/migrations/*.sql`:
-
-| Migration | Tables / changes |
-|---|---|
-| `001_initial.sql` | Base universe, ohlcv, workspaces |
-| `002_pipeline.sql` | Pipeline run tracking |
-| `003_tokens.sql` | Token usage accounting per workspace+agent+day |
-| `004_coverage.sql` | Data-coverage tracking |
-| `005_schema_v2.sql` | v2 normalization |
-| `006_trigger_config.sql` | Report-trigger config rows |
-| `007_collection_cycles.sql` | Daily collection cycle audit |
-| `008_market_universe.sql` | Universe membership over time |
-| `009_market_news.sql` | Tavily / AV news feed store |
-| `010_security.sql` | Security events, rate-limit audit |
-| `011_strategist.sql` | Legacy strategist tables (pre-v2) |
-| `012_execution_engine.sql` | `signals`, `signal_performance`, `orders` |
-| `013_reported_flag.sql` | `signal_performance.reported` for triggers |
-| `014_strategy_versions.sql` | Version rows for immutable strategies |
-| `015_data_agent.sql` | Legacy DataJohn tables — retained but unused |
-| `016_agent_registry.sql` | `agent_registry` — per-agent runtime state |
-| `017_insider_transactions.sql` | SEC Form 4 structured rows |
-| `018_technicals_trim.sql` | Trim unused technical cols |
-| `019_technicals_sma20.sql` | Add SMA20 |
-| `020_drop_technicals.sql` | Drop the standalone `technicals` table |
-| `021_add_ratio_columns.sql` | Add valuation ratio columns |
-
-Redis keys in active use:
-
-- `budget:mode` — GREEN / YELLOW / RED
-- `token_usage:{workspace}:{date}` — daily token counters
-- `pipeline:running:{YYYY-MM-DD}` — pipeline soft-lock
-- `pipeline:resume_checkpoint` — resume JSON `{run_date, next_step}`
-- `queue:report:{workspace}` — queued REPORT invocations
-
----
-
-## 9. Discord interface
-
-`src/channels/discord/bot.js` is the entry point. Channel topology is defined in `src/channels/discord/setup.js` and agent-channel binding in `src/channels/discord/agent-personas.js`. Active channels include `#strategy-memos`, `#research-feed`, `#trade-signals`, `#trade-reports` (and operator channels).
-
-Personas:
-
-- **DataBot** — auto-posts strategy memos to `#strategy-memos` (runner.js after signal runner).
-- **ResearchDesk** — listens on `#strategy-memos`; when a memo is posted, calls `runResearchPipeline()` → `research_report.py` → `#research-feed`.
-- **TradeDesk** — listens on `#research-feed`; calls `runTradePipeline()` → `trade_agent.py`. Posts green-signal summaries + appended Alpaca paper-order receipts to `#trade-signals`, and longer performance / risk digests to `#trade-reports`. Channel keys bound in `agent-personas.js`: `['trade-signals', 'trade-reports']`.
-- **BotJohn** — operator-facing. Responds to `@FundJohn` mentions. Two response modes: **flash** (single-call <10s reply) and **PTC** (Plan-Then-Commit — spawns subagents via `swarm.init` for multi-step tasks).
-
-Bot command surface (Discord slash + `@`-mention):
-
-| Command / trigger | Handler | Effect |
-|---|---|---|
-| `@FundJohn status` | flash | Dumps pipeline / budget / regime state |
-| `@FundJohn approve <signal_id>` | PTC | BotJohn routes to broker (live path — Alpaca paper orders fire automatically without this gate) |
-| `@FundJohn veto <signal_id>` | flash | Marks signal rejected, writes reason |
-| `@FundJohn report <strategy_id>` | PTC | Enqueues REPORT invocation |
-| `#strategy-memos` post | event | Starts research pipeline |
-| `#research-feed` post | event | Starts trade pipeline |
-
----
-
-## 9b. Web dashboard (`src/channels/api/server.js`)
-
-Express app, served on `DASHBOARD_PORT` (default 3000), dark-theme UI built inline as a template string in `getDashboardHtml()`.
-
-### Pages
-
-**Market** (default) — scrollable ticker sidebar, sector overview cards, OHLCV chart with range + type toggles, news feed per ticker.
-
-**Portfolio** — opened via nav button, accessed at runtime from Postgres + Alpaca:
-
-| Section | Source | Notes |
-|---|---|---|
-| Alpaca account row | `GET /api/portfolio/account` → Alpaca paper `/v2/account` | Equity, cash, buying power, day P&L, day P&L%, invested |
-| Strategy stats row | `GET /api/portfolio/summary` | Open count, closed count, win rate, avg/best/worst realized P&L |
-| P&L curve chart | `GET /api/portfolio/pnl-curve?days=90` | 90d avg unrealized P&L% from `signal_pnl` table |
-| Value $ curve toggle | `GET /api/portfolio/value-curve?period=1M` → Alpaca `/v2/account/portfolio/history` | Historical portfolio equity in USD |
-| Active Positions | `GET /api/portfolio/positions` | `execution_signals` LEFT JOIN latest `signal_pnl` row, status='open' |
-| Closed Trades | `GET /api/portfolio/history` | `signal_pnl` JOIN `execution_signals` WHERE status='closed' LIMIT 100 |
-
-**Scroll architecture**: `#portfolio-page` is `position:absolute;inset:0;overflow-y:auto` within `#view-wrap` (the positioned flex child below header+strip). Inner content lives in `#pf-inner` (flex column, unconstrained height). This separates the scroll boundary from flex layout, guaranteeing scroll works across all browsers.
-
-**Position sizing**: stored in `execution_signals.position_size_pct` as a fraction (e.g. `0.014` = 1.4%). Dashboard multiplies by 100 before display.
-
-### SSE auto-refresh
-
-`GET /events` — server-sent event stream. Client listens for:
-- `{"type":"pipeline"}` — shows pipeline status in badge
-- `{"type":"market_update"}` — calls `loadMarket()` + `refreshPipeline()` (re-fetches all market data without full page reload)
-
-`POST /api/events/data-updated` — called by `runMarketClosePipeline()` in `cron-schedule.js` after the pipeline finishes; broadcasts `market_update` to all connected clients.
-
----
-
-## 10. Systemd services
-
-**`johnbot.service`** (Discord bot + Node orchestrator):
-
-```ini
-[Service]
-ExecStart=/usr/bin/node /root/openclaw/src/channels/discord/bot.js
-Environment=CLAUDE_BIN=/usr/local/bin/claude
-Environment=CLAUDE_UID=1001
-User=root
-Restart=on-failure
-```
-
-**`/etc/systemd/system/massive-ws.service`** (Massive WebSocket — live options flow):
-
-```ini
-[Unit]
-Description=Massive WebSocket — live options flow + EOD capture
-After=network-online.target johnbot.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/root/openclaw
-EnvironmentFile=/root/openclaw/.env
-ExecStart=/usr/bin/python3 src/ingestion/massive_ws.py all
-Restart=always
-RestartSec=10
-```
-
-Both services are enabled and start on boot. `massive-ws.service` connects to `wss://socket.massive.com/options`, subscribes `OA.*`, and streams options aggregate events to the `MassiveOptionsCapture` handler. On budget YELLOW/RED it still runs (options flow is zero-token; no reason to pause it). To check status: `systemctl status massive-ws.service` / `journalctl -u massive-ws -f`.
-
-The bot runs as root, but `claude-bin` subprocesses run as `claudebot` (uid 1001) for sandboxing. MCP tool modules are generated into `workspaces/default/tools/` at startup.
-
----
-
-## 11. Scripts (ops + legacy)
-
-`scripts/`:
-
-- `orchestrator.js` — **legacy** diligence orchestrator (pre-v2). Spawns 5 sub-agents in parallel per ticker, assembles 12-section memo, emits `BOTJOHN_PROGRESS:` and `BOTJOHN_VERDICT:` markers. Kept for ad-hoc manual deep-dives.
-- `pipeline-runner.js` — phase-based runner (diligence concurrency 3, scenario 2, trade sequential) with verdict caching.
-- `run_market_state.py` — HMM regime classifier, called from cron.
-- Various one-off migration / backfill scripts.
-
----
-
-## 12. Workspace layout
-
-```
-/root/openclaw/
-├── agents/               # agent identity/prompt .md files (botjohn, researchjohn, tradejohn)
-├── config/               # runtime config (not agent config)
-├── docker-compose.yml    # postgres + redis
-├── johnbot/              # legacy top-level entry (reinit artifacts)
-├── johnbot.service       # systemd unit
-├── mcp-servers/          # MCP provider scaffolding
-├── package.json          # Node deps
-├── scripts/              # ops + legacy scripts
-├── sp500_initial_fill.js # one-shot universe loader
-├── src/
-│   ├── agent/            # orchestration layer (Node)
-│   │   ├── config/       # models.js, servers.json, subagent-types.json
-│   │   ├── graph/        # workflow.js state machine
-│   │   ├── middleware/   # 9-layer stack + deployment-gate + token-budget
-│   │   ├── prompts/      # system + subagent prompts
-│   │   ├── subagents/    # swarm.js, lifecycle.js, types.js
-│   │   └── tools/        # MCP tool generators + registry
-│   ├── backtesting/      # backtest harness
-│   ├── budget/           # token accounting
-│   ├── channels/
-│   │   ├── api/server.js   # web dashboard (market + portfolio pages, SSE, Alpaca API proxy)
-│   │   └── discord/        # bot.js, agent-personas.js, notifications.js
-│   ├── database/         # migrations (27) + redis client + tokens.js
-│   ├── engine/           # cron-schedule.js
-│   ├── execution/        # engine.py, pipeline_orchestrator.py, post_memos.py, research_report.py
-│   │                     # trade_agent.py, alpaca_trader.py, runner.js, send_report.py
-│   │                     # execute_recommendation.py, handoff.py, portfolio_report.py
-│   ├── ingestion/        # pipeline.py, massive_client.py, massive_ws.py, edgar_client.py, run_universe_sync.py
-│   ├── pipeline/         # collector.js (yfinance bulk + options coordinator)
-│   ├── security/         # auth + redaction
-│   ├── skills/           # skill packs
-│   ├── strategies/       # base.py, lifecycle.py, registry.py, manifest.json, implementations/
-│   └── workspace/        # workspace scaffolding
-├── tests/
-└── workspaces/default/   # runtime workspace
-    ├── memory/           # signal_patterns.md, trade_learnings.md, regime_context.md, fund_journal.md
-    ├── output/           # memos/, reports/, signals/
-    └── tools/            # generated MCP tool modules + signals_cache.py + signal_runner.py
-```
-
----
-
-## 13. Deployment workflow (for operators)
-
-1. **Develop locally** in the repo at `fundjohn_repo`.
-2. **Commit + push** to `origin/main`.
-3. **On VPS**: `cd /root/openclaw && git pull && npm install && pip install -r requirements.txt --break-system-packages`.
-4. **Migrations** (if new SQL): `docker compose down && docker compose up -d` — migrations auto-apply on fresh Postgres init; for in-place migrations, run the new `.sql` files manually against the live DB.
-5. **Restart the bot**: `systemctl restart johnbot.service`.
-6. **Watch**: `journalctl -u johnbot -f` for live logs; Discord `#ops` for pipeline status.
-
-Rollback: `git checkout <prev-sha>` and restart. Postgres migrations are not reversed automatically — any destructive migration (e.g. `020_drop_technicals.sql`) requires a manual restore from the nightly backup before rollback.
-
----
-
-## 14. Performance & cost envelope
-
-Authoritative budget config: `config/budget.json` (fallback defaults baked into `src/budget/enforcer.js::loadConfig()`).
-
-| Metric | Threshold / target |
-|---|---|
-| Monthly budget | **$400** |
-| Daily burn → YELLOW | ≥ $20 |
-| Daily burn → RED | ≥ $35 |
-| Monthly % → YELLOW | ≥ 75% of monthly budget |
-| Monthly % → RED | ≥ 90% of monthly budget |
-| Signal stage latency (16:20 cron) | < 5 min target |
-| Research report latency | < 3 min target |
-| Trade agent latency | < 2 min target |
-| MCP rate-limit hit ratio | < 1% of calls |
-
-Spend accounting is queried from Postgres (`src/database/tokens.js::getTotalSpend(30)`); the mode is then cached in Redis `budget:mode` / `budget:daily_usd` / `budget:monthly_usd` with a 1-hour TTL for fast `@FundJohn status` reads.
-
----
-
-## 15. Observability
-
-- **Discord** — live pipeline state (`#ops`), memos (`#strategy-memos`), research (`#research-feed`), trades (`#trade-desk`).
-- **Dashboard** — `src/channels/api/server.js` on port 3000 — market overview + portfolio page with live Alpaca data; SSE auto-refreshes on pipeline completion.
-- **Logs** — `journalctl -u johnbot.service` for bot + spawned subagents.
-- **Postgres** — `signal_performance`, `orders`, `token_usage`, `agent_registry` — richest structured signal.
-- **`/root/.learnings/LEARNINGS.md`** — every agent appends its learnings here with an area tag (e.g. `memory-synthesis`, `risk-scan`).
-
----
-
-*This is the technical spec. If you need "how does it flow on a given day", read [PIPELINE.md](PIPELINE.md). If you want "why was it built this way", read [LEARNINGS.md](LEARNINGS.md).*
+| BotJohn | claude-sonnet-4-6 | Orchestrator/PM — Discord bot, maintenance runs (`src/agent/run_maintenance.js`) |
+| TradeJohn | claude-sonnet-4-6 | Per-ticker confirmer inside `regime_blended_sizer_live.py` — approve/veto/scale, LOW_VOL/TRANSITIONING only, fail-open, budget-capped |
+| PaperHunter | claude-sonnet-4-6 | Per-paper extraction with 4 rejection gates (`src/agent/graphs/paperhunter.js` fan-out) |
+| StrategyCoder | claude-sonnet-4-6 | Strategy implementation + registration |
+| MastermindJohn | claude-opus-4-7 (1M) | Weekend research modes (`src/agent/curators/run_mastermind.js`), code review, interactive chat service |
+
+ResearchJohn was retired 2026-05-02 (`corpus-curator` remains an alias for
+mastermind). LLM spend is dollar-budgeted (`src/budget/`, Redis `budget:mode`
+GREEN/YELLOW/RED); standing orders live in [AGENTS.md](AGENTS.md).
+
+## 3. Deterministic pipeline & regimes
+
+**Daily cycle** — 10:00 ET Mon–Fri, LangGraph-dispatched over
+`src/execution/pipeline_orchestrator.py` (accepts `--steps <subset> --reason
+<tag>` for partial runs):
+`collect → [sentiment] → signals → ic_gate → handoff → trade → alpaca →
+reconcile → report → pyportfolioopt_shadow → health`.
+
+**Regime detection** (regime change ⇒ *redeploy*, never liquidation):
+- Daily HMM (`scripts/run_market_state.py`, 9:00 ET) — read-only regime write.
+- Intraday HMM (`scripts/run_intraday_market_state.py`, every 5–15 min
+  9:00–19:00 ET) — **regime of record** since 2026-06-08; on a confirmed
+  transition (hysteresis + confidence + cooldown) it spawns
+  `scripts/redeploy_pipeline.py` (`signals→handoff→trade→alpaca→reconcile`).
+  The sizer's `delta = target − current_broker_position` nets positions.
+- Crypto HMM (hourly, 24/7) with its own redeploy lane; equity book is
+  structurally invisible to it.
+- Forced liquidation is operator-only (`scripts/run_forced_liquidation.sh`).
+
+**Other lanes** (see `src/engine/cron-schedule.js` + `docs/systemd/`):
+15:55 ET correlation de-gross (threshold 0.6 / cap 0.20), 16:15 ET EOD
+compute, EOD collector with a freshness gate scoped to the
+**strategy-consumed universe** (not the wide resolver envelope — the 2026-07
+starvation fix), pre/post-market take-profit passes, EDGAR 8-K scans,
+premarket scans, nightly amcheck, split watcher, SP-7 overnight ladder.
+
+## 4. Sizing & risk
+
+`src/execution/regime_blended_sizer.py` (+ thin `_live` wrapper) is the
+production `trade` step:
+
+1. **Weights** — per-regime `effective_sharpe` (backtest-only since
+   2026-07-16) × trade-count factor √(ln n/1000), clamped by a plausibility
+   cap from `pipeline_config`.
+2. **Conviction gate** — `S_adj = Σwᵢ²dᵢ / √(Σwᵢwⱼdᵢdⱼρᵢⱼ)` per ticker vs the
+   per-regime floor `regime_sizer_params.min_corr_cum_sharpe` (sole gate since
+   2026-07-01; dashboard-controlled).
+3. **Brackets** — effective-Sharpe-weighted stacked stops/targets
+   (`src/execution/bracket_stacking.py`); session-aware executor
+   (`alpaca_executor.py`) with DTBP guard (min of buying_power, RegT) and
+   extended-hours limit routing; broker-side OCO stops (read them with
+   `alpaca order list --nested`).
+4. **Instrument classes** — equity/etp/option/crypto routing
+   (`instrument_class_sizer.py`); crypto has its own execution lane and
+   fractional-qty handling.
+
+## 5. Data layer
+
+- **Master parquets** (`data/master/*.parquet` — prices, options_eod,
+  financials, macro, insider, earnings, prices_30m, historical_regimes,
+  crypto_bars_1h): **append-only, never delete** (see CLAUDE.md invariant).
+  Reads are DuckDB-bounded; never load whole files on the 8GB box.
+- **Postgres** (docker, pgvector image): 142 numbered idempotent migrations in
+  `src/database/migrations/` applied three ways (compose initdb mount, boot
+  `migrate()`, `npm run db:migrate`). Canonical append-only tables:
+  `execution_signals`, `signal_pnl`, `alpaca_submissions`, `data_coverage`,
+  `strategy_registry`, `research_corpus`. `strategy_backtest_trades` is bulky
+  but regenerable by re-backtest.
+- **Redis**: budget mode, locks, cooldowns, handoff cache, checkpoints — all
+  regenerable.
+- **Universe** — the SP-7 `UniverseResolver` is the sole live-universe
+  authority: per-strategy predicates `universe_filter(meta, as_of)` over
+  `ticker_metadata_snapshots`; a wide fetch envelope keeps history accruing
+  while the freshness gate is scoped to what strategies actually consume.
+- **Coverage truth** — `data_coverage` advances only after parquet writes
+  durably commit (crash ⇒ re-fetch, never a silent hole).
+
+## 6. Research pipeline
+
+Discovery (`arxiv_discovery.py`, `openalex_discovery.py`, paper-expansion
+sweeps) → `research_corpus` → Mastermind corpus rating → PaperHunter
+extraction gates → StrategyCoder implementation → backtest
+(`unified_backtest.py`: true-MTM daily marks, class-aware costs, optional
+resolver-scoped universe) → **per-regime sleeve promotion gate** (positive
+regime Sharpe, ≥trade floor, class max-DD) → registry approval. Weekend
+automation: Saturday backtest-coupled auto-adjustment (apply only on strictly
+positive ΔSharpe; confidence >0.8 auto-approval, else `noted`), Sunday
+auto-approval lane, Monday 00:00 ET activation assigner. The four historical
+per-mode Saturday timers are installed but disabled — superseded by the
+sunday-research split (currently swapped onto Saturday via
+`docs/systemd/weekend-swap/`).
+
+## 7. Deployment & operations
+
+- **Replication**: `docs/bootstrap.md` is the runbook; `scripts/install_systemd.sh`
+  installs the unit fleet; `docs/nginx/openclaw.conf` fronts the dashboard.
+  Clone path `/root/openclaw` and the alpaca CLI at `/root/go/bin/alpaca` are
+  hard requirements (absolute-path lattice).
+- **johnbot runs in ROOT USER scope** (`XDG_RUNTIME_DIR=/run/user/0
+  systemctl --user …`). Never enable the system-scope johnbot copy —
+  split-brain double bot.
+- **Integrity**: `src/security/integrity.js` hash-verifies CLAUDE.md,
+  AGENTS.md, IDENTITY.md, SOUL.md at boot; regenerate the machine-local
+  manifest after editing them (`npm run integrity:generate`).
+- **Diagnostics**: `src/maintenance/doctor.py` (fast preflight),
+  `python3 -m system_checks` (live probes by tag), daily health digest, and
+  `openclaw-failure-notify@` OnFailure hooks on the important units.
+- **Resource envelope**: 2-core / 8GB / no-swap VPS — serialize heavy work
+  (`nice -n 19`), several maintenance units need ~4GB headroom and must not
+  run concurrently with fleet re-backtests.

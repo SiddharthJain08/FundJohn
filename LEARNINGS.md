@@ -1,10 +1,15 @@
 # FundJohn — Shared Learnings & Decisions
 
-> **System**: FundJohn / OpenClaw v2.0
-> **Last updated**: 2026-04-18 (HEAD `beea4cd`)
-> **Companion docs**: [PIPELINE.md](PIPELINE.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [README.md](README.md)
+> **⚠️ HISTORICAL DECISION LOG (2026-04 era).** This file records *why* early
+> architecture decisions were made; it is **not** a description of the current
+> system. Operational claims below may be superseded — the loudest ones are
+> marked with a `SUPERSEDED` banner. For current architecture see
+> [README.md](README.md) and [ARCHITECTURE.md](ARCHITECTURE.md); for the dated
+> engineering changelog see [docs/archive/changelog.md](docs/archive/changelog.md).
+>
+> **System**: FundJohn / OpenClaw v2.0 · **Written**: 2026-04-18 (HEAD `beea4cd`)
 
-This file records *why* FundJohn is built the way it is. When a future operator asks "should we bring back DataJohn?" or "why can't strategies call the MCP tools directly?", the answer is here. Each entry has a **decision**, a **why**, and **how to apply** — so the next person can judge whether the reasoning still holds.
+This file records *why* FundJohn was built the way it is. Each entry has a **decision**, a **why**, and **how to apply** — so the next person can judge whether the reasoning still holds. The design-principles core (§2) remains accurate; time-sensitive sections do not.
 
 ---
 
@@ -197,6 +202,10 @@ Cross-strategy confluence is detected by `src/execution/engine.py::detect_conflu
 
 ## 11. Why we're on Opus for BotJohn and Sonnet for the rest
 
+> **SUPERSEDED.** Model assignments now live in `src/agent/config/models.js`
+> (BotJohn orchestrator runs Sonnet; Mastermind runs Opus 1M). ResearchJohn
+> was retired 2026-05-02.
+
 - **BotJohn** (Opus) — the only agent with veto authority and portfolio access. The cost of a bad decision is high; the cost per token is high but worth it.
 - **ResearchJohn + TradeJohn** (Sonnet) — well-defined, narrow inputs, deterministic output format. Sonnet handles this cleanly and cheaply.
 - **Compaction / pruning** (Haiku) — summarising turns is the cheapest LLM task in the stack.
@@ -274,6 +283,12 @@ If `pipeline_orchestrator.py` crashes hard between acquiring `pipeline:running:{
 ---
 
 ## 15. Massive/Polygon is options-only
+
+> **SUPERSEDED (SP-1 provider cutover, 2026-05-22).** Polygon, Massive, Yahoo
+> and Alpha Vantage were fully removed from the data stack. Alpaca AAT Plus is
+> P1 (quotes, options chain + EOD archive, news, screener); FMP is P2;
+> yfinance survives only inside `src/ingestion/cboe_vol_indices.py` (CI-linted).
+> The instructions below are kept for the historical record only.
 
 ### Decision
 
