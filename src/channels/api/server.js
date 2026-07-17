@@ -407,6 +407,23 @@ app.get('/api/portfolio/positions', async (req, res) => {
       for (const r of sadjRes.rows) sadjByTicker[r.ticker] = r;
     } catch (_) { /* column may predate migration 143 on a fresh clone */ }
 
+    // Per-ticker SIZER contributions — the strategies that actually SIZED the
+    // position (signed sizing weight), same cycle_contributing_strategies source
+    // as /api/portfolio/ticker-alpha. Latest row per ticker that CARRIES
+    // contributions (looser than the S_adj filter → full open-book coverage:
+    // 48/48 today). The expanded per-position view renders THESE instead of the
+    // raw open-intent list, which also carries gated-out + stale-unclosed signals.
+    const contribByTicker = {};
+    try {
+      const contribRes = await dbQuery(`
+        SELECT DISTINCT ON (ticker) ticker, contributions
+          FROM cycle_contributing_strategies
+         WHERE contributions IS NOT NULL AND jsonb_array_length(contributions) > 0
+         ORDER BY ticker, run_date DESC
+      `);
+      for (const r of contribRes.rows) contribByTicker[r.ticker] = r.contributions;
+    } catch (_) { /* column may predate migration 143 on a fresh clone */ }
+
     // Active positions = broker truth. execution_signals carries every
     // strategy's *intent*, including stale rows the reconcile sweep hasn't
     // closed yet (phantoms). The dashboard's "Active Positions" panel must
@@ -434,6 +451,7 @@ app.get('/api/portfolio/positions', async (req, res) => {
           ? sadjByTicker[r.ticker].corr_cum_sharpe : null,
         corr_cum_sharpe_asof: sadjByTicker[r.ticker]
           ? sadjByTicker[r.ticker].corr_cum_sharpe_asof : null,
+        sizer_contributions: contribByTicker[r.ticker] || null,
       }));
 
     if (req.query.group_by === 'strategy') {
@@ -7098,6 +7116,12 @@ function _groupByTicker(rows, mode) {
     const _sadj = g.signals[0] && g.signals[0].corr_cum_sharpe != null
       ? parseFloat(g.signals[0].corr_cum_sharpe) : null;
     g.corr_cum_sharpe = (_sadj != null && isFinite(_sadj)) ? _sadj : null;
+    // The sizer's actual per-strategy contributions for this ticker (attached by
+    // /api/portfolio/positions from cycle_contributing_strategies). The expanded
+    // view prefers these over raw open intents. All signal rows for a ticker
+    // carry the same array; read it off the first, mirroring corr_cum_sharpe.
+    g.sizer_contributions = (g.signals[0] && Array.isArray(g.signals[0].sizer_contributions))
+      ? g.signals[0].sizer_contributions : null;
     g.avg_days = daysN > 0 ? daysSum / daysN : null;
     g.is_open = isOpen;
     g.wins = wins;
@@ -7170,12 +7194,14 @@ function _pnlColor(pct) {
 // current/close prices come from the already-loaded group object. See the
 // in-function comment for the contribution definition and data source.
 function _buildAlphaBarsHtml(group) {
-  // Per-strategy NAV-contribution bars, sourced from the ticker's own signal
-  // rows (no fetch): bar value = position_size% × directional P&L%, summed
-  // across each strategy's signals on the ticker. Open uses the live
-  // unrealized return (entry vs broker current, computed in _groupByTicker);
-  // closed uses realized P&L. Positive (green) = the strategy's bet is winning;
-  // negative (red) = losing. Bars sum to the ticker's NAV-contribution badge.
+  // Per-strategy bars. OPEN positions render the SIZER's actual contributions
+  // (group.sizer_contributions, from cycle_contributing_strategies) — the
+  // strategies that truly sized the position, as signed sizing weight — so the
+  // panel matches the true book instead of the raw open-intent list (which also
+  // carries gated-out + stale-but-unclosed phantoms). CLOSED trades (History)
+  // keep the per-signal realized-P&L bars built here, which ARE legitimately
+  // per-strategy. The signals→P&L build below is the closed-trade path and the
+  // fallback; the sizer override is applied after the price header.
   const byStrat = new Map();
   for (const s of (group.signals || [])) {
     const sid = s.strategy_id || 'unknown';
@@ -7185,7 +7211,7 @@ function _buildAlphaBarsHtml(group) {
     if (cc != null) { e.contribution += cc; e.hasVal = true; }
     if (s.dir_norm) e.dirs.add(s.dir_norm);
   }
-  const contributions = [...byStrat.values()].map(e => ({
+  let contributions = [...byStrat.values()].map(e => ({
     strategy_id: e.strategy_id,
     contribution: e.hasVal ? e.contribution * 100 : null,   // NAV-fraction → display %
     direction: e.dirs.size === 1 ? [...e.dirs][0] : (e.dirs.size > 1 ? 'MIXED' : ''),
@@ -7237,9 +7263,33 @@ function _buildAlphaBarsHtml(group) {
       \${bracketHdr}
     </div>\`;
 
+  // Prefer the sizer's ACTUAL per-strategy contributions (the strategies that
+  // truly SIZED this position) over the raw open-intent list. Fall back to the
+  // intent-P&L bars ONLY for closed trades (History); an OPEN position with no
+  // sizer attribution renders "not re-sized", never the phantom intent list.
+  let contribUnit = 'pnl';
+  if (Array.isArray(group.sizer_contributions) && group.sizer_contributions.length) {
+    contributions = group.sizer_contributions.map(c => ({
+      strategy_id: c.strategy_id,
+      contribution: (c.contribution != null && isFinite(Number(c.contribution))) ? Number(c.contribution) : null,
+      direction: Number(c.direction) > 0 ? 'LONG' : (Number(c.direction) < 0 ? 'SHORT' : ''),
+    })).sort((a, b) => {
+      if (a.contribution == null) return 1;
+      if (b.contribution == null) return -1;
+      return b.contribution - a.contribution;
+    });
+    contribUnit = 'sizing';
+  } else if (isOpen) {
+    contributions = [];          // suppress phantom open-intent bars
+    contribUnit = 'unsized';
+  }
+
   if (!contributions.length) {
+    const emptyMsg = contribUnit === 'unsized'
+      ? \`<b>\${escapeHtml(group.ticker)}</b> has not been re-sized since its last sizing stamp — no current per-strategy attribution.\`
+      : \`No strategy signals recorded for <b>\${escapeHtml(group.ticker)}</b>.\`;
     return \`<div class="alpha-bars">\${priceHdr}
-      <div class="alpha-bars empty">No strategy signals recorded for <b>\${escapeHtml(group.ticker)}</b>.</div>
+      <div class="alpha-bars empty">\${emptyMsg}</div>
     </div>\`;
   }
   const haveValues = contributions.some(c => c.contribution != null && isFinite(c.contribution));
@@ -7260,9 +7310,12 @@ function _buildAlphaBarsHtml(group) {
     const sign     = val >= 0 ? 'pos' : 'neg';
     const valCls   = val >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
     const dirNorm  = c.direction || '';
-    const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2) + '%';
+    const valTxt   = (val >= 0 ? '+' : '') + val.toFixed(2) + (contribUnit === 'sizing' ? '' : '%');
+    const labTitle = contribUnit === 'sizing'
+      ? c.strategy_id + ' · sizing contribution (conviction-weighted allocation: daily_weight × trade_factor × size_scalar × direction)'
+      : c.strategy_id + ' · NAV contribution = size% × P&L%';
     return \`<div class="ab-row">
-      <div class="ab-label" title="\${c.strategy_id} · NAV contribution = size% × P&L%">\${c.strategy_id}</div>
+      <div class="ab-label" title="\${labTitle}">\${c.strategy_id}</div>
       <div class="ab-dir \${_dirCls(dirNorm)}">\${dirNorm}</div>
       <div class="ab-track">
         <div class="ab-zero"></div>
@@ -7275,9 +7328,10 @@ function _buildAlphaBarsHtml(group) {
   const net = haveValues ? contributions.reduce((s, c) => s + (c.contribution || 0), 0) : null;
   let badge = '';
   if (net != null && isFinite(net)) {
-    const netTxt = (net >= 0 ? '+' : '') + net.toFixed(2) + '%';
+    const netTxt = (net >= 0 ? '+' : '') + net.toFixed(2) + (contribUnit === 'sizing' ? '' : '%');
     const netCls = net >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg';
-    badge = \`<span class="ab-badge">net contrib = <span class="\${netCls}">\${netTxt}</span></span>\`;
+    const netLabel = contribUnit === 'sizing' ? 'net sizing' : 'net contrib';
+    badge = \`<span class="ab-badge">\${netLabel} = <span class="\${netCls}">\${netTxt}</span></span>\`;
   }
   // Conviction the position was last sized at = |S_adj|, the MAGNITUDE of the
   // correlation-adjusted cumulative Sharpe. S_adj itself is signed by trade
