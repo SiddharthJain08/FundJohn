@@ -1,6 +1,6 @@
 # SP-3.1 Phase A — Task 0 Crypto CLI Grounding Snapshot
 
-**Captured:** 2026-05-26 ~07:13 UTC, live Alpaca **paper** account `PA3WHYGPPRUD` (`paper-api.alpaca.markets`, CLI v0.0.9, active profile `paper`). Real ~$15 paper orders, position flattened afterward.
+**Captured:** 2026-05-26 ~07:13 UTC, live Alpaca **paper** account `PAXXXXXXXXXX` (`paper-api.alpaca.markets`, CLI v0.0.9, active profile `paper`). Real ~$15 paper orders, position flattened afterward.
 
 This file is the empirical ground truth for SP-3.1 Phase A plan Tasks 3/4/6. Where it differs from the plan's assumptions, **this file wins.**
 

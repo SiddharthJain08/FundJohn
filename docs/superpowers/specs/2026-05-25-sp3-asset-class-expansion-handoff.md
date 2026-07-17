@@ -15,7 +15,7 @@
 
 ## 1. Where production is RIGHT NOW (2026-05-25)
 
-- **This machine IS the live VPS** (`srv1559223`). `johnbot.service` runs as `claudebot` (uid 1001). Heavy LLM cycles (saturday-brain, maintenance, subagent swarms) run as `claudebot` via systemd. `claude-bin` refuses to run as root — run LLM things via the systemd services or `sudo -u claudebot -H env ...`.
+- **This machine IS the live VPS** (`YOUR_VPS_HOSTNAME`). `johnbot.service` runs as `claudebot` (uid 1001). Heavy LLM cycles (saturday-brain, maintenance, subagent swarms) run as `claudebot` via systemd. `claude-bin` refuses to run as root — run LLM things via the systemd services or `sudo -u claudebot -H env ...`.
 - **git:** `main` HEAD = `9c0bd0a`, and `main == origin/main` (fully pushed).
 - **SP-2 is live.** Gates in `/root/openclaw/.env`: `OPENCLAW_UNIVERSE_RECS=1`, `OPENCLAW_PHASE_D_PREDICATE_AT_MINT=1`. The universe resolver (`OPENCLAW_UNIVERSE_RESOLVER`) is **default-on** (kill switch; absent = on). 129 strategies in `manifest.json` (42 live).
 - **Ideator routing fix (2026-05-25) is deployed** — `saturday_brain._hunt` Population-1b routes pre-filled `kind='internal'` ideator drafts into coding. Validated end-to-end at the routing level on a live run (`saturday_run cf4d8656`): 25 internal drafts selected → bypassed PaperHunter → tiered A → dispatched to strategycoder. See `project_ideator_routing_fix.md`.

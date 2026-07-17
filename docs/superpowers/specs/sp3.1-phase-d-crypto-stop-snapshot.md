@@ -1,6 +1,6 @@
 # SP-3.1 Phase D — Crypto Stop CLI Grounding Snapshot
 
-**Captured:** 2026-05-26 ~13:38 UTC, live Alpaca **paper** account `PA3WHYGPPRUD` (`paper-api.alpaca.markets`, CLI v0.0.9). Real ~$15 paper BTC order + stop probes; position flattened afterward.
+**Captured:** 2026-05-26 ~13:38 UTC, live Alpaca **paper** account `PAXXXXXXXXXX` (`paper-api.alpaca.markets`, CLI v0.0.9). Real ~$15 paper BTC order + stop probes; position flattened afterward.
 
 This file is the empirical ground truth for Phase D Task 6 (`_submit_crypto_stop`). Where it differs from the plan's assumptions, **this file wins.**
 

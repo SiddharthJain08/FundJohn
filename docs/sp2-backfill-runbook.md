@@ -157,7 +157,7 @@ INSERT INTO data_quarantine
   (master_table, symbol, affected_date, source_tag, reason, flagged_by)
 VALUES
   ('prices.parquet', 'XYZ', '2022-08-15', 'backfill_5y_v1',
-   'close price 12x reasonable', 'operator:siddharth');
+   'close price 12x reasonable', 'operator:OPERATOR');
 ```
 
 Recovery sequence (per spec §2.3 and §6.2):

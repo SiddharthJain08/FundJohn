@@ -49,7 +49,8 @@ logger = logging.getLogger(__name__)
 
 # ── Webhooks ─────────────────────────────────────────────────────────────────
 WEBHOOKS = {
-    'tradedesk_trade_signals': 'https://discord.com/api/webhooks/1492082674309791886/90a-LQ9bTj4e1vYW31OgY7krJtQNUqVusCQepzI3bPpZJt0uVqVtGNu4b3y-4YVIHFhU',
+    # Set in .env; never hardcode webhook URLs (they are credentials).
+    'tradedesk_trade_signals': os.environ.get('TRADEDESK_TRADE_SIGNALS_WEBHOOK', ''),
     # 'researchdesk_research_feed' retired 2026-05-02; mastermind owns
     # #research-feed now. Look up via agent_registry.webhook_urls if needed.
 }

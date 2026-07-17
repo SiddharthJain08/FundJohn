@@ -169,7 +169,7 @@ The append-only invariant on master parquet means: **if a bad row gets PROMOTEd,
 2. INSERT INTO data_quarantine
      (master_table='prices.parquet', symbol='XYZ', affected_date='2022-08-15',
       source_tag='backfill_5y_v1', reason='close price 12x reasonable',
-      flagged_by='operator:siddharth')
+      flagged_by='operator:OPERATOR')
 3. All downstream consumers MUST filter quarantined (symbol, date) at read time:
    - src/strategies/universe_resolver.py.coverage_floor()
    - src/backtest/unified_backtest.py._load_prices()

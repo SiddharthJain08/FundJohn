@@ -17,7 +17,7 @@ const { formatStatus } = require('./subagents/lifecycle');
 const store    = require('../pipeline/store');
 const tokenDb  = require('../database/tokens');
 
-const DASHBOARD_URL = `http://69.62.68.201`;
+const DASHBOARD_URL = process.env.DASHBOARD_PUBLIC_URL || 'http://localhost:3000';
 
 const COMMANDS = {
   ping:       handlePing,

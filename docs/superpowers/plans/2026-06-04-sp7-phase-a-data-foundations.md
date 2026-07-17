@@ -219,7 +219,7 @@ ROOT = Path("/root/openclaw")
 SHARES_PARQUET = ROOT / "data" / "master" / "shares_outstanding.parquet"
 CIK_MAP = ROOT / "data" / "master" / "_sec_ticker_cik.json"
 PRICES_PARQUET = ROOT / "data" / "master" / "prices.parquet"
-UA = "OpenClaw research (siddharthj1908@gmail.com)"
+UA = "OpenClaw research (contact@fundjohn.ai)"
 MIN_SHARES, MAX_SHARES = 1e6, 2e11  # unit-sanity gates (spec §7)
 
 SCHEMA_COLUMNS = ["ticker", "asof_date", "shares", "form", "filed", "fetched_at"]

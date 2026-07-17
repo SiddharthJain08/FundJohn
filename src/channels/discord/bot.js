@@ -368,7 +368,7 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
           `\`!john /diligence <ticker>\` or \`/run\` — diligence flow\n\n` +
           `**Freeform**\n` +
           `\`!john <any question>\` — routes to PTC subagent (Sonnet 4.6)\n\n` +
-          `_Dashboard: http://69.62.68.201/_`
+          `_Dashboard: ${process.env.DASHBOARD_PUBLIC_URL || 'http://localhost:3000'}/_`
         );
         break;
       }
