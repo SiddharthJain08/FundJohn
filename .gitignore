@@ -8,8 +8,8 @@
 node_modules/
 
 # === Runtime / Generated Data ===
-workspaces/
-logs/
+/workspaces/
+/logs/
 data/*
 # SP-2 Phase B frozen artifacts — committed, exempt from blanket data/* ignore
 !data/.backfill_universe_v1.txt
@@ -17,10 +17,10 @@ data/*
 !data/.backfill_universe_v2.txt
 !data/sp500_historical_membership_v1.csv
 !data/.fmp_ipo_seeded_v1.txt
-output/
-results/
-signals/
-work/
+/output/
+/results/
+/signals/
+/work/
 
 # === Python Cache ===
 __pycache__/
@@ -57,3 +57,6 @@ analysis/deep_dip_buy_feasibility/rows.parquet
 # local brainstorm cache + timestamped manifest backups (not for VCS)
 .superpowers/
 src/strategies/manifest.json.bak-*
+
+# Session scratch notes — never version
+/.scratch/

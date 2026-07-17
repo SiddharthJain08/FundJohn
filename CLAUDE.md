@@ -82,7 +82,7 @@ The cycle and paper-hunt flows run through LangGraph.js:
 - `src/agent/traceBus.js` — in-memory event ring buffer fanning out to dashboard SSE.
 - `bin/run-graph.js` — CLI runner: `node bin/run-graph.js list | cycle '<json>' | cycle:resume '<json>' | cycle:state <threadId>`.
 - Dashboard: `src/channels/dashboard/server.js` on 127.0.0.1:7870 (systemd: `fundjohn-dashboard.service`). SSH-tunnel to view. Surfaces bots, subagents, analyses, verdicts, trades, checkpoints, workspaces, graph runs + live traces, HITL approve/veto buttons.
-- Smoke tests: `node test/graph-smoke.js` (cycle HITL + veto), `node test/paperhunter-smoke.js` (fan-out parallelism).
+- Smoke tests: `node scripts/smoke/graph-smoke.js` (cycle HITL + veto), `node scripts/smoke/paperhunter-smoke.js` (fan-out parallelism).
 - Set `LANGSMITH_API_KEY` in `.env` to auto-enable LangSmith tracing (project=`fundjohn`).
 
 ## Key Paths (VPS: /root/openclaw/)
