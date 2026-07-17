@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-14T16:59:10.173Z",
+  "updated_at": "2026-07-17T12:14:51.460Z",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -5671,6 +5671,272 @@
       },
       "history": [],
       "instrument_class": "equity"
+    },
+    "oxf_aroon_breakout": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_aroon_breakout.py",
+        "class": "OxfAroonBreakout",
+        "description": "Aroon up/down breakout on liquid ETFs (oxfordstrat aroon-indicator-breakout-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_bollinger_momentum": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_bollinger_momentum.py",
+        "class": "OxfBollingerMomentum",
+        "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_bull_oops": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_bull_oops.py",
+        "class": "OxfBullOops",
+        "description": "Bull \"Oops!\" gap-fade reversal on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat bull-oops-pattern). Gap open below prior low then recovery through prior low confirmed on signal-day OHLC; close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_donchian_breakout": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_donchian_breakout.py",
+        "class": "OxfDonchianBreakout",
+        "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_dow_theory": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_dow_theory.py",
+        "class": "OxfDowTheory",
+        "description": "Dow-theory swing-pivot breakout on liquid ETFs (oxfordstrat dow-theory-trend). Close breaks the most-recent pivot. Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_dual_momentum_roc": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_dual_momentum_roc.py",
+        "class": "OxfDualMomentumRoc",
+        "description": "Dual rate-of-change momentum filter (fast = half slow) on liquid ETFs (oxfordstrat dual-momentum-rate-of-change). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_hook": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_hook.py",
+        "class": "OxfHook",
+        "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_hull_ma": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_hull_ma.py",
+        "class": "OxfHullMa",
+        "description": "Dual Hull-MA trend filter on liquid ETFs (oxfordstrat hull-moving-average). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_livermore": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_livermore.py",
+        "class": "OxfLivermore",
+        "description": "Livermore pivotal-point breakout on liquid ETFs (oxfordstrat livermore-system-1). Penetrates 2 most-recent swing pivots by >= noise. Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_nr7": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_nr7.py",
+        "class": "OxfNR7",
+        "description": "NR7 narrow-range breakout on liquid ETFs — daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_price_momentum": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_price_momentum.py",
+        "class": "OxfPriceMomentum",
+        "description": "Dual absolute price-momentum (close minus close-lag) trend filter on liquid ETFs (oxfordstrat price-momentum-model). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_ross_hook": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_ross_hook.py",
+        "class": "OxfRossHook",
+        "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_welles_wilder_breakout": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_welles_wilder_breakout.py",
+        "class": "OxfWellesWilderBreakout",
+        "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "oxf_wyckoff_meanrev": {
+      "state": "candidate",
+      "state_since": "2026-07-17T12:14:51.460Z",
+      "metadata": {
+        "canonical_file": "oxf_wyckoff_meanrev.py",
+        "class": "OxfWyckoffMeanrev",
+        "description": "Wyckoff trap mean-reversion on liquid ETFs — swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill."
+      },
+      "history": [
+        {
+          "at": "2026-07-17T12:14:51.460Z",
+          "from": "ejected",
+          "to": "candidate",
+          "actor": "operator-directive",
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+        }
+      ],
+      "instrument_class": "etp"
     }
   },
   "decommissioned": {
