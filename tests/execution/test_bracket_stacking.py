@@ -1,0 +1,218 @@
+# tests/test_bracket_stacking.py
+import math
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+from execution import bracket_stacking as bs
+
+
+def _b(sid, direction, weight, entry, stop, t1, t2=None):
+    return {'sid': sid, 'direction': direction, 'weight': weight,
+            'entry': entry, 'stop': stop, 't1': t1, 't2': t2}
+
+
+def test_single_block_returns_top_sharpe_rep_not_max_weight():
+    # Two strategies, SAME block, opposite (weight, sharpe) ranking.
+    # A: high weight, low sharpe, tight stop / 5% target
+    # B: low weight, high sharpe, wide stop / 8% target
+    cands = [
+        _b('A', 1, 9.0, 100.0, 98.0, 105.0),    # stop 2%, tp 5%
+        _b('B', 1, 1.0, 100.0, 94.0, 108.0),    # stop 6%, tp 8%
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 7, 'B': 7},
+                             eff_sharpe={'A': 0.5, 'B': 3.0})
+    # One block -> rep is B (max sharpe). tp_total = 8%, stop = 6%.
+    assert out['n_blocks'] == 1
+    assert math.isclose(out['t1'], 108.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 94.0, rel_tol=1e-9)
+
+
+def test_two_uncorrelated_blocks_sharpe_weighted_mean():
+    cands = [
+        _b('A', 1, 5.0, 100.0, 98.0, 105.0),    # block 1: stop 2%, tp 5%
+        _b('B', 1, 5.0, 100.0, 96.0, 105.0),    # block 2: stop 4%, tp 5%
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': 2.0, 'B': 1.0})
+    assert out['n_blocks'] == 2
+    # ω = (2/3, 1/3): stop = 2%·⅔ + 4%·⅓ = 8/3 %; tp = 5% (both agree).
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 100.0 * (1.0 - (0.08 / 3.0)), rel_tol=1e-9)
+
+
+def test_tp_total_is_sharpe_weighted_mean_across_blocks():
+    # Three equal-Sharpe blocks (takes 3%, 5%, 4%) -> mean = 4% (not max 5%,
+    # not sum 12%); stops (1%, 2%, 3%) -> mean = 2%.
+    cands = [
+        _b('A', 1, 1.0, 100.0, 99.0, 103.0),    # block 1: stop 1%, tp 3%
+        _b('B', 1, 1.0, 100.0, 98.0, 105.0),    # block 2: stop 2%, tp 5%
+        _b('C', 1, 1.0, 100.0, 97.0, 104.0),    # block 3: stop 3%, tp 4%
+    ]
+    out = bs.stacked_bracket(cands, 1,
+                             block_map={'A': 1, 'B': 2, 'C': 3},
+                             eff_sharpe={'A': 1.0, 'B': 1.0, 'C': 1.0})
+    assert out['n_blocks'] == 3
+    assert math.isclose(out['t1'], 104.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
+    assert 'sharpe-wtd' in out['why']
+
+
+def test_short_side_mirrors_long():
+    cands = [
+        _b('A', -1, 5.0, 100.0, 102.0, 95.0),   # block1: stop 2%, tp 5%
+        _b('B', -1, 5.0, 100.0, 103.0, 95.0),   # block2: stop 3%, tp 5%
+    ]
+    out = bs.stacked_bracket(cands, -1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': 2.0, 'B': 1.0})
+    # ω = (2/3, 1/3): tp = 5% -> t1 = 95 (short); stop = 2%·⅔ + 3%·⅓ = 7/3 %.
+    assert math.isclose(out['t1'], 95.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 100.0 * (1.0 + (0.07 / 3.0)), rel_tol=1e-9)
+
+
+def test_ungrouped_strategies_are_singleton_blocks():
+    # No block_map entries -> each is its own singleton block -> equal-Sharpe
+    # weighted mean across the two.
+    cands = [
+        _b('A', 1, 1.0, 100.0, 98.0, 105.0),
+        _b('B', 1, 1.0, 100.0, 97.0, 105.0),
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={'A': 1.0, 'B': 1.0})
+    assert out['n_blocks'] == 2
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # both takes 5%
+    assert math.isclose(out['stop'], 97.5, rel_tol=1e-9)  # mean of 2%/3%
+
+
+def test_negative_sharpe_rep_gets_zero_exit_influence():
+    # B has negative eff Sharpe -> ω_B = 0 -> bracket is A's alone.
+    cands = [
+        _b('A', 1, 1.0, 100.0, 98.0, 105.0),    # stop 2%, tp 5%
+        _b('B', 1, 1.0, 100.0, 90.0, 130.0),    # stop 10%, tp 30% (ignored)
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': 1.5, 'B': -2.0})
+    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
+
+
+def test_all_nonpositive_sharpe_degrades_to_equal_weights():
+    cands = [
+        _b('A', 1, 1.0, 100.0, 98.0, 104.0),    # stop 2%, tp 4%
+        _b('B', 1, 1.0, 100.0, 96.0, 108.0),    # stop 4%, tp 8%
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': -1.0, 'B': 0.0})
+    assert math.isclose(out['stop'], 97.0, rel_tol=1e-9)  # mean 3%
+    assert math.isclose(out['t1'], 106.0, rel_tol=1e-9)   # mean 6%
+
+
+def test_wrong_direction_and_nonfinite_rejected():
+    cands = [
+        _b('A', -1, 9.0, 100.0, 98.0, 105.0),               # wrong direction
+        _b('B', 1, 1.0, 100.0, float('nan'), 105.0),        # nonfinite stop
+        _b('C', 1, 1.0, 100.0, 102.0, 105.0),               # inverted (stop>entry long)
+        _b('D', 1, 1.0, 100.0, 98.0, 106.0),                # the only usable long
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={})
+    assert out['n_blocks'] == 1
+    assert out['why'].startswith('stacked')
+    assert math.isclose(out['t1'], 106.0, rel_tol=1e-9)
+
+
+def test_no_usable_bracket_returns_empty():
+    cands = [_b('A', -1, 1.0, 100.0, 98.0, 105.0)]          # only wrong-direction
+    assert bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={}) == {}
+    assert bs.stacked_bracket([], 1, block_map={}, eff_sharpe={}) == {}
+
+
+def test_rep_tiebreak_is_deterministic_smallest_sid():
+    # Equal sharpe in one block -> smallest sid wins (matches representatives()).
+    cands = [
+        _b('Zzz', 1, 1.0, 100.0, 98.0, 105.0),
+        _b('Aaa', 1, 1.0, 100.0, 95.0, 109.0),
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'Zzz': 1, 'Aaa': 1},
+                             eff_sharpe={'Zzz': 2.0, 'Aaa': 2.0})
+    # Tie on sharpe -> 'Aaa' chosen -> stop 5%, tp 9%.
+    assert math.isclose(out['stop'], 95.0, rel_tol=1e-9)
+    assert math.isclose(out['t1'], 109.0, rel_tol=1e-9)
+
+
+def test_t2_never_inverts_past_stacked_t1():
+    # Long: weighted t2 (8%·⅔ + 9%·⅓ = 25/3 %) equals weighted t1 -> clamp keeps
+    # t2 >= t1 (no inversion).
+    cands = [
+        _b('A', 1, 5.0, 100.0, 98.0, 110.0, t2=108.0),   # block1 anchor: tp 10%
+        _b('B', 1, 5.0, 100.0, 96.0, 105.0, t2=109.0),   # block2: tp 5%
+    ]
+    out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
+                             eff_sharpe={'A': 2.0, 'B': 1.0})
+    # t1 = ω-weighted tp: 10%·⅔ + 5%·⅓ = 25/3 %.
+    assert math.isclose(out['t1'], 100.0 * (1.0 + 0.25 / 3.0), rel_tol=1e-9)
+    assert out['t2'] >= out['t1']                         # t2 clamped up, no inversion
+
+    # Single block long with a finite t2 above t1 is preserved unchanged.
+    out1 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=112.0)], 1,
+                              block_map={'A': 1}, eff_sharpe={'A': 1.0})
+    assert math.isclose(out1['t1'], 105.0, rel_tol=1e-9)
+    assert math.isclose(out1['t2'], 112.0, rel_tol=1e-9)
+
+    # None t2 stays None.
+    out2 = bs.stacked_bracket([_b('A', 1, 1.0, 100.0, 98.0, 105.0, t2=None)], 1,
+                              block_map={'A': 1}, eff_sharpe={'A': 1.0})
+    assert out2['t2'] is None
+
+
+class TestDailyNormalizedLevels:
+    def test_long_scales_gap_by_inv_sqrt_cadence(self):
+        # cadence 4 -> f = 1/2. long: entry 100, stop 95, t1 110
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, 95.0, 110.0, None, 4.0)
+        assert math.isclose(stop, 97.5)
+        assert math.isclose(t1, 105.0)
+        assert t2 is None
+
+    def test_short_scales_gap_by_inv_sqrt_cadence(self):
+        # cadence 9 -> f = 1/3. short: entry 100, stop 106 (above), t1 90 (below)
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, 106.0, 90.0, None, 9.0)
+        assert math.isclose(stop, 100.0 + (106.0 - 100.0) / 3.0)   # 102.0
+        assert math.isclose(t1, 100.0 + (90.0 - 100.0) / 3.0)      # 96.6667
+
+    def test_cadence_one_is_noop(self):
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, 115.0, 1.0) == (95.0, 110.0, 115.0)
+
+    def test_monthly_cadence_shrinks_gap(self):
+        stop, _, _ = bs.daily_normalized_levels(100.0, 90.0, 110.0, None, 21.0)
+        assert math.isclose(stop, 100.0 - 10.0 / math.sqrt(21.0))
+
+    def test_pct_identity_matches_weight_scaling(self):
+        # normalized stop_pct == raw stop_pct / sqrt(cadence)
+        e, raw_stop, c = 200.0, 180.0, 16.0
+        stop, _, _ = bs.daily_normalized_levels(e, raw_stop, None, None, c)
+        raw_pct = (e - raw_stop) / e
+        norm_pct = (e - stop) / e
+        assert math.isclose(norm_pct, raw_pct / math.sqrt(c))
+
+    def test_bad_entry_passes_all_levels_through(self):
+        assert bs.daily_normalized_levels(None, 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(0.0, 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(float('nan'), 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+
+    def test_per_level_finite_guard(self):
+        # None/NaN levels pass through; finite levels still normalize (cadence 4 -> f=0.5)
+        stop, t1, t2 = bs.daily_normalized_levels(100.0, None, float('nan'), 120.0, 4.0)
+        assert stop is None
+        assert math.isnan(t1)
+        assert math.isclose(t2, 110.0)   # 100 + (120-100)*0.5
+
+    def test_cadence_floored_at_one(self):
+        # cadence 0 or None -> treated as 1 -> no-op
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, 0.0) == (95.0, 110.0, None)
+        assert bs.daily_normalized_levels(100.0, 95.0, 110.0, None, None) == (95.0, 110.0, None)
+
+    def test_decimal_nan_passthrough_and_finite_decimal_normalizes(self):
+        from decimal import Decimal
+        # Decimal('NaN') entry -> all levels pass through unchanged, no crash
+        assert bs.daily_normalized_levels(Decimal('NaN'), 95.0, 110.0, None, 4.0) == (95.0, 110.0, None)
+        # Decimal('NaN') stop passes through; finite Decimal levels still normalize (cadence 4 -> f=0.5)
+        stop, t1, t2 = bs.daily_normalized_levels(Decimal('100'), Decimal('NaN'), Decimal('110'), None, 4.0)
+        assert isinstance(stop, Decimal) and stop.is_nan()
+        assert abs(float(t1) - 105.0) < 1e-9
+        assert t2 is None
