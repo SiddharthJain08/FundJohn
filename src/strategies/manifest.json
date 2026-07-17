@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-17T12:14:51.460Z",
+  "updated_at": "2026-07-17T18:11:34.926Z",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -5682,11 +5682,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5701,11 +5702,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5720,11 +5722,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5739,11 +5742,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5758,11 +5762,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5777,11 +5782,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5796,11 +5802,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5815,11 +5822,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5834,11 +5842,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5853,11 +5862,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5872,11 +5882,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5891,11 +5902,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5910,11 +5922,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
@@ -5929,11 +5942,12 @@
       },
       "history": [
         {
-          "at": "2026-07-17T12:14:51.460Z",
-          "from": "ejected",
-          "to": "candidate",
+          "from_state": "ejected",
+          "to_state": "candidate",
+          "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
-          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics"
+          "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
         }
       ],
       "instrument_class": "etp"
