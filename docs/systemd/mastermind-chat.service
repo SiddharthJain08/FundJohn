@@ -1,0 +1,46 @@
+[Unit]
+Description=MasterMindJohn interactive chat service — 127.0.0.1:7871
+After=network-online.target postgresql.service docker.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=claudebot
+Group=claudebot
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/services/mastermind_chat/server.js
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+# Core runtime
+Environment="HOME=/home/claudebot"
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="CLAUDE_BIN=/usr/local/bin/claude-bin"
+Environment="PYTHON_BIN=/usr/bin/python3"
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+
+# Service config
+Environment="MASTERMIND_CHAT_PORT=7871"
+Environment="MASTERMIND_CHAT_BIND=127.0.0.1"
+Environment="MASTERMIND_CHAT_MODEL=claude-opus-4-7[1m]"
+Environment="MASTERMIND_CHAT_MAX_BUDGET=5.00"
+Environment="MASTERMIND_CHAT_CWD=/root/openclaw/workspaces/mastermind-chat"
+
+# Data plane. This unit runs as claudebot, which cannot read the root-only
+# /root/openclaw/.env — the DB/Redis URIs must be injected here directly.
+# Set the real POSTGRES_URI (matching your docker-compose credentials) when
+# installing; the value below is a placeholder.
+Environment="POSTGRES_URI=postgresql://openclaw:CHANGE_ME@localhost:5432/openclaw"
+Environment="REDIS_URL=redis://localhost:6379"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mastermind-chat
+
+[Install]
+WantedBy=multi-user.target

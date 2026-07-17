@@ -1,0 +1,48 @@
+{
+  "mcpServers": {
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "mcp-fetch"],
+      "env": {
+        "DEFAULT_HEADERS": "{\"User-Agent\": \"OpenClaw/1.0 contact@fundjohn.ai\"}"
+      }
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "env": {
+        "PUPPETEER_LAUNCH_OPTIONS": "{\"headless\": true, \"args\": [\"--no-sandbox\", \"--disable-setuid-sandbox\"]}"
+      }
+    }
+  },
+  "_tiers": {
+    "tier1_primary": {
+      "alpaca": {
+        "description": "Alpaca AAT Plus — P1 for equity/crypto bars, options chain + EOD archive, news, screener, corp-actions (SP-1 cutover 2026-05-22). Use the alpaca CLI (/root/go/bin/alpaca), not HTTP.",
+        "auth": "ALPACA_API_KEY / ALPACA_SECRET_KEY from .env"
+      },
+      "fmp": {
+        "description": "Financial Modeling Prep — P2 fundamentals/macro/insider/universe ref; use via fetch MCP",
+        "base_url": "https://financialmodelingprep.com/api/v3",
+        "auth": "query param: apikey=${FMP_API_KEY}",
+        "covers": ["company profile", "income statement", "balance sheet", "cash flow", "key metrics", "ratios", "historical prices", "earnings surprises", "SEC filing index", "institutional holders", "stock screener", "peers", "analyst estimates", "price targets", "company news"],
+        "rate_limit": "300/min (paid tier)"
+      },
+      "sec_edgar": {
+        "description": "SEC EDGAR — use via fetch MCP",
+        "base_url": "https://efts.sec.gov/LATEST",
+        "auth": "User-Agent header: ${SEC_USER_AGENT}",
+        "covers": ["10-Q full text", "10-K full text", "8-K full text", "DEF 14A", "Form 4"],
+        "rate_limit": "10/sec"
+      }
+    },
+    "tier2_fallback": {
+      "web_scrape": {
+        "description": "Web scrape (fetch + puppeteer) — last resort for known URLs",
+        "use_only_for": "press releases and investor presentations not available via structured APIs",
+        "check_first": "always check FMP news feed before falling back to web scrape"
+      }
+    },
+    "_retired": "Polygon/Massive, Alpha Vantage, and the yahoo_finance MCP server were removed in the SP-1 provider cutover (2026-05-22) and the AV purge. yfinance survives only inside src/ingestion/cboe_vol_indices.py (CI-linted)."
+  }
+}

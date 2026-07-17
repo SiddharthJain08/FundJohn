@@ -1,0 +1,19 @@
+[Unit]
+Description=FundJohn self-hosted dashboard (:7870)
+After=network-online.target postgresql.service redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/openclaw
+ExecStart=/usr/bin/node /root/openclaw/src/channels/dashboard/server.js
+EnvironmentFile=-/root/openclaw/.env
+Environment="OPENCLAW_DIR=/root/openclaw"
+Environment="FUNDJOHN_DASHBOARD_PORT=7870"
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
