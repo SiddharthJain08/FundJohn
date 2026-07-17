@@ -1,7 +1,9 @@
 """Shared cross-sectional momentum base signal for corroboration strategies.
 
 Pure / deterministic: no I/O, no clock, no randomness. Same inputs -> same outputs.
-Used by S_options_flow_confirmed_momentum and S_sector_flow_confirmed_momentum so the
+Used by S_options_flow_confirmed_momentum (S_sector_flow_confirmed_momentum,
+the other original consumer, was authored but never registered — removed
+2026-07-17, recoverable at 9ab30ed) so the
 'base signal' is identical across both (DRY) and the corroboration lift is measured cleanly.
 """
 from __future__ import annotations
