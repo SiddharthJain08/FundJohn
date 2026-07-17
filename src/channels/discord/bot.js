@@ -787,7 +787,6 @@ async function handlePtcCommand(cmdText, message, userId, participantCtx = {}) {
 
           const fmpPerDay    = parseInt(cfg.fmp_req_per_day || '50000', 10);
           const fmpPerMin    = parseInt(cfg.fmp_req_per_min || '300', 10);
-          const polyUnlimited = parseInt(cfg.polygon_req_per_min || '9999', 10) >= 9999;
 
           // Universe size from DB
           const universeSize = await store.getUniverseTickers().catch(() => []).then(t => t.length);

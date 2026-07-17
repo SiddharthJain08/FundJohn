@@ -334,18 +334,25 @@ def test_g4b_no_close_when_live_option_target(monkeypatch):
     scale (5.1b-ii hedge model): with no equity signal the option order is fail-closed
     dropped (no scale) — so a live option target REQUIRES a non-empty equity book."""
     monkeypatch.setenv('OPENCLAW_OPTION_EXEC', '1')
+    # SP-5.3 C3 (c40b475, 2026-06-04): held+still-targeted structures with min DTE <=
+    # OPTION_EXPIRY_CLOSE_DTE (7) now force-close as '__close_option_expiry__'. The old
+    # hardcoded leg SPY260718C00500000 date-rotted into that window; build a far-dated
+    # leg (today+90d) so this test keeps pinning the NOT-near-expiry branch: keep held,
+    # suppress open, emit NO close of any kind.
+    _exp = date.today() + __import__('datetime').timedelta(days=90)
+    _far_leg = f'SPY{_exp.strftime("%y%m%d")}C00500000'
     monkeypatch.setattr(_sizer, '_held_option_underlyings',
-                        lambda: {'SPY': ['SPY260718C00500000']})
+                        lambda: {'SPY': [_far_leg]})
     orders = _run_sizer(monkeypatch, [
         _sig('S_eq_aapl', 'AAPL', direction=1),
         _sig('S_opt_spy', 'SPY', direction='BUY_VOL', option_spec=_STRADDLE_SPEC),
     ])
-    closes = [o for o in orders if o.get('strategy_id') == '__close_option_orphan__']
-    assert closes == [], f'no orphan-close when SPY has a live option target, got {orders}'
+    closes = [o for o in orders if o.get('strategy_id') in
+              ('__close_option_orphan__', '__close_option_expiry__')]
+    assert closes == [], f'no close when SPY has a live target and is far from expiry, got {orders}'
     # SP-5.3 (C2): the open for held SPY is SUPPRESSED (stacking guard) — the
     # held structure is simply kept; it is neither closed nor re-opened.
-    opt = [o for o in orders if o.get('instrument_class') == 'option' and o['ticker'] == 'SPY'
-           and o.get('strategy_id') != '__close_option_orphan__']
+    opt = [o for o in orders if o.get('instrument_class') == 'option' and o['ticker'] == 'SPY']
     assert opt == [], f'held SPY open must be suppressed (SP-5.3), got {opt}'
 
 

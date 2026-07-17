@@ -159,10 +159,29 @@ def test_iv_mae_helper_perfect_match_is_zero():
 
 
 def test_auto_backtest_refuses_option_strategy(tmp_path):
+    # 2026-07-17: fixture updated — this test used to point at the live
+    # S_short_straddle_vrp.py, which was reaped from the repo on 2026-07-14
+    # (commit 1c2a17f, operator lifted the reaper exemption). The refusal
+    # guard itself is UNCHANGED since it was added in commit 02cbf92 (SP-4 P0):
+    # auto_backtest.run_backtest raises ValueError for instrument_class='option'
+    # after contract validation, directing callers to
+    # backtest.unified_backtest.run_backtest(..., instrument_class='option').
+    # Pin the guard with a self-contained tmp_path fixture so the test no
+    # longer depends on which strategies happen to be in the manifest.
     import importlib
     auto = importlib.import_module('strategies.auto_backtest')
-    # S_short_straddle_vrp is instrument_class='option' → must raise
+    fp = tmp_path / 'S_tmp_option_refusal.py'
+    fp.write_text(
+        "from strategies.base import BaseStrategy\n"
+        "\n"
+        "class TmpOptionRefusalStrat(BaseStrategy):\n"
+        "    id = 'T_tmp_option_refusal'; name = 'tmp option refusal fixture'\n"
+        "    instrument_class = 'option'\n"
+        "    active_in_regimes = ['LOW_VOL']\n"
+        "\n"
+        "    def generate_signals(self, prices, regime, universe, aux_data=None):\n"
+        "        return []\n"
+    )
     import pytest
-    fp = str(ROOT / 'src' / 'strategies' / 'implementations' / 'S_short_straddle_vrp.py')
     with pytest.raises(ValueError, match='option'):
-        auto.run_backtest(fp)
+        auto.run_backtest(str(fp))

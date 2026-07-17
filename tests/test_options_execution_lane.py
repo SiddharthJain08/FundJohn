@@ -257,12 +257,24 @@ def test_route_skips_outside_rth():
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res and res.get('status') == 'skipped' and 'market closed' in res.get('reason','')
 
+def _future_expiry():
+    """_route_option_order resolves expiry against _dt.date.today() (so since its
+    introduction in 8bbca8c / SP-5.1a 2026-05-29; resolver fail-closed per 52f56fd).
+    The route tests originally mocked _list_expiries with HARDCODED 2026-07 dates
+    that rotted stale on 2026-07-17: today+dte_target(30) passed them, every route
+    skipped 'expiry unresolved' before submit, and the CLI-capture mocks never
+    fired (KeyError 'args'). Mock a date relative to today instead: dte_target=30
+    in these specs, so today+45 is always eligible."""
+    import datetime as _dtmod
+    return _dtmod.date.today() + _dtmod.timedelta(days=45)
+
 def test_route_skips_when_strike_unresolved():
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
+    # 2026-07-17: hardcoded 2026-07-16 mock expiry went stale (see _future_expiry).
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=None), \
          patch('execution.alpaca_executor._list_expiries',
-               return_value=[__import__('datetime').date(2026,7,16)]):
+               return_value=[_future_expiry()]):
         res = _route_option_order(_option_order(), equity=100000, coid='c1')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res and res.get('status') == 'skipped' and 'strike' in res.get('reason','')
@@ -282,12 +294,12 @@ def test_route_refuses_short_call():
 
 def test_route_short_put_with_insufficient_cash_skips():
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-16 mock expiry went stale (see _future_expiry).
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
          patch('execution.alpaca_executor._list_expiries',
-               return_value=[_dt.date(2026,7,16)]), \
+               return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._account_cash', return_value=1000.0), \
          patch('execution.alpaca_executor._option_quote',
                return_value={'bid':5.0, 'ask':5.10}), \
@@ -367,7 +379,7 @@ def test_route_honors_limit_price_override_sentinel():
     of the computed marketable limit, so the order RESTS instead of filling.
     Production sizer never sets this key, so real orders are byte-identical."""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-16 mock expiry went stale (see _future_expiry).
     captured = {}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order', 'submit']:
@@ -379,7 +391,7 @@ def test_route_honors_limit_price_override_sentinel():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,16)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._option_quote', return_value={'bid': 5.0, 'ask': 5.10}), \
          patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
          patch('execution.alpaca_executor._options_current_qty', return_value=0), \
@@ -394,7 +406,7 @@ def test_route_honors_limit_price_override_sentinel():
 def test_route_uses_marketable_limit_when_no_override():
     """Without limit_price_override the computed marketable buy limit (ask+slip) is used."""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-16 mock expiry went stale (see _future_expiry).
     captured = {}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order', 'submit']:
@@ -405,7 +417,7 @@ def test_route_uses_marketable_limit_when_no_override():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745, 750, 755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,16)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._option_quote', return_value={'bid': 5.0, 'ask': 5.10}), \
          patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
          patch('execution.alpaca_executor._options_current_qty', return_value=0), \
@@ -563,7 +575,7 @@ def test_route_straddle_submits_mleg_net_debit():
     """structure='straddle' -> one mleg order, net-debit marketable limit,
     instrument_class='option', status submitted."""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-17 mock expiry went stale (see _future_expiry).
     captured = {}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order','submit']:
@@ -573,7 +585,7 @@ def test_route_straddle_submits_mleg_net_debit():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._option_quote', return_value={'bid':9.9,'ask':10.0}), \
          patch('execution.alpaca_executor._options_current_qty', return_value=0), \
          patch('execution.alpaca_executor._account_cash', return_value=100000.0), \
@@ -602,14 +614,14 @@ def test_route_straddle_submits_mleg_net_debit():
 
 def test_route_strangle_submits_mleg():
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-17 mock expiry went stale (see _future_expiry).
     def _fake_cli(args, *a, **kw):
         return (True, {'id':'mleg-2'}, None) if list(args[:2])==['order','submit'] else (True, {}, None)
     def _fake_greeks(u,e,right,spot,band_pct=0.15):
         return [(780.0,0.29,'SPY260717C00780000')] if right=='call' else [(720.0,-0.31,'SPY260717P00720000')]
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._option_chain_greeks', side_effect=_fake_greeks), \
          patch('execution.alpaca_executor._option_quote', return_value={'bid':4.0,'ask':4.1}), \
          patch('execution.alpaca_executor._options_current_qty', return_value=0), \
@@ -625,7 +637,10 @@ def test_route_strangle_submits_mleg():
 def test_route_straddle_skips_when_leg_unresolved():
     """If a structure leg can't be quoted, the whole order skips (no partial submit)."""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-17 mock expiry went stale (see _future_expiry).
+    # This test kept passing but for the WRONG reason ('expiry unresolved' skip) —
+    # the unquoted-leg path it documents was no longer exercised. Reason is now
+    # pinned so a future early-skip can't silently degrade it again.
     submitted = {'n': 0}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order','submit']:
@@ -634,13 +649,14 @@ def test_route_straddle_skips_when_leg_unresolved():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._option_quote', return_value=None), \
          patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
         order = _option_order(strike_rule='atm'); order['option_spec'].structure = 'straddle'
         res = _route_option_order(order, equity=100000, coid='c-skip')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res['status'] == 'skipped' and submitted['n'] == 0
+    assert 'no quote for a structure leg' in res.get('reason','')
 
 
 def test_route_mleg_close_closes_HELD_legs_not_equity():
@@ -710,7 +726,9 @@ def test_record_submission_mleg_keeps_option_class_and_legs():
 def test_route_structure_refuses_non_long_direction():
     """SP-5.1b-i is long-only: a short straddle fails closed (no submit)."""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    # 2026-07-17: hardcoded 2026-07-17 mock expiry went stale (see _future_expiry) —
+    # the envelope refusal sits AFTER expiry resolution, so the stale date skipped
+    # first with the wrong reason.
     submitted = {'n': 0}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order','submit']: submitted['n'] += 1
@@ -718,7 +736,7 @@ def test_route_structure_refuses_non_long_direction():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
         order = _option_order(direction='short', strike_rule='atm')
         order['option_spec'].structure = 'straddle'
@@ -726,10 +744,14 @@ def test_route_structure_refuses_non_long_direction():
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
     assert res['status'] == 'skipped' and 'long-only' in res['reason'] and submitted['n'] == 0
 
-def test_route_structure_refuses_delta_hedge():
-    """SP-5.1b-i does NOT hedge: a hedge='delta' straddle fails closed (defers to 5.1b-ii)."""
+def test_route_structure_refuses_delta_hedge_when_gate_off(monkeypatch):
+    """SP-5.1c (0c909fe, 2026-06-03) lifted the 5.1b-i blanket hedge refusal:
+    hedge='delta' on a LONG straddle/strangle is now ALLOWED when the delta-hedge
+    subsystem gate OPENCLAW_OPTION_DELTA_HEDGE=1 is set. With the gate OFF
+    (explicitly unset here) the order still fails closed, naming the gate.
+    (Also 2026-07-17: hardcoded mock expiry went stale — see _future_expiry.)"""
     _os.environ['OPENCLAW_OPTION_EXEC'] = '1'
-    import datetime as _dt
+    monkeypatch.delenv('OPENCLAW_OPTION_DELTA_HEDGE', raising=False)
     submitted = {'n': 0}
     def _fake_cli(args, *a, **kw):
         if list(args[:2]) == ['order','submit']: submitted['n'] += 1
@@ -737,11 +759,13 @@ def test_route_structure_refuses_delta_hedge():
     with patch('execution.alpaca_executor._alpaca_session_kind', return_value='rth'), \
          patch('execution.alpaca_executor._spot_price', return_value=750.0), \
          patch('execution.alpaca_executor._list_strikes', return_value=[745,750,755]), \
-         patch('execution.alpaca_executor._list_expiries', return_value=[_dt.date(2026,7,17)]), \
+         patch('execution.alpaca_executor._list_expiries', return_value=[_future_expiry()]), \
          patch('execution.alpaca_executor._run_alpaca_cli', side_effect=_fake_cli):
         order = _option_order(direction='long', strike_rule='atm')
         order['option_spec'].structure = 'straddle'
         order['option_spec'].hedge = 'delta'
         res = _route_option_order(order, equity=100000, coid='c-hedge')
     _os.environ.pop('OPENCLAW_OPTION_EXEC', None)
-    assert res['status'] == 'skipped' and 'hedge' in res['reason'] and submitted['n'] == 0
+    assert res['status'] == 'skipped' and submitted['n'] == 0
+    # Post-5.1c the refusal is the GATE message, not a blanket 'no hedging' refusal.
+    assert "requires OPENCLAW_OPTION_DELTA_HEDGE=1" in res['reason']

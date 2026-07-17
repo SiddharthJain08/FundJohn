@@ -7,7 +7,7 @@ hard-coded resolver to learn about the scripts/ directory.
 """
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 def test_run_sentiment_step_happy_path():
@@ -63,7 +63,21 @@ def test_run_sentiment_step_happy_path():
         },
     ]
 
-    with patch.dict('os.environ', {'POSTGRES_URI': 'postgresql://test/test'}), \
+    # Env gates pinned OFF so the test stays hermetic on the production VPS:
+    #   ALPACA_NEWS_INGEST (stage 6b, added eab352b) and
+    #   OPENCLAW_SENTIMENT_RESOLVER_UNIVERSE (_widen_with_resolver, added a3d4616)
+    # must not leak in from the ambient environment and trigger live work.
+    test_env = {
+        'POSTGRES_URI': 'postgresql://test/test',
+        'ALPACA_NEWS_INGEST': '0',
+        'OPENCLAW_SENTIMENT_RESOLVER_UNIVERSE': '0',
+    }
+    # Stage 8's Discord summary (added a7f8eb4) does a deferred
+    # `from src.execution.pipeline_orchestrator import post_channel` inside
+    # main(); stub the module in sys.modules so no real webhook fires.
+    fake_orchestrator = MagicMock()
+    with patch.dict('os.environ', test_env), \
+         patch.dict('sys.modules', {'src.execution.pipeline_orchestrator': fake_orchestrator}), \
          patch.object(mod, 'current_universe', return_value=fake_universe), \
          patch.object(mod, 'fetch_multiple_subreddits', return_value=fake_reddit), \
          patch.object(mod, 'select_sparse_tickers', return_value=['AAPL']), \
@@ -72,7 +86,11 @@ def test_run_sentiment_step_happy_path():
          patch.object(mod, '_load_todays_news', return_value=fake_news_raw), \
          patch.object(mod, 'score_news_rows', return_value=fake_news_scored), \
          patch.object(mod, 'upsert_postgres', return_value=2) as up_pg, \
-         patch.object(mod, 'append_parquet', return_value=2) as up_pq:
+         patch.object(mod, '_append_parquet', return_value=2) as up_pq:
+        # b45b7cf (2026-06-08): sentiment_storage.append_parquet replaced by a
+        # local _append_parquet shadow (pd.to_datetime cast keeps 'date' as
+        # datetime64, compatible with the timestamp[us] parquet schema).
+        # The module no longer imports/exports append_parquet.
         rc = mod.main(['--date', '2026-05-20'])
 
     assert rc == 0

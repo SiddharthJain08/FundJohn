@@ -43,9 +43,18 @@ from backtest.intraday_regime_backtest import (   # noqa: E402
 
 def _build_synthetic_features(n_rows_per_state=100, seed=42):
     """Build features with two clear regimes:
-       LOW_VOL: vix~15, vix3m~16, slope~1.07, rr~0.02, rv~10
-       HIGH_VOL: vix~30, vix3m~28, slope~0.93, rr~0.10, rv~25
+       LOW_VOL:  vix~15, vix3m~16, slope~1.07, rr~0.02, rv~10, gk~0.08, vvix~90
+       HIGH_VOL: vix~30, vix3m~28, slope~0.93, rr~0.10, rv~25, gk~0.35, vvix~140
     Alternating blocks, total = 4 * n_rows_per_state rows.
+
+    Feature set v3 (commit 1172802, 2026-05-20): trainer dropped
+    spy_realized_vol_30m and added spy_gk_vol_daily + vvix_level. The
+    builder emits BOTH generations: v3 columns for trainer.HMM_INPUT_COLS
+    and the legacy spy_realized_vol_30m still selected by the walk-forward
+    harness (src/backtest/intraday_regime_backtest.py HMM_INPUT_COLS was
+    not updated by 1172802 — see module-drift note in the test report).
+    Regime bands mirror the 1172802 commit message (COVID GK_ann 0.39-0.96;
+    VVIX ~140 structural vs ~108 noisy HIGH_VOL).
     """
     rng = np.random.default_rng(seed)
     blocks = []
@@ -59,12 +68,16 @@ def _build_synthetic_features(n_rows_per_state=100, seed=42):
             slp  = v90 / vix
             rr   = rng.normal(0.10, 0.01, n)
             rv   = rng.normal(25, 2, n)
+            gk   = rng.normal(0.35, 0.04, n)
+            vvix = rng.normal(140, 5, n)
         else:
             vix  = rng.normal(15, 0.8, n)
             v90  = rng.normal(16, 0.8, n)
             slp  = v90 / vix
             rr   = rng.normal(0.02, 0.005, n)
             rv   = rng.normal(10, 1, n)
+            gk   = rng.normal(0.08, 0.01, n)
+            vvix = rng.normal(90, 4, n)
         return pd.DataFrame({
             'ts_utc':              pd.date_range(start_ts, periods=n, freq='5min', tz='UTC'),
             'vix_synth_30d':       vix,
@@ -72,6 +85,8 @@ def _build_synthetic_features(n_rows_per_state=100, seed=42):
             'vix_term_slope':      slp,
             'rr_25d':              rr,
             'spy_realized_vol_30m': rv,
+            'spy_gk_vol_daily':    gk,
+            'vvix_level':          vvix,
             'source_quality_flag': 0,
         })
 
@@ -87,15 +102,20 @@ def _build_synthetic_features(n_rows_per_state=100, seed=42):
 
 class TestTrainerCore:
     def test_build_X_imputes_nan_with_means(self):
+        # Feature set v3 (commit 1172802, 2026-05-20): spy_realized_vol_30m
+        # dropped (rv HIGH_VOL>CRISIS inversion; dead since SP-1 Polygon
+        # purge), spy_gk_vol_daily + vvix_level added → 6 input columns.
         df = pd.DataFrame({
             'vix_synth_30d':         [15, 16, np.nan, 17],
             'vix_synth_90d':         [16, 17, 18, np.nan],
             'vix_term_slope':        [1.07] * 4,
             'rr_25d':                [np.nan] * 4,
-            'spy_realized_vol_30m':  [10, 11, 12, 13],
+            'spy_gk_vol_daily':      [0.08, 0.09, 0.10, 0.11],
+            'vvix_level':            [90, 92, np.nan, 95],
         })
         X, means = trainer._build_X(df)
-        assert X.shape == (4, 5)
+        # v3: (n_rows, 6) — was (n_rows, 5) before 1172802.
+        assert X.shape == (4, 6)
         # rr_25d all NaN → mean=0
         assert means['rr_25d'] == 0.0
         # vix_synth_30d mean of present values = (15+16+17)/3
@@ -129,6 +149,10 @@ class TestHmmRecovery:
 
     def test_hmm_recovers_two_distinct_regimes(self):
         df = _build_synthetic_features(n_rows_per_state=100)
+        # trainer.HMM_INPUT_COLS is v3 (6 features, commit 1172802
+        # 2026-05-20); the synthetic builder now emits all 6. Column 0
+        # remains vix_synth_30d, so the ascending-VIX rank mapping below
+        # is unchanged.
         feature_cols = trainer.HMM_INPUT_COLS
         X, means = trainer._build_X(df[feature_cols])
         model = _train_hmm(X)
@@ -182,6 +206,12 @@ class TestDetectTransitions:
         """Run _detect_transitions on a perfectly bimodal feature stream
         and confirm ≥1 transition is detected per regime swap."""
         df = _build_synthetic_features(n_rows_per_state=80)
+        # v3 feature set (commit 1172802, 2026-05-20): X is now (n, 6).
+        # The walk-forward harness's _detect_transitions keeps the FLAT
+        # (hysteresis_n, confidence_floor) contract; the LIVE detector
+        # gained tiered hysteresis (6ae17eb 2026-05-23, 66c3119 2026-06-09)
+        # but the harness was deliberately parameterised, so flat params
+        # remain its contract.
         X, _ = trainer._build_X(df[trainer.HMM_INPUT_COLS])
         model = _train_hmm(X[:160])  # Train on first 2 blocks
         ts = df['ts_utc'].values
