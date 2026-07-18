@@ -48,11 +48,24 @@ const sleepSec = (s) => spawnSync('sleep', [String(s)]);
 
 function waitForFleet() {
   for (;;) {
+    // `pgrep -af` (with cmdline) not bare `-f`: bare pgrep self-matches, because
+    // the transient `sh -c 'pgrep -f refresh_backtests_resumable.js'` wrapper
+    // carries the pattern in its own argv, so pgrep returned that wrapper's pid
+    // forever after the real driver exited (a new pid each poll) — the driver
+    // looked "still running" and this waiter never started. Filter to the real
+    // driver only: a `node` process running the script, excluding the pgrep/
+    // grep/sh -c helpers and our own pid.
     let out = '';
-    try { out = execSync('pgrep -f refresh_backtests_resumable.js || true', { encoding: 'utf8' }).trim(); } catch {}
-    const others = out.split('\n').filter(p => p && parseInt(p, 10) !== process.pid);
+    try { out = execSync('pgrep -af refresh_backtests_resumable.js || true', { encoding: 'utf8' }).trim(); } catch {}
+    const others = out.split('\n').map(l => l.trim()).filter(Boolean).filter((l) => {
+      const pid = parseInt(l.split(/\s+/)[0], 10);
+      if (!pid || pid === process.pid) return false;
+      const cmd = l.slice(l.indexOf(' ') + 1);
+      return /\bnode\b/.test(cmd) && /refresh_backtests_resumable\.js/.test(cmd)
+        && !/pgrep|grep\b|sh -c/.test(cmd);
+    });
     if (!others.length) { log('fleet driver gone — starting'); return; }
-    log(`fleet driver still running (pid ${others[0]}) — waiting 300s`);
+    log(`fleet driver still running (pid ${others[0].split(/\s+/)[0]}) — waiting 300s`);
     sleepSec(300);
   }
 }
