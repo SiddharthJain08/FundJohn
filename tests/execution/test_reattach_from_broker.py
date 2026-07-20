@@ -57,7 +57,7 @@ def test_reattach_uses_broker_target_not_degenerate_db(monkeypatch):
     monkeypatch.setattr(sr, 'latest_stop_submission',
                         lambda c, t, s: {'entry_price': 627.51, 'stop_price': 516.11,
                                          'target_price': 604.79})
-    monkeypatch.setattr(sr, 'cancel_stops_for', lambda s, d: 0)
+    monkeypatch.setattr(sr, 'cancel_stops_for', lambda s, d, **kw: 0)
     placed = {}
     def _fake_oco(*, ticker, position_side, qty, stop_price, target_price, dry_run):
         placed.update(dict(target=target_price, stop=stop_price))

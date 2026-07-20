@@ -93,24 +93,39 @@ def _resolve_intended_bracket(conn, ticker: str, side: str):
     return latest_stop_submission(conn, ticker, side)
 
 
+_RATE_LIMIT_BACKOFF = (2, 5, 10)
+
+
+def _is_rate_limited(err: dict | None) -> bool:
+    if not err:
+        return False
+    return err.get('status') == 429 or 'rate limit' in str(err.get('error', '')).lower()
+
+
 def _run_cli(args, timeout=15):
-    proc = subprocess.run(
-        [ALPACA_CLI, *args],
-        capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    if proc.returncode == 0:
+    import time
+    for attempt, backoff in enumerate((*_RATE_LIMIT_BACKOFF, None)):
+        proc = subprocess.run(
+            [ALPACA_CLI, *args],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if proc.returncode == 0:
+            try:
+                return True, json.loads(proc.stdout), None
+            except json.JSONDecodeError:
+                return True, proc.stdout, None
+        err = {'exit_code': proc.returncode, 'raw_stderr': proc.stderr,
+               'error': proc.stderr.strip()}
         try:
-            return True, json.loads(proc.stdout), None
+            ej = json.loads(proc.stderr)
+            err.update({'status': ej.get('status'), 'code': ej.get('code'),
+                        'error': ej.get('error') or err['error']})
         except json.JSONDecodeError:
-            return True, proc.stdout, None
-    err = {'exit_code': proc.returncode, 'raw_stderr': proc.stderr,
-           'error': proc.stderr.strip()}
-    try:
-        ej = json.loads(proc.stderr)
-        err.update({'status': ej.get('status'), 'code': ej.get('code'),
-                    'error': ej.get('error') or err['error']})
-    except json.JSONDecodeError:
-        pass
+            pass
+        if backoff is None or not _is_rate_limited(err):
+            return False, None, err
+        log(f'  rate-limited ({args[0]} {args[1] if len(args) > 1 else ""}) — retry in {backoff}s')
+        time.sleep(backoff)
     return False, None, err
 
 
@@ -373,22 +388,30 @@ def _alpaca_rest_post(path: str, body: dict, timeout: int = 15):
            or os.environ.get('APCA_API_SECRET_KEY'))
     headers = {'APCA-API-KEY-ID': key or '', 'APCA-API-SECRET-KEY': sec or '',
                'Content-Type': 'application/json'}
-    try:
-        r = requests.post(f'{base}{path}', json=body, headers=headers, timeout=timeout)
-    except Exception as e:
-        return False, None, {'status': None, 'error': str(e)}
-    if r.status_code == 200:
+    import time
+    err = {'status': None, 'error': 'not attempted'}
+    for backoff in (*_RATE_LIMIT_BACKOFF, None):
         try:
-            return True, r.json(), None
+            r = requests.post(f'{base}{path}', json=body, headers=headers, timeout=timeout)
+        except Exception as e:
+            return False, None, {'status': None, 'error': str(e)}
+        if r.status_code == 200:
+            try:
+                return True, r.json(), None
+            except Exception:
+                return True, {}, None
+        try:
+            ej = r.json()
         except Exception:
-            return True, {}, None
-    try:
-        ej = r.json()
-    except Exception:
-        ej = {'message': r.text[:300]}
-    return False, None, {'status': r.status_code,
-                         'error': ej.get('message') or ej.get('error') or r.text[:300],
-                         'code': ej.get('code')}
+            ej = {'message': r.text[:300]}
+        err = {'status': r.status_code,
+               'error': ej.get('message') or ej.get('error') or r.text[:300],
+               'code': ej.get('code')}
+        if backoff is None or not _is_rate_limited(err):
+            return False, None, err
+        log(f'  rate-limited (REST {path}) — retry in {backoff}s')
+        time.sleep(backoff)
+    return False, None, err
 
 
 def submit_protective_oco(*, ticker: str, position_side: str, qty: float,
@@ -451,9 +474,20 @@ def fetch_tp_covered(linked_only: bool = False) -> dict[str, float]:
     return cov
 
 
-def cancel_stops_for(symbol: str, dry_run: bool) -> int:
-    """Cancel resting stop/stop_limit orders on a symbol so its shares are free
-    for an OCO. Returns count canceled."""
+def cancel_stops_for(symbol: str, dry_run: bool, include_reserving: bool = False,
+                     exit_side: str | None = None) -> int:
+    """Cancel resting orders on a symbol so its shares are free for an OCO.
+
+    Default: only bare stop/stop_limit orders (the historical behavior).
+    include_reserving=True additionally cancels EXIT-SIDE limit orders that
+    RESERVE shares against a full-size OCO — bare simple-class limit TPs
+    (afterhours ahtp_*) and partial OCO parents. Full-size OCO placement
+    needs the whole position free; leaving these resting is what produced
+    the chronic "insufficient qty available" naked positions. Only orders
+    whose side == exit_side are touched so a resting ENTRY limit (position
+    direction) survives. Safe because the caller's failure path re-submits
+    a full-qty bare stop.
+    Returns count canceled."""
     ok, payload, err = _run_cli(['order', 'list', '--status', 'open'])
     if not ok:
         return 0
@@ -461,21 +495,89 @@ def cancel_stops_for(symbol: str, dry_run: bool) -> int:
     for o in (payload or []):
         if o.get('symbol') != symbol:
             continue
-        if (o.get('order_type') or o.get('type')) not in ('stop', 'stop_limit'):
-            continue
+        otype = o.get('order_type') or o.get('type')
+        if otype not in ('stop', 'stop_limit'):
+            if not include_reserving or otype != 'limit':
+                continue
+            if exit_side and (o.get('side') or '').lower() != exit_side:
+                continue
         oid = o.get('id')
         if not oid:
             continue
         if dry_run:
-            log(f'  DRY-RUN cancel stop {symbol} {oid}')
+            log(f'  DRY-RUN cancel {otype} {symbol} {oid}')
             n += 1
             continue
         ok2, _, _ = _run_cli(['order', 'cancel', '--order-id', oid])
         if ok2:
             n += 1
         else:
-            log(f'  ⚠ {symbol}: stop cancel failed for {oid}')
+            log(f'  ⚠ {symbol}: {otype} cancel failed for {oid}')
     return n
+
+
+def _post_alert(msg: str) -> None:
+    """Best-effort operator alert to #data-alerts via the persisted
+    agent_registry webhook (same channel map pipeline_orchestrator.notify
+    uses). The naked-position audit is worthless if it only reaches a log
+    file nobody tails — SNDK/XENE sat breached+naked for 3 days that way."""
+    try:
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        cur = conn.cursor()
+        cur.execute("SELECT webhook_urls FROM agent_registry WHERE webhook_urls IS NOT NULL")
+        url = None
+        for (hooks,) in cur.fetchall():
+            if hooks and hooks.get('data-alerts'):
+                url = hooks['data-alerts']
+                break
+        conn.close()
+        if not url:
+            log('alert skipped: no data-alerts webhook in agent_registry')
+            return
+        r = requests.post(url, json={'content': msg[:1900]},
+                          headers={'User-Agent': 'Mozilla/5.0 (openclaw)'}, timeout=10)
+        if r.status_code >= 300:
+            log(f'alert post failed: {r.status_code}')
+    except Exception as e:
+        log(f'alert post error (non-fatal): {e}')
+
+
+def audit_naked_positions(positions: list[dict], breached: list[dict],
+                          dry_run: bool) -> list[str]:
+    """End-of-pass truth check: re-fetch broker coverage and list every
+    position whose downside is still uncovered. Posts a Discord alert when
+    anything is naked or breached — this pass is the last line of defense,
+    so its failures must be operator-visible, not just logged."""
+    # Bare stops (flat order list shows no OCO stop legs) and OCO/bracket
+    # parents reserve DISJOINT shares, so coverage is their SUM — max() here
+    # would flag mixed protection (e.g. 28 OCO + 1 bare stop) as naked and
+    # train the operator to ignore the alert.
+    covered = fetch_active_stops()
+    for _sym, _q in fetch_tp_covered(linked_only=True).items():
+        covered[_sym] = covered.get(_sym, 0.0) + _q
+    naked: list[str] = []
+    for pos in positions:
+        sym = pos.get('symbol')
+        try:
+            q = abs(float(pos.get('qty') or 0))
+        except (TypeError, ValueError):
+            q = 0.0
+        if not sym or q <= 0:
+            continue
+        gap = q - covered.get(sym, 0.0)
+        if gap > 0.01:
+            naked.append(f'{sym} ({gap:.0f}/{q:.0f} sh uncovered)')
+    if (naked or breached) and not dry_run:
+        lines = ['⚠️ **stop_reattach: positions without full downside protection**']
+        if naked:
+            lines.append('NAKED after pass: ' + ', '.join(naked))
+        if breached:
+            lines.append('BREACHED (operator: close or accept): ' + ', '.join(
+                f'{b["ticker"]} {b["side"]} cur={b["current"]:.2f} '
+                f'stop={b["breached_stop"]:.2f} uPnL=${b["unrealized_pl"]:.0f}'
+                for b in breached))
+        _post_alert('\n'.join(lines))
+    return naked
 
 
 def _wait_qty_freed(symbol: str, need: float, timeout: int = 12) -> bool:
@@ -544,10 +646,13 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
                 log(f'  ⚠ {sym}: no valid take-profit from broker history or DB '
                     f'(tstatus={tstatus}) — bare stop only, TP NOT re-established')
             continue
-        # Both legs valid → cancel any bare stop, WAIT for the broker to free
-        # the shares (cancel is async), then place the OCO. If the shares never
-        # free, restore the stop and skip rather than risk a naked position.
-        ncanc = cancel_stops_for(sym, dry_run)
+        # Both legs valid → cancel every reserving exit order (bare stops,
+        # bare ahtp TPs, partial OCO parents), WAIT for the broker to free
+        # the shares (cancel is async), then place the full-size OCO. If the
+        # shares never free, restore the stop and skip rather than risk a
+        # naked position.
+        ncanc = cancel_stops_for(sym, dry_run, include_reserving=True,
+                                 exit_side='sell' if side == 'long' else 'buy')
         if not dry_run and ncanc and not _wait_qty_freed(sym, pos_qty):
             log(f'  ⚠ {sym}: shares not freed after stop cancel — restoring stop, skipping OCO')
             submit_protective_stop(ticker=sym, position_side=side, qty=pos_qty,
@@ -691,6 +796,9 @@ def main():
             for b in breached:
                 log(f'    {b["ticker"]:6} {b["side"]:5} cur={b["current"]:.2f} breached_stop={b["breached_stop"]:.2f} '
                     f'unrealized=${b["unrealized_pl"]:.2f} qty={b["qty"]:.0f}')
+        naked = audit_naked_positions(positions, breached, args.dry_run)
+        if naked:
+            log(f'⚠ NAKED after pass: {", ".join(naked)}')
     finally:
         conn.close()
     return 0
