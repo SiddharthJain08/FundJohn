@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenClaw research auto-commit — commit + push the weekend research pipeline's output (root; triggered by OnSuccess of openclaw-sunday-research-code.service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# No [Install]/timer — this unit is triggered by OnSuccess= on the research
+# finisher, never enabled or scheduled directly. Runs as root because the
+# claudebot-run finisher cannot write .git or push.
+Type=oneshot
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/root/openclaw/scripts/commit_research_output.sh
+TimeoutStartSec=300
