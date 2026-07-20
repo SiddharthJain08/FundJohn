@@ -6,7 +6,7 @@
       "state": "candidate",
       "state_since": "2026-07-14T07:33:32.816421+00:00",
       "metadata": {
-        "canonical_file": "s_ast_combining_fundamental_fscore_and_equity_short_term_reversals.py",
+        "canonical_file": "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals.py",
         "class": "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals",
         "description": "Past 1-month losers with strong Piotroski F-Scores (7-9) outperform past winners with weak F-Scores (0-3), combining mean-reversion with fundamental quality screening.",
         "universe_filter_ref": "src.strategies.universe_default:no_otc",
@@ -4903,7 +4903,7 @@
       "state": "candidate",
       "state_since": "2026-07-14T06:35:04.380278+00:00",
       "metadata": {
-        "canonical_file": "s_ast_asset_growth_effect.py",
+        "canonical_file": "S_ast_asset_growth_effect.py",
         "class": "S_ast_asset_growth_effect",
         "description": "Firms with low total-asset growth outperform firms with high total-asset growth because rapid asset expansion signals overinvestment and dilutes returns on capital.",
         "universe_filter_ref": "src.strategies.universe_default:sp500",

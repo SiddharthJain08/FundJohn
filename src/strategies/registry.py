@@ -315,12 +315,58 @@ _IMPL_MAP = {
     'S_intramonth_momentum_cycle': ('strategies.implementations.S_intramonth_momentum_cycle', 'IntramontMomentumCycle'),
     # LeCompte, Suominen & Hjalmarsson 2026: TSMOM gated by Boundaries metric (CAPE + div-yield + term-spread extremes)
     'S_valuation_bounded_tsmom': ('strategies.implementations.S_valuation_bounded_tsmom', 'S_valuation_bounded_tsmom'),
+    # Research-pipeline batch wired 2026-07-20 — impl files + manifest 'live' +
+    # registry approval existed but _IMPL_MAP wiring was never done (same gap as
+    # the Oxford batch above): get_approved_strategies() skipped all 10 with a
+    # warning, so they produced 0 live signals while backtests (file-path loader)
+    # ran fine.
+    'S_52wk_low_capitulation_reversal': ('strategies.implementations.S_52wk_low_capitulation_reversal', 'FiftyTwoWeekLowCapitulationReversal'),
+    'S_amihud_illiquidity_premium': ('strategies.implementations.S_amihud_illiquidity_premium', 'AmihudIlliquidityPremium'),
+    'S_btc_equity_spillover': ('strategies.implementations.S_btc_equity_spillover', 'BtcEquitySpillover'),
+    'S_earnings_sue_pead': ('strategies.implementations.S_earnings_sue_pead', 'EarningsSuePead'),
+    'S_factor_momentum_rotation': ('strategies.implementations.S_factor_momentum_rotation', 'FactorMomentumRotation'),
+    'S_overnight_intraday_tug_of_war': ('strategies.implementations.S_overnight_intraday_tug_of_war', 'OvernightIntradayTugOfWar'),
+    'S_pre_earnings_vol_runup': ('strategies.implementations.S_pre_earnings_vol_runup', 'PreEarningsVolRunup'),
+    'S_regime_age_momentum': ('strategies.implementations.S_regime_age_momentum', 'RegimeAgeMomentum'),
+    'S_volume_shock_overnight_drift': ('strategies.implementations.S_volume_shock_overnight_drift', 'VolumeShockOvernightDrift'),
+    'S_vwap_closing_pressure': ('strategies.implementations.S_vwap_closing_pressure', 'VwapClosingPressure'),
 }
+
+
+def _discover_impl(strategy_id: str):
+    """Fallback loader: import strategies.implementations.<strategy_id> and
+    return its single BaseStrategy subclass. The research finisher writes impl
+    files + manifest entries but has twice (2026-06-19 Oxford batch, 2026-07-20
+    research batch) shipped live strategies without an _IMPL_MAP entry — this
+    keeps those loadable instead of silently generating zero signals. Returns
+    None unless exactly one concrete subclass is defined in the module itself."""
+    from strategies.base import BaseStrategy
+    module_path = f'strategies.implementations.{strategy_id}'
+    try:
+        mod = importlib.import_module(module_path)
+    except Exception as e:
+        logger.error(f"Fallback import failed for {strategy_id}: {e}")
+        return None
+    candidates = [obj for obj in vars(mod).values()
+                  if isinstance(obj, type)
+                  and issubclass(obj, BaseStrategy)
+                  and obj is not BaseStrategy
+                  and obj.__module__ == module_path]
+    if len(candidates) != 1:
+        logger.error(f"Fallback for {strategy_id}: expected exactly 1 BaseStrategy "
+                     f"subclass in {module_path}, found {len(candidates)}")
+        return None
+    return candidates[0]
 
 
 def load_strategy_class(strategy_id: str):
     """Import and return the class for a given strategy_id. Returns None on failure."""
     if strategy_id not in _IMPL_MAP:
+        cls = _discover_impl(strategy_id)
+        if cls is not None:
+            logger.warning(f"strategy_id={strategy_id} not in _IMPL_MAP — loaded "
+                           f"{cls.__name__} via fallback discovery; add an _IMPL_MAP entry")
+            return cls
         logger.warning(f"No implementation registered for strategy_id={strategy_id}")
         return None
 
