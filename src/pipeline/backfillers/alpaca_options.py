@@ -251,29 +251,20 @@ def _master_readable(parquet_path: Path | None = None) -> bool:
 
 
 def _merge_write(new_df: pd.DataFrame, *, parquet_path: Path = PARQUET_PATH) -> None:
-    """Merge-dedupe new_df into the master and write ATOMICALLY.
+    """Merge-dedupe new_df into the master ATOMICALLY (new row wins on
+    (date, contract_symbol) conflict).
 
-    The pre-2026-07 writer called to_parquet on the master path directly; a
-    SIGTERM mid-write truncated the file (footer never landed). Write to a
-    pid-suffixed sibling and os.replace so a kill at any instant leaves the
-    previous master intact.
+    Delegates to parquet_store.append_dedup: DuckDB streams the existing
+    master from disk (memory-bounded, spills) and writes tmp+os.replace.
+    Only the incoming batch lives in pandas — the previous implementation
+    loaded the whole 6M-row master (pd.read_parquet + concat) and was
+    OOM-killed daily at 3.6-6.2G peaks on the 8GB no-swap box.
     """
+    from src.data.parquet_store import append_dedup
     with _PARQUET_LOCK:
-        if parquet_path.exists():
-            old_df = pd.read_parquet(parquet_path)
-            merged = pd.concat([old_df, new_df], ignore_index=True)
-        else:
-            merged = new_df
-        merged = merged.drop_duplicates(
-            subset=['date', 'contract_symbol'], keep='last',
-        )
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = parquet_path.with_name(f'{parquet_path.name}.tmp-{os.getpid()}')
-        try:
-            merged.to_parquet(tmp, index=False)
-            os.replace(tmp, parquet_path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        append_dedup(parquet_path, new_df,
+                     key_cols=['date', 'contract_symbol'], mode='replace')
 
 
 def _append_parquet(rows: list[dict], *, parquet_path: Path = PARQUET_PATH) -> None:

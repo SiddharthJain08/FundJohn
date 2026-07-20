@@ -496,15 +496,14 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
     if py_pipe.exists():
         return (_maybe_dry(['python3', str(py_pipe), '--date', run_date]), 600)
     if js_pipe.exists():
-        # Collector: the longest step. A warm-cache cycle is minutes; a cold
-        # cycle with wide fundamentals/options gaps has hit the 60 min cap
-        # multiple times this week (3 of 4 runs timed out at 3600s on the
-        # options-chain phase with 401 tickers). Bumped to 90 min as a
-        # buffer — the LLM trade step is now deterministic (~1s) so the
-        # total cycle budget is dominated by collect; we have plenty of
-        # headroom before market close. Re-evaluate if the 90 min cap is
-        # also chronically hit.
-        return (_maybe_dry(['node', str(js_pipe)]), 5400)
+        # Collector: the longest step. A warm-cache cycle is minutes, but a
+        # cold cycle's options-chain phase ran 84.5 min on 2026-07-15 and hit
+        # the 90 min cap on 2026-07-16 (rc=124, whole cycle lost). The EOD
+        # compute starts 20:15 UTC and only needs to clear before premarket,
+        # so the cap is headroom, not a deadline; the overnight fleet driver
+        # (21:30 UTC) gates its own spawns on a memory floor.
+        collect_timeout = int(os.environ.get('OPENCLAW_COLLECT_TIMEOUT_SECONDS', '9000'))
+        return (_maybe_dry(['node', str(js_pipe)]), collect_timeout)
     # default: src/execution/<script>.py
     if script == 'ic_gate_runner':
         # IC gate runner blocks on operator Discord responses. IC_TIMEOUT_SECONDS

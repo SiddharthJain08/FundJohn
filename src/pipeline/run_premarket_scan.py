@@ -185,9 +185,9 @@ def _evaluate_ticker(position: dict, cfg: ScanConfig, scan_ts: datetime,
     n = news_rows[0] if news_rows else None
 
     inputs = ScoreInputs(
-        news_count_window=int(n['news_count_24h']) if n else 0,
-        news_finbert_neg_ratio=float(n['news_finbert_neg']) if n else 0.0,
-        news_finbert_mean_score=float(n['news_mean_score']) if n else 0.0,
+        news_count_window=int(n['news_count_24h'] or 0) if n else 0,
+        news_finbert_neg_ratio=float(n['news_finbert_neg'] or 0.0) if n else 0.0,
+        news_finbert_mean_score=float(n['news_mean_score'] or 0.0) if n else 0.0,
         social_post_count_window=0,    # MVP: social pulled in handoff future iteration
         social_bear_ratio=0.0,
     )

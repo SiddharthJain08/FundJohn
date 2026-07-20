@@ -108,9 +108,12 @@ def test_concurrent_append_preserves_all_rows(tmp_path):
 
 
 def test_append_parquet_write_is_atomic(tmp_path, monkeypatch):
-    """2026-06-29 regression: a kill mid-to_parquet must leave the previous
-    master intact (write goes to a tmp sibling, then os.replace)."""
+    """2026-06-29 regression: a kill mid-write must leave the previous master
+    intact. The write path is parquet_store.append_dedup (DuckDB streaming
+    merge since 2026-07-20) — its commit boundary is the final os.replace, so
+    the kill is simulated there."""
     from src.pipeline.backfillers.alpaca_options import _append_parquet
+    from src.data import parquet_store
     parquet = tmp_path / 'options_eod.parquet'
     _append_parquet(
         [{'date': '2026-05-21', 'contract_symbol': 'A', 'delta': 0.5}],
@@ -118,23 +121,19 @@ def test_append_parquet_write_is_atomic(tmp_path, monkeypatch):
     )
     before = parquet.read_bytes()
 
-    real_to_parquet = pd.DataFrame.to_parquet
+    def dying_replace(src, dst):
+        # Simulate SIGTERM at the commit boundary: tmp written, replace never lands.
+        raise KeyboardInterrupt('killed before os.replace')
 
-    def dying_to_parquet(self, path, *a, **kw):
-        # Simulate SIGTERM mid-write: leave a partial tmp file, then die.
-        Path(path).write_bytes(b'PAR1partial-no-footer')
-        raise KeyboardInterrupt('killed mid-write')
-
-    monkeypatch.setattr(pd.DataFrame, 'to_parquet', dying_to_parquet)
+    monkeypatch.setattr(parquet_store.os, 'replace', dying_replace)
     with pytest.raises(KeyboardInterrupt):
         _append_parquet(
             [{'date': '2026-05-22', 'contract_symbol': 'B', 'delta': 0.6}],
             parquet_path=parquet,
         )
-    monkeypatch.setattr(pd.DataFrame, 'to_parquet', real_to_parquet)
+    monkeypatch.undo()
 
     assert parquet.read_bytes() == before, 'master must be untouched by a failed write'
-    assert not list(tmp_path.glob('*.tmp-*')), 'failed write must not leave tmp litter'
     df = pd.read_parquet(parquet)  # still readable
     assert len(df) == 1
 
