@@ -47,7 +47,6 @@ class-aware cost model).
 | Agent | Model | Role |
 |---|---|---|
 | BotJohn | Sonnet | Orchestrator + PM; the Discord bot (`src/channels/discord/bot.js`) |
-| TradeJohn | Sonnet | Per-ticker order confirmer inside the sizer (fail-open, LOW_VOL/TRANSITIONING only) |
 | PaperHunter | Sonnet | Per-paper alpha extraction with rejection gates |
 | StrategyCoder | Sonnet | Strategy implementation + registration |
 | MastermindJohn | Opus (1M ctx) | Corpus rating, strategy review, sizing recs, paper expansion, interactive chat (:7871) |

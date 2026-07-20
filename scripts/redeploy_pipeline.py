@@ -258,8 +258,52 @@ def _report_failed(reason: str, rc: int, duration_s: float,
 
 REDEPLOY_STEPS = 'signals,handoff,trade,alpaca,reconcile'
 
+# The redeploy REGENERATES signals in its `signals` step, so — unlike the daily
+# cycle, which is news-gated by the 9:15 ET pre-market gate before its trade step —
+# the redeploy has no upstream news gate. The inline TradeJohn sizer confirmer used
+# to provide that intraday news-veto, but it was retired 2026-07-20. To keep the
+# protection, split the redeploy around the pre-market gate: generate signals, run
+# the news gate over them, THEN handoff→trade→… so news-rejected signals never reach
+# the sizer. (run_gate updates execution_signals.lifecycle_state, exactly as it does
+# for the daily flow.)
+_REDEPLOY_STEPS_PRE_GATE = 'signals'
+_REDEPLOY_STEPS_POST_GATE = 'handoff,trade,alpaca,reconcile'
 
-def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
+
+def _run_intraday_news_gate(run_date: str, dry_run: bool) -> None:
+    """Run the pre-market news gate over the freshly-regenerated redeploy signals,
+    before they reach the sizer. Gated on OPENCLAW_EOD_PREMARKET_GATE (same flag as
+    the daily gate). FAIL-OPEN — a gate error must never block the redeploy (news
+    protection is best-effort, mirroring the daily gate's own fail-open posture)."""
+    if os.environ.get('OPENCLAW_EOD_PREMARKET_GATE') != '1':
+        logger.info('intraday news gate skipped (OPENCLAW_EOD_PREMARKET_GATE!=1)')
+        return
+    if dry_run:
+        logger.info('[DRY-RUN] intraday news gate skipped')
+        return
+    try:
+        sys.path.insert(0, str(ROOT / 'src'))
+        from execution.premarket_gate import run_gate
+        result = run_gate()
+        logger.info('intraday news gate ran: %s', result)
+    except Exception as e:
+        logger.warning('intraday news gate failed (fail-open, continuing): %s', e)
+
+
+def _run_redeploy(reason: str, run_date: str, dry_run: bool) -> int:
+    """Full redeploy sequence: signal-gen → news-gate → trade→…. Returns the last
+    orchestrator exit code (or the pre-gate code if signal-gen failed). Splitting the
+    orchestrator subset around the news gate is what closes the intraday news-veto gap
+    left by retiring the inline sizer confirmer (2026-07-20)."""
+    rc = _spawn_orchestrator(reason, run_date, dry_run, steps=_REDEPLOY_STEPS_PRE_GATE)
+    if rc != 0:
+        return rc
+    _run_intraday_news_gate(run_date, dry_run)
+    return _spawn_orchestrator(reason, run_date, dry_run, steps=_REDEPLOY_STEPS_POST_GATE)
+
+
+def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool,
+                        steps: str = REDEPLOY_STEPS) -> int:
     """Run the orchestrator subset synchronously. Returns the orchestrator's
     exit code. We're already in a detached process (spawned by the intraday
     cron), so it's safe to block here for up to 30 min."""
@@ -276,7 +320,7 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
         payload = {
             'runDate':        run_date,
             'reason':         reason,
-            'requestedSteps': REDEPLOY_STEPS.split(','),
+            'requestedSteps': steps.split(','),
         }
         cmd = ['node', str(run_graph_js), 'daily-cycle', json.dumps(payload)]
         logger.info('spawning LangGraph daily-cycle (dry_run=%s): %s', dry_run, ' '.join(cmd))
@@ -285,7 +329,7 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool) -> int:
         cmd = [
             sys.executable,
             str(ROOT / 'src' / 'execution' / 'pipeline_orchestrator.py'),
-            '--steps', REDEPLOY_STEPS,
+            '--steps', steps,
             '--reason', reason,
             '--date', run_date,
             '--force-resume',
@@ -447,7 +491,7 @@ def main(argv=None) -> int:
                 return 0
 
             started = time.time()
-            rc = _spawn_orchestrator(reason, run_date, dry_run=args.dry_run)
+            rc = _run_redeploy(reason, run_date, dry_run=args.dry_run)
             duration_s = round(time.time() - started, 1)
 
             if rc == 0:
@@ -468,7 +512,7 @@ def main(argv=None) -> int:
 
     # ── Legacy path (flag OFF): byte-identical to pre-Task-7 behavior ─────
     started = time.time()
-    rc = _spawn_orchestrator(reason, run_date, dry_run=args.dry_run)
+    rc = _run_redeploy(reason, run_date, dry_run=args.dry_run)
     duration_s = round(time.time() - started, 1)
 
     if rc == 0:

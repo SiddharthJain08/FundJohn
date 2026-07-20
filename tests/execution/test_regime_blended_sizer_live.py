@@ -125,14 +125,6 @@ class TestBuildSizedPayload:
         assert len(payload['vetoed']) == 1
         assert payload['vetoed'][0]['ticker'] == 'XYZ'
 
-    def test_tradejohn_decision_carried_through(self):
-        """tradejohn_decision metadata from confirmer is forwarded to the order."""
-        from execution.regime_blended_sizer_live import _build_sized_payload
-        order = _make_order()
-        order['tradejohn_decision'] = {'action': 'approve', 'multiplier': 0.8, 'rationale': 'test'}
-        payload = _build_sized_payload([order], {'cycle_date': '2026-05-12'})
-        assert payload['orders'][0]['tradejohn_decision']['multiplier'] == 0.8
-
     def test_kelly_final_equals_pct_nav(self):
         """kelly_final is set to pct_nav as a proxy (no raw Kelly from consolidator path)."""
         from execution.regime_blended_sizer_live import _build_sized_payload

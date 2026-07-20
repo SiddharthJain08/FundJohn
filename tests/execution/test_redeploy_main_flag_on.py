@@ -61,10 +61,12 @@ def _run_main_flag_on(argv, *, monkeypatch, redis_kv=None,
 
     # track _spawn_orchestrator calls
     spawn_calls = []
-    def _fake_spawn(reason, run_date, dry_run):
-        spawn_calls.append({'reason': reason, 'run_date': run_date})
+    def _fake_spawn(reason, run_date, dry_run, steps=None):
+        spawn_calls.append({'reason': reason, 'run_date': run_date, 'steps': steps})
         return orchestrator_rc
     monkeypatch.setattr(rd, '_spawn_orchestrator', _fake_spawn)
+    # news gate is a no-op in tests (avoid real DB/FinBERT)
+    monkeypatch.setattr(rd, '_run_intraday_news_gate', lambda run_date, dry_run: None)
 
     # suppress network calls in _post_webhook
     monkeypatch.setattr(rd, '_post_webhook', lambda ch, msg: True)
@@ -147,7 +149,10 @@ class TestProceedPath:
         _, _, _, spawn_calls = _run_main_flag_on(
             ARGV, monkeypatch=monkeypatch, gate_result='proceed',
             orchestrator_rc=0, capsys=capsys)
-        assert len(spawn_calls) == 1, f'expected 1 orchestrator call, got {spawn_calls}'
+        # Split around the intraday news gate: signal-gen then handoff→trade→…
+        assert len(spawn_calls) == 2, f'expected 2 orchestrator calls (news-gate split), got {spawn_calls}'
+        assert spawn_calls[0]['steps'] == 'signals'
+        assert spawn_calls[1]['steps'] == 'handoff,trade,alpaca,reconcile'
         assert spawn_calls[0]['reason'] == 'TEST_T_HV'
         assert spawn_calls[0]['run_date'] == '2026-06-09'
 

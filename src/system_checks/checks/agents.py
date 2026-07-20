@@ -40,22 +40,6 @@ def _claude_bin_responds():
     return Status.PASS, f'CLI responded in {out.get("duration_ms", "?")}ms'
 
 
-@check(name='confirmer_module_imports', tags=['agents'], requires=['fs'])
-def _confirmer_module_imports():
-    """tradejohn_confirmer can be imported (catches syntax + import-time bugs)."""
-    import sys, importlib
-    sys.path.insert(0, '/root/openclaw/src')
-    try:
-        m = importlib.import_module('execution.tradejohn_confirmer')
-    except Exception as e:
-        return Status.FAIL, f'import failed: {type(e).__name__}: {e}'
-    expected = {'confirm', '_default_runner', '_parse_response', 'FAIL_OPEN_DEFAULT'}
-    missing = expected - set(dir(m))
-    if missing:
-        return Status.FAIL, f'missing: {missing}'
-    return Status.PASS, 'imports cleanly with expected API'
-
-
 @check(name='discord_bot_token_valid', tags=['agents'], requires=['discord'])
 def _discord_bot_token_valid():
     """DISCORD_BOT_TOKEN authenticates and the bot is in at least one guild.

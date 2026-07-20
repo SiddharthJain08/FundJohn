@@ -2,9 +2,10 @@
 """LIVE sizer — regime_blended_sizer producing real broker submissions.
 
 Pipeline orchestrator's `trade` step calls this. Reads the structured
-handoff, runs the sizer with the real TradeJohn confirmer, and persists
-the sized handoff via finalize_sized_payload — the path alpaca_executor
-reads from.
+handoff, runs the sizer, and persists the sized handoff via
+finalize_sized_payload — the path alpaca_executor reads from.
+(News-veto now lives in the pre-market gate; the inline TradeJohn LLM
+confirmer was retired 2026-07-20.)
 
 Output format: payload['orders'] shape:
   {ticker, strategy_id, direction, entry, stop, t1, t2, pct_nav, shares,
@@ -63,7 +64,6 @@ sys.path.insert(0, str(ROOT / 'src'))
 import psycopg2, psycopg2.extras
 from execution.regime_blended_sizer import size_positions, _derive_action
 from execution.handoff import read_handoff
-from execution.tradejohn_confirmer import confirm as real_confirmer
 from execution.sized_handoff import finalize_sized_payload
 from strategies.instrument_class import instrument_class_for
 from execution.instrument_class_sizer import apply_instrument_class_sizing
@@ -273,9 +273,6 @@ def _build_sized_payload(orders: list[dict], handoff: dict,
             'contributions':           contributions,
         }
 
-        # Carry TradeJohn confirmer metadata if present.
-        if 'tradejohn_decision' in o:
-            order['tradejohn_decision'] = o['tradejohn_decision']
 
         # SP-5.1c/5-Phase-1b (G3): option orders carry spec (reconstructed to OptionSpec)
         # + normalized direction + contracts so alpaca_executor._route_option_order can
@@ -409,7 +406,7 @@ def _resolve_account_or_none(session_fn=None, fetch_fn=None):
 
 def main():
     ap = argparse.ArgumentParser(
-        description='Phase 3 LIVE sizer — use regime_blended_sizer with real LLM confirmer',
+        description='Phase 3 LIVE sizer — use regime_blended_sizer',
     )
     ap.add_argument('--date', default=date.today().isoformat())
     ap.add_argument('--dry-run', action='store_true',
@@ -540,7 +537,8 @@ def main():
 
     equity = float(account.get('equity', 100_000.0))
 
-    # REAL confirmer (LLM call) — this is the LIVE path.
+    # Per-ticker news-veto is owned by the pre-market news gate (premarket_gate.py),
+    # not the sizer — the inline TradeJohn LLM confirmer was retired 2026-07-20.
     orders = size_positions(
         signals=signals,
         account_state=account,
@@ -548,7 +546,6 @@ def main():
         run_date=run_date,
         strategy_state=strategy_state,
         regime_params=params,
-        confirmer=real_confirmer,
     )
     print(f'[regime_blended_sizer_live] size_positions produced {len(orders)} orders')
 

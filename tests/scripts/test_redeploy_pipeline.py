@@ -116,6 +116,7 @@ def _run_main(argv, *, redis_client, clock_ok=True, clock_is_open=True,
     with patch.dict('os.environ', env_overrides, clear=False), \
          patch.object(redeploy, '_redis', return_value=redis_client), \
          patch.object(redeploy, '_post_webhook', side_effect=_fake_webhook), \
+         patch.object(redeploy, '_run_intraday_news_gate', lambda run_date, dry_run: None), \
          patch.object(redeploy.subprocess, 'run', side_effect=_fake_run):
         rc = redeploy.main(argv)
 
@@ -205,16 +206,17 @@ class TestExtendedHoursGate:
         assert rc == 0
         assert action['action'] == 'completed'
         spawns = _orchestrator_calls(popen_calls)
-        assert len(spawns) == 1
-        # Orchestrator invocation must pass --steps + --reason + --date
-        cmd = spawns[0]['cmd']
-        assert '--steps' in cmd
-        idx = cmd.index('--steps')
-        assert cmd[idx + 1] == 'signals,handoff,trade,alpaca,reconcile'
-        assert '--reason' in cmd
-        assert 'INTRADAY_HMM_LOW_VOL_HIGH_VOL' in cmd
-        assert '--date' in cmd
-        assert '2026-05-19' in cmd
+        # The redeploy is now split around the intraday news gate: signal-gen
+        # first, then handoff→trade→… (news-rejected signals never reach the sizer).
+        assert len(spawns) == 2
+        cmd0 = spawns[0]['cmd']
+        assert '--steps' in cmd0 and cmd0[cmd0.index('--steps') + 1] == 'signals'
+        cmd1 = spawns[1]['cmd']
+        assert '--steps' in cmd1 and cmd1[cmd1.index('--steps') + 1] == 'handoff,trade,alpaca,reconcile'
+        # both carry --reason + --date
+        for cmd in (cmd0, cmd1):
+            assert '--reason' in cmd and 'INTRADAY_HMM_LOW_VOL_HIGH_VOL' in cmd
+            assert '--date' in cmd and '2026-05-19' in cmd
         assert webhook_calls and webhook_calls[0][0] == 'intraday-regime'
 
 

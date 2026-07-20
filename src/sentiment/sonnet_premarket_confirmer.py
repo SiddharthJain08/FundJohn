@@ -1,8 +1,9 @@
 """Sonnet 4.6 pre-market panic confirmer.
 
-Mirrors src/execution/tradejohn_confirmer.py: subprocess to /usr/local/bin/claude-bin,
---output-format json, --max-budget-usd, JSON-with-fenced-fallback parse, fail-open
-on any error (verdict='llm_error').
+Pattern: subprocess to /usr/local/bin/claude-bin, --output-format json,
+--max-budget-usd, JSON-with-fenced-fallback parse, fail-open on any error
+(verdict='llm_error'). This is now the sole LLM news-veto path — the inline
+sizer confirmer (formerly execution/tradejohn_confirmer.py) was retired 2026-07-20.
 """
 from __future__ import annotations
 

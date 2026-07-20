@@ -18,7 +18,6 @@ import re
 from datetime import date
 
 from execution.signal_cadence_gate import filter_by_cadence, advance_last_fire
-from execution.tradejohn_confirmer import confirm as default_confirmer
 from execution.alpaca_executor import _spot_price
 
 logger = logging.getLogger(__name__)
@@ -124,8 +123,12 @@ def size_positions(
         if not passed:
             return []
 
+    # TradeJohn LLM confirmer retired 2026-07-20 — per-ticker news-veto is now
+    # owned by the pre-market news gate (premarket_gate.py, OPENCLAW_EOD_PREMARKET_GATE),
+    # which scores news/sentiment on the day's signals before the trade step. The
+    # `confirmer` param is kept (tests inject stubs) but is None in production.
     return _sharpe_cadence_path(passed, account_state, regime_state,
-                                regime_params, confirmer or default_confirmer)
+                                regime_params, confirmer)
 
 
 def _check_force_fire_flag() -> bool:
@@ -1519,9 +1522,10 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     Fetches the broker book (unless `broker` is supplied pre-fetched — the flatten
     path passes it so it can size the alert first), classifies target_usd vs the
     book into delta/flip/orphan_close emissions via _classify_position_deltas,
-    runs the TradeJohn confirmer over new-exposure emissions only (closes always
-    execute), builds the sized-handoff order dicts, appends option orders, and
-    returns the order list.
+    optionally runs an injected `confirmer` over new-exposure emissions (the
+    TradeJohn LLM confirmer was retired 2026-07-20 — `confirmer` is None in
+    production; news-veto now lives in the pre-market gate), builds the
+    sized-handoff order dicts, appends option orders, and returns the order list.
 
     The flatten path calls this with target_usd={} (→ every held ticker becomes an
     orphan_close), opt_active=[] (a zero-conviction flatten must never OPEN new
