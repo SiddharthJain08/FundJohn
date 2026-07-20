@@ -159,3 +159,74 @@ def test_module_runs_as_standalone_script():
                        capture_output=True, text=True)
     assert 'ModuleNotFoundError' not in r.stderr, r.stderr
     assert r.returncode == 0, (r.returncode, r.stderr)
+
+
+# ── ext-hours stop/TP monitor (2026-07-20) ──────────────────────────────────
+
+_NESTED_ORDERS = [
+    # OCO parent (TP limit) with held stop leg — flat listings hide the leg.
+    {'symbol': 'AKTS', 'type': 'limit', 'order_class': 'oco', 'limit_price': '9.40',
+     'legs': [{'symbol': 'AKTS', 'type': 'stop', 'stop_price': '7.10'}]},
+    # Bare GTC stop, no TP.
+    {'symbol': 'BW', 'type': 'stop', 'order_class': 'simple', 'stop_price': '2.50'},
+]
+
+
+def test_protection_map_reads_oco_stop_leg_and_bare_stop():
+    m = ah.protection_map(_NESTED_ORDERS)
+    assert m['AKTS'] == {'stop': 7.10, 'tp': 9.40}
+    assert m['BW']['stop'] == 2.50 and m['BW']['tp'] is None
+
+
+def test_monitor_plan_long_stop_breach_sells_marketable():
+    plan = ah.monitor_plan(
+        [{'symbol': 'AKTS', 'side': 'long', 'qty': 142, 'current_price': 7.00}],
+        ah.protection_map(_NESTED_ORDERS), slip_pct=0.005)
+    assert len(plan) == 1
+    a = plan[0]
+    assert a['side'] == 'sell' and a['reason'] == 'stop_breach' and a['qty'] == 142
+    assert a['limit'] == round(7.00 * 0.995, 2)        # marketable, below last
+    assert a['stop'] == 7.10                            # restore level carried
+
+
+def test_monitor_plan_short_stop_breach_buys_above():
+    prot = {'ODD': {'stop': 40.0, 'tp': 30.0}}
+    plan = ah.monitor_plan(
+        [{'symbol': 'ODD', 'side': 'short', 'qty': 228, 'current_price': 41.0}],
+        prot, slip_pct=0.005)
+    assert len(plan) == 1 and plan[0]['side'] == 'buy'
+    assert plan[0]['limit'] == round(41.0 * 1.005, 2)   # marketable, above last
+
+
+def test_monitor_plan_tp_reach_and_no_breach_and_idempotency():
+    prot = {'AKTS': {'stop': 7.10, 'tp': 9.40}, 'BW': {'stop': 2.50, 'tp': None}}
+    pos = [
+        {'symbol': 'AKTS', 'side': 'long', 'qty': 142, 'current_price': 9.55},  # TP hit
+        {'symbol': 'BW',   'side': 'long', 'qty': 364, 'current_price': 3.00},  # inside band
+    ]
+    plan = ah.monitor_plan(pos, prot, slip_pct=0.005)
+    assert [a['ticker'] for a in plan] == ['AKTS']
+    assert plan[0]['reason'] == 'tp_reach'
+    # Resting ahsx_ exit → skipped (no double-fire on the next tick).
+    assert ah.monitor_plan(pos, prot, 0.005, resting_exit_syms={'AKTS'}) == []
+
+
+def test_monitor_plan_no_protection_levels_is_not_actioned():
+    # Naked positions are stop_reattach's audit problem, not the monitor's.
+    plan = ah.monitor_plan(
+        [{'symbol': 'XENE', 'side': 'short', 'qty': 18, 'current_price': 68.0}],
+        {}, slip_pct=0.005)
+    assert plan == []
+
+
+def test_run_stop_monitor_skips_during_rth(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_STOP_MONITOR', '1')
+    monkeypatch.setattr(ah, '_cli', lambda *a, **k: (True, {'is_open': True}, None))
+    stats = ah.run_stop_monitor(dry_run=True)
+    assert stats == {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0}
+
+
+def test_run_stop_monitor_gate_off(monkeypatch):
+    monkeypatch.delenv('OPENCLAW_AFTERHOURS_STOP_MONITOR', raising=False)
+    stats = ah.run_stop_monitor(dry_run=True)
+    assert stats['exits'] == 0

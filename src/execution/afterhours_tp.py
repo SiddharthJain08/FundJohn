@@ -3,13 +3,18 @@
 
 Alpaca extended-hours orders must be limit + day TIF + extended_hours=true.
 A sell-limit above market (buy-limit below, for shorts) is a clean ext-hours
-take-profit. Stops cannot be represented in ext-hours, so this covers UPSIDE
-only; the RTH GTC stop still covers downside.
+take-profit. Stops cannot be represented in ext-hours; downside is covered by
+the --monitor mode (2026-07-20): a timer-driven pass that emulates the stop —
+on a level breach it cancels the symbol's resting exit orders and submits an
+ext-hours marketable limit exit, restoring a bare GTC stop on any failure.
 
-Placed at each ext-hours session open; a session-boundary reconcile cancels the
-prior session's TP and resizes the (unlinked) GTC stop after an ext-hours fill.
+TP placement runs at each ext-hours session open; a session-boundary reconcile
+cancels the prior session's TP and resizes the (unlinked) GTC stop after an
+ext-hours fill.
 
-Gate: OPENCLAW_AFTERHOURS_TP (default OFF).
+Gates: OPENCLAW_AFTERHOURS_TP (placement, default OFF),
+OPENCLAW_AFTERHOURS_STOP_MONITOR (monitor, default OFF),
+OPENCLAW_AH_EXIT_SLIP_PCT (marketable-limit buffer, default 0.5).
 """
 from __future__ import annotations
 import os
@@ -180,6 +185,174 @@ def reconcile_afterhours(dry_run: bool) -> dict:
     return stats
 
 
+# ── Ext-hours stop/TP monitor (downside protection outside RTH) ─────────────
+# Plain stop orders cannot trigger in extended sessions, so the resting GTC
+# OCO protects RTH only. The monitor emulates the stop: on a level breach it
+# cancels the symbol's resting exit orders (frees the reserved shares) and
+# submits an extended-hours marketable DAY limit exit. If the ext session
+# closes before it fills, the same limit stays working into the RTH open.
+
+
+def stop_monitor_on() -> bool:
+    return os.environ.get('OPENCLAW_AFTERHOURS_STOP_MONITOR') == '1'
+
+
+def _slip_pct() -> float:
+    """Marketable-limit buffer past last trade. Wide enough to cross thin
+    ext-hours spreads, tight enough to bound a bad print."""
+    try:
+        return float(os.environ.get('OPENCLAW_AH_EXIT_SLIP_PCT', '0.5')) / 100.0
+    except ValueError:
+        return 0.005
+
+
+def protection_map(orders) -> dict:
+    """{symbol: {'stop': float|None, 'tp': float|None}} from resting exit
+    orders. MUST be fed a --nested order list: an OCO's stop lives on a held
+    child leg that a flat listing hides entirely."""
+    out: dict = {}
+    def _lvl(sym, key, val):
+        if not sym or not val:
+            return
+        try:
+            v = float(val)
+        except (TypeError, ValueError):
+            return
+        if v > 0:
+            out.setdefault(sym, {'stop': None, 'tp': None})
+            # Keep the tightest level (max stop for shorts is unknowable here
+            # without side; first-seen is fine — one exit set per symbol).
+            if out[sym][key] is None:
+                out[sym][key] = v
+    for o in (orders or []):
+        sym = o.get('symbol')
+        otype = (o.get('type') or o.get('order_type') or '').lower()
+        oclass = (o.get('order_class') or 'simple').lower()
+        if otype in ('stop', 'stop_limit'):
+            _lvl(sym, 'stop', o.get('stop_price'))
+        elif otype == 'limit' and oclass in ('oco', 'bracket'):
+            _lvl(sym, 'tp', o.get('limit_price'))
+        for leg in (o.get('legs') or []):
+            ltype = (leg.get('type') or leg.get('order_type') or '').lower()
+            if ltype in ('stop', 'stop_limit'):
+                _lvl(leg.get('symbol') or sym, 'stop', leg.get('stop_price'))
+            elif ltype == 'limit':
+                _lvl(leg.get('symbol') or sym, 'tp', leg.get('limit_price'))
+    return out
+
+
+def monitor_plan(positions, protection, slip_pct, resting_exit_syms=frozenset()):
+    """Pure: decide which positions breached their stop/TP level after hours.
+
+    positions: [{'symbol','side','qty','current_price'}]
+    protection: {symbol: {'stop','tp'}} (from protection_map)
+    resting_exit_syms: symbols that already carry an ahsx_ exit (idempotency)
+    Returns [{'ticker','side','qty','limit','reason','level','current','stop'}]
+    — side is the EXIT side; 'stop' carries the protective level for restore.
+    """
+    out = []
+    for p in positions:
+        sym = p.get('symbol')
+        side = (p.get('side') or '').lower()
+        try:
+            qty = abs(float(p.get('qty') or 0))
+            current = float(p.get('current_price') or 0)
+        except (TypeError, ValueError):
+            continue
+        if not sym or qty <= 0 or current <= 0 or side not in ('long', 'short'):
+            continue
+        if sym in resting_exit_syms:
+            continue
+        levels = protection.get(sym) or {}
+        stop, tp = levels.get('stop'), levels.get('tp')
+        reason = None
+        if stop and ((side == 'long' and current <= stop) or
+                     (side == 'short' and current >= stop)):
+            reason, level = 'stop_breach', stop
+        elif tp and ((side == 'long' and current >= tp) or
+                     (side == 'short' and current <= tp)):
+            reason, level = 'tp_reach', tp
+        if not reason:
+            continue
+        exit_side = 'sell' if side == 'long' else 'buy'
+        limit = current * (1 - slip_pct) if exit_side == 'sell' else current * (1 + slip_pct)
+        out.append({'ticker': sym, 'side': exit_side, 'qty': int(qty),
+                    'limit': round(limit, 2), 'reason': reason,
+                    'level': level, 'current': current, 'stop': stop})
+    return out
+
+
+def run_stop_monitor(dry_run: bool) -> dict:
+    """Effectful monitor pass. Skips during RTH (the GTC OCO owns RTH exits)."""
+    from execution.stop_reattach import (fetch_positions, cancel_stops_for,
+                                         _wait_qty_freed, submit_protective_stop,
+                                         _post_alert)
+    stats = {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0}
+    if not stop_monitor_on():
+        log('OPENCLAW_AFTERHOURS_STOP_MONITOR!=1 — skipping')
+        return stats
+    ok, clk, _ = _cli(['clock'])
+    if not ok or not isinstance(clk, dict):
+        log('clock unavailable — skipping (never act on unknown session state)')
+        return stats
+    if clk.get('is_open'):
+        log('market open — RTH exits belong to the resting OCO; skipping')
+        return stats
+    ok, orders, _ = _cli(['order', 'list', '--status', 'open', '--nested',
+                          '--limit', '500'])
+    if not ok:
+        log('order list failed — skipping')
+        return stats
+    resting_exits = {o.get('symbol') for o in (orders or [])
+                     if (o.get('client_order_id') or '').startswith('ahsx_')}
+    positions = list(fetch_positions())
+    plan = monitor_plan(positions, protection_map(orders), _slip_pct(),
+                        resting_exit_syms=resting_exits)
+    stats['checked'] = len(positions)
+    for a in plan:
+        sym = a['ticker']
+        log(f"  {sym}: {a['reason']} (cur={a['current']:.2f} level={a['level']:.2f}) "
+            f"→ ext-hours {a['side'].upper()} LIMIT x{a['qty']} @ {a['limit']:.2f}")
+        if dry_run:
+            stats['exits'] += 1
+            continue
+        pos_side = 'long' if a['side'] == 'sell' else 'short'
+        cancel_stops_for(sym, False, include_reserving=True, exit_side=a['side'])
+        if not _wait_qty_freed(sym, a['qty']):
+            # Cancels may not have landed — protection likely still resting.
+            # Re-assert a bare GTC stop so the RTH open is covered regardless.
+            log(f'  ⚠ {sym}: shares not freed — restoring stop, no ext exit')
+            if a.get('stop'):
+                submit_protective_stop(ticker=sym, position_side=pos_side,
+                                       qty=a['qty'], stop_price=a['stop'],
+                                       dry_run=False)
+            stats['failed'] += 1
+            continue
+        coid = f"ahsx_{sym}_{int(datetime.now(timezone.utc).timestamp())}"
+        ok_s, _pay, err = _submit_limit(
+            ticker=sym, side=a['side'], qty=a['qty'], limit_price=a['limit'],
+            tif='day', order_class='simple', order_type='limit',
+            extended_hours=True, coid=coid)
+        if ok_s:
+            stats['exits'] += 1
+            _post_alert(f"🌙 **after-hours exit** {sym}: {a['reason']} "
+                        f"cur={a['current']:.2f} level={a['level']:.2f} — "
+                        f"{a['side']} limit x{a['qty']} @ {a['limit']:.2f} placed")
+        else:
+            stats['failed'] += 1
+            log(f"  ✘ {sym} ext-hours exit failed: {(err or {}).get('error','?')} "
+                f"— restoring protective stop")
+            if a.get('stop'):
+                r = submit_protective_stop(ticker=sym, position_side=pos_side,
+                                           qty=a['qty'], stop_price=a['stop'],
+                                           dry_run=False)
+                if r.get('status') == 'submitted':
+                    stats['restored'] += 1
+            _post_alert(f"⚠️ after-hours exit FAILED for {sym} "
+                        f"({(err or {}).get('error','?')}) — bare stop restored")
+    return stats
+
+
 def main(argv=None) -> int:
     import argparse
     from execution.stop_reattach import (fetch_positions, fetch_tp_covered,
@@ -187,8 +360,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--reconcile', action='store_true',
                     help='session-boundary reconcile instead of placement')
+    ap.add_argument('--monitor', action='store_true',
+                    help='ext-hours stop/TP breach monitor (downside protection)')
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
+    if args.monitor:
+        log(f'stop-monitor: {run_stop_monitor(args.dry_run)}')
+        return 0
     if not afterhours_tp_on():
         log('OPENCLAW_AFTERHOURS_TP!=1 — skipping')
         return 0

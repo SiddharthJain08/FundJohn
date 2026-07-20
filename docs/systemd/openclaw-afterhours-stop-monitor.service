@@ -1,0 +1,17 @@
+[Unit]
+Description=Ext-hours stop/TP breach monitor — emulates stops outside RTH (downside protection)
+After=network-online.target redis.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=claudebot
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+ExecStart=/usr/bin/python3 /root/openclaw/src/execution/afterhours_tp.py --monitor
+StandardOutput=append:/var/log/openclaw-afterhours-stop-monitor.log
+StandardError=append:/var/log/openclaw-afterhours-stop-monitor.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
