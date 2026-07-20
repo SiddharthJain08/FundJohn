@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-17T18:11:34.926Z",
+  "updated_at": "2026-07-18T19:27:30.969Z",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -1060,37 +1060,6 @@
           "timestamp": "2026-05-25T07:50:03.335Z",
           "actor": "manual:dashboard",
           "reason": "Manual unstack via dashboard",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
-    "S_HV16_gex_regime": {
-      "state": "candidate",
-      "state_since": "2026-06-26T23:00:05.289608+00:00",
-      "metadata": {
-        "canonical_file": "shv16_gex_regime.py",
-        "class": "GEXRegime",
-        "description": "Dealer gamma exposure regime classifier (Bollen & Whaley 2004 JF)"
-      },
-      "history": [
-        {
-          "from_state": "paper",
-          "to_state": "live",
-          "timestamp": "2026-04-22T05:18:07.798201+00:00",
-          "actor": "reconcile:2026-04-22",
-          "reason": "Reconcile — pipeline was firing this strategy while manifest said paper/candidate",
-          "metadata": {
-            "option": "A",
-            "preserve_execution": true
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-06-26T23:00:05.289608+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
           "metadata": {}
         }
       ],
@@ -2833,41 +2802,6 @@
       ],
       "instrument_class": "equity"
     },
-    "S_labor_day_week_momentum_reversal": {
-      "state": "candidate",
-      "state_since": "2026-06-26T23:00:05.329158+00:00",
-      "metadata": {
-        "canonical_file": "S_labor_day_week_momentum_reversal.py",
-        "class": "LaborDayWeekMomentumReversal",
-        "description": "SPX momentum reversal during Labor Day week: short after positive prior-month return, long after negative prior-month return."
-      },
-      "history": [
-        {
-          "from_state": "candidate",
-          "to_state": "live",
-          "timestamp": "2026-05-24T15:33:26.907Z",
-          "actor": "manual:dashboard",
-          "reason": "Manual approve via dashboard [regimes via literature: LOW_VOL,TRANSITIONING,HIGH_VOL]",
-          "metadata": {
-            "eligible_regimes_before": null,
-            "eligible_regimes_after": [
-              "LOW_VOL",
-              "TRANSITIONING",
-              "HIGH_VOL"
-            ]
-          }
-        },
-        {
-          "from_state": "live",
-          "to_state": "candidate",
-          "timestamp": "2026-06-26T23:00:05.329158+00:00",
-          "actor": "strategy_weights_engine",
-          "reason": "auto_demote_after_weekly_cron",
-          "metadata": {}
-        }
-      ],
-      "instrument_class": "equity"
-    },
     "S_fomc_presell_spy_long": {
       "state": "candidate",
       "state_since": "2026-06-29T04:00:01.922160+00:00",
@@ -3589,6 +3523,40 @@
             ],
             "eligible_regimes_after": [
               "LOW_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_ast_turn_of_the_month_in_equity_indexes": {
+      "state": "live",
+      "state_since": "2026-07-18T19:17:15.680Z",
+      "metadata": {
+        "canonical_file": "S_ast_turn_of_the_month_in_equity_indexes.py",
+        "class": "AstTurnOfTheMonthInEquityIndexes",
+        "description": "Long SPY on the last trading day of each month; exit on the 3rd trading day of the new month (turn-of-month institutional flow anomaly).",
+        "eligible_regimes": [
+          "LOW_VOL",
+          "TRANSITIONING"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-07-18T19:17:15.680Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "LOW_VOL",
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_after": [
+              "LOW_VOL",
+              "TRANSITIONING"
             ],
             "eligible_regimes_source": "gate_auto_qualifying"
           }
@@ -4736,14 +4704,34 @@
       "instrument_class": "equity"
     },
     "S_ast_fed_model": {
-      "state": "candidate",
-      "state_since": "2026-07-14T00:00:00.000Z",
+      "state": "live",
+      "state_since": "2026-07-18T19:17:15.584Z",
       "metadata": {
         "canonical_file": "S_ast_fed_model.py",
         "class": "AstFedModel",
-        "description": "Monthly rebalance: OLS of SP500 excess returns on yield gap (earnings yield minus 10Y bond yield); long SPY when forecast > 0, else long SHY."
+        "description": "Monthly rebalance: OLS of SP500 excess returns on yield gap (earnings yield minus 10Y bond yield); long SPY when forecast > 0, else long SHY.",
+        "eligible_regimes": [
+          "HIGH_VOL",
+          "CRISIS"
+        ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-07-18T19:17:15.584Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "HIGH_VOL",
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
       "instrument_class": "etp"
     },
     "S_ast_earnings_quality_factor": {
@@ -4854,12 +4842,15 @@
       "instrument_class": "equity"
     },
     "S_ast_earnings_announcement_premium": {
-      "state": "candidate",
-      "state_since": "2026-07-14T00:00:00.000000Z",
+      "state": "live",
+      "state_since": "2026-07-18T19:17:15.549Z",
       "metadata": {
         "canonical_file": "S_ast_earnings_announcement_premium.py",
         "class": "EarningsAnnouncementPremium",
-        "description": "Long expected earnings announcers vs short non-announcers in the top volume-concentration-ratio quintile, monthly rebalance."
+        "description": "Long expected earnings announcers vs short non-announcers in the top volume-concentration-ratio quintile, monthly rebalance.",
+        "eligible_regimes": [
+          "TRANSITIONING"
+        ]
       },
       "history": [
         {
@@ -4889,6 +4880,20 @@
               ]
             },
             "candidate_id": "64737bff-eed8-46e9-b156-d149305f0a33"
+          }
+        },
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-07-18T19:17:15.549Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": null,
+            "eligible_regimes_after": [
+              "TRANSITIONING"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
           }
         }
       ],
@@ -5247,8 +5252,8 @@
       "instrument_class": "equity"
     },
     "S_amihud_illiquidity_premium": {
-      "state": "candidate",
-      "state_since": "2026-07-12T12:08:22.981724+00:00",
+      "state": "live",
+      "state_since": "2026-07-18T19:17:15.485Z",
       "metadata": {
         "canonical_file": "S_amihud_illiquidity_premium.py",
         "class": "AmihudIlliquidityPremium",
@@ -5256,10 +5261,27 @@
         "origin": "manual_research_2026_07_12",
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
-          "CRISIS"
+          "HIGH_VOL"
         ]
       },
-      "history": [],
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-07-18T19:17:15.485Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "HIGH_VOL"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
       "instrument_class": "equity"
     },
     "S_max_lottery_demand_reversal": {
@@ -5672,6 +5694,17 @@
       "history": [],
       "instrument_class": "equity"
     },
+    "S_ast_value_factor_effect_within_countries": {
+      "state": "candidate",
+      "state_since": "2026-07-18T18:10:07.899621+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_value_factor_effect_within_countries.py",
+        "class": "ValueFactorEffectWithinCountries",
+        "description": "Countries with the lowest Shiller CAPE ratios (below 15, bottom tercile) outperform; rotating annually into the cheapest one-third of country ETFs captures the cross-country value premium."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
     "oxf_aroon_breakout": {
       "state": "candidate",
       "state_since": "2026-07-17T12:14:51.460Z",
@@ -5947,6 +5980,122 @@
           "timestamp": "2026-07-17T12:14:51.460Z",
           "actor": "operator-directive",
           "reason": "re-hearing on 10y backfilled data (2026-07-15) + true-MTM metrics",
+          "metadata": {}
+        }
+      ],
+      "instrument_class": "etp"
+    },
+    "S_ast_time_series_momentum_effect": {
+      "state": "candidate",
+      "state_since": "2026-07-18T18:31:57.206508+00:00",
+      "metadata": {
+        "canonical_file": "S_ast_time_series_momentum_effect.py",
+        "class": "AstTimeSeriesMomentumEffect",
+        "description": "Monthly TSMOM across 24 commodity/FX/equity-index/bond ETF proxies: long assets with positive 12M return, inverse-vol sized, 10% vol target."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_split_session_cluster_garch_gmv": {
+      "state": "candidate",
+      "state_since": "2026-07-18T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_split_session_cluster_garch_gmv.py",
+        "class": "SplitSessionClusterGarchGMV",
+        "description": "Split-session EWMA covariance (overnight slow λ, intraday fast λ) with sector cluster kurtosis blending — long-only GMV (Chen, Hansen & Tong 2026)"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_spectral_denoising_peripheral_portfolio": {
+      "state": "candidate",
+      "state_since": "2026-07-18T19:03:17.289047+00:00",
+      "metadata": {
+        "canonical_file": "S_spectral_denoising_peripheral_portfolio.py",
+        "class": "SpectralDenoisingPeripheralPortfolio",
+        "description": "MP spectral denoising of return correlation matrix recovers core-periphery network; long top-40 peripheral (low-coreness) assets equal-weighted (Ansari et al. 2026)"
+      },
+      "history": [],
+      "instrument_class": "equity"
+    },
+    "S_intramonth_momentum_cycle": {
+      "state": "live",
+      "state_since": "2026-07-18T19:17:15.769Z",
+      "metadata": {
+        "canonical_file": "S_intramonth_momentum_cycle.py",
+        "class": "IntramontMomentumCycle",
+        "description": "Dash-for-cash calendar overlay: long momentum winners / short losers only during the 6 intramonth trading days before month-end (Basilico 2026)",
+        "eligible_regimes": [
+          "CRISIS"
+        ]
+      },
+      "history": [
+        {
+          "from_state": "candidate",
+          "to_state": "live",
+          "timestamp": "2026-07-18T19:17:15.769Z",
+          "actor": "system:sunday-auto-approval",
+          "reason": "auto-promotion: per-regime qualification gate (Sunday second pass)",
+          "metadata": {
+            "eligible_regimes_before": [
+              "CRISIS"
+            ],
+            "eligible_regimes_after": [
+              "CRISIS"
+            ],
+            "eligible_regimes_source": "gate_auto_qualifying"
+          }
+        }
+      ],
+      "instrument_class": "equity"
+    },
+    "S_valuation_bounded_tsmom": {
+      "state": "candidate",
+      "state_since": "2026-07-18T19:27:30.868413+00:00",
+      "metadata": {
+        "canonical_file": "S_valuation_bounded_tsmom.py",
+        "class": "S_valuation_bounded_tsmom",
+        "description": "Equity market time-series momentum earns its premium only when CAPE, dividend yield, and term spread are in a normal (non-extreme) range; near valuation extremes the trend reverses, so gating TSMOM on a composite 'Boundaries' metric improves risk-adjusted returns.",
+        "universe_filter_ref": "src.strategies.universe_default:sp500",
+        "universe_filter_source": "fused_approval_default"
+      },
+      "history": [
+        {
+          "from_state": null,
+          "to_state": "staging",
+          "timestamp": "2026-07-18T19:17:15.268Z",
+          "actor": "saturday_brain_finisher",
+          "reason": "Tier-B from finisher: data fetchable, awaiting operator approval",
+          "metadata": {
+            "decision": {
+              "tier": "B",
+              "reasons": [
+                "prices: backfilled (2016-01-04→2026-07-17, providers polygon/yahoo/alpha_vantage)",
+                "macro: reachable but not backfilled (providers yfinance)",
+                "returns: backfilled (2016-01-04→2026-07-17, providers polygon/yahoo/alpha_vantage/computed)"
+              ],
+              "missing_columns": [
+                "macro"
+              ],
+              "provider_route": [
+                {
+                  "provider": "yfinance",
+                  "column": "macro",
+                  "data_type": "macro",
+                  "gap_from": "2023-02-04",
+                  "gap_to": "2026-07-18"
+                }
+              ]
+            },
+            "candidate_id": "93fe7af1-5764-4f17-bdb9-43faa2716fc5"
+          }
+        },
+        {
+          "from_state": "staging",
+          "to_state": "candidate",
+          "timestamp": "2026-07-18T19:27:30.868413+00:00",
+          "actor": "auto_backtest",
+          "reason": "Auto-backtest: Sharpe undefined, DD 0.0%, trades 0",
           "metadata": {}
         }
       ],

@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_labor_day_week_momentum_reversal",
-  "required": ["prices"],
-  "optional": []
-}

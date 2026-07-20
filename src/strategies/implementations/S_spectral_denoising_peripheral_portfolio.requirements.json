@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_spectral_denoising_peripheral_portfolio",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_ast_time_series_momentum_effect",
+  "required": ["prices"],
+  "optional": []
+}

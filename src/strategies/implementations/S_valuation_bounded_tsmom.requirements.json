@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_valuation_bounded_tsmom",
+  "required": ["prices", "macro"],
+  "optional": []
+}

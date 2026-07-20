@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_split_session_cluster_garch_gmv",
+  "required": ["prices"],
+  "optional": []
+}

@@ -1,9 +1,0 @@
-{
-  "strategy_id": "shv16_gex_regime",
-  "required": [
-    "macro",
-    "options_eod",
-    "prices"
-  ],
-  "optional": []
-}

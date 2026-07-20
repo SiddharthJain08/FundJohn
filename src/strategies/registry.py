@@ -295,6 +295,8 @@ _IMPL_MAP = {
     'S_ast_earnings_quality_factor': ('strategies.implementations.S_ast_earnings_quality_factor', 'EarningsQualityFactor'),
     # Quantpedia: Earnings Announcements + Buybacks — long upcoming-earnings stocks with prior insider-buy signal
     'S_ast_earnings_announcements_combined_with_stock_repurchases': ('strategies.implementations.S_ast_earnings_announcements_combined_with_stock_repurchases', 'AstEarningsAnnouncementsCombinedWithStockRepurchases'),
+    # Quantpedia: Value Factor Effect Within Countries — annual December rotation into cheapest-tercile country ETFs by Shiller CAPE
+    'S_ast_value_factor_effect_within_countries': ('strategies.implementations.S_ast_value_factor_effect_within_countries', 'ValueFactorEffectWithinCountries'),
     # Quantpedia: FED Model — yield-gap OLS predictor for SPY vs SHY rotation
     'S_ast_fed_model':                                               ('strategies.implementations.S_ast_fed_model',                                               'AstFedModel'),
     # Quantpedia: Momentum Factor Combined with Asset Growth Effect — monthly long/short within highest-asset-growth decile
@@ -305,6 +307,14 @@ _IMPL_MAP = {
     'S_ast_residual_momentum_factor': ('strategies.implementations.S_ast_residual_momentum_factor', 'AstResidualMomentumFactor'),
     # Quantpedia: Value Book-to-Market Factor — long bottom-quintile P/B (value), short top-quintile P/B (growth), annual December rebalance
     'S_ast_value_book_to_market_factor': ('strategies.implementations.S_ast_value_book_to_market_factor', 'AstValueBookToMarketFactor'),
+    # Chen, Hansen & Tong 2026: Split-Session Cluster GARCH — overnight/intraday EWMA blend + sector clustering → long-only GMV
+    'S_split_session_cluster_garch_gmv': ('strategies.implementations.S_split_session_cluster_garch_gmv', 'SplitSessionClusterGarchGMV'),
+    # Ansari, Jain & Iyer 2026: Marchenko-Pastur spectral denoising → Markov-chain coreness → LONG top-40 peripheral assets
+    'S_spectral_denoising_peripheral_portfolio': ('strategies.implementations.S_spectral_denoising_peripheral_portfolio', 'SpectralDenoisingPeripheralPortfolio'),
+    # Basilico 2026: dash-for-cash calendar overlay — long/short momentum quintiles in last 6 trading days of month
+    'S_intramonth_momentum_cycle': ('strategies.implementations.S_intramonth_momentum_cycle', 'IntramontMomentumCycle'),
+    # LeCompte, Suominen & Hjalmarsson 2026: TSMOM gated by Boundaries metric (CAPE + div-yield + term-spread extremes)
+    'S_valuation_bounded_tsmom': ('strategies.implementations.S_valuation_bounded_tsmom', 'S_valuation_bounded_tsmom'),
 }
 
 
