@@ -238,6 +238,14 @@ async function processStaging({ log, dryRun, apiBase, budgetMs, perJobTimeoutMs 
 // ── Finale: slider apply + ONE weights rebuild ──────────────────────────────
 function runFinale({ log, dryRun, trigger }) {
   if (dryRun) { log('finale: dry-run — skipping assigner + rebuild'); return false; }
+  // Actuation freeze: during a fleet re-backtest campaign the operator sets
+  // OPENCLAW_ACTIVATION_ASSIGNER=0 so nothing re-derives activation or rebuilds
+  // weights off mixed canonical. weekly_live_sharpe.js already honors it; this
+  // path must too (2026-07-18 it actuated on non-uniform canonical).
+  if (process.env.OPENCLAW_ACTIVATION_ASSIGNER === '0') {
+    log('finale: OPENCLAW_ACTIVATION_ASSIGNER=0 (actuation freeze) — skipping assigner + rebuild');
+    return false;
+  }
   const { spawnSync } = require('child_process');
   const env = { ...process.env, PYTHONPATH: 'src' };
   log('finale: activation_assigner --all (qualification gate + slider) …');
