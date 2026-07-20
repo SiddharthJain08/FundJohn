@@ -10,6 +10,12 @@ Description=Run GTC stop reattach Mon-Fri 16:10 America/New_York (10min post-EOD
 # next session. The in-pipeline stop_reattach step still runs during the
 # cycle as a safety net for multi-day naked positions.
 OnCalendar=Mon..Fri *-*-* 16:10:00 America/New_York
+# 09:35 ET pass (added 2026-07-20): the ext-hours stop monitor may cancel a
+# position's OCO to place a breach/TP exit; if that exit is still unfilled at
+# the RTH open the position enters the session one-sided (BYRN 07-20). Five
+# minutes after open, leftovers have either filled or need replacing with a
+# fresh OCO — which is exactly what this pass does.
+OnCalendar=Mon..Fri *-*-* 09:35:00 America/New_York
 Persistent=true
 Unit=openclaw-stop-reattach.service
 
