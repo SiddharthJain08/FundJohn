@@ -230,3 +230,109 @@ def test_run_stop_monitor_gate_off(monkeypatch):
     monkeypatch.delenv('OPENCLAW_AFTERHOURS_STOP_MONITOR', raising=False)
     stats = ah.run_stop_monitor(dry_run=True)
     assert stats['exits'] == 0
+
+
+# ── pending-exit journal (2026-07-21) ───────────────────────────────────────
+# 8 TP-passed positions were orphaned when Alpaca's OCO cancels outlived
+# _wait_qty_freed AND the bare-stop restore hit insufficient-qty on the
+# still-reserved shares: next tick the orders were gone, protection_map had
+# no levels, and the monitor went blind. The journal makes the debt durable.
+
+import json as _json
+import time as _time
+
+
+def _monitor_env(monkeypatch, tmp_path, *, orders, positions, freed,
+                 submit_ok=True):
+    import execution.stop_reattach as sr
+    monkeypatch.setenv('OPENCLAW_AFTERHOURS_STOP_MONITOR', '1')
+    monkeypatch.setenv('OPENCLAW_AH_INTENTS_PATH', str(tmp_path / 'pending.json'))
+    calls = {'cancels': [], 'submits': [], 'restores': []}
+
+    def fake_cli(args, timeout=15):
+        if args == ['clock']:
+            return True, {'is_open': False}, None
+        return True, orders, None
+
+    monkeypatch.setattr(ah, '_cli', fake_cli)
+    monkeypatch.setattr(sr, 'fetch_positions', lambda: positions)
+    monkeypatch.setattr(sr, 'cancel_stops_for',
+                        lambda s, d, **k: calls['cancels'].append(s))
+    monkeypatch.setattr(sr, '_wait_qty_freed', lambda s, q: freed)
+    monkeypatch.setattr(sr, 'submit_protective_stop',
+                        lambda **k: (calls['restores'].append(k),
+                                     {'status': 'submitted'})[1])
+    monkeypatch.setattr(sr, '_post_alert', lambda *a, **k: None)
+    monkeypatch.setattr(
+        ah, '_submit_limit',
+        lambda **k: (calls['submits'].append(k),
+                     (True, {}, None) if submit_ok
+                     else (False, None, {'error': 'boom'}))[1])
+    return calls
+
+
+_AXTI_OCO = [{'symbol': 'AXTI', 'type': 'limit', 'order_class': 'oco',
+              'limit_price': '50.16',
+              'legs': [{'symbol': 'AXTI', 'type': 'stop',
+                        'stop_price': '43.84'}]}]
+_AXTI_POS = [{'symbol': 'AXTI', 'side': 'long', 'qty': 59,
+              'current_price': 51.5}]
+
+
+def test_monitor_journals_intent_when_cancel_outlives_wait(monkeypatch, tmp_path):
+    calls = _monitor_env(monkeypatch, tmp_path, orders=_AXTI_OCO,
+                         positions=_AXTI_POS, freed=False)
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['failed'] == 1 and calls['cancels'] == ['AXTI']
+    assert calls['submits'] == []                      # shares never freed
+    j = _json.loads((tmp_path / 'pending.json').read_text())
+    assert j['AXTI']['tp'] == 50.16 and j['AXTI']['stop'] == 43.84
+
+
+def test_monitor_retries_from_journal_when_orders_gone(monkeypatch, tmp_path):
+    # The cancel completed AFTER the last tick: zero open orders remain, but
+    # the journal remembers the levels — the exit must still happen.
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'AXTI': {'stop': 43.84, 'tp': 50.16, 'ts': _time.time()}}))
+    calls = _monitor_env(monkeypatch, tmp_path, orders=[],
+                         positions=_AXTI_POS, freed=True)
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['exits'] == 1
+    assert calls['submits'] and calls['submits'][0]['ticker'] == 'AXTI'
+    assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
+
+
+def test_monitor_journal_cleared_when_position_closed(monkeypatch, tmp_path):
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'GONE': {'stop': 1.0, 'tp': 2.0, 'ts': _time.time()}}))
+    calls = _monitor_env(monkeypatch, tmp_path, orders=[], positions=[],
+                         freed=True)
+    ah.run_stop_monitor(dry_run=False)
+    assert calls['submits'] == []
+    assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
+
+
+def test_monitor_journal_cleared_when_protection_visible_again(monkeypatch, tmp_path):
+    # A reattach pass (or the restore) re-covered the symbol: live orders win,
+    # the journal entry is settled, and an inside-band price does nothing.
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'AXTI': {'stop': 43.84, 'tp': 50.16, 'ts': _time.time()}}))
+    orders = [{'symbol': 'AXTI', 'type': 'stop', 'order_class': 'simple',
+               'stop_price': '43.84'}]
+    positions = [{'symbol': 'AXTI', 'side': 'long', 'qty': 59,
+                  'current_price': 47.0}]
+    calls = _monitor_env(monkeypatch, tmp_path, orders=orders,
+                         positions=positions, freed=True)
+    ah.run_stop_monitor(dry_run=False)
+    assert calls['cancels'] == [] and calls['submits'] == []
+    assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
+
+
+def test_monitor_journal_entry_expires_after_ttl(monkeypatch, tmp_path):
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'AXTI': {'stop': 43.84, 'tp': 50.16,
+                  'ts': _time.time() - ah._INTENTS_TTL_S - 60}}))
+    calls = _monitor_env(monkeypatch, tmp_path, orders=[],
+                         positions=_AXTI_POS, freed=True)
+    ah.run_stop_monitor(dry_run=False)
+    assert calls['submits'] == []          # stale intent must not fire exits

@@ -17,8 +17,10 @@ OPENCLAW_AFTERHOURS_STOP_MONITOR (monitor, default OFF),
 OPENCLAW_AH_EXIT_SLIP_PCT (marketable-limit buffer, default 0.5).
 """
 from __future__ import annotations
+import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path as _Path
 
@@ -206,6 +208,41 @@ def _slip_pct() -> float:
         return 0.005
 
 
+_INTENTS_TTL_S = 24 * 3600
+
+
+def _intents_path() -> _Path:
+    return _Path(os.environ.get(
+        'OPENCLAW_AH_INTENTS_PATH',
+        '/root/openclaw/logs/afterhours_pending_exits.json'))
+
+
+def _load_intents() -> dict:
+    """{symbol: {'stop','tp','ts'}} — protection WE cancelled but never
+    replaced (exit unsubmitted and stop-restore failed). Without this journal
+    a slow broker cancel makes the position invisible to every later tick:
+    the orders are gone, so protection_map has no levels to act on
+    (2026-07-21: 8 TP-passed positions orphaned exactly this way)."""
+    try:
+        raw = json.loads(_intents_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    now = time.time()
+    return {k: v for k, v in raw.items()
+            if isinstance(v, dict) and now - float(v.get('ts', 0)) < _INTENTS_TTL_S}
+
+
+def _save_intents(intents: dict) -> None:
+    p = _intents_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix('.tmp')
+        tmp.write_text(json.dumps(intents))
+        os.replace(tmp, p)
+    except OSError as e:
+        log(f'⚠ pending-exit journal write failed: {e}')
+
+
 def protection_map(orders) -> dict:
     """{symbol: {'stop': float|None, 'tp': float|None}} from resting exit
     orders. MUST be fed a --nested order list: an OCO's stop lives on a held
@@ -306,7 +343,23 @@ def run_stop_monitor(dry_run: bool) -> dict:
     resting_exits = {o.get('symbol') for o in (orders or [])
                      if (o.get('client_order_id') or '').startswith('ahsx_')}
     positions = list(fetch_positions())
-    plan = monitor_plan(positions, protection_map(orders), _slip_pct(),
+    protection = protection_map(orders)
+    intents = _load_intents()
+    pos_syms = {p.get('symbol') for p in positions}
+    for sym in list(intents):
+        # Position closed, or protection is visible again (restore landed /
+        # a reattach pass re-covered it) — the debt is settled.
+        if sym not in pos_syms or sym in protection:
+            intents.pop(sym)
+    for sym, i in intents.items():
+        # We cancelled this symbol's protection on an earlier tick and never
+        # replaced it (broker cancel outlived _wait_qty_freed, then the
+        # bare-stop restore hit insufficient-qty on the still-reserved
+        # shares). Resurrect the levels so the plan retries — by now the
+        # cancel has completed and the shares are free.
+        log(f'  ↻ {sym}: pending-exit journal has unreplaced protection — retrying')
+        protection[sym] = {'stop': i.get('stop'), 'tp': i.get('tp')}
+    plan = monitor_plan(positions, protection, _slip_pct(),
                         resting_exit_syms=resting_exits)
     stats['checked'] = len(positions)
     for a in plan:
@@ -317,10 +370,18 @@ def run_stop_monitor(dry_run: bool) -> dict:
             stats['exits'] += 1
             continue
         pos_side = 'long' if a['side'] == 'sell' else 'short'
+        # Journal BEFORE cancelling: if anything past this line fails (or the
+        # process dies), the next tick still knows this symbol owes an exit.
+        lv = protection.get(sym) or {}
+        intents[sym] = {'stop': lv.get('stop'), 'tp': lv.get('tp'),
+                        'ts': time.time()}
+        _save_intents(intents)
         cancel_stops_for(sym, False, include_reserving=True, exit_side=a['side'])
         if not _wait_qty_freed(sym, a['qty']):
             # Cancels may not have landed — protection likely still resting.
-            # Re-assert a bare GTC stop so the RTH open is covered regardless.
+            # Re-assert a bare GTC stop so the RTH open is covered regardless;
+            # the journal entry keeps this symbol visible to the next tick
+            # even if the restore is rejected on still-reserved shares.
             log(f'  ⚠ {sym}: shares not freed — restoring stop, no ext exit')
             if a.get('stop'):
                 submit_protective_stop(ticker=sym, position_side=pos_side,
@@ -335,6 +396,8 @@ def run_stop_monitor(dry_run: bool) -> dict:
             extended_hours=True, coid=coid)
         if ok_s:
             stats['exits'] += 1
+            intents.pop(sym, None)
+            _save_intents(intents)
             _post_alert(f"🌙 **after-hours exit** {sym}: {a['reason']} "
                         f"cur={a['current']:.2f} level={a['level']:.2f} — "
                         f"{a['side']} limit x{a['qty']} @ {a['limit']:.2f} placed")
@@ -350,6 +413,8 @@ def run_stop_monitor(dry_run: bool) -> dict:
                     stats['restored'] += 1
             _post_alert(f"⚠️ after-hours exit FAILED for {sym} "
                         f"({(err or {}).get('error','?')}) — bare stop restored")
+    if not dry_run:
+        _save_intents(intents)
     return stats
 
 
