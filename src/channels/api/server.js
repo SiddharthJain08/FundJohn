@@ -2327,17 +2327,15 @@ async function _buildCandles(days) {
   // 29 days. Floor at 29 so candles always come back populated.
   //
   // We pull two parallel intraday streams so the candles can show
-  // **session-bracketed Open/Close** while the **wicks span the full
-  // 24-hour day** (capturing after-hours and overnight movement):
-  //   continuous   → high / low across the full day, ensures adjacent
-  //                  candles join end-to-end (today's intraday range
-  //                  starts at yesterday's close)
-  //   market_hours → only regular session (9:30-16:00 ET) samples, used
-  //                  for the candle's Open (first session sample) and
-  //                  Close (last session sample). Days with no market
-  //                  samples (weekends/holidays) fall back to the
-  //                  continuous-stream open/close so the candle still
-  //                  renders as a flat mark.
+  // Candle semantics (operator spec 2026-07-21): each candle is the FULL
+  // extended trading day 04:00-20:00 ET —
+  //   open  = first sample of the pre-market session (04:00 ET onward)
+  //   close = last sample of the after-hours session (up to 20:00 ET)
+  //   wicks = high/low across that whole extended window
+  // The continuous stream feeds this after an ET time-of-day filter that
+  // drops the overnight 20:00→04:00 flat stretch (whose inclusion was the
+  // original wrong-OHLC bug). market_hours (9:30-16:00 ET) samples are
+  // kept ONLY for the tooltip's regular-session open/close fields.
   const intradayPeriod = `${Math.min(days, 29)}D`;
   const [contR, mktR, dailyR] = await Promise.all([
     runAlpaca(['account', 'portfolio',
@@ -2373,9 +2371,16 @@ async function _buildCandles(days) {
   const RATIO_HI = 2.0;
   const RATIO_LO = 0.5;
 
-  // Per-day continuous range: high, low, and a fallback open/close drawn
-  // from the first/last continuous sample (used only if market_hours has
-  // no sample for that day).
+  // Per-day extended-session OHLC (04:00-20:00 ET) from the continuous
+  // stream: first sample = pre-market open, last = after-hours close,
+  // high/low over the window.
+  const _etDayTime = (unixSec) => {
+    const s = new Date(unixSec * 1000).toLocaleString('en-CA',
+      { timeZone: 'America/New_York', hourCycle: 'h23',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit' });
+    return s.split(', ');                  // ['YYYY-MM-DD', 'HH:MM']
+  };
   const contByDay = new Map();
   if (contR.ok && contR.payload) {
     const h = contR.payload;
@@ -2387,8 +2392,8 @@ async function _buildCandles(days) {
       if (!Number.isFinite(v) || v <= 0) continue;
       if (baseline != null && (v < baseline * RATIO_LO || v > baseline * RATIO_HI)) continue;
       baseline = v;
-      const d = new Date(ts[i] * 1000)
-        .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+      const [d, hhmm] = _etDayTime(ts[i]);
+      if (hhmm < '04:00' || hhmm >= '20:00') continue;   // overnight stretch
       const slot = contByDay.get(d) || { open: v, high: v, low: v, close: v };
       slot.high  = Math.max(slot.high, v);
       slot.low   = Math.min(slot.low, v);
@@ -2434,18 +2439,12 @@ async function _buildCandles(days) {
     }
   }
 
-  // Merge strategy (2026-07-21 — bar geometry is now SESSION-true):
-  //   - Chart open/high/low/close come from the regular 9:30-16:00 ET
-  //     session, so each candle is the day's true trading OHLC. Overnight
-  //     P&L shows up as the gap between yesterday's close and today's
-  //     open — exactly like a stock's daily chart. (The previous
-  //     continuous-equity geometry folded after-hours drift into the
-  //     bodies, which read as wrong daily OHLC.)
-  //   - Days with no session samples (holidays inside the intraday
-  //     window) fall back to the continuous stream so the chart stays
-  //     unbroken.
-  //   - market_open / market_close stay surfaced for the tooltip; they
-  //     now match the bar geometry on session days.
+  // Merge strategy (operator spec 2026-07-21 — EXTENDED-session geometry):
+  //   - Chart open/high/low/close come from the 04:00-20:00 ET extended
+  //     window: open at the pre-market start, close at the after-hours
+  //     end, wicks the true high/low across it.
+  //   - market_open / market_close (regular 9:30-16:00 session bounds)
+  //     stay surfaced for the tooltip.
   //   - Daily fallback mark is used only when the intraday window
   //     doesn't cover the day (older than ~29 days back).
   const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(), ...dailyByDay.keys()]);
@@ -2456,8 +2455,8 @@ async function _buildCandles(days) {
     let row;
     const cont = contByDay.get(d);
     const mkt  = mktByDay.get(d);
-    if (mkt || cont) {
-      const geo = mkt || cont;
+    if (cont || mkt) {
+      const geo = cont || mkt;
       row = {
         date: d,
         open: geo.open,
@@ -2548,10 +2547,14 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
       .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const byDate = new Map();
     // Bulk historical base: parquet.
+    const REAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
     const parq = await _loadRegimeParquet();
     for (const r of parq) {
       if (!r.date || r.date < cutoff) continue;
-      byDate.set(r.date, r.regime || 'NO_DATA');
+      // "Don't know" is not a state: skip so the forward-fill inherits the
+      // prior real regime instead of painting an UNKNOWN/NO_DATA hole.
+      if (!REAL_REGIMES.includes(r.regime)) continue;
+      byDate.set(r.date, r.regime);
     }
     // Authoritative per-day override: the regime-of-record (market_regime,
     // latest row per day). 2026-06-08: the daily detector is diagnostic-only
@@ -2570,7 +2573,9 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
                 to_char((updated_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS d, state
            FROM market_regime
           WHERE (updated_at AT TIME ZONE 'America/New_York')::date >= $1::date
-          ORDER BY (updated_at AT TIME ZONE 'America/New_York')::date, updated_at DESC`, [cutoff]);
+            AND state = ANY($2)
+          ORDER BY (updated_at AT TIME ZONE 'America/New_York')::date, updated_at DESC`,
+        [cutoff, REAL_REGIMES]);
       for (const r of mr.rows) {
         if (r.state) byDate.set(r.d, r.state);
       }
@@ -2582,12 +2587,18 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
     // market_regime went stale 2026-06-15; without this tier the backdrop
     // forward-fills a month-old state over every recent day.
     try {
+      // state = ANY(REAL_REGIMES) matters doubly here: the intraday HMM's
+      // 05-08→05-18 warm-up wrote all-UNKNOWN days, and being the top
+      // override tier they blanked a stretch market_regime knew perfectly
+      // well (the 2026-07-21 "regime absent 5/8-5/18" report).
       const ir = await dbQuery(
         `SELECT DISTINCT ON ((ts_utc AT TIME ZONE 'America/New_York')::date)
                 to_char((ts_utc AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS d, state
            FROM intraday_regime_states
           WHERE (ts_utc AT TIME ZONE 'America/New_York')::date >= $1::date
-          ORDER BY (ts_utc AT TIME ZONE 'America/New_York')::date, ts_utc DESC`, [cutoff]);
+            AND state = ANY($2)
+          ORDER BY (ts_utc AT TIME ZONE 'America/New_York')::date, ts_utc DESC`,
+        [cutoff, REAL_REGIMES]);
       for (const r of ir.rows) {
         if (r.state) byDate.set(r.d, r.state);
       }
