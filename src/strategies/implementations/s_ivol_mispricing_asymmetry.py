@@ -37,22 +37,27 @@ class IvolMispricingAsymmetry(BaseStrategy):
     def _pctrank(s: pd.Series) -> pd.Series:
         return s.rank(pct=True, na_option='keep')
 
-    # ── helper: annualised IVOL from a returns series ──────────────────────
+    # ── helper: annualised idiosyncratic vol for MANY tickers at once ───────
+    # The FF3 design X = [1, mkt, smb, hml] is IDENTICAL for every ticker, and the
+    # returns are NaN-free upstream (pct_change().fillna(0)), so N per-ticker OLS
+    # regressions collapse to ONE lstsq with a matrix RHS: lstsq(X, Y) factorises X
+    # once (its SVD) and applies it to every column of Y — numerically identical to
+    # the per-ticker loop, ~N× faster. (The per-ticker loop was the S_ivol
+    # full-universe 240-min timeout.)
     @staticmethod
-    def _ivol(ret: pd.Series, mkt: pd.Series, smb: pd.Series, hml: pd.Series) -> float:
-        df = pd.concat([ret, mkt, smb, hml], axis=1).dropna()
-        if len(df) < 10:
-            return np.nan
-        X = df.iloc[:, 1:].values
-        y = df.iloc[:, 0].values
+    def _ivol_batch(rets: pd.DataFrame, mkt: pd.Series,
+                    smb: pd.Series, hml: pd.Series) -> pd.Series:
+        if len(rets) < 10 or rets.shape[1] == 0:
+            return pd.Series(dtype=float)
+        X = np.column_stack([np.ones(len(mkt)), mkt.values, smb.values, hml.values])
+        Y = rets.values                                    # (T, N)
         try:
-            coef, res, _, _ = np.linalg.lstsq(
-                np.column_stack([np.ones(len(X)), X]), y, rcond=None
-            )
-            resid = y - np.column_stack([np.ones(len(X)), X]) @ coef
-            return float(np.std(resid, ddof=1) * np.sqrt(252))
+            coef, *_ = np.linalg.lstsq(X, Y, rcond=None)   # (4, N)
         except Exception:
-            return np.nan
+            return pd.Series(dtype=float)
+        resid = Y - X @ coef                               # (T, N)
+        ivol = np.std(resid, axis=0, ddof=1) * np.sqrt(252)  # (N,)
+        return pd.Series(ivol, index=rets.columns)
 
     def generate_signals(
         self,
@@ -96,13 +101,11 @@ class IvolMispricingAsymmetry(BaseStrategy):
         recent_smb = smb_proxy.iloc[-self.IVOL_LOOKBACK:]
         recent_hml = hml_proxy.iloc[-self.IVOL_LOOKBACK:]
 
-        ivol_vals: dict = {}
-        for tkr in tickers:
-            ivol_vals[tkr] = self._ivol(
-                recent_ret[tkr], recent_mkt, recent_smb, recent_hml
-            )
-
-        ivol_series = pd.Series(ivol_vals).dropna()
+        # Vectorized IVOL across all tickers in one lstsq (see _ivol_batch) —
+        # replaces the per-ticker loop that blew up to 240 min on the full universe.
+        ivol_series = self._ivol_batch(
+            recent_ret[tickers], recent_mkt, recent_smb, recent_hml
+        ).dropna()
         if len(ivol_series) < 20:
             print('[debug] signals=0', file=sys.stderr)
             return []
@@ -214,11 +217,11 @@ class IvolMispricingAsymmetry(BaseStrategy):
                 position_size_pct=round(self.BASE_SIZE * scale, 4),
                 confidence=conf,
                 signal_params={
-                    'ivol': round(float(ivol_vals.get(tkr, 0)), 4),
+                    'ivol': round(float(ivol_series.get(tkr, 0)), 4),
                     'misp_score': round(float(ms.get(tkr, 0)), 4),
                     'leg': 'long_underpriced',
                 },
-                features={'ivol': round(float(ivol_vals.get(tkr, 0)), 4)},
+                features={'ivol': round(float(ivol_series.get(tkr, 0)), 4)},
             ))
 
         for tkr in short_cands[:self.MAX_SIGNALS // 2]:
@@ -240,11 +243,11 @@ class IvolMispricingAsymmetry(BaseStrategy):
                 position_size_pct=round(self.BASE_SIZE * scale, 4),
                 confidence=conf,
                 signal_params={
-                    'ivol': round(float(ivol_vals.get(tkr, 0)), 4),
+                    'ivol': round(float(ivol_series.get(tkr, 0)), 4),
                     'misp_score': round(float(ms.get(tkr, 0)), 4),
                     'leg': 'short_overpriced',
                 },
-                features={'ivol': round(float(ivol_vals.get(tkr, 0)), 4)},
+                features={'ivol': round(float(ivol_series.get(tkr, 0)), 4)},
             ))
 
         signals = signals[:self.MAX_SIGNALS]

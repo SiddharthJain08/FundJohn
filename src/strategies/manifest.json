@@ -2111,6 +2111,11 @@
       "instrument_class": "equity"
     },
     "S_ivol_mispricing_asymmetry": {
+      "backtest_quarantine": {
+        "since": "2026-07-21",
+        "actor": "botjohn",
+        "reason": "Per-ticker FF3 lstsq × full (~12.5k) universe → 240-min timeout, never completes the fleet backtest. Vectorized fix landed (one batched lstsq); quarantined so it stops burning nightly windows until the fix is validated on a real run, then lift."
+      },
       "state": "live",
       "state_since": "2026-07-13T12:52:57.492Z",
       "metadata": {
