@@ -366,13 +366,52 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
         return {}
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
+    out = {}
+    seen_strats = set()
+
+    # Tier 0 (universe ladder campaign, 2026-07-21): CHOSEN-tier sleeves from
+    # the universe shrink (universe_shrink_metrics.chosen). When a strategy's
+    # live universe is a ladder tier selected by the shrink pass, its weights
+    # must derive from THAT tier's sleeves — the full-universe run describes
+    # a universe it no longer trades. A strategy with any chosen rows is
+    # claimed entirely (regimes whose chosen sleeve has NULL sharpe get no bt
+    # entry rather than a full-universe one — tiers are never mixed).
+    tier0_strats: set = set()
+    try:
+        cur.execute('''
+            SELECT latest.strategy_id, m.regime_state, m.sharpe, m.trade_count
+            FROM universe_shrink_metrics m
+            JOIN (
+                SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+                FROM strategy_backtest_runs
+                WHERE strategy_id = ANY(%s) AND primary_window = TRUE
+                ORDER BY strategy_id, run_at DESC
+            ) latest ON latest.run_id = m.run_id
+            WHERE m.chosen AND m.regime_state <> 'TOTAL'
+        ''', (strategy_ids,))
+        for r in cur:
+            tier0_strats.add(r['strategy_id'])
+            if r['sharpe'] is None:
+                continue
+            out[(r['strategy_id'], r['regime_state'])] = {
+                'bt_sharpe': float(r['sharpe']),
+                'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+            }
+            seen_strats.add(r['strategy_id'])
+        if tier0_strats:
+            logger.info('strategy_weights tier-0: %d strategies on chosen '
+                        'shrink sleeves', len(tier0_strats))
+    except Exception as e:
+        logger.warning('strategy_weights tier-0 shrink fetch failed (%s); '
+                       'falling back to full-universe sleeves', e)
+        conn.rollback()
+        tier0_strats = set()
+
     # Tier 1: unified_backtest (canonical).
     # `strategy_backtest_regimes` is keyed by run_id only — strategy_id lives
     # on `strategy_backtest_runs`. Earlier code selected br.strategy_id which
     # silently errored every Sunday with "column br.strategy_id does not
     # exist", forcing the entire weekly weights rebuild down to Tier 3.
-    out = {}
-    seen_strats = set()
     try:
         cur.execute('''
             SELECT latest.strategy_id, br.regime_state, br.sharpe, br.trade_count
@@ -386,6 +425,8 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
             WHERE br.sharpe IS NOT NULL
         ''', (strategy_ids,))
         for r in cur:
+            if r['strategy_id'] in tier0_strats:
+                continue   # claimed by chosen shrink sleeves above
             out[(r['strategy_id'], r['regime_state'])] = {
                 'bt_sharpe': float(r['sharpe']),
                 'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
