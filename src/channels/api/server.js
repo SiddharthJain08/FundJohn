@@ -2411,7 +2411,9 @@ async function _buildCandles(days) {
       baseline = v;
       const d = new Date(ts[i] * 1000)
         .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-      const slot = mktByDay.get(d) || { open: v, close: v };
+      const slot = mktByDay.get(d) || { open: v, high: v, low: v, close: v };
+      slot.high  = Math.max(slot.high, v);
+      slot.low   = Math.min(slot.low, v);
       slot.close = v;
       mktByDay.set(d, slot);
     }
@@ -2432,15 +2434,18 @@ async function _buildCandles(days) {
     }
   }
 
-  // Merge strategy:
-  //   - Chart open/high/low/close come from the continuous stream so
-  //     adjacent candles join end-to-end (today's open == yesterday's
-  //     close, no after-hours discontinuities in the body or wicks).
-  //   - market_open / market_close are surfaced as separate fields so
-  //     the hover tooltip can report regular-session open/close even
-  //     though the bar geometry uses continuous values. The client
-  //     prefers market_* in the tooltip and falls back to open/close
-  //     on weekends/holidays where the session has no samples.
+  // Merge strategy (2026-07-21 — bar geometry is now SESSION-true):
+  //   - Chart open/high/low/close come from the regular 9:30-16:00 ET
+  //     session, so each candle is the day's true trading OHLC. Overnight
+  //     P&L shows up as the gap between yesterday's close and today's
+  //     open — exactly like a stock's daily chart. (The previous
+  //     continuous-equity geometry folded after-hours drift into the
+  //     bodies, which read as wrong daily OHLC.)
+  //   - Days with no session samples (holidays inside the intraday
+  //     window) fall back to the continuous stream so the chart stays
+  //     unbroken.
+  //   - market_open / market_close stay surfaced for the tooltip; they
+  //     now match the bar geometry on session days.
   //   - Daily fallback mark is used only when the intraday window
   //     doesn't cover the day (older than ~29 days back).
   const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(), ...dailyByDay.keys()]);
@@ -2451,15 +2456,14 @@ async function _buildCandles(days) {
     let row;
     const cont = contByDay.get(d);
     const mkt  = mktByDay.get(d);
-    if (cont) {
+    if (mkt || cont) {
+      const geo = mkt || cont;
       row = {
         date: d,
-        open: cont.open,
-        high: cont.high,
-        low:  cont.low,
-        close: cont.close,
-        // Session-bracketed open/close (market hours only) — used by
-        // the tooltip, not by the bar geometry.
+        open: geo.open,
+        high: geo.high,
+        low:  geo.low,
+        close: geo.close,
         market_open:  mkt ? mkt.open  : null,
         market_close: mkt ? mkt.close : null,
         intraday: true,
@@ -2541,7 +2545,7 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
   const days = Math.min(parseInt(req.query.days) || 90, 4_000);
   try {
     const cutoff = new Date(Date.now() - days * 86400 * 1000)
-      .toISOString().slice(0, 10);
+      .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     const byDate = new Map();
     // Bulk historical base: parquet.
     const parq = await _loadRegimeParquet();
@@ -2557,19 +2561,38 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
     // false-CRISIS daily row) wins, and the chart matches what the breaker/
     // sizer actually traded.
     try {
-      // Bucket by UTC date explicitly — the JS forward-fill below keys on UTC
-      // calendar days, so the SQL must too (don't rely on the session TZ).
+      // Bucket by ET trading day — the candles key their days in
+      // America/New_York, so the backdrop must too (UTC bucketing pushed
+      // evening rows onto the next calendar day and painted the band one
+      // day ahead of the candle it belongs to).
       const mr = await dbQuery(
-        `SELECT DISTINCT ON ((updated_at AT TIME ZONE 'UTC')::date)
-                to_char((updated_at AT TIME ZONE 'UTC')::date, 'YYYY-MM-DD') AS d, state
+        `SELECT DISTINCT ON ((updated_at AT TIME ZONE 'America/New_York')::date)
+                to_char((updated_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS d, state
            FROM market_regime
-          WHERE (updated_at AT TIME ZONE 'UTC')::date >= $1::date
-          ORDER BY (updated_at AT TIME ZONE 'UTC')::date, updated_at DESC`, [cutoff]);
+          WHERE (updated_at AT TIME ZONE 'America/New_York')::date >= $1::date
+          ORDER BY (updated_at AT TIME ZONE 'America/New_York')::date, updated_at DESC`, [cutoff]);
       for (const r of mr.rows) {
         if (r.state) byDate.set(r.d, r.state);
       }
     } catch (e) {
       console.warn('[regime-history] market_regime override failed:', e.message);
+    }
+    // Regime-of-record on top: intraday_regime_states — the state the
+    // breaker/sizer actually traded (5-min HMM, sole author since 06-08).
+    // market_regime went stale 2026-06-15; without this tier the backdrop
+    // forward-fills a month-old state over every recent day.
+    try {
+      const ir = await dbQuery(
+        `SELECT DISTINCT ON ((ts_utc AT TIME ZONE 'America/New_York')::date)
+                to_char((ts_utc AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') AS d, state
+           FROM intraday_regime_states
+          WHERE (ts_utc AT TIME ZONE 'America/New_York')::date >= $1::date
+          ORDER BY (ts_utc AT TIME ZONE 'America/New_York')::date, ts_utc DESC`, [cutoff]);
+      for (const r of ir.rows) {
+        if (r.state) byDate.set(r.d, r.state);
+      }
+    } catch (e) {
+      console.warn('[regime-history] intraday_regime_states override failed:', e.message);
     }
     // Forward-fill across every calendar day in the window so weekends,
     // holidays, and any single-day gaps inherit the prior trading day's
@@ -2578,7 +2601,10 @@ app.get('/api/portfolio/regime-history', async (req, res) => {
     // should paint continuously rather than leaving uncoloured strips
     // between trading sessions.
     const start = new Date(cutoff + 'T00:00:00Z');
-    const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
+    // "Today" in ET — iterating to UTC-today would extend the newest band a
+    // day past the newest candle for the 4 hours after 20:00 ET.
+    const today = new Date(new Date().toLocaleDateString('en-CA',
+      { timeZone: 'America/New_York' }) + 'T00:00:00Z');
     const filled = [];
     let last = null;
     for (let cur = new Date(start); cur <= today; cur.setUTCDate(cur.getUTCDate() + 1)) {
