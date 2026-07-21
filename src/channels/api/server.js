@@ -1673,6 +1673,9 @@ app.get('/api/strategies', async (req, res) => {
         backtest_trade_count:      unifiedBacktest[sid]?.trade_count ?? sr.backtest_trade_count ?? null,
         backtest_return_pct:       unifiedBacktest[sid]?.return_pct  ?? sr.backtest_return_pct  ?? null,
         backtest_max_dd_pct:       unifiedBacktest[sid]?.max_dd_pct  ?? sr.backtest_max_dd_pct  ?? null,
+        // W4: non-null iff the backtest_* fields above are CHOSEN-universe
+        // (shrink) numbers rather than the full-universe run's.
+        universe_tier:             unifiedBacktest[sid]?.universe_tier ?? null,
         // Non-metric carry-overs preserved for the staging UI (NOT backtest
         // metrics): lifecycle timestamp + Saturday-brain staging fields that
         // drive the candidate table's Approve flow + ⚠ data badge.
