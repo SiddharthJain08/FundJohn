@@ -923,8 +923,21 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                 strat_regime = regime
                 strat_regime_str = equity_regime_str
             if not is_eligible(strat.id, strat_regime_str):
-                logger.info('[engine] %s skipped — regime %s not in eligible_regimes', strat.id, strat_regime_str)
+                logger.info('[engine] %s skipped — regime %s not eligible (strategy_regime_params)', strat.id, strat_regime_str)
                 continue
+            # Eligibility is decided SOLELY by the DB gate above — the activation
+            # slider derived from backtest performance (strategy_regime_params).
+            # The strategy's own should_run(active_in_regimes) is a stale SECOND
+            # gate that would silently drop signals for a regime the backtest
+            # qualified but the author's active_in_regimes omits (the
+            # "silent-dead" class — ERR-20260721-002). Mirror the backtest's
+            # discovery-mode override (unified_backtest.py ~949): once the DB says
+            # eligible for this regime, widen THIS INSTANCE's active_in_regimes so
+            # should_run cannot veto the current regime. Strategies that branch on
+            # regime['state'] INSIDE generate_signals still see the live regime.
+            _air = getattr(strat, 'active_in_regimes', None)
+            if strat_regime_str and _air is not None and strat_regime_str not in _air:
+                strat.active_in_regimes = [*_air, strat_regime_str]
             # SP-7 Phase C (C1): per-strategy universe slice. None (gate OFF)
             # → byte-identical legacy behavior: shared panel/universe/aux.
             if strategy_universes is not None and strat.id in strategy_universes:
