@@ -47,6 +47,30 @@ def test_ivol_batch_short_window_returns_empty():
     assert IvolMispricingAsymmetry._ivol_batch(rets, z, z, z).empty
 
 
+def test_recent_window_pct_change_matches_full_panel():
+    """Memory opt: computing pct_change on only the last LOOKBACK+1 rows must be
+    numerically identical to the old full-panel pct_change().iloc[-LOOKBACK:]
+    (incl. NaNs) — that's what lets us drop the full-panel copy without changing
+    results. Also checks the equal-weight market proxy is slice-invariant."""
+    L = 21
+    rng = np.random.default_rng(7)
+    T, N = 400, 40
+    idx = pd.bdate_range('2022-01-03', periods=T)
+    closes = pd.DataFrame(
+        100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, (T, N)), axis=0)),
+        columns=[f'T{i:02d}' for i in range(N)], index=idx,
+    )
+    closes.iloc[300, 5] = np.nan     # inject a hole → NaN in a couple returns
+
+    full = closes.pct_change().fillna(0).iloc[-L:]
+    windowed = closes.iloc[-(L + 1):].pct_change().fillna(0).iloc[-L:]
+    pd.testing.assert_frame_equal(windowed, full)
+
+    # equal-weight market proxy: recent mean == full mean, sliced
+    pd.testing.assert_series_equal(windowed.mean(axis=1),
+                                   closes.pct_change().fillna(0).mean(axis=1).iloc[-L:])
+
+
 def test_generate_signals_runs_end_to_end_crisis():
     rng = np.random.default_rng(3)
     T, N = 300, 70

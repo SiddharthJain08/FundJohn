@@ -79,27 +79,30 @@ class IvolMispricingAsymmetry(BaseStrategy):
         aux   = aux_data or {}
 
         # ── build returns ──────────────────────────────────────────────────
-        closes = prices.copy()
-        tickers = [t for t in universe if t in closes.columns]
+        # MEMORY: do NOT copy the full panel. On the full-universe backtest the
+        # `prices.copy()` + a full-panel `pct_change()` peaked ~4.8GB and OOM-killed
+        # the run. Slice columns straight off `prices` (one subset, no extra copy).
+        tickers = [t for t in universe if t in prices.columns]
         if len(tickers) < self.minimum_universe_size_floor():
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        closes = closes[tickers].sort_index()
-        ret = closes.pct_change().fillna(0)
-
-        # ── proxy FF3 factors from SPY / IWM / LQD if available ───────────
-        mkt_proxy = ret.mean(axis=1)  # equal-weight mkt proxy
-        # SMB: small (bottom-half mktcap) minus large; HML: proxy flat if no data
-        smb_proxy = pd.Series(0.0, index=ret.index)
-        hml_proxy = pd.Series(0.0, index=ret.index)
+        closes = prices[tickers].sort_index()
 
         # ── Step 1: compute IVOL for each ticker ───────────────────────────
+        # The IVOL regression needs only the last IVOL_LOOKBACK returns, so compute
+        # pct_change on just that window (LOOKBACK+1 rows) instead of the whole
+        # ~12.5k-ticker panel. Numerically identical to the old full
+        # pct_change().iloc[-LOOKBACK:]: slicing LOOKBACK+1 rows keeps each of the
+        # last LOOKBACK returns' true prior close, and the leading NaN row is
+        # dropped by the trailing .iloc[-LOOKBACK:].
         last_date = closes.index[-1]
-        recent_ret = ret.iloc[-self.IVOL_LOOKBACK:]
-        recent_mkt = mkt_proxy.iloc[-self.IVOL_LOOKBACK:]
-        recent_smb = smb_proxy.iloc[-self.IVOL_LOOKBACK:]
-        recent_hml = hml_proxy.iloc[-self.IVOL_LOOKBACK:]
+        recent_ret = (closes.iloc[-(self.IVOL_LOOKBACK + 1):]
+                      .pct_change().fillna(0).iloc[-self.IVOL_LOOKBACK:])
+        recent_mkt = recent_ret.mean(axis=1)   # equal-weight mkt proxy (== full mean, sliced)
+        # SMB/HML flat proxies (zero columns → vestigial in the FF3 fit)
+        recent_smb = pd.Series(0.0, index=recent_ret.index)
+        recent_hml = pd.Series(0.0, index=recent_ret.index)
 
         # Vectorized IVOL across all tickers in one lstsq (see _ivol_batch) —
         # replaces the per-ticker loop that blew up to 240 min on the full universe.
