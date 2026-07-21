@@ -77,10 +77,19 @@ class ConditionalCoskewnessFactor(BaseStrategy):
         ret_window = returns.iloc[-window:]
         mkt_ret = ret_window[market_col].values
 
-        # Standardize market returns for regression
-        mkt_mean = mkt_ret.mean()
-        mkt_std = mkt_ret.std()
-        if mkt_std < 1e-10:
+        # Standardize market returns for regression. A zero / near-zero prior
+        # close makes pct_change() == inf; a single non-finite market return
+        # poisons mean/std (and therefore EVERY ticker's regression), and inf
+        # flows straight into np.linalg.lstsq → LAPACK DLASCL "parameter 4 had an
+        # illegal value" (which aborts the process, NOT a catchable exception).
+        # Compute the moments over the finite market returns only.
+        mkt_finite = np.isfinite(mkt_ret)
+        if mkt_finite.sum() < self.MIN_OBS:
+            print(f'[debug] signals=0 (insufficient finite market returns: {int(mkt_finite.sum())})', file=sys.stderr)
+            return []
+        mkt_mean = mkt_ret[mkt_finite].mean()
+        mkt_std = mkt_ret[mkt_finite].std()
+        if not np.isfinite(mkt_std) or mkt_std < 1e-10:
             print(f'[debug] signals=0 (degenerate market returns)', file=sys.stderr)
             return []
 
@@ -89,13 +98,18 @@ class ConditionalCoskewnessFactor(BaseStrategy):
 
         # Design matrix: [1, r_m, r_m^2]
         X = np.column_stack([np.ones(len(mkt_z)), mkt_z, mkt_z2])
+        # Rows where the market return was non-finite produce a non-finite design
+        # row — exclude them from every per-ticker regression below.
+        x_finite = np.isfinite(X).all(axis=1)
 
         coskew_scores = {}
         for ticker in tickers:
             if ticker == market_col:
                 continue
             y = ret_window[ticker].values
-            valid = ~np.isnan(y)
+            # np.isfinite (NOT ~np.isnan) — must also drop inf, which is what the
+            # DLASCL failure was; also drop rows with a non-finite market design.
+            valid = np.isfinite(y) & x_finite
             if valid.sum() < self.MIN_OBS:
                 continue
             y_v = y[valid]
