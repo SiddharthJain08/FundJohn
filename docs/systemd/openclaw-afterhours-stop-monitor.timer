@@ -1,9 +1,11 @@
 [Unit]
-Description=Fire ext-hours stop monitor every 10 min in premarket (04:00-09:30 ET) and after-hours (16:00-20:00 ET)
+Description=Fire stop monitor + exit-fill reporter every 10 min, 04:00-20:00 ET Mon-Fri
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 04..09:00/10:00 America/New_York
-OnCalendar=Mon..Fri *-*-* 16..19:00/10:00 America/New_York
+# Full trading day (2026-07-21): the tick also runs the exit-fill reporter,
+# which must see RTH take-profit/stop fills; the stop-emulation half still
+# self-skips while the market is open (the resting GTC OCO owns RTH exits).
+OnCalendar=Mon..Fri *-*-* 04..19:00/10:00 America/New_York
 Persistent=false
 Unit=openclaw-afterhours-stop-monitor.service
 

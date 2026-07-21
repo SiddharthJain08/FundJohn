@@ -336,3 +336,81 @@ def test_monitor_journal_entry_expires_after_ttl(monkeypatch, tmp_path):
                          positions=_AXTI_POS, freed=True)
     ah.run_stop_monitor(dry_run=False)
     assert calls['submits'] == []          # stale intent must not fire exits
+
+
+# ── exit-fill reporter (2026-07-21) ─────────────────────────────────────────
+
+_CLOSED_ORDERS = [
+    # Entry bracket parent (filled) with a filled TP leg + canceled stop leg:
+    # only the TP LEG is an exit.
+    {'id': 'e1', 'symbol': 'MU', 'type': 'limit', 'order_class': 'bracket',
+     'status': 'filled', 'side': 'buy', 'filled_qty': '3',
+     'filled_avg_price': '850.0', 'limit_price': '850.0',
+     'client_order_id': 'entry_MU',
+     'legs': [
+         {'id': 'tp1', 'symbol': 'MU', 'type': 'limit', 'status': 'filled',
+          'side': 'sell', 'filled_qty': '3', 'filled_avg_price': '918.54',
+          'limit_price': '886.23'},
+         {'id': 'st1', 'symbol': 'MU', 'type': 'stop', 'status': 'canceled',
+          'side': 'sell', 'filled_qty': '0', 'stop_price': '813.05'},
+     ]},
+    # Reattach OCO: parent TP canceled, stop LEG filled → stop exit.
+    {'id': 'p2', 'symbol': 'BW', 'type': 'limit', 'order_class': 'oco',
+     'status': 'canceled', 'side': 'sell', 'filled_qty': '0',
+     'limit_price': '10.69', 'client_order_id': 'oco_BW_1',
+     'legs': [{'id': 'st2', 'symbol': 'BW', 'type': 'stop',
+               'status': 'filled', 'side': 'sell', 'filled_qty': '275',
+               'filled_avg_price': '9.70', 'stop_price': '9.75'}]},
+    # Ext-hours emulated exit (ahsx_) filled.
+    {'id': 'x3', 'symbol': 'AXTI', 'type': 'limit', 'order_class': 'simple',
+     'status': 'filled', 'side': 'sell', 'filled_qty': '59',
+     'filled_avg_price': '51.74', 'limit_price': '51.74',
+     'client_order_id': 'ahsx_AXTI_1'},
+    # Plain filled entry (simple market) — must NOT be reported.
+    {'id': 'e4', 'symbol': 'HPE', 'type': 'market', 'order_class': 'simple',
+     'status': 'filled', 'side': 'buy', 'filled_qty': '50',
+     'filled_avg_price': '45.0', 'client_order_id': 'exec_HPE'},
+]
+
+
+def test_classify_exit_fills_kinds_and_entry_exclusion():
+    fills = {f['id']: f for f in ah.classify_exit_fills(_CLOSED_ORDERS)}
+    assert set(fills) == {'tp1', 'st2', 'x3'}
+    assert fills['tp1']['kind'] == 'take_profit' and fills['tp1']['level'] == 886.23
+    assert fills['st2']['kind'] == 'stop' and fills['st2']['price'] == 9.70
+    assert fills['x3']['kind'] == 'ah_exit'
+
+
+def _reporter_env(monkeypatch, tmp_path, orders):
+    import execution.stop_reattach as sr
+    monkeypatch.setenv('OPENCLAW_EXIT_FILLS_STATE', str(tmp_path / 'fills.json'))
+    posts = []
+    monkeypatch.setattr(ah, '_cli', lambda a, timeout=15: (True, orders, None))
+    monkeypatch.setattr(sr, '_post_alert',
+                        lambda msg, channel='data-alerts':
+                        posts.append((channel, msg)))
+    return posts
+
+
+def test_fill_reporter_first_run_seeds_silently(monkeypatch, tmp_path):
+    posts = _reporter_env(monkeypatch, tmp_path, _CLOSED_ORDERS)
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats == {'fills_seen': 3, 'reported': 0}
+    assert posts == []
+    st = _json.loads((tmp_path / 'fills.json').read_text())
+    assert set(st['seen']) == {'tp1', 'st2', 'x3'}
+
+
+def test_fill_reporter_posts_new_fills_to_trade_reports_once(monkeypatch, tmp_path):
+    (tmp_path / 'fills.json').write_text(_json.dumps({'seen': ['tp1', 'st2']}))
+    posts = _reporter_env(monkeypatch, tmp_path, _CLOSED_ORDERS)
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['reported'] == 1
+    assert len(posts) == 1
+    channel, msg = posts[0]
+    assert channel == 'trade-reports'
+    assert 'AXTI' in msg and '51.74' in msg
+    # Second pass: nothing new.
+    posts.clear()
+    stats = ah.run_exit_fill_reporter(dry_run=False)
+    assert stats['reported'] == 0 and posts == []

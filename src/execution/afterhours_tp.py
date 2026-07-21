@@ -400,7 +400,8 @@ def run_stop_monitor(dry_run: bool) -> dict:
             _save_intents(intents)
             _post_alert(f"🌙 **after-hours exit** {sym}: {a['reason']} "
                         f"cur={a['current']:.2f} level={a['level']:.2f} — "
-                        f"{a['side']} limit x{a['qty']} @ {a['limit']:.2f} placed")
+                        f"{a['side']} limit x{a['qty']} @ {a['limit']:.2f} placed",
+                        channel='trade-reports')
         else:
             stats['failed'] += 1
             log(f"  ✘ {sym} ext-hours exit failed: {(err or {}).get('error','?')} "
@@ -418,6 +419,122 @@ def run_stop_monitor(dry_run: bool) -> dict:
     return stats
 
 
+# ── exit-fill reporter (2026-07-21) ─────────────────────────────────────────
+# Positions that exit via take-profit or stop leave no trace in Discord: the
+# GTC OCO / bracket legs fill silently at the broker. Each monitor tick this
+# pass scans recently CLOSED orders for filled exit orders (any session) and
+# posts one #trade-reports line per fill, deduped via a seen-ids state file.
+
+_EXIT_FILL_LABELS = {
+    'take_profit': '✅ **take-profit filled**',
+    'stop': '🛑 **stop filled**',
+    'ah_take_profit': '🌙 **after-hours take-profit filled**',
+    'ah_exit': '🌙 **after-hours exit filled**',
+}
+
+
+def _fills_state_path() -> _Path:
+    return _Path(os.environ.get(
+        'OPENCLAW_EXIT_FILLS_STATE',
+        '/root/openclaw/logs/exit_fills_reported.json'))
+
+
+def classify_exit_fills(orders) -> list:
+    """Pure: walk closed orders (+legs, so OCO stop children are seen) and
+    return every FILLED exit order as {id,symbol,side,qty,price,level,kind}.
+
+    Exit orders are: any filled stop/stop_limit (top or leg); the TP limit of
+    an oco parent or a bracket/oco leg; and the ext-hours ahtp_/ahsx_ limits.
+    Plain top-level limits/markets without an exit coid are ENTRIES — skipped.
+    """
+    out = []
+    def _emit(o, kind, parent_class=None):
+        try:
+            qty = float(o.get('filled_qty') or 0)
+            price = float(o.get('filled_avg_price') or 0)
+        except (TypeError, ValueError):
+            return
+        if qty <= 0 or price <= 0:
+            return
+        level = o.get('limit_price') if 'take_profit' in kind or kind == 'ah_exit' \
+            else o.get('stop_price')
+        try:
+            level = float(level) if level else None
+        except (TypeError, ValueError):
+            level = None
+        out.append({'id': o.get('id'), 'symbol': o.get('symbol'),
+                    'side': (o.get('side') or '').lower(), 'qty': qty,
+                    'price': price, 'level': level, 'kind': kind,
+                    'filled_at': o.get('filled_at')})
+
+    for top in (orders or []):
+        stack = [(top, None)]
+        while stack:
+            o, parent = stack.pop()
+            for leg in (o.get('legs') or []):
+                stack.append((leg, o))
+            if (o.get('status') or '').lower() != 'filled':
+                continue
+            otype = (o.get('type') or o.get('order_type') or '').lower()
+            oclass = (o.get('order_class') or 'simple').lower()
+            coid = o.get('client_order_id') or ''
+            if otype in ('stop', 'stop_limit'):
+                _emit(o, 'stop')
+            elif coid.startswith('ahtp_'):
+                _emit(o, 'ah_take_profit')
+            elif coid.startswith('ahsx_'):
+                _emit(o, 'ah_exit')
+            elif otype == 'limit' and parent is None and oclass == 'oco':
+                _emit(o, 'take_profit')          # reattach OCO parent IS the TP
+            elif otype == 'limit' and parent is not None:
+                _emit(o, 'take_profit')          # bracket/oco child TP leg
+    return out
+
+
+def run_exit_fill_reporter(dry_run: bool) -> dict:
+    """Report newly-filled exit orders to #trade-reports. First run seeds the
+    seen-set silently so history doesn't flood the channel."""
+    from execution.stop_reattach import _post_alert
+    stats = {'fills_seen': 0, 'reported': 0}
+    ok, orders, _ = _cli(['order', 'list', '--status', 'closed', '--nested',
+                          '--limit', '200'])
+    if not ok:
+        log('fill-reporter: order list failed — skipping')
+        return stats
+    fills = classify_exit_fills(orders)
+    stats['fills_seen'] = len(fills)
+    state_p = _fills_state_path()
+    first_run = not state_p.exists()
+    try:
+        seen_list = list(json.loads(state_p.read_text()).get('seen', []))
+    except (OSError, ValueError):
+        seen_list = []
+    seen = set(seen_list)
+    new = [f for f in fills if f['id'] and f['id'] not in seen]
+    for f in new:
+        seen.add(f['id'])
+        seen_list.append(f['id'])
+        if first_run:
+            continue                     # seed silently, no history flood
+        lvl = f" (level {f['level']:.2f})" if f['level'] else ''
+        msg = (f"{_EXIT_FILL_LABELS[f['kind']]} {f['symbol']}: "
+               f"{f['side'].upper()} {f['qty']:g} @ {f['price']:.2f}{lvl} — "
+               f"${f['qty'] * f['price']:,.0f}")
+        log(f'  {msg}')
+        stats['reported'] += 1
+        if not dry_run:
+            _post_alert(msg, channel='trade-reports')
+    if not dry_run:
+        try:
+            state_p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = state_p.with_suffix('.tmp')
+            tmp.write_text(json.dumps({'seen': seen_list[-800:]}))
+            os.replace(tmp, state_p)
+        except OSError as e:
+            log(f'⚠ fill-reporter state write failed: {e}')
+    return stats
+
+
 def main(argv=None) -> int:
     import argparse
     from execution.stop_reattach import (fetch_positions, fetch_tp_covered,
@@ -430,6 +547,9 @@ def main(argv=None) -> int:
     ap.add_argument('--dry-run', action='store_true')
     args = ap.parse_args(argv)
     if args.monitor:
+        # Fill reporter first (session-agnostic — RTH OCO/bracket fills are
+        # the common case); the stop monitor still skips during RTH itself.
+        log(f'fill-reporter: {run_exit_fill_reporter(args.dry_run)}')
         log(f'stop-monitor: {run_stop_monitor(args.dry_run)}')
         return 0
     if not afterhours_tp_on():

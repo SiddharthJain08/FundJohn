@@ -7297,7 +7297,11 @@ function _buildAlphaBarsHtml(group) {
   const bracketKnown = bracket != null;
   const legPct  = (lvl) => (entry != null && isFinite(entry) && entry !== 0)
     ? ((lvl - entry) / entry) * 100 : null;
-  const legHtml = (label, lvl, title) => {
+  // Leg % color is SEMANTIC, not sign-based: stop = red (risk), target =
+  // green (reward). Sign-based coloring read backwards on shorts, where the
+  // stop sits ABOVE entry (+% → green) and the target below (−% → red).
+  // The signed values themselves stay raw price direction.
+  const legHtml = (label, lvl, title, cls) => {
     if (!bracketKnown) {
       return \`<span class="ab-px" title="could not read resting orders from the broker — \${label} unknown, not necessarily absent">\${label} <b>—</b></span>\`;
     }
@@ -7308,14 +7312,16 @@ function _buildAlphaBarsHtml(group) {
     }
     const gap = legPct(lvl);
     const gapTxt = gap == null ? '' :
-      \` <span class="\${gap >= 0 ? 'pf-pnl-pos' : 'pf-pnl-neg'}">\${gap >= 0 ? '+' : ''}\${gap.toFixed(1)}%</span>\`;
+      \` <span class="\${cls}">\${gap >= 0 ? '+' : ''}\${gap.toFixed(1)}%</span>\`;
     return \`<span class="ab-px" title="\${title}">\${label} <b>\${pxFmt(lvl)}</b>\${gapTxt}</span>\`;
   };
   const bracketHdr = !isOpen ? '' :
     legHtml('stop', bracket && bracket.stop,
-            'stop-loss resting at the broker · % is measured from the entry price')
+            'stop-loss resting at the broker · % is measured from the entry price',
+            'pf-pnl-neg')
     + legHtml('target', bracket && bracket.target,
-              'take-profit resting at the broker · % is measured from the entry price');
+              'take-profit resting at the broker · % is measured from the entry price',
+              'pf-pnl-pos');
   const priceHdr = \`<div class="ab-prices">
       <span class="ab-px">entry <b>\${pxFmt(entry)}</b></span>
       <span class="ab-px">\${isOpen ? 'current' : 'close'} <b>\${pxFmt(nowPx)}</b></span>
@@ -7579,6 +7585,10 @@ function _populateTreemap(container, label) {
   const placed = _squarifiedTreemap(items, w, h);
   container.innerHTML = placed.map(g => {
     const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
+    // Shorts display the TICKER's move, not the position P&L sign — a short
+    // losing 2.2% reads "+2.2%" (the stock rose 2.2%). Color stays keyed to
+    // real P&L (_pnlColor(pnl)): red tile + positive number = losing short.
+    const dispPnl = (pnl != null && g.net_dir === 'SHORT') ? -pnl : pnl;
     const dollarPnl = (g.broker && Number.isFinite(g.broker.unrealized_pl))
       ? g.broker.unrealized_pl
       : ((nav && isFinite(nav) && g.contrib_pct != null) ? g.contrib_pct * nav : null);
@@ -7588,11 +7598,15 @@ function _populateTreemap(container, label) {
     const isSel = g.ticker === selectedTicker;
     const days = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
     const sizeClass = _sizeClassForTile(g.w, g.h);
-    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+    const pnlTip = pnl == null ? '' :
+      (dispPnl !== pnl
+        ? ' · px ' + _fmtPctSigned(dispPnl, true) + ' · pnl ' + _fmtPctSigned(pnl, true)
+        : ' · pnl ' + _fmtPctSigned(pnl, true));
+    const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of NAV · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnlTip}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
     return \`<div class="pf-postile\${isSel ? ' selected' : ''}" data-ticker="\${g.ticker}" data-size="\${sizeClass}" style="left:\${g.x.toFixed(1)}px;top:\${g.y.toFixed(1)}px;width:\${g.w.toFixed(1)}px;height:\${g.h.toFixed(1)}px;background:\${_pnlColor(pnl)}" title="\${tip}">
       <div class="pf-postile-sym">\${g.ticker}</div>
       <div class="pf-postile-bottom">
-        <span class="pf-postile-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+        <span class="pf-postile-pnl">\${dispPnl != null ? _fmtPctSigned(dispPnl, true) : '—'}</span>
         <span class="pf-postile-share">\${sharePct.toFixed(1)}%</span>
       </div>
     </div>\`;
@@ -7626,6 +7640,9 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
   const k = MAX_SIDE / Math.sqrt(maxShare);
   const tilesHtml = shown.map(g => {
       const pnl = (g.net_pnl != null && isFinite(g.net_pnl)) ? g.net_pnl * 100 : null;
+      // Shorts display the TICKER's move (see treemap render above); color
+      // stays keyed to real P&L.
+      const dispPnl = (pnl != null && g.net_dir === 'SHORT') ? -pnl : pnl;
       const share       = (g.total_size_pct || 0) / sizeDenom;
       const sharePct    = share * 100;
       const rawNotional = (g.total_size_pct || 0) * 100;
@@ -7648,7 +7665,11 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
       const tier  = side >= 140 ? 'large' : side >= 100 ? 'medium' : side >= 70 ? 'small' : 'tiny';
       const isSel = g.ticker === selectedTicker;
       const days  = g.avg_days != null ? g.avg_days.toFixed(0) + 'd' : '';
-      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnl != null ? ' · pnl ' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%' : ''}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
+      const pnlTip = pnl == null ? '' :
+        (dispPnl !== pnl
+          ? ' · px ' + _fmtPctSigned(dispPnl, true) + ' · pnl ' + _fmtPctSigned(pnl, true)
+          : ' · pnl ' + _fmtPctSigned(pnl, true));
+      const tip = \`\${g.ticker} · \${sharePct.toFixed(2)}% of book (notional \${rawNotional.toFixed(1)}%) · \${g.n} strateg\${g.n === 1 ? 'y' : 'ies'}\${pnlTip}\${dollarPnl != null ? ' · ' + _fmtDollar(dollarPnl, true) : ''}\${g.avg_days != null ? ' · ' + days : ''}\`;
       // data-side carries the computed side length for the client-side
       // shelf packer (_packHeatmapShelves) to read after DOM insertion.
       // Position becomes absolute via packer; until then tiles render
@@ -7661,7 +7682,7 @@ function _buildHeatmapHtml(groups, selectedTicker, expanded, nav) {
         <div class="pf-tile-hero">
           <div class="tk-symbol">\${g.ticker}</div>
           <div class="tk-row">
-            <span class="tk-pnl">\${pnl != null ? _fmtPctSigned(pnl, true) : '—'}</span>
+            <span class="tk-pnl">\${dispPnl != null ? _fmtPctSigned(dispPnl, true) : '—'}</span>
             \${dollarPnl != null ? '<span class="tk-dollar">' + _fmtDollar(dollarPnl, true) + '</span>' : ''}
           </div>
         </div>

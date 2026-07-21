@@ -516,23 +516,24 @@ def cancel_stops_for(symbol: str, dry_run: bool, include_reserving: bool = False
     return n
 
 
-def _post_alert(msg: str) -> None:
-    """Best-effort operator alert to #data-alerts via the persisted
-    agent_registry webhook (same channel map pipeline_orchestrator.notify
-    uses). The naked-position audit is worthless if it only reaches a log
-    file nobody tails — SNDK/XENE sat breached+naked for 3 days that way."""
+def _post_alert(msg: str, channel: str = 'data-alerts') -> None:
+    """Best-effort Discord post via the persisted agent_registry webhook map
+    (same channel map pipeline_orchestrator.notify uses). Ops alerts go to
+    #data-alerts (default); trade lifecycle events go to #trade-reports. The
+    naked-position audit is worthless if it only reaches a log file nobody
+    tails — SNDK/XENE sat breached+naked for 3 days that way."""
     try:
         conn = psycopg2.connect(os.environ['POSTGRES_URI'])
         cur = conn.cursor()
         cur.execute("SELECT webhook_urls FROM agent_registry WHERE webhook_urls IS NOT NULL")
         url = None
         for (hooks,) in cur.fetchall():
-            if hooks and hooks.get('data-alerts'):
-                url = hooks['data-alerts']
+            if hooks and hooks.get(channel):
+                url = hooks[channel]
                 break
         conn.close()
         if not url:
-            log('alert skipped: no data-alerts webhook in agent_registry')
+            log(f'alert skipped: no {channel} webhook in agent_registry')
             return
         r = requests.post(url, json={'content': msg[:1900]},
                           headers={'User-Agent': 'Mozilla/5.0 (openclaw)'}, timeout=10)
