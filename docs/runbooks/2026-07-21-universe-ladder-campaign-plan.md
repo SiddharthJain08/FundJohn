@@ -168,3 +168,50 @@ by dropping a regime below 100 trades / over DD (→ stays larger). Mirror the e
   quarantined (`284c04f`/`6dcb876`). 8 missing `strategy_regime_params` cells seeded FALSE.
 - Probes (read-only, scratchpad): `gate_probe.py`, `gate_probe2.py`, `resolver_test.py`.
 ```
+
+---
+
+## 8. EXECUTION LOG (2026-07-21, fable session) — campaign SHIPPED
+
+All six work items landed the same day the plan was written:
+
+| Item | Commit(s) | What shipped |
+|---|---|---|
+| W1 | `6e3ff68` | `select_tier` flipped to prefer-largest + per-regime maintain-constraint (blocked shrinks carry `blocked_regimes`); tests flipped + 7 new cases |
+| W2 | `3f76565` | `scripts/backfill_metadata_2016_2020.py` — 60 month-ends promoted (2016-01-31…2020-12-31, ~4.3–6.4k rows/month, source_tag `backfill_hist_2016_2020_v1`); resolver now returns 363/401/436 tickers at 2016/2018/2020 as-ofs (was 0) |
+| W3 | `4a22252` | `backtest/universe_shrink.py` (bucket→aggregate→select) + `scripts/run_universe_shrink.py` (metrics upsert → rec → adopt → chosen flags) + migration 144 `universe_shrink_metrics`; assigner prefers chosen sleeves |
+| W3⁺ | `fbfc65e` | `strategy_weights._load_backtest_sharpe` Tier 0 = chosen shrink sleeves (weights + eligibility read the same universe) |
+| W4 | `4a22252` | `:3000 server.js` overlays chosen-tier metrics onto `ubtRunById` + `regime_breakdown` (tiles, scope blends, regime chips); `universe_tier` marks overlaid entries |
+| W5 | `3d74d94` | staging_approver runs `run_universe_shrink.py --strategy <sid> --adopt --reassign` after every fused-approval backtest; `universe_recommender.js` marked SUPERSEDED |
+| W6 | `dedab89`/`093a8bc` | manifest `metadata.backtest_universe_cap` → `PrecomputedResolver` bound in `run_backtest`; S_ivol capped to `tier_liquid`, `backtest_quarantine` REMOVED |
+
+**Membership artifact:** `data/universe_tier_membership_shrink-20260721.parquet`
+(125 month-ends 2016-03-31→2026-07-21; 2016: sp500 357 / r1000 1018 / r3000 1962 /
+liquid 3060 → 2026: 504 / 1034 / 3049 / 5136). The shrink driver auto-rebuilds it
+when >35 days old.
+
+**§6 W3 validation (shrink vs real tier re-run, matched 2y window 2024-01→2025-12):**
+- `S12_insider` (event/per-ticker): population fidelity GOOD — 87 shrink-kept vs 81
+  real-run trades. Metric deltas mostly a comparison artifact (grid CLI pins
+  DEFAULT_MAX_HOLD_DAYS; fleet primaries bake configured max_hold) + smear-vs-marks.
+- `S24_52wk_high_proximity` (top-N rank): population DIVERGES structurally — shrink
+  kept 346 of 943 full-universe trades; the real tier_liquid run produced 1004
+  *different* trades (Sharpe −0.12 real vs −1.83 shrink). A smaller universe
+  re-picks the cross-sectional top-N; it does not subset it.
+- ⚠️ **Consequence:** tier-vs-tier *selection* stays internally consistent (all tiers
+  filtered identically), but the absolute chosen-universe metrics (dashboard W4,
+  eligibility, weights) are approximations for rank/top-N strategies. They
+  self-correct only when a strategy is re-backtested on its adopted universe.
+  Also measured: only ~37% of S24's full-universe trades fall inside even
+  tier_liquid — full-universe fleet metrics are heavily colored by names the live
+  system can never trade.
+
+**Fleet interaction:** S_ivol is not in `data/.refresh_backtests.done`, so the
+nightly resume runs it under the new cap automatically. The ~43 strategies without
+fresh post-correction primaries get them nightly; **OWED: re-run
+`run_universe_shrink.py --adopt` with a fresh artifact tag after `CANONICAL
+UNIFORM`** (the `shrink-1-<artifact>` candidate-set dedupe makes same-tag re-runs
+no-ops), then the owed weights-rebuild/activation sequence picks up chosen sleeves.
+
+**Escape hatch:** `lifecycle_universe_adoption.revert_universe_recommendation`
+(single or `--do-all`) restores pre-adoption refs from the audit rows.
