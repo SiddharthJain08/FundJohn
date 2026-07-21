@@ -1429,6 +1429,61 @@ app.get('/api/strategies', async (req, res) => {
       };
     }
 
+    // ── Chosen-universe overlay (universe ladder campaign W4, 2026-07-21) ──
+    // When the shrink pass has selected+marked a ladder tier for a strategy's
+    // primary run (universe_shrink_metrics.chosen), the dashboard must show
+    // THAT universe's metrics, not the full-universe run numbers. Overlay
+    // both the run-level map (ubtRunById feeds _allScope) and the per-regime
+    // breakdown (feeds blendScope / regime chips). Full-universe values remain
+    // in strategy_backtest_runs; `universe_tier` marks overlaid entries.
+    // avg_pnl / best-worst stay trade-level from the full run (not persisted
+    // per tier); oos_days_in_regime is universe-independent so it is kept.
+    const shrinkChosenRows = (await dbQuery(`
+      SELECT m.strategy_id, m.tier, m.regime_state, m.sharpe, m.max_dd_pct,
+             m.trade_count, m.win_rate, m.sortino, m.calmar,
+             m.mean_holding_days, m.return_pct
+        FROM universe_shrink_metrics m
+        JOIN (SELECT DISTINCT ON (strategy_id) strategy_id, run_id
+                FROM strategy_backtest_runs WHERE primary_window = TRUE
+               ORDER BY strategy_id, run_at DESC) r ON r.run_id = m.run_id
+       WHERE m.chosen
+    `).catch(() => ({ rows: [] }))).rows;
+    for (const m of shrinkChosenRows) {
+      const entry = unifiedBacktest[m.strategy_id];
+      const run   = ubtRunById[m.strategy_id];
+      if (!entry || !run) continue;
+      if (m.regime_state === 'TOTAL') {
+        run.total_sharpe     = m.sharpe;
+        run.total_max_dd_pct = m.max_dd_pct;
+        run.total_return_pct = m.return_pct;
+        run.total_trades     = m.trade_count;
+        run.total_hit_rate   = m.win_rate;
+        run.total_sortino    = m.sortino;
+        run.total_calmar     = m.calmar;
+        run.avg_holding_days = m.mean_holding_days;
+        Object.assign(entry, {
+          sharpe: m.sharpe, sortino: m.sortino, calmar: m.calmar,
+          return_pct: m.return_pct, max_dd_pct: m.max_dd_pct,
+          trade_count: m.trade_count, universe_tier: m.tier,
+        });
+      } else {
+        const prior = entry.regime_breakdown[m.regime_state] || {};
+        entry.regime_breakdown[m.regime_state] = {
+          sharpe:      m.sharpe,
+          max_dd:      m.max_dd_pct != null ? m.max_dd_pct / 100 : null,
+          total_return_pct: m.return_pct,
+          trade_count: m.trade_count,
+          hit_rate:    m.win_rate,
+          max_dd_pct:        m.max_dd_pct,
+          return_pct:        m.return_pct,
+          avg_pnl_pct:       null,   // not persisted per tier
+          avg_holding_days:  m.mean_holding_days,
+          oos_days_in_regime: prior.oos_days_in_regime ?? null,
+          universe_tier:     m.tier,
+        };
+      }
+    }
+
     // Decorate every breakdown entry with `declared` so the dashboard can
     // render BT Sharpe for ALL traded regimes (including non-declared) and
     // still show eligibility independently. eligibleSet = manifest's

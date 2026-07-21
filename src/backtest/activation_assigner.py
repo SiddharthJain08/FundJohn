@@ -187,13 +187,30 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     if not row:
         return None, {}
     run_id = row['run_id']
+    # Universe ladder campaign W3 (2026-07-21): when the strategy's live
+    # universe is a ladder tier chosen by the shrink pass, judge eligibility
+    # on THAT tier's sleeves (universe_shrink_metrics chosen rows) — the
+    # full-universe strategy_backtest_regimes sleeves describe a universe the
+    # strategy no longer trades. Falls back to the full-run sleeves when no
+    # chosen rows exist (no shrink yet / non-ladder predicate).
     cur.execute("""
         SELECT regime_state, sharpe, trade_count, max_dd_pct
-        FROM strategy_backtest_regimes
-        WHERE run_id = %s
+        FROM universe_shrink_metrics
+        WHERE run_id = %s AND chosen AND regime_state <> 'TOTAL'
     """, (run_id,))
+    rows = cur.fetchall()
+    if rows:
+        _log(f'{strategy_id}: eligibility from chosen shrink sleeves '
+             f'({len(rows)} regimes)')
+    else:
+        cur.execute("""
+            SELECT regime_state, sharpe, trade_count, max_dd_pct
+            FROM strategy_backtest_regimes
+            WHERE run_id = %s
+        """, (run_id,))
+        rows = cur.fetchall()
     diag: dict[str, dict] = {}
-    for r in cur:
+    for r in rows:
         s = r['sharpe']
         n = r['trade_count'] if r['trade_count'] is not None else 0
         dd = r['max_dd_pct']

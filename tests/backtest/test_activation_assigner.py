@@ -153,16 +153,29 @@ class TestComputeEligible(unittest.TestCase):
 
     def test_run_with_zero_regime_rows_returns_none(self):
         """A primary_window row can exist with no strategy_backtest_regimes
-        children (malformed/partial write) -- treated the same as no run."""
-        conn = FakeConn(responses=[{'run_id': 'r1'}, []])
+        children (malformed/partial write) -- treated the same as no run.
+        (3 executes since W3: run_id, empty shrink probe, empty fallback.)"""
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [], []])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertIsNone(eligible)
         self.assertEqual(diag, {})
-        self.assertEqual(len(conn.executed), 2)
+        self.assertEqual(len(conn.executed), 3)
+
+    def test_chosen_shrink_sleeves_take_precedence(self):
+        """W3 (universe ladder campaign): when universe_shrink_metrics has
+        chosen rows for the primary run, they are the eligibility source and
+        strategy_backtest_regimes is never queried."""
+        shrink = [_regime_row('LOW_VOL', 2.0, 150)]
+        poison = [_regime_row('LOW_VOL', -5.0, 1)]   # must NOT be consumed
+        conn = FakeConn(responses=[{'run_id': 'r1'}, shrink, poison])
+        eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
+        self.assertTrue(eligible['LOW_VOL'])
+        self.assertEqual(len(conn.executed), 2)      # no fallback query
+        self.assertIn('universe_shrink_metrics', conn.executed[1][0])
 
     def test_sharpe_threshold_boundary(self):
         rows = [_regime_row('LOW_VOL', 0.5, 100), _regime_row('CRISIS', 0.4999, 100)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertTrue(eligible['LOW_VOL'])     # exactly at threshold -> eligible (>=)
         self.assertFalse(eligible['CRISIS'])     # just below -> not eligible
@@ -171,14 +184,14 @@ class TestComputeEligible(unittest.TestCase):
         # 2026-07-13 v2: slider at 0 activates exactly the QUALIFYING regimes
         # (sharpe strictly > 0) -- a 0.0 sleeve stays dormant.
         rows = [_regime_row('LOW_VOL', 0.0, 100), _regime_row('CRISIS', 0.01, 100)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.0)
         self.assertFalse(eligible['LOW_VOL'])
         self.assertTrue(eligible['CRISIS'])
 
     def test_trade_count_guard_boundary(self):
         rows = [_regime_row('LOW_VOL', 1.0, 20), _regime_row('HIGH_VOL', 1.0, 19)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5, min_trades=20)
         self.assertTrue(eligible['LOW_VOL'])     # n==20 -> passes (>=, explicit override)
         self.assertFalse(eligible['HIGH_VOL'])   # n==19 -> fails
@@ -186,7 +199,7 @@ class TestComputeEligible(unittest.TestCase):
     def test_trade_count_gate_default_100(self):
         # Default trade floor comes from the shared per-regime gate (100).
         rows = [_regime_row('LOW_VOL', 1.0, 100), _regime_row('HIGH_VOL', 1.0, 99)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertTrue(eligible['LOW_VOL'])
         self.assertFalse(eligible['HIGH_VOL'])
@@ -195,24 +208,24 @@ class TestComputeEligible(unittest.TestCase):
         # Per-regime sleeve DD gates: equity ceiling 20, option 30.
         rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0),
                 _regime_row('CRISIS', 1.0, 100, max_dd_pct=15.0)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertFalse(eligible['LOW_VOL'])    # dd 25 > equity 20
         self.assertTrue(eligible['CRISIS'])
-        conn = FakeConn(responses=[{'run_id': 'r1'}, [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0)]])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],[_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=25.0)]])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5,
                                              instrument_class='option')
         self.assertTrue(eligible['LOW_VOL'])     # dd 25 <= option 30
 
     def test_null_dd_fails_closed(self):
         rows = [_regime_row('LOW_VOL', 1.0, 100, max_dd_pct=None)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertFalse(eligible['LOW_VOL'])
 
     def test_null_sharpe_excludes(self):
         rows = [_regime_row('LOW_VOL', None, 200)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertFalse(eligible['LOW_VOL'])
 
@@ -222,7 +235,7 @@ class TestComputeEligible(unittest.TestCase):
         the eligible dict, explicitly False -- all 4 regimes always
         determined."""
         rows = [_regime_row('LOW_VOL', 2.0, 100)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertEqual(set(eligible.keys()), set(aa.CANONICAL_REGIMES))
         self.assertTrue(eligible['LOW_VOL'])
@@ -238,7 +251,7 @@ class TestComputeEligible(unittest.TestCase):
             _regime_row('HIGH_VOL', 2.0, 5),          # fails trades
             _regime_row('CRISIS', -0.5, 50),          # fails sharpe (negative)
         ]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertEqual(eligible, {'LOW_VOL': True, 'TRANSITIONING': False,
                                     'HIGH_VOL': False, 'CRISIS': False})
@@ -250,7 +263,7 @@ class TestComputeEligible(unittest.TestCase):
             _regime_row('HIGH_VOL', 0.3, 5),
             _regime_row('CRISIS', None, 50),
         ]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],rows])
         eligible, diag = aa.compute_eligible(conn, 'S_test', threshold=0.5)
         self.assertEqual(eligible, {r: False for r in aa.CANONICAL_REGIMES})
 
@@ -279,11 +292,12 @@ class TestApplyOneDryRun(unittest.TestCase):
     def test_dry_run_makes_no_writes(self):
         regime_rows = [_regime_row('LOW_VOL', 1.0, 100)]
         prior_rows = [_prior_row('LOW_VOL', True)]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, regime_rows, prior_rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
         result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=True)
         self.assertEqual(result['status'], 'ok')
-        # Exactly 3 reads (run_id, regime rows, prior rows) -- no INSERT/UPDATE.
-        self.assertEqual(len(conn.executed), 3)
+        # Exactly 4 reads (run_id, shrink probe, regime rows, prior rows) --
+        # no INSERT/UPDATE.
+        self.assertEqual(len(conn.executed), 4)
         for sql, _ in conn.executed:
             self.assertNotIn('INSERT', sql.upper())
         self.assertFalse(conn.committed)
@@ -311,7 +325,7 @@ class TestApplyOneWrites(unittest.TestCase):
         # Prior: everything currently True (simulates a strategy that was
         # fully active before this derive run).
         prior_rows = [_prior_row(r, True) for r in aa.CANONICAL_REGIMES]
-        conn = FakeConn(responses=[{'run_id': 'r1'}, regime_rows, prior_rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
         result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
         self.assertEqual(result['status'], 'ok')
         self.assertEqual(result['new'], {'LOW_VOL': True, 'TRANSITIONING': False,
@@ -321,8 +335,9 @@ class TestApplyOneWrites(unittest.TestCase):
         self.assertEqual(result['actions']['HIGH_VOL'], 'deactivated')
         self.assertEqual(result['actions']['CRISIS'], 'deactivated')
         self.assertTrue(conn.committed)
-        # 3 reads + 2 INSERTs per changed regime (3 changed) = 3 + 6 = 9.
-        self.assertEqual(len(conn.executed), 9)
+        # 4 reads (incl. shrink probe) + 2 INSERTs per changed regime
+        # (3 changed) = 4 + 6 = 10.
+        self.assertEqual(len(conn.executed), 10)
         inserts = [sql for sql, _ in conn.executed if sql.strip().upper().startswith('INSERT')]
         self.assertEqual(len(inserts), 6)
         changes_inserts = [s for s in inserts if 'strategy_regime_param_changes' in s]
@@ -341,7 +356,7 @@ class TestApplyOneWrites(unittest.TestCase):
             _regime_row('CRISIS', None, 50),
         ]
         prior_rows = [_prior_row('LOW_VOL', True), _prior_row('CRISIS', True)]  # partially active before
-        conn = FakeConn(responses=[{'run_id': 'r1'}, regime_rows, prior_rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
         result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
         self.assertEqual(result['new'], {r: False for r in aa.CANONICAL_REGIMES})
         # LOW_VOL/CRISIS True->False = deactivated; TRANSITIONING/HIGH_VOL
@@ -358,12 +373,12 @@ class TestApplyOneWrites(unittest.TestCase):
         on every weekly run when nothing changed)."""
         regime_rows = [_regime_row(r, 2.0, 100) for r in aa.CANONICAL_REGIMES]  # all pass
         prior_rows = [_prior_row(r, True) for r in aa.CANONICAL_REGIMES]        # already all True
-        conn = FakeConn(responses=[{'run_id': 'r1'}, regime_rows, prior_rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
         result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
         self.assertTrue(all(a == 'unchanged' for a in result['actions'].values()))
-        # 3 reads only, zero writes (commit() is still issued -- harmless,
-        # just closes the read-only transaction).
-        self.assertEqual(len(conn.executed), 3)
+        # 4 reads only (incl. shrink probe), zero writes (commit() is still
+        # issued -- harmless, just closes the read-only transaction).
+        self.assertEqual(len(conn.executed), 4)
         self.assertTrue(conn.committed)
 
     def test_first_ever_row_always_written_even_if_false(self):
@@ -372,7 +387,7 @@ class TestApplyOneWrites(unittest.TestCase):
         must be fully determined, never implicit-by-omission."""
         regime_rows = [_regime_row('LOW_VOL', -1.0, 100)]  # fails -> False
         prior_rows = []  # no prior rows at all for this strategy
-        conn = FakeConn(responses=[{'run_id': 'r1'}, regime_rows, prior_rows])
+        conn = FakeConn(responses=[{'run_id': 'r1'}, [],regime_rows, prior_rows])
         result = aa.apply_one(conn, 'S_test', threshold=0.5, dry_run=False)
         self.assertEqual(result['actions']['LOW_VOL'], 'initialized')
         inserts = [sql for sql, _ in conn.executed if sql.strip().upper().startswith('INSERT')]
