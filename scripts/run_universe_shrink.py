@@ -114,6 +114,10 @@ def main() -> int:
                     help='re-run the activation assigner after adoptions')
     ap.add_argument('--dry-run', action='store_true',
                     help='compute + print only; no DB writes')
+    ap.add_argument('--force', action='store_true',
+                    help='re-shrink even when a rec with this candidate set '
+                         'already exists (e.g. the strategy has a NEW primary '
+                         'run since the last pass — inserts another rec row)')
     ap.add_argument('--artifact')
     ap.add_argument('--states', default='live,candidate')
     ap.add_argument('--limit', type=int)
@@ -165,10 +169,22 @@ def main() -> int:
     for sid in sids:
         run = primaries[sid]
         with pg.cursor() as cur:
-            cur.execute("""SELECT 1 FROM strategy_universe_recommendations
+            cur.execute("""SELECT id FROM strategy_universe_recommendations
                             WHERE strategy_id=%s AND candidate_set_id=%s""",
                         (sid, candidate_set_id))
-            if cur.fetchone() and not args.dry_run:
+            prior_rec = cur.fetchone()
+            if prior_rec and not args.dry_run and not args.force:
+                # Resume path: the rec exists, so only re-derive the chosen
+                # flags from the CURRENT (post-adoption) manifest predicate —
+                # a crash between rec-insert and flag-update must not leave
+                # them stale.
+                live_pred = _current_predicate(manifest[sid])
+                cur.execute("""UPDATE universe_shrink_metrics
+                                  SET chosen=COALESCE(tier=%s, FALSE), rec_id=%s
+                                WHERE run_id=%s""",
+                            (live_pred if live_pred in LADDER_TIERS else None,
+                             prior_rec[0], run['run_id']))
+                pg.commit()
                 skipped += 1
                 continue
             cur.execute("""
@@ -244,8 +260,10 @@ def main() -> int:
 
         live_pred = choice if adopted else current
         with pg.cursor() as cur:
+            # COALESCE: tier=NULL is NULL, not FALSE (non-ladder live
+            # predicate must clear every chosen flag, not NULL-violate).
             cur.execute("""UPDATE universe_shrink_metrics
-                              SET chosen=(tier=%s), rec_id=%s
+                              SET chosen=COALESCE(tier=%s, FALSE), rec_id=%s
                             WHERE run_id=%s""",
                         (live_pred if live_pred in LADDER_TIERS else None,
                          rec_id, run['run_id']))
