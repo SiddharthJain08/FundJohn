@@ -2199,11 +2199,6 @@
       "instrument_class": "equity"
     },
     "S_conditional_coskewness_factor": {
-      "backtest_quarantine": {
-        "since": "2026-07-21",
-        "actor": "botjohn",
-        "reason": "LAPACK DLASCL param-4 illegal value (degenerate matrix in coskewness computation) — reproducible backtest failure; excluded from fleet re-backtest until the strategy code is fixed. See /root/.learnings/ERRORS.md 2026-07-21."
-      },
       "state": "live",
       "state_since": "2026-07-13T12:52:55.793Z",
       "metadata": {
