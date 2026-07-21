@@ -896,6 +896,36 @@ def _configured_max_hold_days(strategy_id: str) -> int:
         return DEFAULT_MAX_HOLD_DAYS
 
 
+def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None):
+    """Universe ladder campaign W6: when the manifest sets
+    metadata.backtest_universe_cap = <ladder tier>, bound the strategy's
+    BACKTEST universe to that tier via the newest frozen membership artifact
+    (PrecomputedResolver — point-in-time, zero DB). For strategies whose
+    full-universe sim cannot complete on this box (S_ivol: per-bar subsets of
+    the 12,536-col panel OOM the 8GB host), the bounded run IS the shrink
+    baseline — start at tier_liquid, then shrink down the ladder. Returns
+    None when no cap is set (byte-identical legacy behavior)."""
+    manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
+    data_dir = Path(data_dir or ROOT / 'data')
+    try:
+        entry = (json.loads(manifest_path.read_text()).get('strategies', {})
+                 .get(strategy_id) or {})
+        cap = (entry.get('metadata') or {}).get('backtest_universe_cap')
+    except Exception:
+        return None
+    if not cap:
+        return None
+    arts = (sorted(data_dir.glob('universe_tier_membership_shrink-*.parquet'))
+            or sorted(data_dir.glob('universe_tier_membership_*.parquet')))
+    if not arts:
+        _log(f'WARNING universe cap {cap!r} set for {strategy_id} but no '
+             'membership artifact exists — falling back to the static universe')
+        return None
+    from backtest.precomputed_resolver import PrecomputedResolver
+    _log(f'universe cap: {strategy_id} bounded to {cap} via {arts[-1].name}')
+    return PrecomputedResolver(arts[-1], cap)
+
+
 def run_backtest(strategy_id: str, *,
                  filepath: Optional[str] = None,
                  start_date: str = DEFAULT_START_DATE,
@@ -947,6 +977,13 @@ def run_backtest(strategy_id: str, *,
     # early-exit on it.
     instance = strategy_cls()
     instance.active_in_regimes = list(CANONICAL_REGIMES)
+
+    # Universe ladder campaign W6 (2026-07-21): a manifest
+    # metadata.backtest_universe_cap bounds this strategy's BACKTEST universe
+    # to a ladder tier. Only consulted when the caller passed no resolver —
+    # explicit resolvers (grid cells, coupling overrides) always win.
+    if resolver is None:
+        resolver = _bounded_resolver(strategy_id)
 
     close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class))
     regimes = load_regimes()

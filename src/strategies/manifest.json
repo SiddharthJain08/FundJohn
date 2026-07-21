@@ -2111,11 +2111,6 @@
       "instrument_class": "equity"
     },
     "S_ivol_mispricing_asymmetry": {
-      "backtest_quarantine": {
-        "since": "2026-07-21",
-        "actor": "botjohn",
-        "reason": "Per-ticker FF3 lstsq × full (~12.5k) universe → 240-min timeout, never completes the fleet backtest. Vectorized fix landed (one batched lstsq); quarantined so it stops burning nightly windows until the fix is validated on a real run, then lift."
-      },
       "state": "live",
       "state_since": "2026-07-13T12:52:57.492Z",
       "metadata": {
@@ -2124,7 +2119,9 @@
         "description": "Arbitrage asymmetry IVOL puzzle: long underpriced, short overpriced high-IVOL stocks",
         "eligible_regimes": [
           "CRISIS"
-        ]
+        ],
+        "backtest_universe_cap": "tier_liquid",
+        "backtest_universe_cap_reason": "W6 2026-07-21: full 12.5k-universe sim OOMs the 8GB box (engine per-bar panel subsets); bounded to tier_liquid — the broadest adoptable ladder tier — as the shrink baseline. Quarantine lifted same date."
       },
       "history": [
         {
