@@ -319,6 +319,49 @@ def monitor_plan(positions, protection, slip_pct, resting_exit_syms=frozenset())
     return out
 
 
+def _latest_quote(sym: str):
+    """(bid, ask) from the live book, (None, None) when unavailable. Only
+    called for symbols the monitor is about to exit — not per-position."""
+    ok, payload, _ = _cli(['data', 'latest-quote', '--symbol', sym])
+    if not ok or not isinstance(payload, dict):
+        return None, None
+    q = payload.get('quote') or {}
+    def _f(v):
+        try:
+            v = float(v)
+            return v if v > 0 else None
+        except (TypeError, ValueError):
+            return None
+    return _f(q.get('bp')), _f(q.get('ap'))
+
+
+def reprice_exit(action: dict, bid, ask, slip_pct: float) -> float:
+    """Pure: final exit limit from the live book instead of the last trade.
+
+    The last trade can be hours stale on thin names (CLYM 2026-07-21: last
+    12.90 was Monday's close, live book 12.25/12.80 — the last-based
+    'marketable' limit sat above the entire book and could never fill).
+
+    Sells price off the BID, buys off the ASK (the side an exit actually
+    crosses), falling back to the last trade when the book side is empty.
+    tp_reach limits are floored (long) / capped (short) at the TP level —
+    never exit worse than target through this path; if nobody trades at
+    target, the order rests until someone does. stop_breach limits stay
+    unfloored: the position has already broken its risk envelope and the
+    slip-bounded marketable price is the point.
+    """
+    side, reason, level = action['side'], action['reason'], action['level']
+    if side == 'sell':
+        ref = bid if bid else action['current']
+        raw = ref * (1 - slip_pct)
+        limit = max(level, raw) if reason == 'tp_reach' else raw
+    else:
+        ref = ask if ask else action['current']
+        raw = ref * (1 + slip_pct)
+        limit = min(level, raw) if reason == 'tp_reach' else raw
+    return round(limit, 2)
+
+
 def run_stop_monitor(dry_run: bool) -> dict:
     """Effectful monitor pass. Skips during RTH (the GTC OCO owns RTH exits)."""
     from execution.stop_reattach import (fetch_positions, cancel_stops_for,
@@ -383,6 +426,12 @@ def run_stop_monitor(dry_run: bool) -> dict:
     stats['checked'] = len(positions)
     for a in plan:
         sym = a['ticker']
+        bid, ask = _latest_quote(sym)
+        quoted = reprice_exit(a, bid, ask, _slip_pct())
+        if quoted != a['limit']:
+            log(f"  {sym}: repriced off live book (bid={bid} ask={ask}): "
+                f"{a['limit']:.2f} → {quoted:.2f}")
+            a['limit'] = quoted
         log(f"  {sym}: {a['reason']} (cur={a['current']:.2f} level={a['level']:.2f}) "
             f"→ ext-hours {a['side'].upper()} LIMIT x{a['qty']} @ {a['limit']:.2f}")
         if dry_run:

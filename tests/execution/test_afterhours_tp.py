@@ -436,3 +436,66 @@ def test_fill_reporter_posts_new_fills_to_trade_reports_once(monkeypatch, tmp_pa
     posts.clear()
     stats = ah.run_exit_fill_reporter(dry_run=False)
     assert stats['reported'] == 0 and posts == []
+
+
+# ── quote-based exit pricing (2026-07-21) ───────────────────────────────────
+
+def _act(side, reason, level, current, limit=None):
+    return {'ticker': 'X', 'side': side, 'qty': 1, 'reason': reason,
+            'level': level, 'current': current,
+            'limit': limit if limit is not None else current}
+
+
+def test_reprice_tp_reach_floors_at_level_when_book_is_below():
+    # CLYM: last 12.90 was Monday's close; live book 12.25/12.80. The limit
+    # must rest AT the target, not above the entire book.
+    assert ah.reprice_exit(_act('sell', 'tp_reach', 12.60, 12.90),
+                           bid=12.25, ask=12.80, slip_pct=0.005) == 12.60
+
+
+def test_reprice_tp_reach_prices_off_live_bid_when_marketable():
+    # Liquid gap-up: bid 918 vs level 886 → slip off the BID captures the
+    # above-target value (fills at bid or better).
+    got = ah.reprice_exit(_act('sell', 'tp_reach', 886.23, 911.03),
+                          bid=918.0, ask=918.5, slip_pct=0.005)
+    assert got == round(918.0 * 0.995, 2) and got > 886.23
+
+
+def test_reprice_short_tp_reach_caps_at_level():
+    # Short cover: never pay MORE than target via the tp_reach path.
+    assert ah.reprice_exit(_act('buy', 'tp_reach', 52.68, 53.5),
+                           bid=52.9, ask=53.0, slip_pct=0.005) == 52.68
+    # Ask below level → pay the (better) ask-based price.
+    got = ah.reprice_exit(_act('buy', 'tp_reach', 52.68, 50.6),
+                          bid=47.6, ask=47.8, slip_pct=0.005)
+    assert got == round(47.8 * 1.005, 2)
+
+
+def test_reprice_stop_breach_is_unfloored():
+    # Breach = get out; the limit follows the live bid down, slip-bounded.
+    got = ah.reprice_exit(_act('sell', 'stop_breach', 9.75, 10.0),
+                          bid=9.60, ask=9.70, slip_pct=0.005)
+    assert got == round(9.60 * 0.995, 2) < 9.75
+
+
+def test_reprice_falls_back_to_last_trade_without_quote():
+    got = ah.reprice_exit(_act('sell', 'tp_reach', 12.60, 12.90),
+                          bid=None, ask=None, slip_pct=0.005)
+    assert got == round(12.90 * 0.995, 2)
+
+
+def test_monitor_submits_quote_repriced_limit(monkeypatch, tmp_path):
+    # Borrowed-TP CLYM scenario end-to-end: live book 12.25/12.80 → the
+    # submitted ext-hours limit is the TP level, not last-trade minus slip.
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'CLYM': {'stop': 11.81, 'tp': 12.60, 'ts': _time.time()}}))
+    orders = [{'symbol': 'CLYM', 'type': 'stop', 'order_class': 'simple',
+               'stop_price': '11.81'}]
+    positions = [{'symbol': 'CLYM', 'side': 'long', 'qty': 214,
+                  'current_price': 12.90}]
+    calls = _monitor_env(monkeypatch, tmp_path, orders=orders,
+                         positions=positions, freed=True)
+    monkeypatch.setattr(ah, '_latest_quote', lambda s: (12.25, 12.80))
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['exits'] == 1
+    assert calls['submits'][0]['limit_price'] == 12.60
