@@ -603,6 +603,87 @@ def _wait_qty_freed(symbol: str, need: float, timeout: int = 12) -> bool:
     return False
 
 
+def _position_still_open(symbol: str) -> bool:
+    """Fresh broker truth for one symbol. Used before restoring a bare stop
+    after an OCO rejection: the canonical rejection cause ("oco orders must
+    be exit orders") is the position closing mid-pass — its TP filled between
+    fetch_positions() and the submit. Restoring a stop then doesn't protect
+    anything; it OPENS a new position when triggered (KLAC 2026-07-21: 4-sh
+    buy_to_open stop restored onto a flat symbol). Fails open (True) when the
+    broker can't be read — restoring a possibly-needed stop beats leaving a
+    possibly-open position naked, and the orphan sweep catches the miss."""
+    ok, payload, _ = _run_cli(['position', 'list'])
+    if not ok:
+        return True
+    for p in (payload or []):
+        if p.get('symbol') == symbol:
+            try:
+                return abs(float(p.get('qty') or 0)) > 0
+            except (TypeError, ValueError):
+                return True
+    return False
+
+
+def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
+    """Cancel EXIT orders whose symbol has no open position — a triggered
+    orphan doesn't close anything, it opens a fresh unintended position.
+    Exit orders are: bare stop/stop_limit/trailing_stop, OCO parents (pure
+    exit pairs), and afterhours monitor limits (ahtp_/ahsx_ client ids).
+    Plain limit/market entries and bracket/OTO parents (entry + attached
+    exits) are legitimately positionless and are never touched; orders
+    already pending_cancel are left to die. Both lists are fetched fresh so
+    a same-pass race (TP fill after the pass's position snapshot) is caught.
+    Returns labels of cancelled orders; posts a data-alerts note when any."""
+    ok, positions, _ = _run_cli(['position', 'list'])
+    if not ok:
+        log('orphan sweep skipped: position list unavailable')
+        return []
+    pos_syms = set()
+    for p in (positions or []):
+        try:
+            if abs(float(p.get('qty') or 0)) > 0:
+                pos_syms.add(p.get('symbol'))
+        except (TypeError, ValueError):
+            pos_syms.add(p.get('symbol'))
+    ok, orders, _ = _run_cli(['order', 'list', '--status', 'open'])
+    if not ok:
+        log('orphan sweep skipped: order list unavailable')
+        return []
+    cancelled: list[str] = []
+    for o in (orders or []):
+        sym = o.get('symbol')
+        if not sym or sym in pos_syms or (only and sym != only):
+            continue
+        if (o.get('status') or '') == 'pending_cancel':
+            continue
+        otype = o.get('order_type') or o.get('type') or ''
+        oclass = (o.get('order_class') or '').lower()
+        coid = o.get('client_order_id') or ''
+        is_exit = (otype in ('stop', 'stop_limit', 'trailing_stop')
+                   or oclass == 'oco'
+                   or coid.startswith(('ahtp_', 'ahsx_')))
+        if not is_exit:
+            continue
+        oid = o.get('id')
+        label = f'{sym} {oclass or otype} x{o.get("qty")}'
+        if dry_run:
+            log(f'  DRY-RUN orphan cancel: {label} ({oid})')
+            cancelled.append(label)
+            continue
+        ok2, _, _ = _run_cli(['order', 'cancel', '--order-id', oid])
+        if ok2:
+            log(f'  🧹 orphan exit cancelled (no position): {label}')
+            cancelled.append(label)
+        else:
+            log(f'  ⚠ {sym}: orphan cancel failed for {oid}')
+    log(f'orphan sweep: {len(cancelled)} exit order(s) on flat symbols'
+        + (f' — {", ".join(cancelled)}' if cancelled else ''))
+    if cancelled and not dry_run:
+        _post_alert('🧹 **stop_reattach: cancelled orphan exit order(s) on flat '
+                    'symbols** — ' + ', '.join(cancelled))
+    return cancelled
+
+
 def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
     """Upgrade positions to a GTC OCO (take-profit + stop) where both legs are
     valid. Idempotent: positions already carrying a resting take-profit are
@@ -611,7 +692,7 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
     tp_cov = fetch_tp_covered(linked_only=True)
     stats = {'oco': 0, 'already_tp': 0, 'no_sub': 0, 'degenerate': 0,
              'breached': 0, 'reached': 0, 'rejected': 0, 'restored': 0,
-             'tp_missing': 0}
+             'tp_missing': 0, 'closed_mid_pass': 0}
     for pos in positions:
         sym = pos.get('symbol')
         try:
@@ -673,6 +754,10 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
         ncanc = cancel_stops_for(sym, dry_run, include_reserving=True,
                                  exit_side='sell' if side == 'long' else 'buy')
         if not dry_run and ncanc and not _wait_qty_freed(sym, pos_qty):
+            if not _position_still_open(sym):
+                stats['closed_mid_pass'] += 1
+                log(f'  ○ {sym}: position closed mid-pass — no restore')
+                continue
             log(f'  ⚠ {sym}: shares not freed after stop cancel — restoring stop, skipping OCO')
             submit_protective_stop(ticker=sym, position_side=side, qty=pos_qty,
                                    stop_price=new_stop, dry_run=False)
@@ -686,6 +771,11 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
         else:
             stats['rejected'] += 1
             if not dry_run:
+                if not _position_still_open(sym):
+                    stats['closed_mid_pass'] += 1
+                    log(f'  ○ {sym}: position closed mid-pass (nothing left to '
+                        f'exit) — no restore')
+                    continue
                 # OCO failed AFTER canceling the bare stop — restore loss-side
                 # protection so the position is never left naked.
                 log(f'  ↩ {sym}: OCO rejected, restoring bare stop')
@@ -723,6 +813,9 @@ def main():
         positions = [p for p in positions if p.get('symbol') == args.only]
         log(f'--only {args.only}: {len(positions)} position(s) after filter')
     if not positions:
+        # Nothing to protect, but exit orders may survive their positions
+        # (orphans open unintended positions when triggered) — sweep anyway.
+        sweep_orphan_exits(args.dry_run, only=args.only)
         return 0
 
     plans = []
@@ -818,6 +911,10 @@ def main():
         naked = audit_naked_positions(positions, breached, args.dry_run)
         if naked:
             log(f'⚠ NAKED after pass: {", ".join(naked)}')
+        # Inverse of the naked audit: exit orders without positions. Runs
+        # LAST so a position that closed during this very pass (TP fill
+        # racing the OCO upgrade — KLAC 2026-07-21) is caught same-pass.
+        sweep_orphan_exits(args.dry_run, only=args.only)
     finally:
         conn.close()
     return 0
