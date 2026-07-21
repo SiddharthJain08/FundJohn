@@ -80,8 +80,8 @@ def autoadopt_enabled() -> bool:
 
 
 def should_autoadopt(metrics_by_tier: dict, current: str, choice: str) -> bool:
-    """ΔSharpe(choice − current tier) >= 0.10 (epsilon-guarded). Narrowing
-    parsimony moves (negative Δ) and non-ladder current predicates do NOT
+    """ΔSharpe(choice − current tier) >= 0.10 (epsilon-guarded). Sharpe-losing
+    moves (negative Δ) and non-ladder current predicates do NOT
     auto-adopt — they post as normal pending recs for the operator."""
     cur_m, new_m = metrics_by_tier.get(current), metrics_by_tier.get(choice)
     if not cur_m or not new_m:

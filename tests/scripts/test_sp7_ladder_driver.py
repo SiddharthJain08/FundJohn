@@ -76,10 +76,12 @@ def test_finalize_payload_no_change():
     W = ('2021-07-01', '2026-06-05')
     cells = {
         'sp500':       {'status': 'done', 'metrics': {'sharpe': 1.5, 'trades_n': 100}, 'w': W},
-        'tier_r1000':  {'status': 'done', 'metrics': {'sharpe': 1.55, 'trades_n': 100}, 'w': W},
+        'tier_r1000':  {'status': 'done', 'metrics': {'sharpe': 1.35, 'trades_n': 100}, 'w': W},
         'tier_r3000':  {'status': 'done', 'metrics': {'sharpe': 1.2, 'trades_n': 100}, 'w': W},
         'tier_liquid': {'status': 'done', 'metrics': {'sharpe': 0.9, 'trades_n': 100}, 'w': W},
     }
+    # sp500 beats every broader tier by >= 0.10 at each rung, so even under
+    # prefer-largest the chain walks all the way down to the current tier
     p = drv.finalize_payload(cells, current='sp500')
     assert p['verdict_name'] == 'no_change' and p['choice'] == 'sp500'
 
@@ -131,7 +133,7 @@ def test_should_autoadopt_requires_delta_vs_current():
 
 
 def test_should_autoadopt_narrowing_or_unknown_current_declines():
-    # narrowing parsimony move: winner BELOW current tier's sharpe
+    # sharpe-losing move: winner BELOW current tier's sharpe
     m = {'sp500': {'sharpe': 1.0, 'trades_n': 100},
          'tier_liquid': {'sharpe': 1.4, 'trades_n': 100}}
     assert drv.should_autoadopt(m, current='tier_liquid', choice='sp500') is False

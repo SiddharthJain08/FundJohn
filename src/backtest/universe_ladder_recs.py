@@ -39,7 +39,10 @@ def build_rationale(verdict: dict, *, window: tuple[str, str]) -> str:
              f"eligible={','.join(verdict['eligible']) or 'none'};"]
     for c in verdict.get('comparisons', []):
         mark = '→' if c['displaced'] else '✗'
-        parts.append(f"{c['challenger']} vs {c['incumbent']} Δ={c['delta']:+.2f}{mark};")
+        blocked = c.get('blocked_regimes') or []
+        note = f" blocked[{','.join(blocked)}]" if blocked else ''
+        parts.append(f"{c['challenger']} vs {c['incumbent']} "
+                     f"Δ={c['delta']:+.2f}{mark}{note};")
     parts.append(f"verdict={verdict['verdict']}"
                  + (f" choice={verdict['choice']}" if verdict['choice'] else ''))
     return ' '.join(parts)[:1000]
