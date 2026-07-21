@@ -573,6 +573,31 @@ async function _phaseCodeAndBacktest(job, ctx) {
       console.warn('[staging_approver] universe stamp failed (non-fatal):', e.message);
     }
 
+    // Universe ladder shrink (campaign W5, 2026-07-21): re-select the new
+    // strategy's universe from its just-persisted FULL-universe backtest by
+    // shrinking the stored trades down the tier ladder (prefer-largest;
+    // a narrower tier only on ΔSharpe >= 0.10 AND the per-regime DD/trades
+    // maintain-constraint) and adopt the choice — the same rule the fleet
+    // re-selection uses. The stamp above stays as the backstop when the
+    // shrink yields no_signal or fails. --reassign re-derives the sizer's
+    // per-regime eligibility from the CHOSEN tier's sleeves. Never fatal.
+    try {
+      const { spawnSync } = require('child_process');
+      const r = spawnSync('python3',
+        ['scripts/run_universe_shrink.py', '--strategy', job.strategy_id,
+         '--adopt', '--reassign'],
+        { cwd: OPENCLAW_DIR, timeout: 900_000, encoding: 'utf8',
+          env: { ...process.env, PYTHONPATH: 'src' } });
+      const tail = String(r.stdout || '').trim().split('\n').slice(-2).join(' | ');
+      if (r.status === 0) {
+        console.log(`[staging_approver] ${job.strategy_id}: universe shrink → ${tail}`);
+      } else {
+        console.warn(`[staging_approver] ${job.strategy_id}: universe shrink rc=${r.status} (non-fatal): ${String(r.stderr || '').slice(-300)}`);
+      }
+    } catch (e) {
+      console.warn('[staging_approver] universe shrink failed (non-fatal):', e.message);
+    }
+
     // Fully-automatic pipeline (operator directive 2026-07-13): continue
     // candidate → live through the per-regime qualification gate. Goes via
     // the HTTP route (same process, :3000) so registry-first sync,

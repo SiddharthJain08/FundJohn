@@ -3,6 +3,14 @@
 /**
  * universe_recommender.js — SP-2 Phase C Task 3.
  *
+ * ⚠️ SUPERSEDED (2026-07-21, universe ladder campaign W3): universe
+ * re-selection now SHRINKS the stored full-universe primary-run trades down
+ * the tier ladder (scripts/run_universe_shrink.py — no per-candidate
+ * re-runs, no LLM) with the prefer-largest select_tier. This curator's
+ * per-candidate grid re-run (spawnSync universe_grid_cli below) and its
+ * Opus pick stay only as a manual fallback; its timer
+ * (openclaw-universe-recs.timer) remains disabled.
+ *
  * MastermindJohn curator that runs every Saturday at 20:00 ET. For each live
  * strategy it:
  *   1. Builds a per-candidate backtest grid (4 cap-independent predicates) by

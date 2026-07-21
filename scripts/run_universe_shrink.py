@@ -71,7 +71,18 @@ def ensure_artifact(args) -> tuple[Path, str]:
         'universe_tier_membership_shrink-*.parquet'))
     if existing:
         p = existing[-1]
-        return p, p.stem.replace('universe_tier_membership_', '')
+        tag = p.stem.replace('universe_tier_membership_', '')
+        # Reuse while fresh: an artifact whose build date is >35 days old
+        # can't bucket the newest trades (its last month-end predates them),
+        # so rebuild instead (research-pipeline W5 path runs unattended).
+        try:
+            built = date.fromisoformat(
+                f'{tag[-8:-4]}-{tag[-4:-2]}-{tag[-2:]}')
+            fresh = (date.today() - built).days <= 35
+        except ValueError:
+            fresh = True
+        if fresh:
+            return p, tag
     run_id = f'shrink-{date.today().strftime("%Y%m%d")}'
     print(f'[shrink] building membership artifact {run_id} '
           '(2016-03-01 → today; ~2 min)…')
@@ -263,9 +274,11 @@ def main() -> int:
 
     if adopted_ids:
         if args.reassign:
-            print('[shrink] re-running activation assigner (--all)…')
+            scope = (['--strategy-id', adopted_ids[0]]
+                     if len(adopted_ids) == 1 else ['--all'])
+            print(f'[shrink] re-running activation assigner {scope}…')
             rc = subprocess.run(
-                ['python3', '-m', 'backtest.activation_assigner', '--all',
+                ['python3', '-m', 'backtest.activation_assigner', *scope,
                  '--notify'],
                 cwd=str(ROOT), env={**os.environ, 'PYTHONPATH': 'src'},
             ).returncode
