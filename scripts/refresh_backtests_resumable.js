@@ -104,8 +104,18 @@ function allStrategies() {
   // tier for a stable, resumable order. This only changes ORDER — every strategy
   // still runs exactly once; the checkpoint is by strategy_id, order-independent.
   const RANK = { live: 0, candidate: 1, staging: 2 };
-  return Object.entries(m.strategies || {})
-    .filter(([, e]) => e.state in RANK)
+  const entries = Object.entries(m.strategies || {}).filter(([, e]) => e.state in RANK);
+  // Backtest quarantine (2026-07-21). A strategy whose backtest REPRODUCIBLY
+  // fails (e.g. a numerical bug) is excluded here via an additive manifest flag
+  // `backtest_quarantine` — this does NOT change lifecycle `state` — so it stops
+  // consuming a fleet slot every night until the strategy code is fixed. NEVER
+  // silent: log each skip + reason so the exclusion is visible in the run log.
+  for (const [sid, e] of entries.filter(([, e]) => e.backtest_quarantine)) {
+    const why = (e.backtest_quarantine && e.backtest_quarantine.reason) || 'flagged';
+    console.log(`[rebt] QUARANTINED (skipped): ${sid} — ${why}`);
+  }
+  return entries
+    .filter(([, e]) => !e.backtest_quarantine)
     .sort(([aSid, aE], [bSid, bE]) =>
       (RANK[aE.state] - RANK[bE.state]) || aSid.localeCompare(bSid))
     .map(([sid]) => sid);
