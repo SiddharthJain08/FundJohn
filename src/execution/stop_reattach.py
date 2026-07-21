@@ -641,6 +641,24 @@ def run_oco_reattach(conn, positions: list[dict], dry_run: bool) -> dict:
             # floor, but surface a missing take-profit for operator review.
             if tstatus == 'reached':
                 stats['reached'] += 1
+                # A reached target can never rest as an OCO, and a stop-only
+                # position gives the ext-hours monitor no TP level to act on
+                # — CLYM rode 2.4% past target for 20h that way (2026-07-21).
+                # Hand the levels to the monitor's pending-exit journal; its
+                # next ext-hours tick captures the profit.
+                if not dry_run:
+                    try:
+                        from execution.afterhours_tp import (_load_intents,
+                                                             _save_intents)
+                        import time as _t
+                        intents = _load_intents()
+                        intents[sym] = {'stop': new_stop, 'tp': new_target,
+                                        'ts': _t.time()}
+                        _save_intents(intents)
+                        log(f'  → {sym}: target {new_target} already reached '
+                            f'— handed to ext-hours monitor journal')
+                    except Exception as e:
+                        log(f'  ⚠ {sym}: monitor-journal handoff failed: {e}')
             else:
                 stats['degenerate'] += 1
                 stats['tp_missing'] += 1

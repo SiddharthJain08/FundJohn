@@ -347,18 +347,37 @@ def run_stop_monitor(dry_run: bool) -> dict:
     intents = _load_intents()
     pos_syms = {p.get('symbol') for p in positions}
     for sym in list(intents):
-        # Position closed, or protection is visible again (restore landed /
-        # a reattach pass re-covered it) — the debt is settled.
-        if sym not in pos_syms or sym in protection:
-            intents.pop(sym)
-    for sym, i in intents.items():
-        # We cancelled this symbol's protection on an earlier tick and never
-        # replaced it (broker cancel outlived _wait_qty_freed, then the
-        # bare-stop restore hit insufficient-qty on the still-reserved
-        # shares). Resurrect the levels so the plan retries — by now the
-        # cancel has completed and the shares are free.
-        log(f'  ↻ {sym}: pending-exit journal has unreplaced protection — retrying')
-        protection[sym] = {'stop': i.get('stop'), 'tp': i.get('tp')}
+        it = intents[sym]
+        if sym not in pos_syms:
+            intents.pop(sym)             # position closed — debt settled
+            continue
+        lv = protection.get(sym)
+        if lv is not None:
+            # Clear only when the OWED leg is resting again. An intent that
+            # carries a TP is settled by a resting TP, never by a bare stop:
+            # clearing on any protection re-opens the stop-only blind spot
+            # (a restored/floor stop hides the TP from every later tick).
+            owes_tp = it.get('tp') is not None
+            if (owes_tp and lv.get('tp') is not None) or \
+               (not owes_tp and lv.get('stop') is not None):
+                intents.pop(sym)
+                continue
+            # Stop-only but a TP is owed (reached-target handoff from the
+            # reattach pass, or an OCO cancel that only restored the stop):
+            # borrow the journaled TP; a live stop level wins over the
+            # journaled one.
+            log(f'  ↻ {sym}: journal owes a take-profit — borrowing level onto live protection')
+            protection[sym] = {'stop': lv.get('stop') if lv.get('stop') is not None
+                               else it.get('stop'),
+                               'tp': it.get('tp')}
+        else:
+            # We cancelled this symbol's protection on an earlier tick and
+            # never replaced it (broker cancel outlived _wait_qty_freed, then
+            # the bare-stop restore hit insufficient-qty on the still-reserved
+            # shares). Resurrect the levels so the plan retries — by now the
+            # cancel has completed and the shares are free.
+            log(f'  ↻ {sym}: pending-exit journal has unreplaced protection — retrying')
+            protection[sym] = {'stop': it.get('stop'), 'tp': it.get('tp')}
     plan = monitor_plan(positions, protection, _slip_pct(),
                         resting_exit_syms=resting_exits)
     stats['checked'] = len(positions)

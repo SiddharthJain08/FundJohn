@@ -312,19 +312,41 @@ def test_monitor_journal_cleared_when_position_closed(monkeypatch, tmp_path):
     assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
 
 
-def test_monitor_journal_cleared_when_protection_visible_again(monkeypatch, tmp_path):
-    # A reattach pass (or the restore) re-covered the symbol: live orders win,
-    # the journal entry is settled, and an inside-band price does nothing.
+def test_monitor_journal_cleared_when_owed_tp_rests_again(monkeypatch, tmp_path):
+    # A reattach pass re-covered the symbol with a full OCO (TP resting): the
+    # owed leg is back, the journal entry is settled, and an inside-band price
+    # does nothing. A bare stop alone must NOT settle a TP-owing intent.
     (tmp_path / 'pending.json').write_text(_json.dumps(
         {'AXTI': {'stop': 43.84, 'tp': 50.16, 'ts': _time.time()}}))
-    orders = [{'symbol': 'AXTI', 'type': 'stop', 'order_class': 'simple',
-               'stop_price': '43.84'}]
+    orders = [{'symbol': 'AXTI', 'type': 'limit', 'order_class': 'oco',
+               'limit_price': '50.16',
+               'legs': [{'symbol': 'AXTI', 'type': 'stop',
+                         'stop_price': '43.84'}]}]
     positions = [{'symbol': 'AXTI', 'side': 'long', 'qty': 59,
                   'current_price': 47.0}]
     calls = _monitor_env(monkeypatch, tmp_path, orders=orders,
                          positions=positions, freed=True)
     ah.run_stop_monitor(dry_run=False)
     assert calls['cancels'] == [] and calls['submits'] == []
+    assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
+
+
+def test_monitor_borrows_owed_tp_over_stop_only_protection(monkeypatch, tmp_path):
+    # CLYM 2026-07-21: reached-target position carries only a bare stop, so
+    # protection_map alone can never decide tp_reach. The journaled TP must be
+    # borrowed onto the live protection and the capture executed.
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'CLYM': {'stop': 11.81, 'tp': 12.60, 'ts': _time.time()}}))
+    orders = [{'symbol': 'CLYM', 'type': 'stop', 'order_class': 'simple',
+               'stop_price': '11.81'}]
+    positions = [{'symbol': 'CLYM', 'side': 'long', 'qty': 214,
+                  'current_price': 12.90}]
+    calls = _monitor_env(monkeypatch, tmp_path, orders=orders,
+                         positions=positions, freed=True)
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['exits'] == 1
+    assert calls['cancels'] == ['CLYM']
+    assert calls['submits'] and calls['submits'][0]['ticker'] == 'CLYM'
     assert _json.loads((tmp_path / 'pending.json').read_text()) == {}
 
 

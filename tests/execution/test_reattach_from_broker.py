@@ -81,3 +81,27 @@ def test_no_silent_drop_when_target_unavailable(monkeypatch):
     stats = sr.run_oco_reattach(conn=None, positions=[_pos('long', 627.80, 694.0)],
                                 dry_run=True)
     assert stats['tp_missing'] == 1           # surfaced, not silently skipped
+
+
+def test_reached_target_hands_off_to_monitor_journal(monkeypatch, tmp_path):
+    """Target already passed → no OCO can rest, but the TP must not vanish:
+    the levels go to the ext-hours monitor's pending-exit journal so its next
+    tick captures the profit (CLYM rode 2.4% past target for 20h, 2026-07-21)."""
+    import json
+    monkeypatch.setenv('OPENCLAW_REATTACH_FROM_BROKER', '1')
+    monkeypatch.setenv('OPENCLAW_AH_INTENTS_PATH', str(tmp_path / 'pending.json'))
+    monkeypatch.setattr(sr, 'fetch_tp_covered', lambda linked_only=False: {})
+    monkeypatch.setattr(sr, 'latest_broker_bracket',
+                        lambda t, s: {'entry': None, 'stop': 611.89,
+                                      'target': 717.03, 'order_id': 'oid'})
+    monkeypatch.setattr(sr, 'latest_stop_submission',
+                        lambda c, t, s: {'entry_price': 627.51, 'stop_price': 516.11,
+                                         'target_price': 604.79})
+    stats = sr.run_oco_reattach(conn=None, positions=[_pos('long', 627.80, 720.0)],
+                                dry_run=False)
+    assert stats['reached'] == 1 and stats['oco'] == 0
+    j = json.loads((tmp_path / 'pending.json').read_text())
+    # Journaled levels are the pass's COMPUTED bracket: tp at/below current
+    # (that's what 'reached' means), stop below tp.
+    assert j['WDC']['tp'] is not None and j['WDC']['tp'] <= 720.0
+    assert j['WDC']['stop'] is not None and j['WDC']['stop'] < j['WDC']['tp']
