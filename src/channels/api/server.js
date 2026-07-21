@@ -3610,6 +3610,7 @@ body.rs-chat-locked{overflow:hidden}
 /* Manifest↔registry drift badge — additive, never replaces the primary status. */
 .st-drift-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--yellow);border:1px solid var(--yellow);background:transparent;cursor:help;vertical-align:middle}
 .st-fresh-badge{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;margin-left:6px;border-radius:3px;color:var(--green);border:1px solid var(--green);background:transparent;cursor:help;vertical-align:middle}
+.st-uni-badge{display:inline-block;font-size:9px;font-weight:700;padding:0 4px;margin-left:6px;border-radius:3px;color:var(--blue);border:1px solid var(--blue);background:transparent;cursor:help;vertical-align:middle;letter-spacing:.03em}
 .st-drift-header{font-size:11px;color:var(--yellow);padding:4px 6px 8px;letter-spacing:.03em}
 #pf-inner{display:flex;flex-direction:column;gap:16px;padding:20px 24px}
 .pf-summary-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -8998,6 +8999,19 @@ function _freshBadge(r) {
   if (!r.fresh) return '';
   return '<span class="st-fresh-badge" title="Newly promoted — live for less than a week (auto-approval batch)">✨ fresh</span>';
 }
+// Universe ladder campaign W4 (2026-07-21): chip showing the CHOSEN universe
+// tier the strategy trades (universe shrink). Non-null universe_tier also
+// means every backtest metric on the row is that tier's shrunk number, not
+// the full-universe run's.
+const _UNI_LABELS = { sp500: 'SP500', tier_r1000: 'R1000',
+                      tier_r3000: 'R3000', tier_liquid: 'LIQUID' };
+function _universeBadge(r) {
+  const t = r.universe_tier;
+  if (!t) return '';
+  return '<span class="st-uni-badge" title="Chosen universe: ' + t
+       + ' (ladder shrink) — Sharpe/DD/trade metrics on this row are for THIS universe, not the full-universe backtest">'
+       + (_UNI_LABELS[t] || t) + '</span>';
+}
 function _driftBadge(r) {
   if (!r.drift || r.drift === 'none') return '';
   if (r.drift === 'trading_not_shown') {
@@ -9410,7 +9424,7 @@ function _renderActiveStack(rows) {
         </tr>\` : '';
       return \`<tr class="st-row-expandable \${isOpen ? 'st-row-open' : ''}" data-sid="\${_escStr(r.strategy_id)}">
         <td class="st-name-cell" style="font-weight:600" title="\${_escStr(r.description)}" onclick="_stToggleExpand('\${_escStr(r.strategy_id)}')">
-          <span class="st-chevron">▶</span>\${r.strategy_id}
+          <span class="st-chevron">▶</span>\${r.strategy_id}\${_universeBadge(r)}
         </td>
         <td><span class="sg-status sg-status-\${sub}" title="\${_escStr(title)}">\${subLabel}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimeBreakdown(r)}</td>
@@ -9675,7 +9689,7 @@ function _renderInactiveStack(rows) {
     </tr>
     \${shown.map(r => {
       return \`<tr>
-        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}</td>
+        <td style="font-weight:600" title="\${_escStr(r.description)}">\${r.strategy_id}\${_universeBadge(r)}</td>
         <td><span class="st-badge st-badge-\${r.state}">\${r.state.toUpperCase()}</span>\${_driftBadge(r)}\${_freshBadge(r)}</td>
         <td>\${_regimesCell(r)}</td>
         <td style="color:var(--dim)">\${_fmtDate(r.last_signal_date)}</td>
