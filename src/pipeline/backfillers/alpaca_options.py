@@ -260,7 +260,14 @@ def _merge_write(new_df: pd.DataFrame, *, parquet_path: Path = PARQUET_PATH) -> 
     loaded the whole 6M-row master (pd.read_parquet + concat) and was
     OOM-killed daily at 3.6-6.2G peaks on the 8GB no-swap box.
     """
-    from src.data.parquet_store import append_dedup
+    try:
+        from src.data.parquet_store import append_dedup
+    except ModuleNotFoundError:
+        # The systemd unit execs this file directly (no PYTHONPATH); the
+        # repo root is three levels up from src/pipeline/backfillers/.
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+        from src.data.parquet_store import append_dedup
     with _PARQUET_LOCK:
         parquet_path.parent.mkdir(parents=True, exist_ok=True)
         append_dedup(parquet_path, new_df,

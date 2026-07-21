@@ -36,9 +36,16 @@ function resolveScript(step, runDate, env = process.env, root = DEFAULT_ROOT) {
   if (fs.existsSync(jsPipe)) {
     // The collect step buffers up to 12k+ tickers' price rows before the
     // mid-flush checkpoint; raise the V8 heap limit so the Node process
-    // does not get OOM-killed before it can flush.
-    const nodeFlags = step === 'run_collector_once' ? ['--max-old-space-size=4096'] : [];
-    return { argv: maybeDry(['node', ...nodeFlags, jsPipe]), timeoutSec: 5400 };
+    // does not get OOM-killed before it can flush. Its timeout is tunable
+    // (OPENCLAW_COLLECT_TIMEOUT_SECONDS, same knob as the Python
+    // orchestrator) — a healthy full-universe collect already takes ~85min
+    // and rc=124 here kills the whole signal night (07-16, 07-20).
+    const isCollect = step === 'run_collector_once';
+    const nodeFlags = isCollect ? ['--max-old-space-size=4096'] : [];
+    const timeoutSec = isCollect
+      ? parseInt(env.OPENCLAW_COLLECT_TIMEOUT_SECONDS || '9000', 10)
+      : 5400;
+    return { argv: maybeDry(['node', ...nodeFlags, jsPipe]), timeoutSec };
   }
   if (fs.existsSync(pyExec)) {
     let timeoutSec = 300;
