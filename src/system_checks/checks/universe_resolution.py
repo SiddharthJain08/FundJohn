@@ -20,24 +20,28 @@ def _universe_resolution():
         out = subprocess.check_output(
             ['python3', '-m', 'src.strategies.universe_resolver',
              '--as-of', str(date.today()), '--states', 'live'],
-            text=True, timeout=30,
+            text=True, timeout=90,
         )
         elapsed = time.monotonic() - t0
         n = len(json.loads(out))
     except subprocess.TimeoutExpired:
-        return Status.FAIL, 'resolver timed out after 30s'
+        return Status.FAIL, 'resolver timed out after 90s'
     except Exception as exc:
         return Status.FAIL, f'resolver error: {exc}'
 
     floor = int(os.environ.get('UNIVERSE_RESOLVER_MIN_LIVE_TICKERS', '200'))
-    # Cold-path SLA: 15s. The resolver subprocess takes ~7s cold (Python startup +
-    # Postgres connect + manifest load + per-strategy fan-out) on a healthy box.
-    # 30s hard cap via subprocess timeout below. The 15s here catches genuine
-    # pathology (DB unreachable, lock contention) without false-positiving on
-    # normal cold starts. Spec originally said 2.0s but that's unachievable;
-    # deviation documented in PR.
-    if elapsed > 15.0:
-        return Status.FAIL, f'resolver slow {elapsed:.1f}s'
     if n < floor:
         return Status.FAIL, f'union={n} < {floor}'
+    # SLA: warm path (persisted coverage-index cache, coverage_index.py
+    # from_parquet) runs in single-digit seconds; 15s catches genuine
+    # pathology (DB unreachable, lock contention). The first invocation
+    # after prices.parquet changes rebuilds the index (~25–30s on the
+    # 2-core box) — that once-a-day cold window is WARN, not FAIL. Beyond
+    # 60s something is actually wrong. Spec originally said 2.0s but
+    # that's unachievable; deviation documented in PR.
+    if elapsed > 60.0:
+        return Status.FAIL, f'resolver slow {elapsed:.1f}s'
+    if elapsed > 15.0:
+        return Status.WARN, (f'resolver {elapsed:.1f}s (cold coverage-index '
+                             f'rebuild window), union={n}')
     return Status.PASS, f'union={n}, {elapsed * 1000:.0f}ms'

@@ -82,8 +82,12 @@ def _live_positions_have_stops():
     equity_pos = [p for p in positions if (p.get('asset_class') or '') == 'us_equity']
     if not equity_pos:
         return Status.SKIP, 'no equity positions'
-    # Open stops
-    or_ = subprocess.run([cli, 'order', 'list', '--status', 'open'],
+    # Open stops. --nested is load-bearing: a flat order list HIDES the stop
+    # legs of OCO/bracket orders, so an OCO-protected book reads as 100%
+    # naked (2026-07-21 maintenance false-alarmed "12/13 naked" on a book
+    # where 11/12 carried full OCOs; same trap as the 07-16 "3 stops vs 9"
+    # dashboard incident).
+    or_ = subprocess.run([cli, 'order', 'list', '--status', 'open', '--nested'],
                          capture_output=True, text=True, timeout=15)
     if or_.returncode != 0:
         return Status.FAIL, f'order list failed: {or_.stderr.strip()[:200]}'
@@ -91,17 +95,30 @@ def _live_positions_have_stops():
         orders = json.loads(or_.stdout) or []
     except json.JSONDecodeError:
         return Status.FAIL, 'order list stdout not JSON'
+    _DEAD = {'canceled', 'filled', 'expired', 'rejected', 'replaced',
+             'done_for_day', 'stopped'}
+
+    def _count_stop(o, parent_qty, covered):
+        t = (o.get('type') or o.get('order_type') or '').lower()
+        if t not in ('stop', 'stop_limit', 'trailing_stop') or not o.get('stop_price'):
+            return
+        if (o.get('status') or '').lower() in _DEAD:
+            return
+        sym = o.get('symbol')
+        try:
+            q = float(o.get('qty') or parent_qty or 0)
+        except (TypeError, ValueError):
+            q = 0.0
+        if sym and q > 0:
+            covered[sym] = covered.get(sym, 0.0) + q
+
     covered: dict[str, float] = {}
     for o in orders:
-        t = (o.get('type') or o.get('order_type') or '').lower()
-        if t in ('stop', 'stop_limit') and o.get('stop_price'):
-            sym = o.get('symbol')
-            try:
-                q = float(o.get('qty') or 0)
-            except (TypeError, ValueError):
-                q = 0.0
-            if sym and q > 0:
-                covered[sym] = covered.get(sym, 0.0) + q
+        _count_stop(o, None, covered)
+        for leg in (o.get('legs') or []):
+            if not leg.get('symbol'):
+                leg = {**leg, 'symbol': o.get('symbol')}
+            _count_stop(leg, o.get('qty'), covered)
     naked = []
     for p in equity_pos:
         sym = p.get('symbol') or ''
