@@ -16,6 +16,13 @@ OnCalendar=Mon..Fri *-*-* 16:10:00 America/New_York
 # minutes after open, leftovers have either filled or need replacing with a
 # fresh OCO — which is exactly what this pass does.
 OnCalendar=Mon..Fri *-*-* 09:35:00 America/New_York
+# 20:05 ET pass (added 2026-07-22): when the ext-hours monitor cancels an OCO
+# and its replacement day-TIF exit limit expires UNFILLED at the 20:00 ET
+# session close, the position would sit naked overnight and through the next
+# open gap until the 09:35 pass (XXI 07-21: TP-reach exit at 17:40 ET never
+# filled, OCO gone, naked 20:00→09:35). Five minutes after ext close, restore
+# GTC OCOs so overnight + the open gap are covered.
+OnCalendar=Mon..Fri *-*-* 20:05:00 America/New_York
 Persistent=true
 Unit=openclaw-stop-reattach.service
 
