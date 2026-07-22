@@ -2290,6 +2290,73 @@ const _portfolioCache = new Map();  // key → { ts, ttl, value, inflight }
 const PNL_CANDLES_TTL  = 90_000;
 const VALUE_CURVE_TTL  = 60_000;
 
+// ── Live daily P&L candle store (operator spec 2026-07-22) ───────────────────
+// Candle day = midnight-to-midnight ET so consecutive candles always TOUCH:
+// each day opens at the prior day's close (equity is flat through the full
+// market close for an all-equity book; crypto sleeve / fees / dividend marks
+// that move overnight land inside the day's wicks instead of as inter-candle
+// gaps). Built live from a 60s equity sampler: close tracks the latest mark,
+// high/low are running extremes, the row solidifies when the ET date rolls.
+// Persisted as ONE compact row of 4 floats per day (no tick-level portfolio
+// history is stored, per operator constraint) — this store is authoritative
+// going forward; days before it began fall back to Alpaca-derived
+// approximations in _buildCandles.
+const PNL_OHLC_PATH = require('path').join(__dirname, '../../../logs/pnl_daily_ohlc.json');
+const PNL_OHLC_KEEP_DAYS = 400;
+let _ohlcStore = null;   // { days: { 'YYYY-MM-DD': {open, high, low, close} } }
+
+function _loadOhlcStore() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(PNL_OHLC_PATH, 'utf8'));
+    if (raw && typeof raw.days === 'object') return raw;
+  } catch (_) { /* first run / unreadable → start fresh */ }
+  return { days: {} };
+}
+
+function _saveOhlcStore() {
+  try {
+    const dates = Object.keys(_ohlcStore.days).sort();
+    for (const d of dates.slice(0, Math.max(0, dates.length - PNL_OHLC_KEEP_DAYS))) {
+      delete _ohlcStore.days[d];
+    }
+    fs.writeFileSync(PNL_OHLC_PATH + '.tmp', JSON.stringify(_ohlcStore));
+    fs.renameSync(PNL_OHLC_PATH + '.tmp', PNL_OHLC_PATH);
+  } catch (e) {
+    console.warn('[pnl-ohlc] persist failed:', e.message);
+  }
+}
+
+const _etDateNow = () => new Date()
+  .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+
+async function samplePnlCandle() {
+  const r = await runAlpaca(['account', 'get'], { timeout: 10_000 });
+  if (!r.ok) return;
+  const v = parseFloat(r.payload?.equity);
+  if (!Number.isFinite(v) || v <= 0) return;
+  if (!_ohlcStore) _ohlcStore = _loadOhlcStore();
+  const days = _ohlcStore.days;
+  const d = _etDateNow();
+  let c = days[d];
+  // Glitch gate: Alpaca occasionally emits an equity sample 1-2 orders of
+  // magnitude off (see _buildCandles outlier note). A bad sample accepted
+  // here would poison a persisted wick permanently, so reject anything >2x
+  // away from the candle's running close (or the prior day's close on
+  // rollover).
+  const ref = c ? c.close
+    : (Object.keys(days).sort().slice(-1).map(k => days[k].close)[0] ?? null);
+  if (ref != null && (v < ref * 0.5 || v > ref * 2.0)) return;
+  if (!c) {
+    const open = ref ?? v;   // midnight rollover: open at prior close → candles touch
+    c = days[d] = { open, high: Math.max(open, v), low: Math.min(open, v), close: v };
+  } else {
+    c.high = Math.max(c.high, v);
+    c.low = Math.min(c.low, v);
+    c.close = v;
+  }
+  _saveOhlcStore();
+}
+
 async function _cached(key, ttlMs, factory) {
   const now = Date.now();
   const hit = _portfolioCache.get(key);
@@ -2327,15 +2394,16 @@ async function _buildCandles(days) {
   // 29 days. Floor at 29 so candles always come back populated.
   //
   // We pull two parallel intraday streams so the candles can show
-  // Candle semantics (operator spec 2026-07-21): each candle is the FULL
-  // extended trading day 04:00-20:00 ET —
-  //   open  = first sample of the pre-market session (04:00 ET onward)
-  //   close = last sample of the after-hours session (up to 20:00 ET)
-  //   wicks = high/low across that whole extended window
-  // The continuous stream feeds this after an ET time-of-day filter that
-  // drops the overnight 20:00→04:00 flat stretch (whose inclusion was the
-  // original wrong-OHLC bug). market_hours (9:30-16:00 ET) samples are
-  // kept ONLY for the tooltip's regular-session open/close fields.
+  // Candle semantics (operator spec 2026-07-22, supersedes the 07-21
+  // extended-session spec): each candle is the full CALENDAR day midnight-
+  // to-midnight ET, and every candle opens at the previous candle's close
+  // so the series always touches — overnight/pre-market repricing shows up
+  // INSIDE a day's body/wicks, never as an inter-candle gap. Days covered
+  // by the live sampler store (logs/pnl_daily_ohlc.json, authoritative
+  // going forward) use its running OHLC; older days approximate from the
+  // continuous stream bucketed by ET calendar day, then the 1D fallback.
+  // market_hours (9:30-16:00 ET) samples are kept ONLY for the tooltip's
+  // regular-session open/close fields.
   const intradayPeriod = `${Math.min(days, 29)}D`;
   const [contR, mktR, dailyR] = await Promise.all([
     runAlpaca(['account', 'portfolio',
@@ -2392,8 +2460,7 @@ async function _buildCandles(days) {
       if (!Number.isFinite(v) || v <= 0) continue;
       if (baseline != null && (v < baseline * RATIO_LO || v > baseline * RATIO_HI)) continue;
       baseline = v;
-      const [d, hhmm] = _etDayTime(ts[i]);
-      if (hhmm < '04:00' || hhmm >= '20:00') continue;   // overnight stretch
+      const [d] = _etDayTime(ts[i]);   // full calendar day — overnight samples included
       const slot = contByDay.get(d) || { open: v, high: v, low: v, close: v };
       slot.high  = Math.max(slot.high, v);
       slot.low   = Math.min(slot.low, v);
@@ -2447,16 +2514,21 @@ async function _buildCandles(days) {
   //     stay surfaced for the tooltip.
   //   - Daily fallback mark is used only when the intraday window
   //     doesn't cover the day (older than ~29 days back).
-  const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(), ...dailyByDay.keys()]);
+  // Live-sampler store rows are authoritative for the days they cover.
+  const liveDays = (_ohlcStore || (_ohlcStore = _loadOhlcStore())).days;
+
+  const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(),
+                           ...dailyByDay.keys(), ...Object.keys(liveDays)]);
   const sorted  = [...allDays].sort();
   const candles = [];
   let prevClose = null;
   for (const d of sorted) {
     let row;
+    const live = liveDays[d];
     const cont = contByDay.get(d);
     const mkt  = mktByDay.get(d);
-    if (cont || mkt) {
-      const geo = cont || mkt;
+    if (live || cont || mkt) {
+      const geo = live || cont || mkt;
       row = {
         date: d,
         open: geo.open,
@@ -2466,6 +2538,7 @@ async function _buildCandles(days) {
         market_open:  mkt ? mkt.open  : null,
         market_close: mkt ? mkt.close : null,
         intraday: true,
+        live: Boolean(live),
       };
     } else {
       const v = dailyByDay.get(d);
@@ -2476,7 +2549,18 @@ async function _buildCandles(days) {
         market_open:  null,
         market_close: null,
         intraday: false,
+        live: false,
       };
+    }
+    // Touching invariant: every candle opens exactly at the prior close.
+    // A no-op in steady state (live-store days already chain open=prev
+    // close; equity is flat through the overnight halt) — it only absorbs
+    // the residual seams between the three sources so overnight repricing
+    // renders inside the candle, never as a gap.
+    if (prevClose != null) {
+      row.open = prevClose;
+      row.high = Math.max(row.high, row.open);
+      row.low  = Math.min(row.low,  row.open);
     }
     row.pct_change = prevClose != null && prevClose > 0
       ? (row.close - prevClose) / prevClose
@@ -10870,6 +10954,8 @@ if (httpServer) {
   // the dashboard is open. Errors are swallowed — the route handler will
   // surface them on the next user request.
   const warmPortfolioCache = () => {
+    // Sampler first: it feeds today's live candle, which _buildCandles reads.
+    samplePnlCandle().catch(() => {});
     _cached('candles:90', PNL_CANDLES_TTL,  () => _buildCandles(90)).catch(() => {});
     _cached('vc:1A',      VALUE_CURVE_TTL,  () => _buildValueCurve('1A')).catch(() => {});
     _cached('vc:all',     VALUE_CURVE_TTL,  () => _buildValueCurve('all')).catch(() => {});
