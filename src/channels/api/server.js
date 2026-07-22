@@ -2329,6 +2329,33 @@ function _saveOhlcStore() {
 const _etDateNow = () => new Date()
   .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 
+// Is today an equity trading day? Resolved from the broker clock (is_open,
+// or next_open still dated today — true at any hour of a trading day, false
+// on weekends/holidays where next_open has rolled to the next session).
+// Weekday fallback if the clock is unreachable. Cached 30 min.
+let _tradingTodayCache = null;
+async function _isTradingToday() {
+  const now = Date.now();
+  if (_tradingTodayCache && now - _tradingTodayCache.ts < 30 * 60_000) {
+    return _tradingTodayCache.val;
+  }
+  let val;
+  try {
+    const r = await runAlpaca(['clock'], { timeout: 10_000 });
+    const etDate = (iso) => new Date(iso)
+      .toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    val = Boolean(r.ok && r.payload &&
+      (r.payload.is_open || etDate(r.payload.next_open) === _etDateNow()));
+    if (!r.ok || !r.payload) throw new Error('clock unavailable');
+  } catch (_) {
+    const dow = new Date().toLocaleDateString('en-US',
+      { timeZone: 'America/New_York', weekday: 'short' });
+    val = dow !== 'Sat' && dow !== 'Sun';
+  }
+  _tradingTodayCache = { ts: now, val };
+  return val;
+}
+
 async function samplePnlCandle() {
   const r = await runAlpaca(['account', 'get'], { timeout: 10_000 });
   if (!r.ok) return;
@@ -2517,16 +2544,50 @@ async function _buildCandles(days) {
   // Live-sampler store rows are authoritative for the days they cover.
   const liveDays = (_ohlcStore || (_ohlcStore = _loadOhlcStore())).days;
 
+  // Equity trading days only (operator spec 2026-07-22): weekends/holidays
+  // emit no candle. The market_hours and 1D streams only carry samples on
+  // session days, so their key union IS the session calendar for the
+  // window — no separate calendar dependency. Today may be absent from
+  // both streams before its first sample, so it's resolved via the broker
+  // clock. Movement ON a closed day (crypto sleeve marking 24/7) is not
+  // dropped: its high/low fold into the NEXT session's candle below.
+  const tradingDays = new Set([...mktByDay.keys(), ...dailyByDay.keys()]);
+  if (!tradingDays.size) {
+    // Both session-calendar sources failed — degrade to a weekday filter
+    // rather than rendering an empty chart.
+    for (const d of contByDay.keys()) {
+      const dow = new Date(d + 'T12:00:00Z').getUTCDay();
+      if (dow !== 0 && dow !== 6) tradingDays.add(d);
+    }
+  }
+  const todayEt = _etDateNow();
+  if (!tradingDays.has(todayEt) && await _isTradingToday()) {
+    tradingDays.add(todayEt);
+  }
+
   const allDays = new Set([...contByDay.keys(), ...mktByDay.keys(),
                            ...dailyByDay.keys(), ...Object.keys(liveDays)]);
   const sorted  = [...allDays].sort();
   const candles = [];
   let prevClose = null;
+  let pendHigh = null;   // closed-day (weekend/holiday) excursion awaiting fold
+  let pendLow  = null;
   for (const d of sorted) {
-    let row;
     const live = liveDays[d];
     const cont = contByDay.get(d);
     const mkt  = mktByDay.get(d);
+    if (!tradingDays.has(d)) {
+      // Closed day: no candle of its own. An all-equity book is flat here
+      // (fold is a no-op); crypto/fee movement carries into the next
+      // session's wicks so nothing real is lost.
+      const src = live || cont;
+      if (src) {
+        pendHigh = pendHigh == null ? src.high : Math.max(pendHigh, src.high);
+        pendLow  = pendLow  == null ? src.low  : Math.min(pendLow,  src.low);
+      }
+      continue;
+    }
+    let row;
     if (live || cont || mkt) {
       const geo = live || cont || mkt;
       row = {
@@ -2561,6 +2622,14 @@ async function _buildCandles(days) {
       row.open = prevClose;
       row.high = Math.max(row.high, row.open);
       row.low  = Math.min(row.low,  row.open);
+    }
+    // Fold any weekend/holiday excursion since the last session into this
+    // candle's wicks (pct_change below already spans the closed stretch
+    // because prevClose is the last SESSION close).
+    if (pendHigh != null) {
+      row.high = Math.max(row.high, pendHigh);
+      row.low  = Math.min(row.low,  pendLow);
+      pendHigh = pendLow = null;
     }
     row.pct_change = prevClose != null && prevClose > 0
       ? (row.close - prevClose) / prevClose
