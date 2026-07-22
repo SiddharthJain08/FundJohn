@@ -58,11 +58,17 @@ from src.ingestion.cboe_vol_indices import _yf_download  # noqa: E402
 
 def yfinance_historical(symbol: str, start: str, end: str) -> pd.DataFrame:
     """Pull daily Close for a symbol via cboe_vol_indices._yf_download.
+    `end` is INCLUSIVE (bumped +1 day at the yfinance boundary, whose `end`
+    is exclusive — the 17:30 ET timer run was silently dropping the current
+    day's close every run, leaving the parquet one trading day stale and
+    tripping the 4-day doctor FAIL after each weekend; cf.
+    cboe_vol_indices._fetch_series_for_macro which already does this).
     Returns DataFrame with columns ['date', 'close']. Empty DataFrame on failure."""
+    end_excl = (date.fromisoformat(end) + timedelta(days=1)).isoformat()
     try:
         # auto_adjust=False keeps Close as the raw closing value (matches
         # what FMP and the existing macro.parquet VIX rows record).
-        df = _yf_download(symbol, period=None, start=start, end=end)
+        df = _yf_download(symbol, period=None, start=start, end=end_excl)
     except Exception as e:
         print(f"  yfinance download failed for {symbol}: {e}", file=sys.stderr)
         return pd.DataFrame(columns=['date', 'close'])
