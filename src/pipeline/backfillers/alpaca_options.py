@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -333,6 +334,18 @@ def main(date_str: str | None = None) -> int:
     if not _master_readable(PARQUET_PATH):
         return 1
     universe = _resolver_archive_universe(date) or _load_universe()
+    # Yahoo-style non-equity symbols (BTC-USD, EURUSD=X, GC=F, ^VIX, BRK-B
+    # preferred/class shares) can never have Alpaca option chains — the
+    # snapshot endpoint 400s "invalid underlying symbol" on every one, every
+    # day, which made the unit exit 1 daily on 54 permanent no-ops and page
+    # the failure notifier (2026-07-21: 5019/5073 archived fine, rc=1 anyway).
+    # Valid Alpaca underlyings are plain [A-Z0-9.] — filter the rest up front
+    # so a nonzero exit means a REAL failure again.
+    skipped_shape = [t for t in universe if not re.fullmatch(r'[A-Z][A-Z0-9.]*', t)]
+    if skipped_shape:
+        universe = [t for t in universe if re.fullmatch(r'[A-Z][A-Z0-9.]*', t)]
+        log.info('options-archive: skipping %d never-optionable symbols '
+                 '(crypto/FX/futures/index/Yahoo-class shapes)', len(skipped_shape))
     log.info('options-archive start date=%s tickers=%d', date, len(universe))
 
     deadline = time.time() + SOFT_BUDGET_S
