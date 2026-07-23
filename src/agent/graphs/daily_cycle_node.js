@@ -125,6 +125,18 @@ function makeStepNode(STEP, scriptName) {
       console.warn(`[daily_cycle_node] stderr persistence failed for ${STEP}: ${e.message}`);
     }
 
+    // Sentiment is a gap-filler: signals runs fine without it (the step is
+    // env-gated OFF by default), so a slow or failed scrape must never cost
+    // the next session's COMPUTED set. 2026-07-22: the universe-wide Alpaca
+    // news ingest blew the 600s step budget (rc=124) and aborted the 16:15
+    // EOD compute before `signals` — recovered by hand. The Discord failure
+    // alert + stderr persistence above still fire; only the abort is skipped.
+    if (STEP === 'sentiment') {
+      completion.status = 'warn';
+      await pipelineLog.feedEnd(STEP, 'warn', state.runDate, durationMs);
+      return { completedSteps: [...(state.completedSteps || []), completion] };
+    }
+
     const err = new Error(`step ${STEP} exited rc=${rc}`);
     err.step       = STEP;
     err.rc         = rc;

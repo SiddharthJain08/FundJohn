@@ -22,7 +22,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('module');
 
-const ROOT = path.resolve(__dirname, '..');
+const ROOT = path.resolve(__dirname, '..', '..');
 const RUN_DATE = '2099-01-01'; // clearly-fake date so we never collide with prod logs
 const STEPS_LOG = path.join(ROOT, 'logs', `daily_cycle_steps_${RUN_DATE}.log`);
 const ABORTS_LOG = path.join(ROOT, 'logs', `daily_cycle_aborts_${RUN_DATE}.log`);
