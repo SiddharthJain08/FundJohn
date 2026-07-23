@@ -550,6 +550,116 @@ def _post_alert(msg: str, channel: str = 'data-alerts') -> None:
         log(f'alert post error (non-fatal): {e}')
 
 
+def emergency_exit_breached(breached: list[dict], positions: list[dict],
+                            dry_run: bool) -> None:
+    """Bounded emergency exit for positions past their strategy stop
+    (2026-07-23, operator-ordered — replaces flag-and-wait, which left
+    breached positions naked overnight: CENN/NVNO 2026-07-22).
+
+    RTH open -> cancel the symbol's resting exits and close the FULL position
+    with a slip-capped marketable limit (bounded: never a bare market order,
+    never chases beyond quote*(1±slip)).
+    Closed / ext-hours -> journal the stop into the ext-hours monitor's
+    pending-exit journal; the next monitor tick (04:00-19:50 ET, 10-min
+    cadence) exits it the moment a session allows. If price recovers inside
+    the stop before then, no exit fires and the next reattach pass
+    re-protects normally — natural hysteresis, no churn at the boundary.
+
+    Gate: OPENCLAW_PAST_STOP_EMERGENCY_EXIT (default ON; =0 restores
+    flag-only). Annotates each breached entry with 'action' so the pass
+    summary and Discord audit report what actually happened."""
+    if os.environ.get('OPENCLAW_PAST_STOP_EMERGENCY_EXIT', '1') == '0':
+        for b in breached:
+            b['action'] = 'flag_only (gate off)'
+        return
+    import time as _t
+    from execution import afterhours_tp as ahtp
+
+    ok_clk, clk, _ = _run_cli(['clock'])
+    is_open = bool(ok_clk and isinstance(clk, dict) and clk.get('is_open'))
+
+    # Idempotency: an emex_/ahsx_ exit already resting means the close is in
+    # flight — never stack a second liquidation order on the same shares.
+    pending: set[str] = set()
+    ok_o, orders, _ = _run_cli(['order', 'list', '--status', 'open',
+                                '--nested', '--limit', '500'])
+    if ok_o:
+        for o in (orders or []):
+            coid = o.get('client_order_id') or ''
+            if coid.startswith(('emex_', 'ahsx_')):
+                pending.add(o.get('symbol'))
+
+    pos_by_sym = {p.get('symbol'): p for p in positions}
+    for b in breached:
+        sym = b['ticker']
+        pos = pos_by_sym.get(sym) or {}
+        try:
+            qty = abs(float(pos.get('qty') or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:
+            b['action'] = 'skipped (no position)'
+            continue
+        if sym in pending:
+            b['action'] = 'exit_already_pending'
+            log(f'  ⛑ {sym}: emergency exit already resting — not stacking another')
+            continue
+        exit_side = 'sell' if b['side'] == 'long' else 'buy'
+        if dry_run:
+            b['action'] = 'exit_dry_run'
+            log(f'  DRY-RUN emergency exit {sym} {exit_side.upper()} x{qty:.0f} '
+                f'({"RTH marketable limit" if is_open else "journal -> monitor"})')
+            continue
+
+        # Journal FIRST (the monitor's journal-before-cancel discipline): if
+        # anything past this line fails, the next monitor tick still knows
+        # this symbol owes an exit.
+        intents = ahtp._load_intents()
+        intents[sym] = {'stop': b['breached_stop'], 'tp': None, 'ts': _t.time()}
+        ahtp._save_intents(intents)
+
+        if not is_open:
+            b['action'] = 'exit_queued (monitor journal)'
+            log(f'  ⛑ {sym}: past stop with no open session — exit journaled; '
+                f'monitor closes it at its next tick')
+            continue
+
+        ncanc = cancel_stops_for(sym, False, include_reserving=True,
+                                 exit_side=exit_side)
+        if ncanc and not _wait_qty_freed(sym, qty):
+            b['action'] = 'exit_queued (shares not freed)'
+            log(f'  ⚠ {sym}: shares not freed after cancel — journal keeps the '
+                f'exit owed; next tick/pass retries')
+            continue
+        slip = ahtp._slip_pct()
+        current = float(b.get('current') or 0)
+        action = {'side': exit_side, 'reason': 'stop_breach',
+                  'level': b['breached_stop'], 'current': current}
+        bid, ask = ahtp._latest_quote(sym)
+        limit = ahtp.reprice_exit(action, bid, ask, slip)
+        coid = f'emex_{sym}_{int(_t.time())}'
+        ok_s, _pay, err = ahtp._submit_limit(
+            ticker=sym, side=exit_side, qty=int(qty), limit_price=limit,
+            tif='day', order_class='simple', order_type='limit',
+            extended_hours=False, coid=coid)
+        if ok_s:
+            intents = ahtp._load_intents()
+            intents.pop(sym, None)
+            ahtp._save_intents(intents)
+            b['action'] = f'exit_submitted @ {limit:.2f}'
+            log(f'  ⛑ {sym}: EMERGENCY EXIT {exit_side.upper()} x{qty:.0f} '
+                f'@ {limit:.2f} (past stop {b["breached_stop"]:.2f}, '
+                f'cur {current:.2f})  order={coid}')
+            _post_alert(f'⛑ **emergency exit** {sym}: past stop '
+                        f'{b["breached_stop"]:.2f} (cur {current:.2f}) — '
+                        f'{exit_side} limit x{qty:.0f} @ {limit:.2f} placed',
+                        channel='trade-reports')
+        else:
+            b['action'] = 'exit_failed (journaled for retry)'
+            log(f'  ✘ {sym}: emergency exit submit failed: '
+                f'{(err or {}).get("error", "?")} — journal keeps it owed')
+
+
 def audit_naked_positions(positions: list[dict], breached: list[dict],
                           dry_run: bool) -> list[str]:
     """End-of-pass truth check: re-fetch broker coverage and list every
@@ -580,9 +690,10 @@ def audit_naked_positions(positions: list[dict], breached: list[dict],
         if naked:
             lines.append('NAKED after pass: ' + ', '.join(naked))
         if breached:
-            lines.append('BREACHED (operator: close or accept): ' + ', '.join(
+            lines.append('PAST STOP (emergency-exit pass): ' + ', '.join(
                 f'{b["ticker"]} {b["side"]} cur={b["current"]:.2f} '
-                f'stop={b["breached_stop"]:.2f} uPnL=${b["unrealized_pl"]:.0f}'
+                f'stop={b["breached_stop"]:.2f} uPnL=${b["unrealized_pl"]:.0f} '
+                f'[{b.get("action", "flag_only")}]'
                 for b in breached))
         _post_alert('\n'.join(lines))
     return naked
@@ -911,10 +1022,11 @@ def main():
             f'{skips["already_covered"]} already_covered, {skips["no_submission_row"]} no_submission, '
             f'{skips["past_stop_breached"]} past_stop_breached')
         if breached:
-            log(f'⚠ {len(breached)} positions PAST their strategy stop — operator review needed (manual close or accept):')
+            emergency_exit_breached(breached, positions, args.dry_run)
+            log(f'⚠ {len(breached)} positions PAST their strategy stop — emergency-exit pass:')
             for b in breached:
                 log(f'    {b["ticker"]:6} {b["side"]:5} cur={b["current"]:.2f} breached_stop={b["breached_stop"]:.2f} '
-                    f'unrealized=${b["unrealized_pl"]:.2f} qty={b["qty"]:.0f}')
+                    f'unrealized=${b["unrealized_pl"]:.2f} qty={b["qty"]:.0f} → {b.get("action", "flag_only")}')
         naked = audit_naked_positions(positions, breached, args.dry_run)
         if naked:
             log(f'⚠ NAKED after pass: {", ".join(naked)}')
