@@ -1512,6 +1512,85 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         scale, account_state, gate_net_sharpe=gate_net_sharpe)
 
 
+# ── Asset-eligibility execution gate (operator directive 2026-07-23) ─────────
+# Positions are only allowed in equities that are active + tradable +
+# easy_to_borrow + fractionable on Alpaca (notional sizing needs fractional
+# orders; universe predicates enforce this upstream for ladder tiers, but
+# sp500/r3000/no_otc universes still admit non-fractionable names — this gate
+# is the execution-side backstop). It NEVER blocks an exit: ineligible
+# tickers can only shed exposure. OPENCLAW_SIZER_ASSET_GATE=0 disables.
+
+def _asset_gate_enabled() -> bool:
+    return os.environ.get('OPENCLAW_SIZER_ASSET_GATE', '1') != '0'
+
+
+def _load_asset_eligibility(symbols):
+    """symbol -> eligible bool for plain-equity symbols. Returns None when the
+    lookup itself fails — the gate then fails OPEN with a loud warning (a DB
+    blip must not brick the whole trade step). Symbols the table has never
+    seen map to False: 'asked and absent' is a real answer, unlike
+    'couldn't ask'."""
+    if not symbols:
+        return {}
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute(
+                """SELECT symbol, (status = 'active' AND tradable
+                                   AND easy_to_borrow AND fractionable)
+                   FROM alpaca_tradable_universe WHERE symbol = ANY(%s)""",
+                (list(symbols),))
+            found = dict(cur.fetchall())
+        return {s: bool(found.get(s, False)) for s in symbols}
+    except Exception as e:
+        logger.warning('regime_blended_sizer.asset_gate: eligibility lookup '
+                       'failed (%s) — gate SKIPPED this cycle (fail-open)', e)
+        return None
+
+
+def _apply_asset_eligibility_gate(target_usd, broker, eligibility=None):
+    """Clamp targets so ineligible equities can only shed exposure.
+
+    Per ineligible ticker: not held → target dropped (open blocked);
+    opposite-sign target → zeroed (the close leg survives, the re-open leg
+    dies); same-sign larger target → capped at the held size (no growth);
+    same-sign smaller target → untouched (reduction is an exit). Orphan
+    closes never enter target_usd, so exits are structurally unblockable.
+    OCC option symbols and crypto pairs ('/') are out of scope. Returns a
+    new dict; `eligibility` is injectable for tests."""
+    if not _asset_gate_enabled() or not target_usd:
+        return target_usd
+    equity_syms = [t for t in target_usd if not _is_occ_symbol(t) and '/' not in t]
+    if eligibility is None:
+        eligibility = _load_asset_eligibility(equity_syms)
+    if eligibility is None:                     # lookup failure → fail-open
+        return target_usd
+    out = dict(target_usd)
+    blocked, unflipped, capped = [], [], []
+    for tkr in equity_syms:
+        # missing key = 'asked and absent' → ineligible (fail-closed);
+        # only a whole-lookup failure (None map, handled above) fails open
+        if eligibility.get(tkr, False):
+            continue
+        target, current = out[tkr], broker.get(tkr, 0.0)
+        if current == 0.0:
+            del out[tkr]
+            blocked.append(tkr)
+        elif (target > 0 > current) or (target < 0 < current):
+            out[tkr] = 0.0
+            unflipped.append(tkr)
+        elif abs(target) > abs(current):
+            out[tkr] = (1.0 if current > 0 else -1.0) * abs(current)
+            capped.append(tkr)
+    if blocked or unflipped or capped:
+        logger.warning(
+            'regime_blended_sizer.asset_gate: ineligible equities gated — '
+            'opens blocked=%s, flips converted to close-only=%s, '
+            'increases capped at held size=%s',
+            sorted(blocked), sorted(unflipped), sorted(capped))
+    return out
+
+
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
                               weight_by_strat, scale, account_state, broker=None,
@@ -1532,6 +1611,7 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     option structures), scale=0.0 and a pre-fetched non-empty `broker`."""
     if broker is None:
         broker = _load_broker_positions_usd()
+    target_usd = _apply_asset_eligibility_gate(target_usd, broker)
     emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
     flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
     logger.info(
