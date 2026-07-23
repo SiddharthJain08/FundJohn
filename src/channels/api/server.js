@@ -374,9 +374,17 @@ app.get('/api/portfolio/positions', async (req, res) => {
     const absorbLeg = (o) => {
       if (!o || !o.symbol || o.status === 'pending_cancel') return;
       const leg = brokerBrackets[o.symbol]
-        || (brokerBrackets[o.symbol] = { stop: null, target: null });
+        || (brokerBrackets[o.symbol] = { stop: null, target: null, exiting: null });
       const sp = parseFloat(o.stop_price);
       const lp = parseFloat(o.limit_price);
+      // emex_ (past-stop emergency exit) / ahsx_ (ext-hours monitor exit) are
+      // LIQUIDATIONS at ~current price, not take-profits — folding their limit
+      // into `target` would paint a breached position as happily bracketed.
+      const coid = o.client_order_id || '';
+      if (coid.startsWith('emex_') || coid.startsWith('ahsx_')) {
+        if (Number.isFinite(lp)) leg.exiting = lp;
+        return;
+      }
       if (Number.isFinite(sp)) leg.stop = sp;
       if (Number.isFinite(lp)) leg.target = lp;
       for (const child of (o.legs || [])) absorbLeg(child);
@@ -389,6 +397,24 @@ app.get('/api/portfolio/positions', async (req, res) => {
         for (const o of ordersResp.payload) absorbLeg(o);
       }
     } catch (_) { /* brokerBracketsOk stays false — panel renders brackets as unknown */ }
+
+    // Exits QUEUED but not yet resting: the ext-hours monitor's pending-exit
+    // journal — the reattach pass writes past-stop positions here when no
+    // session is open, and the monitor's next tick (04:00–19:50 ET, 10-min
+    // cadence) acts on it. Same file the monitor reads, same 24h TTL, so
+    // "queued" here is exactly "the monitor will act at its next tick".
+    const pendingExitSyms = new Set();
+    try {
+      const intentsPath = process.env.OPENCLAW_AH_INTENTS_PATH
+        || require('path').join(__dirname, '../../../logs/afterhours_pending_exits.json');
+      const raw = JSON.parse(fs.readFileSync(intentsPath, 'utf8'));
+      const nowS = Date.now() / 1000;
+      for (const [sym, it] of Object.entries(raw)) {
+        if (it && typeof it === 'object' && nowS - (it.ts || 0) < 24 * 3600) {
+          pendingExitSyms.add(sym);
+        }
+      }
+    } catch (_) { /* no journal file = nothing queued */ }
 
     // Per-ticker corr-adjusted cumulative Sharpe (S_adj) — the conviction the
     // position was last sized at (stamped by the sizer each cycle into
@@ -444,8 +470,11 @@ app.get('/api/portfolio/positions', async (req, res) => {
         }),
         broker_position: brokerPositions[r.ticker] || null,
         // Present-and-empty = genuinely no resting leg; null = broker unreachable.
+        // exiting = a liquidation order (emex_/ahsx_) resting at the broker;
+        // queued = the monitor journal owes this position an exit at its next tick.
         broker_bracket: brokerBracketsOk
-          ? (brokerBrackets[r.ticker] || { stop: null, target: null })
+          ? { ...(brokerBrackets[r.ticker] || { stop: null, target: null, exiting: null }),
+              queued: pendingExitSyms.has(r.ticker) }
           : null,
         corr_cum_sharpe: sadjByTicker[r.ticker]
           ? sadjByTicker[r.ticker].corr_cum_sharpe : null,
@@ -7505,13 +7534,25 @@ function _buildAlphaBarsHtml(group) {
       \` <span class="\${cls}">\${gap >= 0 ? '+' : ''}\${gap.toFixed(1)}%</span>\`;
     return \`<span class="ab-px" title="\${title}">\${label} <b>\${pxFmt(lvl)}</b>\${gapTxt}</span>\`;
   };
+  // A position being LIQUIDATED (past-stop emergency exit / ext-hours monitor
+  // exit) must not read as bracketed or as silently naked — it gets its own
+  // chip. "exit $x pending" = the liquidation order is resting at the broker;
+  // "exit queued" = the monitor journal owes the exit at its next tick
+  // (10-min cadence, 04:00–19:50 ET).
+  const exitChip = !bracketKnown ? '' :
+    (bracket.exiting != null && isFinite(bracket.exiting))
+      ? \`<span class="ab-px" title="liquidation order resting at the broker — this position is being closed (past-stop emergency exit or monitor exit), not bracketed">exit <b>\${pxFmt(bracket.exiting)}</b> <span class="pf-pnl-neg">pending</span></span>\`
+      : (bracket.queued
+        ? \`<span class="ab-px" title="past its stop with no session open — exit journaled for the ext-hours monitor, fires at its next tick (10-min cadence, 04:00–19:50 ET)">exit <b class="pf-pnl-neg">queued</b></span>\`
+        : '');
   const bracketHdr = !isOpen ? '' :
     legHtml('stop', bracket && bracket.stop,
             'stop-loss resting at the broker · % is measured from the entry price',
             'pf-pnl-neg')
     + legHtml('target', bracket && bracket.target,
               'take-profit resting at the broker · % is measured from the entry price',
-              'pf-pnl-pos');
+              'pf-pnl-pos')
+    + exitChip;
   const priceHdr = \`<div class="ab-prices">
       <span class="ab-px">entry <b>\${pxFmt(entry)}</b></span>
       <span class="ab-px">\${isOpen ? 'current' : 'close'} <b>\${pxFmt(nowPx)}</b></span>
