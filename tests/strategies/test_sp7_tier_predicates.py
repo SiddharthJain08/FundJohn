@@ -30,6 +30,8 @@ def test_liquid_tradable_definition():
     assert ud.liquid_tradable(_meta(tradable=False), None) is False
     assert ud.liquid_tradable(_meta(status='inactive'), None) is False
     assert ud.liquid_tradable(_meta(easy_to_borrow=False), None) is False
+    # fractionable required (operator 2026-07-23) — notional sizing needs it
+    assert ud.liquid_tradable(_meta(fractionable=False), None) is False
 
 
 def test_tier_unions():
@@ -46,10 +48,10 @@ def test_tier_unions():
 
 
 def test_nesting_property_exhaustive():
-    """For EVERY combination of the 6 driving booleans, nesting holds."""
-    for sp, r1, r3, tr, etb, act in itertools.product([True, False], repeat=6):
+    """For EVERY combination of the 7 driving booleans, nesting holds."""
+    for sp, r1, r3, tr, etb, act, frac in itertools.product([True, False], repeat=7):
         m = _meta(in_sp500=sp, in_r1000=r1, in_r3000=r3,
-                  tradable=tr, easy_to_borrow=etb,
+                  tradable=tr, easy_to_borrow=etb, fractionable=frac,
                   status='active' if act else 'inactive')
         chain = [ud.sp500(m, None), ud.tier_r1000(m, None),
                  ud.tier_r3000(m, None), ud.tier_liquid(m, None)]

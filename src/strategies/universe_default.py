@@ -61,7 +61,12 @@ def top500_by_adv(meta: TickerMetadata, as_of) -> bool:
 # --- SP-7 Phase B tier ladder (nested by construction) ---
 
 def liquid_tradable(meta: TickerMetadata, as_of) -> bool:
-    return bool(meta.tradable and meta.status == "active" and meta.easy_to_borrow)
+    # fractionable required (operator 2026-07-23): the live sizer sizes by
+    # notional, so non-fractionable names outside the index tiers are
+    # untradeable in practice. Index members stay in tier_liquid via the
+    # tier_r3000 union (nesting invariant).
+    return bool(meta.tradable and meta.status == "active"
+                and meta.easy_to_borrow and meta.fractionable)
 
 def tier_r1000(meta: TickerMetadata, as_of) -> bool:
     return sp500(meta, as_of) or bool(meta.in_r1000)
