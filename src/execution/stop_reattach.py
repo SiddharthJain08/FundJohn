@@ -60,6 +60,13 @@ import psycopg2.extras
 import requests
 
 ROOT = Path(__file__).resolve().parents[2]
+# Run standalone via systemd (ExecStart=python3 .../stop_reattach.py): sys.path[0]
+# is src/execution/, so the lazy `from execution.afterhours_tp import` in the
+# reached-TP monitor handoff raises ModuleNotFoundError (CLYM/SNDK 2026-07-23
+# 00:05 ET pass). Mirror afterhours_tp.py's bootstrap so `execution` resolves.
+for _p in (str(ROOT), str(ROOT / 'src')):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 ALPACA_CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 
 
