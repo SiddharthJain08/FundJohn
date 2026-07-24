@@ -140,7 +140,7 @@ def reconcile_afterhours(dry_run: bool) -> dict:
     if not ok:
         return stats
     pos_qty = {p['symbol']: abs(float(p.get('qty') or 0))
-               for p in fetch_positions()}
+               for p in (fetch_positions() or [])}
     for o in (orders or []):
         if (o.get('client_order_id') or '').startswith('ahtp_'):
             if dry_run:
@@ -206,6 +206,30 @@ def _slip_pct() -> float:
         return float(os.environ.get('OPENCLAW_AH_EXIT_SLIP_PCT', '0.5')) / 100.0
     except ValueError:
         return 0.005
+
+
+def _max_spread_pct() -> float:
+    try:
+        return float(os.environ.get('OPENCLAW_AH_MAX_SPREAD_PCT', '5')) / 100.0
+    except ValueError:
+        return 0.05
+
+
+def book_too_wide(reason: str, bid, ask) -> bool:
+    """Defer a stop_breach exit when the book is too wide to cross.
+
+    A stop exit prices off the far side, so the spread IS the exit cost:
+    NVNO 2026-07-23 08:10Z covered into a 9.85/12.5 premarket book and paid
+    18% over its stop. Past the cap the exit waits for a tighter book — the
+    journal keeps the debt visible every tick, spreads tighten toward the
+    open, and the 09:35 RTH reattach pass is the unconditional backstop.
+    tp_reach is never deferred (its limit is floored at the level, so a wide
+    book can't degrade it), nor is a one-sided/empty book (reprice falls
+    back to last trade, already slip-bounded)."""
+    if reason != 'stop_breach' or not bid or not ask:
+        return False
+    mid = (bid + ask) / 2
+    return mid > 0 and (ask - bid) / mid > _max_spread_pct()
 
 
 _INTENTS_TTL_S = 24 * 3600
@@ -367,7 +391,7 @@ def run_stop_monitor(dry_run: bool) -> dict:
     from execution.stop_reattach import (fetch_positions, cancel_stops_for,
                                          _wait_qty_freed, submit_protective_stop,
                                          _post_alert)
-    stats = {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0}
+    stats = {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0, 'deferred': 0}
     if not stop_monitor_on():
         log('OPENCLAW_AFTERHOURS_STOP_MONITOR!=1 — skipping')
         return stats
@@ -385,7 +409,13 @@ def run_stop_monitor(dry_run: bool) -> dict:
         return stats
     resting_exits = {o.get('symbol') for o in (orders or [])
                      if (o.get('client_order_id') or '').startswith('ahsx_')}
-    positions = list(fetch_positions())
+    positions = fetch_positions()
+    if positions is None:
+        # Couldn't ask ≠ flat book. The intent-reconciliation below settles
+        # journal debt when a symbol leaves the position list — running it on
+        # a failed fetch would wipe every owed exit in one tick.
+        log('position list failed — skipping (never settle debt on unknown state)')
+        return stats
     protection = protection_map(orders)
     intents = _load_intents()
     pos_syms = {p.get('symbol') for p in positions}
@@ -427,6 +457,11 @@ def run_stop_monitor(dry_run: bool) -> dict:
     for a in plan:
         sym = a['ticker']
         bid, ask = _latest_quote(sym)
+        if book_too_wide(a['reason'], bid, ask):
+            log(f"  ⏸ {sym}: book too wide to cross ({bid}/{ask}) — "
+                f"deferring stop exit to a tighter book / RTH pass")
+            stats['deferred'] += 1
+            continue
         quoted = reprice_exit(a, bid, ask, _slip_pct())
         if quoted != a['limit']:
             log(f"  {sym}: repriced off live book (bid={bid} ask={ask}): "
@@ -629,7 +664,7 @@ def main(argv=None) -> int:
     # Session-boundary reconcile FIRST (clear the prior session's ext-hours TPs
     # and resize any stop a filled TP left oversized), THEN place fresh TPs.
     log(f'reconcile: {reconcile_afterhours(args.dry_run)}')
-    positions = list(fetch_positions())
+    positions = fetch_positions() or []
     plan = desired_tps(positions, latest_broker_bracket,
                        tp_covered=fetch_tp_covered())
     log(f'placing {len(plan)} ext-hours TP(s)')

@@ -223,7 +223,8 @@ def test_run_stop_monitor_skips_during_rth(monkeypatch):
     monkeypatch.setenv('OPENCLAW_AFTERHOURS_STOP_MONITOR', '1')
     monkeypatch.setattr(ah, '_cli', lambda *a, **k: (True, {'is_open': True}, None))
     stats = ah.run_stop_monitor(dry_run=True)
-    assert stats == {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0}
+    assert stats == {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0,
+                     'deferred': 0}
 
 
 def test_run_stop_monitor_gate_off(monkeypatch):
@@ -499,3 +500,62 @@ def test_monitor_submits_quote_repriced_limit(monkeypatch, tmp_path):
     stats = ah.run_stop_monitor(dry_run=False)
     assert stats['exits'] == 1
     assert calls['submits'][0]['limit_price'] == 12.60
+
+
+# ── wide-book stop-exit deferral (2026-07-24) ──────────────────────────────
+# NVNO 2026-07-23 08:10Z: stop 10.61, premarket book 9.85/12.5 — the
+# marketable cover priced off the ask and paid 18% over the stop. A breach
+# exit that costs more than the breach must wait for a crossable book.
+
+def test_book_too_wide_defers_only_wide_stop_breach():
+    assert ah.book_too_wide('stop_breach', 9.85, 12.5)        # the NVNO book
+    assert not ah.book_too_wide('stop_breach', 10.60, 10.64)  # tight book
+    assert not ah.book_too_wide('tp_reach', 9.85, 12.5)       # floored at level
+    assert not ah.book_too_wide('stop_breach', None, 12.5)    # one-sided book
+
+
+def test_max_spread_env_override(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_AH_MAX_SPREAD_PCT', '30')
+    assert not ah.book_too_wide('stop_breach', 9.85, 12.5)
+
+
+def test_monitor_defers_stop_breach_on_wide_book(monkeypatch, tmp_path):
+    pos = [{'symbol': 'AXTI', 'side': 'long', 'qty': 59, 'current_price': 42.0}]
+    calls = _monitor_env(monkeypatch, tmp_path, orders=_AXTI_OCO,
+                         positions=pos, freed=True)
+    monkeypatch.setattr(ah, '_latest_quote', lambda s: (40.0, 47.0))
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['deferred'] == 1 and stats['exits'] == 0
+    assert calls['cancels'] == [] and calls['submits'] == []
+    # Deferral happens before any cancel — no protection touched, no debt owed.
+    try:
+        j = _json.loads((tmp_path / 'pending.json').read_text())
+    except FileNotFoundError:
+        j = {}
+    assert 'AXTI' not in j
+
+
+def test_monitor_crosses_tight_book_stop_breach(monkeypatch, tmp_path):
+    pos = [{'symbol': 'AXTI', 'side': 'long', 'qty': 59, 'current_price': 42.0}]
+    calls = _monitor_env(monkeypatch, tmp_path, orders=_AXTI_OCO,
+                         positions=pos, freed=True)
+    monkeypatch.setattr(ah, '_latest_quote', lambda s: (41.95, 42.05))
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats['exits'] == 1 and stats['deferred'] == 0
+    assert calls['submits'][0]['ticker'] == 'AXTI'
+
+
+# ── position fetch failure must not settle journal debt (2026-07-24) ───────
+
+def test_monitor_skips_and_keeps_journal_when_positions_unavailable(
+        monkeypatch, tmp_path):
+    (tmp_path / 'pending.json').write_text(_json.dumps(
+        {'AXTI': {'stop': 43.84, 'tp': 50.16, 'ts': _time.time()}}))
+    calls = _monitor_env(monkeypatch, tmp_path, orders=[], positions=None,
+                         freed=True)
+    stats = ah.run_stop_monitor(dry_run=False)
+    assert stats == {'checked': 0, 'exits': 0, 'restored': 0, 'failed': 0,
+                     'deferred': 0}
+    assert calls['submits'] == [] and calls['cancels'] == []
+    j = _json.loads((tmp_path / 'pending.json').read_text())
+    assert 'AXTI' in j          # a CLI glitch is not "position closed"
