@@ -42,3 +42,44 @@ def test_default_counts_all_tps_for_afterhours_idempotency(monkeypatch):
     cov = sr.fetch_tp_covered()
     assert cov.get('WDC') == 35.0
     assert cov.get('CIEN') == 42.0
+
+
+# ── CLI timeout resilience (2026-07-24) ─────────────────────────────────────
+# 00:05Z: one slow `order list` raised TimeoutExpired straight out of the
+# 20:05 ET reattach pass — the pass died before the emergency-exit check ran.
+# A hung broker call must degrade to (False, None, err), never propagate.
+
+def test_run_cli_timeout_degrades_to_failure(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr('time.sleep', lambda s: None)
+    n = {'calls': 0}
+    def fake_run(cmd, **kw):
+        n['calls'] += 1
+        raise sp.TimeoutExpired(cmd, kw.get('timeout') or 0)
+    monkeypatch.setattr(sr.subprocess, 'run', fake_run)
+    ok, payload, err = sr._run_cli(['order', 'list'])
+    assert ok is False and payload is None
+    assert 'timeout' in err['error']
+    assert n['calls'] == 4              # initial try + one per backoff step
+
+
+def test_run_cli_timeout_then_success_recovers(monkeypatch):
+    import subprocess as sp, types
+    monkeypatch.setattr('time.sleep', lambda s: None)
+    n = {'calls': 0}
+    def fake_run(cmd, **kw):
+        n['calls'] += 1
+        if n['calls'] == 1:
+            raise sp.TimeoutExpired(cmd, 15)
+        return types.SimpleNamespace(returncode=0, stdout='[]', stderr='')
+    monkeypatch.setattr(sr.subprocess, 'run', fake_run)
+    ok, payload, err = sr._run_cli(['position', 'list'])
+    assert ok is True and payload == [] and err is None
+    assert n['calls'] == 2
+
+
+def test_fetch_positions_distinguishes_failure_from_flat(monkeypatch):
+    monkeypatch.setattr(sr, '_run_cli', lambda *a, **k: (False, None, {'error': 'x'}))
+    assert sr.fetch_positions() is None          # couldn't ask
+    monkeypatch.setattr(sr, '_run_cli', lambda *a, **k: (True, [], None))
+    assert sr.fetch_positions() == []            # asked, genuinely flat

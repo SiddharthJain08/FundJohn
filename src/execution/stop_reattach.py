@@ -112,10 +112,22 @@ def _is_rate_limited(err: dict | None) -> bool:
 def _run_cli(args, timeout=15):
     import time
     for attempt, backoff in enumerate((*_RATE_LIMIT_BACKOFF, None)):
-        proc = subprocess.run(
-            [ALPACA_CLI, *args],
-            capture_output=True, text=True, timeout=timeout, check=False,
-        )
+        try:
+            proc = subprocess.run(
+                [ALPACA_CLI, *args],
+                capture_output=True, text=True, timeout=timeout, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            # A hung broker call must degrade the pass, never kill it —
+            # 2026-07-24 00:05Z: one slow `order list` raised straight out of
+            # the 20:05 ET reattach pass before the emergency-exit check ran.
+            err = {'exit_code': None, 'raw_stderr': '',
+                   'error': f'CLI timeout after {timeout}s'}
+            if backoff is None:
+                return False, None, err
+            log(f'  CLI timeout ({args[0]} {args[1] if len(args) > 1 else ""}) — retry in {backoff}s')
+            time.sleep(backoff)
+            continue
         if proc.returncode == 0:
             try:
                 return True, json.loads(proc.stdout), None
@@ -136,13 +148,17 @@ def _run_cli(args, timeout=15):
     return False, None, err
 
 
-def fetch_positions() -> list[dict]:
+def fetch_positions() -> list[dict] | None:
     """Equity-only open positions. Crypto has a parallel stop path in
-    alpaca_executor — skipping here keeps that contract clean."""
+    alpaca_executor — skipping here keeps that contract clean.
+
+    Returns None when the broker call FAILED (couldn't ask) vs [] for a
+    genuinely flat book — conflating the two lets a CLI glitch read as
+    "all positions closed" to consumers that settle debt on that signal."""
     ok, payload, err = _run_cli(['position', 'list'])
     if not ok:
         log(f'position list failed: {(err or {}).get("error","unknown")}')
-        return []
+        return None
     positions = payload or []
     return [p for p in positions if p.get('asset_class') == 'us_equity']
 
@@ -209,8 +225,10 @@ def latest_broker_bracket(ticker: str, position_side: str) -> dict | None:
     Returns {'entry': None, 'stop': float, 'target': float, 'order_id': str}
     or None when no bracket with both legs is found."""
     open_side = 'buy' if position_side == 'long' else 'sell'
+    # 45s: the full nested history is the heaviest CLI call in the pass and
+    # the one that hit the 15s ceiling when the broker API ran slow.
     ok, payload, err = _run_cli(['order', 'list', '--status', 'all',
-                                 '--nested', '--limit', '500'])
+                                 '--nested', '--limit', '500'], timeout=45)
     if not ok:
         log(f'order history fetch failed ({(err or {}).get("error","unknown")})')
         return None
@@ -926,6 +944,13 @@ def main():
         return 1
 
     positions = fetch_positions()
+    if positions is None:
+        # Couldn't ask ≠ flat book: the whole pass is the naked-position
+        # safety net, so a silent 0-position no-op here hides real exposure.
+        log('✗ position list unavailable — pass DEGRADED, nothing reattached')
+        _post_alert('⚠ **stop-reattach pass degraded** — broker position list '
+                    'unavailable; no reattach/emergency check ran this pass')
+        return 1
     log(f'fetched {len(positions)} equity positions')
     if args.only:
         positions = [p for p in positions if p.get('symbol') == args.only]
@@ -947,11 +972,17 @@ def main():
         # Runs first so its stop legs count toward `covered` below — the floor
         # pass then only stops positions the OCO pass left uncovered.
         if args.oco:
-            oco_stats = run_oco_reattach(conn, positions, args.dry_run)
-            log(f'OCO pass: {oco_stats}')
-            if oco_stats.get('tp_missing'):
-                log(f'⚠ {oco_stats["tp_missing"]} position(s) re-stopped WITHOUT a '
-                    f'take-profit (no recoverable TP) — operator review needed')
+            # Never let the OCO upgrade take the rest of the pass with it —
+            # the bare-stop floor, emergency exit and naked audit below are
+            # the actual safety net and must run even when this pass dies.
+            try:
+                oco_stats = run_oco_reattach(conn, positions, args.dry_run)
+                log(f'OCO pass: {oco_stats}')
+                if oco_stats.get('tp_missing'):
+                    log(f'⚠ {oco_stats["tp_missing"]} position(s) re-stopped WITHOUT a '
+                        f'take-profit (no recoverable TP) — operator review needed')
+            except Exception as e:
+                log(f'⚠ OCO pass crashed ({e!r}) — continuing to bare-stop floor')
 
         # Bare-stop floor: ensure every still-uncovered position has a GTC stop.
         # An OCO surfaces as a limit order (its stop leg is linked, not a
