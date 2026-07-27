@@ -9,8 +9,9 @@ from __future__ import annotations
 import sys
 import numpy as np
 import pandas as pd
+from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 from strategies.base import BaseStrategy, Signal, REGIME_POSITION_SCALE
 
 __all__ = ['VPMACDIndexSensitivity']
@@ -62,14 +63,25 @@ def _compute_vp_macd(ohlcv: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({'vp_macd': vp_macd, 'signal': signal_line}, index=ohlcv.index)
 
 
-def _load_ohlcv(tickers: List[str]) -> dict:
-    """Load OHLCV from master parquet; returns {ticker: DataFrame(date, open, high, low, close)}."""
+@lru_cache(maxsize=4)
+def _load_ohlcv_cached(tickers: Tuple[str, ...]) -> dict:
+    """Load OHLCV from master parquet; returns {ticker: DataFrame(date, open, high, low, close)}.
+
+    Memoised + predicate-pushed-down (2026-07-25). generate_signals calls this once
+    per BAR, and the old bare full-parquet read re-materialised all 18.7M rows of the
+    master panel every bar — anon-rss 4.16GB, global OOM-kill (rc=137) on the 8GB box
+    even with the box otherwise idle. `filters=` restricts the read to this strategy's
+    3 index ETFs at the row-group level, and lru_cache makes it ONE read per process
+    instead of ~2,600. Pure performance change: same rows, same dtypes, same order.
+    See reference_vps_two_core_cpu — never load the whole parquet.
+    """
     if not _PRICES_PATH.exists():
         return {}
     try:
         df = pd.read_parquet(
             _PRICES_PATH,
             columns=['ticker', 'date', 'open', 'high', 'low', 'close'],
+            filters=[('ticker', 'in', list(tickers))],
         )
         df = df[df['ticker'].isin(tickers)].copy()
         df['date'] = pd.to_datetime(df['date'])
@@ -81,6 +93,10 @@ def _load_ohlcv(tickers: List[str]) -> dict:
     except Exception as exc:
         print(f'[debug] S_vp_macd_index_sensitivity: OHLCV load failed: {exc}', file=sys.stderr)
         return {}
+
+
+def _load_ohlcv(tickers: List[str]) -> dict:
+    return _load_ohlcv_cached(tuple(sorted(tickers)))
 
 
 class VPMACDIndexSensitivity(BaseStrategy):
@@ -112,6 +128,15 @@ class VPMACDIndexSensitivity(BaseStrategy):
 
         scale = self.position_scale(regime_state)
 
+        # Point-in-time anchor (2026-07-25). `prices` is truncated to the bar the
+        # harness is simulating, but the master parquet below carries FULL history
+        # through today. Without this cutoff, _compute_vp_macd's .iloc[-1]/.iloc[-2]
+        # read the LATEST real-world bars regardless of which bar is being simulated
+        # — a look-ahead that made every backtest bar evaluate the same crossover
+        # (observable as an identical `signals=` line on every bar) while filling at
+        # historical prices. NO-OP in live: there prices.index[-1] IS the last bar.
+        as_of = prices.index[-1]
+
         # Load OHLCV from master parquet (needed for P* computation)
         ohlcv_map = _load_ohlcv(_UNIVERSE)
         if not ohlcv_map:
@@ -124,7 +149,8 @@ class VPMACDIndexSensitivity(BaseStrategy):
             if ticker not in ohlcv_map:
                 continue
 
-            ohlcv = ohlcv_map[ticker].dropna()
+            ohlcv = ohlcv_map[ticker]
+            ohlcv = ohlcv[ohlcv.index <= as_of].dropna()
             if len(ohlcv) < _MIN_BARS:
                 continue
 

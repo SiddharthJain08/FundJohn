@@ -152,6 +152,8 @@ _IMPL_MAP = {
     'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
     # SP-3: commodity ETP momentum — reference strategy for instrument_class='etp' rails
     'S_commodity_etp_momentum':          ('strategies.implementations.S_commodity_etp_momentum',          'CommodityEtpMomentum'),
+    # Volkova 2025 — linear regression channel mean-reversion on SPY
+    'S_linreg_channel_trend':            ('strategies.implementations.S_linreg_channel_trend',            'LinRegChannelTrend'),
     # SP-3.1: BTC momentum — reference strategy for instrument_class='crypto' rails
     'S_btc_momentum':                    ('strategies.implementations.S_btc_momentum',                    'BtcMomentum'),
     # SP-4 Phase 0: short straddle VRP — reference strategy for instrument_class='option' rails
@@ -330,6 +332,10 @@ _IMPL_MAP = {
     'S_regime_age_momentum': ('strategies.implementations.S_regime_age_momentum', 'RegimeAgeMomentum'),
     'S_volume_shock_overnight_drift': ('strategies.implementations.S_volume_shock_overnight_drift', 'VolumeShockOvernightDrift'),
     'S_vwap_closing_pressure': ('strategies.implementations.S_vwap_closing_pressure', 'VwapClosingPressure'),
+    # Moskowitz, Ooi & Pedersen 2012: vol-scaled long-short TSMOM across cross-asset ETPs
+    'S_tsmom_cross_asset_vol_scaled': ('strategies.implementations.S_tsmom_cross_asset_vol_scaled', 'TSMOMCrossAssetVolScaled'),
+    # Sepp & Lucic 2026: EWMA on vol-normalized returns captures spectral trend alpha at low frequencies
+    'S_spectral_trend_ewma_vol_target': ('strategies.implementations.S_spectral_trend_ewma_vol_target', 'SpectralTrendEWMAVolTarget'),
 }
 
 

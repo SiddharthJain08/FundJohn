@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_ast_momentum_in_mutual_fund_returns",
-  "required": ["prices"],
-  "optional": []
-}

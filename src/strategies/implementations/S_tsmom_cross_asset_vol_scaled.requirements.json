@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_tsmom_cross_asset_vol_scaled",
+  "required": ["prices"],
+  "optional": ["realized_vol", "macro"]
+}

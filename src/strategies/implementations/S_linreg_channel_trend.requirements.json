@@ -1,5 +1,5 @@
 {
-  "strategy_id": "S_ast_payday_anomaly",
+  "strategy_id": "S_linreg_channel_trend",
   "required": ["prices"],
   "optional": []
 }

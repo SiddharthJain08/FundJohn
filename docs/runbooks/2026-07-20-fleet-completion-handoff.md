@@ -49,11 +49,34 @@ AND matching `strategy_backtest_regimes`) so the next resume skips them.
 All 3 timers are `Persistent=yes` → **stamp-touch BEFORE re-enable** or they fire a
 missed-window catch-up immediately (actuating on freshly-uniform canonical mid-day).
 
+## ⚠️ ORDERING CORRECTION (2026-07-25) — ACTIVATION MUST PRECEDE WEIGHTS
+
+The step order below (weights=3, activation=5) is **WRONG whenever activation changes
+eligibility**. `strategy_weights` skips any live strategy with no eligible regime in
+`strategy_regime_params` ("is live but has no eligible regimes; skipping"), and the
+activation assigner is what SETS that column. Running weights first builds them against
+*pre-activation* eligibility.
+
+Measured on 2026-07-25: weights ran 06:56:37, activation ran 07:06:37 → **5 LOW_VOL cells
+had no weight row, 3 of which produced 32 of Monday's tickers** and therefore contributed
+ZERO to the conviction gate. Rebuilding weights after activation: 67→71 active strategies,
+89→100 rows, **LOW_VOL breadth 10→15**, skipped 22→18.
+
+**Correct order: … → activation → weights → daily_returns → similarity.**
+(`strategy_similarity` imports `strategy_weights`, so its strategy set also derives from
+weights — rebuild it AFTER weights or new sleeves get the SPARSE_DEFAULT 0.05 rho instead
+of a real one.) If you must keep the legacy order, **run weights TWICE** (before and after
+activation). Same defect class as passing `--reassign` to `run_universe_shrink.py`, which
+runs activation inline during the shrink and ahead of the conviction-floor read.
+
 ## OWED post-UNIFORM sequence (operator-gated — do in order)
 
 1. **Verify uniform** via the SQL query above → outstanding == 0. (Do NOT trust the log.)
+   Gate on **`live` strategies specifically**: a missing `live` strategy is silently dropped
+   from `strategy_weights`; a missing `candidate` is tolerable.
 2. **Reconcile** canonical (spot-check no partial/lying rows).
-3. **Weights rebuild:** `PYTHONPATH=src python3 -m execution.strategy_weights --rebuild --trigger=manual_post_uniform --verbose`
+3. **Weights rebuild** — ⚠️ see ORDERING CORRECTION above, run this AFTER step 5 activation:
+   `PYTHONPATH=src python3 -m execution.strategy_weights --rebuild --trigger=manual_post_uniform --verbose`
 4. **Conviction-floor recheck** — verify live `regime_sizer_params.min_corr_cum_sharpe` floors are sane for the rebuilt metrics (they've been retuned twice; restoring a floor can dump backlog in one execute — see [[project_conviction_floor_trading_halt]]).
 5. **Activation:** restore `OPENCLAW_ACTIVATION_ASSIGNER=1` first, then `PYTHONPATH=src python3 -m backtest.activation_assigner --all --notify`; eyeball the eligibility diff.
 6. **Restore flags:** `sed -i 's/^OPENCLAW_ACTIVATION_ASSIGNER=0$/OPENCLAW_ACTIVATION_ASSIGNER=1/; s/^OPENCLAW_AUTO_DEMOTE=0$/OPENCLAW_AUTO_DEMOTE=1/' .env`

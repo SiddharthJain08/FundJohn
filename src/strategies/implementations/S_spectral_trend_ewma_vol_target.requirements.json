@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_spectral_trend_ewma_vol_target",
+  "required": ["prices"],
+  "optional": ["macro"]
+}
