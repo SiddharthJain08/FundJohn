@@ -1418,7 +1418,8 @@ app.get('/api/strategies', async (req, res) => {
     const ubtRegimeRows = (await dbQuery(`
       SELECT r.strategy_id, br.regime_state, br.trade_count, br.sharpe,
              br.max_dd_pct, br.return_pct, br.hit_rate,
-             br.avg_pnl_pct, br.avg_holding_days, br.oos_days_in_regime
+             br.avg_pnl_pct, br.avg_holding_days, br.oos_days_in_regime,
+             br.sortino, br.calmar
       FROM strategy_backtest_regimes br
       JOIN (
         SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -1455,6 +1456,10 @@ app.get('/api/strategies', async (req, res) => {
         avg_pnl_pct:       r.avg_pnl_pct,
         avg_holding_days:  r.avg_holding_days,
         oos_days_in_regime: r.oos_days_in_regime,
+        // Per-regime risk metrics for the expanded "Backtest by Regime" grid
+        // (operator 2026-07-27: Calmar/maxDD surfaced alongside the DD-gate hatch).
+        sortino:           r.sortino,
+        calmar:            r.calmar,
       };
     }
 
@@ -1509,6 +1514,8 @@ app.get('/api/strategies', async (req, res) => {
           avg_holding_days:  m.mean_holding_days,
           oos_days_in_regime: prior.oos_days_in_regime ?? null,
           universe_tier:     m.tier,
+          sortino:           m.sortino,
+          calmar:            m.calmar,
         };
       }
     }
@@ -1752,6 +1759,34 @@ app.get('/api/strategies', async (req, res) => {
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Current-regime strategy similarity matrix (operator 2026-07-27): powers the
+// expanded panel's "Similar Active Strategies" ordering + pairwise-ρ column.
+// Same store the sizer's corr/tangency S_adj reads (strategy_similarity_matrix,
+// is_current row for the regime of record). {regime, computed_at, matrix} —
+// matrix = {sid: {sid: rho}}. Fail-soft: empty matrix on any error.
+app.get('/api/strategy-similarity', async (_req, res) => {
+  let currentRegime = 'TRANSITIONING';
+  try {
+    const latestJson = JSON.parse(fs.readFileSync(REGIME_FILE, 'utf8'));
+    currentRegime = latestJson.state || 'TRANSITIONING';
+  } catch { /* fallback regime */ }
+  try {
+    const r = await dbQuery(`
+      SELECT regime_state, matrix, computed_at
+        FROM strategy_similarity_matrix
+       WHERE regime_state = $1 AND is_current
+       ORDER BY computed_at DESC LIMIT 1`, [currentRegime]);
+    const row = r.rows[0] || null;
+    res.json({
+      regime:      currentRegime,
+      computed_at: row ? row.computed_at : null,
+      matrix:      row ? (row.matrix || {}) : {},
+    });
+  } catch (err) {
+    res.json({ regime: currentRegime, computed_at: null, matrix: {}, error: err.message });
   }
 });
 
@@ -3777,7 +3812,7 @@ body.rs-chat-locked{overflow:hidden}
 .st-regime-stats .st-rs-row b{color:var(--text);font-weight:600}
 .st-regime-stats .st-rs-na{color:var(--dim);font-style:italic}
 .st-similar{display:flex;flex-direction:column;gap:4px;max-height:180px;overflow-y:auto;padding-right:2px}
-.st-similar-row{display:grid;grid-template-columns:1fr repeat(4,40px);gap:4px;align-items:center;font-size:10px;padding:3px 6px;border-radius:4px;background:var(--border2)}
+.st-similar-row{display:grid;grid-template-columns:1fr repeat(5,40px);gap:4px;align-items:center;font-size:10px;padding:3px 6px;border-radius:4px;background:var(--border2)}
 .st-similar-row .st-sm-name{color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st-similar-row .st-sm-cell{padding:2px 4px;border-radius:3px;text-align:center;font-size:9.5px;font-weight:600;background:var(--bg);color:var(--muted)}
 .st-similar-row .st-sm-cell.pos{color:var(--green)}
@@ -8568,6 +8603,10 @@ function _bindGroupClicks(tableId, renderFn) {
 //   Inactive Stack      = state ∈ {deprecated, archived, orphan} — historical metrics
 //   Research Candidates = state ∈ {paper, candidate} — backtest metrics, Approve/Reject
 let strategiesData = [];
+// Current-regime strategy-similarity matrix (sizer's S_adj store) — powers the
+// expanded panel's pairwise-ρ ordering of Similar Active Strategies.
+let _stSimMatrix = {};
+let _stSimRegime = null;
 let _stActiveJobs = {};   // strategy_id → {job_id, phase, progress, payload}
 let _stLastFailures = {}; // strategy_id → {job_id, reason}  (persisted server-side; survives reload + restart)
 let _stDataUsage = null; // {parameters, strategies_total, categories_total}
@@ -8884,7 +8923,7 @@ function _actRenderPreview(data, host) {
 
 async function loadStrategies() {
   try {
-    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp, notedResp] = await Promise.all([
+    const [rows, jobs, failures, dataUsage, proposals, driftResp, appliedResp, notedResp, simResp] = await Promise.all([
       _safeFetch('/api/strategies',                  [], { critical: true, label: 'strategies list' }),
       _safeFetch('/api/approvals/active',            [], { label: 'active approvals' }),
       _safeFetch('/api/approvals/recent-failures',   [], { label: 'recent failures' }),
@@ -8893,7 +8932,10 @@ async function loadStrategies() {
       _safeFetch('/api/regime-drift',                { signals: [] }, { label: 'regime drift' }),
       _safeFetch('/api/regime-proposals/applied?days=7', { applied: [] }, { label: 'applied adjustments' }),
       _safeFetch('/api/regime-proposals/noted?days=21', { proposals: [], sizing_recs: [] }, { label: 'noted adjustments' }),
+      _safeFetch('/api/strategy-similarity',         { regime: null, matrix: {} }, { label: 'similarity matrix' }),
     ]);
+    _stSimMatrix = (simResp && simResp.matrix) ? simResp.matrix : {};
+    _stSimRegime = simResp ? simResp.regime : null;
     // Fire-and-forget — the gates section renders independently of the
     // strategy list below. Errors are reflected inline in the section.
     _loadSharpeGates();
@@ -9135,6 +9177,14 @@ function _stRenderDataUsage() {
 // trade_count, total_return_pct, hit_rate}. Shows backtest Sharpe per regime.
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
+// Per-regime effective Sharpe — same definition as the row-level Eff.Sharpe
+// column and blendScope: sharpe / sqrt(avg holding days). Null when the sleeve
+// has no holding-days figure (old serialized breakdown rows).
+function _effSharpeOf(b) {
+  const s   = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
+  const act = (b && b.avg_holding_days != null) ? parseFloat(b.avg_holding_days) : null;
+  return (s != null && act && act > 0) ? s / Math.sqrt(act) : null;
+}
 function _regimeBreakdown(r) {
   const breakdown = r.backtest_regime_breakdown || {};
   const eligible = Array.isArray(r.eligible_regimes)
@@ -9148,19 +9198,25 @@ function _regimeBreakdown(r) {
     const b      = breakdown[rg];
     const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
     const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
+    // Cell value = per-regime EFFECTIVE Sharpe (sharpe/√hold-days — matches
+    // the row-level Eff.Sharpe column; operator 2026-07-27). Falls back to raw
+    // sharpe for old rows without a holding-days figure.
+    const effSh  = _effSharpeOf(b);
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (!trades)        klass.push('st-rg-na');
     if (!isEligible)    klass.push('st-rg-ineligible');
     if (editable)       klass.push('st-rg-editable');
-    const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
+    const shTxt  = sharpe != null ? sharpe.toFixed(2) : '—';
+    const valTxt = effSh != null ? effSh.toFixed(2) : shTxt;
     // NOTE: the /api/strategies per-regime object emits the return field as
     // total_return_pct (server.js ~1238), not return_pct as the plan's
     // Step 3b snippet assumed — read the key the API actually surfaces so the
     // tooltip's Ret segment renders instead of always showing a dash.
     const retPct = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
     const statsLine = !trades ? 'no backtest trades'
-      : 'Sharpe ' + valTxt
+      : 'Eff ' + (effSh != null ? effSh.toFixed(2) : '—')
+        + ' · Sharpe ' + shTxt
         + ' · Ret ' + (retPct != null ? (retPct >= 0 ? '+' : '') + parseFloat(retPct).toFixed(1) + '%' : '—')
         + ' · Win ' + (b.hit_rate != null ? Math.round(b.hit_rate * 100) + '%' : '—')
         + ' · ' + trades + ' trades';
@@ -9174,8 +9230,8 @@ function _regimeBreakdown(r) {
             </span>\`;
   }).join('');
   const gridTitle = editable
-    ? 'Per-regime BACKTEST Sharpe · click a regime to toggle eligibility'
-    : "Per-regime BACKTEST Sharpe · operator toggle only for state='live'";
+    ? 'Per-regime effective Sharpe (Sharpe/√hold-days) · click a regime to toggle eligibility'
+    : "Per-regime effective Sharpe (Sharpe/√hold-days) · operator toggle only for state='live'";
   return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
@@ -9617,7 +9673,7 @@ function _renderActiveStack(rows) {
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
-      <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
+      <th title="Per-regime effective Sharpe (backtest Sharpe/√hold-days); dot=current regime; blue=declared">By Regime</th>
       <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
       <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sharpe / sqrt(avg holding days)">Eff.Sharpe</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
@@ -9750,8 +9806,19 @@ async function _stPaintExpand(sid) {
     const retPct = retSrc != null ? parseFloat(retSrc) : null;
     const sharpe = b.sharpe != null ? parseFloat(b.sharpe) : null;
     const winPct = b.hit_rate != null ? Math.round(b.hit_rate * 100) : null;
+    // Additional per-regime risk metrics (operator 2026-07-27): effective
+    // Sharpe (matches the By-Regime cells + row Eff.Sharpe), Calmar (the
+    // DD-gate escape-hatch metric) and Max DD (the ceiling it escapes).
+    const effSh  = _effSharpeOf(b);
+    const calmar = b.calmar != null ? parseFloat(b.calmar) : null;
+    const maxDd  = b.max_dd_pct != null ? parseFloat(b.max_dd_pct) : null;
     const inner = ''
       + '<div class="st-rs-row"><span>Sharpe</span><b>' + (sharpe != null ? sharpe.toFixed(2) : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Eff.Sharpe</span><b>' + (effSh != null ? effSh.toFixed(2) : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Calmar</span><b' + (calmar != null ? ' style="color:' + (calmar >= 0.5 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
+      +   (calmar != null ? calmar.toFixed(2) : '—') + '</b></div>'
+      + '<div class="st-rs-row"><span>Max DD</span><b' + (maxDd != null ? ' style="color:' + (maxDd <= 20 ? 'var(--muted)' : maxDd <= 50 ? 'var(--orange, #f0883e)' : 'var(--red)') + '"' : '') + '>'
+      +   (maxDd != null ? maxDd.toFixed(1) + '%' : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Return</span><b' + (retPct != null ? ' style="color:' + (retPct >= 0 ? 'var(--green)' : 'var(--red)') + '"' : '') + '>'
       +   (retPct != null ? ((retPct >= 0 ? '+' : '') + retPct.toFixed(1) + '%') : '—') + '</b></div>'
       + '<div class="st-rs-row"><span>Win</span><b>' + (winPct != null ? winPct + '%' : '—') + '</b></div>'
@@ -9760,15 +9827,36 @@ async function _stPaintExpand(sid) {
   }).join('');
 
   // ── Similar strategies (overlap on at least one regime) ────────────────
-  // Heatmap cell shows backtest Sharpe for that regime — directly comparable
-  // to the focused strategy's per-regime cells above.
+  // Ordered by PAIRWISE similarity ρ to the focused strategy (operator
+  // 2026-07-27) — the same current-regime matrix the sizer's S_adj reads.
+  // ρ shown first, then the per-regime backtest Sharpes. Missing pair =
+  // matrix sparse-default territory → sorts to the bottom.
   const myRegimes = new Set(r.active_in_regimes || []);
+  const _rhoTo = (other) => {
+    const a = (_stSimMatrix[sid] || {})[other];
+    const b2 = (_stSimMatrix[other] || {})[sid];
+    const v = a != null ? a : b2;
+    return v != null ? parseFloat(v) : null;
+  };
   const similar = Object.values(_stActiveSnapshot)
     .filter(o => o.strategy_id !== sid)
     .filter(o => (o.active_in_regimes || []).some(rg => myRegimes.has(rg)))
-    .sort((a, b) => String(a.strategy_id).localeCompare(String(b.strategy_id)))
+    .sort((a, b) => {
+      const ra = _rhoTo(a.strategy_id), rb = _rhoTo(b.strategy_id);
+      if (ra == null && rb == null) return String(a.strategy_id).localeCompare(String(b.strategy_id));
+      if (ra == null) return 1;
+      if (rb == null) return -1;
+      return rb - ra;
+    })
     .slice(0, 12);
   const similarHtml = similar.length ? similar.map(o => {
+    const rho = _rhoTo(o.strategy_id);
+    const rhoCls = rho == null ? 'empty' : (rho >= 0.85 ? 'neg' : rho >= 0.4 ? '' : 'pos');
+    const rhoTtl = rho == null
+      ? 'pairwise similarity: not in the ' + (_stSimRegime || 'current') + ' matrix (treated ~independent)'
+      : 'pairwise similarity ρ=' + rho.toFixed(2) + ' (' + (_stSimRegime || 'current') + ' matrix — the S_adj input; ≥0.85 = near-clone)';
+    const rhoCell = '<span class="st-sm-cell ' + rhoCls + '" style="font-weight:600" title="' + _escStr(rhoTtl) + '">'
+                  + (rho != null ? rho.toFixed(2) : '—') + '</span>';
     const cells = _REGIME_AXIS.map(rg => {
       const b = (o.backtest_regime_breakdown || {})[rg];
       const bt = (b && b.trade_count != null) ? parseInt(b.trade_count) : 0;
@@ -9781,7 +9869,7 @@ async function _stPaintExpand(sid) {
     }).join('');
     return '<div class="st-similar-row" title="Open ' + o.strategy_id + '">'
          + '<span class="st-sm-name" onclick="_stToggleExpand(\\'' + _escStr(o.strategy_id) + '\\')" style="cursor:pointer">' + o.strategy_id + '</span>'
-         + cells + '</div>';
+         + rhoCell + cells + '</div>';
   }).join('') : '<div class="st-rs-na" style="font-size:10.5px;padding:8px 0">No other active strategies share these regimes.</div>';
 
   // Render the synchronous content + a stable canvas wrapper. The wrapper
@@ -9790,12 +9878,13 @@ async function _stPaintExpand(sid) {
   body.innerHTML = \`
     <div class="st-expand-grid">
       <div class="st-expand-section">
-        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Return · Win · Trades</span></div>
+        <div class="st-expand-section-title"><span>Backtest by Regime</span><span style="color:var(--dim);font-size:9px">Sharpe · Eff · Calmar · MaxDD · Return · Win · Trades</span></div>
         <div class="st-regime-stats">\${cellsHtml}</div>
-        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">backtest Sharpe · share ≥1 regime · click to open</span></div>
+        <div class="st-expand-section-title" style="margin-top:14px"><span>Similar Active Strategies</span><span style="color:var(--dim);font-size:9px">sorted by pairwise ρ · then backtest Sharpe per regime · click to open</span></div>
         <div class="st-similar">
           <div class="st-similar-row" style="background:transparent">
             <span class="st-sm-name" style="color:var(--dim);font-size:9px;text-transform:uppercase;letter-spacing:.06em">Strategy</span>
+            <span class="st-sm-cell" style="background:transparent;color:var(--dim);font-size:9px" title="pairwise similarity to this strategy (current-regime matrix, the S_adj input)">ρ</span>
             \${_REGIME_AXIS.map(rg => '<span class="st-sm-cell" style="background:transparent;color:var(--dim);font-size:9px">' + _REGIME_TAGS[rg] + '</span>').join('')}
           </div>
           \${similarHtml}
