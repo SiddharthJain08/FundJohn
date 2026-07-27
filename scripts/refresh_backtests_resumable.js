@@ -159,6 +159,16 @@ function allStrategies() {
       fs.appendFileSync(CKPT, sid + '\n');   // checkpoint ONLY on success
       ok++;
       console.log(`[rebt] ok   ${sid} (${mins}m) ${ok + fail}/${work.length}`);
+    } else if ((r.stdout || '').includes('wrote run_id=')) {
+      // Post-write kill (2026-07-27: daytime OOM during teardown/panel
+      // rebuild). unified_backtest prints 'wrote run_id=' only AFTER
+      // conn.commit() — the canonical row is durable, so checkpoint instead
+      // of burning a full re-run. The skipped panel rebuild self-heals on the
+      // strategy's next dashboard rebuild.
+      fs.appendFileSync(CKPT, sid + '\n');
+      ok++;
+      const how = r.signal ? `signal ${r.signal}` : `rc=${r.status}`;
+      console.log(`[rebt] ok   ${sid} (${mins}m) SALVAGED — write committed, killed post-write (${how}) ${ok + fail}/${work.length}`);
     } else {
       fail++;
       // rc=137 is the OOM signature on this box; surface it distinctly so a
