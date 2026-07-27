@@ -6,13 +6,15 @@ docs/archive/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below
     weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
+    cadence_days  = avg_holding_days(s, R)                  # ONE time quantity
     daily_weight  = weight / sqrt(avg_holding_days(s, R))   # == per-regime Eff.Sharpe
-                    # (operator 2026-07-27: the divisor is the REGIME sleeve's
-                    # measured holding period, so daily_weight equals the
-                    # dashboard's Eff.Sharpe exactly. cadence_days — the signal
-                    # re-fire interval — is persisted for the sizer's signal
-                    # WINDOW only and is the fallback divisor when a sleeve
-                    # has no holding-days figure.)
+                    # (operator 2026-07-27 v2: the REGIME sleeve's measured
+                    # holding period is BOTH the persisted cadence_days — the
+                    # sizer's signal window — AND the daily_weight divisor, so
+                    # daily_weight equals the dashboard's Eff.Sharpe exactly.
+                    # The strategy-level resolution (run-level backtest avg →
+                    # live avg → static declaration) is only the fallback for
+                    # sleeves without a holding-days figure.)
 
 effective_sharpe was a sample-size blend of backtest and LIVE Sharpe until
 2026-07-16 (`(bt_n×bt_sharpe + live_n×live_sharpe)/(bt_n+live_n)`). Retired by
@@ -746,20 +748,24 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 # sizer downstream re-normalises absolute scale via
                 # scale = λ·NAV / Σ|ticker_w|, so per-cycle allocation
                 # is invariant to scale.
-                # daily_weight divisor = the REGIME sleeve's avg holding days
-                # (operator 2026-07-27: daily_weight == per-regime Eff.Sharpe);
-                # cadence_days is the fallback for sleeves without one and
-                # remains the persisted signal-window quantity either way.
+                # ONE per-(strategy, regime) time quantity (operator 2026-07-27
+                # v2): the REGIME sleeve's avg holding days is BOTH the
+                # daily_weight divisor (dw == per-regime Eff.Sharpe) AND the
+                # persisted cadence_days (the sizer's signal window — how long
+                # a signal stays in the carried set). The strategy-level
+                # resolution (run-level backtest avg → live avg → static
+                # declaration) is only the fallback for sleeves without a
+                # holding-days figure.
                 _hold = e.get('regime_holding_days')
                 if not (_hold and _hold > 0):
                     _hold = e['cadence_days']
                     logger.info('strategy_weights: %s/%s no sleeve holding-days — '
-                                'daily_weight falls back to cadence %.2f',
+                                'cadence/daily_weight fall back to run-level %.2f',
                                 e['strategy_id'], R, _hold)
                 w, w_daily = _regime_weight(e['effective_sharpe'], _hold)
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
-                    cadence_days=e['cadence_days'],
+                    cadence_days=float(_hold),
                     bt_sharpe=e['bt_sharpe'], bt_n=e['bt_n'],
                     live_sharpe=e['live_sharpe'], live_n=e['live_n'],
                     effective_sharpe=e['effective_sharpe'],
