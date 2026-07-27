@@ -9197,26 +9197,23 @@ function _regimeBreakdown(r) {
     const isEligible = eligible.includes(rg);
     const b      = breakdown[rg];
     const trades = b && b.trade_count ? parseInt(b.trade_count) : 0;
+    // Cell value = raw per-regime BACKTEST Sharpe — the quantity the
+    // activation slider gates on. Eff.Sharpe lives in the expanded
+    // "Backtest by Regime" grid only (operator 2026-07-27).
     const sharpe = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
-    // Cell value = per-regime EFFECTIVE Sharpe (sharpe/√hold-days — matches
-    // the row-level Eff.Sharpe column; operator 2026-07-27). Falls back to raw
-    // sharpe for old rows without a holding-days figure.
-    const effSh  = _effSharpeOf(b);
     const klass = ['st-regime-cell', \`st-rg-\${rg}\`];
     if (current === rg) klass.push('st-rg-current');
     if (!trades)        klass.push('st-rg-na');
     if (!isEligible)    klass.push('st-rg-ineligible');
     if (editable)       klass.push('st-rg-editable');
-    const shTxt  = sharpe != null ? sharpe.toFixed(2) : '—';
-    const valTxt = effSh != null ? effSh.toFixed(2) : shTxt;
+    const valTxt = sharpe != null ? sharpe.toFixed(2) : '—';
     // NOTE: the /api/strategies per-regime object emits the return field as
     // total_return_pct (server.js ~1238), not return_pct as the plan's
     // Step 3b snippet assumed — read the key the API actually surfaces so the
     // tooltip's Ret segment renders instead of always showing a dash.
     const retPct = b.total_return_pct != null ? b.total_return_pct : b.return_pct;
     const statsLine = !trades ? 'no backtest trades'
-      : 'Eff ' + (effSh != null ? effSh.toFixed(2) : '—')
-        + ' · Sharpe ' + shTxt
+      : 'Sharpe ' + valTxt
         + ' · Ret ' + (retPct != null ? (retPct >= 0 ? '+' : '') + parseFloat(retPct).toFixed(1) + '%' : '—')
         + ' · Win ' + (b.hit_rate != null ? Math.round(b.hit_rate * 100) + '%' : '—')
         + ' · ' + trades + ' trades';
@@ -9230,8 +9227,8 @@ function _regimeBreakdown(r) {
             </span>\`;
   }).join('');
   const gridTitle = editable
-    ? 'Per-regime effective Sharpe (Sharpe/√hold-days) · click a regime to toggle eligibility'
-    : "Per-regime effective Sharpe (Sharpe/√hold-days) · operator toggle only for state='live'";
+    ? 'Per-regime BACKTEST Sharpe · click a regime to toggle eligibility'
+    : "Per-regime BACKTEST Sharpe · operator toggle only for state='live'";
   return \`<div class="st-regime-grid" title="\${gridTitle}">\${cells}</div>\`;
 }
 
@@ -9673,7 +9670,7 @@ function _renderActiveStack(rows) {
     <tr>
       <th data-sort-key="strategy_id" data-sort-type="str">Strategy</th>
       <th data-sort-key="_active_rank" data-sort-type="num" title="Waiting(0)<Stale(1)<Live(2)">Status</th>
-      <th title="Per-regime effective Sharpe (backtest Sharpe/√hold-days); dot=current regime; blue=declared">By Regime</th>
+      <th title="Per-regime BACKTEST Sharpe; dot=current regime; blue=declared">By Regime</th>
       <th class="num" data-sort-key="sharpe" data-sort-type="num" title="Backtest Sharpe (primary window)">Sharpe</th>
       <th class="num" data-sort-key="effective_sharpe" data-sort-type="num" title="Sharpe / sqrt(avg holding days)">Eff.Sharpe</th>
       <th class="num" data-sort-key="closed_count" data-sort-type="num" title="Backtest trade count">Closed</th>
