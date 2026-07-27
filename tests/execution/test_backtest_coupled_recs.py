@@ -254,14 +254,18 @@ class _CandConn:
 
 def _wire_run(monkeypatch, *, baseline, cand_metrics, conn):
     monkeypatch.setenv('OPENCLAW_BACKTEST_COUPLED_RECS', '1')
+    # Hermetic: legacy full-universe decisions regardless of manifest/artifact
+    # state on this box (chosen-universe path has its own tests below).
+    monkeypatch.setenv('OPENCLAW_COUPLING_CHOSEN_UNIVERSE', '0')
     monkeypatch.setattr(bc, '_load_recs', lambda rec_date=None: [
         {'id': 1, 'strategy_id': 'S_x', 'stop_delta_pct': 0.10,
          'target_delta_pct': None, 'hold_days_delta': None}])
     monkeypatch.setattr(bc, '_eligible_regimes', lambda sid: ['LOW_VOL'])
     monkeypatch.setattr(bc, '_stored_baseline', lambda sid: baseline)
     cand_calls = []
-    def _fake_candidate(sid, override, max_hold_days=None):
-        cand_calls.append({'override': override, 'max_hold_days': max_hold_days})
+    def _fake_candidate(sid, override, max_hold_days=None, resolver=None):
+        cand_calls.append({'override': override, 'max_hold_days': max_hold_days,
+                           'resolver': resolver})
         return conn, 'cand-run-id', cand_metrics
     monkeypatch.setattr(bc, '_run_candidate', _fake_candidate)
     return cand_calls
@@ -342,3 +346,86 @@ def test_run_falls_back_to_persisting_baseline_when_no_stored(monkeypatch):
     out = bc.run(dry_run=True, log=lambda *_: None)
     assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
     assert base_calls == [{'override': None, 'commit': True}]
+
+
+# ── selected-universe decisions (2026-07-27) ─────────────────────────────────
+
+def test_chosen_resolver_env_off(monkeypatch):
+    monkeypatch.setenv('OPENCLAW_COUPLING_CHOSEN_UNIVERSE', '0')
+    assert bc._chosen_resolver('momentum_12_1') == (None, None)
+
+
+def test_chosen_resolver_unknown_strategy(monkeypatch):
+    # A sid absent from the manifest (all synthetic test sids) → legacy full.
+    monkeypatch.delenv('OPENCLAW_COUPLING_CHOSEN_UNIVERSE', raising=False)
+    assert bc._chosen_resolver('S_not_a_real_strategy') == (None, None)
+
+
+def _wire_chosen(monkeypatch, *, probe_conn, full_conn, cand_metrics):
+    """Wire run() onto the chosen-universe path: forced resolver sentinel,
+    shrink-store baseline, per-call conns (probe first, canonical second)."""
+    calls = _wire_run(monkeypatch, baseline=_BASE,
+                      cand_metrics=cand_metrics, conn=probe_conn)
+    sentinel = object()
+    monkeypatch.setattr(bc, '_chosen_resolver', lambda sid: (sentinel, 'sp500'))
+    monkeypatch.setattr(bc, '_chosen_baseline_sharpe', lambda sid, tier: 1.0)
+    conns = [probe_conn, full_conn]
+    def _fake_candidate(sid, override, max_hold_days=None, resolver=None):
+        calls.append({'override': override, 'max_hold_days': max_hold_days,
+                      'resolver': resolver})
+        return conns.pop(0), f'run-{len(calls)}', cand_metrics
+    monkeypatch.setattr(bc, '_run_candidate', _fake_candidate)
+    calls.clear()
+    return calls, sentinel
+
+
+def test_chosen_probe_reject_never_touches_canonical(monkeypatch):
+    probe, full = _CandConn(), _CandConn()
+    calls, sentinel = _wire_chosen(monkeypatch, probe_conn=probe, full_conn=full,
+                                   cand_metrics={'sharpe': 0.5, 'total_trades': 100})
+    marks = []
+    monkeypatch.setattr(bc, '_mark_outcome', lambda rid, o, n: marks.append(o))
+    out = bc.run(dry_run=False, log=lambda *_: None)
+    assert out == {'applied': 0, 'rejected': 1, 'scanned': 1}
+    # ONE run (the probe, carrying the resolver), rolled back, no canonical run
+    assert len(calls) == 1 and calls[0]['resolver'] is sentinel
+    assert probe.rolled_back and not probe.committed
+    assert marks == ['rejected']
+
+
+def test_chosen_probe_apply_recommits_full_universe_canonical(monkeypatch):
+    import sys, types
+    probe, full = _CandConn(), _CandConn()
+    calls, sentinel = _wire_chosen(monkeypatch, probe_conn=probe, full_conn=full,
+                                   cand_metrics={'sharpe': 1.4, 'total_trades': 100})
+    set_calls = []
+    fake_em = types.ModuleType('strategies.eligibility_manager')
+    fake_em.set_params = lambda **kw: set_calls.append(kw)
+    monkeypatch.setitem(sys.modules, 'strategies.eligibility_manager', fake_em)
+    import strategies as _s
+    monkeypatch.setattr(_s, 'eligibility_manager', fake_em, raising=False)
+    fake_panel = types.ModuleType('backtest.backtest_panel')
+    fake_panel.rebuild = lambda sid: None
+    monkeypatch.setitem(sys.modules, 'backtest.backtest_panel', fake_panel)
+    import backtest as _b
+    monkeypatch.setattr(_b, 'backtest_panel', fake_panel, raising=False)
+    marks = []
+    monkeypatch.setattr(bc, '_mark_outcome', lambda rid, o, n: marks.append(o))
+    monkeypatch.setattr(bc, '_replace_stops_for_applied',
+                        lambda sid, sp, log: {'attempted': 0, 'replaced': 0, 'failed': 0})
+    shrink_calls = []
+    import subprocess as _sp
+    monkeypatch.setattr(_sp, 'run', lambda *a, **kw: (shrink_calls.append(a[0]),
+                        types.SimpleNamespace(returncode=0, stdout=''))[1])
+    out = bc.run(dry_run=False, log=lambda *_: None)
+    assert out == {'applied': 1, 'rejected': 0, 'scanned': 1}
+    # probe (resolver) rolled back; canonical re-run (NO resolver) committed
+    assert len(calls) == 2
+    assert calls[0]['resolver'] is sentinel and calls[1]['resolver'] is None
+    assert probe.rolled_back and not probe.committed
+    assert full.committed and not full.rolled_back
+    # canonical run row tagged before commit; sleeve refresh spawned w/o --adopt
+    assert any('notes' in sql and params[1] == 'run-2' for sql, params in full.executed)
+    assert len(shrink_calls) == 1 and '--reassign' in shrink_calls[0] \
+        and '--adopt' not in shrink_calls[0]
+    assert marks == ['applied']

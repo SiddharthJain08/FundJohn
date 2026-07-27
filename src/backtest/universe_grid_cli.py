@@ -195,6 +195,25 @@ def _simulate_grid(
     _slippage_on = os.environ.get('OPENCLAW_BACKTEST_SLIPPAGE', '1') != '0'
     _slippage_bps = _cost_bps if _slippage_on else 0.0
 
+    # Honest cost model (2026-07-27): mirror run_backtest's per-ticker
+    # half-spread map + live asset-eligibility gate (equity/etp only, loud
+    # fallback to flat/ungated). Tier selection prices every universe on the
+    # SAME cost model as canonical runs — without this the ladder optimizes
+    # tiers on costs the live book never pays.
+    from backtest.unified_backtest import load_ticker_cost_bps, load_bt_asset_gate
+    _honest_kwargs = {}
+    if _slippage_on and _instrument_class in ('equity', 'etp'):
+        _cost_map = load_ticker_cost_bps()
+        if _cost_map:
+            _honest_kwargs['cost_bps_by_ticker'] = _cost_map
+            _log(f'grid spread-cost model: {len(_cost_map)} tickers; '
+                 f'fallback flat {_slippage_bps}bps for unmapped')
+    if _instrument_class in ('equity', 'etp'):
+        _gate_map = load_bt_asset_gate()
+        if _gate_map:
+            _honest_kwargs['asset_gate'] = _gate_map
+            _log(f'grid asset gate: {len(_gate_map)} symbols mapped')
+
     start_dt = pd.Timestamp(start_date)
     end_dt = pd.Timestamp(end_date)
     oos_dates = close_wide.loc[start_dt:end_dt].index
@@ -204,6 +223,7 @@ def _simulate_grid(
         strategy_id=strategy_id,
         resolver=resolver,
         slippage_bps=_slippage_bps,
+        **_honest_kwargs,
     )
     trades         = sim['trades']
     universe_sizes = sim['universe_sizes']

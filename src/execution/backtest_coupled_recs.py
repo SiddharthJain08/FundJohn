@@ -38,6 +38,18 @@ canonical row exists (strategy never backtested through the unified engine).
 max_hold: strategy-configured — run_backtest bakes strategy_regime_params
 max_hold into every run, so baselines and candidates share the config horizon
 and applied hold changes compound via the stored config_json anchor.
+
+Selected-universe decisions (2026-07-27 operator directive): when the
+strategy's chosen predicate is a ladder tier, the candidate backtest runs on
+that tier (chosen-universe PROBE, always rolled back) and is judged against
+the chosen tier's TOTAL Sharpe from the shrink store — the adjustment is
+evaluated on the universe the strategy actually trades. On APPLY the applied
+config is re-run on the FULL universe and committed as the new canonical
+primary row (canonical must stay full-universe: it is the shrink baseline),
+then the chosen-tier sleeves/eligibility are refreshed via a per-strategy
+shrink pass. Rejects now cost one cheap tier-bounded run instead of a full
+one. Escape hatch: OPENCLAW_COUPLING_CHOSEN_UNIVERSE=0 restores legacy
+full-universe decisions.
 """
 from __future__ import annotations
 import os
@@ -104,6 +116,61 @@ def _eligible_regimes(strategy_id) -> list:
     return elig or list(CANONICAL_REGIMES)
 
 
+def _repo_root():
+    from pathlib import Path
+    return Path(__file__).resolve().parents[2]
+
+
+def _chosen_resolver(strategy_id):
+    """Selected-universe resolver for adjustment DECISIONS (operator directive
+    2026-07-27): stop/TP/max-hold candidates are judged on the universe the
+    strategy ACTUALLY trades, not the full backtest panel. Returns
+    (resolver, tier); (None, None) = full-universe legacy behavior — the
+    manifest predicate is not a ladder tier (incl. 'full', where the panel IS
+    the selected universe), no membership artifact exists, or
+    OPENCLAW_COUPLING_CHOSEN_UNIVERSE=0 (escape hatch)."""
+    if os.environ.get('OPENCLAW_COUPLING_CHOSEN_UNIVERSE', '1') == '0':
+        return None, None
+    import json
+    root = _repo_root()
+    try:
+        entry = (json.loads((root / 'src/strategies/manifest.json').read_text())
+                 .get('strategies', {}).get(strategy_id) or {})
+        ref = (entry.get('metadata') or {}).get('universe_filter_ref')
+        tier = ref.rsplit(':', 1)[-1] if ref else None
+    except Exception:
+        return None, None
+    from backtest.universe_ladder_selection import LADDER_TIERS
+    if tier not in LADDER_TIERS:
+        return None, None
+    arts = (sorted((root / 'data').glob('universe_tier_membership_shrink-*.parquet'))
+            or sorted((root / 'data').glob('universe_tier_membership_*.parquet')))
+    if not arts:
+        return None, None
+    from backtest.precomputed_resolver import PrecomputedResolver
+    return PrecomputedResolver(arts[-1], tier), tier
+
+
+def _chosen_baseline_sharpe(strategy_id, tier):
+    """Chosen-tier TOTAL Sharpe from the latest shrink pass — the
+    selected-universe baseline a chosen-universe candidate probe is judged
+    against. Shrink metrics filter the full-universe primary run's trades to
+    tier membership (a documented approximation of a native tier run) and
+    carry the same cost model as the probe. None when no shrink row exists
+    (caller falls back to the full-universe canonical baseline, logged)."""
+    import psycopg2
+    try:
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT sharpe FROM universe_shrink_metrics
+                            WHERE strategy_id=%s AND tier=%s AND regime_state='TOTAL'
+                            ORDER BY computed_at DESC LIMIT 1""",
+                        (strategy_id, tier))
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
+
 def _run_metrics(strategy_id, param_override, max_hold_days=None, commit=False) -> dict:
     """Backtest → metrics dict. commit=False (own-conn) rolls back — a pure
     probe. commit=True persists the run as the new canonical primary row (used
@@ -121,19 +188,23 @@ def _run_metrics(strategy_id, param_override, max_hold_days=None, commit=False) 
     return metrics
 
 
-def _run_candidate(strategy_id, param_override, max_hold_days=None):
+def _run_candidate(strategy_id, param_override, max_hold_days=None, resolver=None):
     """Candidate backtest on a DEFERRED-COMMIT connection. Returns
     (conn, run_id, metrics); the caller MUST conn.commit() (apply → the run
     becomes the canonical primary_window row; run_backtest's demotion UPDATE is
     part of the same transaction) or conn.rollback() (reject/dry-run), then
     close. On backtest failure the connection is cleaned up here and the error
-    propagates."""
+    propagates. ``resolver`` (chosen-universe probes) bounds the per-bar
+    universe; probe runs must ALWAYS be rolled back — canonical primary rows
+    stay full-universe (they are the shrink baseline)."""
     import psycopg2
     from backtest import unified_backtest as ub
     conn = psycopg2.connect(os.environ['POSTGRES_URI'])
     try:
         kwargs = dict(conn=conn, commit=False, param_override=param_override,
                       return_metrics=True)
+        if resolver is not None:
+            kwargs['resolver'] = resolver
         if max_hold_days is not None:
             kwargs['max_hold_days'] = int(max_hold_days)
         run_id, metrics = ub.run_backtest(strategy_id, **kwargs)
@@ -325,18 +396,35 @@ def run(rec_date=None, dry_run: bool = False, log=print) -> dict:
         regimes = _eligible_regimes(sid)
         # Stop/target ride the per-regime param_override; max_hold is a single
         # top-level run_backtest arg. ONE candidate backtest evaluates the whole
-        # config change together, full-window, on a deferred-commit connection:
-        # APPLY commits it as the new canonical primary row (no weekly refresh
-        # needed to re-measure), reject/dry-run rolls it back.
+        # config change together, full-window, on a deferred-commit connection.
+        # Selected-universe decisions (2026-07-27): when the strategy's chosen
+        # predicate is a ladder tier, the candidate runs as a chosen-universe
+        # PROBE (always rolled back) and is judged against the chosen tier's
+        # shrink-store baseline; APPLY then re-runs the applied config on the
+        # FULL universe and commits THAT as the new canonical primary row, so
+        # canonical stays the shrink baseline. Legacy full-universe strategies
+        # keep the original flow: APPLY commits the candidate run itself.
         cand_map = {r: {k: v for k, v in (('stop_pct', cand_stop), ('target_pct', cand_tgt)) if v is not None}
                     for r in regimes}
-        cconn, cand_run_id, cand = _run_candidate(sid, cand_map, max_hold_days=cand_hold)
+        resolver, chosen_tier = _chosen_resolver(sid)
+        if resolver is not None:
+            cb = _chosen_baseline_sharpe(sid, chosen_tier)
+            if cb is not None:
+                base_sharpe = float(cb)
+                log(f'[coupling] {sid}: baseline = chosen-tier {chosen_tier} '
+                    f'TOTAL Sharpe {base_sharpe:.2f} (shrink store)')
+            else:
+                log(f'[coupling] {sid}: chosen tier {chosen_tier} has no shrink '
+                    'baseline — judging against the full-universe canonical baseline')
+        cconn, cand_run_id, cand = _run_candidate(sid, cand_map, max_hold_days=cand_hold,
+                                                  resolver=resolver)
+        canonical_committed = False
         try:
             cand_sharpe = float(cand.get('sharpe') or 0.0)
             cand_n = int(cand.get('total_trades') or 0)
             ok = qualifies(baseline_sharpe=base_sharpe, candidate_sharpe=cand_sharpe, candidate_n_trades=cand_n)
-            note = (f'dSharpe {cand_sharpe - base_sharpe:+.3f} ({base_sharpe:.2f}->{cand_sharpe:.2f}), '
-                    f'n={cand_n}')
+            note = (f'dSharpe {cand_sharpe - base_sharpe:+.3f} ({base_sharpe:.2f}->{cand_sharpe:.2f}) '
+                    f'on {chosen_tier or "full"}, n={cand_n}')
             log(f'[coupling] {sid}: stop={cand_stop} target={cand_tgt} max_hold={cand_hold} '
                 f'{note} -> {"APPLY" if ok else "reject"}')
             if not ok:
@@ -358,22 +446,54 @@ def run(rec_date=None, dry_run: bool = False, log=print) -> dict:
                               source='saturday_coupling',
                               bt_sharpe_before=base_sharpe, bt_sharpe_after=cand_sharpe,
                               bt_n_trades=cand_n)
-            # Params are in force → commit the candidate run as the new
-            # canonical primary row (tagged so it's auditable as an apply).
-            with cconn.cursor() as cur:
-                cur.execute("""UPDATE strategy_backtest_runs SET notes=%s
-                                WHERE run_id=%s""",
-                            ('saturday_coupling apply: ' + note, cand_run_id))
-            cconn.commit()
+            if resolver is not None:
+                # The decision run was a chosen-universe probe — never canonical.
+                cconn.rollback()
+                cconn.close()
+                log(f'[coupling] {sid}: refreshing full-universe canonical with the applied config')
+                try:
+                    cconn, cand_run_id, _full = _run_candidate(sid, cand_map, max_hold_days=cand_hold)
+                except Exception as e:
+                    log(f'[coupling] {sid}: full-universe canonical refresh FAILED ({e}) — '
+                        'params are applied; canonical heals on the next fleet run')
+                    cconn = None
+            if cconn is not None:
+                # Params are in force → commit the full-universe run as the new
+                # canonical primary row (tagged so it's auditable as an apply).
+                with cconn.cursor() as cur:
+                    cur.execute("""UPDATE strategy_backtest_runs SET notes=%s
+                                    WHERE run_id=%s""",
+                                ('saturday_coupling apply: ' + note, cand_run_id))
+                cconn.commit()
+                canonical_committed = True
         finally:
-            cconn.close()   # close without commit == rollback (reject/error paths)
+            if cconn is not None:
+                cconn.close()   # close without commit == rollback (reject/error paths)
         # Dashboard backtest panel rebuild — run_backtest skips it on
         # commit=False, so redo it here now that the run is committed.
-        try:
-            from backtest.backtest_panel import rebuild as _rebuild_panel
-            _rebuild_panel(sid)
-        except Exception as e:
-            log(f'[coupling] {sid}: panel rebuild skipped: {e}')
+        if canonical_committed:
+            try:
+                from backtest.backtest_panel import rebuild as _rebuild_panel
+                _rebuild_panel(sid)
+            except Exception as e:
+                log(f'[coupling] {sid}: panel rebuild skipped: {e}')
+        if resolver is not None and canonical_committed:
+            # Refresh the chosen-tier sleeves + per-regime eligibility from the
+            # just-committed canonical trades (fail-soft). No --adopt: universe
+            # re-SELECTION belongs to the fleet/creation processes, not here.
+            try:
+                import subprocess
+                import sys as _sys
+                r = subprocess.run(
+                    [_sys.executable, 'scripts/run_universe_shrink.py',
+                     '--strategy', sid, '--reassign'],
+                    cwd=str(_repo_root()), timeout=900, capture_output=True,
+                    text=True, env={**os.environ, 'PYTHONPATH': 'src'})
+                tail = (r.stdout or '').strip().split('\n')[-1] if (r.stdout or '').strip() else ''
+                log(f'[coupling] {sid}: chosen-tier sleeve refresh rc={r.returncode}'
+                    + (f' :: {tail[:120]}' if tail else ''))
+            except Exception as e:
+                log(f'[coupling] {sid}: sleeve refresh skipped ({e})')
         _mark_outcome(rec['id'], 'applied', 'coupling apply ' + note)
         # Re-anchor broker stops on currently-open positions to the validated
         # stop distance (post-gate only; live/dry owned by alpaca_replace_stop).
