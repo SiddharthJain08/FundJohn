@@ -6,7 +6,13 @@ docs/archive/superpowers/specs/2026-05-14-position-sizing-rewrite-design.md.
 Per regime R, for each active strategy s with R ∈ eligible_regimes:
     effective_sharpe = bt_sharpe        # BACKTEST ONLY — see below
     weight        = effective_sharpe                  # no OUE multiplier (removed 2026-05-29)
-    daily_weight  = weight / sqrt(cadence_days(s))
+    daily_weight  = weight / sqrt(avg_holding_days(s, R))   # == per-regime Eff.Sharpe
+                    # (operator 2026-07-27: the divisor is the REGIME sleeve's
+                    # measured holding period, so daily_weight equals the
+                    # dashboard's Eff.Sharpe exactly. cadence_days — the signal
+                    # re-fire interval — is persisted for the sizer's signal
+                    # WINDOW only and is the fallback divisor when a sleeve
+                    # has no holding-days figure.)
 
 effective_sharpe was a sample-size blend of backtest and LIVE Sharpe until
 2026-07-16 (`(bt_n×bt_sharpe + live_n×live_sharpe)/(bt_n+live_n)`). Retired by
@@ -29,7 +35,7 @@ Sharpe units means both the cum-sharpe gate (Σ effective_sharpe ×
 direction) and the per-ticker allocation (Σ daily_weight × direction)
 speak the same language — Sharpe.
 
-Why sqrt(cadence_days) and not cadence_days? Sharpe scales with sqrt(time)
+Why sqrt(holding_days) and not holding_days? Sharpe scales with sqrt(time)
 under iid returns (σ_T = σ_1·sqrt(T)), so a strategy whose effective_sharpe
 is computed over T-day holding windows should be down-weighted by sqrt(T)
 to convert to a per-cycle-equivalent contribution — dividing by T itself
@@ -102,13 +108,20 @@ class StrategyWeightRow:
 OUE_TAU_DAYS = 45.0      # half-life ≈ 31 days; trade @ 90d ago weighted 0.14
 
 
-def _regime_weight(effective_sharpe: float, cadence_days: float) -> tuple[float, float]:
+def _regime_weight(effective_sharpe: float, holding_days: float) -> tuple[float, float]:
     """Per-(strategy, regime) sizing weight from effective Sharpe.
 
     weight       = effective_sharpe                       (no OUE multiplier)
-    daily_weight = effective_sharpe / sqrt(cadence_days)   (Sharpe scales as
+    daily_weight = effective_sharpe / sqrt(holding_days)   (Sharpe scales as
                    σ·sqrt(T), so a T-day holder's per-cycle contribution is
-                   w/sqrt(T)). cadence is floored at 1 day.
+                   w/sqrt(T)). Floored at 1 day.
+
+    holding_days = the REGIME sleeve's avg holding days (operator directive
+    2026-07-27) — daily_weight is therefore EXACTLY the dashboard's per-regime
+    Eff.Sharpe (sharpe/√hold-days). cadence_days (signal re-fire interval)
+    no longer divides the weight; it remains the signal-window quantity only
+    (carried-set lookback, cadence gate). Callers fall back to cadence_days
+    when a sleeve has no holding-days figure.
 
     The OUE multiplier was removed here 2026-05-29 (operator decision):
     strategy sizing is governed by cross-sector corroboration + the
@@ -117,7 +130,7 @@ def _regime_weight(effective_sharpe: float, cadence_days: float) -> tuple[float,
     redundant. OUE classification is still loaded for the audit columns —
     it just no longer scales size."""
     w = effective_sharpe
-    w_daily = w / math.sqrt(max(1, cadence_days))
+    w_daily = w / math.sqrt(max(1, holding_days))
     return w, w_daily
 
 
@@ -213,10 +226,10 @@ def _load_active_strategies(conn) -> list[dict]:
     # Live-observed avg_holding_days per strategy. The static signal_frequency
     # declaration is a lower bound — many strategies declare 'daily' but
     # actually hold positions for 3-15 days because stops/targets don't hit
-    # within one bar. cadence_days drives both the sizer's active-window
-    # lookback AND daily_weight = w / cadence_days; using the static value
-    # for a strategy that holds 4 days both over-counts old signals AND
-    # over-weights it relative to a true-daily strategy.
+    # within one bar. cadence_days drives the sizer's active-window lookback
+    # (signal persistence) — since 2026-07-27 it no longer divides
+    # daily_weight (that divisor is the REGIME sleeve's avg holding days;
+    # cadence is only the fallback when a sleeve has none).
     #
     # Resolution: cadence_days = max(static_declared, ceil(live_avg)). The
     # max() keeps the static declaration as a floor (a strategy declared
@@ -379,7 +392,8 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     tier0_strats: set = set()
     try:
         cur.execute('''
-            SELECT latest.strategy_id, m.regime_state, m.sharpe, m.trade_count
+            SELECT latest.strategy_id, m.regime_state, m.sharpe, m.trade_count,
+                   m.mean_holding_days
             FROM universe_shrink_metrics m
             JOIN (
                 SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -396,6 +410,8 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
             out[(r['strategy_id'], r['regime_state'])] = {
                 'bt_sharpe': float(r['sharpe']),
                 'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+                'avg_holding_days': (float(r['mean_holding_days'])
+                                     if r['mean_holding_days'] is not None else None),
             }
             seen_strats.add(r['strategy_id'])
         if tier0_strats:
@@ -414,7 +430,8 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     # exist", forcing the entire weekly weights rebuild down to Tier 3.
     try:
         cur.execute('''
-            SELECT latest.strategy_id, br.regime_state, br.sharpe, br.trade_count
+            SELECT latest.strategy_id, br.regime_state, br.sharpe, br.trade_count,
+                   br.avg_holding_days
             FROM strategy_backtest_regimes br
             JOIN (
                 SELECT DISTINCT ON (strategy_id) strategy_id, run_id
@@ -430,6 +447,8 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
             out[(r['strategy_id'], r['regime_state'])] = {
                 'bt_sharpe': float(r['sharpe']),
                 'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+                'avg_holding_days': (float(r['avg_holding_days'])
+                                     if r['avg_holding_days'] is not None else None),
             }
             seen_strats.add(r['strategy_id'])
     except Exception as e:
@@ -705,6 +724,9 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 per_regime_positives.setdefault(R, []).append({
                     'strategy_id': s['strategy_id'],
                     'cadence_days': s['cadence_days'],
+                    # Per-regime sleeve holding days — the daily_weight divisor
+                    # (operator 2026-07-27). None → cadence_days fallback below.
+                    'regime_holding_days': (bt.get((s['strategy_id'], R)) or {}).get('avg_holding_days'),
                     'bt_sharpe': bt_s, 'bt_n': bt_n,
                     'live_sharpe': lv_s, 'live_n': lv_n,
                     'effective_sharpe': eff,
@@ -724,7 +746,17 @@ def rebuild(trigger: str = 'manual', verbose: bool = False) -> list[StrategyWeig
                 # sizer downstream re-normalises absolute scale via
                 # scale = λ·NAV / Σ|ticker_w|, so per-cycle allocation
                 # is invariant to scale.
-                w, w_daily = _regime_weight(e['effective_sharpe'], e['cadence_days'])
+                # daily_weight divisor = the REGIME sleeve's avg holding days
+                # (operator 2026-07-27: daily_weight == per-regime Eff.Sharpe);
+                # cadence_days is the fallback for sleeves without one and
+                # remains the persisted signal-window quantity either way.
+                _hold = e.get('regime_holding_days')
+                if not (_hold and _hold > 0):
+                    _hold = e['cadence_days']
+                    logger.info('strategy_weights: %s/%s no sleeve holding-days — '
+                                'daily_weight falls back to cadence %.2f',
+                                e['strategy_id'], R, _hold)
+                w, w_daily = _regime_weight(e['effective_sharpe'], _hold)
                 rows.append(StrategyWeightRow(
                     strategy_id=e['strategy_id'], regime_state=R,
                     cadence_days=e['cadence_days'],

@@ -9178,12 +9178,14 @@ function _stRenderDataUsage() {
 const _REGIME_AXIS = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 const _REGIME_TAGS = { LOW_VOL: 'LV', TRANSITIONING: 'TR', HIGH_VOL: 'HV', CRISIS: 'CR' };
 // Per-regime effective Sharpe — same definition as the row-level Eff.Sharpe
-// column and blendScope: sharpe / sqrt(avg holding days). Null when the sleeve
-// has no holding-days figure (old serialized breakdown rows).
+// column and blendScope: sharpe / sqrt(avg holding days), floored at 1 day to
+// mirror strategy_weights._regime_weight EXACTLY (since 2026-07-27
+// daily_weight == this quantity). Null when the sleeve has no holding-days
+// figure (old serialized breakdown rows).
 function _effSharpeOf(b) {
   const s   = (b && b.sharpe != null) ? parseFloat(b.sharpe) : null;
   const act = (b && b.avg_holding_days != null) ? parseFloat(b.avg_holding_days) : null;
-  return (s != null && act && act > 0) ? s / Math.sqrt(act) : null;
+  return (s != null && act && act > 0) ? s / Math.sqrt(Math.max(1, act)) : null;
 }
 function _regimeBreakdown(r) {
   const breakdown = r.backtest_regime_breakdown || {};
