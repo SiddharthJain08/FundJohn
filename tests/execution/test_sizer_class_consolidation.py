@@ -110,7 +110,7 @@ def _run_sizer_eod(monkeypatch, signals, broker=None, account=None, params=None,
     weight_rows = [{'strategy_id': sid, 'daily_weight': w, 'effective_sharpe': sh,
                     'cadence_days': 1.0} for sid, (w, sh) in seen.items()]
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
-                        lambda wbs: list(signals))
+                        lambda wbs, cad=None, **_kw: list(signals))
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker))
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     monkeypatch.delenv('OPENCLAW_OPTION_DELTA_HEDGE', raising=False)

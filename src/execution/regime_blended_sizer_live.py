@@ -384,6 +384,48 @@ def _persist_contributing_strategies(run_date_str, orders) -> int:
     return n
 
 
+def _account_state_violations(account, params=None):
+    """Pre-trade account-state assertion (fix 6, 2026-07-27). Returns a list of
+    violation strings — empty means sane. The 2026-07-23 incident: paper account
+    multiplier silently flipped 4→1 with shorting disabled; the sizer planned a
+    long/short book against a long-only account and the short leg vanished with
+    no alert. Checks (each tunable via pipeline_config, fail-open defaults):
+      - multiplier >= min_account_multiplier   (default 2 — paper=4, live RegT=2)
+      - shorting_enabled                        (require_shorting_enabled=1 default)
+      - trading_blocked / account_blocked false, status ACTIVE when reported
+    `params` injectable for tests; production reads pipeline_config."""
+    if params is None:
+        params = {}
+        try:
+            import psycopg2
+            with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+                cur.execute("SELECT key, value FROM pipeline_config WHERE key IN "
+                            "('min_account_multiplier', 'require_shorting_enabled')")
+                params = {k: v for k, v in cur.fetchall()}
+        except Exception:
+            params = {}
+    try:
+        min_mult = float(params.get('min_account_multiplier', 2.0))
+    except (TypeError, ValueError):
+        min_mult = 2.0
+    require_short = str(params.get('require_shorting_enabled', '1')) != '0'
+    v = []
+    mult = account.get('multiplier')
+    if mult is not None and float(mult) < min_mult:
+        v.append(f'multiplier {mult} < required {min_mult} (degraded margin — '
+                 f'planned book will not fit)')
+    if require_short and account.get('shorting_enabled') is False:
+        v.append('shorting_enabled=false (short leg would silently vanish)')
+    if account.get('trading_blocked') is True:
+        v.append('trading_blocked=true')
+    if account.get('account_blocked') is True:
+        v.append('account_blocked=true')
+    status = (account.get('status') or '').upper()
+    if status and status != 'ACTIVE':
+        v.append(f'account status {status} != ACTIVE')
+    return v
+
+
 def _resolve_account_or_none(session_fn=None, fetch_fn=None):
     """Fetch the Alpaca account dict, returning None on any failure.
 
@@ -534,6 +576,27 @@ def main():
         except Exception as _e:
             print(f'  (alert post failed: {_e})', file=sys.stderr)
         return
+
+    # Pre-trade account-state assertion (fix 6): a degraded account (multiplier
+    # flip, shorting revoked, blocked) must HALT new sizing loudly — never plan
+    # a book the account cannot hold. Resting GTC protective exits at the broker
+    # are untouched by this halt; only new order emission stops.
+    _violations = _account_state_violations(account)
+    if _violations:
+        msg = ('[regime_blended_sizer_live] HALT: account-state assertion failed — '
+               + '; '.join(_violations) + ' — emitting ZERO orders (protective '
+               'exits at broker unaffected). Operator: verify the account, then '
+               're-run the trade step.')
+        print(msg, file=sys.stderr)
+        try:
+            from execution.pipeline_orchestrator import post_channel
+            post_channel(
+                os.environ.get('OPENCLAW_TRADE_ALERT_WEBHOOK_NAME', 'trade-reports'),
+                '\U0001f6d1 ' + msg,
+            )
+        except Exception as _e:
+            print(f'  (alert post failed: {_e})', file=sys.stderr)
+        return 0
 
     equity = float(account.get('equity', 100_000.0))
 

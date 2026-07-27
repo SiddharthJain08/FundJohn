@@ -297,6 +297,139 @@ def finalize_parity_marks(cur, closes: dict, run_date,
     return updated
 
 
+def backfill_broker_fill_truth(cur, run_date, workspace_id: str = 'default',
+                               lookback_days: int = 5) -> int:
+    """Populate broker_fill_price + fill_slippage_bps (migration 145) on FILLED
+    parity rows from alpaca_submissions.filled_avg_price (fix 7, 2026-07-27).
+
+    The parity guarantee keeps mark_entry_price = official close; this records
+    what execution ACTUALLY paid alongside it, so live cost/edge decay is
+    measurable (fill_slippage_bps > 0 = paid worse than the mark). Set-based,
+    idempotent (only NULL broker_fill_price rows), self-healing over a trailing
+    window because reconcile can land filled_avg_price after the first parity
+    pass. Savepoint-isolated: a failure here must never poison the engine's
+    parity transaction. Returns rows updated (0 on any failure)."""
+    cur.execute("SAVEPOINT sp_fill_truth")
+    try:
+        cur.execute("""
+            UPDATE execution_signals es
+               SET broker_fill_price = s.fav,
+                   fill_slippage_bps = CASE
+                       WHEN es.mark_entry_price IS NOT NULL AND es.mark_entry_price > 0
+                       THEN (CASE WHEN UPPER(es.direction) IN ('LONG', 'BUY', 'BUY_VOL')
+                                  THEN 1 ELSE -1 END)
+                            * (s.fav - es.mark_entry_price) / es.mark_entry_price * 10000
+                   END
+              FROM (SELECT run_date, ticker, AVG(filled_avg_price) AS fav
+                      FROM alpaca_submissions
+                     WHERE run_date > %s::date - %s
+                       AND filled_avg_price IS NOT NULL AND filled_avg_price > 0
+                     GROUP BY run_date, ticker) s
+             WHERE es.lifecycle_state IN ('FILLED', 'CLOSED_AT_OPEN')
+               AND es.broker_fill_price IS NULL
+               AND es.target_date = s.run_date
+               AND es.ticker = s.ticker
+               AND es.workspace_id = %s
+        """, (run_date, int(lookback_days), workspace_id))
+        n = cur.rowcount or 0
+        cur.execute("RELEASE SAVEPOINT sp_fill_truth")
+        if n:
+            logger.info("[parity_mark] broker-fill truth backfilled on %d row(s)", n)
+        return n
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_fill_truth")
+        cur.execute("RELEASE SAVEPOINT sp_fill_truth")
+        logger.error("[parity_mark] broker-fill backfill failed (%s) — skipped", e)
+        return 0
+
+
+def refresh_live_days(cur) -> int:
+    """strategy_registry.live_days = count of distinct target_dates on which the
+    strategy actually held a marked position (FILLED / CLOSED_AT_OPEN parity
+    rows). Was 0 for every strategy since inception — no writer existed (fix 7,
+    2026-07-27). Set-based + savepoint-isolated; returns registry rows changed."""
+    cur.execute("SAVEPOINT sp_live_days")
+    try:
+        cur.execute("""
+            UPDATE strategy_registry sr
+               SET live_days = s.n
+              FROM (SELECT strategy_id, COUNT(DISTINCT target_date) AS n
+                      FROM execution_signals
+                     WHERE lifecycle_state IN ('FILLED', 'CLOSED_AT_OPEN')
+                       AND strategy_id IS NOT NULL
+                     GROUP BY strategy_id) s
+             WHERE sr.id = s.strategy_id
+               AND COALESCE(sr.live_days, 0) <> s.n
+        """)
+        n = cur.rowcount or 0
+        cur.execute("RELEASE SAVEPOINT sp_live_days")
+        if n:
+            logger.info("[parity_mark] live_days refreshed on %d strategies", n)
+        return n
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_live_days")
+        cur.execute("RELEASE SAVEPOINT sp_live_days")
+        logger.error("[parity_mark] live_days refresh failed (%s) — skipped", e)
+        return 0
+
+
+def close_stale_trackers(cur, staleness_days: int = 14,
+                         held_tickers=None, limit: int = 20000) -> int:
+    """Retire abandoned signal trackers (fix 7, 2026-07-27): signals whose
+    LATEST signal_pnl mark is 'open' but older than `staleness_days` stopped
+    being marked (strategy deprecated / removed from the run set) and pollute
+    every live-metrics rollup. Each is closed via drop_signal_close at its
+    last-known mark with close_reason='stale_tracker' — UPDATE only, NEVER
+    DELETE, canonical close semantics (signal_pnl final row + execution_signals
+    retired).
+
+    `held_tickers` is REQUIRED evidence: pass the current broker ticker set; a
+    None (broker unreadable) SKIPS the whole pass — never retire a tracker we
+    cannot prove is not the live book. Returns signals closed."""
+    if held_tickers is None:
+        logger.warning("[parity_mark] stale-tracker pass skipped: no broker evidence")
+        return 0
+    from execution.open_reconcile import drop_signal_close
+    held = {_norm_ticker(t) for t in held_tickers}
+    cur.execute("""
+        SELECT sp.signal_id, es.ticker,
+               COALESCE(sp.close_price, es.mark_entry_price, es.entry_price) AS px
+          FROM (SELECT DISTINCT ON (signal_id) signal_id, pnl_date, status, close_price
+                  FROM signal_pnl ORDER BY signal_id, pnl_date DESC) sp
+          JOIN execution_signals es ON es.id = sp.signal_id
+         WHERE sp.status = 'open'
+           AND sp.pnl_date < CURRENT_DATE - %s
+         LIMIT %s
+    """, (int(staleness_days), int(limit)))
+    stale = cur.fetchall()
+    closed = skipped = 0
+    for row in stale:
+        sig_id, ticker, px = ((row['signal_id'], row['ticker'], row['px'])
+                              if hasattr(row, 'keys') else row)
+        if ticker and _norm_ticker(ticker) in held:
+            skipped += 1
+            continue
+        pxf = _safe_float(px, 'close_price')
+        if pxf is None or pxf <= 0:
+            skipped += 1
+            continue
+        cur.execute("SAVEPOINT sp_stale")
+        try:
+            drop_signal_close(cur, sig_id, ticker, pxf, reason='stale_tracker')
+            cur.execute("RELEASE SAVEPOINT sp_stale")
+            closed += 1
+        except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_stale")
+            cur.execute("RELEASE SAVEPOINT sp_stale")
+            logger.error("[parity_mark] stale-tracker close failed for %s (%s): %s",
+                         sig_id, ticker, e)
+            skipped += 1
+    if closed or skipped:
+        logger.info("[parity_mark] stale trackers: %d closed, %d skipped "
+                    "(held/unpriced/error)", closed, skipped)
+    return closed
+
+
 def finalize_execution_ledger(cur, closes: dict, run_date,
                               workspace_id: str = 'default') -> int:
     """Materialize the per-ORDER execution ledger on alpaca_submissions.

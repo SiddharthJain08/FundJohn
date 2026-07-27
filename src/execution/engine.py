@@ -1717,6 +1717,24 @@ def main():
                 logger.info(f"Parity marks finalized: {parity_mark_count}")
                 ledger_count = finalize_execution_ledger(cur, _closes, run_date)
                 logger.info(f"Execution ledger finalized: {ledger_count}")
+                # Fix 7 (2026-07-27): record what execution ACTUALLY paid next
+                # to the parity mark, keep registry live_days honest, and retire
+                # abandoned signal trackers (metrics pollution). All savepoint-
+                # isolated internally — never poison this transaction. The
+                # stale-tracker pass requires broker evidence and skips itself
+                # when the book can't be read.
+                from execution.parity_mark import (backfill_broker_fill_truth,
+                                                   refresh_live_days,
+                                                   close_stale_trackers)
+                backfill_broker_fill_truth(cur, run_date, WORKSPACE)
+                refresh_live_days(cur)
+                try:
+                    from execution.regime_blended_sizer import _load_broker_positions_usd
+                    _held = _load_broker_positions_usd()
+                    close_stale_trackers(
+                        cur, held_tickers=(set(_held) if _held is not None else None))
+                except Exception as _st_err:
+                    logger.warning(f"[engine] stale-tracker pass skipped: {_st_err}")
             except Exception as _pm_err:
                 logger.error(f"[engine] parity_mark failed: {_pm_err}")
                 errors.append(f"parity_mark: {_pm_err}")

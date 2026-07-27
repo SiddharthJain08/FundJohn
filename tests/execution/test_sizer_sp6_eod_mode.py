@@ -98,7 +98,7 @@ class TestLegacyLoadingUnchanged:
             active_window_calls.append({'regime': regime_state, 'weights': weight_by_strat})
             return []  # empty → path falls through to today's signals
 
-        def fake_approved(weight_by_strat):
+        def fake_approved(weight_by_strat, cadence_by_strat=None, **_kw):
             approved_calls.append(weight_by_strat)
             return []
 
@@ -200,7 +200,7 @@ class TestEodModeLoadsApprovedBypassesCadence:
             'effective_sharpe': 1.0, 'cadence_days': 1.0,
         }
 
-        def empty_approved_loader(weight_by_strat):
+        def empty_approved_loader(weight_by_strat, cadence_by_strat=None, **_kw):
             return []  # every signal vetoed
 
         monkeypatch.setattr(_sizer, '_load_approved_carried_signals', empty_approved_loader)
@@ -232,7 +232,7 @@ class TestEodModeLoadsApprovedBypassesCadence:
             active_window_calls.append({'regime': regime_state})
             return []
 
-        def fake_approved(weight_by_strat):
+        def fake_approved(weight_by_strat, cadence_by_strat=None, **_kw):
             approved_calls.append(list(weight_by_strat.keys()))
             return []  # empty → fallback to signals; ok for this loader-routing test
 

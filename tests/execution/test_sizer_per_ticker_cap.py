@@ -83,7 +83,7 @@ def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None):
         monkeypatch.delenv(gate, raising=False)
 
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
-                        lambda weight_by_strat: list(carried_rows))
+                        lambda weight_by_strat, cadence_by_strat=None, **_kw: list(carried_rows))
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker or {}))
 

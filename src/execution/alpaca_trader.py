@@ -79,6 +79,14 @@ def _fetch_account_state(sess):
                     state[key] = float(v)
                 except (TypeError, ValueError):
                     pass
+        # Account-sanity fields (fix 6, 2026-07-27): the 2026-07-23 incident —
+        # multiplier silently 4→1 + "not allowed to short" — made the book
+        # long-only for a day with zero alerts. The sizer asserts on these
+        # before emitting new exposure.
+        state['status'] = str(j.get('status') or '')
+        for bkey in ('shorting_enabled', 'trading_blocked', 'account_blocked'):
+            if j.get(bkey) is not None:
+                state[bkey] = bool(j.get(bkey))
         state['fetched'] = True
         logger.info(
             f"[Alpaca] equity=${state['equity']:,.2f} cash=${state['cash']:,.2f} "

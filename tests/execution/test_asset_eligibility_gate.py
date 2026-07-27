@@ -77,9 +77,13 @@ def test_kill_switch(monkeypatch):
 
 def test_eligibility_predicate_sql_shape():
     # the eligibility predicate is the operator contract: active + tradable
-    # + easy_to_borrow + fractionable, sourced from alpaca_tradable_universe
+    # + easy_to_borrow + fractionable, sourced from alpaca_tradable_universe.
+    # conftest stubs the module ATTRIBUTE for e2e determinism, so read the
+    # pristine implementation from the module's source file on disk.
     import inspect
-    src = inspect.getsource(rbs._load_asset_eligibility)
+    full = inspect.getsource(rbs)
+    start = full.index('def _load_asset_eligibility')
+    src = full[start:start + 2500]
     for token in ("status = 'active'", "tradable", "easy_to_borrow",
                   "fractionable", "alpaca_tradable_universe"):
         assert token in src

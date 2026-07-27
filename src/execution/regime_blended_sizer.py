@@ -269,12 +269,24 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
     """Build the correlation-adjusted gate + sizing maps from per-ticker contributors.
     Gate uses RAW daily_weight (size_scalar-exempt — matches the legacy 'gate stays raw'
     intent); sizing uses eff_weight (size_scalar folded in). Identical when all scalars=1.
-    Returns (gate_net_sharpe, sizing_weight, nb_gate, nb_size)."""
+    Returns (gate_net_sharpe, sizing_weight, nb_gate, nb_size).
+
+    2026-07-27 (operator directive): S_adj = TANGENCY combination Sharpe
+    (orthogonalization.tangency_net_sharpe — optimal non-negative weights,
+    monotone in confirming contributors, opposing sides subtract) for BOTH gate
+    and sizing. OPENCLAW_TANGENCY_SADJ=0 reverts to the legacy fixed-
+    proportional corr_adjusted_net_sharpe."""
     from execution import orthogonalization as _og
     contribs_by_ticker = {tkr: list(zip(m['strategies'], m['directions']))
                           for tkr, m in ticker_meta.items()}
-    gate_net_sharpe, nb_gate = _og.corr_adjusted_net_sharpe(contribs_by_ticker, sim, weight_by_strat)
-    sizing_weight, nb_size = _og.corr_adjusted_net_sharpe(contribs_by_ticker, sim, eff_weight_by_strat)
+    if os.environ.get('OPENCLAW_TANGENCY_SADJ', '1') != '0':
+        _fn = _og.tangency_net_sharpe
+        logger.info('corr_cumsharpe: S_adj basis = tangency (optimal-weights) combination Sharpe')
+    else:
+        _fn = _og.corr_adjusted_net_sharpe
+        logger.info('corr_cumsharpe: S_adj basis = legacy fixed-proportional combination Sharpe')
+    gate_net_sharpe, nb_gate = _fn(contribs_by_ticker, sim, weight_by_strat)
+    sizing_weight, nb_size = _fn(contribs_by_ticker, sim, eff_weight_by_strat)
     return gate_net_sharpe, sizing_weight, nb_gate, nb_size
 
 
@@ -410,6 +422,31 @@ def _post_flatten_alert(regime_state, active_count: int, broker: dict) -> None:
         logger.warning('zero-conviction flatten alert post skipped (%s)', e)
 
 
+def _post_ops_alert(line: str) -> None:
+    """Non-gated best-effort #botjohn-log post for sizer operational anomalies
+    (weights-gap exclusions, account-state assertions). Same webhook mechanics as
+    _post_flatten_alert; NEVER raises — an alert failure must not abort sizing."""
+    try:
+        import psycopg2
+        url = None
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT webhook_urls->>'botjohn-log' FROM agent_registry "
+                        "WHERE webhook_urls->>'botjohn-log' IS NOT NULL LIMIT 1")
+            wrow = cur.fetchone()
+            url = wrow[0] if wrow else None
+        if not url:
+            return
+        import json as _json
+        import urllib.request as _ur
+        data = _json.dumps({'content': line[:1900]}).encode()
+        req = _ur.Request(url, data=data, method='POST',
+                          headers={'Content-Type': 'application/json',
+                                   'User-Agent': 'fundjohn-sizer/1.0'})
+        _ur.urlopen(req, timeout=8).read()
+    except Exception as e:
+        logger.warning('ops alert post skipped (%s)', e)
+
+
 def _recent_active_counts(lookback: int = 10) -> list[int]:
     """Recent per-cycle active-signal-set sizes (count of open execution_signals per
     signal_date), newest first. Fail-safe: [] on any error → baseline 0 → gate uses floor only."""
@@ -423,13 +460,33 @@ def _recent_active_counts(lookback: int = 10) -> list[int]:
         return []
 
 
-def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[dict]:
+def _load_approved_carried_signals(weight_by_strat: dict[str, float],
+                                   cadence_by_strat: dict[str, float] | None = None,
+                                   regime_state: str | None = None) -> list[dict]:
     """SP-6 Phase A — load the APPROVED carried set for today's reconcile.
 
-    In EOD mode the sizer loads execution_signals WHERE lifecycle_state='APPROVED'
-    AND target_date=today instead of the legacy active-window query. These signals
-    were already gated at 4PM[T] (EOD compute) + 9:15AM (pre-market carry-forward
-    gate), so no additional age/cadence filter is applied here.
+    CADENCE WINDOW (operator directive 2026-07-25). Previously this was
+    target_date = today ONLY, which made the operator's cadence/overlap design
+    unreachable in production: every step of the live EOD lane (compute → 9:15
+    gate → this sizer) was single-day, so a MONTHLY strategy contributed to the
+    conviction gate for exactly ONE day per month and then vanished — low-cadence
+    sleeves could never "add on naturally" to the higher-frequency ones. We now
+    aggregate across each strategy's own cadence window, mirroring
+    _load_active_window_signals ("information staying relevant in the period":
+    a monthly signal contributes ~21 trading days, a weekly one 5, a daily one 1).
+
+    TWO INVARIANTS DELIBERATELY PRESERVED:
+      1. `lifecycle_state='APPROVED'` — still APPROVED-only. This must NEVER widen
+         to COMPUTED: those are rows the 9:15 pre-market news gate may have
+         deliberately vetoed, and resurrecting them would silently re-admit
+         gate-rejected signals (see the EOD branch comment in size_positions).
+      2. DISTINCT ON (strategy_id, ticker) ORDER BY target_date DESC — one row per
+         (strategy, ticker), newest wins. A re-fire SUPERSEDES the prior signal
+         rather than stacking, so a single strategy can never double-count its own
+         contribution to the overlap (the FILLED-dupe defect class).
+
+    Set OPENCLAW_EOD_CADENCE_WINDOW=0 to revert to the historical today-only
+    behavior without a code change.
 
     Return shape is identical to _load_active_window_signals: a list of
     {strategy_id, ticker, direction, signal_date, entry_price, stop_loss,
@@ -443,12 +500,23 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
     """
     import psycopg2
     import psycopg2.extras
-    from datetime import date as _date
+    import math as _math
+    from datetime import date as _date, timedelta as _timedelta
 
     if not weight_by_strat:
         return []
 
     today = _date.today()
+    window_on = os.environ.get('OPENCLAW_EOD_CADENCE_WINDOW', '1') == '1'
+    cadence_by_strat = cadence_by_strat or {}
+    # Coarse SQL lower bound = today - max cadence; the per-strategy filter below
+    # tightens it. Window OFF → earliest == today (byte-identical to the old query).
+    if window_on and cadence_by_strat:
+        max_cad = max(cadence_by_strat.get(s, 1.0) for s in weight_by_strat)
+    else:
+        max_cad = 1.0
+    earliest = today - _timedelta(days=max(0, _math.ceil(max_cad) - 1))
+
     sids = list(weight_by_strat.keys())
     out = []
     tradable_symbols: set[str] = set()
@@ -459,23 +527,71 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
                     SELECT DISTINCT ON (strategy_id, ticker)
                            strategy_id, ticker, direction, signal_date,
                            entry_price, stop_loss, target_1, target_2,
-                           signal_params
+                           signal_params, target_date
                     FROM execution_signals
                     WHERE lifecycle_state = 'APPROVED'
-                      AND target_date = %s
+                      AND target_date <= %s
+                      AND target_date >= %s
                       AND strategy_id = ANY(%s)
-                    ORDER BY strategy_id, ticker, signal_date DESC
-                ''', (today, sids))
+                    ORDER BY strategy_id, ticker, target_date DESC, signal_date DESC
+                ''', (today, earliest, sids))
                 rows = cur.fetchall()
                 cur.execute("""SELECT symbol FROM alpaca_tradable_universe
                               WHERE status='active' AND tradable=TRUE""")
                 tradable_symbols = {r[0] for r in cur.fetchall()}
+                # Weights-gap audit (2026-07 S_prism_vq incident): a registry-approved
+                # strategy that is ELIGIBLE in this regime, has in-window APPROVED
+                # signals, but NO is_current weights row is invisible to the whole gate
+                # below — it must be a loud alert, never a silent exclusion. Root cause
+                # is always ordering (weights rebuild predates the strategy's
+                # activation); the fix is a weights rebuild, not code. The eligibility
+                # join suppresses honest dormancy (eligible=false strategies whose old
+                # signals are still in a long cadence window — expected absence).
+                gap_sids: list[str] = []
+                if regime_state:
+                    try:
+                        cur.execute('''
+                            SELECT DISTINCT es.strategy_id
+                            FROM execution_signals es
+                            JOIN strategy_registry sr ON sr.id = es.strategy_id
+                            JOIN strategy_regime_params srp
+                              ON srp.strategy_id = es.strategy_id
+                             AND srp.regime_state = %s AND srp.eligible
+                            WHERE sr.status = 'approved'
+                              AND es.lifecycle_state = 'APPROVED'
+                              AND es.target_date <= %s
+                              AND es.target_date >= %s
+                              AND NOT (es.strategy_id = ANY(%s))
+                            ORDER BY 1
+                        ''', (regime_state, today, earliest, sids))
+                        gap_sids = [g[0] for g in cur.fetchall()]
+                    except Exception as ge:
+                        logger.warning('sharpe_cadence EOD: weights-gap audit failed (%s)', ge)
     except Exception as e:
         logger.warning('sharpe_cadence EOD: approved-carried fetch failed (%s); falling back to empty', e)
         return []
 
+    if gap_sids:
+        _gap_line = ('sizer weights-gap: %d approved strategy(ies) with in-window APPROVED '
+                     'signals have NO current weights row for this regime and are EXCLUDED '
+                     'from the conviction gate: %s — rerun the weights rebuild to admit them'
+                     % (len(gap_sids), ', '.join(gap_sids)))
+        logger.warning(_gap_line)
+        _post_ops_alert('⚠️ ' + _gap_line)
+
     dropped_untradable = 0
+    dropped_stale = 0
+    carried_fwd = 0
     for r in rows:
+        # Per-strategy cadence tighten (mirrors _load_active_window_signals):
+        # age 0 == today's emission; a cad=1 daily strategy keeps ONLY age 0.
+        age = (today - r['target_date']).days
+        if age > 0:
+            cad = cadence_by_strat.get(r['strategy_id'], 1.0) if window_on else 1.0
+            if age >= cad:
+                dropped_stale += 1
+                continue
+            carried_fwd += 1
         if tradable_symbols and r['ticker'] not in tradable_symbols:
             dropped_untradable += 1
             continue
@@ -495,7 +611,11 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float]) -> list[di
     if dropped_untradable:
         logger.info('sharpe_cadence EOD: dropped %d untradable signals (universe=%d)',
                     dropped_untradable, len(tradable_symbols))
-    logger.info('sharpe_cadence EOD: loaded %d APPROVED carried signals for %s', len(out), today)
+    if dropped_stale:
+        logger.info('sharpe_cadence EOD: dropped %d stale signals (age >= cadence_days)', dropped_stale)
+    logger.info('sharpe_cadence EOD: loaded %d APPROVED signals for %s '
+                '(cadence_window=%s, %d carried forward from prior days)',
+                len(out), today, 'ON' if window_on else 'OFF', carried_fwd)
     return out
 
 
@@ -1172,11 +1292,15 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # safe placeholder — always overwritten before the gate-drop.
     equity_gate_floor = 0.0
 
-    # Signal loading: EOD mode loads APPROVED carried set (SP-6 Phase A);
-    # legacy path loads the cadence-window active signals. Gate OFF is the
-    # legacy _load_active_window_signals call, unchanged.
+    # Signal loading: EOD mode loads the APPROVED carried set (SP-6 Phase A),
+    # now aggregated across each strategy's CADENCE WINDOW rather than
+    # today-only (operator directive 2026-07-25) so low-cadence sleeves persist
+    # and accumulate into the overlap. Still APPROVED-only — see the invariants
+    # in _load_approved_carried_signals. Gate OFF is the legacy
+    # _load_active_window_signals call, unchanged.
     if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
-        active = _load_approved_carried_signals(weight_by_strat)
+        active = _load_approved_carried_signals(weight_by_strat, cadence_by_strat,
+                                                regime_state=regime_state)
     else:
         # Fix A: aggregate across cadence-window, not today-only.
         active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
@@ -1591,6 +1715,200 @@ def _apply_asset_eligibility_gate(target_usd, broker, eligibility=None):
     return out
 
 
+# ── Book-level net-exposure cap (fix 8, 2026-07-27) ──────────────────────────
+# June 2026 lesson: the corr de-gross caps CLUSTER gross, but nothing stopped
+# the whole fleet from being one momentum bet at 1.6x NET long (06/22 book:
+# $217k long / $14k short → −$17k overnight gap). This caps |net| at
+# max_net_frac × gross by scaling the HEAVY side down (de-lever, never force-
+# grow the light side). Sector caps are blocked on data — ticker_metadata
+# sector is 100% NULL; the corr de-gross remains the statistical stand-in.
+# pipeline_config 'max_net_frac' (default 0.6); kill switch OPENCLAW_NET_EXPOSURE_CAP=0.
+
+_MAX_NET_FRAC_DEFAULT = 0.6
+
+
+def _load_max_net_frac() -> float:
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT value FROM pipeline_config WHERE key = 'max_net_frac'")
+            row = cur.fetchone()
+            if row is not None:
+                v = float(row[0])
+                if 0.0 <= v <= 1.0:
+                    return v
+    except Exception:
+        pass
+    return _MAX_NET_FRAC_DEFAULT
+
+
+def _apply_net_exposure_cap(target_usd, max_net_frac=None):
+    """Scale the heavy side so |Σtarget| <= max_net_frac × Σ|target|. Returns a
+    new dict; a one-sided book de-levers to max_net_frac of its intended gross
+    (that IS the policy — an all-long fleet is one factor bet). `max_net_frac`
+    injectable for tests."""
+    if os.environ.get('OPENCLAW_NET_EXPOSURE_CAP', '1') == '0' or not target_usd:
+        return target_usd
+    if max_net_frac is None:
+        max_net_frac = _load_max_net_frac()
+    longs = sum(v for v in target_usd.values() if v > 0)
+    shorts = sum(-v for v in target_usd.values() if v < 0)
+    gross = longs + shorts
+    net = longs - shorts
+    cap = max_net_frac * gross
+    if gross <= 0 or abs(net) <= cap + 0.01:
+        return target_usd
+    if net > 0:
+        f = (cap + shorts) / longs
+        out = {t: (v * f if v > 0 else v) for t, v in target_usd.items()}
+    else:
+        f = (cap + longs) / shorts
+        out = {t: (v * f if v < 0 else v) for t, v in target_usd.items()}
+    logger.warning(
+        'regime_blended_sizer.net_cap: |net| $%.0f > %.0f%% of gross $%.0f — '
+        '%s side scaled ×%.3f (book de-levered to $%.0f gross)',
+        abs(net), max_net_frac * 100, gross,
+        'long' if net > 0 else 'short', f,
+        sum(abs(v) for v in out.values()))
+    return out
+
+
+# ── Entry-hygiene gate (fix 5, 2026-07-27) ───────────────────────────────────
+# Three churn/liquidity rules applied to TARGETS with only-shed semantics
+# (exits structurally unblockable, mirrors _apply_asset_eligibility_gate):
+#   1. Stop-out cooldown — a ticker stopped out within `stopout_cooldown_days`
+#      cannot re-enter in the SAME direction (the 2026-07 CENN/NVNO churn loop:
+#      stopped → re-shorted at 15:55 the same day → stopped again).
+#   2. Liquidity floor — entries blocked where median close < entry_min_price_usd
+#      or ADV$ < entry_min_adv_usd (measured spread+impact there exceeds any
+#      plausible edge; mirrors unified_backtest.load_bt_asset_gate's floor).
+#   3. Participation cap — |target| capped at entry_participation_frac × ADV$
+#      (never force-shrinks an existing larger position — that would be churn).
+# Data: pipeline_config knobs; data/derived/ticker_cost_bps.json (adv/med_close,
+# regenerated by scripts/build_ticker_cost_model.py); signal_pnl stop closures.
+# Master kill switch: OPENCLAW_ENTRY_HYGIENE=0. Every leg fails OPEN with a log.
+
+_ENTRY_HYGIENE_DEFAULTS = {
+    'stopout_cooldown_days': 7.0,        # calendar days (~5 trading)
+    'entry_min_price_usd': 2.0,
+    'entry_min_adv_usd': 400_000.0,
+    'entry_participation_frac': 0.01,    # 1% of median daily dollar volume
+}
+_COST_ARTIFACT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   '..', '..', 'data', 'derived', 'ticker_cost_bps.json')
+
+
+def _load_entry_hygiene_params() -> dict:
+    """pipeline_config overrides for the entry-hygiene knobs; defaults on any error."""
+    out = dict(_ENTRY_HYGIENE_DEFAULTS)
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("SELECT key, value FROM pipeline_config WHERE key = ANY(%s)",
+                        (list(_ENTRY_HYGIENE_DEFAULTS),))
+            for k, v in cur.fetchall():
+                try:
+                    out[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    return out
+
+
+def _load_recent_stopouts(days: float) -> dict:
+    """{ticker: +1/-1 direction of the stopped trade} for stop_loss closures in
+    the window. Same-direction re-entries are the churn loop; opposite-direction
+    entries stay allowed. Fail-open ({}) on any error."""
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute('''
+                SELECT es.ticker, es.direction, MAX(sp.closed_at)
+                FROM signal_pnl sp
+                JOIN execution_signals es ON es.id = sp.signal_id
+                WHERE sp.close_reason = 'stop_loss'
+                  AND sp.closed_at >= CURRENT_DATE - (%s || ' days')::interval
+                GROUP BY es.ticker, es.direction
+            ''', (int(max(1, days)),))
+            out = {}
+            for tkr, d, _last in cur.fetchall():
+                out[tkr] = _dir_to_int(d)
+            return out
+    except Exception as e:
+        logger.warning('entry_hygiene: stop-out lookup failed (%s) — cooldown skipped', e)
+        return {}
+
+
+def _load_liquidity_stats():
+    """(adv_usd, med_close) dicts from the derived cost artifact, or None."""
+    try:
+        with open(os.path.normpath(_COST_ARTIFACT_PATH)) as f:
+            art = json.load(f)
+        adv, px = art.get('adv_usd') or {}, art.get('med_close') or {}
+        if not adv:
+            return None
+        return adv, px
+    except Exception as e:
+        logger.warning('entry_hygiene: cost artifact unavailable (%s) — liquidity legs skipped', e)
+        return None
+
+
+def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None):
+    """Apply cooldown + liquidity floor + participation cap to targets.
+    Only-shed semantics per blocked ticker: not held → target dropped; flip →
+    close-only; same-sign increase → capped at held size. The participation cap
+    reduces target magnitude to max(cap, |held|). Inputs injectable for tests."""
+    if os.environ.get('OPENCLAW_ENTRY_HYGIENE', '1') == '0' or not target_usd:
+        return target_usd
+    params = params or _load_entry_hygiene_params()
+    if stopouts is None:
+        stopouts = _load_recent_stopouts(params['stopout_cooldown_days'])
+    if liq is None:
+        liq = _load_liquidity_stats()
+    adv, px = liq if liq else ({}, {})
+    out = dict(target_usd)
+    cooled, illiquid, part_capped = [], [], []
+
+    def _shed(tkr):
+        target, current = out[tkr], broker.get(tkr, 0.0)
+        if current == 0.0:
+            del out[tkr]
+        elif (target > 0 > current) or (target < 0 < current):
+            out[tkr] = 0.0
+        elif abs(target) > abs(current):
+            out[tkr] = (1.0 if current > 0 else -1.0) * abs(current)
+
+    for tkr in [t for t in target_usd if not _is_occ_symbol(t) and '/' not in t]:
+        if tkr not in out:
+            continue
+        target = out[tkr]
+        stop_dir = stopouts.get(tkr)
+        if stop_dir and (target > 0) == (stop_dir > 0) and target != 0.0:
+            _shed(tkr)
+            cooled.append(tkr)
+            continue
+        if tkr in adv and (float(adv.get(tkr) or 0.0) < params['entry_min_adv_usd']
+                           or float(px.get(tkr) or 0.0) < params['entry_min_price_usd']):
+            _shed(tkr)
+            illiquid.append(tkr)
+            continue
+        a = float(adv.get(tkr) or 0.0)
+        if a > 0:
+            cap = params['entry_participation_frac'] * a
+            held = abs(broker.get(tkr, 0.0))
+            limit = max(cap, held)
+            if abs(target) > limit + 0.01:
+                out[tkr] = (1.0 if target > 0 else -1.0) * limit
+                part_capped.append(tkr)
+    if cooled or illiquid or part_capped:
+        logger.warning(
+            'regime_blended_sizer.entry_hygiene: stop-out cooldown blocked=%s, '
+            'liquidity floor blocked=%s, participation-capped=%s',
+            sorted(cooled), sorted(illiquid), sorted(part_capped))
+    return out
+
+
 def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_groups,
                               sharpe_by_strat, eff_weight_by_strat, opt_active,
                               weight_by_strat, scale, account_state, broker=None,
@@ -1612,6 +1930,10 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
     if broker is None:
         broker = _load_broker_positions_usd()
     target_usd = _apply_asset_eligibility_gate(target_usd, broker)
+    target_usd = _apply_entry_hygiene_gate(target_usd, broker)
+    # Net cap runs LAST: the per-name gates above can re-skew net (dropping an
+    # unshortable short leg raises net-long) — the emitted book must respect it.
+    target_usd = _apply_net_exposure_cap(target_usd)
     emissions = _classify_position_deltas(target_usd, broker, ticker_meta)
     flip_tickers = {tkr for tkr, _, kind in emissions if kind == 'flip_close'}
     logger.info(

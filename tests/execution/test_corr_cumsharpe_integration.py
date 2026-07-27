@@ -46,6 +46,9 @@ def _params(min_corr_cum_sharpe):
 
 def _run(monkeypatch, weights_rows, carried_rows, sim, min_corr_cum_sharpe):
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    # These tests verify the LEGACY fixed-proportional S_adj wiring + cap math;
+    # the tangency default (2026-07-27) has its own tests (test_tangency_sadj).
+    monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
     # The corr-adjusted gate is unconditional now — prove it fires with NO ortho
     # flag set (CORR_CUMSHARPE included in the clear-list).
     for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
@@ -57,7 +60,7 @@ def _run(monkeypatch, weights_rows, carried_rows, sim, min_corr_cum_sharpe):
     import execution.strategy_similarity as _ss
     monkeypatch.setattr(_ss, 'load_groups',
                         lambda regime: {'block_map': {}, 'fold_map': {}, 'rep_map': {}, 'matrix': sim})
-    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w: list(carried_rows))
+    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w, c=None, **_kw: list(carried_rows))
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
     with _mock.patch('execution.strategy_weights.load_current', return_value=list(weights_rows)):
@@ -133,6 +136,9 @@ def test_matrix_load_failure_degrades_to_sparse_default(monkeypatch, caplog):
     mitigated by the separate asset-corr cap (different correlation source)."""
     import logging
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    # These tests verify the LEGACY fixed-proportional S_adj wiring + cap math;
+    # the tangency default (2026-07-27) has its own tests (test_tangency_sadj).
+    monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
     for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
                  'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
                  'OPENCLAW_STRATEGY_SIZE_SCALAR', 'OPENCLAW_STRATEGY_CORR_CUMSHARPE',
@@ -145,7 +151,7 @@ def test_matrix_load_failure_degrades_to_sparse_default(monkeypatch, caplog):
         raise RuntimeError('similarity DB down')
 
     monkeypatch.setattr(_ss, 'load_groups', _boom)
-    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w: [_carried('S1', 'AAA')])
+    monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda w, c=None, **_kw: [_carried('S1', 'AAA')])
     monkeypatch.setattr(_sizer, '_load_lambda', lambda default=2.0, *, intraday=False: LAM)
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: {})
     with caplog.at_level(logging.WARNING):

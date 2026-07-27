@@ -108,7 +108,7 @@ def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe
                         lambda regime: {'block_map': {}, 'fold_map': {},
                                         'rep_map': {}, 'matrix': {}})
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
-                        lambda w: list(carried_rows))
+                        lambda w, c=None, **_kw: list(carried_rows))
     monkeypatch.setattr(_sizer, '_load_active_window_signals',
                         lambda r, w, c: list(carried_rows))
     monkeypatch.setattr(_sizer, '_load_lambda',

@@ -62,6 +62,115 @@ def fold_active_contributions(active: list[dict], fold_map: dict[str, int],
 # cum-Sharpe machinery — superseded live by corr_adjusted_net_sharpe below.
 
 
+TANGENCY_SHRINK_DEFAULT = 0.10   # R = (1-γ)R_raw + γI — tames the heuristic,
+                                 # non-PSD-guaranteed similarity matrix before inversion
+TANGENCY_MAX_ENUM = 10           # per-side subset-enumeration cap (2^n solves)
+
+
+def _tangency_side_sharpe(sids: list[str], s: list[float],
+                          sim: dict, shrink: float) -> tuple[float, bool]:
+    """Max attainable combination Sharpe over one SAME-DIRECTION contributor set,
+    with NON-NEGATIVE tangency weights: max over non-empty subsets T of
+    √(s_Tᵀ R_T⁻¹ s_T) where x = R_T⁻¹ s_T has every component >= 0.
+
+    The non-negativity constraint is load-bearing: unconstrained R⁻¹ lets the
+    optimizer short a correlated contributor's signal, inflating the score from
+    intra-side spreads that a per-ticker NET position cannot express. Subsets
+    make the quantity monotone (adding a contributor only adds subsets, never
+    removes them) and every singleton is feasible (x = s_i > 0), so the result
+    is always >= max(s_i) — a confirming strategy can never LOWER conviction.
+
+    Returns (best_sharpe, degraded) — degraded=True when any multi-member solve
+    failed numerically (result fell back to smaller subsets; still valid)."""
+    import numpy as _np
+    n = len(s)
+    if n == 0:
+        return 0.0, False
+    if n == 1:
+        return float(s[0]), False
+    if n > TANGENCY_MAX_ENUM:
+        # keep the heaviest contributors for enumeration; the rest can only
+        # have added, never removed, so this is a conservative floor
+        order = sorted(range(n), key=lambda i: -s[i])[:TANGENCY_MAX_ENUM]
+        sids = [sids[i] for i in order]
+        s = [s[i] for i in order]
+        n = TANGENCY_MAX_ENUM
+    R = _np.eye(n)
+    for i in range(n):
+        row_i = sim.get(sids[i], {})
+        for j in range(i + 1, n):
+            rho = row_i.get(sids[j])
+            if rho is None:
+                rho = sim.get(sids[j], {}).get(sids[i], SPARSE_DEFAULT)
+            R[i, j] = R[j, i] = float(rho)
+    R = (1.0 - shrink) * R + shrink * _np.eye(n)
+    sv = _np.asarray(s, dtype=float)
+    best = float(max(s))                       # singletons always feasible
+    degraded = False
+    for mask in range(1, 1 << n):
+        idx = [i for i in range(n) if mask >> i & 1]
+        if len(idx) < 2:
+            continue
+        try:
+            x = _np.linalg.solve(R[_np.ix_(idx, idx)], sv[idx])
+        except _np.linalg.LinAlgError:
+            degraded = True
+            continue
+        if (x < -1e-9).any():
+            continue                           # would bet against a contributor
+        q = float(sv[idx] @ x)
+        if q > 1e-12:
+            best = max(best, math.sqrt(q))
+    return best, degraded
+
+
+def tangency_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
+                        sim: dict[str, dict[str, float]],
+                        weight_by_strat: dict[str, float],
+                        shrink: float = TANGENCY_SHRINK_DEFAULT) -> tuple[dict[str, float], int]:
+    """Signed per-ticker conviction via the OPTIMAL-weights (tangency) combination
+    Sharpe (operator directive 2026-07-27, replaces the fixed-proportional
+    corr_adjusted_net_sharpe as the live S_adj).
+
+    Per ticker: contributors split by direction; each side combines via
+    _tangency_side_sharpe (non-negative tangency, subset-enumerated, shrunk R);
+    S_net = S*_long − S*_short. Properties, by construction:
+      • adding a CONFIRMING contributor never lowers |S_net| (monotone) — the
+        BE-vs-WW anomaly (weak correlated confirmer diluting a fixed-weight
+        combo) cannot occur;
+      • a redundant near-clone adds ~nothing (no naive-sum double count) —
+        which is why the ρ>=0.85 FOLD pre-filter is retired alongside this;
+      • DISAGREEMENT still cancels: opposing sides subtract, so contested
+        tickers gate out (the mig-140 near-cancellation intent survives);
+      • never rewards disagreement: without the non-negativity constraint an
+        opposed pair at ρ=0.3 would score ABOVE either solo (spread arbitrage
+        a net per-ticker position cannot hold).
+    Same signature/return shape as corr_adjusted_net_sharpe; the second value
+    counts tickers whose multi-member solves degraded to smaller subsets."""
+    out: dict[str, float] = {}
+    n_degraded = 0
+    for ticker, contribs in contribs_by_ticker.items():
+        longs_s, longs_id, shorts_s, shorts_id = [], [], [], []
+        for sid, d in contribs:
+            w = weight_by_strat.get(sid)
+            if w is None or not d:
+                continue
+            if int(d) > 0:
+                longs_id.append(sid)
+                longs_s.append(float(w))
+            else:
+                shorts_id.append(sid)
+                shorts_s.append(float(w))
+        if not longs_s and not shorts_s:
+            continue
+        s_long, deg_l = _tangency_side_sharpe(longs_id, longs_s, sim, shrink)
+        s_short, deg_s = _tangency_side_sharpe(shorts_id, shorts_s, sim, shrink)
+        if deg_l or deg_s:
+            n_degraded += 1
+        out[ticker] = s_long - s_short
+    return out, n_degraded
+
+
 def corr_adjusted_net_sharpe(contribs_by_ticker: dict[str, list[tuple]],
                              sim: dict[str, dict[str, float]],
                              weight_by_strat: dict[str, float],
