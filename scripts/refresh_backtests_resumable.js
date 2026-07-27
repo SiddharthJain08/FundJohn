@@ -152,7 +152,11 @@ function allStrategies() {
     const s0 = Date.now();
     // Fresh subprocess per strategy: releases the ~4GB panel peak back to the
     // OS and contains an OOM to this strategy instead of the whole fleet.
-    const r = spawnSync('nice', ['-n', '19', 'python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
+    // fleet_oom_victim_exec.sh marks ONLY this child oom_score_adj=1000 (the
+    // driver stays at normal priority — unit-level OOMScoreAdjust killed the
+    // driver itself at the 2026-07-27 13:30Z market-open surge).
+    const r = spawnSync('bash', [path.join(ROOT, 'scripts/fleet_oom_victim_exec.sh'),
+      'python3', '-m', 'backtest.unified_backtest', '--strategy-id', sid],
       { cwd: ROOT, env, timeout: PER_TIMEOUT_S * 1000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const mins = ((Date.now() - s0) / 60000).toFixed(1);
     if (r.status === 0) {
