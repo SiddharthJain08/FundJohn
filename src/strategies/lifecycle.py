@@ -98,15 +98,30 @@ CANDIDATE_TO_LIVE_MIN_TRADES:   int   = 100
 PAPER_TO_LIVE_MIN_SHARPE   = CANDIDATE_TO_LIVE_MIN_SHARPE
 PAPER_TO_LIVE_MAX_DRAWDOWN = CANDIDATE_TO_LIVE_MAX_DRAWDOWN
 
+# Calmar escape hatch on the DD leg (operator directive 2026-07-27): max
+# drawdown is a running-max extreme that grows mechanically with backtest
+# duration / trade count, so a flat ceiling systematically kills long-history
+# high-breadth sleeves (momentum_12_1 LOW_VOL: Sharpe 2.62 on 4,759 trades,
+# DD 26% — deactivated by the 20% ceiling). A sleeve whose Calmar (annualized
+# return / max DD) clears MIN_CALMAR passes the DD leg up to the catastrophic
+# hard cap. Both remain class-scaled; the hard cap keeps martingale-shaped
+# curves (huge return, ruinous DD) out regardless of Calmar.
+CANDIDATE_TO_LIVE_MIN_CALMAR:  float = 0.5   # DD no worse than 2x annualized return
+CANDIDATE_TO_LIVE_DD_HARD_CAP: float = 0.50  # 50 % — catastrophic ceiling (equity)
+
 # SP-3/SP-4: per-instrument-class candidate→live thresholds. equity/etp keep the
 # legacy values. option + crypto calibrated in SP-4 (2026-05-27), operator-signed-off.
 PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     "equity": {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
-               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,
+               "min_calmar": CANDIDATE_TO_LIVE_MIN_CALMAR,
+               "dd_hard_cap": CANDIDATE_TO_LIVE_DD_HARD_CAP},
     "etp":    {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
                "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
-               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,
+               "min_calmar": CANDIDATE_TO_LIVE_MIN_CALMAR,
+               "dd_hard_cap": CANDIDATE_TO_LIVE_DD_HARD_CAP},
     # option/crypto keep their looser DD ceilings (VIX-anchored SYNTHETIC
     # options engine — SP-4 2026-05-27; BTC is a 60-80% DD asset — SP-3.1
     # 2026-05-26). The Sharpe floor is the shared strictly-positive 0.0 as of
@@ -114,10 +129,14 @@ PROMOTION_THRESHOLDS: dict[str, dict[str, float]] = {
     # activation min-Sharpe slider, not the entry gate.
     "option": {"min_sharpe": 0.0,
                "max_drawdown": 0.30,
-               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,
+               "min_calmar": CANDIDATE_TO_LIVE_MIN_CALMAR,
+               "dd_hard_cap": 0.60},
     "crypto": {"min_sharpe": 0.0,
                "max_drawdown": 0.70,
-               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES},
+               "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,
+               "min_calmar": CANDIDATE_TO_LIVE_MIN_CALMAR,
+               "dd_hard_cap": 0.85},
 }
 
 
@@ -126,7 +145,9 @@ def _promotion_threshold(instrument_class: str) -> dict[str, float]:
         instrument_class,
         {"min_sharpe": CANDIDATE_TO_LIVE_MIN_SHARPE,
          "max_drawdown": CANDIDATE_TO_LIVE_MAX_DRAWDOWN,
-         "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES})
+         "min_trades": CANDIDATE_TO_LIVE_MIN_TRADES,
+         "min_calmar": CANDIDATE_TO_LIVE_MIN_CALMAR,
+         "dd_hard_cap": CANDIDATE_TO_LIVE_DD_HARD_CAP})
 
 
 # SP-3 instrument-class taxonomy. VALID = accepted by validation;

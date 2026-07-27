@@ -45,7 +45,7 @@ CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 MIN_SHARPE_DEFAULT  = float(os.environ.get('ELIGIBILITY_MIN_SHARPE', '0.0'))
 MIN_TRADES_DEFAULT  = int(os.environ.get('ELIGIBILITY_MIN_TRADES', '100'))
 
-from backtest.regime_qualification import class_thresholds  # noqa: E402
+from backtest.regime_qualification import class_thresholds, dd_leg_passes  # noqa: E402
 
 
 def _instrument_class_map() -> dict:
@@ -82,7 +82,7 @@ def compute_eligible(conn, strategy_id: str,
         return [], {}
     run_id = row['run_id']
     cur.execute("""
-        SELECT regime_state, sharpe, trade_count, max_dd_pct
+        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
         FROM strategy_backtest_regimes
         WHERE run_id = %s
     """, (run_id,))
@@ -93,11 +93,13 @@ def compute_eligible(conn, strategy_id: str,
         s     = r['sharpe']
         n     = r['trade_count'] or 0
         dd    = r.get('max_dd_pct') if hasattr(r, 'get') else r['max_dd_pct']
+        cal   = r.get('calmar') if hasattr(r, 'get') else r['calmar']
         # Sharpe is a STRICT exceed (policy 2026-07-13 v2: "positive Sharpe");
-        # the sleeve's own max-DD gates against the class ceiling.
+        # the DD leg is the class ceiling OR the Calmar escape hatch under the
+        # catastrophic hard cap (2026-07-27).
         passes = (s is not None and dd is not None
                   and s > min_sharpe and n >= min_trades
-                  and float(dd) <= gate['max_dd_pct'])
+                  and dd_leg_passes(dd, cal, gate))
         diag[r['regime_state']] = {
             'sharpe':      s,
             'trade_count': n,

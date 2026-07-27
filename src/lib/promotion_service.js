@@ -15,14 +15,20 @@
 // execution is gated by the activation min-Sharpe slider
 // (pipeline_config.strategy_activation_min_sharpe → activation_assigner), so
 // this entry gate is deliberately permissive; the slider is the risk dial.
+// 2026-07-27 Calmar escape hatch on the DD leg (mirrors lifecycle.py): max DD
+// is a running-max extreme that deepens mechanically with backtest duration /
+// breadth, so the flat ceiling systematically killed long-history sleeves
+// (momentum_12_1 LOW_VOL: Sharpe 2.62 on 4,759 trades, DD 26%). A sleeve
+// whose Calmar >= min_calmar passes the DD leg up to dd_hard_cap_pct (the
+// catastrophic ceiling that keeps martingale-shaped curves out regardless).
 const PROMOTION_THRESHOLDS = {
-  equity: { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 },
-  etp:    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100 },
+  equity: { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 },
+  etp:    { min_sharpe: 0, max_drawdown_pct: 20, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 50 },
   // option/crypto keep their looser DD ceilings (synthetic options engine /
   // BTC 60-80% DD asset — see lifecycle.py history). Sharpe floor is now the
   // shared ">0"; the option engine's uncertainty is carried by the slider.
-  option: { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100 },
-  crypto: { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100 },
+  option: { min_sharpe: 0, max_drawdown_pct: 30, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 60 },
+  crypto: { min_sharpe: 0, max_drawdown_pct: 70, min_trades: 100, min_calmar: 0.5, dd_hard_cap_pct: 85 },
 };
 const CANONICAL_REGIMES = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS'];
 function getPromotionThreshold(instrumentClass) {
@@ -37,9 +43,17 @@ function judgeRegimeSleeve(row, thresholds) {
   const dd = row && row.max_dd_pct  != null ? parseFloat(row.max_dd_pct)      : NaN;
   const n  = row && row.trade_count != null ? parseInt(row.trade_count, 10)   : NaN;
   if (isNaN(s) || isNaN(dd) || isNaN(n)) return ['no_backtest'];
+  // Calmar escape hatch (2026-07-27): NULL/missing calmar forfeits only the
+  // hatch — the flat ceiling still applies (never a silent pass).
+  const cal = row && row.calmar != null ? parseFloat(row.calmar) : NaN;
+  const ddOk = dd <= thresholds.max_drawdown_pct
+    || (!isNaN(cal)
+        && thresholds.min_calmar != null
+        && cal >= thresholds.min_calmar
+        && dd <= thresholds.dd_hard_cap_pct);
   const fails = [];
   if (!(s > thresholds.min_sharpe)) fails.push('sharpe');          // strict: must EXCEED
-  if (dd > thresholds.max_drawdown_pct) fails.push('max_dd');
+  if (!ddOk) fails.push('max_dd');
   if (n < thresholds.min_trades) fails.push('trades');
   return fails;
 }
@@ -64,7 +78,7 @@ async function _regimeSleeves(dbQuery, runId) {
   if (runId == null) return null;
   try {
     const rg = await dbQuery(
-      `SELECT regime_state, sharpe, trade_count, max_dd_pct
+      `SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
          FROM strategy_backtest_regimes WHERE run_id = $1`, [runId]);
     return new Map(rg.rows.map(r => [r.regime_state, r]));
   } catch (_) { return null; }

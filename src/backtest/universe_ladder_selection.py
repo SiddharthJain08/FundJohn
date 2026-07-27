@@ -39,15 +39,18 @@ def _regime_trades(m: dict):
 
 def _meets_regime_bar(m, thr: dict) -> bool:
     """True iff one regime sleeve meets the maintain bar: trades >=
-    thr.min_trades AND max_dd_pct <= thr.max_dd_pct. Missing sleeve or
-    missing metric fails closed (a shrink may not hide a regime)."""
+    thr.min_trades AND the DD leg passes (class ceiling OR the 2026-07-27
+    Calmar escape hatch under the hard cap — same contract as
+    regime_qualification.dd_leg_passes). Missing sleeve or missing metric
+    fails closed (a shrink may not hide a regime)."""
     if not m:
         return False
     trades = _regime_trades(m)
     dd = m.get('max_dd_pct')
     if trades is None or dd is None:
         return False
-    return trades >= thr['min_trades'] and float(dd) <= thr['max_dd_pct']
+    from backtest.regime_qualification import dd_leg_passes
+    return trades >= thr['min_trades'] and dd_leg_passes(dd, m.get('calmar'), thr)
 
 
 def select_tier(metrics_by_tier: dict, *,

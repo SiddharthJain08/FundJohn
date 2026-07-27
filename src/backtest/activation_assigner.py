@@ -72,7 +72,7 @@ import psycopg2.extras
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 
-from backtest.regime_qualification import class_thresholds  # noqa: E402
+from backtest.regime_qualification import class_thresholds, dd_leg_passes  # noqa: E402
 
 CANONICAL_REGIMES = ('LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS')
 
@@ -194,7 +194,7 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
     # strategy no longer trades. Falls back to the full-run sleeves when no
     # chosen rows exist (no shrink yet / non-ladder predicate).
     cur.execute("""
-        SELECT regime_state, sharpe, trade_count, max_dd_pct
+        SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
         FROM universe_shrink_metrics
         WHERE run_id = %s AND chosen AND regime_state <> 'TOTAL'
     """, (run_id,))
@@ -204,7 +204,7 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
              f'({len(rows)} regimes)')
     else:
         cur.execute("""
-            SELECT regime_state, sharpe, trade_count, max_dd_pct
+            SELECT regime_state, sharpe, trade_count, max_dd_pct, calmar
             FROM strategy_backtest_regimes
             WHERE run_id = %s
         """, (run_id,))
@@ -214,15 +214,20 @@ def compute_eligible(conn, strategy_id: str, threshold: float,
         s = r['sharpe']
         n = r['trade_count'] if r['trade_count'] is not None else 0
         dd = r['max_dd_pct']
-        # QUALIFIES (shared per-regime gate: >0 sharpe, class DD ceiling on
-        # the SLEEVE, trade floor) AND the slider's sharpe dial on top.
+        # .get: tolerate legacy fixture rows without a calmar key — missing
+        # calmar only forfeits the DD escape hatch (dd_leg_passes contract).
+        cal = r.get('calmar') if hasattr(r, 'get') else r['calmar']
+        # QUALIFIES (shared per-regime gate: >0 sharpe, class DD leg — flat
+        # ceiling OR Calmar escape hatch under the hard cap (2026-07-27) —
+        # trade floor) AND the slider's sharpe dial on top.
         passes = (s is not None and dd is not None
                   and s > gate['min_sharpe']
-                  and float(dd) <= gate['max_dd_pct']
+                  and dd_leg_passes(dd, cal, gate)
                   and n >= eff_min_trades
                   and s >= threshold)
         diag[r['regime_state']] = {'sharpe': s, 'trade_count': n,
-                                   'max_dd_pct': dd, 'eligible': passes}
+                                   'max_dd_pct': dd, 'calmar': cal,
+                                   'eligible': passes}
     if not diag:
         # primary_window run exists but has zero strategy_backtest_regimes
         # rows (malformed/partial write) -- treat identically to "no run":
