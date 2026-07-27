@@ -4028,8 +4028,31 @@ body.rs-chat-locked{overflow:hidden}
 .pf-regime-param-input.dirty{border-color:#d29922;background:rgba(210,153,34,0.05)}
 .pf-regime-param-input.saving{border-color:var(--blue);background:rgba(88,166,255,0.05)}
 .pf-regime-param-suffix{color:var(--dim);font-size:9.5px;margin-left:-4px}
+/* ── Risk switch cards (2026-07-27): side-by-side switch+value controls —
+   corr de-gross + net-exposure cap. Pill toggle is CSS-only over a hidden
+   checkbox; card dims when OFF. */
+.pf-risk-switch-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.pf-risk-switch-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:11px 13px;display:flex;flex-direction:column;gap:8px;transition:opacity .18s,border-color .18s}
+.pf-risk-switch-card.pf-off{opacity:.62}
+.pf-risk-switch-card:not(.pf-off){border-color:rgba(63,185,80,0.28)}
+.pf-rsw-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.pf-rsw-title{font-size:11px;font-weight:600;color:var(--text);letter-spacing:.02em;display:flex;align-items:center;gap:7px}
+.pf-rsw-state{font-size:8.5px;font-weight:700;letter-spacing:.08em;padding:1.5px 6px;border-radius:8px}
+.pf-rsw-state.on{color:var(--green);background:rgba(63,185,80,0.12);border:1px solid rgba(63,185,80,0.3)}
+.pf-rsw-state.off{color:var(--dim);background:rgba(139,148,158,0.08);border:1px solid var(--border2)}
+.pf-rsw-hint{font-size:9.5px;color:var(--dim);line-height:1.45;flex:1}
+.pf-rsw-vals{display:flex;align-items:center;gap:14px;padding-top:7px;border-top:1px dashed var(--border2)}
+.pf-rsw-val{display:flex;flex-direction:column;gap:3px}
+.pf-rsw-val-label{font-size:8.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--dim)}
+.pf-toggle{position:relative;width:36px;height:20px;flex:0 0 auto;display:inline-block;cursor:pointer}
+.pf-toggle input{position:absolute;inset:0;opacity:0;margin:0;cursor:pointer;z-index:1}
+.pf-toggle-track{position:absolute;inset:0;border-radius:10px;background:var(--border);border:1px solid var(--border2);transition:background .18s,border-color .18s}
+.pf-toggle-knob{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:left .18s,background .18s;box-shadow:0 1px 2px rgba(0,0,0,0.4)}
+.pf-toggle input:checked ~ .pf-toggle-track{background:rgba(63,185,80,0.30);border-color:rgba(63,185,80,0.5)}
+.pf-toggle input:checked ~ .pf-toggle-track .pf-toggle-knob{left:18px;background:var(--green)}
+.pf-toggle input:focus-visible ~ .pf-toggle-track{outline:1px solid var(--blue);outline-offset:1px}
 @media(max-width:920px){.pf-regime-grid{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}}
+@media(max-width:560px){.pf-regime-grid{grid-template-columns:1fr}.pf-risk-help{display:none}.pf-risk-switch-grid{grid-template-columns:1fr}}
 /* Squares-only layout (2026-05-21): each tile is a 1:1 square, area
    encodes portfolio size_pct. Tiles are absolutely positioned by JS
    (_packHeatmapShelves) using First-Fit Decreasing Height shelf
@@ -8298,27 +8321,30 @@ function renderRiskPanel(cfg, grossLev) {
   const acPct      = (cfg.global.asset_corr_cap_pct != null) ? cfg.global.asset_corr_cap_pct : 0.20;
   const ncEnabled  = !!cfg.global.net_cap_enabled;
   const ncFrac     = (cfg.global.max_net_frac != null) ? cfg.global.max_net_frac : 0.6;
-  const _switchRow = (id, label, hint, enabled, valueCells) => \`
-    <div class="pf-regime-param-row" style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;margin-top:10px;opacity:\${enabled ? 1 : 0.72}">
-      <span class="pf-regime-param-label-block">
-        <span class="pf-regime-param-label">\${label} <span id="\${id}-state" style="font-weight:700;color:\${enabled ? 'var(--green)' : 'var(--dim)'}">\${enabled ? 'ON' : 'OFF'}</span></span>
-        <span class="pf-regime-param-hint">\${hint}</span>
-      </span>
-      <span style="display:flex;align-items:center;gap:10px">
-        \${valueCells}
-        <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:10px;color:var(--muted)">
-          <input type="checkbox" id="\${id}-switch" \${enabled ? 'checked' : ''} style="accent-color:var(--green);width:15px;height:15px;cursor:pointer" />
+  // Side-by-side switch cards (operator 2026-07-27): pill toggle top-right,
+  // hint prose, value inputs on a footer row. Card dims when OFF.
+  const _switchCard = (id, label, hint, enabled, valueCells) => \`
+    <div class="pf-risk-switch-card \${enabled ? '' : 'pf-off'}" id="\${id}-card">
+      <div class="pf-rsw-head">
+        <span class="pf-rsw-title">\${label}
+          <span class="pf-rsw-state \${enabled ? 'on' : 'off'}">\${enabled ? 'LIVE' : 'OFF'}</span>
+        </span>
+        <label class="pf-toggle" title="\${enabled ? 'Click to disable' : 'Click to enable'} — applies next sizer cycle">
+          <input type="checkbox" id="\${id}-switch" \${enabled ? 'checked' : ''} />
+          <span class="pf-toggle-track"><span class="pf-toggle-knob"></span></span>
         </label>
-      </span>
+      </div>
+      <div class="pf-rsw-hint">\${hint}</div>
+      <div class="pf-rsw-vals">\${valueCells}</div>
     </div>\`;
   const acCells = \`
-    <span style="font-size:9.5px;color:var(--dim)">thr</span>
-    <input type="number" class="pf-regime-param-input" id="pf-ac-thr" min="\${acThrMin}" max="\${acThrMax}" step="0.05" value="\${acThr.toFixed(2)}" />
-    <span style="font-size:9.5px;color:var(--dim)">cap</span>
-    <input type="number" class="pf-regime-param-input" id="pf-ac-pct" min="0.05" max="0.50" step="0.05" value="\${acPct.toFixed(2)}" />\`;
+    <span class="pf-rsw-val"><span class="pf-rsw-val-label">Pearson thr</span>
+      <input type="number" class="pf-regime-param-input" id="pf-ac-thr" min="\${acThrMin}" max="\${acThrMax}" step="0.05" value="\${acThr.toFixed(2)}" /></span>
+    <span class="pf-rsw-val"><span class="pf-rsw-val-label">cluster cap ×NAV</span>
+      <input type="number" class="pf-regime-param-input" id="pf-ac-pct" min="0.05" max="0.50" step="0.05" value="\${acPct.toFixed(2)}" /></span>\`;
   const ncCells = \`
-    <span style="font-size:9.5px;color:var(--dim)">max net</span>
-    <input type="number" class="pf-regime-param-input" id="pf-nc-frac" min="0.10" max="1.00" step="0.05" value="\${ncFrac.toFixed(2)}" />\`;
+    <span class="pf-rsw-val"><span class="pf-rsw-val-label">max |net| ÷ gross</span>
+      <input type="number" class="pf-regime-param-input" id="pf-nc-frac" min="0.10" max="1.00" step="0.05" value="\${ncFrac.toFixed(2)}" /></span>\`;
 
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
@@ -8338,8 +8364,10 @@ function renderRiskPanel(cfg, grossLev) {
       </div>
     </div>
 
-    \${_switchRow('pf-ac', 'Asset-Corr De-Gross', 'Cluster cap on correlated same-direction positions (cap × NAV per cluster; thr = Pearson cutoff).', acEnabled, acCells)}
-    \${_switchRow('pf-nc', 'Net-Exposure Cap', 'De-levers the heavy side so |net| ≤ max-net × gross. Parked OFF 2026-07-27 — flip on to bound one-directional books.', ncEnabled, ncCells)}
+    <div class="pf-risk-switch-grid">
+      \${_switchCard('pf-ac', 'Asset-Corr De-Gross', 'Caps each cluster of correlated same-direction positions at <b>cluster cap</b> × NAV and releases the rest. Lower threshold clusters harder — 0.60 catches the semi sector, 0.70 mostly ETF/market-beta.', acEnabled, acCells)}
+      \${_switchCard('pf-nc', 'Net-Exposure Cap', 'De-levers the heavy side so |net| ≤ <b>max net</b> × intended gross — an all-long book scales down to that fraction. The June one-way-momentum guardrail; parked OFF 2026-07-27.', ncEnabled, ncCells)}
+    </div>
 
     <div class="pf-regime-grid" style="margin-top:14px">\${regimeCards}</div>
   </div>\`;
