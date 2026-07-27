@@ -1722,24 +1722,37 @@ def _apply_asset_eligibility_gate(target_usd, broker, eligibility=None):
 # max_net_frac × gross by scaling the HEAVY side down (de-lever, never force-
 # grow the light side). Sector caps are blocked on data — ticker_metadata
 # sector is 100% NULL; the corr de-gross remains the statistical stand-in.
-# pipeline_config 'max_net_frac' (default 0.6); kill switch OPENCLAW_NET_EXPOSURE_CAP=0.
+# Dashboard-switched (operator 2026-07-27 v2): pipeline_config
+# 'net_exposure_cap_enabled' (ABSENT/0 → OFF — the cap is PARKED by default)
+# + 'max_net_frac' (0.6), both on the Portfolio Risk & Sizing panel and
+# re-read every cycle. Env OPENCLAW_NET_EXPOSURE_CAP is a hard override for
+# tests/emergencies: '0' force-off, '1' force-on.
 
 _MAX_NET_FRAC_DEFAULT = 0.6
 
 
-def _load_max_net_frac() -> float:
+def _load_net_cap_cfg(default_frac: float = _MAX_NET_FRAC_DEFAULT):
+    """(enabled, max_net_frac). Env hard-overrides the switch; otherwise
+    pipeline_config decides with ABSENT → OFF. Value clamped to [0, 1];
+    fail-safe to (env-or-off, default) on any DB error."""
+    env = os.environ.get('OPENCLAW_NET_EXPOSURE_CAP')
+    enabled = True if env == '1' else False if env == '0' else None
+    frac = default_frac
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
-            cur.execute("SELECT value FROM pipeline_config WHERE key = 'max_net_frac'")
-            row = cur.fetchone()
-            if row is not None:
-                v = float(row[0])
-                if 0.0 <= v <= 1.0:
-                    return v
+            cur.execute("SELECT key, value FROM pipeline_config "
+                        "WHERE key IN ('net_exposure_cap_enabled', 'max_net_frac')")
+            rows = dict(cur.fetchall())
+        if enabled is None and 'net_exposure_cap_enabled' in rows:
+            enabled = str(rows['net_exposure_cap_enabled']).strip().lower() in ('1', 'true', 'on')
+        if 'max_net_frac' in rows:
+            v = float(rows['max_net_frac'])
+            if 0.0 <= v <= 1.0:
+                frac = v
     except Exception:
         pass
-    return _MAX_NET_FRAC_DEFAULT
+    return (bool(enabled) if enabled is not None else False), frac
 
 
 def _apply_net_exposure_cap(target_usd, max_net_frac=None):
@@ -1747,10 +1760,13 @@ def _apply_net_exposure_cap(target_usd, max_net_frac=None):
     new dict; a one-sided book de-levers to max_net_frac of its intended gross
     (that IS the policy — an all-long fleet is one factor bet). `max_net_frac`
     injectable for tests."""
-    if os.environ.get('OPENCLAW_NET_EXPOSURE_CAP', '1') == '0' or not target_usd:
+    if not target_usd:
+        return target_usd
+    enabled, cfg_frac = _load_net_cap_cfg()
+    if not enabled:
         return target_usd
     if max_net_frac is None:
-        max_net_frac = _load_max_net_frac()
+        max_net_frac = cfg_frac
     longs = sum(v for v in target_usd.values() if v > 0)
     shorts = sum(-v for v in target_usd.values() if v < 0)
     gross = longs + shorts

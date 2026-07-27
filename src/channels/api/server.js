@@ -659,6 +659,50 @@ app.put('/api/config/asset-corr-thr', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// Risk switches + values (operator 2026-07-27: Risk & Sizing panel keeps ONE
+// slider — leverage; the asset-corr de-gross and the net-exposure cap become
+// switch + value pairs). Partial body; each present field validated + upserted
+// into pipeline_config, which the sizer re-reads every cycle (no restart).
+const _RISK_TOGGLE_FIELDS = {
+  asset_corr_cap_enabled:  { kind: 'bool',
+    desc: 'Asset-correlation de-gross ON/OFF. Sizer reads every cycle. Dashboard switch.' },
+  asset_corr_cap_pct:      { kind: 'num', min: 0.05, max: 0.50,
+    desc: 'Asset-correlation de-gross cluster cap (share of NAV per correlated same-direction cluster). Range [0.05, 0.50]. Sizer reads every cycle. Dashboard value.' },
+  net_exposure_cap_enabled: { kind: 'bool',
+    desc: 'Book net-exposure cap ON/OFF (|net| <= max_net_frac x gross; heavy side de-levered). Sizer reads every cycle. Dashboard switch.' },
+  max_net_frac:            { kind: 'num', min: 0.10, max: 1.00,
+    desc: 'Book net-exposure cap fraction: |net| <= this x intended gross. Range [0.10, 1.00]. Sizer reads every cycle. Dashboard value.' },
+};
+app.put('/api/config/risk-toggles', async (req, res) => {
+  const body = req.body || {};
+  const updates = {};
+  for (const [key, spec] of Object.entries(_RISK_TOGGLE_FIELDS)) {
+    if (body[key] === undefined) continue;
+    if (spec.kind === 'bool') {
+      updates[key] = body[key] ? '1' : '0';
+    } else {
+      const v = parseFloat(body[key]);
+      if (!isFinite(v) || v < spec.min || v > spec.max) {
+        return res.status(400).json({ error: `${key} must be a number in [${spec.min}, ${spec.max}]` });
+      }
+      updates[key] = String(v);
+    }
+  }
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: 'no recognized fields in body' });
+  }
+  try {
+    for (const [key, value] of Object.entries(updates)) {
+      await dbQuery(`
+        INSERT INTO pipeline_config (key, value, description, updated_at)
+        VALUES ($1, $2, $3, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+      `, [key, value, _RISK_TOGGLE_FIELDS[key].desc]);
+    }
+    res.json({ updated: updates });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ── Strategy Activation threshold + dry-run preview ─────────────────────────
 // Slider band for pipeline_config.strategy_activation_min_sharpe — the extra
 // sharpe floor the activation assigner (src/backtest/activation_assigner.py)
@@ -851,10 +895,11 @@ app.post('/api/activation/dry-run', (req, res) => {
 // (= λ × liquidity_param) on one screen.
 app.get('/api/config/regime-sizing', async (req, res) => {
   try {
-    const [lamRes, acThrRes, acEnRes, regimeRes] = await Promise.all([
+    const [lamRes, acThrRes, acEnRes, riskRes, regimeRes] = await Promise.all([
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'position_sizing_lambda'"),
       dbQuery("SELECT value, updated_at FROM pipeline_config WHERE key = 'asset_corr_cap_thr'"),
       dbQuery("SELECT value FROM pipeline_config WHERE key = 'asset_corr_cap_enabled'"),
+      dbQuery("SELECT key, value FROM pipeline_config WHERE key IN ('asset_corr_cap_pct', 'net_exposure_cap_enabled', 'max_net_frac')"),
       dbQuery(`SELECT regime_state, liquidity_param, position_circuit_breaker_pct,
                       min_corr_cum_sharpe, updated_at
                FROM regime_sizer_params
@@ -880,6 +925,7 @@ app.get('/api/config/regime-sizing', async (req, res) => {
     const lam = lamRes.rows[0];
     const acThr = acThrRes.rows[0];
     const acEn  = acEnRes.rows[0];
+    const riskMap = Object.fromEntries((riskRes.rows || []).map(r => [r.key, r.value]));
     res.json({
       current_regime: currentRegime,
       global: {
@@ -894,6 +940,11 @@ app.get('/api/config/regime-sizing', async (req, res) => {
         asset_corr_thr_max:     ASSET_CORR_THR_MAX,
         asset_corr_thr_updated_at: acThr ? acThr.updated_at : null,
         asset_corr_enabled:     acEn ? ['1', 'true', 'on'].includes(String(acEn.value).trim().toLowerCase()) : false,
+        // Switch+value pairs for the reworked Risk & Sizing panel
+        // (operator 2026-07-27: only the leverage slider remains a slider).
+        asset_corr_cap_pct:     riskMap.asset_corr_cap_pct != null ? parseFloat(riskMap.asset_corr_cap_pct) : 0.20,
+        net_cap_enabled:        ['1', 'true', 'on'].includes(String(riskMap.net_exposure_cap_enabled ?? '0').trim().toLowerCase()),
+        max_net_frac:           riskMap.max_net_frac != null ? parseFloat(riskMap.max_net_frac) : 0.6,
       },
       regimes: regimeRes.rows.map(r => ({
         state:                          r.regime_state,
@@ -8237,46 +8288,45 @@ function renderRiskPanel(cfg, grossLev) {
       </div>
     </div>\`;
   }).join('');
-  // Asset-correlation de-gross threshold (LIVE — consumed by the sizer's
-  // _apply_asset_corr_cap). Replaced the unused intraday-leverage placeholder
-  // 2026-06-26. Lower = de-gross correlated clusters more aggressively.
+  // Risk switches (operator 2026-07-27: only the LEVERAGE slider remains a
+  // slider — the corr de-gross and the net-exposure cap are switch+value
+  // rows, all consumed by the sizer from pipeline_config every cycle).
   const acThr      = (cfg.global.asset_corr_thr != null) ? cfg.global.asset_corr_thr : 0.70;
   const acThrMin   = (cfg.global.asset_corr_thr_min != null) ? cfg.global.asset_corr_thr_min : 0.50;
   const acThrMax   = (cfg.global.asset_corr_thr_max != null) ? cfg.global.asset_corr_thr_max : 0.90;
   const acEnabled  = !!cfg.global.asset_corr_enabled;
-  const acStamp    = cfg.global.asset_corr_thr_updated_at
-    ? 'saved ' + new Date(cfg.global.asset_corr_thr_updated_at).toLocaleString('en-US', {month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit'})
-    : '';
-  const acTicks = [
-    { v: 0.55, label: 'aggressive' },
-    { v: 0.60, label: 'semis' },
-    { v: 0.70, label: 'ETF-beta' },
-    { v: 0.85, label: 'loose' },
-  ];
-  const acTickHtml = acTicks.map(t => {
-    const pct = ((t.v - acThrMin) / (acThrMax - acThrMin)) * 100;
-    return \`<span class="pf-tick" data-v="\${t.v}" style="left:\${pct.toFixed(2)}%"><span class="pf-tick-val">\${t.v.toFixed(2)}</span><span class="pf-tick-label">\${t.label}</span></span>\`;
-  }).join('');
+  const acPct      = (cfg.global.asset_corr_cap_pct != null) ? cfg.global.asset_corr_cap_pct : 0.20;
+  const ncEnabled  = !!cfg.global.net_cap_enabled;
+  const ncFrac     = (cfg.global.max_net_frac != null) ? cfg.global.max_net_frac : 0.6;
+  const _switchRow = (id, label, hint, enabled, valueCells) => \`
+    <div class="pf-regime-param-row" style="padding:8px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;margin-top:10px;opacity:\${enabled ? 1 : 0.72}">
+      <span class="pf-regime-param-label-block">
+        <span class="pf-regime-param-label">\${label} <span id="\${id}-state" style="font-weight:700;color:\${enabled ? 'var(--green)' : 'var(--dim)'}">\${enabled ? 'ON' : 'OFF'}</span></span>
+        <span class="pf-regime-param-hint">\${hint}</span>
+      </span>
+      <span style="display:flex;align-items:center;gap:10px">
+        \${valueCells}
+        <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:10px;color:var(--muted)">
+          <input type="checkbox" id="\${id}-switch" \${enabled ? 'checked' : ''} style="accent-color:var(--green);width:15px;height:15px;cursor:pointer" />
+        </label>
+      </span>
+    </div>\`;
+  const acCells = \`
+    <span style="font-size:9.5px;color:var(--dim)">thr</span>
+    <input type="number" class="pf-regime-param-input" id="pf-ac-thr" min="\${acThrMin}" max="\${acThrMax}" step="0.05" value="\${acThr.toFixed(2)}" />
+    <span style="font-size:9.5px;color:var(--dim)">cap</span>
+    <input type="number" class="pf-regime-param-input" id="pf-ac-pct" min="0.05" max="0.50" step="0.05" value="\${acPct.toFixed(2)}" />\`;
+  const ncCells = \`
+    <span style="font-size:9.5px;color:var(--dim)">max net</span>
+    <input type="number" class="pf-regime-param-input" id="pf-nc-frac" min="0.10" max="1.00" step="0.05" value="\${ncFrac.toFixed(2)}" />\`;
 
   el.innerHTML = \`<div class="pf-risk-panel">
     <div class="pf-risk-headline">
-      <div class="pf-risk-title">Leverage &amp; Correlation</div>
-      <div class="pf-risk-help"><strong>Asset-Corr De-Gross</strong> caps each cluster of correlated same-direction positions at a share of NAV and releases the rest; this slider is the Pearson clustering threshold — lower de-grosses harder (0.60 catches the semi sector, 0.70 mostly ETF/market-beta). <strong>Daily (Reg T)</strong> controls today's daily/multi-day process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T overnight rules.</div>
+      <div class="pf-risk-title">Risk &amp; Sizing</div>
+      <div class="pf-risk-help"><strong>Daily (Reg T)</strong> controls today's daily/multi-day process: gross exposure = <code>Leverage × regime.liquidity_param × NAV</code>, hard-capped at 2× per Reg T overnight rules. <strong>Asset-Corr De-Gross</strong> caps each cluster of correlated same-direction positions at <code>cap</code> × NAV (thr = Pearson clustering cutoff; lower clusters harder — 0.60 catches the semi sector). <strong>Net-Exposure Cap</strong> de-levers the heavy side so |net| ≤ <code>max net</code> × gross (an all-long book scales to that fraction). Switches + values apply next sizer cycle.</div>
     </div>
 
-    <div class="pf-lambda-block" style="opacity:\${acEnabled ? 1 : 0.78}">
-      <div class="pf-lambda-block-head"><span class="pf-lr-label">Asset-Corr De-Gross Threshold</span><span class="pf-lr-cap">\${acEnabled ? 'live' : 'disabled — set asset_corr_cap_enabled=1'}</span></div>
-      <div class="pf-lambda-mega">
-        <input type="range" id="pf-asset-corr-slider" min="\${acThrMin}" max="\${acThrMax}" step="0.05" value="\${acThr.toFixed(2)}" />
-        <div class="pf-lambda-ticks">\${acTickHtml}</div>
-      </div>
-      <div class="pf-lambda-readout">
-        <span class="pf-lr-value" id="pf-asset-corr-readout">\${acThr.toFixed(2)}</span>
-        <span class="pf-lr-sub" id="pf-asset-corr-stamp">\${acStamp}</span>
-      </div>
-    </div>
-
-    <div class="pf-lambda-block" style="margin-top:14px">
+    <div class="pf-lambda-block">
       <div class="pf-lambda-block-head"><span class="pf-lr-label">Daily Leverage (Reg T)</span><span class="pf-lr-cap">cap \${cfg.global.max.toFixed(2)}× · active</span></div>
       <div class="pf-lambda-mega">
         <input type="range" id="pf-lambda-slider" min="\${cfg.global.min}" max="\${cfg.global.max}" step="0.05" value="\${lam.toFixed(2)}" />
@@ -8288,8 +8338,66 @@ function renderRiskPanel(cfg, grossLev) {
       </div>
     </div>
 
+    \${_switchRow('pf-ac', 'Asset-Corr De-Gross', 'Cluster cap on correlated same-direction positions (cap × NAV per cluster; thr = Pearson cutoff).', acEnabled, acCells)}
+    \${_switchRow('pf-nc', 'Net-Exposure Cap', 'De-levers the heavy side so |net| ≤ max-net × gross. Parked OFF 2026-07-27 — flip on to bound one-directional books.', ncEnabled, ncCells)}
+
     <div class="pf-regime-grid" style="margin-top:14px">\${regimeCards}</div>
   </div>\`;
+
+  // Risk switch + value wiring — switches PUT immediately; numeric values
+  // debounce 500ms. All land in pipeline_config; sizer picks up next cycle.
+  const _putRisk = async (payload, okMsg) => {
+    try {
+      const r = await fetch('/api/config/risk-toggles', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (r.ok) toast(okMsg + ' — next cycle picks it up', 'ok', 3500);
+      else toast('Risk config update failed', 'error', 4000);
+      return r.ok;
+    } catch (e) { toast('Risk config error: ' + e.message, 'error', 4000); return false; }
+  };
+  const _wireSwitch = (id, key, cfgSync) => {
+    const sw = el.querySelector('#' + id + '-switch');
+    if (!sw) return;
+    sw.addEventListener('change', async () => {
+      const on = sw.checked;
+      const ok = await _putRisk({ [key]: on }, (on ? 'Enabled ' : 'Disabled ') + key.replace(/_/g, ' '));
+      if (ok) { cfgSync(on); renderRiskPanel(cfg, grossLev); }
+      else sw.checked = !on;
+    });
+  };
+  _wireSwitch('pf-ac', 'asset_corr_cap_enabled', on => { cfg.global.asset_corr_enabled = on; });
+  _wireSwitch('pf-nc', 'net_exposure_cap_enabled', on => { cfg.global.net_cap_enabled = on; });
+  const _wireNum = (id, key, cfgKey, viaThrEndpoint) => {
+    const input = el.querySelector('#' + id);
+    if (!input) return;
+    let t = null;
+    input.addEventListener('input', () => {
+      clearTimeout(t);
+      t = setTimeout(async () => {
+        const v = parseFloat(input.value);
+        if (!isFinite(v)) return;
+        let ok;
+        if (viaThrEndpoint) {
+          try {
+            const r = await fetch('/api/config/asset-corr-thr', {
+              method: 'PUT', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ value: v }) });
+            ok = r.ok;
+            toast(ok ? 'De-gross threshold saved: ' + v.toFixed(2) + ' — next cycle picks it up'
+                     : 'De-gross threshold update failed', ok ? 'ok' : 'error', 3500);
+          } catch (e) { toast('De-gross threshold error: ' + e.message, 'error', 4000); ok = false; }
+        } else {
+          ok = await _putRisk({ [key]: v }, key.replace(/_/g, ' ') + ' saved: ' + v.toFixed(2));
+        }
+        if (ok) cfg.global[cfgKey] = v;
+      }, 500);
+    });
+  };
+  _wireNum('pf-ac-thr', 'asset_corr_cap_thr', 'asset_corr_thr', true);
+  _wireNum('pf-ac-pct', 'asset_corr_cap_pct', 'asset_corr_cap_pct', false);
+  _wireNum('pf-nc-frac', 'max_net_frac', 'max_net_frac', false);
 
   // Wire slider — drag with live readout, debounce 400ms before PUT.
   const slider   = el.querySelector('#pf-lambda-slider');
@@ -8341,39 +8449,8 @@ function renderRiskPanel(cfg, grossLev) {
     });
   }
 
-  // Asset-correlation de-gross threshold slider — debounced PUT to
-  // /api/config/asset-corr-thr. LIVE: the sizer reads pipeline_config
-  // asset_corr_cap_thr every cycle, so the new value takes effect on the
-  // next pipeline tick (no restart).
-  const acSlider  = el.querySelector('#pf-asset-corr-slider');
-  const acReadout = el.querySelector('#pf-asset-corr-readout');
-  const acStampEl = el.querySelector('#pf-asset-corr-stamp');
-  if (acSlider && acReadout) {
-    let acTimer = null;
-    acSlider.addEventListener('input', () => {
-      const v = parseFloat(acSlider.value);
-      acReadout.textContent = v.toFixed(2);
-      clearTimeout(acTimer);
-      acTimer = setTimeout(async () => {
-        try {
-          const r = await fetch('/api/config/asset-corr-thr', {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ value: v }),
-          });
-          if (r.ok) {
-            cfg.global.asset_corr_thr = v;
-            cfg.global.asset_corr_thr_updated_at = new Date().toISOString();
-            if (acStampEl) acStampEl.textContent = 'saved just now';
-            toast('De-gross threshold saved: ' + v.toFixed(2) + ' — next cycle picks up the new value', 'ok', 4000);
-          } else {
-            toast('De-gross threshold update failed', 'error', 4000);
-          }
-        } catch (e) {
-          toast('De-gross threshold update error: ' + e.message, 'error', 4000);
-        }
-      }, 400);
-    });
-  }
+  // (Asset-corr threshold slider removed 2026-07-27 — thr/cap are numeric
+  // inputs on the switch rows above; only the leverage slider remains.)
 
   // Click-to-jump on tick labels.
   el.querySelectorAll('.pf-lambda-ticks .pf-tick').forEach(tick => {
