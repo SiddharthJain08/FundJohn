@@ -116,7 +116,7 @@ class TestSlippageEnvDefaultOn(unittest.TestCase):
     slippage_bps directly to simulate_trade and are unaffected by this flag."""
 
     def _run(self, **env_overrides):
-        from tests.test_backtest_fill_model import (
+        from tests.backtest.test_backtest_fill_model import (
             _make_stub_cls, _run_capture, _trivial_dataset,
         )
         close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()

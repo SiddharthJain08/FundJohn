@@ -81,6 +81,91 @@ def resolve_cost_model_bps(instrument_class: str) -> float:
     return INSTRUMENT_COST_BPS.get(instrument_class, INSTRUMENT_COST_BPS["equity"])
 
 
+# Honest cost model (2026-07-27): per-ticker one-way half-spread estimates built
+# by scripts/build_ticker_cost_model.py from ADV$/price + measured 15:55 ET NBBO
+# spreads. Replaces the flat 10bps for equity/etp when present. The artifact is a
+# derived cache — regenerate after large universe changes, never hand-edit.
+TICKER_COST_BPS_JSON = ROOT / 'data' / 'derived' / 'ticker_cost_bps.json'
+
+
+def load_ticker_cost_bps() -> Optional[dict]:
+    """{ticker: one-way half-spread bps} from the derived artifact, or None
+    (caller falls back to the flat INSTRUMENT_COST_BPS model). Kill switch:
+    OPENCLAW_BT_SPREAD_COSTS=0."""
+    if os.environ.get('OPENCLAW_BT_SPREAD_COSTS', '1') == '0':
+        return None
+    try:
+        with open(TICKER_COST_BPS_JSON) as f:
+            art = json.load(f)
+        m = art.get('cost_bps') or {}
+        if not m:
+            return None
+        return {str(k): float(v) for k, v in m.items()}
+    except FileNotFoundError:
+        _log(f'spread-cost artifact missing ({TICKER_COST_BPS_JSON}) — flat cost model in use')
+        return None
+    except Exception as e:
+        _log(f'spread-cost artifact unreadable ({e}) — flat cost model in use')
+        return None
+
+
+BT_MIN_PRICE_USD = 2.0      # entries below this median close are ungateable-cost names
+BT_MIN_ADV_USD = 400_000.0  # ~1% participation headroom for a $4k book slot
+
+
+def load_bt_asset_gate() -> Optional[dict]:
+    """{symbol: (long_ok, short_ok)} mirroring the live sizer's asset-eligibility
+    gate (regime_blended_sizer._load_asset_eligibility): new entries require
+    tradable+active+easy_to_borrow+fractionable; shorts additionally require
+    shortable. A liquidity floor (median close >= BT_MIN_PRICE_USD and ADV$ >=
+    BT_MIN_ADV_USD, from the cost artifact) applies to BOTH sides — sub-$2 /
+    sub-$400k-ADV names are where the measured spread + impact costs exceed any
+    plausible edge (fix 5, 2026-07-27). Snapshot = TODAY'S alpaca_tradable_universe
+    — symbols absent from it (delisted/unknown historically) are NOT ETB-gated,
+    the point-in-time resolver stays the authority there; the liquidity floor
+    still applies when the artifact covers them. Fail-open on any DB error,
+    matching live. Modes via OPENCLAW_BT_ASSET_GATE: 'parity' (default),
+    'short_only', 'off'. Liquidity floor kill switch: OPENCLAW_BT_LIQ_FLOOR=0."""
+    mode = os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
+    if mode == 'off':
+        return None
+    rows = []
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("""
+                SELECT symbol,
+                       (tradable AND status = 'active' AND easy_to_borrow AND fractionable),
+                       (tradable AND status = 'active' AND easy_to_borrow AND shortable)
+                FROM alpaca_tradable_universe
+            """)
+            rows = cur.fetchall()
+    except Exception as e:
+        _log(f'asset gate DB unavailable ({e}) — ETB leg skipped (fail-open, matches live)')
+    if mode == 'short_only':
+        gate = {sym: (True, bool(short_ok)) for sym, elig, short_ok in rows}
+    else:
+        gate = {sym: (bool(elig), bool(elig) and bool(short_ok)) for sym, elig, short_ok in rows}
+    if os.environ.get('OPENCLAW_BT_LIQ_FLOOR', '1') != '0':
+        try:
+            with open(TICKER_COST_BPS_JSON) as f:
+                art = json.load(f)
+            adv = art.get('adv_usd') or {}
+            px = art.get('med_close') or {}
+            n_liq = 0
+            for sym in set(adv) | set(gate):
+                a = float(adv.get(sym, 0.0) or 0.0)
+                p = float(px.get(sym, 0.0) or 0.0)
+                if sym in adv and (a < BT_MIN_ADV_USD or p < BT_MIN_PRICE_USD):
+                    gate[sym] = (False, False)
+                    n_liq += 1
+            _log(f'liquidity floor: {n_liq} symbols below '
+                 f'${BT_MIN_PRICE_USD:.0f}/{BT_MIN_ADV_USD / 1e3:.0f}k-ADV blocked')
+        except Exception as e:
+            _log(f'liquidity floor unavailable ({e}) — ETB-only gate')
+    return gate or None
+
+
 def _log(msg: str) -> None:
     print(f'[unified_backtest] {msg}', flush=True)
 
@@ -304,10 +389,11 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
 
     Long: target hit when high >= target_1; stop when low <= stop_loss.
     Short: target hit when low <= target_1; stop when high >= stop_loss.
-    Bracket is checked at each daily bar in priority: target first, then stop.
-    (Bar-priority bias is a known limitation — the bar's intra-day path isn't
-    available; we use the conservative interpretation that target fires first
-    when both are touched in the same session.)
+    Double-touch bars (both levels inside the bar's range) resolve by
+    OPENCLAW_BT_DOUBLE_TOUCH: 'stop' (DEFAULT since 2026-07-27 — the
+    conservative reading; the intra-bar path is unknown and live OCO fills
+    showed stops realize far more often than targets on wide-range bars) or
+    'target' (the pre-2026-07-27 optimistic legacy, kept as an escape hatch).
 
     If neither fires within max_hold_days → exit at the final day's close.
     If price data ends before max_hold → exit at the last available close
@@ -337,19 +423,25 @@ def simulate_trade(bars: pd.DataFrame, entry_date: pd.Timestamp,
     n = len(bars_window)
     daily_marks = []
     prev_mark = entry_fill
+    _dt_priority = os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop')
     for i, (dt, bar) in enumerate(bars_window.iterrows(), start=1):
         high, low, close = float(bar['high']), float(bar['low']), float(bar['close'])
         exit_level, reason = None, None
         if direction > 0:   # long
-            if high >= target_1:
-                exit_level, reason = float(target_1), 'target'
-            elif low <= stop_loss:
-                exit_level, reason = float(stop_loss), 'stop'
+            t_hit = high >= target_1
+            s_hit = low <= stop_loss
         else:               # short
-            if low <= target_1:
+            t_hit = low <= target_1
+            s_hit = high >= stop_loss
+        if t_hit and s_hit:
+            if _dt_priority == 'target':
                 exit_level, reason = float(target_1), 'target'
-            elif high >= stop_loss:
+            else:
                 exit_level, reason = float(stop_loss), 'stop'
+        elif t_hit:
+            exit_level, reason = float(target_1), 'target'
+        elif s_hit:
+            exit_level, reason = float(stop_loss), 'stop'
         if exit_level is None and i == n:  # last bar, no bracket -> exit at close
             exit_level = close
             reason = 'max_hold' if n == max_hold_days else 'end_of_data'
@@ -610,8 +702,21 @@ def _per_bar_simulate(
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
     fill_model: str = 'close',
     slippage_bps: float = 0.0,
+    cost_bps_by_ticker: Optional[dict] = None,
+    asset_gate: Optional[dict] = None,
 ) -> dict:
     """Single source-of-truth for the per-bar simulation loop.
+
+    cost_bps_by_ticker: optional {ticker: one-way half-spread bps} overriding
+    the flat ``slippage_bps`` per ticker (honest cost model, 2026-07-27).
+    Tickers absent from the map fall back to ``slippage_bps``.
+
+    asset_gate: optional {ticker: (long_ok, short_ok)} execution-eligibility
+    map mirroring the live sizer's asset gate (tradable+active+ETB+fractionable;
+    shorts additionally require shortable). Tickers ABSENT from the map pass —
+    the snapshot is today's Alpaca universe, and absent means delisted/unknown
+    historically, where the point-in-time resolver remains the authority.
+    Gated entries are counted in the returned ``entries_asset_gated``.
 
     Encapsulates: min_lookback gate, regime_payload construction,
     generate_signals 4-arg→3-arg fallback, entry_regime tagging,
@@ -661,6 +766,7 @@ def _per_bar_simulate(
     trades: list[dict] = []
     days_processed = 0
     days_with_signals = 0
+    entries_asset_gated = 0
     bars_raised = 0
     first_raise: str | None = None
     # Track per-bar universe sizes when resolver is active.
@@ -745,6 +851,11 @@ def _per_bar_simulate(
             ticker = sig.ticker
             if ticker not in bars_by_ticker:
                 continue
+            if asset_gate is not None:
+                _long_ok, _short_ok = asset_gate.get(ticker, (True, True))
+                if (direction > 0 and not _long_ok) or (direction < 0 and not _short_ok):
+                    entries_asset_gated += 1
+                    continue
             ticker_bars = bars_by_ticker[ticker]
             # Need the signal-day bar so we can use its close as the entry price
             if current_date not in ticker_bars.index:
@@ -790,10 +901,12 @@ def _per_bar_simulate(
                 continue
             if direction < 0 and (stop_loss <= entry_price or target_1 >= entry_price):
                 continue
+            _tkr_bps = (cost_bps_by_ticker.get(ticker, slippage_bps)
+                        if cost_bps_by_ticker is not None else slippage_bps)
             exit_info = simulate_trade(ticker_bars, fill_date, direction,
                                        entry_price, stop_loss, target_1, max_hold_days,
                                        include_entry_bar=_include_fill_bar,
-                                       slippage_bps=slippage_bps)
+                                       slippage_bps=_tkr_bps)
             # Record stop exits in within-run history so future bars'
             # per-ticker cooldown can suppress same-ticker re-fires. Keep
             # the LATEST stop date per ticker.
@@ -826,12 +939,16 @@ def _per_bar_simulate(
         print(f'[WARN] generate_signals raised on {bars_raised}/{total_bars} bars '
               f'(first: {first_raise}) — 0-trade results are NOT trustworthy '
               f'if this is a large share', file=sys.stderr)
+    if entries_asset_gated:
+        _log(f'asset gate: skipped {entries_asset_gated} entries on execution-ineligible '
+             f'symbols (non-ETB/non-shortable/non-fractionable per today\'s Alpaca universe)')
 
     return {
         'trades':           trades,
         'universe_sizes':   universe_sizes,
         'days_processed':   days_processed,
         'days_with_signals': days_with_signals,
+        'entries_asset_gated': entries_asset_gated,
         'bars_raised':      bars_raised,
         'static_universe':  static_universe,
         'min_lookback':     min_lookback,
@@ -1005,6 +1122,26 @@ def run_backtest(strategy_id: str, *,
     if _sim_fn is _per_bar_simulate:
         _sim_kwargs['fill_model'] = fill_model
         _sim_kwargs['slippage_bps'] = _slippage_bps
+        # Honest cost model (2026-07-27): per-ticker half-spread slippage + the
+        # live asset-eligibility gate, equity/etp only. Both fail back to the
+        # flat/ungated behavior loudly, never fatally.
+        if _slippage_on and instrument_class in ('equity', 'etp'):
+            _cost_map = load_ticker_cost_bps()
+            if _cost_map:
+                _sim_kwargs['cost_bps_by_ticker'] = _cost_map
+                _vals = sorted(_cost_map.values())
+                _log(f'spread-cost model: {len(_cost_map)} tickers '
+                     f'(median {_vals[len(_vals)//2]:.1f}bps, max {_vals[-1]:.1f}bps); '
+                     f'fallback flat {_slippage_bps}bps for unmapped')
+        if instrument_class in ('equity', 'etp'):
+            _gate_map = load_bt_asset_gate()
+            if _gate_map:
+                _sim_kwargs['asset_gate'] = _gate_map
+                _n_no_long = sum(1 for lo, so in _gate_map.values() if not lo)
+                _n_no_short = sum(1 for lo, so in _gate_map.values() if not so)
+                _log(f'asset gate ({os.environ.get("OPENCLAW_BT_ASSET_GATE", "parity")}): '
+                     f'{len(_gate_map)} symbols mapped; {_n_no_long} long-blocked, '
+                     f'{_n_no_short} short-blocked')
     sim = _sim_fn(
         instance, close_wide, bars_by_ticker, regimes, start_dt, end_dt,
         **_sim_kwargs,
@@ -1064,6 +1201,14 @@ def run_backtest(strategy_id: str, *,
                                    if resolver is not None and universe_sizes
                                    else len(universe)),
                 'methodology':    'discovery',
+                # Honest-cost provenance (2026-07-27): distinguishes this epoch
+                # from pre-cost canonical rows. spread_v1 = per-ticker half-spread
+                # artifact; flat = INSTRUMENT_COST_BPS fallback.
+                'cost_model': ('spread_v1' if _sim_kwargs.get('cost_bps_by_ticker')
+                               else f'flat_{_slippage_bps}bps'),
+                'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
+                               if _sim_kwargs.get('asset_gate') else 'off'),
+                'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
             }),
             None,
             total_metrics['sortino'], total_metrics['calmar'], total_metrics['avg_pnl_pct'],

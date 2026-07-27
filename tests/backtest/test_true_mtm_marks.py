@@ -146,7 +146,7 @@ class TestTrueMtmEnvDefaultOn(unittest.TestCase):
     simulate_trade directly and are unaffected by this flag."""
 
     def _run(self, **env_overrides):
-        from tests.test_backtest_fill_model import (
+        from tests.backtest.test_backtest_fill_model import (
             _make_stub_cls, _run_capture, _trivial_dataset,
         )
         close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
@@ -183,7 +183,7 @@ class TestCorrectedEngineDefaultByDefault(unittest.TestCase):
     vs. both flags explicitly ='0' reproducing the pre-fix engine."""
 
     def test_no_env_vars_corrected_engine_active(self):
-        from tests.test_backtest_fill_model import (
+        from tests.backtest.test_backtest_fill_model import (
             _make_stub_cls, _run_capture, _trivial_dataset,
         )
         close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()

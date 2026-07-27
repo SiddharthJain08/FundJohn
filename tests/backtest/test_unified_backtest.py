@@ -102,6 +102,56 @@ class TestSimulateTrade(unittest.TestCase):
         self.assertEqual(out['exit_reason'], 'end_of_data')
 
 
+class TestDoubleTouchPriority(unittest.TestCase):
+    """Both bracket levels inside one bar's range: stop wins by default
+    (honest-cost regime, 2026-07-27); OPENCLAW_BT_DOUBLE_TOUCH=target restores
+    the optimistic legacy."""
+
+    DOUBLE = [
+        {'date': '2024-01-02', 'open': 100, 'high': 100, 'low': 100, 'close': 100},
+        {'date': '2024-01-03', 'open': 100, 'high': 112, 'low': 94,  'close': 100},  # both touched
+    ]
+
+    def setUp(self):
+        import os
+        os.environ.pop('OPENCLAW_BT_DOUBLE_TOUCH', None)
+
+    tearDown = setUp
+
+    def test_long_double_touch_stop_wins_default(self):
+        out = ub.simulate_trade(_bars(self.DOUBLE), pd.Timestamp('2024-01-02'),
+                                direction=1, entry_price=100.0, stop_loss=95.0,
+                                target_1=110.0, max_hold_days=21)
+        self.assertEqual(out['exit_reason'], 'stop')
+        self.assertAlmostEqual(out['pnl_pct'], -0.05)
+
+    def test_short_double_touch_stop_wins_default(self):
+        out = ub.simulate_trade(_bars(self.DOUBLE), pd.Timestamp('2024-01-02'),
+                                direction=-1, entry_price=100.0, stop_loss=105.0,
+                                target_1=95.0, max_hold_days=21)
+        self.assertEqual(out['exit_reason'], 'stop')
+        self.assertAlmostEqual(out['pnl_pct'], -0.05)
+
+    def test_legacy_target_priority_env(self):
+        import os
+        os.environ['OPENCLAW_BT_DOUBLE_TOUCH'] = 'target'
+        out = ub.simulate_trade(_bars(self.DOUBLE), pd.Timestamp('2024-01-02'),
+                                direction=1, entry_price=100.0, stop_loss=95.0,
+                                target_1=110.0, max_hold_days=21)
+        self.assertEqual(out['exit_reason'], 'target')
+        self.assertAlmostEqual(out['pnl_pct'], 0.10)
+
+    def test_single_touch_unaffected(self):
+        bars = _bars([
+            {'date': '2024-01-02', 'open': 100, 'high': 100, 'low': 100, 'close': 100},
+            {'date': '2024-01-03', 'open': 100, 'high': 112, 'low': 99,  'close': 111},
+        ])
+        out = ub.simulate_trade(bars, pd.Timestamp('2024-01-02'), direction=1,
+                                entry_price=100.0, stop_loss=95.0, target_1=110.0,
+                                max_hold_days=21)
+        self.assertEqual(out['exit_reason'], 'target')
+
+
 class TestAggregateMetrics(unittest.TestCase):
     def test_empty_trades(self):
         m = ub.aggregate_metrics([])

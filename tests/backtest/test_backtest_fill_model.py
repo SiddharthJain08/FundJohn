@@ -16,6 +16,7 @@ Test plan:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -104,7 +105,13 @@ def _run_capture(strategy_cls, close_wide, bars_by_ticker, regimes,
         return real_aggregate(trades)
 
     mock_conn = _make_mock_conn()
+    # Honest-cost gates OFF (2026-07-27): these tests assert fill GEOMETRY on
+    # synthetic bars; the fixture ticker 'AAA' is also a real ETF whose ADV sits
+    # below the production liquidity floor, and per-ticker spread costs would
+    # perturb the expected fill arithmetic. Gate behavior has its own tests.
     with (
+        patch.dict(os.environ, {'OPENCLAW_BT_ASSET_GATE': 'off',
+                                'OPENCLAW_BT_SPREAD_COSTS': '0'}),
         patch('backtest.unified_backtest.load_prices_panels',
               return_value=(close_wide, bars_by_ticker)),
         patch('backtest.unified_backtest.load_regimes', return_value=regimes),
