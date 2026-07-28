@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-28T05:04:04.992599+00:00",
+  "updated_at": "2026-07-28T06:07:01.926351+00:00",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -2224,7 +2224,9 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "backtest_universe_cap": "tier_liquid",
+        "backtest_universe_cap_reason": "OOM 2x on full 12.5k-col panel incl. clean-box 63m attempt (2026-07-28 honest-cost epoch night-1); hurst/bocpd precedent"
       },
       "history": [
         {
