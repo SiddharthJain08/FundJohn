@@ -348,3 +348,42 @@ def test_cli_master_table_required():
     # argparse exits 2 when a required arg is missing.
     assert proc.returncode == 2, (proc.returncode, proc.stderr)
     assert "--master-table" in proc.stderr
+
+
+class TestCategoricalFastPath:
+    """The categorical fast path (2026-07-28, prices.parquet 4.3GB-transient
+    fix) must be byte-identical to the generic stringify path."""
+
+    def _frame(self, categorical: bool) -> pd.DataFrame:
+        tickers = ['AAPL', 'MSFT', 'ZZZQ'] * 4
+        dates = ['2026-01-02', '2026-01-03', '2026-01-06', '2026-01-07'] * 3
+        df = pd.DataFrame({'ticker': tickers, 'date': dates,
+                           'close': [float(i) for i in range(12)]})
+        if categorical:
+            df['ticker'] = df['ticker'].astype('category')
+            df['date'] = df['date'].astype('category')
+        return df
+
+    def _run(self, monkeypatch, bad, categorical: bool) -> pd.DataFrame:
+        monkeypatch.setattr(quarantine_filter, '_cached', lambda mt: bad)
+        return filter_quarantined(self._frame(categorical), 'prices.parquet')
+
+    def test_identical_to_generic_path(self, monkeypatch):
+        bad = {('AAPL', '2026-01-02'), ('ZZZQ', '2026-01-07'),
+               ('MISSING', '2026-01-02'), ('AAPL', '1999-01-01')}
+        fast = self._run(monkeypatch, bad, categorical=True)
+        generic = self._run(monkeypatch, bad, categorical=False)
+        assert fast['ticker'].astype(str).tolist() == generic['ticker'].astype(str).tolist()
+        assert fast['date'].astype(str).tolist() == generic['date'].astype(str).tolist()
+        assert fast['close'].tolist() == generic['close'].tolist()
+        assert len(fast) == 10  # rows 0 (AAPL,01-02) and 11 (ZZZQ,01-07) dropped
+
+    def test_no_matching_pairs_returns_frame_unchanged(self, monkeypatch):
+        bad = {('MISSING', '2026-01-02'), ('AAPL', '1999-01-01')}
+        out = self._run(monkeypatch, bad, categorical=True)
+        assert len(out) == 12
+
+    def test_all_kept_when_bad_empty_categories_overlap(self, monkeypatch):
+        out = self._run(monkeypatch, {('ZZZQ', '2026-01-03')}, categorical=True)
+        gen = self._run(monkeypatch, {('ZZZQ', '2026-01-03')}, categorical=False)
+        assert out['close'].tolist() == gen['close'].tolist()

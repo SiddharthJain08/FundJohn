@@ -133,6 +133,33 @@ def filter_quarantined(df: pd.DataFrame, master_table: str) -> pd.DataFrame:
             "quarantine_filter: DataFrame missing 'date' column; "
             f"got columns={df.columns.tolist()}"
         )
+    # Categorical fast path (prices.parquet panel load: 18.8M rows, both key
+    # columns categorical from the dictionary read). The generic path below
+    # materialises two 18.8M-element python string lists PLUS 18.8M tuples —
+    # a ~3.3GB transient measured at 4.3GB whole-process peak on the 8GB box
+    # (the 07-16 "1.15GB whole-load peak" was measured while data_quarantine
+    # was still empty, i.e. before this branch was ever reached). Matching on
+    # category CODES instead is byte-identical (categories ARE the astype(str)
+    # values) at ~200MB transient.
+    if (isinstance(df[key_col].dtype, pd.CategoricalDtype)
+            and isinstance(df["date"].dtype, pd.CategoricalDtype)):
+        import numpy as np
+        kmap = {str(c): i for i, c in enumerate(df[key_col].cat.categories)}
+        dmap = {str(c): i for i, c in enumerate(df["date"].cat.categories)}
+        n_dates = len(dmap)
+        bad_combined = np.array(
+            sorted(kmap[s] * n_dates + dmap[d]
+                   for s, d in bad if s in kmap and d in dmap),
+            dtype="int64",
+        )
+        if bad_combined.size == 0:
+            return df
+        combined = (df[key_col].cat.codes.to_numpy().astype("int64") * n_dates
+                    + df["date"].cat.codes.to_numpy())
+        keep = ~np.isin(combined, bad_combined)
+        if keep.all():
+            return df
+        return df.loc[keep].reset_index(drop=True)
     # Stringify both sides so the comparison is total.
     keys = list(
         zip(df[key_col].astype(str).tolist(), df["date"].astype(str).tolist())
