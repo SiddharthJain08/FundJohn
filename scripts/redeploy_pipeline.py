@@ -290,11 +290,45 @@ def _run_intraday_news_gate(run_date: str, dry_run: bool) -> None:
         logger.warning('intraday news gate failed (fail-open, continuing): %s', e)
 
 
+def _log_acting_ingest_preflight(run_date: str) -> None:
+    """Three-tier ingestion (2026-07-29): a regime-change redeploy switches the
+    ACTING SET — the new regime's strategies must not decide on stale data.
+    Prices are refreshed by the close[t]-proxy injection inside the signals
+    step (same-day mode); the aux category adapters (options/insider/
+    financials/earnings deltas) land separately, so until then this preflight
+    LOGS what the new acting set consumes beyond prices — staleness is
+    visible, never silent. Non-blocking by design."""
+    try:
+        sys.path.insert(0, str(ROOT / 'src'))
+        import psycopg2
+        from execution.acting_ingest_plan import resolve_ingest_plan
+        conn = psycopg2.connect(os.environ['POSTGRES_URI'])
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT state FROM market_regime ORDER BY updated_at DESC LIMIT 1")
+            row = cur.fetchone()
+            if not row:
+                return
+            plan = resolve_ingest_plan(cur, row[0], run_date)
+            aux = {c: len(t) for c, t in plan['categories'].items() if c != 'prices'}
+            logger.info(
+                'acting-ingest preflight (%s): %d acting strategies; aux needs '
+                '%s + marketwide %s (prices refreshed via close-proxy in the '
+                'signals step; aux categories currently served from the latest '
+                'EOD masters — intraday adapters pending)',
+                row[0], len(plan['acting']), aux or '{}', plan['marketwide'] or '[]')
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning('acting-ingest preflight failed (non-blocking): %s', e)
+
+
 def _run_redeploy(reason: str, run_date: str, dry_run: bool) -> int:
     """Full redeploy sequence: signal-gen → news-gate → trade→…. Returns the last
     orchestrator exit code (or the pre-gate code if signal-gen failed). Splitting the
     orchestrator subset around the news gate is what closes the intraday news-veto gap
     left by retiring the inline sizer confirmer (2026-07-20)."""
+    _log_acting_ingest_preflight(run_date)
     rc = _spawn_orchestrator(reason, run_date, dry_run, steps=_REDEPLOY_STEPS_PRE_GATE)
     if rc != 0:
         return rc
