@@ -130,11 +130,25 @@ class TestSameDayGuardAndCoverage(unittest.TestCase):
         self.assertEqual(out, {"AAPL": 150.0})
 
     def test_coverage_floor_raises(self):
-        snap = {"AAPL": {"latestTrade": {"p": 150.0, "t": "2026-07-29T19:00:01Z"}}}
+        # Denominator is provider-RETURNED symbols (2026-07-29): MSFT/GOOG are
+        # returned but unpriced today, so coverage = 1/3 < the 0.5 floor.
+        snap = {"AAPL": {"latestTrade": {"p": 150.0, "t": "2026-07-29T19:00:01Z"}},
+                "MSFT": {"latestTrade": {"p": 300.0, "t": "2026-07-20T19:00:01Z"}},
+                "GOOG": {"latestTrade": {"p": 200.0, "t": "2026-07-20T19:00:01Z"}}}
         cps.subprocess.run = _fake_run(json.dumps(snap))
         with self.assertRaises(CloseProxyError):
             fetch_close_proxy(["AAPL", "MSFT", "GOOG"], "2026-07-29",
                               min_coverage=0.5)
+
+    def test_delisted_symbols_absent_from_response_do_not_count(self):
+        # A 10-year panel carries delisted tickers; when the provider omits
+        # them entirely they must not drag coverage down (they are not a
+        # signal that the snapshot service is degraded).
+        snap = {"AAPL": {"latestTrade": {"p": 150.0, "t": "2026-07-29T19:00:01Z"}}}
+        cps.subprocess.run = _fake_run(json.dumps(snap))
+        out = fetch_close_proxy(["AAPL", "DEADCO", "GONEINC"], "2026-07-29",
+                                min_coverage=0.9)
+        self.assertEqual(out, {"AAPL": 150.0})
 
     def test_coverage_floor_passes_and_daily_bar_counts(self):
         snap = {"AAPL": {"latestTrade": {"p": 150.0, "t": "2026-07-29T19:00:01Z"}},

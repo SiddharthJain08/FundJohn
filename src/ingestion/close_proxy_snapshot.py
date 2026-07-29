@@ -23,9 +23,19 @@ floor raises, so the acting book is never sized off a hollow snapshot.
 ``asof_date=None`` keeps the legacy accept-anything behavior (dashboard /
 ad-hoc callers).
 
+COVERAGE FLOOR CALIBRATION (measured 2026-07-29 09:50 ET, healthy session):
+of 12,036 provider-returned equities in the 10-year panel, 10,336 (85.9%)
+had a same-day print; against the active tradable universe it was 87.0%.
+The shortfall is not breakage — it is illiquid names that had not traded
+20 minutes into the session, plus delisted tickers the API still answers
+for. Coverage rises through the day and the real chain runs at 15:00 ET.
+The floor therefore exists to catch a DEAD snapshot service (coverage near
+zero), not thin early prints: 0.60 leaves wide headroom above a healthy
+day's worst case while still aborting an outage.
+
 Raises CloseProxyError on TOTAL failure (nothing fetched) or, with an
 asof_date, on equity coverage below OPENCLAW_CLOSE_PROXY_MIN_COVERAGE
-(default 0.90). The caller (engine.load_prices) must let this propagate so
+(default 0.60 — calibrated below). The caller (engine.load_prices) must let this propagate so
 the signals step aborts rather than emitting an empty signal set that would
 orphan-close the whole book.
 """
@@ -177,8 +187,11 @@ def fetch_close_proxy(universe, asof_date, min_coverage: float | None = None) ->
     n_equity_priced = 0
 
     syms = list(equities.keys())
+    n_returned = 0
     for i in range(0, len(syms), _CHUNK):
-        res = _fetch_chunk(syms[i:i + _CHUNK])
+        chunk = syms[i:i + _CHUNK]
+        res = _fetch_chunk(chunk)
+        n_returned += sum(1 for a in res if a in equities)
         for asym, snap in res.items():
             p = _price_from_snap(snap or {}, asof_str)
             if p is not None:
@@ -200,13 +213,22 @@ def fetch_close_proxy(universe, asof_date, min_coverage: float | None = None) ->
 
     if asof_str and equities:
         floor = (min_coverage if min_coverage is not None
-                 else float(os.environ.get("OPENCLAW_CLOSE_PROXY_MIN_COVERAGE", "0.90")))
-        coverage = n_equity_priced / len(equities)
-        logger.info("close_proxy: %d/%d servable equities priced (%.1f%%) for %s",
-                    n_equity_priced, len(equities), coverage * 100, asof_str)
+                 else float(os.environ.get("OPENCLAW_CLOSE_PROXY_MIN_COVERAGE", "0.60")))
+        # Denominator = symbols the PROVIDER returned a snapshot for, not every
+        # symbol we asked about. A 10-year price panel carries ~1.7k delisted
+        # tickers the API simply omits; counting them made real coverage read
+        # 85.8% on a healthy RTH day (2026-07-29) and would have aborted the
+        # chain. Provider-returned-but-not-priced-today IS the signal worth
+        # gating on: it means the snapshot service is degraded or the session
+        # has no trades.
+        denom = n_returned or len(equities)
+        coverage = n_equity_priced / denom
+        logger.info("close_proxy: %d/%d provider-returned equities priced (%.1f%%) "
+                    "for %s (%d requested)",
+                    n_equity_priced, denom, coverage * 100, asof_str, len(equities))
         if coverage < floor:
             raise CloseProxyError(
-                f"close[t]-proxy coverage {coverage:.1%} of {len(equities)} servable "
+                f"close[t]-proxy coverage {coverage:.1%} of {denom} provider-returned "
                 f"equities is below the {floor:.0%} floor for {asof_str} — refusing "
                 f"to size the acting book off a hollow snapshot")
     return out
