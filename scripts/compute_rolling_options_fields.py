@@ -20,6 +20,8 @@ import sys, time
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
 IN_DIR  = ROOT / 'data' / 'master' / 'options_aggregates'
@@ -102,8 +104,24 @@ def main():
     print(f'  rows: {len(df):,}  tickers: {df["ticker"].nunique():,}  dates: {df["date"].nunique()}')
 
     print(f'Loading prices from {PRICES_PATH}...')
-    prices = pd.read_parquet(PRICES_PATH)
+    # Memory-bounded read (2026-07-29): the bare pd.read_parquet pulled all 10
+    # columns × 18.8M rows and OOM-killed this script (rc=137) once options_eod
+    # coverage widened the aggregate panel — the "never load whole
+    # prices.parquet" rule. rv_20 needs only ticker/date/close, and only for
+    # tickers present in the aggregates over a window covering their dates plus
+    # the 20-bar warm-up.
+    _tickers = set(df['ticker'].unique())
+    _floor = (df['date'].min() - pd.Timedelta(days=90)).to_pydatetime()
+    _tbl = pq.read_table(PRICES_PATH, columns=['ticker', 'date', 'close'],
+                         read_dictionary=['ticker', 'date'],
+                         filters=(pc.field('date') >= pc.scalar(_floor.strftime('%Y-%m-%d'))))
+    prices = _tbl.to_pandas()
+    del _tbl
+    prices = prices[prices['ticker'].astype(str).isin(_tickers)]
+    print(f'  price rows: {len(prices):,} (pruned to {len(_tickers):,} aggregate tickers '
+          f'from {_floor.date()})')
     rv = compute_rv_20(prices)
+    del prices
     print(f'  rv_20 rows: {len(rv):,}')
 
     df = df.merge(rv, on=['ticker', 'date'], how='left')

@@ -126,8 +126,16 @@ def _aggregate_day(grp: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
     call_volume = float(pd.to_numeric(calls['volume'], errors='coerce').fillna(0).sum())
     put_volume = float(pd.to_numeric(puts['volume'], errors='coerce').fillna(0).sum())
 
-    oi = pd.to_numeric(chain['open_interest'], errors='coerce').fillna(0)
-    contracts_liquid = int((oi > 0).sum())
+    # OPEN INTEREST IS 100% NULL in the current provider's feed (measured
+    # 2026-07-29 on options_eod 2026-07-27..28). Every OI-weighted field must
+    # therefore report UNKNOWN (None), never a computed zero: a gex of 0.0
+    # asserts "no dealer gamma imbalance", which is a fabricated fact, while
+    # None lets a consumer skip. (The live engine computes these the same way
+    # and currently emits the same false zeros — operator follow-up.)
+    oi_raw = pd.to_numeric(chain['open_interest'], errors='coerce')
+    has_oi = bool(oi_raw.notna().any() and (oi_raw.fillna(0) > 0).any())
+    oi = oi_raw.fillna(0)
+    contracts_liquid = int((oi > 0).sum()) if has_oi else None
 
     spot = _mean(chain['close']) if 'close' in chain.columns else None
 
@@ -135,17 +143,19 @@ def _aggregate_day(grp: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
     gamma_atm = _mean(atm['gamma'])
     theta_atm = _mean(atm['theta'])
 
-    gc = float((pd.to_numeric(calls['gamma'], errors='coerce').fillna(0) *
-                pd.to_numeric(calls['open_interest'], errors='coerce').fillna(0)).sum())
-    gp = float((pd.to_numeric(puts['gamma'], errors='coerce').fillna(0) *
-                pd.to_numeric(puts['open_interest'], errors='coerce').fillna(0)).sum())
-    gex = round((gc - gp) * 100, 2)
+    if has_oi:
+        gc = float((pd.to_numeric(calls['gamma'], errors='coerce').fillna(0) *
+                    pd.to_numeric(calls['open_interest'], errors='coerce').fillna(0)).sum())
+        gp = float((pd.to_numeric(puts['gamma'], errors='coerce').fillna(0) *
+                    pd.to_numeric(puts['open_interest'], errors='coerce').fillna(0)).sum())
+        gex = round((gc - gp) * 100, 2)
+    else:
+        gex = None
 
     iv_centroid_delta = surface_premium = None
-    w = (pd.to_numeric(chain['vega'], errors='coerce').abs().fillna(0) *
-         pd.to_numeric(chain['open_interest'], errors='coerce').fillna(0))
+    w = (pd.to_numeric(chain['vega'], errors='coerce').abs().fillna(0) * oi)
     tw = float(w.sum())
-    if tw > 0:
+    if has_oi and tw > 0:
         d = pd.to_numeric(chain['delta'], errors='coerce').fillna(0)
         iv = pd.to_numeric(chain['implied_volatility'], errors='coerce').fillna(0)
         iv_centroid_delta = round(float((d * w).sum() / tw), 4)
