@@ -574,6 +574,7 @@ def load_aux_data(universe: list) -> dict:
                 except Exception as _e:
                     logger.warning(f"Could not load earnings.parquet: {_e}")
             opts_dict = {}
+            _oi_missing_tickers: list = []
             for ticker, grp in opts.groupby('ticker'):
                 if ticker not in universe:
                     continue
@@ -737,11 +738,21 @@ def load_aux_data(universe: list) -> dict:
                 if 'gamma' in chain.columns and 'open_interest' in chain.columns and 'option_type' in chain.columns:
                     _ld4 = chain['date'].max() if 'date' in chain.columns else None
                     _td4 = chain[chain['date'] == _ld4] if _ld4 is not None else chain
-                    _c4  = _td4[_td4['option_type'].str.upper() == 'CALL']
-                    _p4  = _td4[_td4['option_type'].str.upper() == 'PUT']
-                    _gc  = float((_c4['gamma'] * _c4['open_interest']).sum())
-                    _gp  = float((_p4['gamma'] * _p4['open_interest']).sum())
-                    gex  = round((_gc - _gp) * 100, 2)   # per 1-point move, scaled
+                    # open_interest is 100% NULL in the current provider feed
+                    # (measured 2026-07-29 across 3.3M contract rows). Without
+                    # this guard the NaN products sum to 0.0 and gex reports a
+                    # confident 0.0 — "no dealer gamma imbalance" — to S_HV16,
+                    # which is a fabricated fact rather than missing data.
+                    # None makes the absence visible so the strategy stands down.
+                    _oi4 = pd.to_numeric(_td4['open_interest'], errors='coerce')
+                    if _oi4.notna().any() and (_oi4.fillna(0) > 0).any():
+                        _c4  = _td4[_td4['option_type'].str.upper() == 'CALL']
+                        _p4  = _td4[_td4['option_type'].str.upper() == 'PUT']
+                        _gc  = float((_c4['gamma'] * _c4['open_interest']).sum())
+                        _gp  = float((_p4['gamma'] * _p4['open_interest']).sum())
+                        gex  = round((_gc - _gp) * 100, 2)   # per 1-point move, scaled
+                    else:
+                        _oi_missing_tickers.append(ticker)
 
                 #  S-HV19: iv_centroid_delta + surface_premium 
                 iv_centroid_delta = None; surface_premium = None
@@ -806,6 +817,15 @@ def load_aux_data(universe: list) -> dict:
                 logger.warning(f'last_price load failed: {_lpe}')
             aux['options'] = opts_dict
             logger.info(f"Options loaded: {len(opts_dict)} tickers")
+            if _oi_missing_tickers:
+                # LOUD, not silent: OI-derived fields are unavailable, so any
+                # strategy gated on them (S_HV16 gex, s5_max_pain strike OI)
+                # emits nothing rather than acting on fabricated zeros.
+                logger.warning(
+                    "options open_interest ABSENT for %d/%d tickers — gex reported "
+                    "as None (was a false 0.0 before 2026-07-29); OI-gated "
+                    "strategies will stand down until a provider supplies it",
+                    len(_oi_missing_tickers), len(opts_dict))
         except Exception as e:
             logger.warning(f"Could not load options: {e}")
 
