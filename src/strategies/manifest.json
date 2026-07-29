@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "updated_at": "2026-07-28T10:38:53.375013+00:00",
+  "updated_at": "2026-07-28T16:13:47.126863+00:00",
   "strategies": {
     "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals": {
       "state": "candidate",
@@ -6147,6 +6147,28 @@
         }
       ],
       "instrument_class": "etp"
+    },
+    "S_tsmom_cross_asset_vol_scaled": {
+      "state": "candidate",
+      "state_since": "2026-07-25T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_tsmom_cross_asset_vol_scaled.py",
+        "class": "TSMOMCrossAssetVolScaled",
+        "description": "Assets with positive own past 12-month return (skipping last month) tend to continue rising; volatility-scaled long-short across equity index, bond, commodity, and currency ETFs (Moskowitz, Ooi & Pedersen 2012)."
+      },
+      "history": [],
+      "instrument_class": "etp"
+    },
+    "S_spectral_trend_ewma_vol_target": {
+      "state": "candidate",
+      "state_since": "2026-07-26T00:00:00+00:00",
+      "metadata": {
+        "canonical_file": "S_spectral_trend_ewma_vol_target.py",
+        "class": "SpectralTrendEWMAVolTarget",
+        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)"
+      },
+      "history": [],
+      "instrument_class": "equity"
     }
   },
   "decommissioned": {
@@ -6184,28 +6206,6 @@
       "replaced_by": "S5_max_pain",
       "canonical_file": "s5_max_pain.py",
       "reason": "R3 canonicalisation \u2014 numbered sXX_ version designated canonical"
-    },
-    "S_tsmom_cross_asset_vol_scaled": {
-      "state": "candidate",
-      "state_since": "2026-07-25T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_tsmom_cross_asset_vol_scaled.py",
-        "class": "TSMOMCrossAssetVolScaled",
-        "description": "Assets with positive own past 12-month return (skipping last month) tend to continue rising; volatility-scaled long-short across equity index, bond, commodity, and currency ETFs (Moskowitz, Ooi & Pedersen 2012)."
-      },
-      "history": [],
-      "instrument_class": "etp"
-    },
-    "S_spectral_trend_ewma_vol_target": {
-      "state": "candidate",
-      "state_since": "2026-07-26T00:00:00+00:00",
-      "metadata": {
-        "canonical_file": "S_spectral_trend_ewma_vol_target.py",
-        "class": "SpectralTrendEWMAVolTarget",
-        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)"
-      },
-      "history": [],
-      "instrument_class": "equity"
     }
   }
 }

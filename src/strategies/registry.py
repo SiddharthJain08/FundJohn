@@ -336,6 +336,10 @@ _IMPL_MAP = {
     'S_tsmom_cross_asset_vol_scaled': ('strategies.implementations.S_tsmom_cross_asset_vol_scaled', 'TSMOMCrossAssetVolScaled'),
     # Sepp & Lucic 2026: EWMA on vol-normalized returns captures spectral trend alpha at low frequencies
     'S_spectral_trend_ewma_vol_target': ('strategies.implementations.S_spectral_trend_ewma_vol_target', 'SpectralTrendEWMAVolTarget'),
+    # Research batch wired 2026-07-27 — impl files + manifest 'live' + registry approval existed
+    # but _IMPL_MAP wiring was missing; fallback discovery loaded them but without explicit wiring.
+    'S_downside_beta_premium': ('strategies.implementations.S_downside_beta_premium', 'DownsideBetaPremium'),
+    'S_insider_drawdown_confirmation': ('strategies.implementations.S_insider_drawdown_confirmation', 'InsiderDrawdownConfirmation'),
 }
 
 
