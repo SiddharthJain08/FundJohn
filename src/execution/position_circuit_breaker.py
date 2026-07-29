@@ -137,8 +137,17 @@ def main():
             """, (datetime.now(timezone.utc), ticker, ratio, threshold_pct, pos['qty'],
                   json.dumps(payload)))
             conn.commit()
+            if ok and isinstance(payload, dict) and payload.get('partial_flatten'):
+                outcome = (f"\n• PARTIAL flatten: closed {payload.get('closed_qty')} sh; "
+                           f"{payload.get('hostage_qty')} sh held hostage by a stuck order "
+                           f"(pending_cancel zombie?) — residual stays until the order clears; "
+                           f"operator attention needed if it persists")
+            elif ok:
+                outcome = '\n• Closed live'
+            else:
+                outcome = f'\n• Close FAILED: {payload}'
             try:
-                _post_to_discord('circuit-breaker', msg + ('\n• Closed live' if ok else f'\n• Close FAILED: {payload}'))
+                _post_to_discord('circuit-breaker', msg + outcome)
             except Exception as e:
                 print(f'[circuit_breaker] Discord post failed: {e}')
             fired += 1

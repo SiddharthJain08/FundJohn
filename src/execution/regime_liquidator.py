@@ -51,6 +51,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -298,12 +299,68 @@ def _close_symbol(symbol: str, qty: float,
         return True, payload
 
     detail = err or {}
-    if _is_insufficient_qty(detail) and _cancel_symbol_orders(symbol) > 0:
+    if not _is_insufficient_qty(detail):
+        return False, detail
+
+    # Zombie-order hardening (2026-07-29, SNDK): a GTC stop stuck in
+    # pending_cancel for days cannot be cancelled (n == 0) yet still
+    # reserves its shares, so the old n > 0 gate meant NO retry and NO
+    # flatten at all — the breaker 403'd every 5 min while the position
+    # bled past its dead stop. Now: cancel what we can, give the broker a
+    # bounded moment to release qty, retry the full close, and if shares
+    # are STILL hostage close the broker-reported available qty instead.
+    # A partial flatten returns ok=True with partial_flatten/hostage_qty
+    # set so callers can surface the residual instead of silently looping.
+    if _cancel_symbol_orders(symbol) > 0:
+        _await_symbol_orders_gone(symbol)
         ok2, payload2, err2 = _run_cli(
             ['position', 'close', '--symbol-or-asset-id', symbol], timeout=15,
         )
-        return ok2, (payload2 if ok2 else (err2 or {}))
-    return False, detail
+        if ok2:
+            return True, payload2
+        detail = err2 or {}
+        if not _is_insufficient_qty(detail):
+            return False, detail
+
+    avail, requested = _qty_from_insufficient_error(detail)
+    if not avail or avail <= 0:
+        return False, detail
+    ok3, payload3, err3 = _run_cli(
+        ['position', 'close', '--symbol-or-asset-id', symbol,
+         '--qty', ('%g' % avail)], timeout=15,
+    )
+    if not ok3:
+        return False, (err3 or detail)
+    result = payload3 if isinstance(payload3, dict) else {'result': payload3}
+    hostage = (requested if requested is not None else abs(float(qty or 0))) - avail
+    result = {**result, 'partial_flatten': True,
+              'closed_qty': avail, 'hostage_qty': max(hostage, 0)}
+    return True, result
+
+
+def _qty_from_insufficient_error(detail: dict) -> tuple[float | None, float | None]:
+    """Parse (available, requested) share counts out of an Alpaca 40310000
+    "insufficient qty available for order (requested: X, available: Y)"
+    error. Returns (None, None) when the message doesn't carry them."""
+    text = str((detail or {}).get('error') or '')
+    m_avail = re.search(r'available:\s*([\d.]+)', text)
+    m_req = re.search(r'requested:\s*([\d.]+)', text)
+    return (float(m_avail.group(1)) if m_avail else None,
+            float(m_req.group(1)) if m_req else None)
+
+
+def _await_symbol_orders_gone(symbol: str, budget_s: float = 8.0) -> bool:
+    """Poll until no open orders remain on `symbol` (cancels are async —
+    the order sits in pending_cancel briefly, still reserving qty) or the
+    budget elapses. Best-effort: True = orders gone, False = budget hit
+    (e.g. a zombie pending_cancel that will never terminalize)."""
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        if not any(o.get('symbol') == symbol for o in _load_open_orders()
+                   if isinstance(o, dict)):
+            return True
+        time.sleep(1.0)
+    return False
 
 
 def _is_insufficient_qty(detail: dict) -> bool:

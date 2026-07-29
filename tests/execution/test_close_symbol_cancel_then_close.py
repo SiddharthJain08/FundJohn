@@ -113,6 +113,8 @@ class TestCloseSymbol:
         monkeypatch.setattr(rl, '_run_cli', fake_run_cli)
         monkeypatch.setattr(rl, '_cancel_symbol_orders',
                             lambda sym: cancelled.append(sym) or 1)
+        monkeypatch.setattr(rl, '_await_symbol_orders_gone',
+                            lambda sym, budget_s=8.0: True)
 
         ok, payload = rl._close_symbol('GAMB', -15952)
 
@@ -143,3 +145,124 @@ class TestCloseSymbol:
         ok, payload = rl._close_symbol('GAMB', -15952)
         assert ok is False
         assert payload == INSUFFICIENT_QTY_ERR
+
+
+# ── zombie pending_cancel hardening (2026-07-29, SNDK) ───────────────────────
+
+INSUFFICIENT_QTY_ERR_AVAIL11 = {
+    'exit_code': 1, 'status': 403, 'code': 40310000,
+    'error': 'insufficient qty available for order (requested: 13, available: 11)',
+    'error_json': {'code': 40310000},
+}
+
+
+class TestQtyFromInsufficientError:
+    def test_parses_available_and_requested(self):
+        assert rl._qty_from_insufficient_error(INSUFFICIENT_QTY_ERR_AVAIL11) == (11.0, 13.0)
+
+    def test_zero_available(self):
+        assert rl._qty_from_insufficient_error(INSUFFICIENT_QTY_ERR) == (0.0, 15952.0)
+
+    def test_absent_numbers(self):
+        assert rl._qty_from_insufficient_error({'error': 'insufficient qty available'}) == (None, None)
+
+    def test_none_detail(self):
+        assert rl._qty_from_insufficient_error(None) == (None, None)
+
+
+class TestZombieOrderPartialClose:
+    """SNDK 2026-07-28: a GTC stop stuck in pending_cancel for 9 days held 2
+    of 13 shares. Cancel fails (n=0), so the old code never retried and never
+    flattened — the breaker 403'd every 5 min while the position bled 20%
+    past its dead stop. New behavior: close the broker-reported available qty."""
+
+    def test_uncancellable_zombie_closes_available_qty(self, monkeypatch):
+        calls = []
+
+        def fake_run_cli(args, timeout=30):
+            calls.append(args)
+            if args[:2] == ['position', 'close'] and '--qty' not in args:
+                return False, None, INSUFFICIENT_QTY_ERR_AVAIL11
+            if args[:2] == ['position', 'close'] and '--qty' in args:
+                return True, {'status': 'accepted'}, None
+            raise AssertionError(f'unexpected CLI call: {args}')
+
+        monkeypatch.setattr(rl, '_run_cli', fake_run_cli)
+        monkeypatch.setattr(rl, '_cancel_symbol_orders', lambda sym: 0)  # zombie: nothing cancellable
+
+        ok, payload = rl._close_symbol('SNDK', 13)
+
+        assert ok is True
+        assert payload['partial_flatten'] is True
+        assert payload['closed_qty'] == 11.0
+        assert payload['hostage_qty'] == 2.0
+        partial = [a for a in calls if '--qty' in a]
+        assert partial and partial[0][partial[0].index('--qty') + 1] == '11'
+
+    def test_retry_still_blocked_falls_back_to_partial(self, monkeypatch):
+        """Cancels 'succeed' but shares stay reserved (async cancel never
+        lands) → full-close retry 403s again → partial close of available."""
+        close_calls = {'n': 0}
+
+        def fake_run_cli(args, timeout=30):
+            if args[:2] == ['position', 'close'] and '--qty' not in args:
+                close_calls['n'] += 1
+                return False, None, INSUFFICIENT_QTY_ERR_AVAIL11
+            if args[:2] == ['position', 'close'] and '--qty' in args:
+                return True, {'status': 'accepted'}, None
+            raise AssertionError(f'unexpected CLI call: {args}')
+
+        monkeypatch.setattr(rl, '_run_cli', fake_run_cli)
+        monkeypatch.setattr(rl, '_cancel_symbol_orders', lambda sym: 1)
+        monkeypatch.setattr(rl, '_await_symbol_orders_gone', lambda sym, budget_s=8.0: False)
+
+        ok, payload = rl._close_symbol('SNDK', 13)
+
+        assert ok is True
+        assert close_calls['n'] == 2                # full close tried twice
+        assert payload['partial_flatten'] is True
+
+    def test_partial_close_failure_surfaces_error(self, monkeypatch):
+        boom = {'exit_code': 1, 'status': 500, 'error': 'internal'}
+
+        def fake_run_cli(args, timeout=30):
+            if '--qty' in args:
+                return False, None, boom
+            return False, None, INSUFFICIENT_QTY_ERR_AVAIL11
+
+        monkeypatch.setattr(rl, '_run_cli', fake_run_cli)
+        monkeypatch.setattr(rl, '_cancel_symbol_orders', lambda sym: 0)
+
+        ok, payload = rl._close_symbol('SNDK', 13)
+        assert ok is False
+        assert payload == boom
+
+    def test_zero_available_still_surfaces_original_error(self, monkeypatch):
+        """available: 0 (the GAMB short case) — nothing to partially close;
+        original error must surface unchanged."""
+        monkeypatch.setattr(rl, '_run_cli',
+                            lambda args, timeout=30: (False, None, INSUFFICIENT_QTY_ERR))
+        monkeypatch.setattr(rl, '_cancel_symbol_orders', lambda sym: 0)
+
+        ok, payload = rl._close_symbol('GAMB', -15952)
+        assert ok is False
+        assert payload == INSUFFICIENT_QTY_ERR
+
+
+class TestAwaitSymbolOrdersGone:
+    def test_returns_true_when_orders_clear(self, monkeypatch):
+        state = {'polls': 0}
+
+        def fake_orders():
+            state['polls'] += 1
+            return [{'id': 'z', 'symbol': 'SNDK'}] if state['polls'] == 1 else []
+
+        monkeypatch.setattr(rl, '_load_open_orders', fake_orders)
+        monkeypatch.setattr(rl.time, 'sleep', lambda s: None)
+        assert rl._await_symbol_orders_gone('SNDK', budget_s=5.0) is True
+
+    def test_returns_false_on_persistent_zombie(self, monkeypatch):
+        monkeypatch.setattr(rl, '_load_open_orders',
+                            lambda: [{'id': 'z', 'symbol': 'SNDK'}])
+        monkeypatch.setattr(rl.time, 'sleep', lambda s: None)
+        assert rl._await_symbol_orders_gone('SNDK', budget_s=0.2) is False
