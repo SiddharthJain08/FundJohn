@@ -47,6 +47,7 @@ test('sameday ON registers compute/execute/eod-collect/SOD + premarket trio', ()
   assert.ok(exprs.includes('0 15 * * 1-5'), '15:00 compute');
   assert.ok(exprs.includes('55 15 * * 1-5'), '15:55 execute');
   assert.ok(exprs.includes('15 16 * * 1-5'), '16:15 EOD collect');
+  assert.ok(exprs.includes('20 16 * * 1-5'), '16:20 evening marks (fills happen at 15:55, after the 15:00 signals step)');
   assert.ok(exprs.includes('35 9 * * 1-5'), '9:35 SOD refresh');
   assert.ok(exprs.includes('15 9 * * 1-5'), '9:15 premarket gate survives the mode');
   assert.ok(exprs.includes('25 9 * * 1-5'), '9:25 reconcile survives the mode');

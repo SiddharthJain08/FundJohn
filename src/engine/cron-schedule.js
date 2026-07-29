@@ -525,6 +525,33 @@ function start(swarm, generateId, notifyDiscord) {
                 dispatchCycle('sameday-eod-collect', ['collect', 'option_hedge']);
             }, { timezone: 'America/New_York' });
 
+            // 16:20 ET — evening measurement pass (parity marks, ledger,
+            // live_days, stale trackers). These ride the engine's `signals`
+            // step, which in this mode runs at 15:00 — BEFORE the 15:55 fills —
+            // so without this the day's fills go unmarked until the next
+            // cycle (verified 2026-07-29: signals stayed COMPUTED after the
+            // first same-day execution). Runs after the fills, produces NO
+            // signals. Spawned directly: it is a measurement job, not a
+            // pipeline step.
+            cron.schedule('20 16 * * 1-5', () => {
+                log('same-day evening marks (4:20pm ET): parity → ledger → live_days → stale');
+                try {
+                    const fs = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `evening_marks_${today}.log`), 'a');
+                    const child = spawn(PYTHON, ['scripts/run_evening_marks.py', '--date', today], {
+                        cwd: ROOT, env: { ...process.env },
+                        detached: true, stdio: ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`evening-marks spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`evening-marks spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+
             // 9:35 ET — start-of-day dashboard price refresh (close-exec
             // heritage; dashboard-only, not a signal input).
             cron.schedule('35 9 * * 1-5', () => {
