@@ -239,7 +239,17 @@ _OPTIONS_SIGNAL_COLS = [
 # archives deepen. Options: 60 >= the 30d IV-rank lookback. HV20 prices: 120 — the
 # HV20 calc only needs ~28 trading days, but the `len(_g) < 22` skip below means a
 # too-tight window would silently drop sparse/halted tickers, so keep generous headroom.
-_OPTIONS_READ_WINDOW_DAYS = int(os.environ.get('OPENCLAW_OPTIONS_READ_WINDOW_DAYS', '60'))
+# 60 -> 14 (2026-07-29): options_eod reached 18M rows, 17M of them in July
+# alone (the collector now pulls full chains for 551 tickers daily), so a
+# 60-day window read essentially the WHOLE file — 5.4GB in pandas, rc=137 at
+# the signals step. This killed the 20:15 EOD compute every night since 07-27
+# and the first same-day 15:00 compute. 14 days still covers the aux's 8-day
+# history arrays and most of iv_rank's 30-day range (which degrades gracefully
+# on a short history). PROPER FIX (owed): serve the live options aux from the
+# pre-aggregated panel + intraday overlay instead of re-aggregating raw chains
+# on every run — same math, ~225k rows instead of 18M, and it puts live and
+# backtest on ONE source.
+_OPTIONS_READ_WINDOW_DAYS = int(os.environ.get('OPENCLAW_OPTIONS_READ_WINDOW_DAYS', '14'))
 _HV20_PRICES_WINDOW_DAYS  = int(os.environ.get('OPENCLAW_HV20_PRICES_WINDOW_DAYS', '120'))
 
 
