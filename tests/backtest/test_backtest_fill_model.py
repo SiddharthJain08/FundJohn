@@ -142,30 +142,44 @@ def _trivial_dataset(n=12, open_delta=5.0):
     return close_wide, bars, regimes, dates, closes, opens
 
 
-# ── (a) REGRESSION: default == explicit "close" ───────────────────────────────
+# ── (a) DEFAULT RESOLUTION: default == same_close; env pins legacy ───────────
 
 class TestRegression:
-    """Default call must produce identical trades to explicit fill_model='close'."""
+    """2026-07-29 same-day pivot: the unset default resolves to 'same_close';
+    OPENCLAW_BT_FILL_MODEL restores the legacy t+1 models exactly."""
 
-    def test_default_equals_explicit_close(self):
+    @staticmethod
+    def _assert_identical(a, b, label):
+        assert a is not None and b is not None
+        assert len(a) == len(b), f'trade count must match ({label})'
+        for td, te in zip(a, b):
+            assert td['entry_price'] == te['entry_price'], label
+            assert td['exit_date'] == te['exit_date'], label
+            assert td['exit_reason'] == te['exit_reason'], label
+            assert td['pnl_pct'] == te['pnl_pct'], label
+
+    def test_default_equals_explicit_same_close(self):
         close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
         stub = _make_stub_cls()
-        trades_default = _run_capture(stub, close_wide, bars, regimes)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('OPENCLAW_BT_FILL_MODEL', None)
+            trades_default = _run_capture(stub, close_wide, bars, regimes,
+                                          fill_model=None)
+        trades_explicit = _run_capture(stub, close_wide, bars, regimes,
+                                       fill_model='same_close')
+        self._assert_identical(trades_default, trades_explicit,
+                               'default vs explicit same_close')
+
+    def test_env_pins_legacy_close(self):
+        close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
+        stub = _make_stub_cls()
+        with patch.dict(os.environ, {'OPENCLAW_BT_FILL_MODEL': 'close'}):
+            trades_default = _run_capture(stub, close_wide, bars, regimes,
+                                          fill_model=None)
         trades_explicit = _run_capture(stub, close_wide, bars, regimes,
                                        fill_model='close')
-        assert trades_default is not None
-        assert trades_explicit is not None
-        assert len(trades_default) == len(trades_explicit), \
-            'trade count must match between default and explicit close'
-        for td, te in zip(trades_default, trades_explicit):
-            assert td['entry_price'] == te['entry_price'], \
-                'entry_price must be identical'
-            assert td['exit_date'] == te['exit_date'], \
-                'exit_date must be identical'
-            assert td['exit_reason'] == te['exit_reason'], \
-                'exit_reason must be identical'
-            assert td['pnl_pct'] == te['pnl_pct'], \
-                'pnl_pct must be identical'
+        self._assert_identical(trades_default, trades_explicit,
+                               'env close vs explicit close')
 
     def test_close_fill_is_next_bar_close(self):
         """Entry price under 'close' must equal close[t+1], not open[t+1]."""
@@ -294,6 +308,65 @@ class TestFillBarExitEligibility:
 
 
 # ── (d) ValueError on invalid fill_model ─────────────────────────────────────
+
+class TestSameCloseFill:
+    """'same_close' (2026-07-29 same-day pivot): signal[t] fills at close[t],
+    exit walk starts strictly at t+1, final-bar signals cannot fill."""
+
+    def test_entry_is_signal_bar_close(self):
+        close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
+        stub = _make_stub_cls()
+        trades = _run_capture(stub, close_wide, bars, regimes,
+                              fill_model='same_close')
+        assert trades
+        tr = sorted(trades, key=lambda t: t['entry_date'])[0]
+        # First signal fires at index 9 (len(prices) >= 10) and fills THAT bar.
+        assert pd.Timestamp(tr['entry_date']) == dates[9]
+        assert abs(tr['entry_price'] - closes[9]) < 1e-9, \
+            f"same_close fill: entry_price={tr['entry_price']} != close[9]={closes[9]}"
+
+    def test_one_day_earlier_than_legacy_close(self):
+        close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
+        stub = _make_stub_cls()
+        same = sorted(_run_capture(stub, close_wide, bars, regimes,
+                                   fill_model='same_close'),
+                      key=lambda t: t['entry_date'])
+        legacy = sorted(_run_capture(stub, close_wide, bars, regimes,
+                                     fill_model='close'),
+                        key=lambda t: t['entry_date'])
+        assert same and legacy
+        assert pd.Timestamp(same[0]['entry_date']) < pd.Timestamp(legacy[0]['entry_date'])
+
+    def test_last_bar_signal_does_not_fill(self):
+        """A signal on the final bar has no exit walk — must be skipped, so no
+        trade may carry entry_date == last bar."""
+        close_wide, bars, regimes, dates, closes, opens = _trivial_dataset()
+        stub = _make_stub_cls()
+        trades = _run_capture(stub, close_wide, bars, regimes,
+                              fill_model='same_close')
+        assert trades
+        assert max(pd.Timestamp(t['entry_date']) for t in trades) < dates[-1]
+
+    def test_signal_bar_low_not_exit_eligible(self):
+        """The fill bar's own H/L happened BEFORE the close fill — a deep low
+        on the signal bar must not stop the trade out same-bar; the stop hits
+        on the NEXT bar."""
+        n = 13
+        dates = pd.date_range('2024-01-01', periods=n, freq='B')
+        rows = [(100.0, 100.3, 80.0, 100.0)] * n   # every low far below a 7% stop
+        close_wide = pd.DataFrame({'AAA': [r[3] for r in rows]}, index=dates)
+        close_wide.index.name = 'date'
+        bars = _bars_from_rows({'AAA': rows}, dates)
+        regimes = pd.Series({d: 'LOW_VOL' for d in dates})
+        stub = _make_stub_cls()
+        trades = _run_capture(stub, close_wide, bars, regimes,
+                              fill_model='same_close')
+        assert trades
+        tr = sorted(trades, key=lambda t: t['entry_date'])[0]
+        assert pd.Timestamp(tr['entry_date']) == dates[9]
+        assert pd.Timestamp(tr['exit_date']) == dates[10], \
+            'stop must trigger on the bar AFTER the same-close fill, not the fill bar'
+
 
 class TestFillModelValidation:
     def test_invalid_fill_model_raises(self):

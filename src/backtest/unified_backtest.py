@@ -700,7 +700,7 @@ def _per_bar_simulate(
     resolver=None,
     param_override=None,
     max_hold_days: int = DEFAULT_MAX_HOLD_DAYS,
-    fill_model: str = 'close',
+    fill_model: Optional[str] = None,
     slippage_bps: float = 0.0,
     cost_bps_by_ticker: Optional[dict] = None,
     asset_gate: Optional[dict] = None,
@@ -723,11 +723,14 @@ def _per_bar_simulate(
     stop/target sanity skips, simulate_trade, and per-bar universe-size
     tracking.
 
-    fill_model: 'close' (default, byte-identical to prior behavior) fills
-    entry at close[t+1]; 'open' fills entry at open[t+1] and includes the
-    fill bar in the exit walk (H/L of the fill bar are eligible for bracket
-    exits, since they occur after the open fill). Raises ValueError on any
-    other value.
+    fill_model: None (default) resolves via _default_fill_model() —
+    'same_close' unless OPENCLAW_BT_FILL_MODEL overrides. 'same_close'
+    (2026-07-29 same-day pivot) fills entry at close[t], the signal bar's
+    own close, exit walk from t+1 — mirrors the live 15:00-ET-collect →
+    submit-by-close chain. 'close' (legacy t+1) fills entry at close[t+1];
+    'open' fills entry at open[t+1] and includes the fill bar in the exit
+    walk (H/L of the fill bar are eligible for bracket exits, since they
+    occur after the open fill). Raises ValueError on any other value.
 
     Returns a dict with keys:
       - trades: list[dict]
@@ -741,10 +744,14 @@ def _per_bar_simulate(
     regimes (discovery mode); callers are responsible for this.
     ``strategy_id`` is only required when ``resolver`` is not None.
     """
-    if fill_model not in ('close', 'open'):
-        raise ValueError(f'fill_model must be "close" or "open", got {fill_model!r}')
+    if fill_model is None:
+        fill_model = _default_fill_model()
+    if fill_model not in ('close', 'open', 'same_close'):
+        raise ValueError(f'fill_model must be "close", "open" or "same_close", '
+                         f'got {fill_model!r}')
     _price_col = 'open' if fill_model == 'open' else 'close'
     _include_fill_bar = fill_model == 'open'
+    _same_day = fill_model == 'same_close'
     # 2026-07-05: corrected engine (true MTM) is now the STANDING DEFAULT —
     # ON unless explicitly disabled with =0 (escape hatch back to the
     # pre-fix smear-only engine). Was default-OFF (=='1') pre-cutover.
@@ -860,22 +867,29 @@ def _per_bar_simulate(
             # Need the signal-day bar so we can use its close as the entry price
             if current_date not in ticker_bars.index:
                 continue
-            # signal[t] -> execute[t+1]: the strategy decides on `current_date`
-            # (t) but the order fills on the NEXT available bar's close (t+1).
-            # `ref` is the strategy's intended price (signal-day close in
-            # practice — 127/140 strategies set entry_price themselves); brackets
-            # are shaped around it, then re-anchored to the actual fill.
+            # Fill timing (2026-07-29 pivot): 'same_close' fills AT the signal
+            # bar's close — signal[t] -> execute[t] — mirroring the live chain
+            # (collect+signals ~15:00 ET, submit before the close; the intraday
+            # execution search is abandoned, so the old t+1 lag modeled a day of
+            # staleness with no live counterpart). 'close'/'open' keep the
+            # legacy t+1 semantics for comparison runs. `ref` is the strategy's
+            # intended price (signal-day close in practice — 127/140 strategies
+            # set entry_price themselves); brackets are shaped around it, then
+            # re-anchored to the actual fill (a no-op under same_close when the
+            # strategy priced off the same close).
             ref = float(sig.entry_price) if (sig.entry_price and sig.entry_price > 0) \
                   else float(ticker_bars.loc[current_date, 'close'])
             stop_ref = float(sig.stop_loss) if (sig.stop_loss and sig.stop_loss > 0) \
                        else (ref * 0.93 if direction > 0 else ref * 1.07)
             target_ref = float(sig.target_1) if (sig.target_1 and sig.target_1 > 0) \
                          else (ref * 1.08 if direction > 0 else ref * 0.92)
-            # Locate t+1: first bar strictly after the signal bar.
+            # The exit walk always starts strictly after the fill bar's close,
+            # so ≥1 future bar is required in every model (under same_close a
+            # final-bar entry would be a zero-information open trade — skip).
             _future_idx = ticker_bars.index[ticker_bars.index > current_date]
             if len(_future_idx) == 0:
-                continue  # signal on the last available bar — cannot fill
-            fill_date = _future_idx[0]
+                continue  # signal on the last available bar
+            fill_date = current_date if _same_day else _future_idx[0]
             entry_price = float(ticker_bars.loc[fill_date, _price_col])
             # A corrupt price bar (NaN fill price) cannot fill an order at a
             # known price. Skip rather than emit a NaN-entry trade whose NaN
@@ -1013,6 +1027,18 @@ def _configured_max_hold_days(strategy_id: str) -> int:
         return DEFAULT_MAX_HOLD_DAYS
 
 
+def _default_fill_model() -> str:
+    """Standing fill-timing default for every backtest that doesn't pin one.
+
+    2026-07-29 operator directive: the intraday-execution search is abandoned,
+    so signal[t] -> submission[t+1] modeled a day of signal staleness with no
+    live counterpart. The live chain returns to same-day execution (collect +
+    signals ~15:00 ET, submit on completion, fill by the close), and the
+    backtest mirrors it as 'same_close': entry at the signal bar's close.
+    OPENCLAW_BT_FILL_MODEL is the escape hatch ('close'/'open' = legacy t+1)."""
+    return os.environ.get('OPENCLAW_BT_FILL_MODEL', 'same_close')
+
+
 def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None):
     """Universe ladder campaign W6: when the manifest sets
     metadata.backtest_universe_cap = <ladder tier>, bound the strategy's
@@ -1054,7 +1080,7 @@ def run_backtest(strategy_id: str, *,
                  param_override=None,
                  return_metrics: bool = False,
                  instrument_class: str = 'equity',
-                 fill_model: str = 'close') -> str:
+                 fill_model: Optional[str] = None) -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
@@ -1119,6 +1145,7 @@ def run_backtest(strategy_id: str, *,
     )
     # fill_model is threaded to _per_bar_simulate ONLY — options_backtest.simulate
     # does not accept it (option brackets are priced contracts, not open/close fills).
+    fill_model = fill_model or _default_fill_model()
     if _sim_fn is _per_bar_simulate:
         _sim_kwargs['fill_model'] = fill_model
         _sim_kwargs['slippage_bps'] = _slippage_bps
@@ -1209,6 +1236,9 @@ def run_backtest(strategy_id: str, *,
                 'asset_gate': (os.environ.get('OPENCLAW_BT_ASSET_GATE', 'parity')
                                if _sim_kwargs.get('asset_gate') else 'off'),
                 'double_touch': os.environ.get('OPENCLAW_BT_DOUBLE_TOUCH', 'stop'),
+                # Fill-timing provenance (2026-07-29 same-day pivot):
+                # same_close = signal[t] fills at close[t]; close/open = legacy t+1.
+                'fill_model': fill_model,
             }),
             None,
             total_metrics['sortino'], total_metrics['calmar'], total_metrics['avg_pnl_pct'],
