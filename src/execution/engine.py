@@ -121,8 +121,25 @@ def _next_trading_day(run_date: date) -> date:
 
 
 def _eod_signal_register_gate_on() -> bool:
-    """Returns True if OPENCLAW_EOD_SIGNAL_REGISTER==1 (default OFF)."""
+    """Returns True if OPENCLAW_EOD_SIGNAL_REGISTER==1 (default OFF).
+
+    Controls the EOD-flow signal semantics ONLY: target_date=T+1 via
+    _next_trading_day (gate ON) vs same-day target_date=T (gate OFF —
+    the close-exec/same-day semantics). Lifecycle side-effects that must
+    survive in BOTH executing modes live behind
+    _signal_lifecycle_pass_on() instead."""
     return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+
+
+def _signal_lifecycle_pass_on() -> bool:
+    """True when a routed-execution mode is driving the book (EOD flow OR
+    same-day exec, 2026-07-29 pivot). Gates the compute-health sentinel and
+    the parity-mark / ledger-finalize / live-measurement pass — those must
+    run whenever signals feed real submissions, regardless of the timing
+    model. (The sentinel also arms the premarket reconcile's deliberate-
+    flatten guard, which stays active in same-day mode.)"""
+    return (os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+            or os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1')
 
 
 def _is_trading_session(d: date) -> bool | None:
@@ -1070,7 +1087,15 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
     # Hoist gate check and next-trading-day lookup ONCE per call (not per signal).
     # When gate is OFF, next_td stays None — no CLI subprocess spawned.
     _gate_on = _eod_signal_register_gate_on()
-    _next_td = _next_trading_day(run_date) if _gate_on else None
+    # Same-day mode (2026-07-29 pivot): signals carry the FULL SP-6 lifecycle
+    # (lifecycle_state/computed_at/target_date + continuation mints) with
+    # target_date = run_date (T) — execute-today semantics. Legacy NULL-
+    # lifecycle rows would leave tomorrow's premarket reconcile blind to
+    # today's book (zero-APPROVED + sentinel ⇒ deliberate flatten).
+    _sameday = os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1'
+    _lifecycle_rows = _gate_on or _sameday
+    _next_td = (_next_trading_day(run_date) if _gate_on
+                else (run_date if _sameday else None))
     for strategy_id, signals in strategy_results.items():
         for sig in signals:
             try:
@@ -1119,8 +1144,8 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                 # position's broker stop-leg keeps its day-0 values until
                 # natural exit + re-entry; the DB and dashboard always
                 # show the strategy's current intent.
-                if _gate_on:
-                    # Gate ON: continuation mints create MULTIPLE open rows per
+                if _lifecycle_rows:
+                    # Lifecycle rows: continuation mints create MULTIPLE open rows per
                     # (strategy_id, ticker) over time, so the match must be
                     # DETERMINISTIC — pick the NEWEST target_date so the spent-
                     # check below compares against the latest intent.  Also fetch
@@ -1152,7 +1177,7 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                 # parity_mark.finalize_parity_marks closes it as the CONTINUATION
                 # fills (D1: close_reason='rolled_continuation').
                 _continuation_mint = False
-                if existing_row and _gate_on:
+                if existing_row and _lifecycle_rows:
                     _existing_td = existing_row[1]
                     if _existing_td is not None and _next_td is not None \
                             and _existing_td < _next_td:
@@ -1209,8 +1234,8 @@ def write_signals(cur, strategy_results: dict, regime_state: str, run_date: date
                     # Reached when EITHER no open row matched (first emit) OR the
                     # matched row is spent and we are minting a CONTINUATION row
                     # for the next target_date (_continuation_mint, gate-ON only).
-                    if _gate_on:
-                        # Gate ON: include lifecycle_state, computed_at, target_date
+                    if _lifecycle_rows:
+                        # Lifecycle insert: lifecycle_state, computed_at, target_date
                         cur.execute("""
                             INSERT INTO execution_signals
                                 (strategy_id, workspace_id, signal_date, ticker, direction,
@@ -1672,8 +1697,9 @@ def main():
         strategy_results = run_strategies(strategies, prices, regime, universe,
                                           aux_data, strategy_universes=strategy_universes)
 
-        # 4.5 Write eod_compute_health sentinel (gated: OPENCLAW_EOD_SIGNAL_REGISTER==1)
-        if _eod_signal_register_gate_on():
+        # 4.5 Write eod_compute_health sentinel (gated: any routed-execution
+        # mode — EOD flow or same-day exec; arms the premarket flatten guard)
+        if _signal_lifecycle_pass_on():
             _stats = run_strategies.last_run_stats
             n_strategies_total = _stats['total']
             n_strategies_ok = _stats['ran_ok']
@@ -1703,7 +1729,11 @@ def main():
         #     using last non-NaN close per ticker — mirrors update_pnl's proven
         #     pattern (prices[ticker].dropna().iloc[-1]).
         parity_mark_count = 0
-        if _eod_signal_register_gate_on():
+        # Any routed-execution mode: parity marks / ledger finalize /
+        # live-measurement must run whenever signals feed real submissions
+        # (2026-07-29: was EOD-flag-only, which would have silently killed
+        # fix-7 measurement on the same-day flip).
+        if _signal_lifecycle_pass_on():
             try:
                 from execution.parity_mark import (
                     finalize_parity_marks, finalize_execution_ledger)
