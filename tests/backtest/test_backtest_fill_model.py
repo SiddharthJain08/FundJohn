@@ -717,3 +717,45 @@ class TestDriverUnit:
             assert 'S_slow' in report_text
             # Coverage section must show 1 timeout.
             assert 'timeout' in report_text
+
+
+# ── evening-aux lag under the same-day fill model (2026-07-29) ───────────────
+
+class TestAuxEveningLag:
+    """Under same_close, evening-collected aux (options/vol/macro/financials/
+    insider) must be served as-of t-1 — at 15:00 ET the day-t rows don't exist
+    yet. Sentiment is ingested in-chain before signals, so it stays day-t."""
+
+    _EVENING = ['_day_slice', '_vol_indices_slice', '_macro_slice',
+                '_financials_slice', '_insider_slice', '_insider_long_slice']
+
+    def _capture(self, monkeypatch):
+        from strategies import aux_data_loader as adl
+        calls = {}
+        for name in self._EVENING + ['_sentiment_day_slice']:
+            def _rec(d, _n=name):
+                calls[_n] = d
+                return {}
+            monkeypatch.setattr(adl, name, _rec)
+        return adl, calls
+
+    def test_same_day_model_lags_evening_categories(self, monkeypatch):
+        adl, calls = self._capture(monkeypatch)
+        monkeypatch.delenv('OPENCLAW_BT_FILL_MODEL', raising=False)
+        adl.load_aux_data('2026-07-28')
+        for name in self._EVENING:
+            assert calls[name] == '2026-07-27', f'{name} must lag to t-1'
+        assert calls['_sentiment_day_slice'] == '2026-07-28'
+
+    def test_legacy_model_keeps_same_day_aux(self, monkeypatch):
+        adl, calls = self._capture(monkeypatch)
+        monkeypatch.setenv('OPENCLAW_BT_FILL_MODEL', 'close')
+        adl.load_aux_data('2026-07-28')
+        for name in self._EVENING + ['_sentiment_day_slice']:
+            assert calls[name] == '2026-07-28'
+
+    def test_default_literal_matches_engine_default(self, monkeypatch):
+        """aux_data_loader duplicates the default string to avoid importing
+        the engine module — pin the pair so they can never drift."""
+        monkeypatch.delenv('OPENCLAW_BT_FILL_MODEL', raising=False)
+        assert ub._default_fill_model() == 'same_close'
