@@ -137,7 +137,13 @@ def _aggregate_day(grp: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
     oi = oi_raw.fillna(0)
     contracts_liquid = int((oi > 0).sum()) if has_oi else None
 
-    spot = _mean(chain['close']) if 'close' in chain.columns else None
+    # `spot` is the UNDERLYING price. chain['close'] is the CONTRACT's close,
+    # so using it here produced ~$10 "spots" for SPY (2026-07-29) and fed
+    # aux_data['options'][t]['last_price'] the same nonsense. Left as None
+    # here and filled from prices.parquet by _attach_spot() after the frame is
+    # built; the retired provider's panel carried the true underlying (SPY
+    # spot 711.21 on 2026-04-22), so this restores that semantics.
+    spot = None
 
     atm = chain[chain['delta'].abs().between(*ATM_DELTA)]
     gamma_atm = _mean(atm['gamma'])
@@ -188,6 +194,32 @@ def _aggregate_day(grp: pd.DataFrame, as_of: pd.Timestamp) -> dict | None:
     }
 
 
+def _attach_spot(agg: pd.DataFrame) -> pd.DataFrame:
+    """Fill `spot` from the underlying's close in prices.parquet (bounded read:
+    only the aggregate's tickers and date span)."""
+    if agg.empty:
+        return agg
+    lo = (agg['date'].min() - pd.Timedelta(days=5)).strftime('%Y-%m-%d')
+    hi = agg['date'].max().strftime('%Y-%m-%d')
+    px_path = ROOT / 'data' / 'master' / 'prices.parquet'
+    try:
+        tbl = pq.read_table(px_path, columns=['ticker', 'date', 'close'],
+                            read_dictionary=['ticker', 'date'],
+                            filters=(pc.field('date') >= pc.scalar(lo)) &
+                                    (pc.field('date') <= pc.scalar(hi)))
+        px = tbl.to_pandas()
+        del tbl
+    except Exception as exc:  # noqa: BLE001
+        print(f'WARNING: spot backfill failed ({exc}) — spot left NULL')
+        return agg
+    px['ticker'] = px['ticker'].astype(str)
+    px['date'] = pd.to_datetime(px['date'])
+    px = px.rename(columns={'close': '_spot'})
+    agg = agg.merge(px, on=['ticker', 'date'], how='left')
+    agg['spot'] = agg['_spot']
+    return agg.drop(columns=['_spot'])
+
+
 def build_frame(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (ticker, as_of), grp in df.groupby(['ticker', 'date'], sort=True):
@@ -195,7 +227,8 @@ def build_frame(df: pd.DataFrame) -> pd.DataFrame:
         if row is not None:
             rows.append(row)
     out = pd.DataFrame(rows, columns=OUT_COLS)
-    return out.sort_values(['date', 'ticker']).reset_index(drop=True)
+    out = _attach_spot(out)
+    return out[OUT_COLS].sort_values(['date', 'ticker']).reset_index(drop=True)
 
 
 def _month_bounds(month: str) -> tuple[pd.Timestamp, pd.Timestamp]:

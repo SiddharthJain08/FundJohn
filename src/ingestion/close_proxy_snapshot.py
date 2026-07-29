@@ -94,14 +94,26 @@ def _run_cli(args: list[str]):
     if out.returncode != 0:
         logger.warning("close_proxy: CLI rc=%s stderr=%s", out.returncode, (out.stderr or "")[:200])
         return None, (out.stderr or "")
-    s = out.stdout or ""
-    for ch in "[{":
-        i = s.find(ch)
-        if i >= 0:
-            try:
-                return json.loads(s[i:]), (out.stderr or "")
-            except Exception:  # noqa: BLE001
-                return None, (out.stderr or "")
+    s = (out.stdout or "").strip()
+    if not s:
+        return None, (out.stderr or "")
+    # Parse the WHOLE document first. The previous implementation scanned for
+    # the first '[' or '{' ANYWHERE and sliced from it, which silently broke
+    # during RTH: a quote's condition list ("c": ["R"]) is the first '[' in an
+    # object payload, so it sliced mid-object, failed, and returned None —
+    # every snapshot chunk empty, CloseProxyError, signals abort. Measured
+    # 2026-07-29 14:00Z on a live SPY/NVDA multi-snapshots response.
+    try:
+        return json.loads(s), (out.stderr or "")
+    except Exception:  # noqa: BLE001
+        pass
+    # Tolerate a banner/preamble before the JSON body: try each candidate start
+    # and keep going if one fails, instead of giving up on the first.
+    for i in sorted(j for j in (s.find("{"), s.find("[")) if j > 0):
+        try:
+            return json.loads(s[i:]), (out.stderr or "")
+        except Exception:  # noqa: BLE001
+            continue
     return None, (out.stderr or "")
 
 

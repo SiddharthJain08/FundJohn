@@ -142,3 +142,30 @@ class TestSameDayGuardAndCoverage(unittest.TestCase):
         cps.subprocess.run = _fake_run(json.dumps(snap))
         out = fetch_close_proxy(["AAPL", "MSFT"], "2026-07-29", min_coverage=0.9)
         self.assertEqual(out, {"AAPL": 150.0, "MSFT": 300.0})
+
+
+class TestRthConditionArrayParse(unittest.TestCase):
+    """2026-07-29: during RTH a quote carries a condition LIST ("c": ["R"]).
+    The old parser scanned for the first '[' ANYWHERE and sliced from it,
+    landing mid-object → parse failure → every chunk empty → CloseProxyError
+    → the 15:00 same-day chain would abort at signals. Measured live."""
+
+    def test_object_payload_with_inner_condition_array(self):
+        snap = {"SPY": {"latestQuote": {"ap": 739.64, "c": ["R"],
+                                        "t": "2026-07-29T13:42:00Z"},
+                        "latestTrade": {"p": 739.47,
+                                        "t": "2026-07-29T13:42:01Z"}}}
+        cps.subprocess.run = _fake_run(json.dumps(snap))
+        self.assertEqual(fetch_close_proxy(["SPY"], None), {"SPY": 739.47})
+
+    def test_list_payload_still_parses(self):
+        cps.subprocess.run = _fake_run(json.dumps([]))
+        # A bare list is not a snapshot dict — no prices, and the universe was
+        # non-empty, so the loud error (not a silent empty) is correct.
+        with self.assertRaises(CloseProxyError):
+            fetch_close_proxy(["SPY"], None)
+
+    def test_preamble_before_json_body_tolerated(self):
+        snap = {"SPY": {"latestTrade": {"p": 739.47}}}
+        cps.subprocess.run = _fake_run("warning: using cached creds\n" + json.dumps(snap))
+        self.assertEqual(fetch_close_proxy(["SPY"], None), {"SPY": 739.47})
