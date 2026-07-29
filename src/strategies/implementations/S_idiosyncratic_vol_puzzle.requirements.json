@@ -1,0 +1,8 @@
+{
+  "strategy_id": "S_idiosyncratic_vol_puzzle",
+  "required": [
+    "prices"
+  ],
+  "optional": [],
+  "origin": "backfilled 2026-07-29 from aux_data usage scan (same-day pivot ingest scoping)"
+}

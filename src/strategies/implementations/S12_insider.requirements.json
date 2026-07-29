@@ -1,0 +1,9 @@
+{
+  "strategy_id": "S12_insider",
+  "required": [
+    "prices",
+    "insider"
+  ],
+  "optional": [],
+  "origin": "backfilled 2026-07-29 from aux_data usage scan (same-day pivot ingest scoping)"
+}

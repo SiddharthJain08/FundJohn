@@ -1,0 +1,9 @@
+{
+  "strategy_id": "S_HV19_iv_surface_tilt",
+  "required": [
+    "prices",
+    "options_eod"
+  ],
+  "optional": [],
+  "origin": "backfilled 2026-07-29 from aux_data usage scan (same-day pivot ingest scoping)"
+}

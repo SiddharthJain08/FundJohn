@@ -1,0 +1,8 @@
+{
+  "strategy_id": "oxf_orbp_momentum",
+  "required": [
+    "prices"
+  ],
+  "optional": [],
+  "origin": "backfilled 2026-07-29 from aux_data usage scan (same-day pivot ingest scoping)"
+}
