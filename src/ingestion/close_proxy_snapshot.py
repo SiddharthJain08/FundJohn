@@ -7,17 +7,34 @@ parquet (the post-close EOD refresh writes the real close[t]).
 
 Equities/ETPs: `alpaca data multi-snapshots` (latestTrade.p, falling back to
 minuteBar.c then dailyBar.c). Crypto (BASE-USD): `alpaca data crypto
-latest-trades`. Indices/futures/FX are skipped (no snapshot).
+latest-trades`. Indices/futures/FX are skipped (no snapshot), as are symbol
+classes Alpaca does not serve (preferreds `X-PRA`, rights/warrants/units,
+multi-letter dot suffixes like DX-Y.NYB) — one such symbol in a request 400s
+the WHOLE chunk ("invalid symbol"), which un-hardened dropped ~50 innocent
+tickers per offender (2026-07-29 probe: near-total coverage loss on the
+12.5k universe). Residual offenders are retried out of the chunk by parsing
+the broker's own "invalid symbol: X" error.
 
-Raises CloseProxyError on TOTAL failure (nothing fetched). The caller
-(engine.load_prices) must let this propagate so the signals step aborts rather
-than emitting an empty signal set that would orphan-close the whole book.
+Freshness (2026-07-29 same-day pivot): when ``asof_date`` is passed, only
+prices whose snapshot node is stamped that date are accepted — a thinly
+traded name whose last trade was days ago is OMITTED (NaN in the injected
+row) rather than served as a stale close[t]. Coverage below the configured
+floor raises, so the acting book is never sized off a hollow snapshot.
+``asof_date=None`` keeps the legacy accept-anything behavior (dashboard /
+ad-hoc callers).
+
+Raises CloseProxyError on TOTAL failure (nothing fetched) or, with an
+asof_date, on equity coverage below OPENCLAW_CLOSE_PROXY_MIN_COVERAGE
+(default 0.90). The caller (engine.load_prices) must let this propagate so
+the signals step aborts rather than emitting an empty signal set that would
+orphan-close the whole book.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import subprocess
 
 logger = logging.getLogger(__name__)
@@ -25,17 +42,31 @@ logger = logging.getLogger(__name__)
 CLI = os.environ.get("ALPACA_CLI_BIN", "/root/go/bin/alpaca")
 _CHUNK = 50
 _TIMEOUT = 40
+# Bound on invalid-symbol evictions per chunk before giving up on it.
+_MAX_INVALID_RETRIES = 8
+
+_INVALID_SYMBOL_RE = re.compile(r"invalid symbol:\s*([A-Za-z0-9./\-]+)")
 
 
 class CloseProxyError(RuntimeError):
-    """Raised when the close[t]-proxy snapshot cannot be fetched at all."""
+    """Raised when the close[t]-proxy snapshot cannot be fetched at all,
+    or (asof mode) covers too little of the equity universe."""
 
 
 def _to_alpaca_equity(ticker: str) -> str | None:
-    """engine ticker -> Alpaca equity symbol; None for non-equity symbols
-    (indices `^`, futures/FX `=`, crypto `-USD`) which have no equity snapshot."""
+    """engine ticker -> Alpaca equity symbol; None for symbols with no
+    Alpaca equity snapshot: indices `^`, futures/FX `=`, crypto `-USD`,
+    preferred shares (`CMS-PRC`), rights/warrants/units (`X-RT`/`X-WS`/
+    `X-UN`), and multi-letter dot suffixes (`DX-Y.NYB`). Sending any of
+    these poisons its whole multi-snapshot chunk with a 400."""
     t = (ticker or "").strip().upper()
     if not t or t.startswith("^") or "=" in t or t.endswith("-USD"):
+        return None
+    if re.search(r"-PR[A-Z]?$", t):
+        return None
+    if re.search(r"-(RT|WS|WSA|UN?)$", t):
+        return None
+    if "." in t and len(t.rsplit(".", 1)[-1]) > 2:
         return None
     # Yahoo class-share convention uses a dash; Alpaca wants a dot (BRK-B -> BRK.B).
     if "." not in t and "-" in t and t.count("-") == 1 and len(t.split("-")[1]) <= 2:
@@ -51,6 +82,7 @@ def _from_alpaca_equity(sym: str) -> str:
 
 
 def _run_cli(args: list[str]):
+    """Run the alpaca CLI; return (parsed_json_or_None, stderr_text)."""
     try:
         out = subprocess.run(
             [CLI, "-q"] + args, capture_output=True, text=True,
@@ -58,34 +90,66 @@ def _run_cli(args: list[str]):
         )
     except Exception as e:  # noqa: BLE001 - CLI missing/timeout -> treat as chunk failure
         logger.warning("close_proxy: CLI invocation failed (%s)", e)
-        return None
+        return None, str(e)
     if out.returncode != 0:
         logger.warning("close_proxy: CLI rc=%s stderr=%s", out.returncode, (out.stderr or "")[:200])
-        return None
+        return None, (out.stderr or "")
     s = out.stdout or ""
     for ch in "[{":
         i = s.find(ch)
         if i >= 0:
             try:
-                return json.loads(s[i:])
+                return json.loads(s[i:]), (out.stderr or "")
             except Exception:  # noqa: BLE001
-                return None
-    return None
+                return None, (out.stderr or "")
+    return None, (out.stderr or "")
 
 
-def _price_from_snap(snap: dict) -> float | None:
+def _fetch_chunk(chunk: list[str]) -> dict:
+    """Fetch one multi-snapshots chunk, evicting broker-named invalid
+    symbols and retrying so one bad symbol cannot poison its chunk."""
+    chunk = list(chunk)
+    for _ in range(_MAX_INVALID_RETRIES):
+        if not chunk:
+            return {}
+        res, err = _run_cli(["data", "multi-snapshots", "--symbols", ",".join(chunk)])
+        if isinstance(res, dict):
+            return res
+        m = _INVALID_SYMBOL_RE.search(err or "")
+        if not m or m.group(1) not in chunk:
+            return {}
+        bad = m.group(1)
+        chunk.remove(bad)
+        logger.warning("close_proxy: evicted invalid symbol %s from chunk, retrying", bad)
+    logger.warning("close_proxy: chunk still failing after %d evictions — dropped",
+                   _MAX_INVALID_RETRIES)
+    return {}
+
+
+def _price_from_snap(snap: dict, asof_str: str | None = None) -> float | None:
+    """Best price from a snapshot node. With ``asof_str`` (YYYY-MM-DD), only
+    nodes stamped that date qualify — stale last-trades are rejected. Trade
+    timestamps are UTC ISO; at the ~15:00 ET chain the UTC and ET calendar
+    dates coincide, so a plain prefix match is exact."""
     for top, key in (("latestTrade", "p"), ("minuteBar", "c"), ("dailyBar", "c")):
-        v = (snap.get(top) or {}).get(key)
-        if v:
-            return float(v)
+        node = snap.get(top) or {}
+        v = node.get(key)
+        if not v:
+            continue
+        if asof_str and not str(node.get("t", "")).startswith(asof_str):
+            continue
+        return float(v)
     return None
 
 
-def fetch_close_proxy(universe, asof_date) -> dict:
+def fetch_close_proxy(universe, asof_date, min_coverage: float | None = None) -> dict:
     """Return {engine_ticker: latest_price} for the universe.
 
-    Partial results are fine (tickers missing a snapshot are omitted).
-    Raises CloseProxyError only if a fetch was attempted and produced nothing.
+    asof_date: when given, prices must be stamped that date (same-day guard)
+    and equity coverage below the floor raises. None = legacy best-effort.
+    min_coverage: fraction of the SERVABLE equity subset that must price;
+    default env OPENCLAW_CLOSE_PROXY_MIN_COVERAGE (0.90). Only enforced in
+    asof mode.
     """
     equities: dict[str, str] = {}  # alpaca_sym -> engine_ticker
     cryptos: list[str] = []
@@ -96,22 +160,22 @@ def fetch_close_proxy(universe, asof_date) -> dict:
         elif (tk or "").strip().upper().endswith("-USD"):
             cryptos.append(tk)
 
+    asof_str = str(asof_date)[:10] if asof_date is not None else None
     out: dict[str, float] = {}
+    n_equity_priced = 0
 
     syms = list(equities.keys())
     for i in range(0, len(syms), _CHUNK):
-        chunk = syms[i:i + _CHUNK]
-        res = _run_cli(["data", "multi-snapshots", "--symbols", ",".join(chunk)])
-        if not isinstance(res, dict):
-            continue
+        res = _fetch_chunk(syms[i:i + _CHUNK])
         for asym, snap in res.items():
-            p = _price_from_snap(snap or {})
+            p = _price_from_snap(snap or {}, asof_str)
             if p is not None:
                 out[equities.get(asym, _from_alpaca_equity(asym))] = p
+                n_equity_priced += 1
 
     for tk in cryptos:
         pair = tk.strip().upper()[:-4] + "/USD"  # BTC-USD -> BTC/USD
-        res = _run_cli(["data", "crypto", "latest-trades", "--symbols", pair])
+        res, _err = _run_cli(["data", "crypto", "latest-trades", "--symbols", pair])
         price = None
         if isinstance(res, dict):
             node = res.get(pair) or (res.get("trades") or {}).get(pair) or {}
@@ -121,6 +185,18 @@ def fetch_close_proxy(universe, asof_date) -> dict:
 
     if (equities or cryptos) and not out:
         raise CloseProxyError("close[t]-proxy snapshot fetch produced no prices")
+
+    if asof_str and equities:
+        floor = (min_coverage if min_coverage is not None
+                 else float(os.environ.get("OPENCLAW_CLOSE_PROXY_MIN_COVERAGE", "0.90")))
+        coverage = n_equity_priced / len(equities)
+        logger.info("close_proxy: %d/%d servable equities priced (%.1f%%) for %s",
+                    n_equity_priced, len(equities), coverage * 100, asof_str)
+        if coverage < floor:
+            raise CloseProxyError(
+                f"close[t]-proxy coverage {coverage:.1%} of {len(equities)} servable "
+                f"equities is below the {floor:.0%} floor for {asof_str} — refusing "
+                f"to size the acting book off a hollow snapshot")
     return out
 
 
@@ -138,9 +214,7 @@ def fetch_open_prices(universe) -> dict:
     out: dict[str, float] = {}
     syms = list(equities.keys())
     for i in range(0, len(syms), _CHUNK):
-        res = _run_cli(["data", "multi-snapshots", "--symbols", ",".join(syms[i:i + _CHUNK])])
-        if not isinstance(res, dict):
-            continue
+        res = _fetch_chunk(syms[i:i + _CHUNK])
         for asym, snap in res.items():
             o = ((snap or {}).get("dailyBar") or {}).get("o")
             if o:
