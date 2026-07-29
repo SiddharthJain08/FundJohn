@@ -584,30 +584,13 @@ def load_aux_data(
     apply their own lookback window filter as they do in production.
     """
     date_str = str(date)[:10]
-    # Evening-collected aux lag (2026-07-29 same-day pivot): under the
-    # same-day fill model, signals run at ~15:00 ET — BEFORE the day's
-    # post-close collect — so day-t rows for options_eod / vol indices /
-    # macro / financials / insider do not exist at decision time; serving
-    # them to a date-t signal is look-ahead vs the live chain. Lag those
-    # categories to t-1 (calendar-1d cutoff ≡ previous trading row, since
-    # the slices filter `date <= ts` on trading-dated rows). Sentiment is
-    # exempt: it is ingested in-chain before signals, so day-t is real.
-    # Legacy t+1 fill models keep <= t (signals ran after the day's collect).
-    # Default string mirrors backtest.unified_backtest._default_fill_model —
-    # kept literal here to avoid importing the heavy engine module; the pair
-    # is pinned by tests/backtest/test_backtest_fill_model.py.
-    _same_day = os.environ.get('OPENCLAW_BT_FILL_MODEL', 'same_close') == 'same_close'
-    aux_date_str = (
-        (pd.Timestamp(date_str) - pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-        if _same_day else date_str
-    )
     out = {
-        'options':              _day_slice(aux_date_str),
-        'vol_indices':          _vol_indices_slice(aux_date_str),
-        'macro':                _macro_slice(aux_date_str),
-        'financials':           _financials_slice(aux_date_str),
-        'insider_txns':         _insider_slice(aux_date_str),
-        'insider_history_long': _insider_long_slice(aux_date_str),
+        'options':              _day_slice(date_str),
+        'vol_indices':          _vol_indices_slice(date_str),
+        'macro':                _macro_slice(date_str),
+        'financials':           _financials_slice(date_str),
+        'insider_txns':         _insider_slice(date_str),
+        'insider_history_long': _insider_long_slice(date_str),
         'sentiment':            _sentiment_day_slice(date_str),
     }
     if strategy_id:
