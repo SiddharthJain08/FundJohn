@@ -86,12 +86,12 @@ const nyTz     = registeredCrons.filter(c => c.opts && c.opts.timezone === 'Amer
 
 assert(eodExprs.includes('15 16 * * 1-5'), '(a) 16:15 ET EOD compute registered');
 assert(eodExprs.includes('15 9 * * 1-5'),  '(b) 09:15 ET premarket gate registered');
-assert(eodExprs.includes('28 9 * * 1-5'),  '(c) 09:28 ET open reconcile registered');
+assert(eodExprs.includes('25 9 * * 1-5'),  '(c) 09:25 ET open reconcile registered (moved pre-9:28 OPG cutoff 2026-06-08)');
 assert(eodExprs.includes('32 9 * * 1-5'),  '(d) 09:32 ET OPG sweep registered');
 assert(eodExprs.includes('55 15 * * 1-5'), '(e) 15:55 ET into-close fill registered');
 
 // All EOD crons must use ET timezone
-const eodExpected = ['15 16 * * 1-5', '15 9 * * 1-5', '28 9 * * 1-5', '32 9 * * 1-5', '55 15 * * 1-5'];
+const eodExpected = ['15 16 * * 1-5', '15 9 * * 1-5', '25 9 * * 1-5', '32 9 * * 1-5', '55 15 * * 1-5'];
 const allEtTz = eodExpected.every(expr =>
     registeredCrons.some(c => c.expr === expr && c.opts && c.opts.timezone === 'America/New_York')
 );
@@ -160,7 +160,7 @@ assert(!threwOffLoad, 'No throw when all gates OFF');
 const offExprs = registeredCrons.map(c => c.expr);
 assert(!offExprs.includes('15 16 * * 1-5'), '(a) 16:15 NOT registered when gate OFF');
 assert(!offExprs.includes('15 9 * * 1-5'),  '(b) 09:15 NOT registered when gate OFF');
-assert(!offExprs.includes('28 9 * * 1-5'),  '(c) 09:28 NOT registered when gate OFF');
+assert(!offExprs.includes('25 9 * * 1-5'),  '(c) 09:25 NOT registered when gate OFF');
 assert(!offExprs.includes('32 9 * * 1-5'),  '(d) 09:32 NOT registered when gate OFF');
 assert(!offExprs.includes('55 15 * * 1-5'), '(e) 15:55 EOD NOT registered when gate OFF');
 // Legacy 10am still registers when all gates off

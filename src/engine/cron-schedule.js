@@ -253,21 +253,27 @@ function start(swarm, generateId, notifyDiscord) {
     // unchanged. Spec: docs/archive/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
     const closeExecLive       = process.env.OPENCLAW_CLOSE_EXEC_LIVE       === '1';
     const eodSignalRegister   = process.env.OPENCLAW_EOD_SIGNAL_REGISTER   === '1';
+    // 2026-07-29 same-day pivot: signal[t] -> submission[t]. 15:00 ET compute
+    // (close[t]-proxy snapshot; no full collect in the critical path) ->
+    // 15:55 ET execute into the close (mirrors the backtests' same_close
+    // fill) -> 16:15 ET official EOD collect. The premarket protective flow
+    // (9:15 gate / 9:25 reconcile / 9:32 sweep) is shared with the EOD mode.
+    const sameDayExec         = process.env.OPENCLAW_SAMEDAY_EXEC          === '1';
 
-    // Mutual exclusion: EOD-flow and close-exec-live cannot both drive routed
-    // strategies simultaneously — they operate on incompatible timing assumptions.
-    if (eodSignalRegister && closeExecLive) {
+    // Mutual exclusion: exactly one timing mode may drive routed strategies.
+    const _modes = [eodSignalRegister, closeExecLive, sameDayExec].filter(Boolean);
+    if (_modes.length > 1) {
         throw new Error(
-            'OPENCLAW_EOD_SIGNAL_REGISTER and OPENCLAW_CLOSE_EXEC_LIVE cannot both be 1 ' +
-            '— they would both drive routed strategies on conflicting timing models. ' +
-            'Disable OPENCLAW_CLOSE_EXEC_LIVE before enabling the EOD flow.'
+            'OPENCLAW_EOD_SIGNAL_REGISTER, OPENCLAW_CLOSE_EXEC_LIVE and ' +
+            'OPENCLAW_SAMEDAY_EXEC are mutually exclusive — they drive routed ' +
+            'strategies on conflicting timing models. Enable exactly one.'
         );
     }
 
     // 10:00 AM ET Mon–Fri — legacy daily cycle (registered only when NEITHER
     // close-exec NOR EOD-flow is ON). EOD-flow supersedes the legacy same-day
     // cycle (§4: entire live cycle re-timed to act-next-day).
-    if (!closeExecLive && !eodSignalRegister) cron.schedule('0 10 * * 1-5', () => {
+    if (!closeExecLive && !eodSignalRegister && !sameDayExec) cron.schedule('0 10 * * 1-5', () => {
         const useLangGraph = process.env.OPENCLAW_LANGGRAPH_ORCHESTRATOR === '1';
         const today = new Date().toISOString().slice(0, 10);
 
@@ -347,7 +353,7 @@ function start(swarm, generateId, notifyDiscord) {
     // Mutual exclusion with OPENCLAW_CLOSE_EXEC_LIVE is enforced at registration
     // (throw above). Gate-OFF = zero new crons registered (byte-identical to pre-SP6).
     // Spec: docs/archive/superpowers/specs/2026-05-31-sp6-phase-a-eod-open-execution-design.md §4/§12
-    if (eodSignalRegister) {
+    if (eodSignalRegister || sameDayExec) {
         const dispatchCycle = (reason, steps) => {
             const today = new Date().toISOString().slice(0, 10);
             try {
@@ -366,7 +372,9 @@ function start(swarm, generateId, notifyDiscord) {
         // lifecycle_state='COMPUTED' with target_date=T+1; also writes the
         // eod_compute_health sentinel and parity_mark (mark_entry_price) for
         // any positions filled that day.
-        cron.schedule('15 16 * * 1-5', () => {
+        // EOD mode only — under same-day exec the 16:15 slot runs collect
+        // alone (see the sameDayExec block below).
+        if (eodSignalRegister) cron.schedule('15 16 * * 1-5', () => {
             log('EOD compute (4:15pm ET): collect → sentiment → signals → option_hedge');
             dispatchCycle('eod-signal-register', ['collect', 'sentiment', 'signals', 'option_hedge']);
         }, { timezone: 'America/New_York' });
@@ -467,10 +475,64 @@ function start(swarm, generateId, notifyDiscord) {
         // CRITICAL: 'trade' (sizer) must precede 'alpaca' (executor) — without it
         // there is nothing sized to execute. Drops are already closed at 9:30;
         // the sizer's re-diff sees them gone, so no double-close.
-        cron.schedule('55 15 * * 1-5', () => {
+        // EOD mode only — same-day exec has its own 15:55 execute leg below.
+        if (eodSignalRegister) cron.schedule('55 15 * * 1-5', () => {
             log('EOD into-close fill (3:55pm ET): trade → alpaca → reconcile → report → health');
             dispatchCycle('eod-into-close-fill', ['trade', 'alpaca', 'reconcile', 'report', 'health']);
         }, { timezone: 'America/New_York' });
+
+        // ── Same-day execution (2026-07-29 pivot): signal[t] → submission[t] ──
+        // Spec lineage: 2026-05-27 close-exec design (close[t]-proxy snapshot,
+        // execute into the close) + the 2026-07-29 three-tier ingestion
+        // directive. Requires OPENCLAW_CLOSE_PROXY_SNAPSHOT=1 in .env so
+        // engine.load_prices injects the same-day proxy row (hardened
+        // close_proxy_snapshot: chunk-poison eviction, same-day stamp guard,
+        // coverage floor). The premarket gate/reconcile/sweep above stay
+        // active in this mode — they protect the carried book premarket.
+        if (sameDayExec) {
+            // 15:00 ET — compute: sentiment → signals(proxy) → gates → sized
+            // handoff. NO full collect in the critical path (67-min aux
+            // collection is the 16:15 slot's job; tier-1 acting-set aux
+            // adapters land separately — see acting_ingest_plan).
+            cron.schedule('0 15 * * 1-5', () => {
+                log('same-day compute (3:00pm ET): sentiment → signals → ic_gate → handoff → trade');
+                dispatchCycle('sameday-compute',
+                              ['sentiment', 'signals', 'ic_gate', 'handoff', 'trade']);
+            }, { timezone: 'America/New_York' });
+
+            // 15:55 ET — execute into the close, ONLY on a handoff produced
+            // TODAY (a stale/missing handoff means the 15:00 compute failed —
+            // submitting yesterday's sizing would be exactly the staleness
+            // this pivot removes).
+            cron.schedule('55 15 * * 1-5', () => {
+                const fs = require('fs');
+                const today = new Date().toISOString().slice(0, 10);
+                const handoff = path.join(ROOT, 'output', 'handoffs', `${today}_sized.json`);
+                if (!fs.existsSync(handoff)) {
+                    log(`same-day execute ABORT: no ${today}_sized.json — 15:00 compute did not complete; nothing submitted`);
+                    return;
+                }
+                log('same-day execute (3:55pm ET): alpaca → reconcile → report → shadow → health');
+                dispatchCycle('sameday-execute',
+                              ['alpaca', 'reconcile', 'report', 'pyportfolioopt_shadow', 'health']);
+            }, { timezone: 'America/New_York' });
+
+            // 16:15 ET — official EOD collect (append real close[t] + aux
+            // masters) + option_hedge. Signals are NOT recomputed here; the
+            // 15:00 chain is the sole signal producer in this mode.
+            cron.schedule('15 16 * * 1-5', () => {
+                log('same-day EOD collect (4:15pm ET): collect → option_hedge');
+                dispatchCycle('sameday-eod-collect', ['collect', 'option_hedge']);
+            }, { timezone: 'America/New_York' });
+
+            // 9:35 ET — start-of-day dashboard price refresh (close-exec
+            // heritage; dashboard-only, not a signal input).
+            cron.schedule('35 9 * * 1-5', () => {
+                log('SOD dashboard refresh (9:35am ET)');
+                try { runPython('src/pipeline/run_sod_refresh.py'); }
+                catch (e) { log(`SOD refresh error: ${e.message.slice(0, 200)}`); }
+            }, { timezone: 'America/New_York' });
+        }
     }
     // ── End SP-6 Phase A EOD block ────────────────────────────────────────────
 
