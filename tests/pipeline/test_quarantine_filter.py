@@ -387,3 +387,51 @@ class TestCategoricalFastPath:
         out = self._run(monkeypatch, {('ZZZQ', '2026-01-03')}, categorical=True)
         gen = self._run(monkeypatch, {('ZZZQ', '2026-01-03')}, categorical=False)
         assert out['close'].tolist() == gen['close'].tolist()
+
+
+class TestGenericPathSymbolPrefilter:
+    """2026-07-29: the generic (non-categorical) path was rewritten around a
+    vectorized symbol prefilter after the 18.8M-tuple zip OOM-killed the
+    engine's sentiment+signals steps. Row selection must be byte-identical."""
+
+    def _frame(self):
+        tickers = ['AAPL', 'MSFT', 'ZZZQ'] * 4
+        dates = ['2026-01-02', '2026-01-03', '2026-01-06', '2026-01-07'] * 3
+        return pd.DataFrame({'ticker': tickers, 'date': dates,
+                             'close': [float(i) for i in range(12)]})
+
+    def test_drops_exact_pairs_only(self, monkeypatch):
+        bad = {('AAPL', '2026-01-02'), ('ZZZQ', '2026-01-07'),
+               ('AAPL', '1999-01-01')}
+        monkeypatch.setattr(quarantine_filter, '_cached', lambda mt: bad)
+        out = filter_quarantined(self._frame(), 'prices.parquet')
+        assert len(out) == 10
+        remaining = set(zip(out['ticker'], out['date']))
+        assert ('AAPL', '2026-01-02') not in remaining
+        assert ('ZZZQ', '2026-01-07') not in remaining
+        # Other AAPL/ZZZQ dates survive — prefilter must not over-drop.
+        assert ('AAPL', '2026-01-07') in remaining
+        assert ('ZZZQ', '2026-01-02') in remaining
+
+    def test_no_symbol_overlap_returns_all_rows(self, monkeypatch):
+        bad = {('NOPE', '2026-01-02'), ('MISSING', '2026-01-03')}
+        monkeypatch.setattr(quarantine_filter, '_cached', lambda mt: bad)
+        out = filter_quarantined(self._frame(), 'prices.parquet')
+        assert len(out) == 12
+        assert list(out.index) == list(range(12))
+
+    def test_symbol_overlap_but_no_date_match(self, monkeypatch):
+        bad = {('AAPL', '1999-01-01')}
+        monkeypatch.setattr(quarantine_filter, '_cached', lambda mt: bad)
+        out = filter_quarantined(self._frame(), 'prices.parquet')
+        assert len(out) == 12
+
+    def test_matches_categorical_fast_path(self, monkeypatch):
+        bad = {('AAPL', '2026-01-02'), ('ZZZQ', '2026-01-07')}
+        monkeypatch.setattr(quarantine_filter, '_cached', lambda mt: bad)
+        obj = filter_quarantined(self._frame(), 'prices.parquet')
+        cat_in = self._frame()
+        cat_in['ticker'] = cat_in['ticker'].astype('category')
+        cat_in['date'] = cat_in['date'].astype('category')
+        cat = filter_quarantined(cat_in, 'prices.parquet')
+        assert obj['close'].tolist() == cat['close'].tolist()

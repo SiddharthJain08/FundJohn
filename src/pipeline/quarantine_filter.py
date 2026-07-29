@@ -160,12 +160,28 @@ def filter_quarantined(df: pd.DataFrame, master_table: str) -> pd.DataFrame:
         if keep.all():
             return df
         return df.loc[keep].reset_index(drop=True)
-    # Stringify both sides so the comparison is total.
-    keys = list(
-        zip(df[key_col].astype(str).tolist(), df["date"].astype(str).tolist())
-    )
-    mask = [k not in bad for k in keys]
-    return df.loc[mask].reset_index(drop=True)
+    # Generic path, symbol-prefiltered (2026-07-29): the old implementation
+    # stringified BOTH columns and zipped 18.8M python tuples — a ~3.3GB
+    # transient that OOM-killed the engine's sentiment AND signals steps two
+    # nights running (rc=137 at 4.5GB; _db_adapters/_load_month reads the
+    # prices parquet with plain object dtype, so the categorical fast path
+    # above never engages). Quarantined SYMBOLS are few, so vectorized isin
+    # (C-speed, one 18.8M bool array) shrinks the tuple work to only the
+    # rows of affected tickers. Byte-identical row selection.
+    import numpy as np
+    bad_symbols = {s for s, _ in bad}
+    key_s = df[key_col].astype(str)
+    cand = key_s.isin(bad_symbols).to_numpy()
+    if not cand.any():
+        return df.reset_index(drop=True)
+    keep = np.ones(len(df), dtype=bool)
+    sub_pos = np.flatnonzero(cand)
+    sub_keys = key_s.iloc[sub_pos]
+    sub_dates = df["date"].iloc[sub_pos].astype(str)
+    for pos, s, d in zip(sub_pos, sub_keys, sub_dates):
+        if (s, d) in bad:
+            keep[pos] = False
+    return df.loc[keep].reset_index(drop=True)
 
 
 def invalidate_cache(master_table: str | None = None) -> None:
