@@ -77,6 +77,7 @@ def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None):
     stubbed. The corr-adjusted gate is unconditional; clear all ortho flags so
     the cap reads the same corr S_adj the gate does. Returns the emitted orders."""
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
     for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
                  'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',
                  'OPENCLAW_OPTION_DELTA_HEDGE'):
@@ -180,6 +181,7 @@ class TestLegacyPathUncapped:
         """OPENCLAW_EOD_RECONCILE unset → legacy path byte-identical:
         a single ticker keeps the FULL λ×NAV target (no cap applied)."""
         monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+        monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
         monkeypatch.delenv('OPENCLAW_INTRADAY_REDEPLOY', raising=False)
         for gate in ('OPENCLAW_STRATEGY_FOLD', 'OPENCLAW_STRATEGY_CORR_WEIGHT',
                      'OPENCLAW_STRATEGY_ORTHO_SHADOW', 'OPENCLAW_STRATEGY_BRACKET_STACK',

@@ -54,6 +54,20 @@ SIGNAL_SET_MIN_FRAC = 0.30
 # momentary regime blip). Absent/anything-but-'1' => inert (historical HOLD).
 
 
+
+def _eod_signal_register_lane() -> bool:
+    """True only in the SP-6 EOD signal-register lane (signals computed at
+    16:15[T] targeting T+1, gated premarket, executed into close[T+1]).
+
+    2026-07-29: this used to be spelled `OPENCLAW_EOD_RECONCILE == '1'`, which
+    conflated "the premarket reconcile job is enabled" with "the EOD timing
+    model drives signals". The same-day lane (OPENCLAW_SAMEDAY_EXEC) keeps the
+    premarket reconcile enabled for its protective closes while producing
+    signals through the 15:00 handoff — under the old spelling the sizer would
+    have ignored that handoff and self-loaded an APPROVED carried set the
+    same-day lane never writes, sizing an empty book against live positions.
+    In EOD mode both flags are 1, so behavior there is unchanged."""
+    return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
 def _dust_tickers(target_usd: dict, dust_floor_usd: float = DUST_FLOOR_USD) -> list:
     """Tickers whose absolute target notional is below the hard dust floor.
     Pure (does not mutate its input). The caller drops these WITHOUT
@@ -99,8 +113,8 @@ def size_positions(
     """
     regime_state = regime['state']
 
-    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
-        # SP-6 Phase A — EOD reconcile mode. The APPROVED carried set was
+    if _eod_signal_register_lane():
+        # SP-6 Phase A — EOD signal-register lane. The APPROVED carried set was
         # already gated at the 4PM[T] EOD compute and the 9:15 pre-market
         # carry-forward gate; re-applying cadence here would wrongly skip
         # signals that are pre-approved for T+1 execution. Signal loading
@@ -1186,7 +1200,7 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
     Reuses the SAME order-emission tail the normal path uses (_emit_orders_from_targets
     with target_usd={}), so orphan_close order dicts are field-identical to the normal
     orphan path — no hand-rolled dicts. opt_active is passed empty."""
-    if not (os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+    if not (_eod_signal_register_lane()
             and os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1'
             and os.environ.get('OPENCLAW_FLATTEN_ON_ZERO_CONVICTION') == '1'
             and len(active) >= SIGNAL_SET_MIN_FLOOR):

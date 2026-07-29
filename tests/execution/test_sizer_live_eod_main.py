@@ -90,6 +90,9 @@ def test_eod_mode_no_handoff_reaches_size_positions(driver_env, monkeypatch):
     with regime resolved from the market_regime DB fallback, and must NOT
     depend on read_handoff."""
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    # The EOD LANE is keyed on the signal-register flag (2026-07-29); production
+    # EOD mode sets both. Same-day mode keeps RECONCILE=1 with REGISTER=0.
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
     captured = {}
 
     def capturing_size_positions(**kwargs):
@@ -110,6 +113,7 @@ def test_eod_mode_no_handoff_reaches_size_positions(driver_env, monkeypatch):
 def test_gate_off_no_handoff_returns_1(driver_env, monkeypatch):
     """Gate OFF + no handoff: verbatim legacy — return 1, never size."""
     monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+    monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
     called = {'n': 0}
 
     def must_not_size(**kwargs):
@@ -129,6 +133,9 @@ def test_eod_mode_payload_carries_resolved_regime(driver_env, monkeypatch):
     """EOD mode: the synthetic handoff starts regime={}, but the persisted
     payload must carry the resolved regime so the trade report isn't '?'."""
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    # The EOD LANE is keyed on the signal-register flag (2026-07-29); production
+    # EOD mode sets both. Same-day mode keeps RECONCILE=1 with REGISTER=0.
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
 
     one_order = {
         'ticker': 'AAPL', 'strategy_id': 'S_a', 'direction': 'long',
@@ -152,3 +159,37 @@ def test_eod_mode_payload_carries_resolved_regime(driver_env, monkeypatch):
     assert rc == 0
     assert captured['payload']['regime'] == {'state': 'LOW_VOL'}, \
         'persisted payload must carry the resolved regime, not the synthetic {}'
+
+
+# ── same-day lane (2026-07-29 pivot) ─────────────────────────────────────────
+
+def test_sameday_mode_uses_handoff_not_carried_set(driver_env, monkeypatch):
+    """Same-day mode keeps OPENCLAW_EOD_RECONCILE=1 (the premarket reconcile
+    still runs for protective closes) but must take the HANDOFF path.
+
+    Regression: the lane used to be keyed on OPENCLAW_EOD_RECONCILE, so the
+    same-day chain would ignore its freshly-built 15:00 handoff and self-load
+    an APPROVED carried set that same-day mode never writes — sizing an empty
+    set against a live book."""
+    monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_SAMEDAY_EXEC', '1')
+    monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
+
+    handoff = {'cycle_date': '2026-06-03', 'regime': {'state': 'LOW_VOL'},
+               'signals': [{'ticker': 'AAA', 'direction': 'LONG', 'strategy_id': 's1',
+                            'entry': 10.0, 'stop': 9.0, 't1': 11.0}]}
+    rh = mock.Mock(return_value=handoff)
+    monkeypatch.setattr(drv, 'read_handoff', rh)
+
+    captured = {}
+
+    def capturing_size_positions(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(drv, 'size_positions', capturing_size_positions)
+    drv.main()
+
+    rh.assert_called()                       # handoff WAS consulted
+    assert len(captured.get('signals') or []) == 1, \
+        'same-day mode must pass the handoff signals to the sizer'

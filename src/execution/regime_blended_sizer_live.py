@@ -465,7 +465,12 @@ def main():
         print('[regime_blended_sizer_live] POSTGRES_URI not set; aborting', file=sys.stderr)
         return 2
 
-    eod_mode = os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+    # EOD signal-register lane, NOT "the reconcile job is enabled" (2026-07-29):
+    # the same-day lane keeps the premarket reconcile on for protective closes
+    # while producing signals via the 15:00 structured handoff. Keying off
+    # OPENCLAW_EOD_RECONCILE here would send the same-day chain down the
+    # self-load branch and size an EMPTY carried set against a live book.
+    eod_mode = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
     if eod_mode:
         # SP-6 Phase A — EOD reconcile mode. eod-signal-register persists the
         # carried set to execution_signals (APPROVED, target_date=T+1); it does

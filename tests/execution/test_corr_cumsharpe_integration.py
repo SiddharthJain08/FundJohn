@@ -46,6 +46,7 @@ def _params(min_corr_cum_sharpe):
 
 def _run(monkeypatch, weights_rows, carried_rows, sim, min_corr_cum_sharpe):
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')  # EOD lane key (2026-07-29)
     # These tests verify the LEGACY fixed-proportional S_adj wiring + cap math;
     # the tangency default (2026-07-27) has its own tests (test_tangency_sadj).
     monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
@@ -136,6 +137,7 @@ def test_matrix_load_failure_degrades_to_sparse_default(monkeypatch, caplog):
     mitigated by the separate asset-corr cap (different correlation source)."""
     import logging
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')  # EOD lane key (2026-07-29)
     # These tests verify the LEGACY fixed-proportional S_adj wiring + cap math;
     # the tangency default (2026-07-27) has its own tests (test_tangency_sadj).
     monkeypatch.setenv('OPENCLAW_TANGENCY_SADJ', '0')
