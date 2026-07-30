@@ -251,6 +251,29 @@ def _write_gate_ran_sentinel(cur, target_date) -> None:
     )
 
 
+def _post_premarket_alert(vetoed: list, target_date) -> None:
+    """Announce held-position vetoes to #pre-market-alerts. Never fatal — the
+    veto is already durable in signal_gate_verdicts before this runs."""
+    helper = ROOT / 'src' / 'agent' / 'curators' / '_discord_webhook.js'
+    if not helper.exists():
+        return
+    lines = '\n'.join(f'• **{t}** — panic {p:.0f}, severity {s}' for t, p, s in vetoed)
+    text = (f'🛑 **Pre-market veto ({target_date})** — {len(vetoed)} held '
+            f'position(s) flagged on news; the 9:25 reconcile will close them '
+            f'at the open and the sizer will not re-open them today.\n{lines}')
+    import subprocess
+    js = ("const { postToChannel } = require(%r);"
+          "let c=[];process.stdin.on('data',d=>c.push(d));"
+          "process.stdin.on('end',async()=>{"
+          "await postToChannel('botjohn','pre-market-alerts',"
+          "Buffer.concat(c).toString('utf8'));});") % str(helper)
+    try:
+        subprocess.run(['node', '-e', js], input=text.encode('utf-8'),
+                       capture_output=True, timeout=30, env={**os.environ})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('premarket veto alert failed to post: %s', exc)
+
+
 def run_gate(conn=None, broker_loader=None) -> dict:
     """Main entry point.
 
@@ -311,6 +334,7 @@ def run_gate(conn=None, broker_loader=None) -> dict:
         errors: list[str] = []
         n_approved = 0
         n_rejected = 0
+        vetoed_holds: list[tuple] = []
 
         if signals:
             tickers = list({s['ticker'] for s in signals})
@@ -476,6 +500,7 @@ def run_gate(conn=None, broker_loader=None) -> dict:
                     signal_id or '-', ticker, verdict, ps,
                 )
                 if is_hold and verdict == 'REJECTED':
+                    vetoed_holds.append((ticker, ps, severity))
                     logger.warning(
                         'PREMARKET VETO: %s (panic=%.1f, severity=%s) — the 9:25 '
                         'reconcile will close this position at the open',
@@ -483,6 +508,19 @@ def run_gate(conn=None, broker_loader=None) -> dict:
 
         # ── Gate-ran sentinel (ALWAYS written on successful run) ──────────────
         _write_gate_ran_sentinel(cur, target_date)
+
+        if vetoed_holds:
+            # A veto closes a real position 10 minutes later; the operator runs
+            # this book from Discord and should not learn it from a log file.
+            # Isolated: the verdict rows are already written, and an alerting
+            # failure reaching the outer handler would roll the whole gate back
+            # and report gate_ran=False — a Discord outage must not be able to
+            # un-veto a position.
+            try:
+                _post_premarket_alert(vetoed_holds, target_date)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning('premarket veto alert failed: %s', exc)
+                errors.append(f'veto_alert_error: {str(exc)[:120]}')
 
         # Commit only when we own the connection (production path).
         # Injected connections (tests) are managed by the caller.

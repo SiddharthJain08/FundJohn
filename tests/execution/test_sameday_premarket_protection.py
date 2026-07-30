@@ -142,7 +142,13 @@ class TestHeldSubjects:
 
 
 class TestGateScoresTheBook:
-    def _run(self, monkeypatch, *, panic, book, confirmer_verdict='bearish_news_driven'):
+    def _run(self, monkeypatch, *, panic, book, confirmer_verdict='bearish_news_driven',
+             alert=None):
+        # NEVER let a test reach the real webhook. Harmless without
+        # POSTGRES_URI (the lookup cannot connect), but pytest is routinely run
+        # with it exported on this box — which would post a fabricated veto to
+        # the operator's #pre-market-alerts.
+        monkeypatch.setattr(pg, '_post_premarket_alert', alert or (lambda v, d: None))
         monkeypatch.setattr(pg, 'score_news_for_tickers',
                             lambda tickers, since: [
                                 {'ticker': t, 'news_count_24h': 5, 'news_finbert_neg': 4,
@@ -299,3 +305,34 @@ class TestSizerReentryBlock:
                     'entry_min_price_usd': 0, 'entry_participation_frac': 1.0},
             premarket_vetoes={'AAPL'})
         assert out == {'MSFT': 10_000.0}
+
+
+class TestVetoAlert:
+    def test_veto_is_announced(self, sameday, monkeypatch):
+        posted = {}
+        t = TestGateScoresTheBook()
+        t._run(monkeypatch, panic=90.0, book={'AAPL': 5000.0},
+               alert=lambda v, d: posted.update({'vetoed': v, 'date': d}))
+        assert [x[0] for x in posted['vetoed']] == ['AAPL']
+
+    def test_no_veto_no_alert(self, sameday, monkeypatch):
+        posted = []
+        t = TestGateScoresTheBook()
+        t._run(monkeypatch, panic=1.0, book={'AAPL': 5000.0},
+               alert=lambda v, d: posted.append(v))
+        assert posted == []
+
+    def test_alert_failure_cannot_un_veto_a_position(self, sameday, monkeypatch):
+        """The verdict rows are durable before the alert runs. If an alerting
+        error reached the outer handler it would roll the whole gate back and
+        report gate_ran=False — a Discord outage must never be able to
+        resurrect a position the gate decided to close."""
+        def boom(v, d):
+            raise RuntimeError('discord down')
+        t = TestGateScoresTheBook()
+        out, cur = t._run(monkeypatch, panic=90.0, book={'AAPL': 5000.0}, alert=boom)
+        assert out['gate_ran'] is True
+        assert out['n_rejected'] == 1
+        assert any('veto_alert_error' in e for e in out['errors'])
+        assert [p for p in cur.wrote('INSERT INTO signal_gate_verdicts')
+                if p[1] == pg.GATE_TYPE_HOLD][0][4] == 'REJECTED'
