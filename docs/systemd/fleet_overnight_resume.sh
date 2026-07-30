@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Nightly (Mon-Fri post-close) DURABLE fleet re-backtest continuation, until the
+# canonical reaches UNIFORM. Installed as openclaw-fleet-overnight-resume.{service,
+# timer}; box is Etc/UTC so all times below are UTC.
+#
+# Bounding: the hard wall-clock stop is the SERVICE's RuntimeMaxSec (systemd
+# cgroup-wide SIGTERM->SIGKILL — kills the in-flight python child too, which a bare
+# `timeout` can orphan). --deadline just stops NEW spawns near the wall.
+# --per-timeout 14400 (240m) gives the slow-sim strategies their full shot (this is
+# the overnight window they were deferred to).
+#
+# COMPUTE ONLY: writes canonical; NO weights rebuild, NO activation, NO Oxford.
+# The masked actuators + OPENCLAW_ACTIVATION_ASSIGNER/AUTO_DEMOTE=0 stay as-is —
+# reaching CANONICAL UNIFORM does NOT auto-actuate; the OWED post-fleet sequence is
+# operator-gated. On reaching 0 outstanding this self-disables its own timer.
+set -u
+cd /root/openclaw || exit 1
+LOG=/root/openclaw/logs/fleet_overnight_resume.log
+
+# Guard: never run two drivers at once. Matching on `pgrep -x node` (process NAME
+# is exactly node) then grepping the cmdline is load-bearing: a bare `pgrep -f`
+# also matches any SHELL whose command line merely CONTAINS the driver's filename
+# — e.g. an operator/agent session running `pgrep -f refresh_backtests_resumable.js`
+# to check on it. That self-match makes the nightly run skip SILENTLY (observed
+# 2026-07-30 06:45Z). A shell is never named `node`, so this form cannot self-match.
+if pgrep -a -x node 2>/dev/null | grep -q 'refresh_backtests_resumable\.js'; then
+  echo "[overnight $(date -u +%FT%TZ)] a fleet driver is already running — skipping this trigger" >> "$LOG"
+  exit 0
+fi
+
+# No-new-spawn deadline = 06:15 UTC (before the ~07:30 premarket scan). Fires tonight
+# after 21:30 start, so 'today 06:15' is in the past -> roll to tomorrow.
+DL=$(date -u -d 'today 06:15' +%s); NOW=$(date -u +%s)
+(( DL <= NOW )) && DL=$(date -u -d 'tomorrow 06:15' +%s)
+DL_STR=$(date -u -d "@${DL}" +%Y-%m-%dT%H:%M)
+
+echo "[overnight $(date -u +%FT%TZ)] start (pid $$); --deadline ${DL_STR}Z --per-timeout 14400" >> "$LOG"
+node scripts/refresh_backtests_resumable.js --resume \
+  --deadline "${DL_STR}" --per-timeout 14400 --mem-floor 4500 --mem-wait 3600 >> "$LOG" 2>&1
+rc=$?
+
+OUT=$(grep -oE '[0-9]+ strategies still outstanding' "$LOG" | tail -1 | grep -oE '^[0-9]+')
+echo "[overnight $(date -u +%FT%TZ)] exit rc=$rc; outstanding=${OUT:-unknown}" >> "$LOG"
+if [[ "$OUT" == "0" ]]; then
+  echo "[overnight $(date -u +%FT%TZ)] CANONICAL UNIFORM — self-disabling nightly timer." >> "$LOG"
+  systemctl disable --now openclaw-fleet-overnight-resume.timer >> "$LOG" 2>&1
+  # Honest-cost epoch (operator directive 2026-07-27): universe selection is
+  # PART of the re-gate — the cost model changed, so every strategy's tier
+  # choice must be re-derived from the fresh honest-cost trades. Shrink the
+  # full-universe primary runs down the tier ladder, prefer-largest select,
+  # ADOPT change verdicts, and re-derive per-regime eligibility from the
+  # chosen tier's sleeves (--reassign). Runs once, niced, post-uniform.
+  echo "[overnight $(date -u +%FT%TZ)] UNIFORM -> universe selection: run_universe_shrink --adopt --reassign" >> "$LOG"
+  nice -n 19 python3 scripts/run_universe_shrink.py --adopt --reassign >> "$LOG" 2>&1
+  src=$?
+  echo "[overnight $(date -u +%FT%TZ)] universe selection rc=$src. OWED actuation (weights rebuild -> floor recheck -> activation; then re-enable openclaw-weekly-strategy-weights.timer + OPENCLAW_ACTIVATION_ASSIGNER/AUTO_DEMOTE=1 in .env) is OPERATOR-GATED." >> "$LOG"
+fi
