@@ -266,6 +266,49 @@ def _reconcile_enabled() -> bool:
     return os.environ.get(ENV_RECONCILE_GATE) == '1'
 
 
+def _load_premarket_vetoes(cur, today: date) -> set:
+    """Tickers this morning's premarket gate vetoed while we HOLD them.
+
+    Source: signal_gate_verdicts WHERE gate_type='premarket_hold' AND
+    verdict='REJECTED' AND target_date=today — written by
+    premarket_gate.run_gate in same-day protect mode against the broker book.
+    Normalized to broker-symbol convention so it keys against the book."""
+    cur.execute(
+        """
+        SELECT DISTINCT ticker
+        FROM signal_gate_verdicts
+        WHERE gate_type = 'premarket_hold'
+          AND verdict = 'REJECTED'
+          AND target_date = %s
+          AND ticker IS NOT NULL
+        """,
+        (today,),
+    )
+    return {_normalize_broker_symbol(_norm_row_get(r, 'ticker', 0))
+            for r in cur.fetchall()}
+
+
+def _sameday_protect_mode() -> bool:
+    """Mirror of premarket_gate.sameday_protect_mode — same env pair, so the
+    gate's subject set and the reconcile's target set can never disagree about
+    which model is in force."""
+    return (os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1'
+            and os.environ.get('OPENCLAW_SAMEDAY_PREMARKET_PROTECT', '1') != '0')
+
+
+def _hold_target_set(broker: dict, vetoed: set) -> dict[str, float]:
+    """Same-day target: HOLD everything except what the gate vetoed.
+
+    In same-day mode there is no carried APPROVED register to diff against —
+    signals are filled the day they are computed. The thing we carry overnight
+    is the book itself, so the book IS the target, minus this morning's vetoes.
+    Sign-only, exactly like _load_approved_set, so _classify_position_deltas
+    emits orphan_close for the vetoed names and NOTHING for the rest (no flips:
+    the signs are taken from the book they are compared against)."""
+    return {tkr: (-1.0 if usd < 0 else 1.0)
+            for tkr, usd in broker.items() if tkr not in vetoed}
+
+
 def _normalize_broker_symbol(t: str) -> str:
     """Map a broker symbol to the engine BASE-USD (dash) convention.
 
@@ -630,10 +673,7 @@ def run_reconcile(
         cur = conn.cursor()
         today = run_date or datetime.now(timezone.utc).date()
 
-        # 2. Sign-only APPROVED targets (NO NAV / sizing).
-        target = _load_approved_set(cur, today)
-
-        # 3. Broker book (re-fetched immediately before any close), keys normalized.
+        # 2. Broker book (re-fetched immediately before any close), keys normalized.
         from execution.regime_blended_sizer import _classify_position_deltas
         if broker_loader is None:
             from execution.regime_blended_sizer import _load_broker_positions_usd
@@ -649,10 +689,27 @@ def run_reconcile(
                 continue
             broker[_normalize_broker_symbol(tkr)] = f
 
+        # 3. Sign-only targets (NO NAV / sizing).
+        sameday = _sameday_protect_mode()
+        vetoed: set = set()
+        if sameday:
+            # Same-day execution has no carried APPROVED register at 09:25 —
+            # signals are computed AND filled on day T, so _load_approved_set
+            # is empty every morning and the whole diff was inert (2026-07-29).
+            # Target = the book we carry, minus this morning's news vetoes.
+            vetoed = _load_premarket_vetoes(cur, today)
+            target = _hold_target_set(broker, vetoed)
+        else:
+            target = _load_approved_set(cur, today)
+
         logger.info(
-            'run_reconcile: today=%s approved=%d broker=%d dry_run=%s',
-            today, len(target), len(broker), dry_run,
+            'run_reconcile: today=%s mode=%s target=%d broker=%d vetoed=%d dry_run=%s',
+            today, 'sameday-hold' if sameday else 'approved-register',
+            len(target), len(broker), len(vetoed), dry_run,
         )
+        if sameday and vetoed:
+            logger.warning('run_reconcile: premarket vetoes to close at the open: %s',
+                           ','.join(sorted(vetoed)))
 
         # 4. Classify (Task 4). Sign-only targets — magnitude carries direction only.
         emissions = _classify_position_deltas(target, broker, ticker_meta={})
@@ -665,7 +722,41 @@ def run_reconcile(
         # single order.
         is_flatten = (not target) and bool(broker)
 
-        if is_flatten:
+        if is_flatten and sameday:
+            # DIFFERENT FAILURE GEOMETRY, so a different guard.
+            #
+            # In the approved-register model an empty target is ambiguous: it
+            # means either "every strategy went flat" or "the gate crashed and
+            # wrote nothing". Health-green + gate-ran separates them.
+            #
+            # Here the target is derived FROM THE BOOK, so a crashed gate
+            # produces zero vetoes ⇒ target == book ⇒ no closes at all. The
+            # only path to an empty target is the gate explicitly vetoing
+            # every held name. That is the guard: the gate ran, and it rejected
+            # all of them. `_eod_health_green(today)` is deliberately NOT
+            # required — in this mode the sentinel for day T is written by the
+            # 15:00 compute, hours AFTER this 09:25 job, so requiring it would
+            # refuse every flatten unconditionally and silently disarm the
+            # protection exactly when it is market-wide.
+            gate_ok = gate_ran if gate_ran is not None else _gate_ran_today(cur, today)
+            all_vetoed = len(vetoed) >= len(broker)
+            if not (gate_ok and all_vetoed):
+                logger.error(
+                    'run_reconcile: REFUSING FLATTEN of %d positions — '
+                    'gate_ran=%s all_vetoed=%s (vetoed=%d of %d, today=%s). '
+                    'An empty same-day target that the gate did not explicitly '
+                    'produce is a pipeline failure, not a flat day.',
+                    len(broker), gate_ok, all_vetoed, len(vetoed), len(broker), today,
+                )
+                counts['holds'] = len(broker)
+                _maybe_commit(conn, own_conn)
+                return counts
+            logger.warning(
+                'run_reconcile: FLATTEN authorized — the premarket gate vetoed '
+                'ALL %d held positions; closing the book at the open (today=%s)',
+                len(broker), today,
+            )
+        elif is_flatten:
             health_ok = _eod_health_green(cur, today)
             gate_ok = gate_ran if gate_ran is not None else _gate_ran_today(cur, today)
             if not (health_ok and gate_ok):

@@ -1884,21 +1884,59 @@ def _load_liquidity_stats():
         return None
 
 
-def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None):
-    """Apply cooldown + liquidity floor + participation cap to targets.
-    Only-shed semantics per blocked ticker: not held → target dropped; flip →
-    close-only; same-sign increase → capped at held size. The participation cap
-    reduces target magnitude to max(cap, |held|). Inputs injectable for tests."""
+def _load_premarket_vetoes():
+    """Tickers this morning's pre-market news gate vetoed (same-day protect
+    mode). Fail-open (empty) on any error — the veto tightens entries, and a
+    lookup failure must not be able to widen them either way."""
+    try:
+        import psycopg2
+        from datetime import datetime as _dt, timezone as _tz
+        # Bind the UTC date explicitly rather than CURRENT_DATE: the gate stamps
+        # target_date from datetime.now(utc), and CURRENT_DATE follows the DB
+        # session TimeZone. They agree today (both UTC) — a silent drift would
+        # disable the re-entry block with no error anywhere.
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ticker
+                FROM signal_gate_verdicts
+                WHERE gate_type = 'premarket_hold'
+                  AND verdict = 'REJECTED'
+                  AND target_date = %s
+                  AND ticker IS NOT NULL
+            """, (_dt.now(_tz.utc).date(),))
+            return {r[0] for r in cur.fetchall()}
+    except Exception as e:  # noqa: BLE001
+        logger.warning('entry_hygiene: premarket-veto lookup failed (%s) — '
+                       'same-day re-entry NOT blocked', e)
+        return set()
+
+
+def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None,
+                              premarket_vetoes=None):
+    """Apply premarket veto + cooldown + liquidity floor + participation cap to
+    targets. Only-shed semantics per blocked ticker: not held → target dropped;
+    flip → close-only; same-sign increase → capped at held size. The
+    participation cap reduces target magnitude to max(cap, |held|). Inputs
+    injectable for tests.
+
+    The premarket veto is what makes pre-market protection actually protective.
+    Without it the 09:25 reconcile closes a news-vetoed position at the open and
+    the SAME DAY's 15:00 chain re-opens it six hours later — the pattern
+    observed on SNDK 2026-07-29, where a risk close was re-bought within hours.
+    Direction-agnostic on purpose, unlike the stop-out cooldown: the veto says
+    "this name is dangerous today", not "this side of it lost"."""
     if os.environ.get('OPENCLAW_ENTRY_HYGIENE', '1') == '0' or not target_usd:
         return target_usd
     params = params or _load_entry_hygiene_params()
     if stopouts is None:
         stopouts = _load_recent_stopouts(params['stopout_cooldown_days'])
+    if premarket_vetoes is None:
+        premarket_vetoes = _load_premarket_vetoes()
     if liq is None:
         liq = _load_liquidity_stats()
     adv, px = liq if liq else ({}, {})
     out = dict(target_usd)
-    cooled, illiquid, part_capped = [], [], []
+    cooled, illiquid, part_capped, vetoed = [], [], [], []
 
     def _shed(tkr):
         target, current = out[tkr], broker.get(tkr, 0.0)
@@ -1913,6 +1951,10 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         if tkr not in out:
             continue
         target = out[tkr]
+        if tkr in premarket_vetoes and target != 0.0:
+            _shed(tkr)
+            vetoed.append(tkr)
+            continue
         stop_dir = stopouts.get(tkr)
         if stop_dir and (target > 0) == (stop_dir > 0) and target != 0.0:
             _shed(tkr)
@@ -1931,11 +1973,12 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
             if abs(target) > limit + 0.01:
                 out[tkr] = (1.0 if target > 0 else -1.0) * limit
                 part_capped.append(tkr)
-    if cooled or illiquid or part_capped:
+    if cooled or illiquid or part_capped or vetoed:
         logger.warning(
-            'regime_blended_sizer.entry_hygiene: stop-out cooldown blocked=%s, '
-            'liquidity floor blocked=%s, participation-capped=%s',
-            sorted(cooled), sorted(illiquid), sorted(part_capped))
+            'regime_blended_sizer.entry_hygiene: premarket-veto blocked=%s, '
+            'stop-out cooldown blocked=%s, liquidity floor blocked=%s, '
+            'participation-capped=%s',
+            sorted(vetoed), sorted(cooled), sorted(illiquid), sorted(part_capped))
     return out
 
 

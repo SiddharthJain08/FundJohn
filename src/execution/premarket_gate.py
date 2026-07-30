@@ -43,6 +43,8 @@ from sentiment.sonnet_premarket_confirmer import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 ENV_GATE = 'OPENCLAW_EOD_PREMARKET_GATE'
+ENV_SAMEDAY = 'OPENCLAW_SAMEDAY_EXEC'
+ENV_SAMEDAY_PROTECT = 'OPENCLAW_SAMEDAY_PREMARKET_PROTECT'
 
 # panic_score threshold — mirrors the scanner's env default (35).
 # Read at run_gate() call-time from OPENCLAW_PREMARKET_ADVISORY_THRESHOLD so
@@ -57,6 +59,71 @@ def _advisory_threshold() -> float:
 # Gate type identifiers
 GATE_TYPE_SIGNAL = 'news_sentiment'
 GATE_TYPE_SENTINEL = '__gate_ran__'
+# Same-day mode: the subject is a HELD POSITION, not a carried signal. Kept
+# distinct so the audit trail never conflates "we vetoed tomorrow's intent"
+# with "we vetoed a position we already own".
+GATE_TYPE_HOLD = 'premarket_hold'
+
+
+def sameday_protect_mode() -> bool:
+    """True when the gate must protect the CURRENT BOOK rather than a carried
+    signal register.
+
+    Under same-day execution signals are COMPUTED at 15:00[T] and FILLED by
+    15:55[T], so by 09:15[T+1] there is never a COMPUTED row with
+    target_date=T+1 — the gate's subject set is ALWAYS empty and the operator's
+    pre-market protective close silently does nothing (verified live
+    2026-07-29: `REFUSING FLATTEN of 6 positions … holds=6`). The positions we
+    actually carry overnight are yesterday's FILLED intent, i.e. the broker
+    book, so that is what the gate scores in this mode.
+
+    Escape hatch: OPENCLAW_SAMEDAY_PREMARKET_PROTECT=0 reverts to the
+    signal-register subject set without a code change."""
+    return (os.environ.get(ENV_SAMEDAY) == '1'
+            and os.environ.get(ENV_SAMEDAY_PROTECT, '1') != '0')
+
+
+def _load_held_subjects(broker_loader=None) -> list[dict]:
+    """The overnight book as gate subjects: one pseudo-signal per held equity.
+
+    `id` is None — these are POSITIONS, not signal rows, so the gate must not
+    touch execution_signals.lifecycle_state for them (that column tracks the
+    signal that opened the position and is already FILLED). The veto is
+    recorded in signal_gate_verdicts and consumed by open_reconcile.
+
+    Option/OCC legs are excluded: news-panic scoring on a contract symbol is
+    meaningless, and the option lane owns its own closes."""
+    if broker_loader is None:
+        from execution.regime_blended_sizer import _load_broker_positions_usd
+        broker_loader = _load_broker_positions_usd
+    from execution.regime_blended_sizer import _is_occ_symbol
+    try:
+        book = broker_loader() or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error('premarket_gate: broker book unavailable (%s) — no held '
+                     'subjects; the book is left UNPROTECTED this morning', exc)
+        return []
+    subjects: list[dict] = []
+    for tkr, usd in sorted(book.items()):
+        try:
+            f = float(usd)
+        except (TypeError, ValueError):
+            continue
+        if f == 0.0 or _is_occ_symbol(tkr) or '/' in tkr:
+            continue
+        subjects.append({
+            'id': None,
+            'strategy_id': None,
+            'ticker': tkr,
+            'direction': 'SHORT' if f < 0 else 'LONG',
+            'position_size_pct': abs(f),
+            'signal_date': None,
+            'target_1': None,
+            'stop_loss': None,
+            'target_date': None,
+            'computed_at': None,
+        })
+    return subjects
 
 
 def is_enabled() -> bool:
@@ -184,7 +251,7 @@ def _write_gate_ran_sentinel(cur, target_date) -> None:
     )
 
 
-def run_gate(conn=None) -> dict:
+def run_gate(conn=None, broker_loader=None) -> dict:
     """Main entry point.
 
     Loads COMPUTED signals for today, scores news sentiment, applies verdict
@@ -228,6 +295,18 @@ def run_gate(conn=None) -> dict:
         logger.info(
             'Loaded %d COMPUTED signals for target_date=%s', len(signals), target_date
         )
+        if sameday_protect_mode():
+            # Union, not replacement: a COMPUTED-for-today row at 09:15 is an
+            # anomaly in this mode (the 15:00 chain fills same-day), but if one
+            # exists it still deserves a verdict.
+            covered = {s['ticker'] for s in signals}
+            held = [s for s in _load_held_subjects(broker_loader)
+                    if s['ticker'] not in covered]
+            signals = signals + held
+            logger.info(
+                'same-day protect mode: +%d held position(s) as gate subjects '
+                '(the signal register is empty every morning in this mode)',
+                len(held))
 
         errors: list[str] = []
         n_approved = 0
@@ -335,6 +414,9 @@ def run_gate(conn=None) -> dict:
                     'finbert_neg_ratio': float(finbert_neg_ratio),
                     'threshold': advisory_threshold,
                 }
+                # A held position (signal_id None) is audited under its own gate
+                # type; a carried signal keeps the original one.
+                is_hold = signal_id is None
                 try:
                     _write_gate_verdict(
                         cur,
@@ -348,6 +430,7 @@ def run_gate(conn=None) -> dict:
                         model_label,
                         gate_meta,
                         'premarket_gate',
+                        gate_type=GATE_TYPE_HOLD if is_hold else GATE_TYPE_SIGNAL,
                     )
                 except Exception as exc:
                     logger.error(
@@ -357,23 +440,30 @@ def run_gate(conn=None) -> dict:
                     continue  # skip lifecycle update on DB error
 
                 # ── Update signal lifecycle ───────────────────────────────────
-                gate_verdict_obj = {
-                    'verdict': verdict,
-                    'panic_score': float(ps),
-                    'news_count': news_count,
-                    'severity': severity,
-                    'model': model_label,
-                }
-                try:
-                    _update_signal_lifecycle(
-                        cur, signal_id, verdict, approved_at, gate_verdict_obj
-                    )
-                except Exception as exc:
-                    logger.error(
-                        'update_signal_lifecycle failed for signal %s: %s', signal_id, exc
-                    )
-                    errors.append(f'update_lifecycle_error_{ticker}: {str(exc)[:120]}')
-                    continue
+                # HELD POSITIONS ARE NOT TRANSITIONED. The row that opened the
+                # position is already FILLED; rewriting it to REJECTED would
+                # corrupt the execution ledger and the P&L that hangs off it.
+                # The veto reaches the broker through open_reconcile reading
+                # this morning's premarket_hold verdicts.
+                if not is_hold:
+                    gate_verdict_obj = {
+                        'verdict': verdict,
+                        'panic_score': float(ps),
+                        'news_count': news_count,
+                        'severity': severity,
+                        'model': model_label,
+                    }
+                    try:
+                        _update_signal_lifecycle(
+                            cur, signal_id, verdict, approved_at, gate_verdict_obj
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            'update_signal_lifecycle failed for signal %s: %s',
+                            signal_id, exc
+                        )
+                        errors.append(f'update_lifecycle_error_{ticker}: {str(exc)[:120]}')
+                        continue
 
                 if verdict == 'APPROVED':
                     n_approved += 1
@@ -381,9 +471,15 @@ def run_gate(conn=None) -> dict:
                     n_rejected += 1
 
                 logger.info(
-                    'signal %s ticker=%s verdict=%s panic=%.1f',
-                    signal_id, ticker, verdict, ps,
+                    '%s %s ticker=%s verdict=%s panic=%.1f',
+                    'held-position' if is_hold else 'signal',
+                    signal_id or '-', ticker, verdict, ps,
                 )
+                if is_hold and verdict == 'REJECTED':
+                    logger.warning(
+                        'PREMARKET VETO: %s (panic=%.1f, severity=%s) — the 9:25 '
+                        'reconcile will close this position at the open',
+                        ticker, ps, severity)
 
         # ── Gate-ran sentinel (ALWAYS written on successful run) ──────────────
         _write_gate_ran_sentinel(cur, target_date)
