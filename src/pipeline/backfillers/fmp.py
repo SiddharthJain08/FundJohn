@@ -92,6 +92,91 @@ def _quarters_for(from_date: date, to_date: date) -> int:
     return min(q, FMP_QUARTER_CAP)
 
 
+def build_financial_rows(ticker, statements, metrics, ratios, balance) -> list:
+    """Statements+metrics+ratios+balance -> master financials.parquet rows.
+
+    Extracted 2026-07-30 so the 14:30 tier-1 intraday adapter and this EOD
+    backfiller build rows from ONE definition. A second copy would drift, and
+    the drift would surface as strategies scoring a same-day reporter on
+    subtly different fields than every other name in the cross-section.
+    """
+    out = []
+    metrics_by_period = {m.get('date') or m.get('calendarYear'): m for m in (metrics or [])}
+    ratios_by_period  = {r.get('date') or r.get('calendarYear'): r for r in (ratios  or [])}
+    balance_by_period = {b.get('date') or b.get('calendarYear'): b for b in (balance or [])}
+
+    for s in statements or []:
+        period = s.get('period') or s.get('calendarYear')
+        d      = s.get('date')
+        if not d:
+            continue
+        m = metrics_by_period.get(d, {}) or {}
+        r = ratios_by_period.get(d, {}) or {}
+        b = balance_by_period.get(d, {}) or {}
+
+        def _first(*vals):
+            """First non-None value — unlike `or`-chains, a real 0.0 wins."""
+            return next((v for v in vals if v is not None), None)
+
+        rev   = _f(s.get('revenue'))
+        gp    = _f(s.get('grossProfit'))
+        ebit  = _f(s.get('ebitda') or s.get('operatingIncome'))
+        ni    = _f(s.get('netIncome'))
+        eps   = _f(s.get('eps'))
+        gm    = (gp / rev) if rev and gp and rev > 0 else None
+        om    = _f(s.get('operatingIncomeRatio')) or _f(r.get('operatingProfitMargin'))
+        nm    = _f(s.get('netIncomeRatio'))       or _f(r.get('netProfitMargin'))
+
+        out.append({
+            'ticker':              ticker,
+            'period':              period,
+            'date':                d,
+            'revenue':             rev,
+            'gross_profit':        gp,
+            'ebitda':              ebit,
+            'net_income':          ni,
+            'eps':                 eps,
+            'gross_margin':        gm,
+            'operating_margin':    om,
+            'net_margin':          nm,
+            # /stable/ field names FIRST, legacy v3 names as fallbacks.
+            # The v3-only reads returned None for every row since the
+            # stable migration — roe/roic/debt_equity/p_fcf were 0%
+            # populated across 4,159 rows (found 2026-07-03; S10 +
+            # S_bankruptcy were unable to signal anywhere).
+            'revenue_growth':      _first(_f(r.get('revenueGrowth')), _f(m.get('revenueGrowthTTM'))),
+            'ev_revenue':          _first(_f(m.get('evToSales')),
+                                          _f(m.get('enterpriseValueOverRevenue')),
+                                          _f(m.get('enterpriseValueOverRevenueTTM'))),
+            'ev_ebitda':           _first(_f(m.get('evToEBITDA')),
+                                          _f(r.get('enterpriseValueMultiple')),
+                                          _f(m.get('enterpriseValueOverEBITDA')),
+                                          _f(m.get('enterpriseValueOverEBITDATTM'))),
+            'pe_ratio':            _first(_f(r.get('priceToEarningsRatio')),
+                                          _f(m.get('peRatio')), _f(r.get('priceEarningsRatio'))),
+            'market_cap':          _f(m.get('marketCap')),
+            'roe':                 _first(_f(m.get('returnOnEquity')),
+                                          _f(r.get('returnOnEquity')), _f(m.get('roeTTM'))),
+            'roic':                _first(_f(m.get('returnOnInvestedCapital')),
+                                          _f(m.get('returnOnCapitalEmployed')),
+                                          _f(r.get('returnOnCapitalEmployed')), _f(m.get('roicTTM'))),
+            'debt_equity_ratio':   _first(_f(r.get('debtToEquityRatio')),
+                                          _f(r.get('debtEquityRatio')), _f(m.get('debtToEquityTTM'))),
+            'p_fcf_ratio':         _first(_f(r.get('priceToFreeCashFlowRatio')),
+                                          _f(r.get('priceToFreeCashFlowsRatio')), _f(m.get('pfcfRatioTTM'))),
+            # Balance-sheet block (Altman-Z / S_bankruptcy_risk_anomaly)
+            'total_assets':        _f(b.get('totalAssets')),
+            'total_liabilities':   _f(b.get('totalLiabilities')),
+            'retained_earnings':   _f(b.get('retainedEarnings')),
+            'working_capital':     _first(_f(m.get('workingCapital')),
+                                          (None if _f(b.get('totalCurrentAssets')) is None
+                                           or _f(b.get('totalCurrentLiabilities')) is None
+                                           else _f(b.get('totalCurrentAssets')) - _f(b.get('totalCurrentLiabilities')))),
+            'operating_income':    _f(s.get('operatingIncome')),
+        })
+    return out
+
+
 def _backfill_financials(from_date: date, to_date: date) -> int:
     """Pull quarterly income statement + key metrics + ratios for every
     universe ticker and merge into financials.parquet."""
@@ -116,79 +201,7 @@ def _backfill_financials(from_date: date, to_date: date) -> int:
                 print(f'  [fmp] {ticker}: {e}')
             continue
 
-        metrics_by_period = {m.get('date') or m.get('calendarYear'): m for m in (metrics or [])}
-        ratios_by_period  = {r.get('date') or r.get('calendarYear'): r for r in (ratios  or [])}
-        balance_by_period = {b.get('date') or b.get('calendarYear'): b for b in (balance or [])}
-
-        for s in statements or []:
-            period = s.get('period') or s.get('calendarYear')
-            d      = s.get('date')
-            if not d:
-                continue
-            m = metrics_by_period.get(d, {}) or {}
-            r = ratios_by_period.get(d, {}) or {}
-            b = balance_by_period.get(d, {}) or {}
-
-            def _first(*vals):
-                """First non-None value — unlike `or`-chains, a real 0.0 wins."""
-                return next((v for v in vals if v is not None), None)
-
-            rev   = _f(s.get('revenue'))
-            gp    = _f(s.get('grossProfit'))
-            ebit  = _f(s.get('ebitda') or s.get('operatingIncome'))
-            ni    = _f(s.get('netIncome'))
-            eps   = _f(s.get('eps'))
-            gm    = (gp / rev) if rev and gp and rev > 0 else None
-            om    = _f(s.get('operatingIncomeRatio')) or _f(r.get('operatingProfitMargin'))
-            nm    = _f(s.get('netIncomeRatio'))       or _f(r.get('netProfitMargin'))
-
-            rows_out.append({
-                'ticker':              ticker,
-                'period':              period,
-                'date':                d,
-                'revenue':             rev,
-                'gross_profit':        gp,
-                'ebitda':              ebit,
-                'net_income':          ni,
-                'eps':                 eps,
-                'gross_margin':        gm,
-                'operating_margin':    om,
-                'net_margin':          nm,
-                # /stable/ field names FIRST, legacy v3 names as fallbacks.
-                # The v3-only reads returned None for every row since the
-                # stable migration — roe/roic/debt_equity/p_fcf were 0%
-                # populated across 4,159 rows (found 2026-07-03; S10 +
-                # S_bankruptcy were unable to signal anywhere).
-                'revenue_growth':      _first(_f(r.get('revenueGrowth')), _f(m.get('revenueGrowthTTM'))),
-                'ev_revenue':          _first(_f(m.get('evToSales')),
-                                              _f(m.get('enterpriseValueOverRevenue')),
-                                              _f(m.get('enterpriseValueOverRevenueTTM'))),
-                'ev_ebitda':           _first(_f(m.get('evToEBITDA')),
-                                              _f(r.get('enterpriseValueMultiple')),
-                                              _f(m.get('enterpriseValueOverEBITDA')),
-                                              _f(m.get('enterpriseValueOverEBITDATTM'))),
-                'pe_ratio':            _first(_f(r.get('priceToEarningsRatio')),
-                                              _f(m.get('peRatio')), _f(r.get('priceEarningsRatio'))),
-                'market_cap':          _f(m.get('marketCap')),
-                'roe':                 _first(_f(m.get('returnOnEquity')),
-                                              _f(r.get('returnOnEquity')), _f(m.get('roeTTM'))),
-                'roic':                _first(_f(m.get('returnOnInvestedCapital')),
-                                              _f(m.get('returnOnCapitalEmployed')),
-                                              _f(r.get('returnOnCapitalEmployed')), _f(m.get('roicTTM'))),
-                'debt_equity_ratio':   _first(_f(r.get('debtToEquityRatio')),
-                                              _f(r.get('debtEquityRatio')), _f(m.get('debtToEquityTTM'))),
-                'p_fcf_ratio':         _first(_f(r.get('priceToFreeCashFlowRatio')),
-                                              _f(r.get('priceToFreeCashFlowsRatio')), _f(m.get('pfcfRatioTTM'))),
-                # Balance-sheet block (Altman-Z / S_bankruptcy_risk_anomaly)
-                'total_assets':        _f(b.get('totalAssets')),
-                'total_liabilities':   _f(b.get('totalLiabilities')),
-                'retained_earnings':   _f(b.get('retainedEarnings')),
-                'working_capital':     _first(_f(m.get('workingCapital')),
-                                              (None if _f(b.get('totalCurrentAssets')) is None
-                                               or _f(b.get('totalCurrentLiabilities')) is None
-                                               else _f(b.get('totalCurrentAssets')) - _f(b.get('totalCurrentLiabilities')))),
-                'operating_income':    _f(s.get('operatingIncome')),
-            })
+        rows_out.extend(build_financial_rows(ticker, statements, metrics, ratios, balance))
         time.sleep(MIN_BACKFILL_CALLS)
         if i % 50 == 0:
             print(f'  [fmp] progress: {i}/{len(tickers)} tickers, {len(rows_out)} rows so far')

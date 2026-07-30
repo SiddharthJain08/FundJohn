@@ -183,3 +183,89 @@ class TestFailOpen:
         out = engine._inject_intraday_options(panel, TODAY, ['AAPL'])
         assert out['date'].max() == TODAY
         assert pd.isna(out.loc[out['date'] == TODAY, 'open']).all()
+
+
+class TestRowStreamOverlays:
+    """engine._inject_intraday_rows — the financials/insider seam.
+
+    Same three guarantees as the options helper (age guard, universe scope,
+    fail-open) plus one the options path does not need: the master WINS on a
+    key collision. For insider that is load-bearing — load_aux_data builds a
+    LIST of every transaction per ticker, so a row present in both sources
+    would be counted twice by the consuming strategy."""
+
+    KEYS = ['ticker', 'date', 'insider_name', 'transaction_type', 'shares']
+
+    def _master(self, rows):
+        return pd.DataFrame(rows, columns=self.KEYS + ['role'])
+
+    def _write_ins(self, rows, as_of=TODAY):
+        io_mod.write_overlay(self._master(rows), as_of, category='insider')
+
+    def _row(self, tk='AAPL', d='2026-07-30', who='Doe', ty='S-Sale', sh=100.0):
+        return {'ticker': tk, 'date': d, 'insider_name': who,
+                'transaction_type': ty, 'shares': sh, 'role': 'officer'}
+
+    def test_new_rows_are_appended(self, overlay_dir):
+        master = self._master([self._row(who='Old')])
+        self._write_ins([self._row(who='New')])
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 2
+        assert set(out['insider_name']) == {'Old', 'New'}
+
+    def test_a_filing_in_both_is_not_counted_twice(self, overlay_dir):
+        master = self._master([self._row()])
+        self._write_ins([self._row(), self._row(who='Other')])
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 2
+        assert sum(out['insider_name'] == 'Doe') == 1
+
+    def test_tickers_outside_the_universe_are_dropped(self, overlay_dir):
+        master = self._master([self._row()])
+        self._write_ins([self._row(tk='ZZZZ', who='New')])
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 1
+
+    def test_stale_overlay_is_ignored(self, overlay_dir):
+        master = self._master([self._row(who='Old')])
+        self._write_ins([self._row(who='New')])
+        path = io_mod.overlay_path(TODAY, 'insider')
+        old = path.stat().st_mtime - 7 * 3600
+        os.utime(path, (old, old))
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 1
+
+    def test_unreadable_overlay_keeps_the_master(self, overlay_dir):
+        master = self._master([self._row()])
+        path = io_mod.overlay_path(TODAY, 'insider')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('not a parquet')
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 1
+
+    def test_disabled_by_default(self, overlay_dir, monkeypatch):
+        monkeypatch.setattr(engine, '_INTRADAY_AUX', False)
+        master = self._master([self._row(who='Old')])
+        self._write_ins([self._row(who='New')])
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 1
+
+    def test_financials_dedup_on_ticker_and_period_end(self, overlay_dir):
+        keys = ['ticker', 'date']
+        master = pd.DataFrame([{'ticker': 'AAPL', 'date': '2026-03-28',
+                                'period': 'Q2', 'revenue': 1.0}])
+        io_mod.write_overlay(pd.DataFrame([
+            {'ticker': 'AAPL', 'date': '2026-03-28', 'period': 'undefinedQ2',
+             'revenue': 1.0},                                    # same quarter
+            {'ticker': 'AAPL', 'date': '2026-06-30', 'period': 'Q3',
+             'revenue': 2.0},                                    # genuinely new
+        ]), TODAY, category='financials')
+        out = engine._inject_intraday_rows(master, 'financials', ['AAPL'],
+                                           dedup_keys=keys)
+        assert sorted(out['date']) == ['2026-03-28', '2026-06-30']

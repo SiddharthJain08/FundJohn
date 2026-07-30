@@ -21,8 +21,11 @@ data, but "we asked and got nothing" must never look like "we didn't ask"
 (feedback_silent_failure_pattern). manifest.json records attempted /
 succeeded / skipped per category, and system_checks reads it.
 
-Adapters exist for: options_eod. Categories without one are recorded in the
-manifest with adapter="none" so the remaining gaps stay visible.
+Adapters: options_eod (chains), insider (Form 4 stream), financials (today's
+reporters). Categories without one are recorded in the manifest with
+adapter="none" so the remaining gaps stay visible. The manifest also records
+`master_ticker_coverage` per category — an adapter closes a FRESHNESS gap and
+cannot close a COVERAGE gap the master never had.
 
 Run: python3 scripts/run_acting_ingest.py [--date YYYY-MM-DD] [--budget 900]
      [--categories options_eod] [--dry-run]
@@ -46,9 +49,47 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('acting_ingest')
 
-# Categories this tier can actually fetch today. Everything else in the plan is
-# still reported so the gap is visible rather than assumed-covered.
-ADAPTERS = {'options_eod'}
+
+def _ingest_insider(tickers, as_of, budget_s, dry_run=False) -> dict:
+    """New Form 4s since the master's newest filing, scoped to the universe.
+
+    Cheapest of the three (a few paged calls over the global filing stream) and
+    the one with the most genuinely intraday content — Form 4s post throughout
+    the trading day."""
+    import pandas as pd
+    from ingestion.intraday_insider import build_overlay
+    from ingestion.intraday_options import write_overlay, overlay_path
+
+    ts = pd.Timestamp(as_of)
+    if dry_run:
+        return {'adapter': 'intraday_insider', 'dry_run': True,
+                'requested': len(tickers)}
+    df, stats = build_overlay(tickers, ts, budget_s=budget_s)
+    result = {'adapter': 'intraday_insider', **stats}
+    # An empty result is a QUIET DAY, not a failure: no new filings in the
+    # window is the common case. Only write when there is something to serve.
+    if not df.empty:
+        write_overlay(df, ts, category='insider')
+        result['path'] = str(overlay_path(ts, 'insider'))
+    return result
+
+
+def _ingest_financials(tickers, as_of, budget_s, dry_run=False) -> dict:
+    """Newly-published quarters for in-universe tickers that just reported."""
+    import pandas as pd
+    from ingestion.intraday_financials import build_overlay
+    from ingestion.intraday_options import write_overlay, overlay_path
+
+    ts = pd.Timestamp(as_of)
+    if dry_run:
+        return {'adapter': 'intraday_financials', 'dry_run': True,
+                'requested': len(tickers)}
+    df, stats = build_overlay(tickers, ts, budget_s=budget_s)
+    result = {'adapter': 'intraday_financials', **stats}
+    if not df.empty:
+        write_overlay(df, ts, category='financials')
+        result['path'] = str(overlay_path(ts, 'financials'))
+    return result
 
 
 def _ingest_options(tickers, as_of, budget_s, dry_run=False) -> dict:
@@ -82,6 +123,45 @@ def _ingest_options(tickers, as_of, budget_s, dry_run=False) -> dict:
         logger.warning('aggregate overlay failed (raw overlay kept): %s', exc)
         result['aggregate_error'] = str(exc)[:200]
     return result
+
+
+# Categories this tier can fetch, in RUN ORDER. Cheapest first, so a budget
+# overrun costs the least-complete adapter rather than the one still queued —
+# and note the order is explicit, not `sorted(plan['categories'])`, which would
+# have put the ~270s financials sweep ahead of the ~294s options fetch.
+# Everything else in the plan is still reported so the gap stays visible.
+ADAPTERS = {
+    'insider':     _ingest_insider,      # ~1s   — paged global filing stream
+    'options_eod': _ingest_options,      # ~294s — 5,173 chains
+    'financials':  _ingest_financials,   # ~270s — ~283 reporters x 4 endpoints
+}
+ADAPTER_ORDER = ['insider', 'options_eod', 'financials']
+
+
+_MASTER_FOR = {'options_eod': 'options_eod', 'financials': 'financials',
+               'insider': 'insider'}
+
+
+def _master_coverage(category: str, wanted) -> dict | None:
+    """{tickers_in_master, wanted, frac} for the category's master parquet.
+
+    The adapter closes a FRESHNESS gap; it cannot close a COVERAGE gap the
+    master never had. Surfacing both keeps them distinguishable."""
+    name = _MASTER_FOR.get(category)
+    if not name or not wanted:
+        return None
+    path = ROOT / 'data' / 'master' / f'{name}.parquet'
+    if not path.exists():
+        return {'in_master': 0, 'wanted': len(wanted), 'frac': 0.0}
+    try:
+        import pyarrow.parquet as pq
+        have = set(pq.read_table(path, columns=['ticker']).column('ticker').to_pylist())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('coverage probe failed for %s: %s', category, exc)
+        return None
+    n = len(have & set(wanted))
+    return {'in_master': n, 'wanted': len(wanted),
+            'frac': round(n / len(wanted), 4)}
 
 
 def main() -> int:
@@ -127,7 +207,10 @@ def main() -> int:
     wanted = ({c.strip() for c in args.categories.split(',')} if args.categories
               else set(plan['categories']))
     results: dict = {}
-    for cat in sorted(plan['categories']):
+    # Adapter-backed categories in explicit cost order, then the rest.
+    ordered = ([c for c in ADAPTER_ORDER if c in plan['categories']] +
+               [c for c in sorted(plan['categories']) if c not in ADAPTER_ORDER])
+    for cat in ordered:
         consumers = plan['consumers'].get(cat, [])
         if cat not in wanted:
             results[cat] = {'adapter': 'skipped', 'consumers': consumers}
@@ -155,12 +238,21 @@ def main() -> int:
                     cat, len(plan['categories'][cat]), remaining)
         try:
             results[cat] = {'consumers': consumers,
-                            **_ingest_options(plan['categories'][cat], run_date,
-                                              remaining, args.dry_run)}
+                            **ADAPTERS[cat](plan['categories'][cat], run_date,
+                                            remaining, args.dry_run)}
         except Exception as exc:  # noqa: BLE001
             logger.error('%s ingest FAILED: %s', cat, exc)
-            results[cat] = {'adapter': 'intraday_options', 'consumers': consumers,
+            results[cat] = {'adapter': ADAPTERS[cat].__name__, 'consumers': consumers,
                             'error': str(exc)[:300]}
+
+    # Freshness is not coverage. An adapter can run perfectly and still leave a
+    # category thin because the MASTER only ever covered part of the universe
+    # (financials: 817 of 5,173 tickers as of 2026-07-30). Recording both stops
+    # "adapter live" from reading as "category covered".
+    for cat, res in results.items():
+        if res.get('adapter') in (None, 'none', 'skipped') or res.get('dry_run'):
+            continue
+        res['master_ticker_coverage'] = _master_coverage(cat, plan['categories'].get(cat, []))
 
     manifest = {
         'run_date': run_date.isoformat(),
@@ -170,9 +262,14 @@ def main() -> int:
         'categories': results,
         'elapsed_s': round(time.monotonic() - t0, 1),
         'budget_s': args.budget,
-        # plan_delta (tier 3) needs to know what tier 1 already covered.
-        'fresh': {'categories': {c: plan['categories'][c] for c in plan['categories']
-                                 if results.get(c, {}).get('rows')},
+        # plan_delta (tier 3) needs to know what tier 1 already covered. Keyed
+        # on the fetch SUCCEEDING, not on rows returned: zero new rows is the
+        # normal state for an event stream on a quiet day, and treating that as
+        # "not covered" would make tier 3 re-fetch it on every regime change.
+        'fresh': {'categories': {c: plan['categories'][c]
+                                 for c, r in results.items()
+                                 if r.get('adapter', '').startswith('intraday_')
+                                 and not r.get('error') and not r.get('dry_run')},
                   'marketwide': []},
     }
     out = ROOT / 'data' / 'derived' / 'intraday' / run_date.isoformat()

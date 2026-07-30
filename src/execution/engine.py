@@ -379,6 +379,78 @@ def _inject_intraday_options(opts, today, universe):
         return opts
 
 
+def _intraday_overlay_exists(category: str) -> bool:
+    if not _INTRADAY_AUX:
+        return False
+    try:
+        from ingestion.intraday_options import overlay_path
+        return overlay_path(pd.Timestamp.today().normalize(), category).exists()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _inject_intraday_rows(master, category: str, universe, *, dedup_keys):
+    """Splice a tier-1 row overlay into an aux master frame.
+
+    Used by the row-stream categories (financials, insider) — the options path
+    has its own helper because it also has to equalize an expiry band.
+
+    Three shared properties with _inject_intraday_options:
+      * a 6h age guard, so a file left by an earlier run cannot pass itself off
+        as today's snapshot;
+      * scoped to `universe`;
+      * fail-open — the master is returned unchanged on any error, because a
+        stale-but-present panel beats no panel.
+
+    The MASTER WINS on a key collision. The overlay is a snapshot taken before
+    the 16:15 collect; once the official record carries the same row, it is
+    authoritative. For insider this is also what keeps the transaction list
+    from double-counting a filing that both sources saw."""
+    if not _INTRADAY_AUX or master is None:
+        return master
+    try:
+        from ingestion.intraday_options import load_overlay, overlay_path
+        today = pd.Timestamp.today().normalize()
+        path = overlay_path(today, category)
+        if not path.exists():
+            return master
+        age_h = (time.time() - path.stat().st_mtime) / 3600.0
+        if age_h > _INTRADAY_AUX_MAX_AGE_H:
+            logger.warning('intraday %s overlay is %.1fh old (max %.1fh) — '
+                           'IGNORED, serving the EOD master', category, age_h,
+                           _INTRADAY_AUX_MAX_AGE_H)
+            return master
+        overlay = load_overlay(today, category)
+        if overlay is None or overlay.empty:
+            return master
+        overlay = overlay[overlay['ticker'].isin(set(universe))]
+        if overlay.empty:
+            return master
+        keys = [k for k in dedup_keys if k in master.columns and k in overlay.columns]
+        if keys and not master.empty:
+            known = set(master[keys].astype(str).itertuples(index=False, name=None))
+            keep = [t not in known for t in
+                    overlay[keys].astype(str).itertuples(index=False, name=None)]
+            n_dup = len(overlay) - sum(keep)
+            overlay = overlay[keep]
+        else:
+            n_dup = 0
+        if overlay.empty:
+            logger.info('intraday %s overlay fully superseded by the master '
+                        '(%d duplicate row(s))', category, n_dup)
+            return master
+        merged = pd.concat([master, overlay.reindex(columns=master.columns)],
+                           ignore_index=True)
+        logger.info('intraday %s overlay: +%d row(s) / %d ticker(s) '
+                    '(%d already in master)', category, len(overlay),
+                    overlay['ticker'].nunique(), n_dup)
+        return merged
+    except Exception as e:  # noqa: BLE001
+        logger.warning('intraday %s overlay skipped (%s) — master kept',
+                       category, e)
+        return master
+
+
 REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
 
 
@@ -557,9 +629,14 @@ def load_aux_data(universe: list) -> dict:
     #   gross_margin → grossProfitMargin, debt_equity_ratio → debtEquityRatio,
     #   ev_ebitda → enterpriseValueMultiple, p_fcf_ratio → priceToFreeCashFlowsRatio
     fin_path = master_dir / 'financials.parquet'
-    if fin_path.exists():
+    # NOT gated on fin_path.exists(): a present overlay must still be served if
+    # the master is missing, or a fresh clone would silently discard tier-1.
+    if fin_path.exists() or _intraday_overlay_exists('financials'):
         try:
-            fin = pd.read_parquet(fin_path)
+            fin = (pd.read_parquet(fin_path) if fin_path.exists()
+                   else pd.DataFrame(columns=['ticker', 'date']))
+            fin = _inject_intraday_rows(fin, 'financials', universe,
+                                        dedup_keys=['ticker', 'date'])
             # Use most recent row per ticker
             fin_latest = fin.sort_values('date').groupby('ticker').last().reset_index()
             fin_dict = {}
@@ -593,9 +670,17 @@ def load_aux_data(universe: list) -> dict:
 
     # Insider transactions: {ticker: [{transactionDate, transactionType, reportingName, value, shares}]}
     insider_path = master_dir / 'insider.parquet'
-    if insider_path.exists():
+    if insider_path.exists() or _intraday_overlay_exists('insider'):
         try:
-            ins = pd.read_parquet(insider_path)
+            ins = (pd.read_parquet(insider_path) if insider_path.exists()
+                   else pd.DataFrame(columns=['ticker', 'date']))
+            # Dedup is load-bearing here: the loop below builds a LIST of every
+            # transaction per ticker, so a row present in both the master and
+            # the overlay would be COUNTED TWICE by the consuming strategy.
+            ins = _inject_intraday_rows(
+                ins, 'insider', universe,
+                dedup_keys=['ticker', 'date', 'insider_name',
+                            'transaction_type', 'shares'])
             ins_dict = {}
             for ticker, grp in ins.groupby('ticker'):
                 if ticker not in universe:

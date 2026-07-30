@@ -47,6 +47,63 @@ def _is_due(now: datetime) -> bool:
     return now.weekday() < 5 and now.hour >= _DUE_HOUR_ET
 
 
+def _grade(cat: str, adapter: str, res: dict) -> tuple:
+    """(verdict, detail) per adapter.
+
+    Graded on whether the FETCH SUCCEEDED, never on how many rows came back.
+    options_eod is a per-ticker sweep where a low hit rate is a real problem;
+    insider and financials are EVENT STREAMS where zero new rows is an ordinary
+    quiet day. Grading those on row count would WARN most days, and a check
+    that cries wolf is worse than no check.
+    """
+    elapsed = res.get('elapsed_s', '?')
+    if adapter == 'intraday_options':
+        requested = res.get('requested') or 0
+        if not requested:
+            return 'ok', f'{cat}: nothing requested'
+        # Symbol classes with no listed options were never askable; grading
+        # against them would make a healthy run look like a partial one.
+        askable = requested - (res.get('skipped_class') or 0)
+        covered = res.get('ok') or 0
+        cov = covered / askable if askable else 0.0
+        detail = (f'{cat}: {covered}/{askable} ({cov:.0%}), '
+                  f'{res.get("rows", 0)} rows, {elapsed}s')
+        if res.get('skipped_budget'):
+            return 'warn', (f'{detail} — {res["skipped_budget"]} tickers never '
+                            f'requested (wall-clock budget expired)')
+        if cov < _MIN_COVERAGE:
+            return 'warn', f'{detail} — below the {_MIN_COVERAGE:.0%} floor'
+        return 'ok', detail
+
+    if adapter == 'intraday_insider':
+        pages = res.get('pages') or 0
+        detail = (f'{cat}: {res.get("rows", 0)} new filing(s) from {pages} page(s), '
+                  f'{res.get("dup_in_master", 0)} already held, {elapsed}s')
+        if pages == 0:
+            return 'fail', f'{detail} — the filing stream returned nothing at all'
+        if res.get('budget_expired'):
+            return 'warn', f'{detail} — stream truncated by the wall-clock budget'
+        if res.get('http_errors'):
+            return 'warn', f'{detail} — {res["http_errors"]} page fetch error(s)'
+        return 'ok', detail
+
+    if adapter == 'intraday_financials':
+        reporters = res.get('reporters') or 0
+        fetched = res.get('fetched') or 0
+        detail = (f'{cat}: {res.get("rows", 0)} new period-row(s) from '
+                  f'{fetched}/{reporters} reporter(s), {elapsed}s')
+        if reporters == 0:
+            return 'ok', f'{cat}: no in-universe reporters today (quiet day)'
+        if res.get('skipped_budget'):
+            return 'warn', (f'{detail} — {res["skipped_budget"]} reporter(s) '
+                            f'never fetched (wall-clock budget expired)')
+        if fetched / reporters < _MIN_COVERAGE:
+            return 'warn', f'{detail} — below the {_MIN_COVERAGE:.0%} fetch floor'
+        return 'ok', detail
+
+    return 'warn', f'{cat}: unrecognized adapter {adapter!r}'
+
+
 @check(name='acting_ingest_coverage', tags=['pipeline'], requires=[])
 def _acting_ingest_coverage():
     if os.environ.get('OPENCLAW_SAMEDAY_EXEC') != '1':
@@ -82,23 +139,15 @@ def _acting_ingest_coverage():
             continue
         if adapter == 'skipped' or res.get('dry_run'):
             continue
-        requested = res.get('requested') or 0
-        if not requested:
-            continue
-        # Symbol classes with no listed options were never askable; grading
-        # against them would make a healthy run look like a partial one.
-        askable = requested - (res.get('skipped_class') or 0)
-        covered = res.get('ok') or 0
-        cov = covered / askable if askable else 0.0
-        detail = (f'{cat}: {covered}/{askable} ({cov:.0%}), {res.get("rows", 0)} rows, '
-                  f'{res.get("elapsed_s", "?")}s')
-        if res.get('skipped_budget'):
-            warns.append(f'{detail} — {res["skipped_budget"]} tickers never '
-                         f'requested (wall-clock budget expired)')
-        elif cov < _MIN_COVERAGE:
-            warns.append(f'{detail} — below the {_MIN_COVERAGE:.0%} floor')
-        else:
-            oks.append(detail)
+        verdict, detail = _grade(cat, adapter, res)
+        cov = res.get('master_ticker_coverage')
+        if cov and cov.get('frac', 1.0) < 1.0:
+            # Freshness and coverage are different failures. Saying so keeps
+            # "adapter live" from reading as "category covered".
+            detail += (f' [master covers {cov["in_master"]}/{cov["wanted"]} '
+                       f'of the acting universe]')
+        (fails if verdict == 'fail' else warns if verdict == 'warn'
+         else oks).append(detail)
 
     if fails:
         return Status.FAIL, '; '.join(fails + warns)
