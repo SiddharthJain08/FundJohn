@@ -125,17 +125,23 @@ def _ingest_options(tickers, as_of, budget_s, dry_run=False) -> dict:
     return result
 
 
-# Categories this tier can fetch, in RUN ORDER. Cheapest first, so a budget
-# overrun costs the least-complete adapter rather than the one still queued —
-# and note the order is explicit, not `sorted(plan['categories'])`, which would
-# have put the ~270s financials sweep ahead of the ~294s options fetch.
-# Everything else in the plan is still reported so the gap stays visible.
+# Categories this tier can fetch, in RUN ORDER — explicit, not
+# `sorted(plan['categories'])`, which would order them alphabetically.
+#
+# BOUNDED WORK FIRST, OPEN-ENDED LAST. insider and financials have work lists
+# whose size is known up front (pages of a filing stream; today's reporters);
+# options is a 5,173-ticker sweep whose duration depends entirely on how the
+# provider is behaving. Measured 2026-07-30: options took 294s on a quiet box
+# and 856s under memory contention, with 49 timeouts. Running it last makes it
+# the budget SINK — it degrades per-ticker and reports skipped_budget, whereas
+# an over-running options fetch placed second truncated financials at 192 of
+# 270 reporters. Financials also serves 3 consumers to options' 1.
 ADAPTERS = {
-    'insider':     _ingest_insider,      # ~1s   — paged global filing stream
-    'options_eod': _ingest_options,      # ~294s — 5,173 chains
-    'financials':  _ingest_financials,   # ~270s — ~283 reporters x 4 endpoints
+    'insider':     _ingest_insider,      # ~0.4s      — paged global filing stream
+    'financials':  _ingest_financials,   # ~275-400s  — today's reporters x 4 endpoints
+    'options_eod': _ingest_options,      # ~294-856s  — 5,173 chains; absorbs the remainder
 }
-ADAPTER_ORDER = ['insider', 'options_eod', 'financials']
+ADAPTER_ORDER = ['insider', 'financials', 'options_eod']
 
 
 _MASTER_FOR = {'options_eod': 'options_eod', 'financials': 'financials',

@@ -101,6 +101,12 @@ def _grade(cat: str, adapter: str, res: dict) -> tuple:
             return 'warn', f'{detail} — below the {_MIN_COVERAGE:.0%} fetch floor'
         return 'ok', detail
 
+    if not str(adapter).startswith('intraday_'):
+        # A category served by something other than a tier-1 adapter — today
+        # only `prices`, refreshed in-memory by the close-proxy injection
+        # inside the signals step. Informational, not a defect; grading it as
+        # unknown made EVERY run WARN.
+        return 'ok', f'{cat}: served by {adapter}'
     return 'warn', f'{cat}: unrecognized adapter {adapter!r}'
 
 

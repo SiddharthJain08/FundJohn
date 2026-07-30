@@ -154,3 +154,21 @@ class TestBuildOverlay:
         df, stats = fi.build_overlay(['A', 'B'], AS_OF)
         assert stats['failed'] == 1 and stats['fetched'] == 1
         assert any('A:' in s for s in stats['failed_sample'])
+
+
+class TestDriverOrdering:
+    """The order is a risk decision, not a detail (2026-07-30 stress run)."""
+
+    def test_open_ended_options_runs_last(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'rai', ROOT / 'scripts' / 'run_acting_ingest.py')
+        rai = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rai)
+        assert rai.ADAPTER_ORDER[-1] == 'options_eod', (
+            'options is the only adapter whose duration is unbounded by its '
+            'work list (294s quiet, 856s under contention). Placed before '
+            'financials it truncated it at 192/270 reporters; last, it '
+            'absorbs the remaining budget and degrades per-ticker.')
+        assert rai.ADAPTER_ORDER[0] == 'insider'
+        assert set(rai.ADAPTER_ORDER) == set(rai.ADAPTERS)
