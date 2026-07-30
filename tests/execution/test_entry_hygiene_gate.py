@@ -126,9 +126,14 @@ def test_occ_and_crypto_symbols_out_of_scope():
 
 def test_kill_switch(monkeypatch):
     monkeypatch.setenv("OPENCLAW_ENTRY_HYGIENE", "0")
+    # Injected like every other call here. The early return happens before any
+    # lookup today, so omitting these would still pass — but that would make
+    # this file's DB-free claim depend on statement order inside the function
+    # rather than on injection.
     out = rbs._apply_entry_hygiene_gate(
         {"CENN": -3000.0}, {}, stopouts={"CENN": -1},
-        liq=({}, {}), params=dict(PARAMS))
+        liq=({}, {}), params=dict(PARAMS),
+        risk_exits={}, premarket_vetoes=set())
     assert out["CENN"] == -3000.0
 
 
@@ -176,3 +181,18 @@ def test_risk_exit_is_independent_of_the_stopout_window():
 def test_untouched_tickers_pass_through():
     out = _gate({"MSFT": 5000.0}, {}, risk_exits={"SNDK": 1})
     assert out == {"MSFT": 5000.0}
+
+
+def test_gate_sits_inside_the_shared_emission_tail():
+    """Wiring, not logic. Both emission paths (normal sizing and the
+    zero-conviction flatten) go through _emit_orders_from_targets, so the gate
+    living inside IT rather than at each caller is what makes the cooldowns
+    unskippable — including on the intraday-redeploy `trade` step, which runs
+    the same sizer. A second emission route that bypassed it would look fixed
+    while re-opening the exact position the breaker just closed."""
+    import inspect
+    tail = inspect.getsource(rbs._emit_orders_from_targets)
+    assert '_apply_entry_hygiene_gate(' in tail
+    module = inspect.getsource(rbs)
+    # Exactly one call site: the definition plus this single invocation.
+    assert module.count('_apply_entry_hygiene_gate(') == 2
