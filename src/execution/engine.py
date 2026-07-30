@@ -349,17 +349,30 @@ def _inject_intraday_options(opts, today, universe):
             return opts
 
         overlay = _drop_zero_greeks(overlay)
-        in_band = lambda df: df[((df['expiry'] - today).dt.days > 0)
-                                & ((df['expiry'] - today).dt.days <= MAX_DTE)]
+        n_over, n_tk, n_before = len(overlay), overlay['ticker'].nunique(), len(opts)
+
+        def in_band(df):
+            # `expiry > today` is TODAY-relative on purpose: it is what closes
+            # the expiry-day hole. The MAX_DTE cap is per OBSERVATION date, so
+            # every date keeps the same contract population — a today-relative
+            # cap would strip short-dated contracts from older dates only,
+            # skewing the history arrays load_aux_data builds from `grp`.
+            dte_today = (df['expiry'] - today).dt.days
+            dte_own = (df['expiry'] - df['date']).dt.days
+            return df[(dte_today > 0) & (dte_own <= MAX_DTE)]
+
+        # Rebind so the unfiltered panel is freed before the concat: this is
+        # the step that OOM'd (rc=137) on 06-24 and 07-29, on 8GB and no swap.
+        opts = in_band(opts)
         # The panel carries columns the chain feed does not (`open`); reindex
         # rather than select, so a schema gap widens the frame with NaN instead
         # of raising and costing the whole overlay.
         aligned = in_band(overlay).reindex(columns=opts.columns)
-        merged = pd.concat([in_band(opts), aligned], ignore_index=True)
+        del overlay
+        merged = pd.concat([opts, aligned], ignore_index=True)
         logger.info("intraday options overlay: +%d rows / %d tickers "
-                    "(panel cut to 0<DTE<=%d: %d -> %d rows)",
-                    len(overlay), overlay['ticker'].nunique(), MAX_DTE,
-                    len(opts), len(merged))
+                    "(band 0<DTE, per-date cap %d: %d -> %d rows)",
+                    n_over, n_tk, MAX_DTE, n_before, len(merged))
         return merged
     except Exception as e:  # noqa: BLE001 — never lose the EOD panel over an overlay
         logger.warning("intraday options overlay skipped (%s) — EOD panel kept", e)

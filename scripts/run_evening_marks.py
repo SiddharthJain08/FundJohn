@@ -53,6 +53,49 @@ def _closes_for(universe_hint=None) -> dict:
     return closes
 
 
+WEBHOOK_HELPER = ROOT / 'src' / 'agent' / 'curators' / '_discord_webhook.js'
+
+
+def _post_discord(text: str, channel: str = 'data-alerts') -> None:
+    """Non-fatal Discord post via the Node webhook helper."""
+    if not WEBHOOK_HELPER.exists():
+        return
+    import subprocess
+    js = ("const { postToChannel } = require(%r);"
+          "let c=[];process.stdin.on('data',d=>c.push(d));"
+          "process.stdin.on('end',async()=>{"
+          "await postToChannel('botjohn',%r,Buffer.concat(c).toString('utf8'));});"
+          ) % (str(WEBHOOK_HELPER), channel)
+    try:
+        subprocess.run(['node', '-e', js], input=text.encode('utf-8'),
+                       capture_output=True, timeout=30, env={**os.environ})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('discord post failed: %s', exc)
+
+
+def _grade_tier1_ingest() -> None:
+    """Grade the 14:30 tier-1 acting-set ingest and alert if it under-delivered.
+
+    The engine's overlay injection falls OPEN by design — a thin or missing
+    overlay silently serves yesterday's options surface rather than blocking
+    the cycle. Something has to observe that, and the only weekday
+    system_checks run is openclaw-botjohn-maintenance at 12:00 ET, three
+    hours BEFORE the ingest it would grade. This slot is the first one after
+    the fact, so the operator learns the same evening rather than after a
+    second stale day."""
+    try:
+        from system_checks.checks.acting_ingest_coverage import _acting_ingest_coverage
+        from system_checks.types import Status
+        status, detail = _acting_ingest_coverage()
+        logger.info('tier-1 ingest grade: %s — %s', status, detail)
+        if status is not Status.PASS:
+            _post_discord(f'⚠️ tier-1 acting-set ingest {getattr(status, "name", status)} '
+                          f'— today\'s acting strategies may have decided on the '
+                          f'previous EOD collect.\n{detail}')
+    except Exception as exc:  # noqa: BLE001
+        logger.warning('tier-1 ingest grading skipped: %s', exc)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--date', default=None, help='run date (default: today)')
@@ -102,6 +145,8 @@ def main() -> int:
             logger.warning('stale-tracker pass skipped: %s', exc)
         conn.commit()
         logger.info('evening marks committed for %s', run_date)
+        # After the commit: grading must never be able to roll back the marks.
+        _grade_tier1_ingest()
         return 0
     except Exception as exc:  # noqa: BLE001
         conn.rollback()

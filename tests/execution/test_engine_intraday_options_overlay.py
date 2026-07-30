@@ -127,6 +127,32 @@ class TestSharedExpiryBand:
         chain = future[future['expiry'] == future['expiry'].min()]
         assert chain['date'].max() == TODAY
 
+    def test_dte_cap_is_per_observation_date_not_today_relative(self, overlay_dir):
+        """A today-relative cap strips short-dated contracts from OLDER dates
+        only, skewing the history arrays load_aux_data builds from `grp`
+        (iv_rank_history / vrp_history) — the mirror image of the population
+        bias the band exists to remove."""
+        old = TODAY - pd.Timedelta(days=10)
+        panel = _panel([
+            _row('AAPL', old, 5),        # 5 DTE as of ITS date, expiry future
+            _row('AAPL', old, 200),      # beyond the cap on its own date
+            _row('AAPL', YDAY, 30),
+        ])
+        # expiry must still be in the future for the short-dated old row.
+        panel.loc[0, 'expiry'] = TODAY + pd.Timedelta(days=3)
+        _write([_row('AAPL', TODAY, 20)])
+        out = engine._inject_intraday_options(panel, TODAY, ['AAPL'])
+        kept = out[out['date'] == old]
+        assert len(kept) == 1, 'the short-dated older row must survive the cap'
+        assert (kept['expiry'] - kept['date']).dt.days.iloc[0] <= io_mod.MAX_DTE
+
+    def test_expired_contracts_are_dropped_regardless_of_their_own_dte(self, overlay_dir):
+        panel = _panel([_row('AAPL', YDAY, 1)])   # expiry == TODAY
+        panel.loc[0, 'expiry'] = TODAY - pd.Timedelta(days=1)
+        _write([_row('AAPL', TODAY, 20)])
+        out = engine._inject_intraday_options(panel, TODAY, ['AAPL'])
+        assert (out['expiry'] > TODAY).all()
+
 
 class TestFailOpen:
     def test_stale_overlay_is_ignored(self, overlay_dir, monkeypatch):
