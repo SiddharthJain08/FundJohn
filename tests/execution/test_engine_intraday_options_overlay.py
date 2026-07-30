@@ -269,3 +269,15 @@ class TestRowStreamOverlays:
         out = engine._inject_intraday_rows(master, 'financials', ['AAPL'],
                                            dedup_keys=keys)
         assert sorted(out['date']) == ['2026-03-28', '2026-06-30']
+
+    def test_datetime_master_still_dedups_against_a_string_overlay(self, overlay_dir):
+        """Both masters store `date` as a string today and the adapters emit
+        strings, so the keys match. If a future writer switches to datetime64,
+        str() would give '2026-07-30 00:00:00', the anti-join would miss EVERY
+        row, and insider transactions would silently double-count."""
+        master = self._master([self._row()])
+        master['date'] = pd.to_datetime(master['date'])
+        self._write_ins([self._row()])
+        out = engine._inject_intraday_rows(master, 'insider', ['AAPL'],
+                                           dedup_keys=self.KEYS)
+        assert len(out) == 1

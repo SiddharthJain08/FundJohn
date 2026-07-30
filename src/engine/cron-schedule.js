@@ -496,10 +496,13 @@ function start(swarm, generateId, notifyDiscord) {
             // partial overlay and the engine falls back per-ticker to the EOD
             // panel, whereas an overrun inside the chain delays execution and
             // can trip the 15:55 "no sized handoff" abort — a silent no-trade
-            // day. Measured 2026-07-30: 5,173 tickers in 294s, so --budget 900
-            // still lands ~15 min before the compute.
+            // day. Measured 2026-07-30 across all three adapters: insider 0.2s
+            // + options 294s + financials 396s + ~20s plan resolution ≈ 710s,
+            // so --budget 1200 leaves real headroom and still lands by ~14:50.
+            // Adapters run cheapest-first, so a budget overrun truncates
+            // financials (the last and most re-fetchable) rather than options.
             cron.schedule('30 14 * * 1-5', () => {
-                log('tier-1 acting-set ingest (2:30pm ET): options chains for the acting universe');
+                log('tier-1 acting-set ingest (2:30pm ET): insider stream, options chains, today\'s reporters');
                 try {
                     const fs = require('fs');
                     const today = new Date().toISOString().slice(0, 10);
@@ -507,7 +510,7 @@ function start(swarm, generateId, notifyDiscord) {
                     try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
                     const logFd = fs.openSync(path.join(logDir, `acting_ingest_${today}.log`), 'a');
                     const child = spawn(PYTHON, ['scripts/run_acting_ingest.py',
-                                                 '--date', today, '--budget', '900'], {
+                                                 '--date', today, '--budget', '1200'], {
                         cwd: ROOT, env: { ...process.env },
                         detached: true, stdio: ['ignore', logFd, logFd],
                     });

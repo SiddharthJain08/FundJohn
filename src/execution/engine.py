@@ -428,9 +428,21 @@ def _inject_intraday_rows(master, category: str, universe, *, dedup_keys):
             return master
         keys = [k for k in dedup_keys if k in master.columns and k in overlay.columns]
         if keys and not master.empty:
-            known = set(master[keys].astype(str).itertuples(index=False, name=None))
+            def _norm(df):
+                # Both masters store `date` as a STRING today and the adapters
+                # emit strings, so a plain astype(str) matches. Normalizing
+                # date-ish columns to 10-char ISO anyway: if a future writer
+                # switches to datetime64, str() would yield '... 00:00:00',
+                # the anti-join would silently miss EVERY row, and insider
+                # transactions would start double-counting with no error.
+                out = df[keys].astype(str)
+                for c in out.columns:
+                    if 'date' in c:
+                        out[c] = out[c].str.slice(0, 10)
+                return out
+            known = set(_norm(master).itertuples(index=False, name=None))
             keep = [t not in known for t in
-                    overlay[keys].astype(str).itertuples(index=False, name=None)]
+                    _norm(overlay).itertuples(index=False, name=None)]
             n_dup = len(overlay) - sum(keep)
             overlay = overlay[keep]
         else:
