@@ -83,8 +83,15 @@ class TestFetchChainRows:
         rows = io_mod.fetch_chain_rows('SPY', AS_OF)
         assert calls['n'] == 2 and len(rows) == 2
 
-    def test_cli_failure_returns_empty(self, monkeypatch):
+    def test_cli_failure_raises_not_empty(self, monkeypatch):
+        """"provider refused" and "no listed options" must not both look like
+        an empty chain — an outage would read as a clean, empty ingest."""
         monkeypatch.setattr(io_mod, '_run_cli', lambda args: None)
+        with pytest.raises(io_mod.IntradayOptionsError):
+            io_mod.fetch_chain_rows('SPY', AS_OF)
+
+    def test_empty_payload_is_empty_not_error(self, monkeypatch):
+        monkeypatch.setattr(io_mod, '_run_cli', lambda args: {'snapshots': {}})
         assert io_mod.fetch_chain_rows('SPY', AS_OF) == []
 
 
@@ -150,3 +157,78 @@ class TestOverlayIO:
         df = pd.DataFrame([{'ticker': 'X', 'date': AS_OF}])
         p = io_mod.write_overlay(df, AS_OF)
         assert 'data/master' not in str(p)
+
+
+class TestFetchRawFrame:
+    """The concurrent driver-facing fetch: budget, symbol classes, accounting."""
+
+    def _ok(self, *_a, **_k):
+        return [{'ticker': 'X', 'date': AS_OF, 'expiry': AS_OF, 'strike': 1.0,
+                 'option_type': 'CALL', 'open_interest': None,
+                 'implied_volatility': 0.2, 'delta': 0.5, 'gamma': 0.01,
+                 'theta': -0.01, 'vega': 0.1, 'volume': 10, 'close': 1.0}]
+
+    def test_non_optionable_symbol_classes_are_skipped_not_failed(self, monkeypatch):
+        """Indices/preferreds/warrants have no underlying — counting their
+        guaranteed 400 as a FAILURE would corrupt the coverage signal the
+        three-tier design reports on."""
+        seen = []
+
+        def fake(sym, as_of, row_ticker=None):
+            seen.append(sym)
+            return self._ok()
+
+        monkeypatch.setattr(io_mod, 'fetch_chain_rows', fake)
+        df, st = io_mod.fetch_raw_frame(
+            ['AAPL', '^IXIC', 'T-PRC', 'ACHR.WS'], AS_OF, workers=2)
+        assert st['skipped_class'] == 3
+        assert st['failed'] == 0 and st['ok'] == 1
+        assert seen == ['AAPL']
+        assert st['requested'] == 4
+
+    def test_rows_carry_the_engine_ticker_not_the_provider_symbol(self, monkeypatch):
+        captured = {}
+
+        def fake(sym, as_of, row_ticker=None):
+            captured['sym'] = sym
+            captured['row_ticker'] = row_ticker
+            return self._ok()
+
+        monkeypatch.setattr(io_mod, 'fetch_chain_rows', fake)
+        io_mod.fetch_raw_frame(['BRK-B'], AS_OF, workers=1)
+        assert captured == {'sym': 'BRK.B', 'row_ticker': 'BRK-B'}
+
+    def test_failure_is_counted_and_does_not_abort_the_batch(self, monkeypatch):
+        def fake(sym, as_of, row_ticker=None):
+            if sym == 'BAD':
+                raise io_mod.IntradayOptionsError('boom')
+            return self._ok()
+
+        monkeypatch.setattr(io_mod, 'fetch_chain_rows', fake)
+        df, st = io_mod.fetch_raw_frame(['AAPL', 'BAD', 'MSFT'], AS_OF, workers=2)
+        assert st['failed'] == 1 and st['ok'] == 2
+        assert len(df) == 2
+        assert any('BAD' in s for s in st['failed_sample'])
+
+    def test_budget_stops_submitting_and_reports_the_shortfall(self, monkeypatch):
+        """A partial overlay degrades per-ticker to the EOD panel; overrunning
+        would delay the 15:00 compute and risk the 15:55 no-handoff abort."""
+        import time as _t
+
+        def slow(sym, as_of, row_ticker=None):
+            _t.sleep(0.25)
+            return self._ok()
+
+        monkeypatch.setattr(io_mod, 'fetch_chain_rows', slow)
+        tickers = [f'T{i}' for i in range(40)]
+        df, st = io_mod.fetch_raw_frame(tickers, AS_OF, budget_s=0.3, workers=2)
+        assert st['skipped_budget'] > 0
+        assert st['attempted'] + st['skipped_budget'] == len(tickers)
+        assert st['elapsed_s'] < 10   # returned early, did not run all 40
+
+    def test_empty_result_is_a_typed_frame_not_a_crash(self, monkeypatch):
+        monkeypatch.setattr(io_mod, 'fetch_chain_rows',
+                            lambda *a, **k: [])
+        df, st = io_mod.fetch_raw_frame(['AAPL'], AS_OF, workers=1)
+        assert list(df.columns) == io_mod.RAW_COLS
+        assert st['empty'] == 1 and st['rows'] == 0

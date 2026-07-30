@@ -144,3 +144,59 @@ class TestLoadRequirementsReal:
     def test_missing_file_fails_conservative(self):
         r = aip.load_requirements('S_does_not_exist_xyz')
         assert r == {'required': ['prices'], 'optional': []}
+
+
+class TestSchemaContract:
+    """Both regressions from 2026-07-30, when the plan had never once resolved
+    a non-empty scope in production and every caller swallowed it."""
+
+    def test_selects_the_column_the_registry_actually_has(self, monkeypatch):
+        """`strategy_registry` keys on `id`; there is no `strategy_id` column.
+        The mismatch raised inside every caller's non-blocking except branch,
+        so the redeploy preflight logged 'failed' instead of a plan."""
+        seen = {}
+
+        class _Cur:
+            def execute(self, sql, params=None):
+                seen['sql'] = sql
+
+            def fetchall(self):
+                return [('A',)]
+
+        monkeypatch.setattr('strategies.regime_gate.is_eligible',
+                            lambda sid, regime: True)
+        aip.resolve_acting_set(_Cur(), 'LOW_VOL')
+        assert 'strategy_id' not in seen['sql']
+        assert 'SELECT id FROM strategy_registry' in seen['sql']
+
+    def test_empty_base_universe_raises_rather_than_planning_nothing(self, monkeypatch):
+        """build_strategy_universes INTERSECTS its predicate with the base set,
+        so an empty base yields zero tickers per strategy with error=None and
+        adopted=True — a plan that looks successful and ingests nothing."""
+        cur = _wire(monkeypatch, approved=['A'], eligible={'A'},
+                    universes={}, requirements={'A': {'required': ['prices'],
+                                                     'optional': []}})
+        monkeypatch.setattr(aip, 'base_universe', lambda *a, **k: [])
+        with pytest.raises(aip.IngestPlanError):
+            aip.resolve_ingest_plan(cur, 'LOW_VOL', '2026-07-30')
+
+    def test_base_universe_ignores_the_registry_universe_column(self, monkeypatch):
+        """That column holds symbolic labels ('SP500', 'FixedETFlist:SPY,...'),
+        not tickers — which is why the engine derives its base from the master
+        price panel instead."""
+        import pyarrow as pa
+        monkeypatch.setattr(
+            'pyarrow.parquet.read_table',
+            lambda *a, **k: pa.table({'ticker': ['AAPL', 'MSFT', 'AAPL']}))
+        assert aip.base_universe() == ['AAPL', 'MSFT']
+
+    def test_unresolvable_strategy_widens_to_the_base_not_to_nothing(self, monkeypatch):
+        """C1 fail-open: a strategy whose predicate resolves empty ingests the
+        whole base universe. Ingest scope may over-fetch; it may never
+        silently shrink below what the engine will read."""
+        cur = _wire(monkeypatch, approved=['A'], eligible={'A'},
+                    universes={'A': []},
+                    requirements={'A': {'required': ['options_eod'], 'optional': []}})
+        plan = aip.resolve_ingest_plan(cur, 'LOW_VOL', '2026-07-30',
+                                       fallback_universe=['AAPL', 'MSFT'])
+        assert plan['categories']['options_eod'] == ['AAPL', 'MSFT']

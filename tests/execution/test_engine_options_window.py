@@ -79,8 +79,15 @@ def test_read_matches_full_read_then_filter_oracle(tmp_path):
 
 
 def test_windows_cover_their_lookbacks():
-    """Each read window must exceed its consumer's longest lookback: options IV-rank
-    is 30 days; HV20 needs ~28 trading days but the len(_g)<22 skip wants headroom."""
+    """Each read window must cover its consumer's lookback.
+
+    Options was 60 -> 14 on 2026-07-29 (8771c67): options_eod reached 18M rows,
+    17M of them in July, so a 60-day window read essentially the whole file —
+    5.4GB in pandas, rc=137 at the signals step. 14 days is the floor that
+    still covers the aux's 8-day history arrays; iv_rank's 30-day range
+    degrades gracefully on a shorter history rather than erroring. Anything
+    below 14 would truncate the history arrays themselves, silently.
+    """
     from src.execution.engine import _OPTIONS_READ_WINDOW_DAYS, _HV20_PRICES_WINDOW_DAYS
-    assert _OPTIONS_READ_WINDOW_DAYS >= 30
+    assert _OPTIONS_READ_WINDOW_DAYS >= 14  # the 8-day history arrays + weekends
     assert _HV20_PRICES_WINDOW_DAYS >= 45   # generous over the ~28 trading-day need

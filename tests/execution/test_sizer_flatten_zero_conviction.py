@@ -88,10 +88,15 @@ def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe
     """Drive size_positions with everything external stubbed. Returns (orders, alerts)
     where `alerts` is the list of _post_flatten_alert (regime, active_count, broker)
     calls captured during the run."""
-    if eod:
-        monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
-    else:
-        monkeypatch.delenv('OPENCLAW_EOD_RECONCILE', raising=False)
+    # The EOD lane is selected by OPENCLAW_EOD_SIGNAL_REGISTER since 2026-07-29
+    # (d573e45) — OPENCLAW_EOD_RECONCILE now means only "the premarket
+    # reconcile job is enabled", which the same-day lane also sets. In real EOD
+    # mode both are 1, so set both.
+    for flag in ('OPENCLAW_EOD_SIGNAL_REGISTER', 'OPENCLAW_EOD_RECONCILE'):
+        if eod:
+            monkeypatch.setenv(flag, '1')
+        else:
+            monkeypatch.delenv(flag, raising=False)
     if intraday:
         monkeypatch.setenv('OPENCLAW_INTRADAY_REDEPLOY', '1')
     else:

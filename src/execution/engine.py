@@ -21,6 +21,7 @@ import logging
 import traceback
 import decimal
 import subprocess
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -279,6 +280,90 @@ def resolve_workspace(cur, name_or_id: str) -> str:
     cur.execute("SELECT id FROM workspaces ORDER BY created_at ASC LIMIT 1")
     row = cur.fetchone()
     return str(row['id']) if row else name_or_id
+
+
+_INTRADAY_AUX = os.environ.get('OPENCLAW_INTRADAY_AUX', '0') == '1'
+_INTRADAY_AUX_MAX_AGE_H = float(os.environ.get('OPENCLAW_INTRADAY_AUX_MAX_AGE_H', '6'))
+
+
+def _inject_intraday_options(opts, today, universe):
+    """Splice the tier-1 (14:30 ET) options overlay into the EOD panel.
+
+    WHY (three-tier ingestion, operator directive 2026-07-29): an ACTING
+    strategy must never decide on the previous day's EOD collect. Under
+    same-day execution the signals step runs at 15:00 ET, hours before the
+    16:15 collect, so without this every options field the engine derives is
+    yesterday's surface.
+
+    WHERE: raw contract rows, not aggregates. Every derived field below keys
+    off ``chain['date'].max()`` (iv30, pc_ratio, gamma_atm, theta_atm,
+    iv_spread, skew_20d, term structure, gex, iv_centroid_delta), so injecting
+    today-dated raw rows makes the whole surface same-day with NO change to
+    the field math.
+
+    Two invariants:
+      * PRECEDENCE — panel rows dated today win. load_aux_data also runs from
+        redeploy_pipeline on a regime change, which can fire after the 16:15
+        collect has already appended real closes; the official record beats
+        the snapshot whenever both exist.
+      * SHARED EXPIRY BAND — the overlay carries only 0 < DTE <= MAX_DTE, so
+        the panel side is cut to the same band. Measured on 2026-07-29, not
+        equalizing shifts the per-ticker mean IV by a median +4.5 vol points
+        (p95 +19) purely from contract population, which would masquerade as
+        a real one-day move. It also closes the expiry-day hole: without it
+        `nearest_expiry` on a Friday resolves to a same-day expiry the
+        overlay has no rows for, silently reverting those tickers to
+        yesterday.
+    """
+    if not _INTRADAY_AUX or opts is None or 'date' not in opts.columns:
+        return opts
+    try:
+        from ingestion.intraday_options import load_overlay, overlay_path, MAX_DTE
+        path = overlay_path(today, 'options_raw')
+        # An overlay is a SNAPSHOT of a moment. A file left from an earlier run
+        # (or a tier-1 job that failed and never refreshed it) is date-stamped
+        # today while holding a stale surface — precisely the staleness this
+        # pivot removes. Age it out rather than trust the filename.
+        if path.exists():
+            age_h = (time.time() - path.stat().st_mtime) / 3600.0
+            if age_h > _INTRADAY_AUX_MAX_AGE_H:
+                logger.warning("intraday options overlay is %.1fh old (max %.1fh) "
+                               "— IGNORED, options aux served from the EOD panel",
+                               age_h, _INTRADAY_AUX_MAX_AGE_H)
+                return opts
+        overlay = load_overlay(today, category='options_raw')
+        if overlay is None or overlay.empty:
+            logger.info("intraday options overlay absent for %s — options aux "
+                        "served from the EOD panel", today.date())
+            return opts
+        overlay['date']   = pd.to_datetime(overlay['date'], errors='coerce')
+        overlay['expiry'] = pd.to_datetime(overlay['expiry'], errors='coerce')
+        overlay = overlay[overlay['ticker'].isin(set(universe))]
+
+        already = set(opts.loc[opts['date'] == today, 'ticker'].unique())
+        if already:
+            overlay = overlay[~overlay['ticker'].isin(already)]
+        if overlay.empty:
+            logger.info("intraday options overlay fully superseded by today's "
+                        "EOD rows (%d tickers)", len(already))
+            return opts
+
+        overlay = _drop_zero_greeks(overlay)
+        in_band = lambda df: df[((df['expiry'] - today).dt.days > 0)
+                                & ((df['expiry'] - today).dt.days <= MAX_DTE)]
+        # The panel carries columns the chain feed does not (`open`); reindex
+        # rather than select, so a schema gap widens the frame with NaN instead
+        # of raising and costing the whole overlay.
+        aligned = in_band(overlay).reindex(columns=opts.columns)
+        merged = pd.concat([in_band(opts), aligned], ignore_index=True)
+        logger.info("intraday options overlay: +%d rows / %d tickers "
+                    "(panel cut to 0<DTE<=%d: %d -> %d rows)",
+                    len(overlay), overlay['ticker'].nunique(), MAX_DTE,
+                    len(opts), len(merged))
+        return merged
+    except Exception as e:  # noqa: BLE001 — never lose the EOD panel over an overlay
+        logger.warning("intraday options overlay skipped (%s) — EOD panel kept", e)
+        return opts
 
 
 REGIME_LATEST_FILE = ROOT / '.agents' / 'market-state' / 'regime_latest.json'
@@ -569,6 +654,9 @@ def load_aux_data(universe: list) -> dict:
 
             if 'date' in opts.columns:
                 opts['date'] = pd.to_datetime(opts['date'], errors='coerce')
+
+            # Tier-1 intraday overlay (three-tier ingestion, 2026-07-30).
+            opts = _inject_intraday_options(opts, today, universe)
 
             # Load earnings calendar for earnings_dte (S-HV17)
             _earnings_path = Path(__file__).resolve().parent.parent.parent / 'data' / 'master' / 'earnings.parquet'

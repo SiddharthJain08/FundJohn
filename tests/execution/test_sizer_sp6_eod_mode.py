@@ -142,6 +142,7 @@ class TestEodModeLoadsApprovedBypassesCadence:
     def test_cadence_pending_signal_not_skipped_gate_on(self, monkeypatch):
         """A carried signal with a future next_fire_date must NOT be skipped
         in EOD mode — it was already gated at 4PM[T] + 9:15AM pre-market."""
+        monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
         monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
 
         sharpe_cadence_calls = []
@@ -222,7 +223,8 @@ class TestEodModeLoadsApprovedBypassesCadence:
 
     def test_approved_loader_called_not_active_window_gate_on(self, monkeypatch):
         """_load_approved_carried_signals must be called (not _load_active_window_signals)
-        when OPENCLAW_EOD_RECONCILE=1."""
+        in the EOD signal-register lane."""
+        monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
         monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
 
         active_window_calls = []

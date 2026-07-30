@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +48,12 @@ CLI = os.environ.get('ALPACA_CLI_BIN', '/root/go/bin/alpaca')
 # (engine.load_aux_data term-structure bands), so 100 days covers both.
 MAX_DTE = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_DTE', '100'))
 PAGE_LIMIT = 500
+# Deepest measured chain (SPY, 2026-07-30) is ~15 pages; 24 leaves headroom
+# without letting one pathological underlying eat the wall-clock budget.
+MAX_PAGES = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_PAGES', '24'))
+# The fetch is network-bound, not CPU-bound, so the 2-core box tolerates more
+# in flight than it has cores. Keep it modest: these are subprocesses.
+WORKERS = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_WORKERS', '8'))
 _TIMEOUT = 45
 # OCC symbol: ROOT + YYMMDD + C/P + strike*1000 (8 digits).
 _OCC = re.compile(r'^(?P<root>[A-Z]+)(?P<y>\d{2})(?P<m>\d{2})(?P<d>\d{2})'
@@ -86,16 +93,21 @@ def _decode_occ(sym: str) -> dict | None:
     }
 
 
-def fetch_chain_rows(ticker: str, as_of: pd.Timestamp) -> list[dict]:
+def fetch_chain_rows(ticker: str, as_of: pd.Timestamp,
+                     row_ticker: str | None = None) -> list[dict]:
     """Today's chain for one underlying, shaped like options_eod columns.
 
     0-DTE is excluded (no greeks/IV from the provider); expiries beyond
-    MAX_DTE are not requested. Pages until exhausted."""
+    MAX_DTE are not requested. Pages until exhausted.
+
+    A CLI failure on the FIRST page raises: "the provider refused" and "this
+    underlying has no listed options" must not both surface as an empty list,
+    or an outage reads as a clean, empty ingest."""
     gte = (as_of + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
     lte = (as_of + pd.Timedelta(days=MAX_DTE)).strftime('%Y-%m-%d')
     rows: list[dict] = []
     page = None
-    for _ in range(40):  # hard page bound; a chain deeper than this is pathological
+    for _page_i in range(MAX_PAGES):
         args = ['data', 'option', 'chain', '--underlying-symbol', ticker,
                 '--expiration-date-gte', gte, '--expiration-date-lte', lte,
                 '--limit', str(PAGE_LIMIT)]
@@ -103,6 +115,11 @@ def fetch_chain_rows(ticker: str, as_of: pd.Timestamp) -> list[dict]:
             args += ['--page-token', page]
         payload = _run_cli(args)
         if not isinstance(payload, dict):
+            if _page_i == 0:
+                raise IntradayOptionsError(f'{ticker}: chain request failed')
+            # A mid-pagination failure keeps the pages already collected but
+            # is not silent — the driver records it as a truncated chain.
+            logger.warning('intraday_options: %s truncated at page %d', ticker, _page_i)
             break
         snaps = payload.get('snapshots') or {}
         for occ, snap in snaps.items():
@@ -113,7 +130,7 @@ def fetch_chain_rows(ticker: str, as_of: pd.Timestamp) -> list[dict]:
             daily = snap.get('dailyBar') or {}
             trade = snap.get('latestTrade') or {}
             rows.append({
-                'ticker': ticker,
+                'ticker': row_ticker or ticker,
                 'date': as_of.normalize(),
                 'expiry': dec['expiry'],
                 'strike': dec['strike'],
@@ -137,16 +154,115 @@ def fetch_chain_rows(ticker: str, as_of: pd.Timestamp) -> list[dict]:
     return rows
 
 
-def build_overlay(tickers, as_of: pd.Timestamp) -> pd.DataFrame:
+RAW_COLS = ['ticker', 'date', 'expiry', 'strike', 'option_type', 'open_interest',
+            'implied_volatility', 'delta', 'gamma', 'theta', 'vega', 'volume', 'close']
+
+
+def fetch_raw_frame(tickers, as_of: pd.Timestamp, budget_s: float | None = None,
+                    workers: int | None = None):
+    """Concurrent per-ticker chain fetch → (raw DataFrame, stats).
+
+    Returns rows in options_eod column shape so the LIVE engine can consume
+    them with ZERO changes to its field math: every derived field in
+    engine.load_aux_data keys off ``chain['date'].max()``, so today-dated raw
+    rows make the whole surface same-day by construction.
+
+    ``budget_s`` is a HARD global wall clock. When it expires the fetch stops
+    submitting and returns what it has: a partial overlay degrades to the EOD
+    panel per-ticker, whereas overrunning into the 15:00 compute would delay
+    execution itself. Every skipped ticker is counted in ``stats``, never
+    dropped quietly."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from ingestion.close_proxy_snapshot import _to_alpaca_equity
+
+    requested = list(dict.fromkeys(tickers))
+    # Symbol classes the provider has no underlying for (indices `^IXIC`,
+    # preferreds `T-PRC`, rights/warrants/units, FX). Requesting them yields a
+    # guaranteed 400 that would otherwise be counted as a fetch FAILURE and
+    # muddy the coverage signal the whole three-tier design depends on.
+    pairs = [(tk, _to_alpaca_equity(tk)) for tk in requested]
+    tickers = [(tk, sym) for tk, sym in pairs if sym]
+    workers = workers or WORKERS
+    t0 = time.monotonic()
+    stats = {'attempted': 0, 'ok': 0, 'empty': 0, 'failed': 0,
+             'skipped_budget': 0, 'requested': len(requested), 'rows': 0,
+             'skipped_class': len(pairs) - len(tickers), 'failed_sample': []}
+    frames: list[pd.DataFrame] = []
+
+    def _expired() -> bool:
+        return budget_s is not None and (time.monotonic() - t0) >= budget_s
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {}
+        it = iter(tickers)
+        submitted = 0
+
+        def _submit_next() -> bool:
+            nonlocal submitted
+            try:
+                tk, sym = next(it)
+            except StopIteration:
+                return False
+            pending[pool.submit(fetch_chain_rows, sym, as_of, tk)] = tk
+            submitted += 1
+            return True
+
+        for _ in range(workers):
+            if not _submit_next():
+                break
+        while pending:
+            done = next(as_completed(list(pending)))
+            tk = pending.pop(done)
+            stats['attempted'] += 1
+            try:
+                rows = done.result()
+            except Exception as exc:  # noqa: BLE001
+                stats['failed'] += 1
+                if len(stats['failed_sample']) < 10:
+                    stats['failed_sample'].append(f'{tk}: {str(exc)[:80]}')
+            else:
+                if rows:
+                    stats['ok'] += 1
+                    frames.append(pd.DataFrame(rows, columns=RAW_COLS))
+                else:
+                    stats['empty'] += 1
+            if not _expired():
+                _submit_next()
+        stats['skipped_budget'] = len(tickers) - submitted
+
+    stats['elapsed_s'] = round(time.monotonic() - t0, 1)
+    if stats['skipped_budget']:
+        logger.warning('intraday_options: wall-clock budget %ss expired — %d of '
+                       '%d tickers not requested', budget_s,
+                       stats['skipped_budget'], len(tickers))
+    df = (pd.concat(frames, ignore_index=True) if frames
+          else pd.DataFrame(columns=RAW_COLS))
+    stats['rows'] = len(df)
+    logger.info('intraday_options: %d rows / %d ok / %d empty / %d failed / '
+                '%d budget-skipped / %d non-optionable in %ss',
+                stats['rows'], stats['ok'], stats['empty'], stats['failed'],
+                stats['skipped_budget'], stats['skipped_class'], stats['elapsed_s'])
+    return df, stats
+
+
+def build_overlay(tickers, as_of: pd.Timestamp,
+                  raw: pd.DataFrame | None = None) -> pd.DataFrame:
     """Aggregate today's chains for `tickers` into per-(ticker, date) rows.
 
     Reuses build_options_aggregates._aggregate_day verbatim, so the intraday
-    surface and the historical panel are computed by ONE definition."""
+    surface and the historical panel are computed by ONE definition.
+
+    Pass ``raw`` (from fetch_raw_frame) to aggregate an already-fetched frame
+    instead of re-hitting the provider — the driver writes both artifacts from
+    a single fetch."""
     import sys
     sys.path.insert(0, str(ROOT / 'scripts'))
     from build_options_aggregates import _aggregate_day, OUT_COLS
 
     tickers = list(tickers)
+    if raw is None:
+        raw, _ = fetch_raw_frame(tickers, as_of)
     # `spot` must be the UNDERLYING price. _aggregate_day deliberately leaves
     # it None (chain['close'] is a CONTRACT price — using it produced ~$10
     # "spots" for SPY); intraday the hardened close-proxy snapshot IS the
@@ -160,14 +276,9 @@ def build_overlay(tickers, as_of: pd.Timestamp) -> pd.DataFrame:
                        'spot left NULL', exc)
 
     out_rows = []
-    for tk in tickers:
-        rows = fetch_chain_rows(tk, as_of)
-        if not rows:
-            logger.info('intraday_options: %s — no contracts returned', tk)
-            continue
-        df = pd.DataFrame(rows)
+    greeks = ['delta', 'gamma', 'theta', 'vega']
+    for tk, df in (raw.groupby('ticker') if not raw.empty else []):
         # Mirror the historical builder's degenerate-row drop.
-        greeks = ['delta', 'gamma', 'theta', 'vega']
         df = df[~(df[greeks].fillna(0) == 0).all(axis=1)]
         if df.empty:
             continue

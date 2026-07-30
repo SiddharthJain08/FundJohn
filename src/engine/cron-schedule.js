@@ -490,10 +490,38 @@ function start(swarm, generateId, notifyDiscord) {
         // coverage floor). The premarket gate/reconcile/sweep above stay
         // active in this mode — they protect the carried book premarket.
         if (sameDayExec) {
+            // 14:30 ET — TIER 1: fetch everything the ACTING strategies consume,
+            // fresh, before the compute reads it (three-tier ingestion). Its own
+            // job, not a step in the 15:00 chain: an overrun here leaves a
+            // partial overlay and the engine falls back per-ticker to the EOD
+            // panel, whereas an overrun inside the chain delays execution and
+            // can trip the 15:55 "no sized handoff" abort — a silent no-trade
+            // day. Measured 2026-07-30: 5,173 tickers in 294s, so --budget 900
+            // still lands ~15 min before the compute.
+            cron.schedule('30 14 * * 1-5', () => {
+                log('tier-1 acting-set ingest (2:30pm ET): options chains for the acting universe');
+                try {
+                    const fs = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `acting_ingest_${today}.log`), 'a');
+                    const child = spawn(PYTHON, ['scripts/run_acting_ingest.py',
+                                                 '--date', today, '--budget', '900'], {
+                        cwd: ROOT, env: { ...process.env },
+                        detached: true, stdio: ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`tier-1 ingest spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`tier-1 ingest spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+
             // 15:00 ET — compute: sentiment → signals(proxy) → gates → sized
             // handoff. NO full collect in the critical path (67-min aux
-            // collection is the 16:15 slot's job; tier-1 acting-set aux
-            // adapters land separately — see acting_ingest_plan).
+            // collection is the 16:15 slot's job; the tier-1 overlay above is
+            // what makes the aux the engine reads same-day).
             cron.schedule('0 15 * * 1-5', () => {
                 log('same-day compute (3:00pm ET): sentiment → signals → ic_gate → handoff → trade');
                 dispatchCycle('sameday-compute',

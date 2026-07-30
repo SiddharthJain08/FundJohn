@@ -68,13 +68,18 @@ def _to_alpaca_equity(ticker: str) -> str | None:
     Alpaca equity snapshot: indices `^`, futures/FX `=`, crypto `-USD`,
     preferred shares (`CMS-PRC`), rights/warrants/units (`X-RT`/`X-WS`/
     `X-UN`), and multi-letter dot suffixes (`DX-Y.NYB`). Sending any of
-    these poisons its whole multi-snapshot chunk with a 400."""
+    these poisons its whole multi-snapshot chunk with a 400.
+
+    Both separators carry these classes: master prices holds `ACHR.WS` and
+    `AXIA.PR` alongside the dash forms, and a 2-char dot suffix slipped
+    through the length rule below (found 2026-07-30 via the options chain
+    feed, which rejects the same symbols)."""
     t = (ticker or "").strip().upper()
     if not t or t.startswith("^") or "=" in t or t.endswith("-USD"):
         return None
-    if re.search(r"-PR[A-Z]?$", t):
+    if re.search(r"[-.]PR[A-Z]?$", t):
         return None
-    if re.search(r"-(RT|WS|WSA|UN?)$", t):
+    if re.search(r"[-.](RT|WS|WSA|UN?)$", t):
         return None
     if "." in t and len(t.rsplit(".", 1)[-1]) > 2:
         return None

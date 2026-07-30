@@ -58,6 +58,36 @@ def load_requirements(strategy_id: str) -> dict:
         return {'required': ['prices'], 'optional': []}
 
 
+class IngestPlanError(RuntimeError):
+    """Raised when a plan cannot be scoped — never returned as an empty plan."""
+
+
+def base_universe(cur=None) -> list[str]:
+    """The set the SP-7 resolver clamps against: every ticker in master
+    prices — engine parity (`engine.run_engine` logs "Universe from master
+    prices: 12541" then "union 5173 tickers" after the resolver).
+
+    The registry's `universe` column is deliberately NOT used: it holds
+    symbolic labels ('SP500', 'FixedETFlist:SPY,EFA,...'), not tickers, which
+    is why the engine falls through to the parquet-derived set.
+
+    Load-bearing, not a nicety: ``build_strategy_universes`` INTERSECTS each
+    predicate with this base and is documented to return ``universe ⊆
+    fallback``. Called with an empty base it returns an empty universe for
+    every strategy with ``error=None`` and ``adopted=True`` — a zero-ticker
+    plan that looks successful (found 2026-07-30: the redeploy preflight had
+    been resolving to nothing since it shipped)."""
+    try:
+        import pyarrow.parquet as pq
+        path = ROOT / 'data' / 'master' / 'prices.parquet'
+        col = pq.read_table(path, columns=['ticker']).column('ticker')
+        return sorted(set(col.to_pylist()))
+    except Exception as exc:  # noqa: BLE001
+        logger.error('acting_ingest_plan: could not derive a base universe '
+                     'from master prices (%s)', exc)
+        return []
+
+
 def resolve_acting_set(cur, regime_state: str) -> list[str]:
     """Strategies that will ACT under ``regime_state``: registry
     status='approved' filtered by the regime eligibility gate — the exact
@@ -65,9 +95,12 @@ def resolve_acting_set(cur, regime_state: str) -> list[str]:
     + regime_gate.is_eligible). Weights are NOT consulted: a zero-weighted
     eligible strategy still computes signals, so its data must be fresh."""
     from strategies.regime_gate import is_eligible
-    cur.execute("SELECT strategy_id FROM strategy_registry WHERE status = 'approved'")
-    approved = [r[0] if not isinstance(r, dict) else r['strategy_id']
-                for r in cur.fetchall()]
+    # The strategy id column is `id`, not `strategy_id` — same SELECT the
+    # engine issues (engine.load_approved_strategies). The mismatch made every
+    # caller fall into its non-blocking except branch, so the redeploy
+    # preflight logged "failed" instead of a plan (found 2026-07-30).
+    cur.execute("SELECT id FROM strategy_registry WHERE status = 'approved'")
+    approved = [r['id'] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
     return [sid for sid in approved if is_eligible(sid, regime_state)]
 
 
@@ -95,7 +128,13 @@ def resolve_ingest_plan(cur, regime_state: str, run_date,
                 'categories': {}, 'marketwide': [], 'consumers': {}}
 
     from execution.live_universe import build_strategy_universes
-    fallback = list(fallback_universe or [])
+    fallback = list(fallback_universe or base_universe())
+    if not fallback:
+        raise IngestPlanError(
+            'acting_ingest_plan: base universe is EMPTY — build_strategy_universes '
+            'INTERSECTS its predicate with this set, so the plan would resolve to '
+            'zero tickers in every category and tier-1 would ingest nothing while '
+            'reporting success')
     try:
         built = build_strategy_universes(acting, run_date, fallback)
     except Exception as exc:
@@ -119,6 +158,12 @@ def resolve_ingest_plan(cur, regime_state: str, run_date,
                 marketwide.add(cat)
             else:
                 categories.setdefault(cat, set()).update(uni)
+
+    for cat, tickers in categories.items():
+        if not tickers:
+            logger.error('acting_ingest_plan: category %s has CONSUMERS (%s) but '
+                         'resolved to zero tickers — tier-1 would skip it silently',
+                         cat, ','.join(consumers.get(cat, [])[:5]))
 
     return {
         'regime_state': regime_state,
