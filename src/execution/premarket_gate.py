@@ -42,6 +42,29 @@ from sentiment.sonnet_premarket_confirmer import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
+def _ensure_logging() -> None:
+    """Give the root logger a handler when we're the entry point.
+
+    cron-schedule.js spawns this module as `python -c "... run_gate()"`, so
+    there is no __main__ block to hang a basicConfig on (open_reconcile.py has
+    one; that is why its log file has content and ours did not). Without a
+    handler every logger.info here is discarded and the daily
+    premarket_gate_<date>.log is created 0 bytes — which is exactly how the
+    2026-07-30 news blackout stayed invisible: the gate APPROVED all four held
+    names on zero news rows and said nothing.
+
+    No-op if anything already configured logging, so importers and tests keep
+    their own handlers.
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    )
+
+
 ENV_GATE = 'OPENCLAW_EOD_PREMARKET_GATE'
 ENV_SAMEDAY = 'OPENCLAW_SAMEDAY_EXEC'
 ENV_SAMEDAY_PROTECT = 'OPENCLAW_SAMEDAY_PREMARKET_PROTECT'
@@ -296,6 +319,7 @@ def run_gate(conn=None, broker_loader=None) -> dict:
     - If conn is None (production), a new connection is opened, committed, and
       closed by run_gate.
     """
+    _ensure_logging()
     if not is_enabled():
         logger.info('%s not set; gate disabled — returning no-op', ENV_GATE)
         return {
@@ -353,6 +377,28 @@ def run_gate(conn=None, broker_loader=None) -> dict:
                 )
                 errors.append(f'news_score_error: {str(exc)[:120]}')
                 # news_by_ticker stays empty → panic_score=0 → APPROVED
+
+            # An EMPTY result is not an error, so the branch above never fires
+            # for it — but it is operationally identical to one: every subject
+            # scores panic 0.0 and is APPROVED because we had nothing to read,
+            # not because we looked and found calm. Measured 2026-07-30: the
+            # gate held BLD/CBK/JAN/SNDK on zero rows. `sentiment` only runs in
+            # the 15:00/16:15 ET compute chain, always AFTER this 13:15Z gate,
+            # so we depend entirely on the PREVIOUS session's fetch landing
+            # inside the 18h lookback; on 07-27, 07-29 and 07-30 it did not.
+            # Report it loudly — see feedback_silent_failure_pattern: "asked
+            # and absent" must never look like "couldn't ask".
+            if tickers and not news_by_ticker:
+                logger.warning(
+                    'news window EMPTY for all %d subject(s) since %s — every '
+                    'verdict below is fail-open APPROVED on NO DATA, not on '
+                    'observed calm. Check that the sentiment step ran.',
+                    len(tickers), window_start.isoformat(timespec='minutes'),
+                )
+                errors.append(
+                    f'news_window_empty: 0 rows for {len(tickers)} subject(s) '
+                    f'since {window_start.isoformat(timespec="minutes")} — '
+                    'verdicts are fail-open, gate could not veto')
 
             # ── Per-signal scoring + verdict ─────────────────────────────────
             approved_at = datetime.now(timezone.utc)
