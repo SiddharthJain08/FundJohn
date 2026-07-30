@@ -1,6 +1,7 @@
-"""Entry-hygiene gate (fix 5, 2026-07-27): stop-out cooldown + liquidity floor
-+ ADV participation cap, applied to targets with only-shed semantics — exits
-are never blocked. All inputs injectable; no DB/artifact access in tests."""
+"""Entry-hygiene gate (fix 5, 2026-07-27): stop-out cooldown + risk-exit
+cooldown + pre-market veto + liquidity floor + ADV participation cap, applied
+to targets with only-shed semantics — exits are never blocked. All inputs
+injectable; no DB/artifact access in tests."""
 import importlib
 
 import pytest
@@ -16,16 +17,22 @@ def _hygiene_enabled(monkeypatch):
 
 PARAMS = {
     'stopout_cooldown_days': 7.0,
+    'risk_exit_cooldown_days': 7.0,
     'entry_min_price_usd': 2.0,
     'entry_min_adv_usd': 400_000.0,
     'entry_participation_frac': 0.01,
 }
 
 
-def _gate(target, broker, *, stopouts=None, liq=None):
+def _gate(target, broker, *, stopouts=None, liq=None, risk_exits=None,
+          premarket_vetoes=None):
+    # Every lookup is injected: an omitted one falls through to the REAL
+    # Postgres on this box (modules under src/execution load .env at import),
+    # which would make these unit tests depend on live risk state.
     return rbs._apply_entry_hygiene_gate(
         dict(target), broker,
-        stopouts=stopouts or {}, liq=liq or ({}, {}), params=dict(PARAMS))
+        stopouts=stopouts or {}, liq=liq or ({}, {}), params=dict(PARAMS),
+        risk_exits=risk_exits or {}, premarket_vetoes=premarket_vetoes or set())
 
 
 # ── stop-out cooldown ────────────────────────────────────────────────────────
@@ -123,3 +130,49 @@ def test_kill_switch(monkeypatch):
         {"CENN": -3000.0}, {}, stopouts={"CENN": -1},
         liq=({}, {}), params=dict(PARAMS))
     assert out["CENN"] == -3000.0
+
+
+# ── risk-exit cooldown: circuit-breaker fires + forced liquidations ──────────
+# Operator item from 2026-07-29: the breaker closed 8 of 10 SNDK for risk at
+# 13:40Z and the SAME afternoon's 15:00 chain re-bought 5 (avg entry
+# 1292 -> 1083). The stop-out cooldown could not have caught it — a PARTIAL
+# flatten leaves signal_pnl 'open', so no close_reason is ever written.
+
+def test_risk_exit_blocks_same_direction_reentry_from_flat():
+    out = _gate({"SNDK": 7000.0}, {}, risk_exits={"SNDK": 1})
+    assert "SNDK" not in out
+
+
+def test_risk_exit_caps_an_add_at_the_held_size():
+    """The SNDK case exactly: 2 sh left after a partial flatten, chain wants 7.
+    Only-shed — we never force an exit, we just refuse to grow the risk."""
+    out = _gate({"SNDK": 7000.0}, {"SNDK": 2000.0}, risk_exits={"SNDK": 1})
+    assert out["SNDK"] == 2000.0
+
+
+def test_risk_exit_allows_opposite_direction():
+    """A breaker fire says 'this LONG lost'; a short is a different trade —
+    same reasoning as the stop-out cooldown."""
+    out = _gate({"SNDK": -7000.0}, {}, risk_exits={"SNDK": 1})
+    assert out["SNDK"] == -7000.0
+
+
+def test_risk_exit_never_blocks_an_exit():
+    out = _gate({"SNDK": 0.0}, {"SNDK": 5000.0}, risk_exits={"SNDK": 1})
+    assert out["SNDK"] == 0.0
+
+
+def test_risk_exit_forces_close_only_on_a_flip():
+    out = _gate({"SNDK": 5000.0}, {"SNDK": -3000.0}, risk_exits={"SNDK": 1})
+    assert out["SNDK"] == 0.0
+
+
+def test_risk_exit_is_independent_of_the_stopout_window():
+    """Distinct knob: an operator lengthening one must not move the other."""
+    assert 'risk_exit_cooldown_days' in rbs._ENTRY_HYGIENE_DEFAULTS
+    assert 'stopout_cooldown_days' in rbs._ENTRY_HYGIENE_DEFAULTS
+
+
+def test_untouched_tickers_pass_through():
+    out = _gate({"MSFT": 5000.0}, {}, risk_exits={"SNDK": 1})
+    assert out == {"MSFT": 5000.0}

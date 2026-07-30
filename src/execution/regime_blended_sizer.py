@@ -1820,6 +1820,10 @@ def _apply_net_exposure_cap(target_usd, max_net_frac=None):
 
 _ENTRY_HYGIENE_DEFAULTS = {
     'stopout_cooldown_days': 7.0,        # calendar days (~5 trading)
+    # Circuit-breaker fires and forced liquidations, in calendar days. Separate
+    # knob from the stop-out window so the operator can tune the two risk-exit
+    # classes independently; same default.
+    'risk_exit_cooldown_days': 7.0,
     'entry_min_price_usd': 2.0,
     'entry_min_adv_usd': 400_000.0,
     'entry_participation_frac': 0.01,    # 1% of median daily dollar volume
@@ -1843,6 +1847,56 @@ def _load_entry_hygiene_params() -> dict:
                     pass
     except Exception:
         pass
+    return out
+
+
+def _load_recent_risk_exits(days: float) -> dict:
+    """{ticker: +1/-1 direction} for CIRCUIT-BREAKER fires and forced
+    liquidations in the window — the risk exits that leave no usable
+    close_reason.
+
+    WHY NOT close_reason (operator item, 2026-07-29): the breaker closed 8 of
+    10 SNDK for risk at 13:40Z and the 15:00 chain re-bought 5 the same
+    afternoon (avg entry 1292 -> 1083). The stop-out cooldown could never have
+    caught it — a PARTIAL flatten leaves signal_pnl 'open', so no close_reason
+    is written at all. Measured: one `circuit_breaker` close_reason row in the
+    last 60 days, dated 07-01, while the breaker fired repeatedly on 07-28/29.
+    `circuit_breaker_fires` is the authoritative record; its `position_qty` is
+    signed, which is the direction we need.
+
+    FAILED fires count. A 403 "insufficient qty" fire still means the position
+    breached the loss threshold — adding to it is exactly the behaviour the
+    cooldown exists to stop. DRY-RUN rows do NOT: nothing was exited.
+
+    Fail-open ({}) on any error, matching _load_recent_stopouts."""
+    out: dict = {}
+    try:
+        import psycopg2
+        with psycopg2.connect(os.environ['POSTGRES_URI']) as c, c.cursor() as cur:
+            cur.execute('''
+                SELECT ticker, position_qty
+                FROM circuit_breaker_fires
+                WHERE ts_utc >= NOW() - (%s || ' days')::interval
+                  AND COALESCE(close_result_json->>'dry_run', 'false') <> 'true'
+                  AND position_qty IS NOT NULL
+                  AND position_qty <> 0
+            ''', (int(max(1, days)),))
+            for tkr, qty in cur.fetchall():
+                out[tkr] = 1 if float(qty) > 0 else -1
+            # Forced liquidations (operator-only since the 2026-05-19 redeploy
+            # switch). side_closed names the side that WAS held.
+            cur.execute('''
+                SELECT symbol, side_closed
+                FROM alpaca_liquidations
+                WHERE triggered_at >= NOW() - (%s || ' days')::interval
+                  AND result_status IN ('closed', 'filled')
+            ''', (int(max(1, days)),))
+            for sym, side in cur.fetchall():
+                out[sym] = -1 if str(side or '').startswith('short') else 1
+    except Exception as e:  # noqa: BLE001
+        logger.warning('entry_hygiene: risk-exit lookup failed (%s) — '
+                       'breaker/liquidation cooldown skipped', e)
+        return {}
     return out
 
 
@@ -1912,12 +1966,17 @@ def _load_premarket_vetoes():
 
 
 def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, params=None,
-                              premarket_vetoes=None):
-    """Apply premarket veto + cooldown + liquidity floor + participation cap to
+                              premarket_vetoes=None, risk_exits=None):
+    """Apply premarket veto + cooldowns + liquidity floor + participation cap to
     targets. Only-shed semantics per blocked ticker: not held → target dropped;
     flip → close-only; same-sign increase → capped at held size. The
     participation cap reduces target magnitude to max(cap, |held|). Inputs
     injectable for tests.
+
+    Three cooldown classes, all same-direction-only except the news veto:
+      premarket veto  — this name is dangerous TODAY (direction-agnostic)
+      stop-out        — this side of this name just hit its stop
+      risk exit       — the circuit breaker fired on it, or it was liquidated
 
     The premarket veto is what makes pre-market protection actually protective.
     Without it the 09:25 reconcile closes a news-vetoed position at the open and
@@ -1932,11 +1991,15 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
         stopouts = _load_recent_stopouts(params['stopout_cooldown_days'])
     if premarket_vetoes is None:
         premarket_vetoes = _load_premarket_vetoes()
+    if risk_exits is None:
+        risk_exits = _load_recent_risk_exits(
+            params.get('risk_exit_cooldown_days',
+                       _ENTRY_HYGIENE_DEFAULTS['risk_exit_cooldown_days']))
     if liq is None:
         liq = _load_liquidity_stats()
     adv, px = liq if liq else ({}, {})
     out = dict(target_usd)
-    cooled, illiquid, part_capped, vetoed = [], [], [], []
+    cooled, illiquid, part_capped, vetoed, risk_cooled = [], [], [], [], []
 
     def _shed(tkr):
         target, current = out[tkr], broker.get(tkr, 0.0)
@@ -1960,6 +2023,11 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
             _shed(tkr)
             cooled.append(tkr)
             continue
+        risk_dir = risk_exits.get(tkr)
+        if risk_dir and (target > 0) == (risk_dir > 0) and target != 0.0:
+            _shed(tkr)
+            risk_cooled.append(tkr)
+            continue
         if tkr in adv and (float(adv.get(tkr) or 0.0) < params['entry_min_adv_usd']
                            or float(px.get(tkr) or 0.0) < params['entry_min_price_usd']):
             _shed(tkr)
@@ -1973,12 +2041,13 @@ def _apply_entry_hygiene_gate(target_usd, broker, *, stopouts=None, liq=None, pa
             if abs(target) > limit + 0.01:
                 out[tkr] = (1.0 if target > 0 else -1.0) * limit
                 part_capped.append(tkr)
-    if cooled or illiquid or part_capped or vetoed:
+    if cooled or illiquid or part_capped or vetoed or risk_cooled:
         logger.warning(
             'regime_blended_sizer.entry_hygiene: premarket-veto blocked=%s, '
-            'stop-out cooldown blocked=%s, liquidity floor blocked=%s, '
-            'participation-capped=%s',
-            sorted(vetoed), sorted(cooled), sorted(illiquid), sorted(part_capped))
+            'stop-out cooldown blocked=%s, risk-exit cooldown blocked=%s, '
+            'liquidity floor blocked=%s, participation-capped=%s',
+            sorted(vetoed), sorted(cooled), sorted(risk_cooled),
+            sorted(illiquid), sorted(part_capped))
     return out
 
 
