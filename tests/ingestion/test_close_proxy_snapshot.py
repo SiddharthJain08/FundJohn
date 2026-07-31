@@ -1,15 +1,48 @@
 """tests/test_close_proxy_snapshot.py — close[t]-proxy snapshot util (mock-only)."""
 from __future__ import annotations
 import json
+import subprocess
 import sys
 import types
 import unittest
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / 'src'))
 from ingestion import close_proxy_snapshot as cps  # noqa: E402
 from ingestion.close_proxy_snapshot import fetch_close_proxy, CloseProxyError  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _restore_subprocess_run():
+    """Undo this file's `cps.subprocess.run = ...` stubs after every test.
+
+    close_proxy_snapshot does a plain `import subprocess`, so `cps.subprocess`
+    IS the global module object — `cps.subprocess.run = fake` rebinds
+    subprocess.run for the ENTIRE pytest process, not just this module
+    (verified: `cps.subprocess is subprocess` -> True). Nothing here restored
+    it, so whichever stub ran last leaked into every later test that shells
+    out.
+
+    That was the whole cross-suite failure: running
+    `tests/ingestion/ tests/execution/ tests/system_checks/` together left the
+    line-184 stub ("warning: using cached creds\\n{SPY...}") installed, and 15
+    downstream tests in test_option_hedge / test_orchestrator_* /
+    test_papermint_coverage_check / test_universe_shadow_parity_check /
+    test_dry_run_dataflow got that canned SPY snapshot back from their own
+    subprocess.run calls instead of real output. All 39 passed in isolation,
+    which is what made it look environmental for so long.
+
+    Autouse so it also covers the unittest.TestCase classes below.
+    """
+    original = subprocess.run
+    try:
+        yield
+    finally:
+        subprocess.run = original
+        cps.subprocess.run = original
 
 
 def _fake_run(stdout: str = "", rc: int = 0, capture: dict | None = None):

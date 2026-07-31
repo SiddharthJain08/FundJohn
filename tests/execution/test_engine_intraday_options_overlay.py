@@ -22,8 +22,20 @@ sys.path.insert(0, str(ROOT / 'src'))
 from execution import engine  # noqa: E402
 from ingestion import intraday_options as io_mod  # noqa: E402
 
-TODAY = pd.Timestamp('2026-07-30').normalize()
-YDAY = pd.Timestamp('2026-07-29').normalize()
+# MUST be the real current date, not a pinned one. `_inject_intraday_rows`
+# derives its own `today` from pd.Timestamp.today() (engine.py:413) and looks
+# for an overlay at that path, so a pinned TODAY stops matching the moment the
+# clock rolls over. Pinned at '2026-07-30' this file silently rotted overnight:
+# 3 tests failed and — worse — the other 18 kept passing VACUOUSLY, because
+# "no overlay found" returns the master unchanged, which is exactly what the
+# master-wins assertions expect. Keep this dynamic.
+TODAY = pd.Timestamp.today().normalize()
+# Derived, not pinned: these tests assert on the TODAY-vs-prior-session
+# relationship (expiry == TODAY must lose nearest_expiry, dte_today > 0), so
+# YDAY has to stay exactly one day behind TODAY. Pinned at '2026-07-29' it
+# drifted to TODAY-2 as soon as the date rolled and the band arithmetic moved
+# with it.
+YDAY = TODAY - pd.Timedelta(days=1)
 
 
 def _row(ticker, date, dte, iv=0.20, delta=0.5):
