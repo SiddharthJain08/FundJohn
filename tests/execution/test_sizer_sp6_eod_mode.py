@@ -181,6 +181,10 @@ class TestEodModeLoadsApprovedBypassesCadence:
         Without this guard, a vetoed handoff would silently re-enter the sizer
         via the legacy fallback. The flatten path belongs to run_reconcile (Task 8b).
         """
+        # Both flags, matching real EOD mode and this class's sibling tests. The
+        # EOD lane keys on SIGNAL_REGISTER; RECONCILE alone is ALSO true in
+        # same-day mode (2026-07-31 lane fix).
+        monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
         monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
 
         sharpe_cadence_calls = []

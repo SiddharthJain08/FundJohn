@@ -14,9 +14,33 @@ Output format: payload['orders'] shape:
 alpaca_executor reads payload['orders']; strategy_id drives the
 already_executed() idempotency check.
 """
-import argparse, json, math, os, sys
+import argparse, json, logging, math, os, sys
 from datetime import date
 from pathlib import Path
+
+
+def _ensure_logging() -> None:
+    """Give the root logger a handler when we're the entry point.
+
+    This module is the pipeline's `trade` step and is spawned as a bare
+    script, so nothing had ever configured logging — every logger.info /
+    logger.warning in regime_blended_sizer.py went to a handler-less root
+    logger and was DISCARDED. Only the print() lines survived, which is why
+    production showed a bare `size_positions produced 0 orders` with no
+    reason, and why the 2026-07-30/31 no-trade days needed archaeology to
+    diagnose (the cadence-skip counts, the corr-cumsharpe S_adj distribution
+    and rec_floor, and the weights-gap alert were all being written and
+    thrown away).
+
+    Same defect and same fix as premarket_gate._ensure_logging (b464747).
+    Idempotent: if a caller already configured handlers we leave them alone,
+    so importing this module from a test or another entry point is unaffected.
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        level=os.environ.get('OPENCLAW_SIZER_LOG_LEVEL', 'INFO').upper(),
+        format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
 
 def _finite(x) -> bool:
@@ -447,6 +471,7 @@ def _resolve_account_or_none(session_fn=None, fetch_fn=None):
 
 
 def main():
+    _ensure_logging()
     ap = argparse.ArgumentParser(
         description='Phase 3 LIVE sizer — use regime_blended_sizer',
     )

@@ -112,6 +112,9 @@ def _run_sizer_eod(monkeypatch, signals, broker=None, account=None, params=None,
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals',
                         lambda wbs, cad=None, **_kw: list(signals))
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker))
+    # EOD lane = SIGNAL_REGISTER (timing model), not RECONCILE (also 1 in
+    # same-day mode). See the 2026-07-31 lane fix in regime_blended_sizer.
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     monkeypatch.delenv('OPENCLAW_OPTION_DELTA_HEDGE', raising=False)
     with _mock.patch('execution.strategy_weights.load_current', return_value=weight_rows):

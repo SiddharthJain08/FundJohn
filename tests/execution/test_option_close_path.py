@@ -284,6 +284,12 @@ def _run_sizer_eod(monkeypatch, signals, broker=None, min_cum_sharpe=0.0):
                     'cadence_days': 1.0} for sid, (w, sh) in seen.items()]
     monkeypatch.setattr(_sizer, '_load_approved_carried_signals', lambda wbs, cad=None, **_kw: list(signals))
     monkeypatch.setattr(_sizer, '_load_broker_positions_usd', lambda: dict(broker))
+    # The EOD lane is defined by SIGNAL_REGISTER (the timing model), not by
+    # RECONCILE (which only means "the premarket reconcile job is enabled" and
+    # is ALSO 1 in same-day mode). Real EOD mode sets both; this fixture drove
+    # _load_approved_carried_signals while setting only RECONCILE, so it passed
+    # for the wrong reason until the 2026-07-31 lane fix.
+    monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '1')
     monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
     monkeypatch.delenv('OPENCLAW_OPTION_DELTA_HEDGE', raising=False)
     with _mock.patch('execution.strategy_weights.load_current', return_value=weight_rows):

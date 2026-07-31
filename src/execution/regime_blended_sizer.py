@@ -1312,14 +1312,33 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # and accumulate into the overlap. Still APPROVED-only — see the invariants
     # in _load_approved_carried_signals. Gate OFF is the legacy
     # _load_active_window_signals call, unchanged.
-    if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+    #
+    # 2026-07-31: these three branches used to be spelled
+    # `OPENCLAW_EOD_RECONCILE == '1'` — the exact conflation d573e45 (2026-07-29)
+    # fixed in regime_blended_sizer_live.py but never propagated HERE. The
+    # wrapper's own comment predicted the failure verbatim: "Keying off
+    # OPENCLAW_EOD_RECONCILE here would send the same-day chain down the
+    # self-load branch and size an EMPTY carried set against a live book."
+    # That is precisely what happened. MEASURED 2026-07-31:
+    #   • the same-day 15:00 chain writes execution_signals as COMPUTED, and
+    #     NOTHING in same-day mode ever writes APPROVED — premarket_gate is the
+    #     only APPROVED writer and in protect mode it scores the BOOK ("the
+    #     signal register is empty every morning in this mode"), ic_gate is
+    #     default-OFF;
+    #   • so this branch self-loaded a set the lane never writes and returned []
+    #     every day, surviving only on the decaying 07-27 EOD-era approval
+    #     inventory: 121 in-window on 07-30 -> 6 on 07-31 -> ~1 next;
+    #   • 0 orders => no <date>_sized.json => the 15:55 executor aborts. No
+    #     alpaca_submissions rows at all for 07-30 or 07-31.
+    # In EOD mode BOTH flags are 1, so that lane is byte-identical.
+    if _eod_signal_register_lane():
         active = _load_approved_carried_signals(weight_by_strat, cadence_by_strat,
                                                 regime_state=regime_state)
     else:
         # Fix A: aggregate across cadence-window, not today-only.
         active = _load_active_window_signals(regime_state, weight_by_strat, cadence_by_strat)
     if not active:
-        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        if _eod_signal_register_lane():
             # EOD mode: an empty APPROVED set means every carried signal was
             # vetoed (or none were computed). Do NOT fall back to the handoff
             # signals — those may contain COMPUTED/legacy rows the pre-market
@@ -1334,7 +1353,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
         active = signals or []
         logger.info('regime_blended_sizer.sharpe_cadence: active-window empty, using today\'s signals (%d)', len(active))
     else:
-        if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1':
+        if _eod_signal_register_lane():
             logger.info('regime_blended_sizer.sharpe_cadence: EOD mode — %d APPROVED carried signals', len(active))
         else:
             logger.info('regime_blended_sizer.sharpe_cadence: %d active-window signals across all cadences', len(active))
