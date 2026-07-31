@@ -146,11 +146,9 @@ def _drive_two(monkeypatch, gate_on: bool):
         )
 
 
-@pytest.mark.xfail(
-    reason="stale vs 130617f revert(brackets): stacked combine went back to "
-           "min-stop / max-take, this test still asserts the eff-Sharpe "
-           "weighted mean — operator to either update expectations or re-flip",
-    strict=False)
+# xfail removed 2026-07-31: the marker said "operator to either update
+# expectations or re-flip" — the operator re-flipped, so the eff-Sharpe
+# weighted mean this test asserts is live again and the test must hold.
 def test_stacked_combine_weights_normalized_stops(monkeypatch):
     import math
 

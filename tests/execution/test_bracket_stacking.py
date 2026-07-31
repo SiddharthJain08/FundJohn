@@ -26,7 +26,7 @@ def test_single_block_returns_top_sharpe_rep_not_max_weight():
     assert math.isclose(out['stop'], 94.0, rel_tol=1e-9)
 
 
-def test_two_uncorrelated_blocks_min_stop_max_take():
+def test_two_uncorrelated_blocks_sharpe_weighted_mean():
     cands = [
         _b('A', 1, 5.0, 100.0, 98.0, 105.0),    # block 1: stop 2%, tp 5%
         _b('B', 1, 5.0, 100.0, 96.0, 105.0),    # block 2: stop 4%, tp 5%
@@ -34,14 +34,14 @@ def test_two_uncorrelated_blocks_min_stop_max_take():
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
     assert out['n_blocks'] == 2
-    # stop = min(2%, 4%) = 2%; tp = max(5%, 5%) = 5%.
+    # ω = (2/3, 1/3): stop = 2%·⅔ + 4%·⅓ = 8/3 %; tp = 5% (both agree).
     assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
-    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 100.0 * (1.0 - (0.08 / 3.0)), rel_tol=1e-9)
 
 
-def test_min_stop_max_take_across_three_blocks():
-    # Takes (3%, 5%, 4%) -> MAX = 5% (not mean 4%, not sum 12%);
-    # stops (1%, 2%, 3%) -> MIN = 1% (tightest risk envelope wins).
+def test_tp_total_is_sharpe_weighted_mean_across_blocks():
+    # Three equal-Sharpe blocks (takes 3%, 5%, 4%) -> mean = 4% (not max 5%,
+    # not sum 12%); stops (1%, 2%, 3%) -> mean = 2%.
     cands = [
         _b('A', 1, 1.0, 100.0, 99.0, 103.0),    # block 1: stop 1%, tp 3%
         _b('B', 1, 1.0, 100.0, 98.0, 105.0),    # block 2: stop 2%, tp 5%
@@ -51,9 +51,9 @@ def test_min_stop_max_take_across_three_blocks():
                              block_map={'A': 1, 'B': 2, 'C': 3},
                              eff_sharpe={'A': 1.0, 'B': 1.0, 'C': 1.0})
     assert out['n_blocks'] == 3
-    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
-    assert math.isclose(out['stop'], 99.0, rel_tol=1e-9)
-    assert 'max-of-blocks' in out['why'] and 'min-of-blocks' in out['why']
+    assert math.isclose(out['t1'], 104.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
+    assert 'sharpe-wtd' in out['why']
 
 
 def test_short_side_mirrors_long():
@@ -63,14 +63,14 @@ def test_short_side_mirrors_long():
     ]
     out = bs.stacked_bracket(cands, -1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
-    # Short: tp = max(5%, 5%) -> t1 = 95; stop = min(2%, 3%) -> 102 (tightest).
+    # ω = (2/3, 1/3): tp = 5% -> t1 = 95 (short); stop = 2%·⅔ + 3%·⅓ = 7/3 %.
     assert math.isclose(out['t1'], 95.0, rel_tol=1e-9)
-    assert math.isclose(out['stop'], 102.0, rel_tol=1e-9)
+    assert math.isclose(out['stop'], 100.0 * (1.0 + (0.07 / 3.0)), rel_tol=1e-9)
 
 
 def test_ungrouped_strategies_are_singleton_blocks():
-    # No block_map entries -> each is its own singleton block -> min/max
-    # combine across the two.
+    # No block_map entries -> each is its own singleton block -> equal-Sharpe
+    # weighted mean across the two.
     cands = [
         _b('A', 1, 1.0, 100.0, 98.0, 105.0),
         _b('B', 1, 1.0, 100.0, 97.0, 105.0),
@@ -78,33 +78,30 @@ def test_ungrouped_strategies_are_singleton_blocks():
     out = bs.stacked_bracket(cands, 1, block_map={}, eff_sharpe={'A': 1.0, 'B': 1.0})
     assert out['n_blocks'] == 2
     assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)   # both takes 5%
-    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)  # min of 2%/3% gaps
+    assert math.isclose(out['stop'], 97.5, rel_tol=1e-9)  # mean of 2%/3%
 
 
-def test_negative_sharpe_rep_still_bounds_the_envelope():
-    # Sharpe picks reps WITHIN a block and the anchor, but every block rep's
-    # levels participate in the min/max combine — a negative-Sharpe block
-    # still widens the take and can tighten the stop.
+def test_negative_sharpe_rep_gets_zero_exit_influence():
+    # B has negative eff Sharpe -> ω_B = 0 -> bracket is A's alone.
     cands = [
         _b('A', 1, 1.0, 100.0, 98.0, 105.0),    # stop 2%, tp 5%
-        _b('B', 1, 1.0, 100.0, 90.0, 130.0),    # stop 10%, tp 30%
+        _b('B', 1, 1.0, 100.0, 90.0, 130.0),    # stop 10%, tp 30% (ignored)
     ]
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 1.5, 'B': -2.0})
-    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)   # min(2%, 10%) = 2%
-    assert math.isclose(out['t1'], 130.0, rel_tol=1e-9)    # max(5%, 30%) = 30%
-    assert math.isclose(out['entry'], 100.0, rel_tol=1e-9) # anchor = A (top sharpe)
+    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)
+    assert math.isclose(out['t1'], 105.0, rel_tol=1e-9)
 
 
-def test_all_nonpositive_sharpe_still_combines_min_max():
+def test_all_nonpositive_sharpe_degrades_to_equal_weights():
     cands = [
         _b('A', 1, 1.0, 100.0, 98.0, 104.0),    # stop 2%, tp 4%
         _b('B', 1, 1.0, 100.0, 96.0, 108.0),    # stop 4%, tp 8%
     ]
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': -1.0, 'B': 0.0})
-    assert math.isclose(out['stop'], 98.0, rel_tol=1e-9)  # min(2%, 4%)
-    assert math.isclose(out['t1'], 108.0, rel_tol=1e-9)   # max(4%, 8%)
+    assert math.isclose(out['stop'], 97.0, rel_tol=1e-9)  # mean 3%
+    assert math.isclose(out['t1'], 106.0, rel_tol=1e-9)   # mean 6%
 
 
 def test_wrong_direction_and_nonfinite_rejected():
@@ -140,16 +137,16 @@ def test_rep_tiebreak_is_deterministic_smallest_sid():
 
 
 def test_t2_never_inverts_past_stacked_t1():
-    # Long: t1 = max take (10% -> 110); anchor's own t2 (108) sits BELOW the
-    # stacked t1 -> clamped up to t1 (no inversion).
+    # Long: weighted t2 (8%·⅔ + 9%·⅓ = 25/3 %) equals weighted t1 -> clamp keeps
+    # t2 >= t1 (no inversion).
     cands = [
         _b('A', 1, 5.0, 100.0, 98.0, 110.0, t2=108.0),   # block1 anchor: tp 10%
         _b('B', 1, 5.0, 100.0, 96.0, 105.0, t2=109.0),   # block2: tp 5%
     ]
     out = bs.stacked_bracket(cands, 1, block_map={'A': 1, 'B': 2},
                              eff_sharpe={'A': 2.0, 'B': 1.0})
-    # t1 = max(10%, 5%) = 10%.
-    assert math.isclose(out['t1'], 110.0, rel_tol=1e-9)
+    # t1 = ω-weighted tp: 10%·⅔ + 5%·⅓ = 25/3 %.
+    assert math.isclose(out['t1'], 100.0 * (1.0 + 0.25 / 3.0), rel_tol=1e-9)
     assert out['t2'] >= out['t1']                         # t2 clamped up, no inversion
 
     # Single block long with a finite t2 above t1 is preserved unchanged.
