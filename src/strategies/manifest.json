@@ -2103,7 +2103,9 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "backtest_universe_cap": "tier_liquid",
+        "backtest_universe_cap_reason": "Three consecutive fleet failures, zero results: OOM 3.9GB RSS at 1h42m (2026-07-22, killed the whole unit), signal SIGKILL at 34.2m (2026-07-31 overnight), signal SIGTERM at 150.0m (2026-07-31 daytime, hit --per-timeout). Uncapped it simulates the FULL ~12.5k-col panel (_bounded_resolver returns None with no cap set) while its PRODUCTION universe_filter_ref is already tier_liquid \u2014 so bounding the backtest to tier_liquid (4,996 symbols at the 2026-07-25 snapshot) IMPROVES backtest/live parity rather than degrading it. S_ivol/hurst/bocpd/amihud precedent: the bounded run IS the shrink baseline. Resolving artifact universe_tier_membership_shrink-20260725.parquet predates the 07-29 same-day pivot. NOTE: capping changes which PAIRS form and the kappa ranking selects from a different pool \u2014 capped results are NOT comparable to this strategy's own prior uncapped numbers; that is intended, not noise."
       },
       "history": [
         {
@@ -2123,7 +2125,12 @@
           "metadata": {}
         }
       ],
-      "instrument_class": "equity"
+      "instrument_class": "equity",
+      "backtest_quarantine": {
+        "reason": "cap to tier_liquid applied 2026-07-31 but UNPROVEN \u2014 quarantined so the nightly does not re-test it at the head of the queue (localeCompare puts it first; it burned 184m across 2026-07-31's two sessions for zero banked strategies). --per-timeout is GLOBAL, so it cannot be given a short leash while S_ma_tsmom_crossover needs 124m. CLEAR THIS FLAG once a supervised solo pass completes under the cap; if the solo pass also fails, the 2026-07-22 verdict stands and it needs a memory/algorithm fix.",
+        "since": "2026-07-31",
+        "clears_when": "supervised solo pass completes with backtest_universe_cap=tier_liquid"
+      }
     },
     "S_ivol_mispricing_asymmetry": {
       "state": "live",
