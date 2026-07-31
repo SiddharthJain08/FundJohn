@@ -379,6 +379,39 @@ function start(swarm, generateId, notifyDiscord) {
             dispatchCycle('eod-signal-register', ['collect', 'sentiment', 'signals', 'option_hedge']);
         }, { timezone: 'America/New_York' });
 
+        // (a2) 09:05 ET Mon–Fri — pre-market news fetch, 10 min AHEAD of the gate.
+        // market_news is otherwise written only by run_sentiment_step stage 6b,
+        // inside the 15:00/16:15 ET compute chain — always AFTER the 09:15 gate.
+        // The pivot to same-day compute moved that fetch 21:20Z -> 19:00Z, which
+        // put it 15 minutes BEFORE the gate's 18h window floor, so the window went
+        // structurally empty (0 rows 07-29/30/31) and every subject was APPROVED
+        // fail-open on no data. This job scopes a fetch to exactly the gate's own
+        // subjects — the held book in same-day protect mode, ~4 names — and writes
+        // market_news only. Fail-open: the script always exits 0, so a news outage
+        // can never stop the gate from running.
+        if (process.env.OPENCLAW_EOD_PREMARKET_GATE === '1') {
+            cron.schedule('5 9 * * 1-5', () => {
+                log('pre-market news fetch (9:05am ET — ahead of the 9:15 gate)');
+                try {
+                    const fs    = require('fs');
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logDir = path.join(ROOT, 'logs');
+                    try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+                    const logFd = fs.openSync(path.join(logDir, `premarket_news_${today}.log`), 'a');
+                    const child = spawn(PYTHON, ['scripts/run_premarket_news.py'], {
+                        cwd:      ROOT,
+                        env:      { ...process.env },
+                        detached: true,
+                        stdio:    ['ignore', logFd, logFd],
+                    });
+                    child.unref();
+                    log(`premarket-news spawned (pid ${child.pid})`);
+                } catch (e) {
+                    log(`premarket-news spawn error: ${e.message}`);
+                }
+            }, { timezone: 'America/New_York' });
+        }
+
         // (b) 09:15 ET Mon–Fri — pre-market carry-forward gate.
         // Reads COMPUTED signals, applies panic/sentiment verdict, transitions to
         // APPROVED or REJECTED, writes signal_gate_verdicts + __gate_ran__ sentinel.

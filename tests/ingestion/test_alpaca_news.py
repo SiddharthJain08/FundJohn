@@ -5,6 +5,7 @@ import pytest
 
 from src.ingestion.alpaca_news import (
     ingest_alpaca_news,
+    ingest_market_news_only,
     _chunk_symbols,
     _aggregate_per_ticker,
     _score_with_finbert,
@@ -139,3 +140,71 @@ def test_score_with_finbert_negative_label_inverts_sign():
         result = _score_with_finbert([{'headline': 'Down', 'summary': ''}])
     assert result[0]['finbert_label'] == 'negative'
     assert result[0]['finbert_score'] == pytest.approx(-0.7)
+
+
+# ── ingest_market_news_only — the pre-market gate's narrow path ──────────────
+# The gate runs at 09:15 ET, before any compute chain has fetched news. This
+# path exists to feed it WITHOUT the ticker_sentiment_daily side-effect that
+# would publish zero-count rows for article-less tickers hours early.
+
+def test_market_news_only_never_writes_ticker_sentiment():
+    """The whole point: raw articles land, aggregates do NOT.
+
+    ingest_alpaca_news writes a ticker_sentiment_daily row for EVERY requested
+    symbol including ones with no articles (alpaca_news_count_24h=0). Scoped to
+    the held book and run pre-market, that would publish zeros hours before the
+    full-universe run overwrites them — a silent-zero for anything reading those
+    columns in between.
+    """
+    with patch('src.ingestion.alpaca_news._fetch_news_chunk',
+               return_value=[{'id': 1, 'headline': 'x'}]), \
+         patch('src.ingestion.alpaca_news._upsert_market_news',
+               return_value=1) as mock_news, \
+         patch('src.ingestion.alpaca_news._upsert_ticker_sentiment') as mock_ts, \
+         patch('src.ingestion.alpaca_news._score_with_finbert') as mock_finbert:
+        inserted = ingest_market_news_only(['BLD', 'SNDK'])
+
+    assert inserted == 1
+    mock_news.assert_called_once()
+    mock_ts.assert_not_called()
+    mock_finbert.assert_not_called()   # no FinBERT dependency on this path
+
+
+def test_market_news_only_empty_symbols_is_a_noop():
+    """No subjects → no fetch, no write, returns 0 (gate has nothing to score)."""
+    with patch('src.ingestion.alpaca_news._fetch_news_chunk') as mock_fetch, \
+         patch('src.ingestion.alpaca_news._upsert_market_news') as mock_news:
+        assert ingest_market_news_only([]) == 0
+    mock_fetch.assert_not_called()
+    mock_news.assert_not_called()
+
+
+def test_market_news_only_chunks_at_50_and_accumulates():
+    """Chunking matches the full ingest; every chunk's articles reach the upsert."""
+    syms = [f'TKR{i}' for i in range(120)]
+    with patch('src.ingestion.alpaca_news._fetch_news_chunk',
+               side_effect=lambda chunk, start: [{'id': s} for s in chunk]), \
+         patch('src.ingestion.alpaca_news._upsert_market_news',
+               return_value=0) as mock_news:
+        ingest_market_news_only(syms)
+
+    articles = mock_news.call_args[0][0]
+    assert len(articles) == 120          # 50 + 50 + 20, nothing dropped
+
+
+def test_market_news_only_honours_hours_lookback():
+    """`hours` controls the fetch window start passed to Alpaca."""
+    seen = {}
+
+    def _capture(chunk, start):
+        seen['start'] = start
+        return []
+
+    with patch('src.ingestion.alpaca_news._fetch_news_chunk', side_effect=_capture), \
+         patch('src.ingestion.alpaca_news._upsert_market_news', return_value=0):
+        ingest_market_news_only(['AAPL'], hours=6)
+
+    from datetime import datetime, timezone
+    delta_h = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(seen['start'])).total_seconds() / 3600
+    assert 5.9 < delta_h < 6.1

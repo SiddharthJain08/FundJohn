@@ -271,6 +271,50 @@ def _upsert_ticker_sentiment(rows: list[dict]) -> None:
         conn.commit()
 
 
+def ingest_market_news_only(symbols: list[str], hours: int = 24) -> int:
+    """Fetch raw articles for `symbols` and persist ONLY to market_news.
+
+    Why this exists: the pre-market gate (13:15Z) scores news over an 18h
+    lookback, but the full ingest_alpaca_news() below runs as stage 6b of the
+    sentiment step in the 15:00/16:15 ET compute chain — always AFTER the gate.
+    Measured 2026-07-31, fetch clock-time by day:
+
+        pre-pivot  (compute 16:15 ET):  21:20Z 21:29Z 21:22Z 21:20Z
+        post-pivot (compute 15:00 ET):  19:00:45Z  19:00:43Z
+
+    The gate's window opens 19:15Z the prior day. The old 21:20Z fetch landed
+    just after that floor (the gate saw a ~2h evening sliver); the 19:00Z fetch
+    lands 15 minutes BEFORE it, so the window is structurally empty and every
+    subject is APPROVED fail-open on no data. Running this before the gate is
+    what puts overnight and pre-market articles in scope for the first time.
+
+    Deliberately does NOT write ticker_sentiment_daily. ingest_alpaca_news()
+    stamps a row for EVERY requested symbol — including ones with no articles,
+    at alpaca_news_count_24h=0 — so a pre-market pass scoped to the held book
+    would publish zeros for those tickers hours before the full-universe run
+    that overwrites them. That is precisely the silent-zero class this gate work
+    exists to remove, so we take only the raw-article half.
+
+    Idempotent: market_news upserts ON CONFLICT (uuid) DO NOTHING, so the later
+    full run neither duplicates these rows nor loses its own.
+
+    Returns the number of NEW market_news rows (0 is a legitimate quiet
+    overnight; the caller reports the article count separately).
+    """
+    if not symbols:
+        log.info('market_news_only: empty symbol list; skipping')
+        return 0
+    start = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    articles: list[dict] = []
+    for chunk in _chunk_symbols(symbols, chunk_size=50):
+        articles.extend(_fetch_news_chunk(chunk, start=start))
+    inserted = _upsert_market_news(articles)
+    log.info('market_news_only: %d symbol(s), %d article(s) fetched since %s, '
+             '%d new market_news row(s)',
+             len(symbols), len(articles), start, inserted)
+    return inserted
+
+
 def ingest_alpaca_news(symbols: list[str]) -> None:
     """Main entry. Fetches 24h Alpaca news for universe, scores via FinBERT,
     writes one row per symbol to ticker_sentiment_daily.alpaca_news_* columns.
