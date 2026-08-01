@@ -690,7 +690,20 @@ def build(run_date: str) -> dict:
         from execution.alpaca_trader import _alpaca_session, _fetch_account_state
         _account = _fetch_account_state(_alpaca_session())
         if _account.get('fetched'):
-            portfolio.setdefault('portfolio_value', _account['equity'])
+            # Assign, don't setdefault (2026-08-01). output/portfolio.json ships a
+            # hardcoded template `"portfolio_value": 1000000` — its own _comment
+            # says "Update portfolio_value and positions manually" — so the key is
+            # ALWAYS present and setdefault was a permanent no-op. Every structured
+            # handoff carried $1,000,000 against a real ~$96k equity (10.4x) while
+            # the `[handoff] live Alpaca: equity=$...` line printed just below
+            # reported the truth. Exactly the staleness the comment above warns
+            # about, in the one field the comment did not protect.
+            #
+            # Never reached live sizing: regime_blended_sizer_live takes equity
+            # from _resolve_account_or_none() (a broker fetch). The consumer is
+            # pyportfolioopt_shadow_sizer.py:48, which never routes orders — so
+            # the damage was that every shadow-vs-live comparison ran at ~10x NAV.
+            portfolio['portfolio_value']     = _account['equity']
             portfolio['long_market_value']   = _account['long_market_value']
             portfolio['short_market_value']  = _account['short_market_value']
             portfolio['cash']                = _account['cash']
