@@ -340,6 +340,10 @@ _IMPL_MAP = {
     # but _IMPL_MAP wiring was missing; fallback discovery loaded them but without explicit wiring.
     'S_downside_beta_premium': ('strategies.implementations.S_downside_beta_premium', 'DownsideBetaPremium'),
     'S_insider_drawdown_confirmation': ('strategies.implementations.S_insider_drawdown_confirmation', 'InsiderDrawdownConfirmation'),
+    # Ravagnani et al. 2026: AR forecast-error uncertainty robust hedge ratio (ETP pairs)
+    'S_robust_min_variance_hedge': ('strategies.implementations.S_robust_min_variance_hedge', 'RobustMinVarHedge'),
+    # Keim & Stambaugh 1984: Weekend effect — Monday equity returns systematically negative
+    'S_weekend_effect_monday_short': ('strategies.implementations.S_weekend_effect_monday_short', 'WeekendEffectMondayShort'),
 }
 
 

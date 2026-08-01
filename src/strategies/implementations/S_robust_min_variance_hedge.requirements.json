@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_robust_min_variance_hedge",
+  "required": ["prices"],
+  "optional": ["prices_30m"]
+}

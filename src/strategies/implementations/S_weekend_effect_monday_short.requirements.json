@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_weekend_effect_monday_short",
+  "required": ["prices"],
+  "optional": []
+}
