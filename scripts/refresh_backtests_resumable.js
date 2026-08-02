@@ -95,30 +95,49 @@ function waitForMemory(sid) {
   }
 }
 
-function allStrategies() {
+// LIVE-FIRST ordering (2026-07-16). On this box the 10y re-backtest is a
+// multi-day run, so front-load the strategies that drive the CURRENT book's
+// sizing + the conviction-floor recheck (state='live'); candidates (needed only
+// for NEW activation decisions) and staging trail. Alphabetical within each
+// tier for a stable, resumable order. This only changes ORDER — every strategy
+// still runs exactly once; the checkpoint is by strategy_id, order-independent.
+const RANK = { live: 0, candidate: 1, staging: 2 };
+
+function manifestEntries() {
   const m = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/strategies/manifest.json'), 'utf8'));
-  // LIVE-FIRST ordering (2026-07-16). On this box the 10y re-backtest is a
-  // multi-day run, so front-load the strategies that drive the CURRENT book's
-  // sizing + the conviction-floor recheck (state='live'); candidates (needed only
-  // for NEW activation decisions) and staging trail. Alphabetical within each
-  // tier for a stable, resumable order. This only changes ORDER — every strategy
-  // still runs exactly once; the checkpoint is by strategy_id, order-independent.
-  const RANK = { live: 0, candidate: 1, staging: 2 };
-  const entries = Object.entries(m.strategies || {}).filter(([, e]) => e.state in RANK);
-  // Backtest quarantine (2026-07-21). A strategy whose backtest REPRODUCIBLY
-  // fails (e.g. a numerical bug) is excluded here via an additive manifest flag
-  // `backtest_quarantine` — this does NOT change lifecycle `state` — so it stops
-  // consuming a fleet slot every night until the strategy code is fixed. NEVER
-  // silent: log each skip + reason so the exclusion is visible in the run log.
-  for (const [sid, e] of entries.filter(([, e]) => e.backtest_quarantine)) {
+  return Object.entries(m.strategies || {})
+    .filter(([, e]) => e.state in RANK)
+    .sort(([aSid, aE], [bSid, bE]) =>
+      (RANK[aE.state] - RANK[bE.state]) || aSid.localeCompare(bSid));
+}
+
+// Backtest quarantine (2026-07-21). A strategy whose backtest REPRODUCIBLY
+// fails (e.g. a numerical bug) carries an additive manifest flag
+// `backtest_quarantine` — this does NOT change lifecycle `state` — so it stops
+// consuming a fleet slot every night until the strategy code is fixed.
+function quarantinedStrategies() {
+  return manifestEntries().filter(([, e]) => e.backtest_quarantine).map(([sid]) => sid);
+}
+
+// Emit the skip reasons ONCE per process. NEVER silent: the exclusion has to be
+// visible in the run log. (Previously logged from inside allStrategies(), which
+// is called several times per run — hence the duplicate QUARANTINED blocks.)
+let _quarantineLogged = false;
+function logQuarantined() {
+  if (_quarantineLogged) return;
+  _quarantineLogged = true;
+  for (const [sid, e] of manifestEntries().filter(([, e]) => e.backtest_quarantine)) {
     const why = (e.backtest_quarantine && e.backtest_quarantine.reason) || 'flagged';
     console.log(`[rebt] QUARANTINED (skipped): ${sid} — ${why}`);
   }
-  return entries
-    .filter(([, e]) => !e.backtest_quarantine)
-    .sort(([aSid, aE], [bSid, bE]) =>
-      (RANK[aE.state] - RANK[bE.state]) || aSid.localeCompare(bSid))
-    .map(([sid]) => sid);
+}
+
+// RUNNABLE strategies only — quarantined ones are excluded from the work queue.
+// Callers measuring COMPLETION must not use this set; see the `remaining`
+// computation below for why.
+function allStrategies() {
+  logQuarantined();
+  return manifestEntries().filter(([, e]) => !e.backtest_quarantine).map(([sid]) => sid);
 }
 
 (async () => {
@@ -186,12 +205,33 @@ function allStrategies() {
     }
   }
   const total = ((Date.now() - t0) / 60000).toFixed(1);
-  const remaining = allStrategies().filter(s => !new Set(
-    fs.existsSync(CKPT) ? fs.readFileSync(CKPT, 'utf8').split('\n').filter(Boolean) : []).has(s)).length;
-  console.log(`[rebt] DONE ok=${ok} fail=${fail} in ${total}m | ${remaining} strategies still outstanding`);
+  const doneSet = new Set(fs.existsSync(CKPT)
+    ? fs.readFileSync(CKPT, 'utf8').split('\n').filter(Boolean) : []);
+  const runnableLeft = allStrategies().filter(s => !doneSet.has(s)).length;
+  // COUNT QUARANTINED STRATEGIES AS OUTSTANDING (2026-08-02). They are excluded
+  // from allStrategies(), so counting only that set made them vanish from the
+  // completion metric: `remaining` could reach 0 — printing a clean line with no
+  // CANONICAL IS MIXED warning — while they sat on the OLD window/methodology.
+  // That is not cosmetic. fleet_overnight_resume.sh greps this exact line and,
+  // at 0, runs `run_universe_shrink.py --adopt --reassign` (real actuation:
+  // --adopt commits universe-ladder verdicts, --reassign re-derives per-regime
+  // sleeve eligibility) AND disables its own timer. Neither is covered by the
+  // masked OPENCLAW_ACTIVATION_ASSIGNER / AUTO_DEMOTE guards. The S_pairs
+  // quarantine had this armed already. They ARE outstanding — they simply
+  // aren't runnable tonight — so uniform must not be declared while any remain.
+  const quarantinedLeft = quarantinedStrategies().filter(s => !doneSet.has(s));
+  const remaining = runnableLeft + quarantinedLeft.length;
+  const split = quarantinedLeft.length
+    ? ` (${runnableLeft} runnable + ${quarantinedLeft.length} quarantined)`
+    : '';
+  console.log(`[rebt] DONE ok=${ok} fail=${fail} in ${total}m | ${remaining} strategies still outstanding${split}`);
   if (remaining > 0) {
     console.log(`[rebt] ⚠️ CANONICAL IS MIXED (${remaining} strategies still on the old window/methodology).`);
     console.log(`[rebt]    Do NOT rebuild weights or run weekend_saturday until this reaches 0.`);
+  }
+  if (quarantinedLeft.length) {
+    console.log(`[rebt] ⛔ UNIFORM UNREACHABLE while quarantined: ${quarantinedLeft.join(', ')}`);
+    console.log(`[rebt]    Fix + re-backtest, or consciously accept a canonical that excludes them.`);
   }
   if (fail > 0) console.log(`[rebt] failures logged to ${FAILED}`);
   process.exit(0);

@@ -41,6 +41,28 @@ rc=$?
 
 OUT=$(grep -oE '[0-9]+ strategies still outstanding' "$LOG" | tail -1 | grep -oE '^[0-9]+')
 echo "[overnight $(date -u +%FT%TZ)] exit rc=$rc; outstanding=${OUT:-unknown}" >> "$LOG"
+
+# Independent quarantine check (2026-08-02). Belt-and-braces with the driver's
+# own accounting fix: quarantined strategies used to be filtered out of
+# allStrategies(), so they vanished from the outstanding count and OUT could
+# read 0 while they sat on the OLD methodology — silently arming the actuation
+# below. The driver now counts them, but this branch does REAL actuation
+# (--adopt commits universe-ladder verdicts, --reassign re-derives per-regime
+# sleeve eligibility, and the timer disables itself), and none of it is covered
+# by the masked OPENCLAW_ACTIVATION_ASSIGNER / AUTO_DEMOTE guards. So verify
+# against the manifest directly rather than trusting a grepped log line.
+QUAR=$(python3 -c "
+import json
+m=json.load(open('/root/openclaw/src/strategies/manifest.json'))
+q=[k for k,v in (m.get('strategies') or {}).items()
+   if v.get('state') in ('live','candidate','staging') and v.get('backtest_quarantine')]
+print(','.join(sorted(q)))
+" 2>/dev/null)
+if [[ -n "$QUAR" ]]; then
+  echo "[overnight $(date -u +%FT%TZ)] NOT actuating: ${QUAR//,/, } still quarantined — canonical cannot be uniform. Fix + re-backtest, or clear the flag deliberately." >> "$LOG"
+  OUT=""   # neutralise the uniform branch; leave the nightly timer enabled
+fi
+
 if [[ "$OUT" == "0" ]]; then
   echo "[overnight $(date -u +%FT%TZ)] CANONICAL UNIFORM — self-disabling nightly timer." >> "$LOG"
   systemctl disable --now openclaw-fleet-overnight-resume.timer >> "$LOG" 2>&1
