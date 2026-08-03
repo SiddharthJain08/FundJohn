@@ -28,10 +28,31 @@ if pgrep -a -x node 2>/dev/null | grep -q 'refresh_backtests_resumable\.js'; the
   exit 0
 fi
 
-# No-new-spawn deadline = 06:15 UTC (before the ~07:30 premarket scan). Fires tonight
-# after 21:30 start, so 'today 06:15' is in the past -> roll to tomorrow.
-DL=$(date -u -d 'today 06:15' +%s); NOW=$(date -u +%s)
-(( DL <= NOW )) && DL=$(date -u -d 'tomorrow 06:15' +%s)
+# No-new-spawn deadline = 10:30 UTC. Fires tonight after the 21:30 start, so
+# 'today 10:30' is in the past -> roll to tomorrow (13h of spawning).
+#
+# WAS 06:15, justified as "before the ~07:30 premarket scan" — WRONG, and it cost
+# ~5h of window every night. `openclaw-premarket-scan-0730.timer` is NAMED in ET
+# but SCHEDULED in UTC: it fires at 11:30Z, not 07:30Z. (Same trap as the
+# `openclaw-sunday-*` units, which fire on Saturday.) Measured 2026-08-03, every
+# unit between 06:15Z and 11:30Z: amcheck 2s, refresh-universe-sizes 34s,
+# regime-live-pnl 1s, phase2d-nightly 7s, afterhours-stop-monitor 14s,
+# afterhours-tp-premarket 1s — under a minute of CPU combined. They are also
+# WRITE-DISJOINT from the fleet: they write strategy_universe_sizes,
+# strategy_signal_overlap, mastermind_proposal_outcomes and
+# strategy_regime_live_pnl_rollup, none of which is referenced anywhere under
+# src/backtest/. First real boundary is edgar-8k at 11:15Z.
+#
+# ⚠ This is HALF of a two-part change. The service's RuntimeMaxSec is the real
+# bound; it was 32400 (9h -> hard stop 06:30Z), which would have made this edit
+# INERT. Raised to 48600 (13.5h -> hard stop 11:00Z) in the unit file. If you
+# ever move this deadline again, move RuntimeMaxSec with it or nothing changes.
+#
+# Friday's run lands on SATURDAY morning: 06:00Z options-eligibility is 17s (and
+# already overlapped the old 06:30Z stop), and Sat 06:30-11:00Z is otherwise
+# empty — sunday-research-ingest is 12:00Z, an hour after the new stop.
+DL=$(date -u -d 'today 10:30' +%s); NOW=$(date -u +%s)
+(( DL <= NOW )) && DL=$(date -u -d 'tomorrow 10:30' +%s)
 DL_STR=$(date -u -d "@${DL}" +%Y-%m-%dT%H:%M)
 
 echo "[overnight $(date -u +%FT%TZ)] start (pid $$); --deadline ${DL_STR}Z --per-timeout 14400" >> "$LOG"

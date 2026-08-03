@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenClaw fleet re-backtest overnight resume (bounded, compute-only)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/openclaw
+EnvironmentFile=/root/openclaw/.env
+Nice=19
+# Hard wall-clock bound: cgroup-wide SIGTERM->SIGKILL 13.5h after the 21:30
+# start (11:00 UTC). This is the REAL bound; the driver's --deadline (10:30)
+# only stops new spawns.
+#
+# WAS 32400 (9h -> 06:30Z), paired with a --deadline of 06:15 that was justified
+# as "before the ~07:30 premarket scan". That scan actually fires at 11:30Z —
+# openclaw-premarket-scan-0730.timer is NAMED in ET, SCHEDULED in UTC — so the
+# pair was giving up ~4.75h of compute every night. Everything between 06:15Z
+# and 11:30Z totals <1min of CPU and is write-disjoint from src/backtest/
+# (measured 2026-08-03; see the script header). Stop is 11:00Z, 15m clear of the
+# 11:15Z edgar-8k job.
+#
+# ⚠ Keep this in lockstep with the script's --deadline. Moving one without the
+# other is silent: a later deadline under the old RuntimeMaxSec changes nothing,
+# because the cgroup kill lands first.
+RuntimeMaxSec=48600
+TimeoutStopSec=90
+ExecStart=/bin/bash /root/fleet_overnight_resume.sh
