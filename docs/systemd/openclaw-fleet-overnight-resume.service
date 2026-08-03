@@ -17,9 +17,11 @@ Nice=19
 # as "before the ~07:30 premarket scan". That scan actually fires at 11:30Z —
 # openclaw-premarket-scan-0730.timer is NAMED in ET, SCHEDULED in UTC — so the
 # pair was giving up ~4.75h of compute every night. Everything between 06:15Z
-# and 11:30Z totals <1min of CPU and is write-disjoint from src/backtest/
-# (measured 2026-08-03; see the script header). Stop is 11:00Z, 15m clear of the
-# 11:15Z edgar-8k job.
+# and 11:30Z is seconds-scale and write-disjoint from src/backtest/ (measured
+# 2026-08-03; see the script header), EXCEPT openclaw-afterhours-stop-monitor,
+# which fires every 10min from 08:00Z (~19 runs in the extension) and guards
+# LIVE positions — it stays ahead of the fleet via Nice=19 + the children's
+# oom_score_adj=1000. Stop is 11:00Z, 15m clear of the 11:15Z edgar-8k job.
 #
 # ⚠ Keep this in lockstep with the script's --deadline. Moving one without the
 # other is silent: a later deadline under the old RuntimeMaxSec changes nothing,

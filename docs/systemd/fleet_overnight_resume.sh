@@ -36,9 +36,17 @@ fi
 # but SCHEDULED in UTC: it fires at 11:30Z, not 07:30Z. (Same trap as the
 # `openclaw-sunday-*` units, which fire on Saturday.) Measured 2026-08-03, every
 # unit between 06:15Z and 11:30Z: amcheck 2s, refresh-universe-sizes 34s,
-# regime-live-pnl 1s, phase2d-nightly 7s, afterhours-stop-monitor 14s,
-# afterhours-tp-premarket 1s — under a minute of CPU combined. They are also
-# WRITE-DISJOINT from the fleet: they write strategy_universe_sizes,
+# regime-live-pnl 1s, phase2d-nightly 7s, afterhours-tp-premarket 1s.
+#
+# ⚠ ONE of them is NOT a single run: openclaw-afterhours-stop-monitor is
+# `Mon..Fri 04..19:00/10:00 America/New_York` = every 10 MINUTES from 08:00Z, so
+# the extension newly overlaps ~19 invocations (~4.4min CPU total). It runs
+# afterhours_tp.py --monitor, which protects LIVE open positions, so it must
+# never be starved. It is not: fleet children run Nice=19 (monitor wins CPU) and
+# are marked oom_score_adj=1000 by fleet_oom_victim_exec.sh (kernel kills the
+# BACKTEST, never the monitor). Overlap is deliberate and bounded, not free.
+#
+# The rest are also WRITE-DISJOINT from the fleet: they write strategy_universe_sizes,
 # strategy_signal_overlap, mastermind_proposal_outcomes and
 # strategy_regime_live_pnl_rollup, none of which is referenced anywhere under
 # src/backtest/. First real boundary is edgar-8k at 11:15Z.
