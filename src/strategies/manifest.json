@@ -2114,10 +2114,13 @@
         }
       ],
       "instrument_class": "equity",
-      "backtest_quarantine": {
+      "backtest_quarantine_cleared": {
         "reason": "cap to tier_liquid applied 2026-07-31 but UNPROVEN — quarantined so the nightly does not re-test it at the head of the queue (localeCompare puts it first; it burned 184m across 2026-07-31's two sessions for zero banked strategies). --per-timeout is GLOBAL, so it cannot be given a short leash while S_ma_tsmom_crossover needs 124m. CLEAR THIS FLAG once a supervised solo pass completes under the cap; if the solo pass also fails, the 2026-07-22 verdict stands and it needs a memory/algorithm fix.",
         "since": "2026-07-31",
-        "clears_when": "supervised solo pass completes with backtest_universe_cap=tier_liquid"
+        "clears_when": "supervised solo pass completes with backtest_universe_cap=tier_liquid",
+        "cleared_on": "2026-08-03",
+        "cleared_by": "operator directive",
+        "cleared_note": "Cleared WITHOUT satisfying the stated clears_when ('supervised solo pass completes'). That condition is superseded, not met: the 2026-08-01 solo pass SIGTERM'd at 60m and was read as 'intrinsically slow', but it ran with an interactive agent session attached (~0.9GB) on an 8GB no-swap box, and fleet children are marked oom_score_adj=1000 by fleet_oom_victim_exec.sh so they are the DESIGNATED OOM victim. On 2026-08-03 that confound was shown to explain three other 'reproducible' failures: S23_regime_momentum, oxf_aroon_breakout and oxf_wyckoff_meanrev all banked once conditions changed. Retest is the UNATTENDED nightly (13.5h since f0ae161, no session on the box). backtest_universe_cap=tier_liquid is RETAINED. If it fails there with a full 240m leash and nothing else on the box, THAT is the clean verdict the 08-01 run was meant to give."
       }
     },
     "S_ivol_mispricing_asymmetry": {
