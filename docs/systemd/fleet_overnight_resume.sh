@@ -92,6 +92,28 @@ if [[ -n "$QUAR" ]]; then
   OUT=""   # neutralise the uniform branch; leave the nightly timer enabled
 fi
 
+# ── OPERATOR ACTUATION GATE (2026-08-03) ────────────────────────────────────
+# Set to 1 to restore the original behaviour (self-disable timer + run the
+# universe shrink automatically on reaching UNIFORM). ONE line to re-enable.
+#
+# Why it exists: until today the QUAR check above was the de-facto gate — it
+# blanked OUT whenever anything was quarantined, and S_pairs always was. That
+# made the actuation branch unreachable in practice. Clearing the S_pairs
+# quarantine (db0560f, so the unattended nightly can retest it) removed that
+# accidental protection, and the fleet is now close enough to finish (27
+# runnable, ~8.8h of work vs a 13.5h window) that UNIFORM is reachable on a
+# single unattended run. The post-uniform sequence is OPERATOR-GATED
+# (directive 2026-07-27), so it must not fire because a quarantine flag came
+# off for an unrelated reason. Compute is unaffected — only actuation is held.
+ALLOW_ACTUATION=0
+
+if [[ "$OUT" == "0" && "$ALLOW_ACTUATION" != "1" ]]; then
+  echo "[overnight $(date -u +%FT%TZ)] ✅ CANONICAL UNIFORM REACHED — NOT actuating (ALLOW_ACTUATION=0)." >> "$LOG"
+  echo "[overnight $(date -u +%FT%TZ)]    Timer left ENABLED (subsequent runs are no-ops at 0 outstanding)." >> "$LOG"
+  echo "[overnight $(date -u +%FT%TZ)]    OWED, operator-gated: run_universe_shrink --adopt --reassign -> weights rebuild -> floor recheck -> activation -> re-enable openclaw-weekly-strategy-weights.timer + OPENCLAW_ACTIVATION_ASSIGNER/AUTO_DEMOTE=1." >> "$LOG"
+  OUT=""   # fall through without actuating
+fi
+
 if [[ "$OUT" == "0" ]]; then
   echo "[overnight $(date -u +%FT%TZ)] CANONICAL UNIFORM — self-disabling nightly timer." >> "$LOG"
   systemctl disable --now openclaw-fleet-overnight-resume.timer >> "$LOG" 2>&1
