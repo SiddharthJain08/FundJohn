@@ -9,7 +9,7 @@
         "canonical_file": "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals.py",
         "class": "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals",
         "description": "Past 1-month losers with strong Piotroski F-Scores (7-9) outperform past winners with weak F-Scores (0-3), combining mean-reversion with fundamental quality screening.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000",
         "universe_filter_source": "paperhunter_inferred"
       },
       "history": [
@@ -209,7 +209,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -1207,7 +1207,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -1274,7 +1274,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -1303,7 +1303,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000",
+        "universe_filter_ref": "src.strategies.universe_default:sp500",
         "backtest_universe_cap": "tier_liquid",
         "backtest_universe_cap_reason": "2026-07-24 fleet UNIFORM: full 12.5k-universe sim SIGKILL-OOMs the 8GB box (108m). BOCPD panel recursion is per-ticker (vectorization is exact, cross-section-independent), so bounding the backtest to tier_liquid (its live universe_filter_ref) is a correctness fix, not a distortion. S_ivol W6 precedent."
       },
@@ -1451,7 +1451,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -1520,7 +1520,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -1571,7 +1571,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -2004,7 +2004,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -2030,7 +2030,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -2091,7 +2091,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000",
         "backtest_universe_cap": "tier_liquid",
         "backtest_universe_cap_reason": "Three consecutive fleet failures, zero results: OOM 3.9GB RSS at 1h42m (2026-07-22, killed the whole unit), signal SIGKILL at 34.2m (2026-07-31 overnight), signal SIGTERM at 150.0m (2026-07-31 daytime, hit --per-timeout). Uncapped it simulates the FULL ~12.5k-col panel (_bounded_resolver returns None with no cap set) while its PRODUCTION universe_filter_ref is already tier_liquid — so bounding the backtest to tier_liquid (4,996 symbols at the 2026-07-25 snapshot) IMPROVES backtest/live parity rather than degrading it. S_ivol/hurst/bocpd/amihud precedent: the bounded run IS the shrink baseline. Resolving artifact universe_tier_membership_shrink-20260725.parquet predates the 07-29 same-day pivot. NOTE: capping changes which PAIRS form and the kappa ranking selects from a different pool — capped results are NOT comparable to this strategy's own prior uncapped numbers; that is intended, not noise."
       },
@@ -2135,7 +2135,7 @@
         ],
         "backtest_universe_cap": "tier_liquid",
         "backtest_universe_cap_reason": "W6 2026-07-21: full 12.5k-universe sim OOMs the 8GB box (engine per-bar panel subsets); bounded to tier_liquid — the broadest adoptable ladder tier — as the shrink baseline. Quarantine lifted same date.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2259,7 +2259,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2320,7 +2320,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2346,7 +2346,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2639,7 +2639,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2669,7 +2669,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -2764,7 +2764,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -3121,7 +3121,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -3186,7 +3186,8 @@
       "metadata": {
         "canonical_file": "S_linreg_channel_trend.py",
         "class": "LinRegChannelTrend",
-        "description": "Always-in-market SPY channel strategy: LONG near lower regression band, SHORT near upper band (N=40, Factor=0.20)."
+        "description": "Always-in-market SPY channel strategy: LONG near lower regression band, SHORT near upper band (N=40, Factor=0.20).",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [],
       "instrument_class": "etp"
@@ -3327,7 +3328,7 @@
           },
           "caveat": "NEWS-ONLY backtest on backfilled Alpaca/Benzinga news (334k rows, 2022-11-15+, median ~191 tickers/day). Live signal ALSO includes Reddit/StockTwits social sentiment (real-time-only, not reconstructable) so live behavior will differ. Positive Sharpe in every regime; CRISIS (+0.39) untraded per active_in_regimes."
         },
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -3517,7 +3518,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -3699,7 +3700,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -3916,7 +3917,7 @@
         "canonical_file": "oxf_rsi2_meanrev.py",
         "class": "OxfRsi2Meanrev",
         "description": "RSI(2) oversold dip-buy inside an SMA(200) uptrend on liquid ETFs, long-only mean-reversion (oxfordstrat relative-strength-index-1). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -4351,7 +4352,7 @@
           "HIGH_VOL",
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -4768,7 +4769,8 @@
         "description": "Long expected earnings announcers vs short non-announcers in the top volume-concentration-ratio quintile, monthly rebalance.",
         "eligible_regimes": [
           "TRANSITIONING"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5055,7 +5057,7 @@
           "LOW_VOL",
           "HIGH_VOL"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -5089,7 +5091,8 @@
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -5137,7 +5140,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -5171,7 +5174,7 @@
         "eligible_regimes": [
           "HIGH_VOL"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "backtest_universe_cap": "tier_liquid",
         "backtest_universe_cap_reason": "OOM 2x on full 12.5k-col panel (2026-07-28 honest-cost epoch, nights 1); bounded run is the shrink baseline (hurst/bocpd precedent)"
       },
@@ -5221,7 +5224,7 @@
         "eligible_regimes": [
           "HIGH_VOL"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [
         {
@@ -5290,7 +5293,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [],
       "instrument_class": "equity"
@@ -5346,7 +5349,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -5380,7 +5383,7 @@
         "eligible_regimes": [
           "LOW_VOL"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [],
       "instrument_class": "equity"
@@ -5396,7 +5399,8 @@
         "spec_doc": "docs/superpowers/specs/2026-07-12-manual-research-run-design.md",
         "eligible_regimes": [
           "LOW_VOL"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5585,7 +5589,7 @@
           "LOW_VOL",
           "HIGH_VOL"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -5693,7 +5697,7 @@
         "canonical_file": "oxf_bollinger_momentum.py",
         "class": "OxfBollingerMomentum",
         "description": "Bollinger-band momentum breakout on liquid ETFs (oxfordstrat bollinger-bands). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5752,7 +5756,7 @@
         "canonical_file": "oxf_donchian_breakout.py",
         "class": "OxfDonchianBreakout",
         "description": "Donchian N-day channel breakout on liquid ETFs (oxfordstrat donchian-channel-2). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5794,7 +5798,7 @@
         "canonical_file": "oxf_dual_momentum_roc.py",
         "class": "OxfDualMomentumRoc",
         "description": "Dual rate-of-change momentum filter (fast = half slow) on liquid ETFs (oxfordstrat dual-momentum-rate-of-change). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -5815,7 +5819,7 @@
         "canonical_file": "oxf_hook.py",
         "class": "OxfHook",
         "description": "Crabel hook gap-and-narrowing-range ORB on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat pattern-hook). Hook setup on t-1, Open+Stretch pierce confirmed on signal-day t; close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5836,7 +5840,7 @@
         "canonical_file": "oxf_hull_ma.py",
         "class": "OxfHullMa",
         "description": "Dual Hull-MA trend filter on liquid ETFs (oxfordstrat hull-moving-average). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5878,7 +5882,7 @@
         "canonical_file": "oxf_nr7.py",
         "class": "OxfNR7",
         "description": "NR7 narrow-range breakout on liquid ETFs — daily-bar confirmed-breakout adaptation (oxfordstrat nr7). close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5899,7 +5903,7 @@
         "canonical_file": "oxf_price_momentum.py",
         "class": "OxfPriceMomentum",
         "description": "Dual absolute price-momentum (close minus close-lag) trend filter on liquid ETFs (oxfordstrat price-momentum-model). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -5920,7 +5924,7 @@
         "canonical_file": "oxf_ross_hook.py",
         "class": "OxfRossHook",
         "description": "Ross hook 1-2-3 trend-break breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat ross-hook-filter-2). Hook high pierced on signal-day OHLC after a 1-2-3 swing structure; close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -5941,7 +5945,7 @@
         "canonical_file": "oxf_welles_wilder_breakout.py",
         "class": "OxfWellesWilderBreakout",
         "description": "Welles Wilder volatility breakout on liquid ETFs — confirmed-breakout daily-bar adaptation (oxfordstrat welles-wilder-1). Close move over the lookback exceeds ARC = ATR*const (stateless SIC proxy); close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid",
         "eligible_regimes": [
           "CRISIS"
         ]
@@ -5979,7 +5983,7 @@
         "canonical_file": "oxf_wyckoff_meanrev.py",
         "class": "OxfWyckoffMeanrev",
         "description": "Wyckoff trap mean-reversion on liquid ETFs — swing-pivot reclaim adaptation of the A/B/C/D pattern (oxfordstrat richard-wyckoff-mean-reversion-1). Daily-bar, close[t+1] fill.",
-        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [
         {
@@ -6056,7 +6060,7 @@
         "eligible_regimes": [
           "CRISIS"
         ],
-        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
+        "universe_filter_ref": "src.strategies.universe_default:sp500"
       },
       "history": [
         {
@@ -6136,7 +6140,8 @@
       "metadata": {
         "canonical_file": "S_tsmom_cross_asset_vol_scaled.py",
         "class": "TSMOMCrossAssetVolScaled",
-        "description": "Assets with positive own past 12-month return (skipping last month) tend to continue rising; volatility-scaled long-short across equity index, bond, commodity, and currency ETFs (Moskowitz, Ooi & Pedersen 2012)."
+        "description": "Assets with positive own past 12-month return (skipping last month) tend to continue rising; volatility-scaled long-short across equity index, bond, commodity, and currency ETFs (Moskowitz, Ooi & Pedersen 2012).",
+        "universe_filter_ref": "src.strategies.universe_default:tier_liquid"
       },
       "history": [],
       "instrument_class": "etp"
@@ -6167,7 +6172,8 @@
         "description": "AR forecast-error uncertainty robust hedge ratio: h*=sigma_SF/(sigma_F2_hat+Theta_F); LONG spot, SHORT hedge ETF pairs (Ravagnani et al. 2026, arXiv:2604.02126).",
         "eligible_regimes": [
           "CRISIS"
-        ]
+        ],
+        "universe_filter_ref": "src.strategies.universe_default:tier_r3000"
       },
       "history": [
         {
@@ -6193,7 +6199,8 @@
       "metadata": {
         "canonical_file": "S_weekend_effect_monday_short.py",
         "class": "WeekendEffectMondayShort",
-        "description": "Monday equity returns are systematically negative across all firm sizes — short R3000 universe on Monday open, exit Monday close (Keim & Stambaugh 1984)."
+        "description": "Monday equity returns are systematically negative across all firm sizes — short R3000 universe on Monday open, exit Monday close (Keim & Stambaugh 1984).",
+        "universe_filter_ref": "src.strategies.universe_default:tier_r1000"
       },
       "history": [],
       "instrument_class": "equity"
