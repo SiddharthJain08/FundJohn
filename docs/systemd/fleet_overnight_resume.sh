@@ -123,8 +123,24 @@ if [[ "$OUT" == "0" ]]; then
   # full-universe primary runs down the tier ladder, prefer-largest select,
   # ADOPT change verdicts, and re-derive per-regime eligibility from the
   # chosen tier's sleeves (--reassign). Runs once, niced, post-uniform.
-  echo "[overnight $(date -u +%FT%TZ)] UNIFORM -> universe selection: run_universe_shrink --adopt --reassign" >> "$LOG"
-  nice -n 19 python3 scripts/run_universe_shrink.py --adopt --reassign >> "$LOG" 2>&1
+  #
+  # 🔴 --force IS LOAD-BEARING, ADDED 2026-08-05 AFTER THIS BIT US.
+  # run_universe_shrink skips a strategy outright when a recommendation already
+  # exists for the same (strategy_id, candidate_set_id) — the check has NO date
+  # or run comparison, so a rec from a PREVIOUS epoch blocks re-derivation
+  # against the new backtests. It is a crash-RESUME path, not a correctness one.
+  # Running the real sequence by hand on 08-05:
+  #     without --force:  changes=4  adopted=4  skipped_existing=132   (recs dated 07-25)
+  #     with    --force:  changes=46 adopted=46 skipped_existing=0
+  # and the activation assigner's verdict flipped with it — on the STALE
+  # universes it deactivated 77 cells and made 35 strategies dormant; on the
+  # re-derived ones, 10 and 2. Nothing errored either way: a clean run on wrong
+  # inputs. Since this branch only fires post-uniform (i.e. every strategy has a
+  # NEW primary run by definition), re-derivation is always what we want here.
+  # NOTE `--dry-run` ignores the skip, so a dry-run preview does NOT match what
+  # an un-forced adopt actually does — that mismatch is how the bug hid.
+  echo "[overnight $(date -u +%FT%TZ)] UNIFORM -> universe selection: run_universe_shrink --adopt --reassign --force" >> "$LOG"
+  nice -n 19 python3 scripts/run_universe_shrink.py --adopt --reassign --force >> "$LOG" 2>&1
   src=$?
   echo "[overnight $(date -u +%FT%TZ)] universe selection rc=$src. OWED actuation (weights rebuild -> floor recheck -> activation; then re-enable openclaw-weekly-strategy-weights.timer + OPENCLAW_ACTIVATION_ASSIGNER/AUTO_DEMOTE=1 in .env) is OPERATOR-GATED." >> "$LOG"
 fi
