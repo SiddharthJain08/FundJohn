@@ -300,22 +300,32 @@ the assigner's verdict flipped from 77 deactivations / 35 newly-dormant to 10 / 
 Note `--dry-run` **ignores** the skip, so a dry-run preview does not predict what
 an un-forced adopt does.
 
-### 5.5 DO **NOT** remove — deliberately-off, still live-capable
+### 5.5 DO **NOT** remove — and why "= 0" does not mean "stale"
 
-Classified explicitly so a cleanup pass does not strip a safety switch:
+🔴 **`0` is not a synonym for "off" in this codebase.** Three distinct
+categories share the value `0`, and only one is deletable. The test that
+separates them is **"does anything consume it?"**, never the value.
 
-| flag | value | why it stays |
-|---|---|---|
-| `OPENCLAW_REDEPLOY_EXTENDED_HOURS` | 0 | deliberate feature gate, consumed at `src/engine/cron-schedule.js:679` |
-| `OPENCLAW_STRATEGY_CADENCE_STOP_NORM` | 0 | deliberate anti-churn decision (`21a406f`), live-meaningful |
-| `OPENCLAW_CLOSE_EXEC_LIVE` | 0 | legacy execution lane, superseded by `OPENCLAW_SAMEDAY_EXEC=1`; `doctor.py:434` enforces mutual exclusion with `EOD_SIGNAL_REGISTER` |
-| `OPENCLAW_EOD_SIGNAL_REGISTER` | 0 | as above — the pair is an interlock; removing one silently weakens the doctor check |
+| category | what `0` means | examples | evidence | action |
+|---|---|---|---|---|
+| **Mode selector** | `0` **IS the live setting** — it selects the running mode | `OPENCLAW_EOD_SIGNAL_REGISTER` (67 consumers), `OPENCLAW_CLOSE_EXEC_LIVE` (19) | `engine.py:124-132`: *"target_date=T+1 (gate ON) vs same-day target_date=T (gate OFF — the close-exec/same-day semantics)"*. We run same-day, so `0` is correct and load-bearing. `doctor.py:434` fails if both are `1` — mutually exclusive flows. | **LEAVE.** Changing these changes execution semantics. |
+| **Revert switch** | off by a live risk DECISION; the flag is the documented rollback path | `OPENCLAW_STRATEGY_CADENCE_STOP_NORM` (8 consumers), `OPENCLAW_REDEPLOY_EXTENDED_HOURS` (7) | `bracket_stacking.py:103`: *"DISABLED IN PRODUCTION since 2026-07-31 … Kept because the flag is the revert path, but understand what turning it back ON does."* Anti-churn (`21a406f`, stops widen ×3). `REDEPLOY_EXTENDED_HOURS` off after measured after-hours slippage. | **LEAVE.** Deleting removes the rollback. |
+| **Genuinely dead** | no consumer anywhere | `OPENCLAW_STRATEGY_BLOCK` (**0 refs in `src/`**), `correlation_matrix.py` (**0 imports**) | grep across `src/ scripts/ tests/` | **DELETE** (§5.1, §5.2). |
+
+⇒ Of the five `OPENCLAW_*` flags currently at `0`, **exactly one**
+(`OPENCLAW_STRATEGY_BLOCK`) is stale. Verify with:
+```bash
+grep -rn "$FLAG" --include=*.py --include=*.js --include=*.sh src/ scripts/ tests/ | wc -l
+```
+A count of 0 is the only evidence that justifies deletion.
 
 The 15 disabled timers (`openclaw-saturday-brain`, `openclaw-mastermind-corpus`,
 `openclaw-position-recs`, `openclaw-strategy-review`, `openclaw-paper-expansion`,
 `openclaw-weekend-saturday`, `openclaw-weekend-sunday`, …) are **superseded by
-the sunday-research split**, not stale artefacts. Removing their units removes
-the ability to run those modes manually. Leave disabled; do not delete.
+the sunday-research split**, not stale artefacts — the underlying modes still
+exist on `run_mastermind.js --mode {corpus|comprehensive-review|position-recs|paper-expansion}`
+for manual runs. Removing their units removes that capability. Leave disabled;
+do not delete.
 
 ---
 
