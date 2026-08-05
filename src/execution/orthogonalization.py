@@ -12,7 +12,7 @@ Spec: docs/archive/superpowers/specs/2026-05-29-strategy-orthogonalization-desig
 from __future__ import annotations
 import math
 
-SPARSE_DEFAULT = 0.05   # unknown strategy-pair similarity (matches strategy_similarity/correlation_matrix)
+SPARSE_DEFAULT = 0.05   # unknown strategy-pair similarity (matches strategy_similarity)
 
 
 def _dir_to_int(direction) -> int:

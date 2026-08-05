@@ -270,10 +270,16 @@ commit that `CRISIS_CORRELATION_PRIOR=0.7` dies with it** — it was never wired
 so nothing is lost, but the record should say so explicitly to prevent someone
 "restoring" a safety net that never existed.
 
-### 5.2 DELETE — orphan env var
+### 5.2 ~~DELETE — orphan env var~~ — CORRECTION: it does not exist
 
-`OPENCLAW_STRATEGY_BLOCK` — present in `.env` (empty), **zero references in
-`src/`**. Remove the line.
+`OPENCLAW_STRATEGY_BLOCK` is **not in `.env` and not in the code**. An earlier
+draft listed it as "present but empty" — that was a misread of an empty `grep`
+result (no match) as an empty value. Nothing to delete; `.env` untouched.
+
+**Method note, since this is the failure mode this whole section is about:**
+`grep -m1 "^KEY=" .env | cut -d= -f2-` prints an empty string BOTH when the key
+is absent and when it is set-but-empty. Distinguish with
+`grep -c "^KEY=" .env` (0 = absent) before claiming anything about a flag.
 
 ### 5.3 RETIRE — fold/block orthogonalisation (operator-confirmed)
 
