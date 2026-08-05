@@ -8,6 +8,29 @@ Type=simple
 User=root
 WorkingDirectory=/root/openclaw
 EnvironmentFile=/root/openclaw/.env
+# numexpr crash containment (2026-08-05). This box has a SPLIT dependency stack:
+# pip numpy 2.4.4 (upgraded 2026-05-15) + pip pandas 3.0.2 in /usr/local, but
+# numexpr 2.10.2 is the DISTRO build in /usr/lib — a C extension stranded by a
+# pip upgrade, predating pandas 3.x. pandas routes frame binops through numexpr
+# above _MIN_ELEMENTS=1e6, and at fleet scale that segfaults DETERMINISTICALLY
+# (reproduced 3/3 in ~30s with pure pandas, no strategy code).
+#
+# It cost two nights on S_spectral_trend_ewma_vol_target: SIGABRT 08-04 06:53,
+# SIGSEGV 08-04 23:07, the latter on an idle box at VmHWM 2.97GB with the fault
+# inside interpreter.cpython-313-x86_64-linux-gnu.so. Verified 08-05: with
+# threads=1 the same strategy ran 20.2m with ZERO segfaults (it then hit the
+# ordinary OOM ceiling, a separate problem).
+#
+# Scoped to the fleet on purpose — the LIVE signals/sizer/handoff path shares
+# this stack and is equally exposed, but that is a trading-day change and is
+# tracked separately. The real fix is aligning numexpr with the pip stack
+# (pip install numexpr); this is containment, not a repair.
+#
+# The driver spreads process.env into each child, so this reaches the python
+# grandchild. NUMEXPR_* must be set BEFORE numexpr is imported — an env var is,
+# a runtime call would not be.
+Environment=NUMEXPR_MAX_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
 Nice=19
 # Hard wall-clock bound: cgroup-wide SIGTERM->SIGKILL 13.5h after the 21:30
 # start (11:00 UTC). This is the REAL bound; the driver's --deadline (10:30)
