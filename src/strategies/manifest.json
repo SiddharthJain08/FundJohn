@@ -6147,7 +6147,9 @@
       "metadata": {
         "canonical_file": "S_spectral_trend_ewma_vol_target.py",
         "class": "SpectralTrendEWMAVolTarget",
-        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)"
+        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)",
+        "backtest_universe_cap": "tier_liquid",
+        "backtest_universe_cap_reason": "Operator directive 2026-08-05. Uncapped this strategy has universe_filter_ref=None, so the backtest simulates the FULL ~14.6k-symbol panel and has NEVER completed a canonical run: SIGABRT 08-04 06:53 and SIGSEGV 08-04 23:07 (both the pandas-3/numexpr-2.10.2 defect, contained since by NUMEXPR_MAX_THREADS=1), then pure OOM at 20.2m/2.79GB and 29.1m/3.35GB once the crash was fixed. Time is not the binding constraint — memory is — so a longer window does not help. Capping to tier_liquid (~5k symbols) cuts the panel ~3x. ⚠ HONEST CAVEAT, differs from the S_pairs precedent: S_pairs already had a PRODUCTION universe_filter_ref=tier_liquid, so capping its backtest IMPROVED live/backtest parity. This strategy has NO production filter, so the cap genuinely narrows what it models — results are NOT comparable to an uncapped run of the same strategy, and that is a modelling choice, not a parity fix."
       },
       "history": [],
       "instrument_class": "equity"
