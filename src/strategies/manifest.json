@@ -6147,12 +6147,16 @@
       "metadata": {
         "canonical_file": "S_spectral_trend_ewma_vol_target.py",
         "class": "SpectralTrendEWMAVolTarget",
-        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)",
-        "backtest_universe_cap": "tier_liquid",
-        "backtest_universe_cap_reason": "Operator directive 2026-08-05. Uncapped this strategy has universe_filter_ref=None, so the backtest simulates the FULL ~14.6k-symbol panel and has NEVER completed a canonical run: SIGABRT 08-04 06:53 and SIGSEGV 08-04 23:07 (both the pandas-3/numexpr-2.10.2 defect, contained since by NUMEXPR_MAX_THREADS=1), then pure OOM at 20.2m/2.79GB and 29.1m/3.35GB once the crash was fixed. Time is not the binding constraint — memory is — so a longer window does not help. Capping to tier_liquid (~5k symbols) cuts the panel ~3x. ⚠ HONEST CAVEAT, differs from the S_pairs precedent: S_pairs already had a PRODUCTION universe_filter_ref=tier_liquid, so capping its backtest IMPROVED live/backtest parity. This strategy has NO production filter, so the cap genuinely narrows what it models — results are NOT comparable to an uncapped run of the same strategy, and that is a modelling choice, not a parity fix."
+        "description": "Vol-normalized EWMA trend signal with vol-targeted position sizing (Sepp & Lucic 2026)"
       },
       "history": [],
-      "instrument_class": "equity"
+      "instrument_class": "equity",
+      "backtest_quarantine": {
+        "reason": "REPRODUCIBLE RESOURCE WALL — 5 attempts, zero completions; strategy_backtest_runs has NEVER held a row for this strategy. Two distinct causes, both investigated: (1) pandas-3.0.2 / numexpr-2.10.2 segfault (SIGABRT 08-04 06:53, SIGSEGV 08-04 23:07, fault inside interpreter.cpython-313 .so) — FIXED by NUMEXPR_MAX_THREADS=1 on the fleet unit (c7fc4a7); it has not crashed since. (2) A hard ~3.2-3.4GB memory ceiling that remains: OOM at 20.2m/2.79GB, 29.1m/3.35GB, 77.4m/3.32GB (clean box, 5.9GB free) and 43.6m/3.39GB (capped to tier_liquid). TIME IS NOT THE CONSTRAINT — given the whole box it ran 4x longer and hit the identical ceiling, so the 13.5h nightly window will fail the same way. THE UNIVERSE CAP DOES NOT HELP — tier_liquid (~5k vs ~14.6k symbols) moved peak memory by ~2%; cap was verified genuinely applied (_bounded_resolver -> PrecomputedResolver _tier=tier_liquid) and has now been REVERTED because it narrows what the strategy models (universe_filter_ref is None) while buying nothing. THE STRATEGY'S OWN MATH IS NOT THE BOTTLENECK — its exact op sequence (pct_change/ewm.std/div/ewm.mean/mul-div/clip) ran to completion at 2200x5000 on this same box in a standalone reproducer. The memory is consumed by the backtest HARNESS path, which is why narrowing the strategy's universe was ineffective.",
+        "since": "2026-08-05",
+        "clears_when": "A code-level fix to the harness memory profile for this strategy, evidenced by ONE completed run (a row in strategy_backtest_runs). Do NOT clear on the strength of a longer window or a smaller universe — both were measured and rejected above.",
+        "accepted_by": "operator directive 2026-08-05 — canonical proceeds at 139/140, consciously excluding this strategy"
+      }
     },
     "S_robust_min_variance_hedge": {
       "state": "live",
