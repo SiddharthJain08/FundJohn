@@ -147,6 +147,43 @@ def get_forward_earnings_calendar(tickers: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def get_earnings_history(tickers: list[str],
+                         throttle_s: float = 0.4) -> pd.DataFrame:
+    """Per-ticker past+future earnings events via yfinance Ticker.earnings_dates.
+
+    Returns long DataFrame[ticker, date, eps_estimated, eps_actual] — one row
+    per earnings event, date normalised to a plain date (yfinance returns
+    exchange-tz timestamps). ~12 most recent events per ticker (yfinance
+    default), which covers the SUE trailing window (63 trading days).
+
+    This is the earnings-ACTUALS source since 2026-08-06: FMP's bulk
+    earning_calendar endpoint 403s on the current tier and its per-ticker
+    historical/earning_calendar endpoint (scripts/backfill_earnings.py) now
+    403s too — the SP-1 "earnings backfill is FMP-only" note is obsolete, and
+    keeping it FMP-only is what froze earnings.parquet at 2026-04-30.
+    """
+    rows = []
+    for t in tickers:
+        try:
+            ed = yf.Ticker(t).earnings_dates
+            if ed is None or ed.empty:
+                continue
+            for ts, r in ed.iterrows():
+                d = ts.date() if hasattr(ts, 'date') else pd.to_datetime(ts).date()
+                rows.append({
+                    'ticker':        t,
+                    'date':          d,
+                    'eps_estimated': r.get('EPS Estimate'),
+                    'eps_actual':    r.get('Reported EPS'),
+                })
+        except Exception as e:
+            log.warning('yfinance earnings_dates for %s: %s', t, e)
+        if throttle_s:
+            time.sleep(throttle_s)
+    return pd.DataFrame(rows, columns=['ticker', 'date',
+                                       'eps_estimated', 'eps_actual'])
+
+
 # ── Incremental macro.parquet writer (mirrors old fetch_vol_indices.main) ─────
 
 def _fetch_series_for_macro(yf_ticker: str, start: str, end_inclusive: str) -> pd.DataFrame:

@@ -608,6 +608,17 @@ async function runEarningsCalendar() {
   );
 }
 
+// Earnings MASTER merge: calendar rows + reported actuals → earnings.parquet
+// (append-only). Bounded work — actuals fetch only covers tickers whose event
+// just passed unreported.
+async function runEarningsMasterMerge() {
+  return _runIngestPhase(
+    '📅', 'Earnings master merge (calendar + actuals)',
+    ['src/ingestion/ingest_earnings_master.py'],
+    'earnings', 10 * 60_000,
+  );
+}
+
 // ── Phase 2: Historical prices — gap-aware, never re-fetches known data ────────
 
 async function runHistoricalPrices(daysBack = 3650, tickers = null) {
@@ -2065,6 +2076,12 @@ async function runDailyCollection() {
   // Runs after fundamentals because they share the same provider universe.
   if (cfg.collect_earnings_calendar !== 'false') {
     await runEarningsCalendar();
+    // 4c: fold the fresh calendar + reported actuals into the earnings
+    // MASTER — the file engine.py and the earnings strategies actually read.
+    // Its previous refresh path was orphaned FMP dead code and the master
+    // silently froze 2026-04-30 → 08-06 (remediation spec §3). Runs right
+    // after the calendar so the master can never lag it by more than a run.
+    await runEarningsMasterMerge();
   }
 
   // Phase 6: News — skipped in YELLOW/RED
