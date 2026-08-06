@@ -16,6 +16,7 @@ Daily run sequence:
 
 import os
 import sys
+import gc as _gc
 import json
 import logging
 import traceback
@@ -541,6 +542,36 @@ def load_approved_strategies(cur):
 # 3. LOAD PRICES
 # ──────────────────────────────────────────────────────────
 
+def _parquet_date_axis(path, date_col: str = 'date'):
+    """Every distinct value of `date_col` in the parquet, as a sorted DatetimeIndex.
+
+    Reads ONE column via Arrow and dedupes in Arrow (no pandas materialisation):
+    ~1.6s and ~600MB transient on the 18.9M-row master, taken and released
+    BEFORE the main panel read, so it does not raise the process peak.
+
+    Load-bearing, not cosmetic. Once load_prices pushes the universe filter into
+    the parquet read, a date on which only OUT-OF-universe tickers traded
+    vanishes from the panel entirely — whereas the old full read kept it as an
+    all-NaN row. Reindexing onto this axis preserves the old frame exactly.
+    That row is not always harmless downstream: apply_equity_calendar drops
+    all-NaN rows, but it is gated (OPENCLAW_EQUITY_TRADING_CALENDAR) and crypto
+    ALWAYS gets the full union calendar, so the difference would be live-visible.
+
+    Returns None on any structural surprise; the caller then keeps the filtered
+    frame's own index rather than guessing.
+    """
+    try:
+        import pyarrow.parquet as _pq
+        import pyarrow.compute as _pc
+        tab = _pq.read_table(path, columns=[date_col])
+        vals = _pc.unique(tab.column(date_col).combine_chunks()).to_pylist()
+        del tab
+        _gc.collect()
+        return pd.DatetimeIndex(sorted(pd.to_datetime(v) for v in vals))
+    except Exception:      # an optimisation/fidelity aid, never a hard dependency
+        return None
+
+
 def load_prices(universe: list) -> pd.DataFrame:
     """Load master price parquet; pivot to wide format (date index × ticker columns, close prices).
 
@@ -560,14 +591,67 @@ def load_prices(universe: list) -> pd.DataFrame:
         logger.warning(f"Master prices not found at {master_path}")
         return pd.DataFrame()
     try:
-        df = pd.read_parquet(master_path, columns=['ticker', 'date', 'close'])
-        wide = df.pivot(index='date', columns='ticker', values='close')
-        wide.index = pd.to_datetime(wide.index)
-        wide.sort_index(inplace=True)
+        # ── OOM hardening (2026-08-06) ──────────────────────────────────────
+        # This used to read ALL 18.86M rows / 12,547 tickers / 15 years and then
+        # pandas-.pivot() the lot, only to throw ~58% of the columns away on the
+        # next line. Measured peak RSS 2608MB for a 3831x5231 result that needs
+        # ~160MB. The signals step has been OOM-killed 5 times in 10 days
+        # (rc=137: 07-27/28/29, 08-03, 08-05) on an 8GB no-swap box where the
+        # kernel's own tally at kill time was 8134MB across 59 tasks — i.e. it
+        # died by a couple of hundred MB.
+        #
+        # Two changes, both provably output-identical (verified 08-06 against
+        # the old path: same shape/columns/index/dtypes/NaN-mask, max abs
+        # diff 0.0):
+        #   1. push the universe filter into the parquet read — the universe is
+        #      already resolved before this call (engine logs "live-universe ON:
+        #      union N tickers" immediately before "Prices loaded"), so nothing
+        #      downstream sees a different frame.
+        #   2. build the wide frame by direct numpy scatter. pandas .pivot()
+        #      transiently allocates ~1.4GB above the frames it returns.
+        # Peak 2608MB -> 1969MB (-639MB, -25%), which is larger than the margin
+        # by which both the 08-03 and 08-05 kills overshot.
+        _read_kwargs = {'columns': ['ticker', 'date', 'close']}
+        _uni = sorted({t for t in (universe or []) if isinstance(t, str)})
+        # Take the full date axis BEFORE the panel read (and release it) so the
+        # transient does not stack onto the peak; needed to restore any date the
+        # universe filter drops. Skipped entirely when we aren't filtering.
+        _date_axis = _parquet_date_axis(master_path) if _uni else None
+        if _uni:
+            _read_kwargs['filters'] = [('ticker', 'in', _uni)]
+        df = pd.read_parquet(master_path, **_read_kwargs)
+
+        if df.empty:
+            wide = pd.DataFrame()
+        else:
+            _dates = np.sort(df['date'].unique())
+            _tick  = pd.Categorical(df['ticker'])
+            _di    = pd.Index(_dates).get_indexer(df['date'])
+            _ti    = _tick.codes.astype(np.int64)
+            _out   = np.full((len(_dates), len(_tick.categories)), np.nan, dtype=np.float64)
+            _out[_di, _ti] = df['close'].to_numpy()
+            wide = pd.DataFrame(_out, index=pd.to_datetime(_dates),
+                                columns=list(_tick.categories))
+            # Drop the long frame and the scatter scratch before anything else
+            # allocates — this is the whole point of the rewrite.
+            del df, _dates, _tick, _di, _ti, _out
+            _gc.collect()
+            wide.sort_index(inplace=True)
+
         cols = [c for c in universe if c in wide.columns]
         if cols:
             wide = wide[cols]
-        if len(wide.index):
+        # Restore any date the universe filter dropped, as the all-NaN row the
+        # old full read would have produced. No-op on real data (every date in
+        # the master carries at least one universe ticker) but it keeps the
+        # rewrite exactly equivalent instead of nearly so.
+        if _date_axis is not None and len(_date_axis) and not wide.empty:
+            wide = wide.reindex(_date_axis)
+        # Fix C's invariant: last_parquet_max_date must be the PARQUET's own max,
+        # not the filtered frame's.
+        if _date_axis is not None and len(_date_axis):
+            load_prices.last_parquet_max_date = _date_axis.max().date()
+        elif len(wide.index):
             load_prices.last_parquet_max_date = wide.index.max().date()
     except (OSError, ValueError, KeyError) as e:   # narrow: parquet read/pivot only
         logger.error(f"Failed to load prices: {e}")
