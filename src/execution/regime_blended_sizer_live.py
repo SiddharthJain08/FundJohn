@@ -495,7 +495,8 @@ def main():
     # while producing signals via the 15:00 structured handoff. Keying off
     # OPENCLAW_EOD_RECONCILE here would send the same-day chain down the
     # self-load branch and size an EMPTY carried set against a live book.
-    eod_mode = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    eod_mode = eod_register_on()
     if eod_mode:
         # SP-6 Phase A — EOD reconcile mode. eod-signal-register persists the
         # carried set to execution_signals (APPROVED, target_date=T+1); it does

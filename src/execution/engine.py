@@ -123,14 +123,16 @@ def _next_trading_day(run_date: date) -> date:
 
 
 def _eod_signal_register_gate_on() -> bool:
-    """Returns True if OPENCLAW_EOD_SIGNAL_REGISTER==1 (default OFF).
+    """True ⇒ T+1 EOD-register signal semantics (target_date=T+1 via
+    _next_trading_day); False ⇒ same-day target_date=T (the live mode).
 
-    Controls the EOD-flow signal semantics ONLY: target_date=T+1 via
-    _next_trading_day (gate ON) vs same-day target_date=T (gate OFF —
-    the close-exec/same-day semantics). Lifecycle side-effects that must
-    survive in BOTH executing modes live behind
-    _signal_lifecycle_pass_on() instead."""
-    return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    §8 (2026-08-06): mode resolution moved to signal_target_mode — the
+    positively-named OPENCLAW_SAMEDAY_SIGNAL_TARGET wins when set, the
+    legacy OPENCLAW_EOD_SIGNAL_REGISTER is honoured for one epoch when
+    not. Lifecycle side-effects that must survive in BOTH executing modes
+    live behind _signal_lifecycle_pass_on() instead."""
+    from execution.signal_target_mode import eod_register_on
+    return eod_register_on()
 
 
 def _signal_lifecycle_pass_on() -> bool:
@@ -140,8 +142,8 @@ def _signal_lifecycle_pass_on() -> bool:
     run whenever signals feed real submissions, regardless of the timing
     model. (The sentinel also arms the premarket reconcile's deliberate-
     flatten guard, which stays active in same-day mode.)"""
-    return (os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
-            or os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1')
+    from execution.signal_target_mode import eod_register_on
+    return eod_register_on() or os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1'
 
 
 def _is_trading_session(d: date) -> bool | None:

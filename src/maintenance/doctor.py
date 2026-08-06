@@ -431,18 +431,22 @@ def check_env_optional():
 
 @_check('eod_mutual_exclusion')
 def check_eod_mutual_exclusion():
-    """Fail if BOTH OPENCLAW_EOD_SIGNAL_REGISTER and OPENCLAW_CLOSE_EXEC_LIVE are ON.
-    These modes are mutually exclusive: EOD_SIGNAL_REGISTER computes + persists new
-    signals for the day; CLOSE_EXEC_LIVE fires the legacy into-close execution.
-    Running both simultaneously creates conflicting signal sets and double-execution."""
-    eod_register = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    """Fail when the T+1 EOD-register flow and OPENCLAW_CLOSE_EXEC_LIVE are
+    BOTH on (conflicting signal sets + double-execution), and fail on a
+    half-migrated §8 environment where OPENCLAW_SAMEDAY_SIGNAL_TARGET and
+    the legacy OPENCLAW_EOD_SIGNAL_REGISTER contradict each other."""
+    from execution.signal_target_mode import eod_register_on, legacy_alias_conflict
+    conflict = legacy_alias_conflict()
+    if conflict:
+        return _fail('eod_mutual_exclusion', conflict)
+    eod_register = eod_register_on()
     close_exec   = os.environ.get('OPENCLAW_CLOSE_EXEC_LIVE') == '1'
     if eod_register and close_exec:
         return _fail('eod_mutual_exclusion',
-                     'OPENCLAW_EOD_SIGNAL_REGISTER=1 AND OPENCLAW_CLOSE_EXEC_LIVE=1 (mutually exclusive flows)')
+                     'T+1 EOD register AND OPENCLAW_CLOSE_EXEC_LIVE=1 (mutually exclusive flows)')
     active = ('eod_signal_register' if eod_register
               else 'close_exec_live' if close_exec
-              else 'neither')
+              else 'sameday_signal_target')
     return _ok('eod_mutual_exclusion', f'active_flow={active}')
 
 
@@ -471,8 +475,15 @@ def check_eod_gate_consistency():
     PASS: all three =1, or all three unset/≠1.
     FAIL: any mix (some =1, some not).
     """
-    on  = [g for g in _EOD_GATES if os.environ.get(g) == '1']
-    off = [g for g in _EOD_GATES if os.environ.get(g) != '1']
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+
+    def _gate_on(g):
+        if g == 'OPENCLAW_EOD_SIGNAL_REGISTER':
+            return eod_register_on()
+        return os.environ.get(g) == '1'
+
+    on  = [g for g in _EOD_GATES if _gate_on(g)]
+    off = [g for g in _EOD_GATES if not _gate_on(g)]
     if len(on) in (0, 3):
         state = 'all_on' if len(on) == 3 else 'all_off'
         return _ok('eod_gate_consistency', f'eod_gates={state}')
@@ -1725,7 +1736,8 @@ def check_option_delta_hedge_deps():
     name = 'option_delta_hedge_deps'
     if os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') != '1':
         return _ok(name, 'gate OFF — skipped')
-    eod_register = os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    eod_register = eod_register_on()
     eod_reconcile = os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
     if not (eod_register and eod_reconcile):
         return _fail(name,

@@ -67,7 +67,8 @@ def _eod_signal_register_lane() -> bool:
     have ignored that handoff and self-loaded an APPROVED carried set the
     same-day lane never writes, sizing an empty book against live positions.
     In EOD mode both flags are 1, so behavior there is unchanged."""
-    return os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') == '1'
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    return eod_register_on()
 def _dust_tickers(target_usd: dict, dust_floor_usd: float = DUST_FLOOR_USD) -> list:
     """Tickers whose absolute target notional is below the hard dust floor.
     Pure (does not mutate its input). The caller drops these WITHOUT

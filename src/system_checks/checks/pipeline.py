@@ -256,11 +256,12 @@ def _pipeline_log_no_unhandled_traceback():
 
 @check(name='eod_compute_health_fresh', tags=['pipeline'], requires=['db'])
 def _eod_compute_health_fresh():
-    """When OPENCLAW_EOD_SIGNAL_REGISTER=1: latest eod_compute_health row must
+    """In T+1 EOD-register mode: latest eod_compute_health row must
     be for CURRENT_DATE and healthy=true.  WARN if missing/stale/unhealthy.
-    Gate off → SKIP (no spurious noise on the legacy flow)."""
-    if os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1':
-        return Status.SKIP, 'OPENCLAW_EOD_SIGNAL_REGISTER is OFF'
+    Same-day mode → SKIP (no spurious noise on the same-day flow)."""
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    if not eod_register_on():
+        return Status.SKIP, 'same-day signal target is ON (T+1 register flow inactive)'
     with _pg() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT healthy, run_date FROM eod_compute_health
@@ -280,13 +281,14 @@ def _eod_compute_health_fresh():
 
 @check(name='carried_set_present', tags=['pipeline'], requires=['db'])
 def _carried_set_present():
-    """When OPENCLAW_EOD_SIGNAL_REGISTER=1: expect COMPUTED and/or APPROVED
+    """In T+1 EOD-register mode: expect COMPUTED and/or APPROVED
     execution_signals rows for today.  WARN if zero (engine may have hit the
-    regime gate or universe was empty).  Gate off → SKIP."""
+    regime gate or universe was empty).  Same-day mode → SKIP."""
     if not _is_trading_day(date.today()):
         return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
-    if os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1':
-        return Status.SKIP, 'OPENCLAW_EOD_SIGNAL_REGISTER is OFF'
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    if not eod_register_on():
+        return Status.SKIP, 'same-day signal target is ON (T+1 register flow inactive)'
     with _pg() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT COUNT(*) FROM execution_signals

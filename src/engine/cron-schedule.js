@@ -252,7 +252,14 @@ function start(swarm, generateId, notifyDiscord) {
     // 9:35am dashboard-only SOD refresh. When OFF, the legacy 10:00am cycle runs
     // unchanged. Spec: docs/archive/superpowers/specs/2026-05-27-open-execution-timing-and-action-label-design.md
     const closeExecLive       = process.env.OPENCLAW_CLOSE_EXEC_LIVE       === '1';
-    const eodSignalRegister   = process.env.OPENCLAW_EOD_SIGNAL_REGISTER   === '1';
+    // §8 (2026-08-06): OPENCLAW_SAMEDAY_SIGNAL_TARGET is the positively-named
+    // mode selector (1 = same-day target_date=T, the live config). When set it
+    // wins; the legacy OPENCLAW_EOD_SIGNAL_REGISTER spelling is honoured for
+    // one epoch. JS twin of src/execution/signal_target_mode.py — keep in sync.
+    const _sdst = process.env.OPENCLAW_SAMEDAY_SIGNAL_TARGET;
+    const eodSignalRegister   = (_sdst != null && _sdst !== '')
+        ? _sdst !== '1'
+        : process.env.OPENCLAW_EOD_SIGNAL_REGISTER === '1';
     // 2026-07-29 same-day pivot: signal[t] -> submission[t]. 15:00 ET compute
     // (close[t]-proxy snapshot; no full collect in the critical path) ->
     // 15:55 ET execute into the close (mirrors the backtests' same_close

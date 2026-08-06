@@ -23,7 +23,8 @@ def _option_hedge():
     if os.environ.get('OPENCLAW_OPTION_DELTA_HEDGE') != '1':
         return Status.SKIP, 'OPENCLAW_OPTION_DELTA_HEDGE=0'
 
-    if (os.environ.get('OPENCLAW_EOD_SIGNAL_REGISTER') != '1'
+    from execution.signal_target_mode import eod_register_on   # §8 alias resolver
+    if (not eod_register_on()
             or os.environ.get('OPENCLAW_EOD_RECONCILE') != '1'):
         return Status.FAIL, (
             'delta-hedge ON but EOD pipeline gates off '

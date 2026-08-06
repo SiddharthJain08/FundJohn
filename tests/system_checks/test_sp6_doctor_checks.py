@@ -97,7 +97,9 @@ class TestDoctorEodMutualExclusion:
         monkeypatch.delenv('OPENCLAW_CLOSE_EXEC_LIVE', raising=False)
         res = doctor.check_eod_mutual_exclusion()
         assert res['severity'] == doctor.PASS
-        assert 'neither' in res['detail']
+        # §8: with neither legacy flow on, the resolver names the live
+        # same-day mode instead of the old 'neither'.
+        assert 'sameday_signal_target' in res['detail']
 
     def test_both_explicitly_zero_passes(self, monkeypatch):
         monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '0')
@@ -195,7 +197,7 @@ class TestEodComputeHealthFresh:
         monkeypatch.delenv('OPENCLAW_EOD_SIGNAL_REGISTER', raising=False)
         result = pipeline._eod_compute_health_fresh()
         assert result[0] is Status.SKIP
-        assert 'OFF' in result[1]
+        assert 'same-day signal target is ON' in result[1]   # §8 wording
 
     def test_gate_off_explicit_zero_skips(self, monkeypatch):
         monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '0')
