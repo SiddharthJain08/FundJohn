@@ -23,3 +23,12 @@ def _deterministic_sizer_gates(monkeypatch):
     monkeypatch.setattr(rbs, '_load_asset_eligibility', lambda symbols: None)
     monkeypatch.setenv('OPENCLAW_NET_EXPOSURE_CAP', '0')
     monkeypatch.setenv('OPENCLAW_ENTRY_HYGIENE', '0')
+    # §8 (2026-08-06): production .env carries OPENCLAW_SAMEDAY_SIGNAL_TARGET=1
+    # and some test module's import-time load_dotenv pulls it into os.environ
+    # during collection. The resolver lets the new flag WIN over the legacy
+    # OPENCLAW_EOD_SIGNAL_REGISTER, so every pre-§8 test that enables the T+1
+    # mode by monkeypatching only the legacy flag silently stayed in same-day
+    # mode (45 combined-run failures, 2026-08-06). Clearing it here restores
+    # pure legacy-flag semantics for the suite; §8's own tests set both
+    # explicitly.
+    monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
