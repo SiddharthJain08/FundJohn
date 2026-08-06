@@ -1,7 +1,32 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
+import pytest
+
 from execution import regime_blended_sizer as rbs
 from execution import asset_correlation as ac
+
+
+@pytest.fixture(autouse=True)
+def _env_only_corr_cfg(monkeypatch):
+    """pipeline_config wins over the env these tests set, and on this box the
+    REAL DB has asset_corr_cap_enabled=1 (operator slider, 2026-06-26) — so
+    every fixture here was silently judged by production state (failing since
+    then whenever run against the prod DB). Standing rule: stub prod-state
+    gates in fixtures. This resolves env → default only."""
+    def env_only(default_thr=rbs._ASSET_CORR_THR_DEFAULT,
+                 default_cap_pct=rbs._ASSET_CORR_CAP_PCT_DEFAULT):
+        enabled = os.environ.get('OPENCLAW_ASSET_CORR_CAP') == '1'
+        try:
+            thr = float(os.environ.get('OPENCLAW_ASSET_CORR_THR', default_thr))
+        except (TypeError, ValueError):
+            thr = default_thr
+        try:
+            cap_pct = float(os.environ.get('OPENCLAW_ASSET_CORR_CAP_PCT',
+                                           default_cap_pct))
+        except (TypeError, ValueError):
+            cap_pct = default_cap_pct
+        return enabled, thr, cap_pct
+    monkeypatch.setattr(rbs, '_load_asset_corr_cfg', env_only)
 
 
 def _fake_corr(monkeypatch):

@@ -139,6 +139,10 @@ class TestDoctorEodGateConsistency:
 
     def test_all_three_unset_passes(self, monkeypatch):
         _set_eod_gates(monkeypatch, register=False, premarket=False, reconcile=False)
+        # Production .env leaks OPENCLAW_SAMEDAY_EXEC=1 into os.environ at
+        # collection; with it set the check reports the same-day pattern
+        # instead of the legacy all_off. This test means "everything unset".
+        monkeypatch.delenv('OPENCLAW_SAMEDAY_EXEC', raising=False)
         res = doctor.check_eod_gate_consistency()
         assert res['severity'] == doctor.PASS
         assert 'all_off' in res['detail']
