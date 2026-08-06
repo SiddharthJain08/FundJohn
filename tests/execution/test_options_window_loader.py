@@ -61,11 +61,18 @@ def opts_parquet(tmp_path):
 
 
 def _old_path(path, window_days):
+    """The pre-2026-08-06 pipeline PLUS the in_band cut that
+    _inject_intraday_options applied on overlay days — i.e. the semantics of
+    record (15:00 ET same-day compute), which the loader now applies always."""
     df = engine._read_parquet_window(path, engine._OPTIONS_SIGNAL_COLS,
                                      window_days, TODAY)
     df = engine._drop_zero_greeks(df)
     df['expiry'] = pd.to_datetime(df['expiry'], errors='coerce')
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    dte_today = (df['expiry'] - TODAY).dt.days
+    dte_own = (df['expiry'] - df['date']).dt.days
+    from ingestion.intraday_options import MAX_DTE
+    df = df[(dte_today > 0) & (dte_own <= MAX_DTE)]
     return df.reset_index(drop=True)
 
 
@@ -125,3 +132,16 @@ def test_loader_dropped_all_degenerate(opts_parquet):
     greeks = new[['delta', 'gamma', 'theta', 'vega']].fillna(0)
     assert not (greeks == 0).all(axis=1).any(), \
         'all-zero-greek rows must be dropped at the arrow layer'
+
+
+def test_loader_applies_dte_band(opts_parquet):
+    """Expired contracts and beyond-MAX_DTE LEAPS never reach the frame —
+    the band applies on EVERY run now, not only when an overlay exists."""
+    from ingestion.intraday_options import MAX_DTE
+    new = engine._load_options_window(opts_parquet, engine._OPTIONS_SIGNAL_COLS,
+                                      14, TODAY)
+    assert (new['expiry'] > TODAY).all()
+    dte_own = (new['expiry'] - new['date']).dt.days
+    assert (dte_own <= MAX_DTE).all()
+    # The fixture's 2027-01-15 LEAPS (dte_own ~162-171) must be gone.
+    assert not (new['expiry'] == pd.Timestamp('2027-01-15')).any()

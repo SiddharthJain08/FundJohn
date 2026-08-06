@@ -296,13 +296,33 @@ def _load_options_window(path, columns, window_days, today):
          pandas conversion (same fillna(0)==0 semantics and same log line as
          _drop_zero_greeks, which stays for other callers);
       3. numeric columns remain float64 — no value changes anywhere.
+
+    The loader also applies the 0 < DTE <= MAX_DTE expiry band that
+    _inject_intraday_options applies when a tier-1 overlay exists — now on
+    EVERY run. Before this the panel was bimodal: banded on overlay days
+    (the 15:00 ET same-day compute, the semantics of record for execution)
+    and unbanded on overlay-less runs (the 10:00 ET base cycle), where
+    expired weeklies and LEAPS both inflated the per-ticker IV history by a
+    median +4.5 vol points (per the injection's own 2026-07-29 measurement)
+    AND kept ~9M rows alive through the aggregation loop — the second half
+    of the 5.2GB OOM. With-overlay behavior is unchanged (the band is
+    idempotent); overlay-less runs now match it. Most of the band is pushed
+    into the parquet read itself (expiry > today, expiry <= today+MAX_DTE is
+    a superset of dte_own <= MAX_DTE since date <= today); the exact
+    per-observation cut follows in pandas.
     """
     import pyarrow.compute as _pc
     import pyarrow.parquet as _pq
+    try:
+        from ingestion.intraday_options import MAX_DTE as _max_dte
+    except Exception:  # noqa: BLE001 — same default as intraday_options.py
+        _max_dte = int(os.environ.get('OPENCLAW_INTRADAY_OPTIONS_MAX_DTE', '100'))
     cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
     tbl = _pq.read_table(
         path, columns=list(columns),
-        filters=[('date', '>=', cutoff)],
+        filters=[('date', '>=', cutoff),
+                 ('expiry', '>', today.strftime('%Y-%m-%d')),
+                 ('expiry', '<=', (today + pd.Timedelta(days=_max_dte)).strftime('%Y-%m-%d'))],
         read_dictionary=['ticker', 'date', 'expiry', 'option_type'])
     total = tbl.num_rows
     greeks = [c for c in ('delta', 'gamma', 'theta', 'vega')
@@ -322,6 +342,12 @@ def _load_options_window(path, columns, window_days, today):
     for col in ('date', 'expiry'):
         if col in df.columns and isinstance(df[col].dtype, pd.CategoricalDtype):
             df[col] = _cat_to_datetime(df[col])
+    # Exact per-observation band (the arrow expiry filters above are its
+    # superset). Mirrors _inject_intraday_options.in_band precisely.
+    if 'expiry' in df.columns and 'date' in df.columns and not df.empty:
+        _dte_today = (df['expiry'] - today).dt.days
+        _dte_own = (df['expiry'] - df['date']).dt.days
+        df = df[(_dte_today > 0) & (_dte_own <= _max_dte)]
     return df
 
 
