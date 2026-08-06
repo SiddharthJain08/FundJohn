@@ -510,6 +510,14 @@ def _resolve_script(script: str, run_date: str) -> tuple[list[str], int]:
         # defaults to 600s inside the runner; allow generous headroom on the
         # orchestrator wrapper so the runner's own poll-timeout fires first.
         timeout = int(os.environ.get('IC_TIMEOUT_SECONDS', '600')) + 120
+    elif script == 'engine':
+        # The signals step — see the twin in resolve_script.js for the full
+        # evidence. Short version: it was the only pyExec step still on the
+        # bare 300s literal and it outgrew it (173s→264s as strategies went
+        # 89→97), timing out on 2026-08-05 for a zero-signal day. The creep is
+        # secular, not regime-driven. This path is the one a manual recovery
+        # run uses, so it must move with the JS twin or recovery stays capped.
+        timeout = int(os.environ.get('OPENCLAW_SIGNALS_TIMEOUT_SECONDS', '900'))
     else:
         timeout = 300
     exec_argv = ['python3', str(py_exec), '--date', run_date]

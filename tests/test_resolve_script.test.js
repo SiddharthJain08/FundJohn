@@ -17,6 +17,7 @@ function makeFixture() {
   fs.writeFileSync(path.join(dir, 'src/pipeline/run_sentiment_step.py'), '# py\n');
   fs.writeFileSync(path.join(dir, 'src/execution/engine.py'), '# py\n');
   fs.writeFileSync(path.join(dir, 'src/execution/ic_gate_runner.py'), '# py\n');
+  fs.writeFileSync(path.join(dir, 'src/execution/handoff.py'), '# py\n');
   return dir;
 }
 
@@ -27,20 +28,35 @@ test('Python script in src/pipeline resolves with --date and 600s timeout', () =
   assert.equal(timeoutSec, 600);
 });
 
-test('Node script in src/pipeline resolves without --date and 5400s timeout', () => {
+test('run_collector_once gets a raised heap limit and OPENCLAW_COLLECT_TIMEOUT_SECONDS (default 9000s)', () => {
   const root = makeFixture();
   const { argv, timeoutSec } = resolveScript('run_collector_once', '2026-05-21', {}, root);
   // run_collector_once gets a raised V8 heap limit (OOM hardening — see
   // src/execution/resolve_script.js).
   assert.deepEqual(argv, ['node', '--max-old-space-size=4096', path.join(root, 'src/pipeline/run_collector_once.js')]);
-  assert.equal(timeoutSec, 5400);
+  assert.equal(timeoutSec, 9000);
+  const env = { OPENCLAW_COLLECT_TIMEOUT_SECONDS: '4200' };
+  assert.equal(resolveScript('run_collector_once', '2026-05-21', env, root).timeoutSec, 4200);
 });
 
 test('Fallback src/execution Python with default 300s timeout', () => {
   const root = makeFixture();
+  const { argv, timeoutSec } = resolveScript('handoff', '2026-05-21', {}, root);
+  assert.deepEqual(argv, ['python3', path.join(root, 'src/execution/handoff.py'), '--date', '2026-05-21']);
+  assert.equal(timeoutSec, 300);
+});
+
+test('engine (signals) uses OPENCLAW_SIGNALS_TIMEOUT_SECONDS, default 900s — NOT the bare 300s fallback', () => {
+  // Regression guard for 2026-08-05: the signals step sat on the generic 300s
+  // literal while its runtime crept 173s→264s, then blew the cap (rc=124) for
+  // a zero-signal day. Must stay in lockstep with the Python twin in
+  // pipeline_orchestrator.py:_resolve_script.
+  const root = makeFixture();
   const { argv, timeoutSec } = resolveScript('engine', '2026-05-21', {}, root);
   assert.deepEqual(argv, ['python3', path.join(root, 'src/execution/engine.py'), '--date', '2026-05-21']);
-  assert.equal(timeoutSec, 300);
+  assert.equal(timeoutSec, 900);
+  const env = { OPENCLAW_SIGNALS_TIMEOUT_SECONDS: '1200' };
+  assert.equal(resolveScript('engine', '2026-05-21', env, root).timeoutSec, 1200);
 });
 
 test('ic_gate_runner uses IC_TIMEOUT_SECONDS + 120s (default 720s)', () => {

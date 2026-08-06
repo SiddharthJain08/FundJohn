@@ -51,6 +51,20 @@ function resolveScript(step, runDate, env = process.env, root = DEFAULT_ROOT) {
     let timeoutSec = 300;
     if (step === 'ic_gate_runner') {
       timeoutSec = parseInt(env.IC_TIMEOUT_SECONDS || '600', 10) + 120;
+    } else if (step === 'engine') {
+      // The signals step. It was the ONLY pyExec step left on the bare 300s
+      // literal, and it outgrew it: execution_runs shows duration climbing
+      // 173s (07-21, 89 strategies) → 264s (08-04, 97), i.e. 88% of budget for
+      // three days running, and on 2026-08-05 it blew through — rc=124 at
+      // exactly 300128ms, ZERO signals for the day, no retry (there is none).
+      // The creep is secular (strategy count + universe growth), NOT regime:
+      // 07-31 TRANSITIONING ran 240/257s vs LOW_VOL 263/264s, and
+      // strategies_run is 97 on every row regardless of regime.
+      // 900 = ~3.4x the current mean. Keep in lockstep with the Python twin
+      // in pipeline_orchestrator.py:_resolve_script — that path is what the
+      // manual recovery invocation uses, so patching only this file leaves
+      // recovery still capped at 300s.
+      timeoutSec = parseInt(env.OPENCLAW_SIGNALS_TIMEOUT_SECONDS || '900', 10);
     }
     const execArgv = ['python3', pyExec, '--date', runDate];
     // The daily cycle runs during RTH, so the stop_reattach step places GTC
