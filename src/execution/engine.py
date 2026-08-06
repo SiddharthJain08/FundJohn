@@ -542,6 +542,45 @@ def load_approved_strategies(cur):
 # 3. LOAD PRICES
 # ──────────────────────────────────────────────────────────
 
+def _memory_footprint() -> str:
+    """' peak_rss=1.9GB avail=3.1GB | co-tenants: node 217MB, uvicorn 487MB'.
+
+    Best-effort and never raises — this is a diagnostic tail on a log line, and
+    must not be able to fail a run that has already done its work.
+    """
+    try:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+        avail = None
+        try:
+            for line in open('/proc/meminfo'):
+                if line.startswith('MemAvailable:'):
+                    avail = int(line.split()[1]) / 1024 / 1024
+                    break
+        except OSError:
+            pass
+        others = []
+        me = os.getpid()
+        for pid_dir in os.listdir('/proc'):
+            if not pid_dir.isdigit() or int(pid_dir) == me:
+                continue
+            try:
+                with open(f'/proc/{pid_dir}/statm') as f:
+                    rss_mb = int(f.read().split()[1]) * 4096 / 1048576
+                if rss_mb < 150:          # only things big enough to matter
+                    continue
+                with open(f'/proc/{pid_dir}/comm') as f:
+                    others.append((rss_mb, f.read().strip()))
+            except (OSError, ValueError, IndexError):
+                continue
+        others.sort(reverse=True)
+        tail = ', '.join(f'{n} {r:.0f}MB' for r, n in others[:5]) or 'none >150MB'
+        av = f' avail={avail:.1f}GB' if avail is not None else ''
+        return f' peak_rss={peak:.1f}GB{av} | co-tenants: {tail}'
+    except Exception:
+        return ''
+
+
 def _parquet_date_axis(path, date_col: str = 'date'):
     """Every distinct value of `date_col` in the parquet, as a sorted DatetimeIndex.
 
@@ -2139,7 +2178,14 @@ def main():
             except Exception as e:
                 logger.warning(f"OUE classify_batch failed (closes still persisted): {e}")
 
-        logger.info(f"=== Execution Engine DONE in {duration_s}s ===")
+        # Peak RSS + who else was resident. The signals step was OOM-killed 5x in
+        # the 10 days to 2026-08-05 and the post-mortems had to be reconstructed
+        # from kernel OOM dumps, which only survive when a kill actually happens
+        # — on 08-05 a 2310MB co-tenant python3 was sharing the box with this
+        # process and could NOT be identified afterwards because it was gone.
+        # Logging it on every run makes the next occurrence attributable, and
+        # makes the headroom trend visible before it becomes a kill.
+        logger.info(f"=== Execution Engine DONE in {duration_s}s ==={_memory_footprint()}")
 
         # Output JSON for caller
         print(json.dumps({
