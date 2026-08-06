@@ -482,6 +482,24 @@ def check_eod_gate_consistency():
             return eod_register_on()
         return os.environ.get(g) == '1'
 
+    # Same-day pivot (2026-07-29): with the T+1 register OFF and
+    # OPENCLAW_SAMEDAY_EXEC=1, the protective premarket flow (gate 9:15 +
+    # reconcile 9:28/9:32) legitimately stays ON — that is the CANONICAL
+    # live pattern, which this check mislabeled "partial activation" and
+    # FAILed every day of the same-day epoch. In same-day mode the two
+    # protective gates must simply agree with each other.
+    if (not _gate_on('OPENCLAW_EOD_SIGNAL_REGISTER')
+            and os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1'):
+        protective = ('OPENCLAW_EOD_PREMARKET_GATE', 'OPENCLAW_EOD_RECONCILE')
+        p_on = [g for g in protective if _gate_on(g)]
+        if len(p_on) in (0, len(protective)):
+            state = 'sameday+protective_on' if p_on else 'sameday_bare'
+            return _ok('eod_gate_consistency', f'eod_gates={state}')
+        return _fail('eod_gate_consistency',
+                     f'same-day mode with protective gates split: '
+                     f'ON={[g.replace("OPENCLAW_", "") for g in p_on]} — '
+                     f'gate and reconcile must be toggled together')
+
     on  = [g for g in _EOD_GATES if _gate_on(g)]
     off = [g for g in _EOD_GATES if not _gate_on(g)]
     if len(on) in (0, 3):
