@@ -48,6 +48,15 @@ def _run_node_scenario(step, rcs, env_extra=None):
     script = """
     const path = require('node:path');
     const scenario = %s;
+    // The node's tail-persist appends to the REAL logs/daily_cycle_steps_<date>.log
+    // — stub it out or every test run pollutes the production step log
+    // (found 2026-08-06: runId=t artifacts in the live log).
+    const fs = require('node:fs');
+    const _origAppend = fs.appendFileSync;
+    fs.appendFileSync = (p, data) => {
+      if (String(p).includes('daily_cycle')) return;
+      return _origAppend(p, data);
+    };
     const helpersPath = path.join(%s, 'src', 'agent', 'graphs', 'daily_cycle_helpers.js');
     const helpers = require(helpersPath);
     let attempts = 0;
