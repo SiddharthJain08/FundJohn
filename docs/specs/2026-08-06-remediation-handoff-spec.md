@@ -1,7 +1,20 @@
 # Handoff spec — open remediations from the 2026-08-05/06 signal-outage investigation
 
-**Status:** HANDOFF. Nothing below has been started. To be executed as a Fable task
-in a fresh session.
+**Status:** EXECUTED 2026-08-06 (Fable session, commits `30c6443..0a790cc`).
+§7 real --dry-run · §2 diagnosed and resolved (no wiring bug — see
+`memory/project_zero_signal_36_decomposition`; 13 never-eligible strategies
+sweep out via auto-demote at grace expiry ~08-12) · §3 earnings un-orphaned
+(yfinance master merge in collector) + §3.3 master_freshness probe (caught 4
+MORE frozen masters: historical_regimes [fixed same day], iv_history,
+prices_30m, corporate_actions) · §5 retry in both twins · §4 backfill run
+(FMP /api/v3 is dead account-wide — "Legacy Endpoint"; /stable/ works) ·
+§8 OPENCLAW_SAMEDAY_SIGNAL_TARGET=1 with one-epoch alias · §9 CLOSED by
+operator: keep the flag · §10 largely subsumed by §2's decomposition ·
+§6 waiting on recurrence (per-run co-tenant logging live). Plus a second
+OOM wave not in this spec: the options window read (5.2GB → 2.8GB full
+engine, `1791ea0`+`95f5cde`).
+
+Original text below, unchanged, for the record.
 **Grounded against the tree at commit `c697d62`.** Every path, line number, flag,
 table and count below was verified live on 2026-08-06T09:04Z — not recalled.
 **Scope:** defects *discovered* in the 08-05/06 session and *not yet begun*. Work
