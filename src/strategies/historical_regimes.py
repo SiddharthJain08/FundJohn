@@ -128,12 +128,38 @@ _cache: pd.DataFrame | None = None
 
 
 def _load_cached() -> pd.DataFrame:
-    """Load the cached classifier output, building the cache if missing."""
+    """Load the cached classifier output, (re)building it when missing OR
+    stale relative to macro.parquet's VIX series.
+
+    The staleness check exists because rebuild_cache() spent 2026-07-22 →
+    08-06 with no scheduled caller at all — the cache silently froze while
+    macro kept advancing, and every consumer (backtest partitions, live
+    strategies reading the parquet directly) got July's regime for August
+    (remediation 2026-08-06). The collector now rebuilds daily after the VIX
+    ingest; this check is the second line of defence for consumers that run
+    before the collector or on a box where it failed.
+    """
     global _cache
     if _cache is not None:
         return _cache
-    if not CACHE.exists():
-        rebuild_cache()
+    needs_rebuild = not CACHE.exists()
+    if not needs_rebuild and MACRO.exists():
+        try:
+            cached_max = pd.to_datetime(
+                pd.read_parquet(CACHE, columns=['date'])['date']).max()
+            macro = pd.read_parquet(MACRO, columns=['date', 'series'])
+            vix_max = pd.to_datetime(
+                macro.loc[macro['series'] == 'VIX', 'date']).max()
+            needs_rebuild = pd.notna(vix_max) and (
+                pd.isna(cached_max) or cached_max < vix_max)
+        except Exception:  # noqa: BLE001 — an unreadable probe must not break consumers
+            needs_rebuild = False
+    if needs_rebuild:
+        try:
+            rebuild_cache()
+        except Exception:  # noqa: BLE001 — a failed rebuild falls back to the stale cache
+            if not CACHE.exists():
+                raise
     _cache = pd.read_parquet(CACHE)
     _cache['date'] = pd.to_datetime(_cache['date']).dt.date
     return _cache

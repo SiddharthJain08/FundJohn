@@ -1995,6 +1995,17 @@ async function runDailyCollection() {
   // (incremental fetch keyed off macro.parquet max_date per series).
   if (cfg.collect_macro !== 'false') {
     await runVolIndices();
+    // 1b': re-derive historical_regimes.parquet from the fresh VIX rows.
+    // rebuild_cache() had ZERO scheduled callers and the master silently
+    // froze 2026-07-22 → 08-06 (caught by the master_freshness probe) —
+    // starving S_regime_age_momentum + S_mvgarch_nig_crra_portfolio live
+    // and serving stale regime labels to every backtest partition. Cheap:
+    // one VIX classify pass over ~9k macro rows.
+    await _runIngestPhase(
+      '🧭', 'Historical regimes rebuild',
+      ['src/strategies/historical_regimes.py', '--rebuild'],
+      'historical_regimes', 3 * 60_000,
+    );
   }
 
   // Phase 1c: Wide-format vol_indices.parquet (vix_close, vvix_close, vix9d_close).
