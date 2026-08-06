@@ -266,6 +266,65 @@ def _read_parquet_window(path, columns, window_days, today=None, date_col='date'
     return pd.read_parquet(path, columns=list(columns), filters=[(date_col, '>=', cutoff)])
 
 
+def _cat_to_datetime(s: 'pd.Series') -> 'pd.Series':
+    """Category-of-ISO-strings → datetime64, converting only the (few) unique
+    categories instead of every row. Equivalent to pd.to_datetime(s,
+    errors='coerce') on the object column, at ~1/1e6 the work for a
+    16M-row/10-unique-date column."""
+    cats = pd.to_datetime(s.cat.categories, errors='coerce')
+    codes = s.cat.codes.to_numpy()
+    out = cats.take(np.where(codes >= 0, codes, 0)).to_numpy(copy=True)
+    out[codes < 0] = np.datetime64('NaT')
+    return pd.Series(out, index=s.index)
+
+
+def _load_options_window(path, columns, window_days, today):
+    """Memory-lean options_eod window read (2026-08-06 OOM fix, 2nd wave).
+
+    The plain _read_parquet_window at 1.8-1.9M rows/day (full daily chains for
+    the tradable universe since the three-tier ingestion, 2026-07-30) hands
+    pandas ~16M rows where ticker/date/expiry/option_type are python-object
+    strings: measured 5.2GB peak on 2026-08-06 — over the whole box. Same
+    step, same rc=137 class as the prices-panel fix (9bccab0), different
+    frame. Three changes, output-equivalent:
+
+      1. dictionary-encode the four string columns at the arrow layer
+         (ticker/option_type stay pandas category downstream — groupby and
+         .str.upper() behave identically; date/expiry are decoded per-CATEGORY
+         to datetime64, which the old path produced via row-wise to_datetime);
+      2. drop degenerate all-zero-greek rows with arrow compute BEFORE the
+         pandas conversion (same fillna(0)==0 semantics and same log line as
+         _drop_zero_greeks, which stays for other callers);
+      3. numeric columns remain float64 — no value changes anywhere.
+    """
+    import pyarrow.compute as _pc
+    import pyarrow.parquet as _pq
+    cutoff = (today - pd.Timedelta(days=window_days)).strftime('%Y-%m-%d')
+    tbl = _pq.read_table(
+        path, columns=list(columns),
+        filters=[('date', '>=', cutoff)],
+        read_dictionary=['ticker', 'date', 'expiry', 'option_type'])
+    total = tbl.num_rows
+    greeks = [c for c in ('delta', 'gamma', 'theta', 'vega')
+              if c in tbl.column_names]
+    if greeks and total:
+        zero = None
+        for c in greeks:
+            m = _pc.equal(_pc.fill_null(tbl[c], 0.0), 0.0)
+            zero = m if zero is None else _pc.and_(zero, m)
+        tbl = tbl.filter(_pc.invert(zero))
+        dropped = total - tbl.num_rows
+        if dropped > 0:
+            logger.info('sp1.engine.options_filter dropped=%d degenerate rows (of %d total)',
+                        dropped, total)
+    df = tbl.to_pandas(self_destruct=True, split_blocks=True)
+    del tbl
+    for col in ('date', 'expiry'):
+        if col in df.columns and isinstance(df[col].dtype, pd.CategoricalDtype):
+            df[col] = _cat_to_datetime(df[col])
+    return df
+
+
 # ──────────────────────────────────────────────────────────
 # 1. LOAD REGIME
 # ──────────────────────────────────────────────────────────
@@ -370,6 +429,16 @@ def _inject_intraday_options(opts, today, universe):
         # of raising and costing the whole overlay.
         aligned = in_band(overlay).reindex(columns=opts.columns)
         del overlay
+        # Keep the panel's dictionary encoding through the concat: a mixed
+        # category/object concat silently upcasts ticker+option_type back to
+        # per-row python objects for every panel row (~GB-scale at 1.8M
+        # rows/day — the dtype half of the 2026-08-06 OOM fix).
+        for _c in ('ticker', 'option_type'):
+            if _c in opts.columns and isinstance(opts[_c].dtype, pd.CategoricalDtype):
+                _cats = opts[_c].cat.categories.union(
+                    pd.Index(aligned[_c].dropna().unique()))
+                opts[_c] = opts[_c].cat.set_categories(_cats)
+                aligned[_c] = pd.Categorical(aligned[_c], categories=_cats)
         merged = pd.concat([opts, aligned], ignore_index=True)
         logger.info("intraday options overlay: +%d rows / %d tickers "
                     "(band 0<DTE, per-date cap %d: %d -> %d rows)",
@@ -874,9 +943,9 @@ def load_aux_data(universe: list) -> dict:
             # via pyarrow pushdown instead of full-loading the multi-million-row
             # options_eod.parquet (the 2026-06-24 signals-step OOM, rc=137). `today` is
             # computed once at the top of this try block (also used by the HV20 read).
-            opts = _read_parquet_window(opts_path, _OPTIONS_SIGNAL_COLS, _OPTIONS_READ_WINDOW_DAYS, today)
-            # SP-1: drop degenerate (all-zero-greek) rows before any aggregation.
-            opts = _drop_zero_greeks(opts)
+            # SP-1 degenerate-row drop happens inside the loader, at the arrow
+            # layer, before pandas ever materializes the frame.
+            opts = _load_options_window(opts_path, _OPTIONS_SIGNAL_COLS, _OPTIONS_READ_WINDOW_DAYS, today)
 
             # Ensure expiry is datetime
             if 'expiry' in opts.columns:
