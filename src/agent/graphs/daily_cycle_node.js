@@ -54,31 +54,56 @@ function makeStepNode(STEP, scriptName) {
     // Inject PYTHONPATH so Python steps can `from strategies.X import ...` etc.
     env.PYTHONPATH = _pythonpath(env.PYTHONPATH);
     const { argv, timeoutSec } = resolveScript(SCRIPT, state.runDate, env);
-    const { rc, stdout, stderrTail, durationMs, timedOut } = await runSubprocess(argv, { timeoutSec, env });
 
-    // Persist the step's stdout AND stderr tails on EVERY completion (success
-    // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):
-    // the sizer's own log line naming the cause ("dropped N tickers below
-    // min_cum_sharpe=4.00 (kept=0)") was captured above and then discarded —
-    // only aborts persisted anything (stderr, below). Same pattern, stderr
-    // edition (2026-07-02): the sizer's rc=0 diagnostics (corr_cumsharpe.live /
-    // breadth_weight / clamp) print to stderr whose only other sink is a
-    // self-expiring Discord post (pipeline_config corr_cumsharpe_log_until).
-    // Tail-bounded so chatty steps (engine.py) can't bloat the file. Failure
-    // here must never break the step itself.
-    try {
-      const fs = require('node:fs');
-      const logDir = path.join(ROOT, 'logs');
-      try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
-      const stepsLog = path.join(logDir, `daily_cycle_steps_${state.runDate}.log`);
-      const header = `\n=== ${new Date().toISOString()} step=${STEP} rc=${rc} durationMs=${durationMs} timedOut=${timedOut || false} runId=${runId} ===\n`;
-      const tail = (stdout || '').slice(-4000);
-      const errTail = (stderrTail || '').slice(-4000);
-      fs.appendFileSync(stepsLog,
-        header + (tail || '(stdout empty)') + '\n'
-        + (errTail ? `--- stderr tail ---\n${errTail}\n` : ''));
-    } catch (e) {
-      console.warn(`[daily_cycle_node] stdout persistence failed for ${STEP}: ${e.message}`);
+    const runOnce = async (attempt) => {
+      const res = await runSubprocess(argv, { timeoutSec, env });
+
+      // Persist the step's stdout AND stderr tails on EVERY completion (success
+      // included). rc=0 zero-order days were un-diagnosable twice (2026-06-02/03):
+      // the sizer's own log line naming the cause ("dropped N tickers below
+      // min_cum_sharpe=4.00 (kept=0)") was captured above and then discarded —
+      // only aborts persisted anything (stderr, below). Same pattern, stderr
+      // edition (2026-07-02): the sizer's rc=0 diagnostics (corr_cumsharpe.live /
+      // breadth_weight / clamp) print to stderr whose only other sink is a
+      // self-expiring Discord post (pipeline_config corr_cumsharpe_log_until).
+      // Tail-bounded so chatty steps (engine.py) can't bloat the file. Failure
+      // here must never break the step itself.
+      try {
+        const fs = require('node:fs');
+        const logDir = path.join(ROOT, 'logs');
+        try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+        const stepsLog = path.join(logDir, `daily_cycle_steps_${state.runDate}.log`);
+        const header = `\n=== ${new Date().toISOString()} step=${STEP} attempt=${attempt} rc=${res.rc} durationMs=${res.durationMs} timedOut=${res.timedOut || false} runId=${runId} ===\n`;
+        const tail = (res.stdout || '').slice(-4000);
+        const errTail = (res.stderrTail || '').slice(-4000);
+        fs.appendFileSync(stepsLog,
+          header + (tail || '(stdout empty)') + '\n'
+          + (errTail ? `--- stderr tail ---\n${errTail}\n` : ''));
+      } catch (e) {
+        console.warn(`[daily_cycle_node] stdout persistence failed for ${STEP}: ${e.message}`);
+      }
+      return res;
+    };
+
+    let { rc, stdout, stderrTail, durationMs, timedOut } = await runOnce(1);
+
+    // §5 (2026-08-06 remediation spec): ONE bounded retry for the signals
+    // step. Before this, any abort-worthy rc lost the entire trading day's
+    // signals (08-05: rc=124 and rc=137 on independent days; the only prior
+    // "retry" on record, 07-29, was a human). Safe to re-run: the engine's
+    // writes live in a single transaction committed at the very end, so a
+    // killed/failed attempt persisted nothing, and execution_signals inserts
+    // are ON CONFLICT DO NOTHING. Window arithmetic: 2 × 900s timeout = 30min,
+    // inside the 15:00→15:55 ET same-day compute→execute gap. The alert below
+    // is distinct from the abort alert so a silently-degrading step that
+    // passes only on retry stays visible. Kill switch: OPENCLAW_SIGNALS_RETRY=0.
+    if (STEP === 'signals'
+        && env.OPENCLAW_SIGNALS_RETRY !== '0'
+        && rc !== 0 && !(rc === 1 && !strictMode(env))) {
+      console.warn(`[daily_cycle_node] signals rc=${rc}${timedOut ? ' (timeout)' : ''} — one bounded retry`);
+      await pipelineLog.notifyFailure(`${STEP} (attempt 1/2 failed — retrying once)`,
+                                      state.runDate, rc, stderrTail);
+      ({ rc, stdout, stderrTail, durationMs, timedOut } = await runOnce(2));
     }
 
     const completion = {

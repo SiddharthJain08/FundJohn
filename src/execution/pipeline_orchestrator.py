@@ -850,6 +850,26 @@ def main(argv=None):
             # Run the step
             ok, rc = run_step(script, run_date, step_env)
 
+            # §5 (2026-08-06 remediation spec): ONE bounded retry for the
+            # signals step — twin of daily_cycle_node.js. A failed signals
+            # step loses the whole trading day (08-05: rc=137 OOM and rc=124
+            # timeout on independent days; the only prior "retry", 07-29, was
+            # a human running this orchestrator by hand). Idempotent: the
+            # engine's writes commit in ONE transaction at the very end, so a
+            # failed attempt persisted nothing, and execution_signals inserts
+            # are ON CONFLICT DO NOTHING. The distinct alert keeps a
+            # passes-only-on-retry degradation visible. Kill switch:
+            # OPENCLAW_SIGNALS_RETRY=0.
+            if (not ok and step_key == 'signals'
+                    and os.environ.get('OPENCLAW_SIGNALS_RETRY', '1') != '0'):
+                log(f'signals failed (rc={rc}) — one bounded retry')
+                notify(
+                    f'{reason_tag}🔁 `signals` attempt 1/2 failed (rc={rc}) — '
+                    f'retrying once ({run_date})',
+                    channel=STEP_FAILURE_CHANNEL.get('signals', 'pipeline-feed'),
+                )
+                ok, rc = run_step(script, run_date, step_env)
+
             # Tier 3 exit-code discipline (gated): rc == 2 means auth/config
             # error — abort the cycle without retrying. Behind the
             # OPENCLAW_STRICT_EXIT_CODES feature flag for one cycle so we
