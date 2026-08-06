@@ -82,8 +82,22 @@ async function buildDigest(date = new Date(), failureCtx = null) {
     const greenCnt = Number(sig.ev_pos);
     const totalCnt = Number(sig.n_signals);
     const highConv = Number(sig.high_conv_count);
-    const evOk     = parseFloat(avgEvPct) >= -0.5 || greenCnt >= 1;
-    gateLine = `${evOk ? '✅' : '🚫'} Latest run (${sig.run_date.toISOString().slice(0,10)}): ${totalCnt} signals, ${greenCnt} green, avg EV ${avgEvPct}%, ${highConv} high-conv — ${evOk ? 'trade step eligible' : 'trade step blocked by quality gate'}`;
+    const runDay   = sig.run_date.toISOString().slice(0, 10);
+    // The query is `ORDER BY run_date DESC LIMIT 1` with no date filter, so on a
+    // day the engine never wrote a summary this silently shows the PREVIOUS day's
+    // row. Say so rather than passing it off as "latest run".
+    const today    = new Date().toISOString().slice(0, 10);
+    const staleTag = runDay === today ? '' : `  ⚠️ STALE — no summary row for ${today}`;
+    if (totalCnt === 0) {
+      // A zero-signal day used to render as "✅ … trade step eligible", because
+      // evOk only looked at avg EV (0 >= -0.5) and green count. That is exactly
+      // backwards: zero signals means the book cannot change at all. 2026-08-05
+      // was a total signal outage and the digest would have called it healthy.
+      gateLine = `🚨 Latest run (${runDay}): **0 signals** — nothing computed, book cannot change. Check the signals step for rc=137 (OOM) / rc=124 (timeout).${staleTag}`;
+    } else {
+      const evOk = parseFloat(avgEvPct) >= -0.5 || greenCnt >= 1;
+      gateLine = `${evOk ? '✅' : '🚫'} Latest run (${runDay}): ${totalCnt} signals, ${greenCnt} green, avg EV ${avgEvPct}%, ${highConv} high-conv — ${evOk ? 'trade step eligible' : 'trade step blocked by quality gate'}${staleTag}`;
+    }
   }
 
   // Signal delta

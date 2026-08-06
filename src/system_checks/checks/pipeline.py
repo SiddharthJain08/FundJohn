@@ -70,19 +70,96 @@ def _pipeline_completed_today():
     return Status.WARN, 'pipeline not yet complete (or partial)'
 
 
+# The same-day compute (OPENCLAW_SAMEDAY_EXEC=1) fires at 15:00 ET — signals
+# land ~19:02Z. The daily maintenance runner is 12:00 ET (16:00Z), i.e. THREE
+# HOURS EARLIER, so a naive "are there signals today?" probe warned on every
+# single trading day and carried no information. That is why 2026-08-05 — a
+# genuine zero-signal day, both computes killed (rc=137 then rc=124) — was
+# indistinguishable from every healthy day. Gate on the window, and separate
+# "engine ran and found nothing" from "engine never finished".
+_SAMEDAY_COMPUTE_UTC_HOUR = 19
+
+
+def _sameday_mode() -> bool:
+    return os.environ.get('OPENCLAW_SAMEDAY_EXEC') == '1'
+
+
 @check(name='signals_persisted_today', tags=['pipeline'], requires=['db'])
 def _signals_persisted_today():
-    """execution_signals has rows for today — engine actually ran strategies."""
+    """execution_signals has rows for today — engine actually ran strategies.
+
+    A zero count is only meaningful once the compute window has closed, and it
+    means two very different things depending on whether the engine COMPLETED:
+    a finished run with 0 signals is a dry market (WARN); a run that never
+    finished is a dead pipeline (FAIL). Conflating them is what hid 08-05.
+    """
     if not _is_trading_day(date.today()):
         return Status.SKIP, f'{_today()} is not a trading day (market holiday/weekend)'
+
+    now_utc = datetime.now(timezone.utc)
+    if _sameday_mode() and now_utc.hour < _SAMEDAY_COMPUTE_UTC_HOUR:
+        return Status.SKIP, (
+            f'same-day compute has not run yet (fires ~{_SAMEDAY_COMPUTE_UTC_HOUR}:00Z, '
+            f'now {now_utc:%H:%M}Z) — a zero count here is expected, not a fault'
+        )
+
     with _pg() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM execution_signals WHERE signal_date = CURRENT_DATE"
         )
         n = cur.fetchone()[0]
-    if n == 0:
-        return Status.WARN, '0 signals for today (regime gate or empty universe?)'
-    return Status.PASS, f'{n} signals persisted'
+        # execution_runs is written by engine.py's log_run() at the very END of
+        # a run, so a row today == the engine reached completion at least once.
+        cur.execute(
+            "SELECT COALESCE(MAX(duration_seconds), 0), COUNT(*)"
+            "  FROM execution_runs WHERE run_date = CURRENT_DATE"
+        )
+        longest, n_runs = cur.fetchone()
+
+    if n > 0:
+        return Status.PASS, f'{n} signals persisted ({n_runs} completed engine run(s))'
+    if n_runs == 0:
+        return Status.FAIL, (
+            'ZERO signals and the engine never completed today — no execution_runs '
+            'row exists, so the signals step died (check rc=137 OOM / rc=124 timeout '
+            'in logs/daily_cycle_aborts_*.log). The book is unchanged.'
+        )
+    return Status.WARN, (
+        f'0 signals but the engine DID complete ({n_runs} run(s), longest {longest}s) '
+        f'— strategies genuinely fired nothing today'
+    )
+
+
+@check(name='signals_step_timeout_headroom', tags=['pipeline'], requires=['db'])
+def _signals_step_timeout_headroom():
+    """The engine's runtime is well inside its subprocess timeout.
+
+    Leading indicator for the 2026-08-05 outage: duration crept 173s (07-21,
+    89 strategies) -> 264s (08-04, 97) against a 300s cap and nothing watched
+    it, so the first anyone knew was a zero-signal day. The cap is now
+    OPENCLAW_SIGNALS_TIMEOUT_SECONDS (default 900) in BOTH resolve_script.js
+    and pipeline_orchestrator.py — keep this threshold reading the same knob.
+    """
+    cap = int(os.environ.get('OPENCLAW_SIGNALS_TIMEOUT_SECONDS', '900'))
+    with _pg() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT run_date, duration_seconds FROM execution_runs"
+            " WHERE duration_seconds IS NOT NULL"
+            " ORDER BY created_at DESC LIMIT 5"
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return Status.SKIP, 'no execution_runs rows yet'
+
+    worst_date, worst = max(rows, key=lambda r: float(r[1]))
+    pct = float(worst) / cap * 100
+    trend = ', '.join(f'{float(d):.0f}s' for _, d in reversed(rows))
+    detail = f'peak {float(worst):.0f}s of {cap}s cap ({pct:.0f}%) on {worst_date}; last 5: {trend}'
+    if pct >= 85:
+        return Status.FAIL, f'signals step is about to blow its timeout — {detail}'
+    if pct >= 70:
+        return Status.WARN, f'signals step timeout headroom shrinking — {detail}'
+    return Status.PASS, detail
 
 
 @check(name='signals_geometry_ordered_today', tags=['pipeline'], requires=['db'])
