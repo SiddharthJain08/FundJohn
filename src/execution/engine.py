@@ -1318,10 +1318,25 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                 strat_prices, strat_aux, strat_universe = prices, aux_data, universe
             if calendar_for(ic) == 'equity':
                 strat_prices = apply_equity_calendar(strat_prices)
+            _t_gen = time.perf_counter()
             signals = strat.generate_signals(strat_prices, strat_regime, strat_universe, strat_aux)
+            _gen_s = time.perf_counter() - _t_gen
             _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
             results[strat.id] = signals or []
-            logger.info(f"  {strat.id}: {len(results[strat.id])} signals")
+            # Per-strategy input diagnostics (§2 Phase A, 2026-08-06 spec): 36
+            # approved strategies ran clean and returned [] on every live day
+            # while backtesting thousands of trades, and nothing recorded WHAT
+            # each strategy was actually handed. panel is the post-slice,
+            # post-calendar frame generate_signals received.
+            _aux_desc = ','.join(
+                f"{k}:{len(v) if hasattr(v, '__len__') else '?'}"
+                for k, v in sorted((strat_aux or {}).items()))
+            _pshape = getattr(strat_prices, 'shape', None)
+            logger.info(
+                f"  {strat.id}: {len(results[strat.id])} signals "
+                f"[universe={len(strat_universe or [])} "
+                f"panel={f'{_pshape[0]}x{_pshape[1]}' if _pshape is not None else 'none'} "
+                f"aux={{{_aux_desc}}} t={_gen_s:.2f}s]")
         except Exception as e:
             logger.error(f"  {strat.id} FAILED: {e}\n{traceback.format_exc()}")
             errored_ids.add(strat.id)
@@ -1929,8 +1944,8 @@ def _parse_run_date(argv=None) -> date:
     main() ignored argv and used date.today() — harmless while the two
     coincide, wrong for any historical re-run (e.g. recomputing an EOD target
     set after a data fix; see sp6 diagnosis 2026-06-04 §10). parse_known_args
-    so orchestrator-injected flags the engine doesn't implement (--dry-run)
-    never crash the signals step.
+    so orchestrator-injected flags the engine doesn't implement never crash
+    the signals step. --dry-run is real since 2026-08-06 (_parse_dry_run).
     """
     import argparse
     p = argparse.ArgumentParser(add_help=False)
@@ -1945,13 +1960,31 @@ def _parse_run_date(argv=None) -> date:
     return date.today()
 
 
+def _parse_dry_run(argv=None) -> bool:
+    """True when --dry-run is on the argv (PIPELINE_DRY_RUN=1 appends it).
+
+    The engine's half of the contract at pipeline_orchestrator.py:481: compute
+    everything (regime, universe, panel load, run_strategies) so the cycle's
+    plumbing and memory profile are exercised for real, then skip every
+    external write. Kept separate from _parse_run_date so existing callers of
+    that function keep their exact signature.
+    """
+    import argparse
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument('--dry-run', action='store_true')
+    args, _unknown = p.parse_known_args(argv if argv is not None else sys.argv[1:])
+    return bool(args.dry_run)
+
+
 def main():
     import time
     t0       = time.time()
     run_date = _parse_run_date()
+    dry_run  = _parse_dry_run()
     errors   = []
 
-    logger.info(f"=== Execution Engine START {run_date} ===")
+    logger.info(f"=== Execution Engine START {run_date} ==="
+                + (" [DRY-RUN — no external writes]" if dry_run else ""))
 
     if not DB_URI:
         logger.error("POSTGRES_URI not set — aborting")
@@ -1976,8 +2009,9 @@ def main():
         strategies = load_approved_strategies(cur)
         if not strategies:
             logger.info("No approved strategies — nothing to do")
-            log_run(cur, run_date, regime_state, {'strategies_run': 0, 'errors': []})
-            conn.commit()
+            if not dry_run:
+                log_run(cur, run_date, regime_state, {'strategies_run': 0, 'errors': []})
+                conn.commit()
             return
 
         # Build combined universe
@@ -2047,6 +2081,37 @@ def main():
                 logger.warning(f'last_price inject failed: {_e}')
         strategy_results = run_strategies(strategies, prices, regime, universe,
                                           aux_data, strategy_universes=strategy_universes)
+
+        if dry_run:
+            # Everything above (regime, universe resolution, panel load,
+            # generate_signals) ran for real — memory profile and per-strategy
+            # behavior are the production ones. Everything below is writes
+            # (W1-W19 in the 2026-08-06 spec map: eod_compute_health,
+            # execution_signals, parity/lifecycle passes, confluence, pnl,
+            # report triggers, execution_runs, OUE) — skip it all wholesale
+            # rather than threading a flag through every helper; the three
+            # commit sites stay unreached and the txn is rolled back.
+            would_signals = sum(len(v) for v in strategy_results.values())
+            per_strat = {sid: len(v) for sid, v in strategy_results.items() if v}
+            conn.rollback()
+            duration_s = round(time.time() - t0, 2)
+            logger.info(f"DRY-RUN: would write {would_signals} signals across "
+                        f"{len(per_strat)} emitting strategies: {per_strat}")
+            logger.info(f"=== Execution Engine DRY-RUN DONE in {duration_s}s ==="
+                        f"{_memory_footprint()}")
+            print(json.dumps({
+                'status':            'ok',
+                'dry_run':           True,
+                'run_date':          str(run_date),
+                'regime':            regime_state,
+                'strategies_run':    len(strategies),
+                'signals_generated': would_signals,
+                'confluence_count':  0,
+                'pnl_updates':       0,
+                'report_triggers':   0,
+                'duration_s':        duration_s,
+            }))
+            return
 
         # 4.5 Write eod_compute_health sentinel (gated: any routed-execution
         # mode — EOD flow or same-day exec; arms the premarket flatten guard)
@@ -2204,12 +2269,14 @@ def main():
         conn.rollback()
         logger.error(f"FATAL: {e}\n{traceback.format_exc()}")
         errors.append(str(e))
-        try:
-            log_run(cur, run_date, 'UNKNOWN', {'errors': errors})
-            conn.commit()
-        except Exception:
-            pass
-        print(json.dumps({'status': 'error', 'error': str(e)}))
+        if not dry_run:
+            try:
+                log_run(cur, run_date, 'UNKNOWN', {'errors': errors})
+                conn.commit()
+            except Exception:
+                pass
+        print(json.dumps({'status': 'error', 'error': str(e),
+                          **({'dry_run': True} if dry_run else {})}))
         sys.exit(_fatal_exit_code(e))
     finally:
         cur.close()
