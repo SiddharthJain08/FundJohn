@@ -24,11 +24,19 @@ def _sm_with(instrument_class):
 
 def test_thresholds_lookup():
     # Policy 2026-07-13 v2: shared strictly-positive Sharpe floor + 100-trade
-    # minimum; per-class DD ceilings unchanged. Keep value-synced with
-    # src/lib/promotion_service.js PROMOTION_THRESHOLDS.
-    assert _promotion_threshold('option') == {'min_sharpe': 0.0, 'max_drawdown': 0.30, 'min_trades': 100}
-    assert _promotion_threshold('crypto') == {'min_sharpe': 0.0, 'max_drawdown': 0.70, 'min_trades': 100}
-    assert _promotion_threshold('equity') == {'min_sharpe': 0.0, 'max_drawdown': 0.20, 'min_trades': 100}
+    # minimum; per-class DD ceilings unchanged. Calmar escape hatch (edge-
+    # recovery epoch, 2026-07-27): dd may exceed the ceiling when
+    # calmar >= min_calmar AND dd <= the per-class dd_hard_cap (50/60/85).
+    # Keep value-synced with src/lib/promotion_service.js PROMOTION_THRESHOLDS.
+    assert _promotion_threshold('option') == {
+        'min_sharpe': 0.0, 'max_drawdown': 0.30, 'min_trades': 100,
+        'min_calmar': 0.5, 'dd_hard_cap': 0.60}
+    assert _promotion_threshold('crypto') == {
+        'min_sharpe': 0.0, 'max_drawdown': 0.70, 'min_trades': 100,
+        'min_calmar': 0.5, 'dd_hard_cap': 0.85}
+    assert _promotion_threshold('equity') == {
+        'min_sharpe': 0.0, 'max_drawdown': 0.20, 'min_trades': 100,
+        'min_calmar': 0.5, 'dd_hard_cap': 0.50}
 
 
 def test_option_dd_ceiling_between_equity_and_crypto():
