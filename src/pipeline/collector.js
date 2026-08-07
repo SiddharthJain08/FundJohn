@@ -568,9 +568,14 @@ async function run30mPrices() {
 }
 
 // Per-ticker ATM-30d/90d IV history derived from options_eod.parquet.
-// Guard: only run daily once the parquet has ≥ 30 days of history. The first
-// run is performed by staging-approval backfill, which builds the seed
-// history; daily collection just appends yesterday's slice on top.
+// Guard history (2026-08-07): the original ≥30-day guard referenced a
+// "staging-approval backfill" seed builder that NEVER EXISTED, so the
+// incremental path was deadlocked from birth (15 days < 30, forever). The
+// seed was built manually on 2026-08-07 (--rebuild with the new bounded
+// pyarrow read) and yields 26 distinct dates — the honest maximum, because
+// pre-2026-06-29 options_eod snapshots carry zero/absent greeks (no ATM-band
+// deltas). Guard lowered to 20 so daily incrementals accrue from here; the
+// original 30 would have re-deadlocked on a ceiling the data cannot reach yet.
 async function runIvHistory() {
   const fs = require('fs');
   const path = require('path');
@@ -588,8 +593,8 @@ async function runIvHistory() {
     ], { timeout: 30_000 }).toString().trim();
     distinctDays = parseInt(out, 10) || 0;
   } catch (_) {}
-  if (distinctDays < 30) {
-    notify(`⏭️  iv_history skipped — only ${distinctDays} day(s) of seed history; needs ≥ 30`);
+  if (distinctDays < 20) {
+    notify(`⏭️  iv_history skipped — only ${distinctDays} day(s) of seed history; needs ≥ 20`);
     return;
   }
   return _runIngestPhase(
