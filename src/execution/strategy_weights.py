@@ -466,17 +466,32 @@ def _load_backtest_sharpe(conn, strategy_ids: list[str]) -> dict[tuple[str, str]
     # unified_backtest row yet).
     missing = [s for s in strategy_ids if s not in seen_strats]
     if missing:
+        # strategy_regime_backtests carries no holding-days column; borrow the
+        # strategy's latest primary run's overall figure so the bt-dict shape is
+        # uniform across tiers (field-shape drift fix 2026-08-07 — an absent key
+        # silently reverted daily_weight's divisor to the strategy-level cadence).
+        # NULL when the strategy has no primary run either → the documented
+        # strategy-level cadence fallback applies, now explicitly.
         cur.execute('''
-            SELECT DISTINCT ON (strategy_id, regime_state)
-                   strategy_id, regime_state, sharpe, trade_count
-            FROM strategy_regime_backtests
-            WHERE strategy_id = ANY(%s) AND sharpe IS NOT NULL
-            ORDER BY strategy_id, regime_state, run_at DESC NULLS LAST
+            SELECT DISTINCT ON (b.strategy_id, b.regime_state)
+                   b.strategy_id, b.regime_state, b.sharpe, b.trade_count,
+                   runs.avg_holding_days
+            FROM strategy_regime_backtests b
+            LEFT JOIN (
+                SELECT DISTINCT ON (strategy_id) strategy_id, avg_holding_days
+                FROM strategy_backtest_runs
+                WHERE primary_window = TRUE
+                ORDER BY strategy_id, run_at DESC
+            ) runs ON runs.strategy_id = b.strategy_id
+            WHERE b.strategy_id = ANY(%s) AND b.sharpe IS NOT NULL
+            ORDER BY b.strategy_id, b.regime_state, b.run_at DESC NULLS LAST
         ''', (missing,))
         for r in cur:
             out[(r['strategy_id'], r['regime_state'])] = {
                 'bt_sharpe': float(r['sharpe']) if r['sharpe'] is not None else None,
                 'bt_n':      int(r['trade_count']) if r['trade_count'] is not None else None,
+                'avg_holding_days': (float(r['avg_holding_days'])
+                                     if r['avg_holding_days'] is not None else None),
             }
             seen_strats.add(r['strategy_id'])
 
@@ -529,7 +544,8 @@ def _apply_regime_agnostic_override(
 
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cur.execute('''
-        SELECT DISTINCT ON (strategy_id) strategy_id, total_sharpe, total_trades
+        SELECT DISTINCT ON (strategy_id) strategy_id, total_sharpe, total_trades,
+               avg_holding_days
           FROM strategy_backtest_runs
          WHERE strategy_id = ANY(%s) AND primary_window = TRUE
            AND total_sharpe IS NOT NULL
@@ -538,6 +554,8 @@ def _apply_regime_agnostic_override(
     overall = {r['strategy_id']: {
         'bt_sharpe': float(r['total_sharpe']),
         'bt_n':      int(r['total_trades']) if r['total_trades'] is not None else None,
+        'avg_holding_days': (float(r['avg_holding_days'])
+                             if r['avg_holding_days'] is not None else None),
     } for r in cur}
 
     for s in active:
@@ -545,7 +563,18 @@ def _apply_regime_agnostic_override(
         if sid not in overall:
             continue
         for R in s['eligible_regimes']:
-            bt[(sid, R)] = dict(overall[sid])  # copy so callers can't mutate the source
+            # The directive unifies SHARPE (and its n) across regimes — it says
+            # nothing about cadence. Field-shape drift fix 2026-08-07: the old
+            # `bt[(sid, R)] = dict(overall[sid])` silently DROPPED the tier's
+            # per-regime avg_holding_days, so daily_weight's divisor fell back
+            # to the strategy-level cadence for every agnostic strategy
+            # (live victim: S12_insider). Preserve the per-regime cadence when
+            # a tier populated it; otherwise use the run-level figure.
+            entry = dict(overall[sid])  # copy so callers can't mutate the source
+            prior = bt.get((sid, R)) or {}
+            if prior.get('avg_holding_days') is not None:
+                entry['avg_holding_days'] = prior['avg_holding_days']
+            bt[(sid, R)] = entry
         logger.info('strategy_weights: %s regime-agnostic override → bt_sharpe=%.4f across %s',
                     sid, overall[sid]['bt_sharpe'], s['eligible_regimes'])
 
