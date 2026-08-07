@@ -47,11 +47,14 @@ SIGNAL_SET_MIN_FRAC = 0.30
 # FULLY rejected by the corr-conviction gate triggers a FLATTEN of the whole
 # broker book (orphan_close every held position) instead of silently HOLDing —
 # see the `if not ticker_w:` branch in _sharpe_cadence_path and
-# _maybe_flatten_zero_conviction. Fires on the EOD lane ONLY
-# (OPENCLAW_EOD_RECONCILE=1 AND OPENCLAW_INTRADAY_REDEPLOY!=1): an intraday
-# regime-transition redeploy inherits EOD_RECONCILE=1 from the parent env, so the
-# INTRADAY exclusion is load-bearing (an intraday flatten would liquidate on a
-# momentary regime blip). Absent/anything-but-'1' => inert (historical HOLD).
+# _maybe_flatten_zero_conviction. Fires on BOTH daily signal-target lanes (the
+# legacy T+1 EOD-register flow AND the same-day flow — 2026-08-07 fix: the
+# 2026-07-29 same-day pivot had silently disarmed this switch, because the lane
+# test only admitted the EOD flow; 08-06 kept=0 held a $48k book as a result).
+# NEVER fires when OPENCLAW_INTRADAY_REDEPLOY=1: the intraday regime-transition
+# redeploy inherits the parent env, so the INTRADAY exclusion is load-bearing
+# (an intraday flatten would liquidate the book on a momentary regime blip).
+# Absent/anything-but-'1' => inert (historical HOLD).
 
 
 
@@ -1178,7 +1181,7 @@ def _scaled_target_diff(survivors: dict, weight_by_strat: dict, size_scalars: di
 def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confirmer,
                                    _ortho_groups, sharpe_by_strat, eff_weight_by_strat,
                                    weight_by_strat, account_state, opt_active):
-    """FLATTEN-on-genuine-zero-conviction (EOD lane only).
+    """FLATTEN-on-genuine-zero-conviction (both daily signal-target lanes).
 
     Called from the post-conviction-gate empty check (`if not ticker_w:`) when a
     HEALTHY carried set has been FULLY rejected by the corr-conviction gate.
@@ -1187,21 +1190,31 @@ def _maybe_flatten_zero_conviction(active, regime_state, ticker_meta, nav, confi
     the gate conditions below hold; returns None (→ caller keeps the historical
     HOLD, byte-identical to prior behavior) in EVERY other case:
 
-      1. OPENCLAW_EOD_RECONCILE == '1'         — the EOD lane; AND
+      1. a DAILY signal-target lane — either the legacy T+1 EOD-register flow or
+         the same-day flow. After the §8 flag migration these two are complements
+         (signal_target_mode), so this disjunction is exhaustive by construction;
+         it is spelled out (a) to document intent and (b) so a future third lane
+         does not inherit flatten authority silently. History: the original
+         predicate admitted ONLY the EOD lane, so the 2026-07-29 same-day pivot
+         silently disarmed the switch — on 2026-08-06 a fully-gated 327-signal day
+         held a 7-position book instead of flattening (fixed 2026-08-07); AND
       2. OPENCLAW_INTRADAY_REDEPLOY != '1'     — NEVER on an intraday regime-
-         transition redeploy. That subprocess INHERITS EOD_RECONCILE=1 from the
-         parent env (scripts/redeploy_pipeline.py: `env = {**os.environ}`), so this
+         transition redeploy. That subprocess INHERITS the parent env
+         (scripts/redeploy_pipeline.py: `env = {**os.environ}`), so this
          exclusion is load-bearing — an intraday flatten would liquidate the book on
          a momentary regime blip; AND
       3. len(active) >= SIGNAL_SET_MIN_FLOOR   — a healthy carried set (a thin/
-         degenerate ~2-signal day must not trigger a liquidation); AND
+         degenerate ~2-signal day must not trigger a liquidation; a 0-signal
+         outage day never reaches this branch at all — it exits earlier on the
+         empty carried set, so a pipeline failure can never flatten); AND
       4. OPENCLAW_FLATTEN_ON_ZERO_CONVICTION == '1' — default-OFF operator kill-
          switch (this whole feature is inert until the operator flips it).
 
     Reuses the SAME order-emission tail the normal path uses (_emit_orders_from_targets
     with target_usd={}), so orphan_close order dicts are field-identical to the normal
     orphan path — no hand-rolled dicts. opt_active is passed empty."""
-    if not (_eod_signal_register_lane()
+    from execution.signal_target_mode import sameday_signal_target_on
+    if not ((_eod_signal_register_lane() or sameday_signal_target_on())
             and os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1'
             and os.environ.get('OPENCLAW_FLATTEN_ON_ZERO_CONVICTION') == '1'
             and len(active) >= SIGNAL_SET_MIN_FLOOR):

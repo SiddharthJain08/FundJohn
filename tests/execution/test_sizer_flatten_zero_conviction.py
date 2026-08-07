@@ -7,9 +7,11 @@ empty check) + _maybe_flatten_zero_conviction.
 The intended behavior: when a HEALTHY carried set (len(active) >= SIGNAL_SET_MIN_FLOOR)
 is FULLY rejected by the corr-conviction gate AND the operator has armed the default-OFF
 kill-switch OPENCLAW_FLATTEN_ON_ZERO_CONVICTION, the sizer FLATTENS the whole broker book
-(orphan_close every held position) instead of silently HOLDing. Fires on the EOD lane
-ONLY (OPENCLAW_EOD_RECONCILE=1 AND OPENCLAW_INTRADAY_REDEPLOY!=1) — an intraday redeploy
-inherits EOD_RECONCILE=1 from the parent env, so the intraday exclusion is load-bearing.
+(orphan_close every held position) instead of silently HOLDing. Fires on BOTH daily
+signal-target lanes — legacy T+1 EOD-register AND same-day (2026-08-07 fix: the
+2026-07-29 same-day pivot had silently disarmed the switch; 08-06 kept=0 held the book).
+NEVER fires with OPENCLAW_INTRADAY_REDEPLOY=1 — the intraday redeploy inherits the
+parent env, so the intraday exclusion is load-bearing.
 
 Matrix:
   (a) EOD + flag ON + healthy set + ALL gated → orphan_close for EVERY held position.
@@ -22,6 +24,10 @@ Matrix:
   (f) alert fires ONLY on the flatten branch (asserted per-test).
   (g) normal path (some tickers clear) → orders identical with the flag ON vs OFF
       (byte-identical pin) — the flag is inert on the normal path.
+  (h) SAME-DAY lane (OPENCLAW_SAMEDAY_SIGNAL_TARGET=1) + flag ON + healthy set +
+      ALL gated → flattens (the 2026-08-06 incident, pinned).
+  (i) SAME-DAY lane + intraday redeploy → [] (the intraday exclusion survives the
+      lane fix — same-day + INTRADAY_REDEPLOY=1 must never flatten).
 
 Mocking style mirrors tests/test_corr_cumsharpe_integration.py: every external surface
 (weights DB, carried-set loader, lambda, broker, similarity load_groups, the two Discord
@@ -84,19 +90,30 @@ def _healthy_set(n=10, weight=1.0):
 
 
 def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe,
-         eod=True, intraday=False, flatten_flag=None, confirmer=None):
+         eod=True, intraday=False, sameday=False, flatten_flag=None, confirmer=None):
     """Drive size_positions with everything external stubbed. Returns (orders, alerts)
     where `alerts` is the list of _post_flatten_alert (regime, active_count, broker)
     calls captured during the run."""
-    # The EOD lane is selected by OPENCLAW_EOD_SIGNAL_REGISTER since 2026-07-29
-    # (d573e45) — OPENCLAW_EOD_RECONCILE now means only "the premarket
-    # reconcile job is enabled", which the same-day lane also sets. In real EOD
-    # mode both are 1, so set both.
-    for flag in ('OPENCLAW_EOD_SIGNAL_REGISTER', 'OPENCLAW_EOD_RECONCILE'):
-        if eod:
-            monkeypatch.setenv(flag, '1')
-        else:
-            monkeypatch.delenv(flag, raising=False)
+    # Lane selection rides signal_target_mode (§8 alias resolver): the new flag
+    # OPENCLAW_SAMEDAY_SIGNAL_TARGET wins when set; otherwise the legacy
+    # OPENCLAW_EOD_SIGNAL_REGISTER is honoured. OPENCLAW_EOD_RECONCILE now means
+    # only "the premarket reconcile job is enabled", which the same-day lane also
+    # sets. Three deterministic configurations:
+    #   eod=True      → legacy EOD lane (register=1, new flag unset)
+    #   sameday=True  → production same-day lane (new flag=1, register=0, reconcile=1)
+    #   neither       → both signal-target flags unset (resolver: same-day default)
+    assert not (eod and sameday), 'pick one lane'
+    if sameday:
+        monkeypatch.setenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', '1')
+        monkeypatch.setenv('OPENCLAW_EOD_SIGNAL_REGISTER', '0')
+        monkeypatch.setenv('OPENCLAW_EOD_RECONCILE', '1')
+    else:
+        monkeypatch.delenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', raising=False)
+        for flag in ('OPENCLAW_EOD_SIGNAL_REGISTER', 'OPENCLAW_EOD_RECONCILE'):
+            if eod:
+                monkeypatch.setenv(flag, '1')
+            else:
+                monkeypatch.delenv(flag, raising=False)
     if intraday:
         monkeypatch.setenv('OPENCLAW_INTRADAY_REDEPLOY', '1')
     else:
@@ -126,10 +143,14 @@ def _run(monkeypatch, *, weights_rows, carried_rows, broker, min_corr_cum_sharpe
     monkeypatch.setattr(_sizer, '_post_flatten_alert',
                         lambda regime, n, brk: alerts.append((regime, n, dict(brk))))
 
+    # In the same-day (non-EOD) lane the live wrapper passes the 15:00 handoff
+    # signals into size_positions; an empty `signals` arg would trip the legacy
+    # lane's `if not passed: return []` before the conviction gate. Mirror that.
+    passed_in = list(carried_rows) if sameday else []
     with _mock.patch('execution.strategy_weights.load_current',
                      return_value=list(weights_rows)):
         orders = _sizer.size_positions(
-            signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
+            signals=passed_in, account_state=_account(), regime={'state': 'LOW_VOL'},
             run_date=date(2026, 7, 6), strategy_state={},
             regime_params=_params(min_corr_cum_sharpe),
             confirmer=confirmer or (lambda proposals: {}))
@@ -280,3 +301,55 @@ def test_g_normal_path_byte_identical_flag_on_vs_off(monkeypatch):
     assert _is_close(by_ticker['ORPH'])
     for t in ('T0', 'T1'):
         assert t in by_ticker and by_ticker[t]['source_mode'] == 'sharpe_cadence'
+
+
+# ---------------------------------------------------------------------------
+# (h) SAME-DAY lane + flag ON + healthy set + ALL gated → flattens.
+#     Pins the 2026-08-06 incident: 327-signal day, kept=0, 7-position book HELD
+#     because the old lane predicate admitted only the EOD-register flow.
+# ---------------------------------------------------------------------------
+
+def test_h_sameday_lane_flag_on_healthy_all_gated_flattens(monkeypatch):
+    weights, carried = _healthy_set(n=10)
+    broker = {'CBK': 7_038.0, 'JAN': 10_896.0, 'STRC': 11_053.0}
+    orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
+                          broker=broker, min_corr_cum_sharpe=5.0,
+                          eod=False, sameday=True, intraday=False, flatten_flag='1')
+
+    assert orders, ('same-day lane must flatten on genuine zero conviction — the '
+                    '2026-07-29 pivot disarming this switch is the pinned regression')
+    assert {o['ticker'] for o in orders} == set(broker)
+    for o in orders:
+        assert o['strategy_id'] == '__close_orphan__' and _is_close(o)
+        assert o['target_usd'] == 0.0
+    assert len(alerts) == 1
+    regime, n, brk = alerts[0]
+    assert regime == 'LOW_VOL' and n == 10 and brk == broker
+
+
+# ---------------------------------------------------------------------------
+# (i) SAME-DAY lane + intraday redeploy → [] — the intraday exclusion survives
+#     the lane fix. An intraday flatten would liquidate on a momentary blip.
+# ---------------------------------------------------------------------------
+
+def test_i_sameday_lane_intraday_redeploy_never_flattens(monkeypatch):
+    weights, carried = _healthy_set(n=10)
+    orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
+                          broker={'HELDA': 8_000.0, 'HELDB': -3_000.0},
+                          min_corr_cum_sharpe=5.0,
+                          eod=False, sameday=True, intraday=True, flatten_flag='1')
+    assert orders == [], ('same-day + INTRADAY_REDEPLOY=1 must NOT flatten, got %r'
+                          % orders)
+    assert alerts == [], 'flatten must NOT fire on a same-day intraday redeploy'
+
+
+# ---------------------------------------------------------------------------
+# (j) SAME-DAY lane + flag OFF → inert (the kill-switch is lane-independent).
+# ---------------------------------------------------------------------------
+
+def test_j_sameday_lane_flag_off_is_inert(monkeypatch):
+    weights, carried = _healthy_set(n=10)
+    orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
+                          broker={'HELDA': 8_000.0}, min_corr_cum_sharpe=5.0,
+                          eod=False, sameday=True, flatten_flag='0')
+    assert orders == [] and alerts == []
