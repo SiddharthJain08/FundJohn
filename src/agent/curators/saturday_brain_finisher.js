@@ -387,6 +387,35 @@ async function main() {
     log(`reaper: FAILED (non-fatal): ${e.message}`);
   }
 
+  // Phase 11 — SIMILARITY REBUILD (spec 2026-08-05 §4.2A): a strategy that
+  // reached candidate/live in Phase 9 (or was ejected in Phase 10) has no/stale
+  // rows in strategy_similarity_matrix, so every pair against it takes
+  // SPARSE_DEFAULT (=near-independent) and inflates S_adj until the Monday
+  // cron. Rebuild here, ALWAYS LAST — strictly after Phase 9's weights rebuild
+  // (ordering: universe shrink → activation → weights → similarity). Skipped on
+  // a no-op run (nothing promoted/ejected/coded ⇒ the matrix is not invalidated).
+  // Source rides OPENCLAW_SIMILARITY_SOURCE via resolve_source(). Non-fatal.
+  const lifecycleChanged = Boolean(
+    (autoApproval && autoApproval.promoted && autoApproval.promoted.length) ||
+    (reaped && reaped.ejected && reaped.ejected.length) ||
+    coded > 0);
+  if (!dryRun && lifecycleChanged) {
+    try {
+      const { execFileSync } = require('child_process');
+      log('similarity: lifecycle changed this run — rebuilding strategy similarity');
+      execFileSync(
+        'python3',
+        ['-m', 'execution.strategy_similarity', '--rebuild',
+         '--trigger=saturday_finisher', '--verbose'],
+        { cwd: OPENCLAW_DIR, stdio: 'inherit',
+          env: { ...process.env, PYTHONPATH: 'src' } });
+    } catch (e) {
+      log(`similarity rebuild: FAILED (non-fatal): ${e.message}`);
+    }
+  } else if (!dryRun) {
+    log('similarity: no lifecycle change this run — rebuild skipped');
+  }
+
   await _markRunComplete(dryRun, log, {
     coded, codedFailed: failed,
     tierA: tiers.A.length, tierB: tiers.B.length, tierC: tiers.C.length,

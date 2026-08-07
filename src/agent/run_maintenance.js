@@ -1031,6 +1031,28 @@ async function main(deps = {}) {
     return postFallback(_getWebhook, _postWebhook, `🚨 BotJohn maintenance run failed (mode=${mode}): ${err.message}`);
   }
 
+  // weekend-sat is the actuator lane where universes/eligibility/weights move
+  // (spec 2026-08-05 §4.2B): regenerate strategy similarity at the END of the
+  // mode so the matrix reflects whatever the run adjusted. Ordering constraint
+  // (§4.2C): similarity derives its strategy set from strategy_weights, so this
+  // must be the LAST actuation in the lane. Deterministic (not prompt-driven),
+  // non-fatal — a similarity failure must not eat the maintenance report.
+  // Source rides OPENCLAW_SIMILARITY_SOURCE via resolve_source().
+  if (mode === 'weekend-sat') {
+    try {
+      const { execFileSync } = require('child_process');
+      console.log('[run_maintenance] weekend-sat: rebuilding strategy similarity (post-actuation)');
+      execFileSync(
+        'python3',
+        ['-m', 'execution.strategy_similarity', '--rebuild',
+         '--trigger=weekend_sat_maintenance', '--verbose'],
+        { cwd: OPENCLAW_DIR, stdio: 'inherit',
+          env: { ...process.env, PYTHONPATH: 'src' } });
+    } catch (err) {
+      console.error(`[run_maintenance] similarity rebuild failed (non-fatal): ${err.message}`);
+    }
+  }
+
   const content = formatReport(session.result, session.costUsd, session.durationMs, costCap);
 
   const url = await _getWebhook('botjohn', 'botjohn-log').catch(() => null);

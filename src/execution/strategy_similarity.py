@@ -187,11 +187,16 @@ def _cofiring_sets_by_regime(window_days: int) -> dict[str, dict[str, set]]:
 
 
 def _returns_by_regime(window_days: int) -> dict[str, dict[str, dict[str, float]]]:
-    """{regime_state: {strategy_id: {date_str: daily_return}}} from strategy_daily_returns."""
+    """{regime_state: {strategy_id: {date_str: daily_return}}} from strategy_daily_returns.
+
+    source='live' filter is load-bearing: the table carries a `source` column, and
+    any future writer of backtest-derived rows must NOT silently blend into the
+    live leg (2026-08-07 guard, pre-dating any such writer)."""
     sql = """
         SELECT regime_state, strategy_id, ret_date::text, daily_return_pct::float
           FROM strategy_daily_returns
          WHERE ret_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+           AND source = 'live'
     """
     out: dict[str, dict[str, dict[str, float]]] = {r: {} for r in REGIME_STATES}
     conn = _db()
@@ -204,6 +209,117 @@ def _returns_by_regime(window_days: int) -> dict[str, dict[str, dict[str, float]
     finally:
         conn.close()
     return out
+
+
+def _returns_by_regime_backtest() -> dict[str, dict[str, dict[str, float]]]:
+    """{regime_state: {strategy_id: {date_str: mean_pnl_pct}}} from BACKTEST trades.
+
+    Source: strategy_backtest_trades t JOIN strategy_backtest_runs r
+            ON r.run_id = t.run_id AND r.primary_window
+    A trade's pnl_pct is bucketed onto its EXIT date (realisation), grouped by
+    t.entry_regime (spec 2026-08-05 §3.2). Per-day value = AVG(pnl_pct) across
+    that day's exits — Pearson is invariant to per-strategy affine scaling, so
+    mean-vs-sum only differs through day-mix weighting; mean is used because it
+    is bounded regardless of trade count. entry_regime is the ENTRY stamp, not
+    the holding period — the --shadow report measures how often exits cross
+    regimes (§3.4(2)) so the mis-bucketing is quantified, not assumed away."""
+    sql = """
+        SELECT t.entry_regime, t.strategy_id, t.exit_date::text, AVG(t.pnl_pct)::float
+          FROM strategy_backtest_trades t
+          JOIN strategy_backtest_runs r ON r.run_id = t.run_id AND r.primary_window
+         WHERE t.exit_date IS NOT NULL AND t.entry_regime IS NOT NULL
+         GROUP BY 1, 2, 3
+    """
+    out: dict[str, dict[str, dict[str, float]]] = {r: {} for r in REGIME_STATES}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            for regime, sid, d, ret in cur.fetchall():
+                if regime in out:
+                    out[regime].setdefault(sid, {})[d] = float(ret)
+    finally:
+        conn.close()
+    return out
+
+
+def _cofiring_sets_by_regime_backtest() -> tuple[dict[str, dict[str, set]],
+                                                 dict[str, dict[str, set]]]:
+    """BACKTEST co-firing tuples, same shape as the live sibling, plus each
+    strategy's traded-ticker set (its de-facto simulated universe).
+
+    Returns ({regime: {sid: {(iso_week, ticker, direction_int)}}},
+             {regime: {sid: {ticker}}}).
+
+    The traded-ticker sets exist for §3.4(1): post-shrink universes differ per
+    strategy, so raw backtest co-firing fakes orthogonality between strategies
+    simulated on different symbol sets. Overlap must be computed on the
+    INTERSECTION of the two strategies' traded universes
+    (overlap_similarity_restricted below)."""
+    sql = """
+        SELECT DISTINCT t.entry_regime, t.strategy_id,
+               to_char(t.entry_date, 'IYYY"W"IW'), t.ticker, t.direction
+          FROM strategy_backtest_trades t
+          JOIN strategy_backtest_runs r ON r.run_id = t.run_id AND r.primary_window
+         WHERE t.entry_regime IS NOT NULL AND t.ticker IS NOT NULL
+    """
+    sets: dict[str, dict[str, set]] = {r: {} for r in REGIME_STATES}
+    universes: dict[str, dict[str, set]] = {r: {} for r in REGIME_STATES}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            for regime, sid, wk, ticker, direction in cur.fetchall():
+                if regime not in sets:
+                    continue
+                d = _dir_to_int(direction)
+                if d == 0:
+                    continue
+                sets[regime].setdefault(sid, set()).add((wk, ticker, d))
+                universes[regime].setdefault(sid, set()).add(ticker)
+    finally:
+        conn.close()
+    return sets, universes
+
+
+def overlap_similarity_restricted(sets_by_strat: dict[str, set],
+                                  tickers_by_strat: dict[str, set]
+                                  ) -> tuple[dict[str, dict[str, float]],
+                                             dict[tuple, int]]:
+    """Pairwise Jaccard restricted, per pair, to the intersection of the two
+    strategies' traded-ticker universes (§3.4(1) mitigation). Returns
+    (matrix, intersection_size_per_pair). Empty intersection → 0.0 similarity
+    with intersection size 0 recorded (the caller can distinguish 'orthogonal'
+    from 'never comparable')."""
+    strats = sorted(sets_by_strat.keys())
+    # ticker → tuple-bucket index per strategy, so a pair only touches buckets
+    # in its universe intersection instead of filtering full sets (16k+ pairs).
+    buckets: dict[str, dict[str, set]] = {}
+    for s in strats:
+        by_ticker: dict[str, set] = {}
+        for tup in sets_by_strat[s]:
+            by_ticker.setdefault(tup[1], set()).add(tup)
+        buckets[s] = by_ticker
+    out: dict[str, dict[str, float]] = {s: {} for s in strats}
+    inter_size: dict[tuple, int] = {}
+    for i, a in enumerate(strats):
+        out[a][a] = 1.0
+        for b in strats[i + 1:]:
+            common = tickers_by_strat.get(a, set()) & tickers_by_strat.get(b, set())
+            inter_size[(a, b)] = inter_size[(b, a)] = len(common)
+            if not common:
+                out[a][b] = out[b][a] = 0.0
+                continue
+            n_int = n_uni = 0
+            ba, bb = buckets[a], buckets[b]
+            for t in common:
+                sa, sb = ba.get(t, ()), bb.get(t, ())
+                sa, sb = set(sa), set(sb)
+                n_int += len(sa & sb)
+                n_uni += len(sa | sb)
+            j = (n_int / n_uni) if n_uni else 0.0
+            out[a][b] = out[b][a] = j
+    return out, inter_size
 
 
 def _eff_sharpe_by_strat(regime_state: str) -> dict[str, float]:
@@ -227,6 +343,66 @@ def similarity_for_regime(regime_state: str, window_days: int = DEFAULT_WINDOW_D
         n_obs)
 
 
+def similarity_for_regime_backtest(regime_state: str,
+                                   window_days: int = DEFAULT_WINDOW_DAYS,
+                                   live_cofiring=None, bt_cofiring=None,
+                                   bt_universes=None, bt_returns=None
+                                   ) -> dict[str, dict[str, float]]:
+    """Backtest-sourced similarity (spec 2026-08-05 §3.1): replace ONE leg, not both.
+
+    * PnL-correlation leg → BACKTEST (strategy_backtest_trades, primary runs,
+      10y / all 4 regimes) — the leg that was starved on live data (HIGH_VOL had
+      13 strategies, CRISIS zero).
+    * Co-firing overlap leg → LIVE where it exists (same ticker, same ISO week,
+      same direction in production is genuinely OBSERVED behaviour); where a pair
+      lacks live observation on either side, fall back to BACKTEST overlap
+      computed on the intersection of the two strategies' traded universes
+      (§3.4(1)) rather than to SPARSE_DEFAULT.
+
+    The adaptive alpha rides the BACKTEST returns' joint-observation counts —
+    with ~10y of history alpha sits at its 0.6 ceiling for almost every pair, so
+    the blend is ≈ 0.4·overlap + 0.6·ret_corr."""
+    live_cofiring = (live_cofiring if live_cofiring is not None
+                     else _cofiring_sets_by_regime(window_days).get(regime_state, {}))
+    if bt_cofiring is None or bt_universes is None:
+        _sets, _unis = _cofiring_sets_by_regime_backtest()
+        bt_cofiring = _sets.get(regime_state, {})
+        bt_universes = _unis.get(regime_state, {})
+    bt_returns = (bt_returns if bt_returns is not None
+                  else _returns_by_regime_backtest().get(regime_state, {}))
+
+    overlap_live = overlap_similarity(live_cofiring) if live_cofiring else {}
+    overlap_bt, _inter = (overlap_similarity_restricted(bt_cofiring, bt_universes)
+                          if bt_cofiring else ({}, {}))
+    retcorr, n_obs = (return_correlation(bt_returns) if bt_returns else ({}, {}))
+    strats = sorted(set(overlap_live) | set(overlap_bt) | set(retcorr))
+    if not strats:
+        return {}
+
+    def _pair_overlap(a: str, b: str) -> float:
+        if a == b:
+            return 1.0
+        # live observation preferred: both sides must actually have live emissions
+        if live_cofiring.get(a) and live_cofiring.get(b):
+            return overlap_live.get(a, {}).get(b, 0.0)
+        return overlap_bt.get(a, {}).get(b, 0.0)
+
+    return blend_similarity(
+        {a: {b: _pair_overlap(a, b) for b in strats} for a in strats},
+        {a: {b: retcorr.get(a, {}).get(b, 1.0 if a == b else SPARSE_DEFAULT) for b in strats} for a in strats},
+        n_obs)
+
+
+def resolve_source(source: Optional[str] = None) -> str:
+    """'live' | 'backtest' — explicit arg wins, else OPENCLAW_SIMILARITY_SOURCE,
+    else 'live'. Read at call time (not import) so the weekly cron picks up an
+    .env cutover without code changes."""
+    src = source or os.environ.get('OPENCLAW_SIMILARITY_SOURCE') or 'live'
+    if src not in ('live', 'backtest'):
+        raise ValueError(f'OPENCLAW_SIMILARITY_SOURCE={src!r}: expected live|backtest')
+    return src
+
+
 def representatives(fold_groups: dict[int, list[str]],
                     eff_sharpe: dict[str, float]) -> dict[int, str]:
     """group_id -> max-effective_sharpe member (ties broken by strategy_id for determinism)."""
@@ -236,11 +412,22 @@ def representatives(fold_groups: dict[int, list[str]],
     return out
 
 
-def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS, verbose: bool = False) -> dict:
-    """Build per-regime similarity + clusters; persist matrix, fold-groups, factor-blocks, audit."""
+def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS,
+            verbose: bool = False, source: Optional[str] = None) -> dict:
+    """Build per-regime similarity + clusters; persist matrix, fold-groups, factor-blocks, audit.
+
+    source: 'live' (historical behaviour) or 'backtest' (spec 2026-08-05 —
+    PnL leg from backtest trades, co-firing live-where-observed). Defaults to
+    OPENCLAW_SIMILARITY_SOURCE so the cutover is an .env flip."""
     import json
+    src = resolve_source(source)
     cof = _cofiring_sets_by_regime(window_days)
-    rets = _returns_by_regime(window_days)
+    rets = _returns_by_regime(window_days) if src == 'live' else None
+    bt_sets = bt_unis = bt_rets = None
+    if src == 'backtest':
+        bt_sets, bt_unis = _cofiring_sets_by_regime_backtest()
+        bt_rets = _returns_by_regime_backtest()
+    trigger = trigger if src == 'live' else f'{trigger}+src=backtest'
     summary: dict[str, dict] = {}
     conn = _db()
     try:
@@ -258,9 +445,17 @@ def rebuild(trigger: str = 'manual', window_days: int = DEFAULT_WINDOW_DAYS, ver
                     "UPDATE strategy_factor_blocks SET is_current=FALSE WHERE regime_state=%s AND is_current",
                     (regime,))
 
-                sim = similarity_for_regime(regime, window_days,
-                                            cofiring=cof.get(regime, {}),
-                                            returns=rets.get(regime, {}))
+                if src == 'live':
+                    sim = similarity_for_regime(regime, window_days,
+                                                cofiring=cof.get(regime, {}),
+                                                returns=rets.get(regime, {}))
+                else:
+                    sim = similarity_for_regime_backtest(
+                        regime, window_days,
+                        live_cofiring=cof.get(regime, {}),
+                        bt_cofiring=bt_sets.get(regime, {}),
+                        bt_universes=bt_unis.get(regime, {}),
+                        bt_returns=bt_rets.get(regime, {}))
                 if not sim:
                     summary[regime] = {'strategies': 0}
                     continue
@@ -364,16 +559,268 @@ def load_groups(regime_state: str) -> dict:
     return out
 
 
+def _current_weight_rows(regime_state: str) -> dict[str, dict]:
+    """{strategy_id: {daily_weight, bt_n, bt_sharpe}} for is_current rows."""
+    out: dict[str, dict] = {}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT strategy_id, daily_weight::float, COALESCE(bt_n, 0),
+                          COALESCE(bt_sharpe, 0)::float
+                     FROM strategy_weights_by_regime
+                    WHERE is_current AND regime_state=%s""", (regime_state,))
+            for sid, dw, bt_n, bt_s in cur.fetchall():
+                out[sid] = {'daily_weight': float(dw or 0.0), 'bt_n': int(bt_n),
+                            'bt_sharpe': float(bt_s)}
+    finally:
+        conn.close()
+    return out
+
+
+def _gate_weight_map(regime_state: str) -> dict[str, float]:
+    """Replicates the sizer's gate leg: daily_weight × trade_weight_factor(bt_n)."""
+    from execution.orthogonalization import trade_weight_factor
+    anchor = 1000.0
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM pipeline_config WHERE key='strategy_trade_factor_anchor'")
+            row = cur.fetchone()
+            if row and row[0]:
+                anchor = float(row[0])
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    rows = _current_weight_rows(regime_state)
+    return {sid: r['daily_weight'] * trade_weight_factor(r['bt_n'], anchor)
+            for sid, r in rows.items()}
+
+
+def _recent_contribs(regime_state: str, days: int) -> dict[str, list[tuple]]:
+    """{ticker: [(sid, dir_int), ...]} from recent execution_signals restricted to
+    strategies carrying current weights — an approximation of the sizer's
+    active-window ticker_meta for the shadow S_adj recompute (latest signal per
+    (strategy, ticker) wins, matching the sizer's aggregation)."""
+    weights = _current_weight_rows(regime_state)
+    latest: dict[tuple, tuple] = {}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT strategy_id, ticker, direction, signal_date
+                     FROM execution_signals
+                    WHERE signal_date >= CURRENT_DATE - (%s::int * INTERVAL '1 day')
+                      AND strategy_id IS NOT NULL AND ticker IS NOT NULL""",
+                (days,))
+            for sid, ticker, direction, sdate in cur.fetchall():
+                if sid not in weights:
+                    continue
+                d = _dir_to_int(direction)
+                if d == 0:
+                    continue
+                key = (sid, ticker)
+                if key not in latest or sdate > latest[key][0]:
+                    latest[key] = (sdate, d)
+    finally:
+        conn.close()
+    contribs: dict[str, list[tuple]] = {}
+    for (sid, ticker), (_d, dsign) in latest.items():
+        contribs.setdefault(ticker, []).append((sid, dsign))
+    return contribs
+
+
+def _live_floor(regime_state: str) -> float:
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT min_corr_cum_sharpe FROM regime_sizer_params WHERE regime_state=%s",
+                        (regime_state,))
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else 1.0
+    finally:
+        conn.close()
+
+
+def _sadj_under(matrix: dict, contribs: dict, gate_w: dict) -> dict[str, float]:
+    from execution.orthogonalization import tangency_net_sharpe
+    if not contribs:
+        return {}
+    adj, _backstop = tangency_net_sharpe(contribs, matrix or {}, gate_w)
+    return adj
+
+
+def _pair_iter(strats: list[str]):
+    for i, a in enumerate(strats):
+        for b in strats[i + 1:]:
+            yield a, b
+
+
+def _pct_list(vals: list[float], p: float) -> float:
+    if not vals:
+        return 0.0
+    vs = sorted(vals)
+    i = max(0, min(len(vs) - 1, int(round(p * (len(vs) - 1)))))
+    return vs[i]
+
+
+def shadow_report(window_days: int = DEFAULT_WINDOW_DAYS, sadj_days: int = 7) -> dict:
+    """Spec 2026-08-05 §3.3 — compare the LIVE current matrix (what the sizer
+    uses today) against the backtest-sourced build, per regime. WRITES NOTHING.
+    The comparison is the deliverable; §3.5 gates the cutover on it."""
+    live_cof = _cofiring_sets_by_regime(window_days)
+    bt_sets, bt_unis = _cofiring_sets_by_regime_backtest()
+    bt_rets = _returns_by_regime_backtest()
+    report: dict[str, dict] = {}
+    for regime in REGIME_STATES:
+        live_matrix = load_groups(regime).get('matrix') or {}
+        bt_matrix = similarity_for_regime_backtest(
+            regime, window_days,
+            live_cofiring=live_cof.get(regime, {}),
+            bt_cofiring=bt_sets.get(regime, {}),
+            bt_universes=bt_unis.get(regime, {}),
+            bt_returns=bt_rets.get(regime, {}))
+        weights = _current_weight_rows(regime)
+        weighted = sorted(set(weights))
+
+        # (2)+(3) pair-level diffs on pairs that currently carry weight.
+        deltas, live_pair_deltas, sparse_gained = [], [], 0
+        inter_sizes = []
+        _, inter_map = (overlap_similarity_restricted(bt_sets.get(regime, {}),
+                                                      bt_unis.get(regime, {}))
+                        if bt_sets.get(regime) else ({}, {}))
+        big_moves = 0
+        for a, b in _pair_iter(weighted):
+            in_live = (a in live_matrix and b in (live_matrix.get(a) or {}))
+            rho_live = (live_matrix[a][b] if in_live else SPARSE_DEFAULT)
+            in_bt = (a in bt_matrix and b in (bt_matrix.get(a) or {}))
+            rho_bt = (bt_matrix[a][b] if in_bt else SPARSE_DEFAULT)
+            d = rho_bt - rho_live
+            deltas.append(d)
+            if abs(d) > 0.2:
+                big_moves += 1
+            if in_live:
+                live_pair_deltas.append(d)
+            elif in_bt:
+                sparse_gained += 1
+            if (a, b) in inter_map:
+                inter_sizes.append(inter_map[(a, b)])
+
+        # (4) S_adj recompute over the recent signal window under both matrices.
+        gate_w = _gate_weight_map(regime)
+        contribs = _recent_contribs(regime, sadj_days)
+        floor = _live_floor(regime)
+        sadj_live = _sadj_under(live_matrix, contribs, gate_w)
+        sadj_bt = _sadj_under(bt_matrix, contribs, gate_w)
+        keep_live = {t for t, v in sadj_live.items() if abs(v) >= floor}
+        keep_bt = {t for t, v in sadj_bt.items() if abs(v) >= floor}
+        mags_bt = sorted(abs(v) for v in sadj_bt.values())
+
+        # §3.4(3) look-ahead sentinels: extreme backtest pairs.
+        hot_pairs = [(a, b, round(bt_matrix[a][b], 3))
+                     for a, b in _pair_iter(sorted(bt_matrix))
+                     if abs(bt_matrix.get(a, {}).get(b, 0.0)) > 0.9]
+
+        report[regime] = {
+            'n_strategies': {'live': len(live_matrix), 'backtest': len(bt_matrix)},
+            'weighted_strategies': len(weighted),
+            'pair_delta_rho': {
+                'n_pairs': len(deltas),
+                'median': round(_pct_list(deltas, 0.5), 4),
+                'p25': round(_pct_list(deltas, 0.25), 4),
+                'p75': round(_pct_list(deltas, 0.75), 4),
+                'abs_gt_0.2': big_moves,
+            },
+            'signed_mean_delta_on_live_pairs': (
+                round(sum(live_pair_deltas) / len(live_pair_deltas), 4)
+                if live_pair_deltas else None),
+            'n_live_observed_pairs': len(live_pair_deltas),
+            'sparse_default_pairs_gaining_real_rho': sparse_gained,
+            'universe_intersection': {
+                'median': _pct_list([float(x) for x in inter_sizes], 0.5),
+                'p25': _pct_list([float(x) for x in inter_sizes], 0.25),
+                'zero_intersection_pairs': sum(1 for x in inter_sizes if x == 0),
+            },
+            'sadj': {
+                'floor': floor,
+                'tickers': len(sadj_live),
+                'keep_live_matrix': len(keep_live),
+                'keep_backtest_matrix': len(keep_bt),
+                'kept_set_changed': sorted(keep_live ^ keep_bt)[:20],
+                'bt_dist': {'min': (mags_bt[0] if mags_bt else 0.0),
+                            'p50': _pct_list(mags_bt, 0.5),
+                            'p90': _pct_list(mags_bt, 0.9),
+                            'max': (mags_bt[-1] if mags_bt else 0.0)},
+                # floor calibration: kept-ticker count at candidate floors under
+                # the BACKTEST matrix — the operator sets sliders from this curve.
+                'keep_curve_backtest_matrix': {
+                    f'{f/100:.2f}': sum(1 for v in mags_bt if v >= f / 100)
+                    for f in range(60, 261, 10)},
+            },
+            'hot_pairs_gt_0.9': hot_pairs[:15],
+        }
+    # §3.4(2) — regime mis-bucketing: share of trades whose exit falls in a
+    # different regime than entry (needs the historical regime calendar).
+    try:
+        report['_cross_regime_exit_share'] = _cross_regime_exit_share()
+    except Exception as e:                                    # non-fatal diagnostic
+        report['_cross_regime_exit_share'] = f'unavailable: {e}'
+    return report
+
+
+def _cross_regime_exit_share() -> dict[str, float]:
+    """Per entry_regime: fraction of primary-run trades whose exit_date's regime
+    (historical_regimes.parquet) differs from entry_regime."""
+    import pandas as pd
+    hist = pd.read_parquet('data/master/historical_regimes.parquet',
+                           columns=['date', 'regime'])
+    by_date = {str(d.date() if hasattr(d, 'date') else d): r
+               for d, r in zip(hist['date'], hist['regime'])}
+    sql = """
+        SELECT t.entry_regime, t.exit_date::text, count(*)
+          FROM strategy_backtest_trades t
+          JOIN strategy_backtest_runs r ON r.run_id=t.run_id AND r.primary_window
+         WHERE t.exit_date IS NOT NULL AND t.entry_regime IS NOT NULL
+         GROUP BY 1, 2
+    """
+    tot: dict[str, int] = {}
+    crossed: dict[str, int] = {}
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            for regime, exit_d, n in cur.fetchall():
+                tot[regime] = tot.get(regime, 0) + n
+                exit_regime = by_date.get(exit_d)
+                if exit_regime is not None and exit_regime != regime:
+                    crossed[regime] = crossed.get(regime, 0) + n
+    finally:
+        conn.close()
+    return {r: round(crossed.get(r, 0) / tot[r], 4) for r in sorted(tot)}
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument('--rebuild', action='store_true')
+    p.add_argument('--shadow', action='store_true',
+                   help='spec 2026-08-05 §3.3: live-vs-backtest diff report; writes NOTHING')
+    p.add_argument('--source', choices=('live', 'backtest'), default=None,
+                   help='similarity source for --rebuild (default: OPENCLAW_SIMILARITY_SOURCE or live)')
     p.add_argument('--trigger', default='manual')
     p.add_argument('--window-days', type=int, default=DEFAULT_WINDOW_DAYS)
+    p.add_argument('--sadj-days', type=int, default=7)
     p.add_argument('--verbose', action='store_true')
     args = p.parse_args()
+    if args.shadow:
+        import json
+        print(json.dumps(shadow_report(window_days=args.window_days,
+                                       sadj_days=args.sadj_days), indent=2))
+        return 0
     if args.rebuild:
-        s = rebuild(trigger=args.trigger, window_days=args.window_days, verbose=args.verbose)
+        s = rebuild(trigger=args.trigger, window_days=args.window_days,
+                    verbose=args.verbose, source=args.source)
         print('similarity rebuild:', s)
     return 0
 
