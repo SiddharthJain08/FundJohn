@@ -1,12 +1,22 @@
 # Spec — Backtest ≡ Live signal-generation parity
 
-**Status:** AUDITED 2026-08-07 (operator directive: "the main thing to verify is
-that backtest signal generation matches live signal generation exactly … same
-paths, same information, and re-running the backtest with the same newer
-information generates exactly the same signals"). Phase 1 (determinism) SHIPPED
-same day (`1acb7eb`). Phases 2–4 need operator scheduling — every structural
-change below invalidates the current promotion/gating baselines and requires a
-fleet re-backtest + re-gate before its numbers are comparable again.
+**Status:** AUDITED 2026-08-07; Phase 1 (determinism) SHIPPED (`1acb7eb`);
+**CLOSED OUT by operator ruling 2026-08-07 — observation mode** (see §6).
+
+**Operator ruling (2026-08-07):** the BACKTEST side is authoritative and not
+the issue. Backtests use `tier_liquid` as the largest universe by default and
+universe selection narrows INWARD down the ladder
+(`metadata.backtest_universe_cap`, `unified_backtest.py` ladder helper —
+"start at tier_liquid, then shrink"); each strategy's final gating metrics are
+determined exactly by its SELECTED universe (`universe_shrink_metrics` chosen
+sleeves → weights tier 0). The fleet has been repaired and re-backtested
+repeatedly on this basis. ⇒ **Any live-vs-backtest signal disparity is to be
+investigated on the LIVE side first** (§0's audit rows where LIVE diverges:
+iv_rank computed over 14d but labelled 30d, missing vol_indices /
+recent_stop_outs aux keys, non-point-in-time financials read, full-history
+insider window, sentiment source, close-proxy last bar). The §0 universe rows
+describe the UNCAPPED generic invocation path, not the ladder-driven runs that
+produce gating metrics.
 
 **Grounding:** every claim verified against the working tree on 2026-08-07 by a
 line-level audit of `src/execution/engine.py` (live) vs
@@ -106,3 +116,14 @@ signals per side (hash order pinned, wall-clock leaks anchored, RNGs seeded) —
 with one caveat: a live `--date` re-run across the close-proxy settlement
 boundary still differs on the last bar (proxy vs settled close; by design in
 same-day mode). Backtest-vs-live IDENTITY on the same day requires Phases 2–3.
+
+## 6. Close-out (operator decision 2026-08-07)
+
+System remediation is CLOSED. Plan: observe after the full similarity rebuild
+this weekend (backtest-sourced matrix cuts over at that rebuild) and let the
+new active stack operate through next week. Phases 2–4 above are PARKED until
+those results are in; any disparity investigation starts on the live side per
+the ruling. Parked residuals carried forward: options-aggregates rebuild
+(Phase 2), frozen masters iv_history / prices_30m / corporate_actions (the
+master_freshness probe FAILs on them daily BY DESIGN until repaired — that
+daily FAIL is the reminder, not a new incident).
