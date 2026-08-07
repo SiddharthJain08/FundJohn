@@ -121,7 +121,10 @@ class IndustryMomentumMoskowitz(BaseStrategy):
 
         # Equal-weight sector returns (proxy for value-weight; no market-cap in pipeline)
         sector_rets: Dict[str, float] = {}
-        for sector in set(_SECTOR_MAP[t] for t in stock_ret.index):
+        # sorted() — dict insertion order feeds sort_values' stable-sort
+        # tie-breaks downstream; raw set iteration varied per process
+        # (parity fix 2026-08-07).
+        for sector in sorted(set(_SECTOR_MAP[t] for t in stock_ret.index)):
             members = [t for t in stock_ret.index if _SECTOR_MAP[t] == sector]
             if members:
                 sector_rets[sector] = float(stock_ret[members].mean())

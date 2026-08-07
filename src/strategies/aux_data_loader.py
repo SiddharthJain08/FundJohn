@@ -136,11 +136,31 @@ def _day_slice(date_str: str) -> dict[str, dict]:
     ts = pd.to_datetime(date_str)
     day = panel[panel['date'] == ts]
     if day.empty:
-        # Fall back to the most recent prior date (stale-but-best-available)
+        # Fall back to the most recent prior date (stale-but-best-available).
+        # 2026-08-07: this fallback made a 3-month aggregates freeze SILENT —
+        # every bar after the panel's max date was served the frozen last slice
+        # and the backtest scored strategies on a dead options surface. Make
+        # staleness loud, and (opt-in) refuse it: with
+        # OPENCLAW_BT_OPTIONS_MAX_STALE_DAYS=N set, a slice more than N days
+        # older than the requested bar is treated as MISSING (strategies see no
+        # options aux and stand down) instead of silently stale.
         prior = panel[panel['date'] <= ts]
         if prior.empty:
             return {}
         last_ts = prior['date'].max()
+        stale_days = (ts - last_ts).days
+        _max_stale = os.environ.get('OPENCLAW_BT_OPTIONS_MAX_STALE_DAYS')
+        if stale_days > 5:
+            log.warning('aux_data_loader: options aggregates STALE for %s — '
+                        'serving %s (%d days old)%s', date_str,
+                        last_ts.date(), stale_days,
+                        '' if not _max_stale else f' [max_stale={_max_stale}]')
+        if _max_stale:
+            try:
+                if stale_days > int(_max_stale):
+                    return {}
+            except ValueError:
+                pass
         day = panel[panel['date'] == last_ts]
 
     earn = _load_earnings()

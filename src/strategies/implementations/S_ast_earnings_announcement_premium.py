@@ -20,22 +20,34 @@ _N_ANN_MAX   = 16   # cap on announcement-month volumes used in numerator
 _MAX_PER_LEG = 15   # cap per long/short leg
 
 _PRICES_VOL: pd.DataFrame | None = None
+_PRICES_VOL_CUTOFF: pd.Timestamp | None = None
 _EARN_DF: pd.DataFrame | None = None
 
 
-def _load_vol() -> pd.DataFrame:
-    global _PRICES_VOL
-    if _PRICES_VOL is not None:
+def _load_vol(asof: pd.Timestamp) -> pd.DataFrame:
+    """Volume frame covering [asof - (_N_MONTHS+3)mo, ∞) from disk.
+
+    Parity fix 2026-08-07: the cutoff used to be wall-clock
+    (pd.Timestamp.today()), so a historical backtest bar saw an EMPTY window
+    and the strategy silently stood down in backtest while firing live. Anchor
+    to the bar date instead. The cache is reused whenever it already covers the
+    requested window (a frame loaded for an earlier asof is a superset for
+    every later asof, so a forward-walking backtest still loads once)."""
+    global _PRICES_VOL, _PRICES_VOL_CUTOFF
+    needed = (asof - pd.DateOffset(months=_N_MONTHS + 3)).normalize()
+    if _PRICES_VOL is not None and _PRICES_VOL_CUTOFF is not None \
+            and _PRICES_VOL_CUTOFF <= needed:
         return _PRICES_VOL
     p = _ROOT / 'data' / 'master' / 'prices.parquet'
     if not p.exists():
         _PRICES_VOL = pd.DataFrame()
+        _PRICES_VOL_CUTOFF = needed
         return _PRICES_VOL
-    cutoff = (pd.Timestamp.today() - pd.DateOffset(months=_N_MONTHS + 3)).strftime('%Y-%m-%d')
     df = pd.read_parquet(p, columns=['ticker', 'date', 'volume'],
-                         filters=[('date', '>=', cutoff)])
+                         filters=[('date', '>=', needed.strftime('%Y-%m-%d'))])
     df['date'] = pd.to_datetime(df['date'])
     _PRICES_VOL = df
+    _PRICES_VOL_CUTOFF = needed
     return _PRICES_VOL
 
 
@@ -90,7 +102,7 @@ class EarningsAnnouncementPremium(BaseStrategy):
         if len(month_bars) == 0 or today != month_bars[0]:
             return []
 
-        vol_df  = _load_vol()
+        vol_df  = _load_vol(today)
         earn_df = _load_earn()
         if vol_df.empty or earn_df.empty:
             print(f'[debug] signals=0', file=sys.stderr)

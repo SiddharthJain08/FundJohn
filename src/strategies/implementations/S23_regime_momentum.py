@@ -92,7 +92,11 @@ class RegimeMomentumStrategy(BaseStrategy):
             vl_k  = n_long - mo_k
             mo_pick = mom.dropna().sort_values(ascending=False).head(mo_k).index.tolist()
             vl_pick = rvol.dropna().sort_values(ascending=True).head(vl_k).index.tolist()
-            picked  = list(set(mo_pick + vl_pick))[:n_long]
+            # dict.fromkeys = order-preserving dedup (momentum picks first, then
+            # low-vol fills). A plain set() here made the [:n_long] cut depend on
+            # per-process string-hash order — the same inputs picked different
+            # tickers run to run (parity fix 2026-08-07).
+            picked  = list(dict.fromkeys(mo_pick + vl_pick))[:n_long]
 
         signals = []
         for ticker in picked:

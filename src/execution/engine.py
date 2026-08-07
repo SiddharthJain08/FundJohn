@@ -850,10 +850,19 @@ def _sentiment_slice(universe: list, as_of=None) -> dict:
         return {}
 
 
-def load_aux_data(universe: list) -> dict:
-    """Load financials + insider from master Parquets; convert to dict formats the strategies expect."""
+def load_aux_data(universe: list, as_of=None) -> dict:
+    """Load financials + insider from master Parquets; convert to dict formats the strategies expect.
+
+    as_of anchors every date-relative aux computation (options DTE / iv_rank
+    window, upcoming-earnings split, sentiment slice). Parity fix 2026-08-07:
+    these used wall-clock today, so a --date re-run on a later calendar day
+    produced DIFFERENT aux → different signals (the engine's half of the
+    backtest≡live reproducibility contract). None → today (the daily case,
+    behaviour unchanged)."""
     aux = {}
     master_dir = ROOT / 'data' / 'master'
+    _as_of_ts = (pd.Timestamp(as_of).normalize() if as_of is not None
+                 else pd.Timestamp.today().normalize())
 
     # Financials: {ticker: {gross_margin, net_margin, ev_ebitda, pe_ratio, ...}}
     # Also provides camelCase aliases for S10_quality_value (FMP field name convention):
@@ -938,7 +947,7 @@ def load_aux_data(universe: list) -> dict:
     opts_path = master_dir / 'options_eod.parquet'
     if opts_path.exists():
         try:
-            today = pd.Timestamp.today().normalize()
+            today = _as_of_ts
             # Pre-compute HV20 per ticker from master prices (options_eod has no hv20 column)
             # Used for rv_20 and vrp fields consumed by S_HV9, S_HV11, S_HV12, S_HV14, S_HV20.
             _hv20_by_ticker = {}
@@ -996,7 +1005,7 @@ def load_aux_data(universe: list) -> dict:
                 try:
                     _earnings_df = pd.read_parquet(_earnings_path)
                     _earnings_df['date'] = pd.to_datetime(_earnings_df['date'], errors='coerce')
-                    _today_ts = pd.Timestamp.today().normalize()
+                    _today_ts = _as_of_ts
                     _upcoming_earnings = _earnings_df[_earnings_df['date'] >= _today_ts].copy()
                     logger.info(f"Earnings calendar loaded: {len(_upcoming_earnings)} upcoming events")
                 except Exception as _e:
@@ -1292,7 +1301,7 @@ def load_aux_data(universe: list) -> dict:
     # Sentiment: {ticker: {news_count_24h, news_mean_score, news_finbert_pos/neu/neg}}
     # Read from ticker_sentiment_daily.alpaca_news_* (live Alpaca-news FinBERT scores),
     # remapped to the news_* keys S_news_sentiment_long_short expects — backtest parity.
-    aux['sentiment'] = _sentiment_slice(universe)
+    aux['sentiment'] = _sentiment_slice(universe, as_of=_as_of_ts.date())
     logger.info(f"Sentiment loaded: {len(aux['sentiment'])} tickers")
 
     return aux
@@ -2161,7 +2170,7 @@ def main():
 
         # 3. Load data
         prices   = load_prices(universe)
-        aux_data = load_aux_data(universe)
+        aux_data = load_aux_data(universe, as_of=run_date)
 
         if prices.empty:
             logger.warning("Prices DataFrame empty — signals will be minimal")
