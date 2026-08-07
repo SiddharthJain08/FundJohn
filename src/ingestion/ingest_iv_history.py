@@ -101,14 +101,36 @@ def main():
     print(f"iv_history ingest — rebuild={args.rebuild}  "
           f"since={since_d}  existing_rows={len(existing):,}")
 
-    # Stream through options_eod by ticker-date partition to limit memory
-    opts = pd.read_parquet(OPTS_EOD, columns=[
-        'ticker', 'date', 'expiry', 'strike', 'option_type',
-        'delta', 'implied_volatility',
-    ])
-    opts['date'] = pd.to_datetime(opts['date'])
+    # Bounded read (2026-08-07): the old pd.read_parquet materialised ALL
+    # ~29.5M rows × 7 cols (~5GB) BEFORE filtering — right at this box's OOM
+    # ceiling, and the reason the seed backfill never ran. Push down BOTH the
+    # date window and the ATM-call band (option_type=='call', delta∈[0.45,0.55])
+    # that _atm_iv_for_dte ultimately keeps; cuts the read ~15-20x.
+    # SEMANTIC DELTA, accepted: nearest-DTE expiry selection now happens over
+    # ATM-call rows only — a date whose nearest in-band expiry had no ATM call
+    # (old: None) now falls to the nearest expiry that HAS one. Slightly more
+    # coverage, same quantity. All declared consumers are deprecated strategies,
+    # so no live number shifts. 'strike' was read but never used — dropped.
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    _cols = ['ticker', 'date', 'expiry', 'option_type', 'delta',
+             'implied_volatility']
+    flt = ((pc.field('option_type') == 'call')
+           & (pc.field('delta') >= 0.45) & (pc.field('delta') <= 0.55))
     if since_d is not None:
-        opts = opts[opts['date'] > since_d]
+        try:
+            _dflt = pc.field('date') > pc.scalar(since_d.to_pydatetime())
+            tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt & _dflt)
+        except Exception:
+            # date stored as string in some vintages — string bounds compare
+            # correctly for ISO dates (same fallback as build_options_aggregates).
+            _dflt = pc.field('date') > pc.scalar(since_d.strftime('%Y-%m-%d'))
+            tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt & _dflt)
+    else:
+        tbl = pq.read_table(OPTS_EOD, columns=_cols, filters=flt)
+    opts = tbl.to_pandas()
+    del tbl
+    opts['date'] = pd.to_datetime(opts['date'])
     print(f"  filtering → {len(opts):,} option rows in window")
 
     records = []

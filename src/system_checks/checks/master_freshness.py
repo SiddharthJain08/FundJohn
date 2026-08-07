@@ -56,8 +56,13 @@ _CADENCES: dict[str, tuple[str | None, int]] = {
     # financials max(date) is a fiscal period END; quarterly cadence.
     'financials.parquet':         ('date', 120),
     'shares_outstanding.parquet': ('asof_date', 35),
-    # corporate_actions is sparse/event-driven; collector touches it on run.
-    'corporate_actions.parquet':  (None, 45),
+    # corporate_actions is sparse/event-driven (ex-dates arrive irregularly),
+    # so freshness = mtime, not max(date). The old comment here claimed "the
+    # collector touches it on run" — FALSE until 2026-08-07, when the file had
+    # had NO caller since its 04-28 authoring run and the 45d allowance hid a
+    # 101-day freeze. Collector Phase 4d (runCorporateActions) now refreshes a
+    # trailing 60d window daily; 7d mtime allowance keeps a broken phase loud.
+    'corporate_actions.parquet':  (None, 7),
 }
 
 # Covered by a dedicated, stricter check — do not double-report here.

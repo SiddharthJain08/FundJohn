@@ -619,6 +619,22 @@ async function runEarningsMasterMerge() {
   );
 }
 
+async function runCorporateActions() {
+  // 2026-08-07: corporate_actions.parquet had NO caller since its 04-28
+  // authoring run (25 rows; split DETECTION moved to split_watcher v2, which
+  // queries Alpaca directly). Keep the master itself current too — trailing
+  // 60-day window per run, merge dedups on id, so daily runs are idempotent.
+  // NOTE: the read-side adjuster stays OFF (OPENCLAW_APPLY_SPLIT_ADJUSTMENT
+  // unset) — prices are already split-adjusted at ingest; adjusting on top
+  // would double-adjust. This phase only maintains the master.
+  const start = new Date(Date.now() - 60 * 86_400_000).toISOString().slice(0, 10);
+  return _runIngestPhase(
+    '🏢', 'Corporate actions (Alpaca)',
+    ['src/pipeline/alpaca_corporate_actions.py', '--start', start],
+    'corporate_actions', 10 * 60_000,
+  );
+}
+
 // ── Phase 2: Historical prices — gap-aware, never re-fetches known data ────────
 
 async function runHistoricalPrices(daysBack = 3650, tickers = null) {
@@ -2093,6 +2109,10 @@ async function runDailyCollection() {
     // silently froze 2026-04-30 → 08-06 (remediation spec §3). Runs right
     // after the calendar so the master can never lag it by more than a run.
     await runEarningsMasterMerge();
+
+    // 4d: corporate-actions master refresh (2026-08-07 un-orphaning — the
+    // file had no caller at all; see runCorporateActions).
+    await runCorporateActions();
   }
 
   // Phase 6: News — skipped in YELLOW/RED

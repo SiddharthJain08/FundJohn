@@ -750,6 +750,36 @@ function start(swarm, generateId, notifyDiscord) {
         }
     }, { timezone: 'America/New_York' });
 
+    // Daily 06:05 ET Mon-Fri — forward-fill the options aggregates panel
+    // (backtest's only options source + intraday-HMM skew feature). The panel
+    // froze twice (04-22 retirement, 07-29 one-off manual repair) because
+    // nothing scheduled the builders — this is the missing schedule. Morning
+    // slot: box is quiet, options_eod already carries T-1, and the 18:00 ET
+    // HMM refit then reads a fresh panel. Detached spawn (runs 10-30 min) with
+    // its own log — same pattern as cadence-recompute below.
+    cron.schedule('5 6 * * 1-5', () => {
+        log('options-aggregates refresh: spawning refresh_options_aggregates.py');
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const today = new Date().toISOString().slice(0, 10);
+            const logDir = path.join(ROOT, 'logs');
+            try { fs.mkdirSync(logDir, { recursive: true }); } catch (_) {}
+            const logPath = path.join(logDir, `options_aggregates_refresh_${today}.log`);
+            const logFd = fs.openSync(logPath, 'a');
+            const child = spawn(PYTHON, ['scripts/refresh_options_aggregates.py'], {
+                cwd: ROOT,
+                env: { ...process.env },
+                detached: true,
+                stdio: ['ignore', logFd, logFd],
+            });
+            child.unref();
+            log(`options-aggregates refresh: spawned (pid ${child.pid}) → ${logPath}`);
+        } catch (e) {
+            log(`options-aggregates refresh spawn error: ${e.message}`);
+        }
+    }, { timezone: 'America/New_York' });
+
     // Daily 23:55 ET — recompute per-strategy avg holding period + next_fire_date.
     cron.schedule('55 23 * * *', () => {
         log('cadence-recompute: spawning strategy_cadence_recompute.py');
