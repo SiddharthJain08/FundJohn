@@ -67,6 +67,7 @@ _FIN_CAMEL_ALIASES = {
     'workingCapital':           'working_capital',
     'operatingIncome':          'operating_income',
     'marketCap':                'market_cap',
+    'netIncome':                'net_income',
 }
 SENTIMENT_FIELDS = ['news_count_24h', 'news_mean_score', 'news_finbert_pos',
                     'news_finbert_neu', 'news_finbert_neg']
@@ -455,6 +456,19 @@ def _financials_slice(date_str: str) -> dict:
     if asof.empty:
         return {}
     latest = asof.groupby('ticker').last()
+    # Prior-period rows, SELF-relative to each ticker's latest as-of filing
+    # (not to the as-of date — a stale ticker whose only row is old must not
+    # serve that same row as both "current" and "prior", fabricating 0%
+    # growth). 250d ≈ ≥3 quarters older ⇒ the .last() row is the ~1-year-back
+    # filing; 60d ⇒ the prior quarter. Absent history ⇒ key present, value
+    # None — consumers (S_ast_asset_growth_effect, S_ast_roa_effect_within_
+    # stocks, S_accrual_anomaly) skip the ticker. Mirrors engine.py
+    # load_aux_data exactly (the live twin).
+    _latest_date = asof.groupby('ticker')['date'].transform('max')
+    _py = asof[asof['date'] <= _latest_date - pd.Timedelta(days=250)] \
+        .groupby('ticker')[['total_assets', 'working_capital']].last().to_dict('index')
+    _pq = asof[asof['date'] <= _latest_date - pd.Timedelta(days=60)] \
+        .groupby('ticker')[['total_assets']].last().to_dict('index')
     out: dict = {}
     for ticker, row in latest.iterrows():
         d = {
@@ -464,6 +478,13 @@ def _financials_slice(date_str: str) -> dict:
         }
         for camel, snake in _FIN_CAMEL_ALIASES.items():
             d[camel] = d.get(snake)
+        py, pq = _py.get(ticker), _pq.get(ticker)
+        d['totalAssetsPriorYear'] = (
+            float(py['total_assets']) if py is not None and pd.notna(py['total_assets']) else None)
+        d['workingCapitalPriorYear'] = (
+            float(py['working_capital']) if py is not None and pd.notna(py['working_capital']) else None)
+        d['totalAssetsPriorQuarter'] = (
+            float(pq['total_assets']) if pq is not None and pd.notna(pq['total_assets']) else None)
         out[ticker] = d
     return out
 

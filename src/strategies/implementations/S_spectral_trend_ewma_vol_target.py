@@ -72,7 +72,7 @@ class SpectralTrendEWMAVolTarget(BaseStrategy):
         sig_lag = dv.shift(1).replace(0.0, np.nan)
         z       = rets.div(sig_lag)                                            # §2: z_t = r_t / sigma_{t-1}
         S       = z.ewm(span=ewma_span, min_periods=ewma_span // 2).mean()    # §4.3: European TF signal
-        w       = S.mul(sig_tgt).div(np.sqrt(252) * dv.replace(0.0, np.nan)) # §2.3: vol-targeted weight
+        w       = S.mul(sig_tgt).div(np.sqrt(252) * sig_lag)                  # §2.3: vol-targeted weight (sigma_{t-1}, no same-bar peek)
         w       = w.clip(-1.0, 1.0)
 
         s_last = S.iloc[-1]

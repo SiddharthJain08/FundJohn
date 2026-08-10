@@ -146,16 +146,24 @@ class S_valuation_bounded_tsmom(BaseStrategy):
         window = min(2520, len(macro))  # ~10 trading years
 
         def _scaled(col):
-            """Scale column to [-1, 1] using rolling 10-yr min/max. Returns latest value."""
-            s = macro[col].dropna()
-            if len(s) < 50:
+            """Scale column to [-1, 1] using rolling 10-yr min/max at the as-of date.
+
+            No up-front dropna(): compacting the index would make the window span
+            10 years of OBSERVATIONS and land iloc[-1] on the last non-NaN row
+            instead of the frame's end.  min_periods lets NaN gaps ride inside the
+            window; we take the last valid scaled value at/before the frame's end
+            (the caller truncates macro to the as-of date).
+            """
+            s = macro[col]
+            if s.notna().sum() < 50:
                 return None
             rmin = s.rolling(window, min_periods=50).min()
             rmax = s.rolling(window, min_periods=50).max()
             rng = (rmax - rmin).replace(0.0, np.nan)
-            scaled = 2.0 * (s - rmin) / rng - 1.0
-            val = scaled.iloc[-1]
-            return None if pd.isna(val) else float(val)
+            scaled = (2.0 * (s - rmin) / rng - 1.0).dropna()
+            if scaled.empty:
+                return None
+            return float(scaled.iloc[-1])
 
         # ── Term spread (required for Boundaries metric) ─────────────────────
         ts_col = next((c for c in ('TERM_SPREAD', 'T10Y2Y', 'T10Y3M', 'T10YFF', 'SLOPE', 'term_spread')
@@ -199,11 +207,21 @@ def _run_backtest(prices_path: str, macro_path: str, regimes_path: str,
     # ── Load prices ──────────────────────────────────────────────────────────
     if not os.path.exists(prices_path):
         return pd.DataFrame(columns=['strategy_id', 'signal_date', 'regime_state', 'pnl', 'r_multiple'])
-    prices_df = pd.read_parquet(prices_path, columns=['SPY'] if 'SPY' in
-                                pd.read_parquet(prices_path, columns=[]).columns else None)
-    if 'SPY' not in prices_df.columns:
+    import pyarrow.parquet as pq
+    pcols = pq.ParquetFile(prices_path).schema_arrow.names
+    if {'ticker', 'date', 'close'} <= set(pcols):
+        # Long master panel — predicate-pushdown to SPY rows only (never load the whole parquet)
+        prices_df = pd.read_parquet(prices_path, columns=['ticker', 'date', 'close'],
+                                    filters=[('ticker', '==', 'SPY')])
+        prices_df = prices_df[prices_df['ticker'] == 'SPY']
+        prices_df = prices_df.rename(columns={'close': 'SPY'}).set_index('date')[['SPY']]
+    elif 'SPY' in pcols:
+        prices_df = pd.read_parquet(prices_path, columns=['SPY'])
+    else:
         return pd.DataFrame(columns=['strategy_id', 'signal_date', 'regime_state', 'pnl', 'r_multiple'])
-    spy = prices_df['SPY'].dropna()
+    # Coerce to DatetimeIndex — a RangeIndex makes .loc[start:end] slice empty (0 trades)
+    prices_df.index = pd.to_datetime(prices_df.index)
+    spy = prices_df['SPY'].dropna().sort_index()
     spy = spy.loc[start:end]
     if len(spy) < 260:
         return pd.DataFrame(columns=['strategy_id', 'signal_date', 'regime_state', 'pnl', 'r_multiple'])
@@ -212,6 +230,14 @@ def _run_backtest(prices_path: str, macro_path: str, regimes_path: str,
     macro_df = pd.DataFrame()
     if os.path.exists(macro_path):
         macro_df = pd.read_parquet(macro_path)
+        if {'series', 'value'} <= set(macro_df.columns):
+            # Long (date, series, value) layout → wide columns for _boundaries_ok
+            macro_df = macro_df.pivot_table(index='date', columns='series', values='value')
+        elif 'date' in macro_df.columns:
+            macro_df = macro_df.set_index('date')
+        # Coerce to DatetimeIndex — without it .loc[:sig_date] would pass FUTURE macro rows
+        macro_df.index = pd.to_datetime(macro_df.index)
+        macro_df = macro_df.sort_index()
 
     # ── Load historical regimes ──────────────────────────────────────────────
     regimes: dict[str, str] = {}
@@ -224,6 +250,7 @@ def _run_backtest(prices_path: str, macro_path: str, regimes_path: str,
 
     strategy = S_valuation_bounded_tsmom()
     records = []
+    n_signal_evals = 0
 
     # Monthly signals: first trading day of each month
     monthly_dates = spy.resample('MS').first().index
@@ -238,12 +265,13 @@ def _run_backtest(prices_path: str, macro_path: str, regimes_path: str,
         # Build prices frame
         prices_win = pd.DataFrame({'SPY': spy_hist})
 
-        # Build macro frame up to sig_date
-        macro_win = macro_df.loc[:sig_date] if not macro_df.empty and hasattr(macro_df.index, 'date') else macro_df
+        # Build macro frame up to sig_date — ALWAYS truncate (index is a DatetimeIndex by now)
+        macro_win = macro_df.loc[:sig_date] if not macro_df.empty else macro_df
 
         regime_state = regimes.get(date_str, 'LOW_VOL')
         regime = {'state': regime_state}
 
+        n_signal_evals += 1
         sigs = strategy.generate_signals(prices_win, regime, ['SPY'],
                                          aux_data={'macro': macro_win} if not macro_win.empty else None)
         if not sigs:
@@ -269,6 +297,9 @@ def _run_backtest(prices_path: str, macro_path: str, regimes_path: str,
             'r_multiple': float(r_multiple),
         })
 
+    # Diagnostic: a 0-trade output should be self-explanatory (history gate vs signal gate)
+    print(f'[backtest] monthly iterations reaching signal step: {n_signal_evals}; trades: {len(records)}',
+          file=sys.stderr)
     return pd.DataFrame(records)
 
 

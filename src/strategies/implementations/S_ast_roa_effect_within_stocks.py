@@ -87,12 +87,11 @@ class AstROAEffectWithinStocks(BaseStrategy):
                 continue
             net_income = float(net_income)
 
-            lagged_assets = (
-                fin.get('totalAssetsPriorYear')
-                or fin.get('totalAssetsPY')
-                or fin.get('totalAssetsPreviousYear')
-                or fin.get('totalAssets')
-            )
+            # Hypothesis: ONE-QUARTER-lagged total assets. The aux financials
+            # panel serves totalAssetsPriorQuarter (self-relative to the
+            # ticker's latest filing). NO fallback to current-period assets —
+            # that silently violated the hypothesis; absent history ⇒ skip.
+            lagged_assets = fin.get('totalAssetsPriorQuarter')
             if not lagged_assets:
                 continue
             lagged_assets = float(lagged_assets)

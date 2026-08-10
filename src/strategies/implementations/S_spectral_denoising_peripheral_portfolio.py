@@ -56,12 +56,14 @@ class SpectralDenoisingPeripheralPortfolio(BaseStrategy):
                   file=sys.stderr)
             return []
 
-        # Rebalance gate: emit signals only on the first day of each 125-day window
-        # Determine position of last date in the full price history
-        all_px_len = len(prices.dropna(subset=[tickers[0]], how='all')) if tickers else len(prices)
-        if all_px_len % REBALANCE_DAYS != 0 and all_px_len > REBALANCE_DAYS:
+        # Rebalance gate: emit signals only when the latest bar enters a new
+        # REBALANCE_DAYS calendar-day bucket (date-anchored — independent of any
+        # ticker's NaN pattern; fires once per bucket under daily iteration)
+        anchor = prices.index[0]
+        bucket = (prices.index[-1] - anchor).days // REBALANCE_DAYS
+        if (prices.index[-2] - anchor).days // REBALANCE_DAYS == bucket:
             # Not a rebalance day — suppress output (pipeline holds existing positions)
-            print(f'[debug] signals=0 (not rebalance day: pos={all_px_len})', file=sys.stderr)
+            print(f'[debug] signals=0 (not rebalance day: bucket={bucket})', file=sys.stderr)
             return []
 
         rets = px.pct_change().dropna()

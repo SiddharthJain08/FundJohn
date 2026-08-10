@@ -44,11 +44,18 @@ class AssetGrowthEffect(BaseStrategy):
         if not self.should_run(regime_state):
             return []
 
-        # Only rebalance in June (month 6)
+        # Annual June rebalance: fire on the FIRST bar inside June (previous
+        # bar is not June) — once per year under daily AND monthly sampling,
+        # instead of every June bar under daily iteration.
         latest_date = prices.index[-1]
-        if hasattr(latest_date, 'month') and latest_date.month != 6:
-            print(f'[debug] signals=0', file=sys.stderr)
-            return []
+        if hasattr(latest_date, 'month'):
+            prev_date = prices.index[-2] if len(prices.index) >= 2 else None
+            into_june = latest_date.month == 6 and (
+                prev_date is None or not hasattr(prev_date, 'month')
+                or prev_date.month != 6)
+            if not into_june:
+                print(f'[debug] signals=0', file=sys.stderr)
+                return []
 
         financials = (aux_data or {}).get('financials', {})
         if not financials:

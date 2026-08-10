@@ -879,7 +879,19 @@ def load_aux_data(universe: list, as_of=None) -> dict:
             fin = _inject_intraday_rows(fin, 'financials', universe,
                                         dedup_keys=['ticker', 'date'])
             # Use most recent row per ticker
-            fin_latest = fin.sort_values('date').groupby('ticker').last().reset_index()
+            fin = fin.sort_values('date')
+            fin_latest = fin.groupby('ticker').last().reset_index()
+            # Prior-period rows, SELF-relative to each ticker's latest filing
+            # (a stale ticker's only row must not serve as both "current" and
+            # "prior" — that fabricates 0% growth). 250d ≈ ≥3 quarters older ⇒
+            # .last() is the ~1-year-back filing; 60d ⇒ the prior quarter.
+            # Mirrors aux_data_loader._financials_slice (the backtest twin).
+            _fin_dt = pd.to_datetime(fin['date'])
+            _fin_latest_dt = _fin_dt.groupby(fin['ticker']).transform('max')
+            _fin_py = fin[_fin_dt <= _fin_latest_dt - pd.Timedelta(days=250)] \
+                .groupby('ticker')[['total_assets', 'working_capital']].last().to_dict('index')
+            _fin_pq = fin[_fin_dt <= _fin_latest_dt - pd.Timedelta(days=60)] \
+                .groupby('ticker')[['total_assets']].last().to_dict('index')
             fin_dict = {}
             for _, row in fin_latest.iterrows():
                 ticker = row.get('ticker')
@@ -903,6 +915,20 @@ def load_aux_data(universe: list, as_of=None) -> dict:
                     d['workingCapital']              = d.get('working_capital')
                     d['operatingIncome']             = d.get('operating_income')
                     d['marketCap']                   = d.get('market_cap')
+                    d['netIncome']                   = d.get('net_income')
+                    # Prior-period aliases (2026-08-10; asset-growth / ROA /
+                    # accrual candidates). None when the panel lacks history.
+                    _py = _fin_py.get(ticker)
+                    _pq = _fin_pq.get(ticker)
+                    d['totalAssetsPriorYear'] = (
+                        float(_py['total_assets'])
+                        if _py is not None and pd.notna(_py['total_assets']) else None)
+                    d['workingCapitalPriorYear'] = (
+                        float(_py['working_capital'])
+                        if _py is not None and pd.notna(_py['working_capital']) else None)
+                    d['totalAssetsPriorQuarter'] = (
+                        float(_pq['total_assets'])
+                        if _pq is not None and pd.notna(_pq['total_assets']) else None)
                     fin_dict[ticker] = d
             aux['financials'] = fin_dict
             logger.info(f"Financials loaded: {len(fin_dict)} tickers")

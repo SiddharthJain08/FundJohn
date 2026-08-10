@@ -48,20 +48,26 @@ class AstValueBookToMarketFactor(BaseStrategy):
         if not self.should_run(regime_state):
             return []
 
-        # Annual rebalance: only fire signals in December
+        # Annual December rebalance: fire on the FIRST bar inside December —
+        # once per year under daily AND monthly sampling.
         try:
             last_date = pd.Timestamp(prices.index[-1])
-            current_month = last_date.month
+            prev_date = (pd.Timestamp(prices.index[-2])
+                         if len(prices.index) >= 2 else None)
+            into_dec = last_date.month == 12 and (
+                prev_date is None or prev_date.month != 12)
         except Exception:
-            current_month = 12  # fail-open: always run if date unparseable
+            into_dec = True  # fail-open: always run if dates unparseable
 
-        if current_month != 12:
-            print('[debug] signals=0', file=sys.stderr)
+        if not into_dec:
+            print('[debug] signals=0 (not December-entry bar)', file=sys.stderr)
             return []
 
         financials = (aux_data or {}).get('financials', {})
         if not financials:
-            print('[debug] signals=0', file=sys.stderr)
+            # Distinguish the three early-return causes (Sunday review) so a
+            # zero-trade backtest is self-explanatory.
+            print('[debug] signals=0 (aux financials empty)', file=sys.stderr)
             return []
 
         scale = self.position_scale(regime_state)
@@ -82,7 +88,11 @@ class AstValueBookToMarketFactor(BaseStrategy):
             if price <= 0:
                 continue
 
-            # Book equity (total stockholders' equity — point-in-time from prior quarter)
+            # Book equity: the financials panel has no stockholders'-equity
+            # field, but totalAssets − totalLiabilities IS book equity —
+            # derive it (2026-08-10, Sunday review: the old key lookups
+            # never matched anything and every ticker was skipped). Keep the
+            # legacy keys as a first preference should a richer feed appear.
             book_eq = float(
                 fin.get('totalStockholdersEquity')
                 or fin.get('totalEquity')
@@ -90,9 +100,14 @@ class AstValueBookToMarketFactor(BaseStrategy):
                 or 0.0
             )
             if book_eq <= 0:
+                ta = fin.get('totalAssets')
+                tl = fin.get('totalLiabilities')
+                if ta is not None and tl is not None:
+                    book_eq = float(ta) - float(tl)
+            if book_eq <= 0:
                 continue
 
-            # Market cap: shares * price, or direct field
+            # Market cap: shares * price, or the panel's marketCap field
             shares = float(fin.get('sharesOutstanding') or fin.get('commonStockSharesOutstanding') or 0.0)
             mktcap = shares * price if shares > 0 else float(fin.get('marketCap') or 0.0)
             if mktcap <= 0:

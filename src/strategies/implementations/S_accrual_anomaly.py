@@ -6,11 +6,10 @@ LONG bottom-decile balance-sheet accruals (highest earnings quality),
 SHORT top-decile balance-sheet accruals (lowest earnings quality).
 Annual rebalance in May after all companies publish annual earnings.
 
-BS_ACC = (ΔCA − ΔCash) − (ΔCL − ΔSTD − ΔITP) − Dep
-         -----------------------------------------------
-                    avg(TotalAssets)
-
-Normalized by average total assets (Sloan 1996 convention).
+Full Sloan (1996): BS_ACC = [(ΔCA − ΔCash) − (ΔCL − ΔSTD − ΔITP) − Dep] / avg(TA).
+Implemented here as the dominant ΔWC term, BS_ACC ≈ ΔWC_yoy / avg(TA), because the
+financials panel carries working_capital + prior-year history but not the CA/Cash/CL
+line items (see _compute_bs_acc docstring, 2026-08-10).
 """
 from __future__ import annotations
 import sys
@@ -35,53 +34,39 @@ def _float_or_none(v) -> float | None:
 
 
 def _compute_bs_acc(fin: dict) -> float | None:
+    """Balance-sheet accruals scaled by average total assets.
+
+    Data-contract rewrite 2026-08-10 (Sunday code review: the original read
+    '*PriorYear' sibling keys for CA/Cash/CL that no data source here ever
+    provides — every ticker returned None and the strategy never fired). The
+    financials panel does not carry the current-asset / cash / current-
+    liability line items Sloan's full BS_ACC needs, but it does carry
+    working_capital (= CA − CL) with genuine prior-year history served as
+    workingCapitalPriorYear / totalAssetsPriorYear (self-relative to the
+    ticker's latest filing — aux_data_loader._financials_slice and its
+    engine.py twin). So this computes the dominant ΔWC term of Sloan (1996):
+
+        BS_ACC ≈ ΔWC_yoy / avg(TotalAssets)
+
+    omitting the ΔCash / ΔSTD / ΔITP corrections and depreciation. Returns
+    None when the panel lacks prior-year history for the ticker (the ranking
+    then simply excludes it — no fabricated zeros).
     """
-    Compute balance-sheet accruals scaled by avg total assets.
-    Returns None if required fields are missing.
-    """
-    # ── current-year fields ───────────────────────────────────────────────────
-    ca   = _float_or_none(fin.get('currentAssets') or fin.get('totalCurrentAssets'))
-    cash = _float_or_none(fin.get('cashAndCashEquivalents') or fin.get('cashAndShortTermInvestments'))
-    cl   = _float_or_none(fin.get('currentLiabilities') or fin.get('totalCurrentLiabilities'))
-    std  = _float_or_none(fin.get('currentDebt') or fin.get('shortTermDebt') or fin.get('currentPortionOfLongTermDebt') or 0.0)
-    itp  = _float_or_none(fin.get('incomeTaxPayable') or fin.get('taxPayable') or 0.0)
-    dep  = _float_or_none(fin.get('depreciationAndAmortization') or fin.get('depreciation') or fin.get('depreciationAmortization') or 0.0)
-    ta   = _float_or_none(fin.get('totalAssets'))
+    wc    = _float_or_none(fin.get('workingCapital'))
+    wc_py = _float_or_none(fin.get('workingCapitalPriorYear'))
+    ta    = _float_or_none(fin.get('totalAssets'))
+    ta_py = _float_or_none(fin.get('totalAssetsPriorYear'))
 
-    # ── prior-year fields (FMP sometimes provides *PriorYear / *PY keys) ─────
-    ca_py   = _float_or_none(fin.get('currentAssetsPriorYear') or fin.get('currentAssetsPY') or fin.get('totalCurrentAssetsPriorYear'))
-    cash_py = _float_or_none(fin.get('cashAndCashEquivalentsPriorYear') or fin.get('cashAndCashEquivalentsPY'))
-    cl_py   = _float_or_none(fin.get('currentLiabilitiesPriorYear') or fin.get('currentLiabilitiesPY') or fin.get('totalCurrentLiabilitiesPriorYear'))
-    std_py  = _float_or_none(fin.get('currentDebtPriorYear') or fin.get('shortTermDebtPriorYear') or fin.get('currentDebtPY') or 0.0)
-    itp_py  = _float_or_none(fin.get('incomeTaxPayablePriorYear') or fin.get('taxPayablePriorYear') or fin.get('incomeTaxPayablePY') or 0.0)
-    ta_py   = _float_or_none(fin.get('totalAssetsPriorYear') or fin.get('totalAssetsPY') or fin.get('totalAssetsPreviousYear'))
-
-    # ── require all non-optional current-year fields ──────────────────────────
-    if any(v is None for v in [ca, cash, cl, ta]):
+    if wc is None or wc_py is None or ta is None:
         return None
-    # require prior-year for at least the 3 main balance-sheet items
-    if any(v is None for v in [ca_py, cash_py, cl_py]):
-        return None
-
-    # ── safe defaults for optional prior-year fields ──────────────────────────
-    std  = std  if std  is not None else 0.0
-    itp  = itp  if itp  is not None else 0.0
-    dep  = dep  if dep  is not None else 0.0
-    std_py = std_py if std_py is not None else 0.0
-    itp_py = itp_py if itp_py is not None else 0.0
-    ta_py  = ta_py  if ta_py  is not None else ta
+    if ta_py is None:
+        ta_py = ta
 
     avg_ta = (ta + ta_py) / 2.0
     if avg_ta <= 0.0:
         return None
 
-    delta_ca   = ca   - ca_py
-    delta_cash = cash - cash_py
-    delta_cl   = cl   - cl_py
-    delta_std  = std  - std_py
-    delta_itp  = itp  - itp_py
-
-    bs_acc = ((delta_ca - delta_cash) - (delta_cl - delta_std - delta_itp) - dep) / avg_ta
+    bs_acc = (wc - wc_py) / avg_ta
     return float(bs_acc) if np.isfinite(bs_acc) else None
 
 
@@ -113,11 +98,18 @@ class AccrualAnomaly(BaseStrategy):
         if not self.should_run(regime_state):
             return []
 
-        # Annual rebalance: fire only in May (after earnings season)
+        # Annual May rebalance (after annual earnings publish): fire on the
+        # FIRST bar inside May — once per year under daily AND monthly
+        # sampling, instead of every May bar under daily iteration.
         latest_date = prices.index[-1]
-        if hasattr(latest_date, 'month') and latest_date.month != 5:
-            print(f'[debug] signals=0', file=sys.stderr)
-            return []
+        if hasattr(latest_date, 'month'):
+            prev_date = prices.index[-2] if len(prices.index) >= 2 else None
+            into_may = latest_date.month == 5 and (
+                prev_date is None or not hasattr(prev_date, 'month')
+                or prev_date.month != 5)
+            if not into_may:
+                print(f'[debug] signals=0', file=sys.stderr)
+                return []
 
         financials = (aux_data or {}).get('financials', {})
         if not financials:
