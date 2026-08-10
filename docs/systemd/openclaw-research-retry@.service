@@ -1,0 +1,10 @@
+[Unit]
+Description=Research retry scheduler for %i — arms a delayed restart after a weekend-research failure
+# Instantiated via OnFailure=openclaw-research-retry@%n.service from the
+# guards.conf drop-in on each openclaw-sunday-* research unit (2026-08-10).
+# The script enforces max 3 retries per 4-day cycle and keeps retries out of
+# RTH. Runs as root: it needs systemctl start + /var/lib/openclaw state.
+
+[Service]
+Type=oneshot
+ExecStart=/root/openclaw/scripts/research_retry.sh %i
