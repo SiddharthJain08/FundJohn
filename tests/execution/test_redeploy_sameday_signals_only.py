@@ -1,13 +1,11 @@
-"""Same-day lane: the intraday redeploy is SIGNALS-ONLY.
+"""Intraday redeploy executes the FULL sequence in BOTH signal-target lanes.
 
-Operator directive 2026-08-10 — the 15:00/15:55 same-day lane is the SOLE
-execution wave. Motivating incident 2026-08-07: the 10:01 LOW_VOL→TRANSITIONING
-redeploy opened 47 positions; the 15:00 compute found zero conviction over the
-same book and flattened it the same afternoon (see
-test_sized_handoff_guard for the layer that then swallowed the flatten).
-A regime transition must still recompute signals (they join the 15:00 carried
-pool) but must never submit orders. The legacy T+1 EOD-register lane keeps the
-full redeploy sequence unchanged.
+OPERATOR RULING 2026-08-10: a regime transition SHOULD submit positions when
+signals are determined and cross the conviction threshold — full redeploy
+execution (signals → news-gate → handoff,trade,alpaca,reconcile) is intended
+behaviour in the same-day lane too. This file previously pinned a short-lived
+signals-only gate for the same-day lane (introduced and reverted the same
+morning); it now pins the ruling so the gate does not silently reappear.
 """
 import scripts.redeploy_pipeline as rd
 
@@ -28,30 +26,29 @@ def _harness(monkeypatch, rcs=(0, 0)):
     return calls
 
 
-def test_sameday_lane_redeploy_is_signals_only(monkeypatch):
+def _assert_full_sequence(calls, rc):
+    assert rc == 0
+    assert calls['spawn'] == [rd._REDEPLOY_STEPS_PRE_GATE,
+                              rd._REDEPLOY_STEPS_POST_GATE], \
+        'redeploy must run the full pre-gate → post-gate sequence, got %r' \
+        % calls['spawn']
+    assert len(calls['gate']) == 1, 'news gate runs between the two legs'
+
+
+def test_sameday_lane_runs_full_redeploy(monkeypatch):
     monkeypatch.setenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', '1')
     calls = _harness(monkeypatch)
     rc = rd._run_redeploy('INTRADAY_HMM_LOW_VOL_TRANSITIONING', '2026-08-10',
                           dry_run=False)
-    assert rc == 0
-    assert calls['spawn'] == [rd._REDEPLOY_STEPS_PRE_GATE], \
-        'same-day redeploy must run ONLY the signals step, got %r' % calls['spawn']
-    assert calls['gate'] == [], 'news gate is part of the execution leg — skipped'
-    assert any('15:55' in msg for _ch, msg in calls['hook']), \
-        'the deferral must be announced on the intraday-regime webhook'
+    _assert_full_sequence(calls, rc)
 
 
-def test_eod_lane_keeps_full_redeploy(monkeypatch):
-    # Explicit legacy T+1 lane: new flag 0 → eod_register semantics.
+def test_eod_lane_runs_full_redeploy(monkeypatch):
     monkeypatch.setenv('OPENCLAW_SAMEDAY_SIGNAL_TARGET', '0')
     calls = _harness(monkeypatch)
     rc = rd._run_redeploy('INTRADAY_HMM_LOW_VOL_TRANSITIONING', '2026-08-10',
                           dry_run=False)
-    assert rc == 0
-    assert calls['spawn'] == [rd._REDEPLOY_STEPS_PRE_GATE,
-                              rd._REDEPLOY_STEPS_POST_GATE], \
-        'EOD lane must keep the full pre-gate → post-gate sequence'
-    assert len(calls['gate']) == 1, 'news gate runs between the two legs'
+    _assert_full_sequence(calls, rc)
 
 
 def test_pre_gate_failure_short_circuits_both_lanes(monkeypatch):
@@ -61,4 +58,4 @@ def test_pre_gate_failure_short_circuits_both_lanes(monkeypatch):
                           dry_run=False)
     assert rc == 3
     assert calls['spawn'] == [rd._REDEPLOY_STEPS_PRE_GATE]
-    assert calls['gate'] == [] and calls['hook'] == []
+    assert calls['gate'] == []
