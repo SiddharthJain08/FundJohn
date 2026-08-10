@@ -751,8 +751,15 @@ class ResearchOrchestrator {
         try { onPhase('backtest', hb); } catch (_) {}
       }, 5_000);
       try {
+        // --universe-cap tier_liquid (operator directive 2026-08-10): every NEW
+        // candidate's first backtest is bounded to the largest backtestable
+        // ladder tier. An uncapped 12,548-ticker run OOM-killed the Saturday
+        // finisher on 2026-08-08 (SPY-only strategy, 5.8G unit peak); the cap
+        // is also stamped into manifest metadata at registration below so
+        // every later re-backtest inherits it.
         const { stdout, stderr, code } = await _spawnPython(
-          ['-m', 'backtest.unified_backtest', '--strategy-file', implPath],
+          ['-m', 'backtest.unified_backtest', '--strategy-file', implPath,
+           '--universe-cap', 'tier_liquid'],
           { cwd: OPENCLAW_DIR, timeoutMs: 900_000, onChild: opts.onChild,
             env: { ...process.env, PYTHONPATH: 'src' } });
         // unified_backtest writes log lines to stdout and the run_id at the end.
@@ -879,7 +886,11 @@ class ResearchOrchestrator {
       `    # Strategy isn't in the manifest yet (saturday_brain Tier-A path). Register`,
       `    # in CANDIDATE so the dashboard surfaces it with the backtest metrics that`,
       `    # are about to land in strategy_registry.`,
-      `    lsm.register(sid, initial_state=StrategyState.CANDIDATE, metadata={'canonical_file': sid + '.py'})`,
+      `    # backtest_universe_cap=tier_liquid (operator directive 2026-08-10):`,
+      `    # new candidates are ALWAYS ladder-bounded — the first backtest ran with`,
+      `    # --universe-cap tier_liquid, and this stamp makes every later re-backtest`,
+      `    # (fleet nightly, re-gates) inherit the same bound.`,
+      `    lsm.register(sid, initial_state=StrategyState.CANDIDATE, metadata={'canonical_file': sid + '.py', 'backtest_universe_cap': 'tier_liquid'})`,
       `else:`,
       `    cur = lsm.get_state(sid)`,
       `    if (cur, StrategyState.CANDIDATE) in VALID_TRANSITIONS:`,

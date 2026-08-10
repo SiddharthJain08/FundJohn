@@ -1039,7 +1039,8 @@ def _default_fill_model() -> str:
     return os.environ.get('OPENCLAW_BT_FILL_MODEL', 'same_close')
 
 
-def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None):
+def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None,
+                      cap_override: Optional[str] = None):
     """Universe ladder campaign W6: when the manifest sets
     metadata.backtest_universe_cap = <ladder tier>, bound the strategy's
     BACKTEST universe to that tier via the newest frozen membership artifact
@@ -1050,12 +1051,20 @@ def _bounded_resolver(strategy_id: str, *, manifest_path=None, data_dir=None):
     None when no cap is set (byte-identical legacy behavior)."""
     manifest_path = Path(manifest_path or ROOT / 'src' / 'strategies' / 'manifest.json')
     data_dir = Path(data_dir or ROOT / 'data')
-    try:
-        entry = (json.loads(manifest_path.read_text()).get('strategies', {})
-                 .get(strategy_id) or {})
-        cap = (entry.get('metadata') or {}).get('backtest_universe_cap')
-    except Exception:
-        return None
+    if cap_override:
+        # Explicit cap from the caller (--universe-cap): wins over the manifest
+        # and needs no manifest entry — this is how a NEW candidate's FIRST
+        # backtest is bounded before it has been registered (operator directive
+        # 2026-08-10 after the uncapped 12,548-ticker run OOM-killed the
+        # Saturday finisher).
+        cap = cap_override
+    else:
+        try:
+            entry = (json.loads(manifest_path.read_text()).get('strategies', {})
+                     .get(strategy_id) or {})
+            cap = (entry.get('metadata') or {}).get('backtest_universe_cap')
+        except Exception:
+            return None
     if not cap:
         return None
     arts = (sorted(data_dir.glob('universe_tier_membership_shrink-*.parquet'))
@@ -1080,7 +1089,8 @@ def run_backtest(strategy_id: str, *,
                  param_override=None,
                  return_metrics: bool = False,
                  instrument_class: str = 'equity',
-                 fill_model: Optional[str] = None) -> str:
+                 fill_model: Optional[str] = None,
+                 universe_cap: Optional[str] = None) -> str:
     """Execute the unified backtest for one strategy. Returns the run_id (UUID).
 
     Side effect: writes one row to strategy_backtest_runs, up to 4 rows
@@ -1125,8 +1135,10 @@ def run_backtest(strategy_id: str, *,
     # metadata.backtest_universe_cap bounds this strategy's BACKTEST universe
     # to a ladder tier. Only consulted when the caller passed no resolver —
     # explicit resolvers (grid cells, coupling overrides) always win.
+    # universe_cap (2026-08-10) is the caller-supplied override for strategies
+    # not yet in the manifest (a new candidate's first backtest).
     if resolver is None:
-        resolver = _bounded_resolver(strategy_id)
+        resolver = _bounded_resolver(strategy_id, cap_override=universe_cap)
 
     close_wide, bars_by_ticker = load_prices_panels(calendar=_calendar_for(instrument_class))
     regimes = load_regimes()
@@ -1363,6 +1375,12 @@ def main() -> int:
                     help='Pin the hold horizon; default resolves each strategy\'s '
                          'configured max_hold from strategy_regime_params '
                          f'(falls back to {DEFAULT_MAX_HOLD_DAYS}).')
+    ap.add_argument('--universe-cap', default=None,
+                    help='Bound the backtest universe to a ladder tier (e.g. '
+                         'tier_liquid) regardless of manifest metadata — the '
+                         'way a NEW candidate\'s first backtest is bounded '
+                         'before registration. Manifest metadata.backtest_'
+                         'universe_cap still applies when this is unset.')
     args = ap.parse_args()
 
     if args.all_live:
@@ -1387,6 +1405,7 @@ def main() -> int:
             run_backtest(args.strategy_id,
                          start_date=args.start_date, end_date=args.end_date,
                          max_hold_days=args.max_hold_days,
+                         universe_cap=args.universe_cap,
                          instrument_class=_resolve_instrument_class(args.strategy_id))
             return 0
         except FileNotFoundError as e:
@@ -1401,6 +1420,7 @@ def main() -> int:
             run_backtest(sid, filepath=args.strategy_file,
                          start_date=args.start_date, end_date=args.end_date,
                          max_hold_days=args.max_hold_days,
+                         universe_cap=args.universe_cap,
                          instrument_class=_resolve_instrument_class(sid, filepath=args.strategy_file))
             return 0
         except Exception as e:
