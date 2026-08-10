@@ -99,7 +99,7 @@ class AstROAEffectWithinStocks(BaseStrategy):
                 continue
 
             roa = net_income / lagged_assets
-            if not np.isfinite(roa) or roa == 0.0:
+            if not np.isfinite(roa):
                 continue
 
             candidates.append({
