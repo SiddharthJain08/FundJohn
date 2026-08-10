@@ -2170,6 +2170,21 @@ def _emit_orders_from_targets(target_usd, ticker_meta, nav, confirmer, _ortho_gr
             sid_out = '__flip_close__'
             out_target = 0.0
             out_current = broker.get(tkr, 0.0)
+        elif kind == 'orphan_close':
+            # Reserved sid for the SAME two reasons as __flip_close__ above:
+            # (a) the executor's already_executed() dedup keys on
+            #     (run_date, strategy_id, ticker) — in the same-day lane the
+            #     morning open already wrote a row under real_sid, so an
+            #     attributed close is swallowed as "already executed". The
+            #     2026-08-07 zero-conviction flatten emitted 47 closes and
+            #     liquidated $0 exactly this way.
+            # (b) executor tier-0 (closes first, freeing buying power) detects
+            #     orphan closes BY this sid (_exec_priority_for_test).
+            # Strategy attribution is not lost — contributing_strategies /
+            # contributions below still carry ticker_meta's real strategies.
+            sid_out = '__close_orphan__'
+            out_target = 0.0
+            out_current = broker.get(tkr, 0.0)
         elif kind == 'flip_open':
             sid_out = real_sid
             out_target = target_usd.get(tkr, 0.0)

@@ -353,3 +353,38 @@ def test_j_sameday_lane_flag_off_is_inert(monkeypatch):
                           broker={'HELDA': 8_000.0}, min_corr_cum_sharpe=5.0,
                           eod=False, sameday=True, flatten_flag='0')
     assert orders == [] and alerts == []
+
+
+# ---------------------------------------------------------------------------
+# (k) Flatten closes of tickers WITH live strategy attribution must still be
+#     '__close_orphan__'. Tests (a)/(h) use broker tickers disjoint from the
+#     carried set, so ticker_meta had no attribution and the sid fell through
+#     to '__close_orphan__' by default — they never exercised the collision.
+#     2026-08-07 production: the morning lane OPENED 47 positions under their
+#     real strategy_id; the afternoon flatten emitted closes for the SAME
+#     tickers, ticker_meta attributed them, sid_out = real_sid, and the
+#     executor's already_executed() (run_date, strategy_id, ticker) dedup
+#     swallowed all 47 — "$68,749 gross liquidated" in the log, $0 at the
+#     broker. This pins the reserved-sid contract for attributed closes.
+# ---------------------------------------------------------------------------
+
+def test_k_flatten_of_attributed_positions_uses_reserved_sid(monkeypatch):
+    weights, carried = _healthy_set(n=10)
+    # Broker holds the SAME tickers the carried set attributes (T0..T2) —
+    # ticker_meta will carry real strategies for them.
+    broker = {'T0': 8_000.0, 'T1': -5_000.0, 'T2': 12_500.0}
+    orders, alerts = _run(monkeypatch, weights_rows=weights, carried_rows=carried,
+                          broker=broker, min_corr_cum_sharpe=5.0,
+                          eod=False, sameday=True, intraday=False, flatten_flag='1')
+
+    assert orders, 'flatten must emit orders for attributed positions, got []'
+    assert {o['ticker'] for o in orders} == set(broker)
+    for o in orders:
+        assert o['strategy_id'] == '__close_orphan__', (
+            'attributed flatten close must carry the reserved sid (dedup + '
+            'tier-0 contract), got %r for %s' % (o['strategy_id'], o['ticker']))
+        assert _is_close(o) and o['target_usd'] == 0.0
+        # Attribution itself must survive on the payload, just not in the sid.
+        assert o['contributing_strategies'], (
+            'contributing_strategies must keep the real attribution, got %r' % o)
+    assert len(alerts) == 1

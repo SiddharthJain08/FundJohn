@@ -79,3 +79,45 @@ def test_force_resize_bypasses_guard(patched, monkeypatch):
     ok = sized_handoff.finalize_sized_payload('2026-06-11', _payload(), source='test')
     assert ok is True
     assert patched['writes'] == [('2026-06-11', 'sized')]
+
+
+def _flatten_payload(n=3):
+    return {'orders': [{'ticker': 'T%d' % i, 'strategy_id': '__close_orphan__',
+                        'target_usd': 0.0, 'pct_nav': 0.01} for i in range(n)],
+            'vetoed': []}
+
+
+def test_pure_flatten_payload_bypasses_guard(patched):
+    """2026-08-07 regression: the same-day zero-conviction flatten (all orders
+    __close_orphan__) was silently discarded by the guard because the 10:00
+    base cycle had already submitted — 47 closes logged as liquidated, $0
+    reached the broker. A pure-flatten payload must be WRITTEN even when
+    submissions already exist for the run_date."""
+    patched['count'] = 53  # the morning wave already submitted
+    ok = sized_handoff.finalize_sized_payload('2026-08-07', _flatten_payload(),
+                                              source='test')
+    assert ok is True
+    assert patched['writes'] == [('2026-08-07', 'sized')], \
+        'a pure flatten must overwrite the stale morning handoff'
+
+
+def test_mixed_payload_still_refused_when_submissions_exist(patched):
+    """One open order in the payload -> the ERR-20260612-001 refusal stands
+    (re-truing residual deltas into the close is operator policy, not ours)."""
+    patched['count'] = 53
+    payload = _flatten_payload()
+    payload['orders'].append({'ticker': 'NEW', 'strategy_id': 'S_x', 'pct_nav': 0.02})
+    ok = sized_handoff.finalize_sized_payload('2026-08-07', payload, source='test')
+    assert ok is True
+    assert patched['writes'] == [], 'mixed payloads must not overwrite'
+
+
+def test_empty_orders_payload_still_refused_when_submissions_exist(patched):
+    """No orders at all is NOT a flatten — an empty payload must never clobber
+    the morning handoff (send_report + d-1 context read it)."""
+    patched['count'] = 53
+    ok = sized_handoff.finalize_sized_payload('2026-08-07',
+                                              {'orders': [], 'vetoed': []},
+                                              source='test')
+    assert ok is True
+    assert patched['writes'] == []

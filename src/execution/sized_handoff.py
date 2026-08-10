@@ -66,7 +66,28 @@ def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
                 )
                 already = _cur.fetchone()[0] or 0
                 _conn.close()
-                if already > 0:
+                # PURE-FLATTEN exemption: a payload that is nothing but
+                # __close_orphan__ liquidations (the zero-conviction flatten)
+                # must NOT be discarded by the refuse-to-overwrite below. It is
+                # safe to (re)write: the closes were sized from the LIVE broker
+                # book moments ago, and the executor's per-order
+                # already_executed() still dedups each close individually — a
+                # pure flatten cannot double-OPEN anything. Without this, the
+                # same-day lane's 15:00 flatten dies here whenever the 10:00
+                # base cycle submitted anything: 2026-08-07 the sizer logged
+                # "$68,749 gross liquidated" for 47 closes and $0 reached the
+                # broker — the executor re-read the MORNING handoff instead.
+                _orders = payload.get('orders') or []
+                _pure_flatten = bool(_orders) and all(
+                    (o.get('strategy_id') or '') == '__close_orphan__'
+                    for o in _orders)
+                if already > 0 and _pure_flatten:
+                    print(f'[sized_handoff] {already} Alpaca submission(s) already exist for '
+                          f'{run_date}, but this payload is a PURE FLATTEN '
+                          f'({len(_orders)} __close_orphan__ close(s), no opens) — '
+                          f'writing it over the earlier sized handoff so the '
+                          f'liquidation actually reaches the executor.')
+                elif already > 0:
                     # An intraday regime-redeploy (or a same-cycle re-run) has
                     # already submitted this run_date's orders. Do NOT abort:
                     # the old `return False` surfaced as the trade step's rc=3,
