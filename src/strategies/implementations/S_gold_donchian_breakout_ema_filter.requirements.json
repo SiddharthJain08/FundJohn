@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_gold_donchian_breakout_ema_filter",
+  "required": ["prices"],
+  "optional": []
+}

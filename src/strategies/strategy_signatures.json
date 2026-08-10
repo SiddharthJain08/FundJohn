@@ -315,32 +315,6 @@
       "TRANSITIONING"
     ]
   },
-  "S_ast_momentum_effect_in_commodities": {
-    "regime_set_hash": "c722b3f150c07554",
-    "direction_hash": "ad8944b86def7516",
-    "formula_tokens": [
-      "momentum",
-      "regime",
-      "value"
-    ],
-    "regimes": [
-      "HIGH_VOL",
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
-  "S_ast_momentum_factor_and_style_rotation_effect": {
-    "regime_set_hash": "10b0b5eb7bebe610",
-    "direction_hash": "c65c9aa02b36a104",
-    "formula_tokens": [
-      "momentum",
-      "regime"
-    ],
-    "regimes": [
-      "LOW_VOL",
-      "TRANSITIONING"
-    ]
-  },
   "S_ast_momentum_factor_combined_with_asset_growth_effect": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
@@ -706,6 +680,21 @@
       "TRANSITIONING"
     ]
   },
+  "S_conformal_kelly_etp_sizing": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "beta",
+      "regime",
+      "rv",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_crisis_quality_rebound": {
     "regime_set_hash": "900af3274024f50d",
     "direction_hash": "a8f3862b96300e62",
@@ -883,6 +872,21 @@
       "TRANSITIONING"
     ]
   },
+  "S_gold_donchian_breakout_ema_filter": {
+    "regime_set_hash": "10b0b5eb7bebe610",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "breakout",
+      "momentum",
+      "regime",
+      "value"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_gold_trend_momentum_vol_target": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "a8f3862b96300e62",
@@ -988,6 +992,21 @@
     ],
     "regimes": [
       "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_intraday_first_half_hour_momentum_etf": {
+    "regime_set_hash": "169a8bbb4e444919",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "momentum",
+      "regime"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "NEUTRAL",
       "TRANSITIONING"
     ]
   },
@@ -1131,6 +1150,21 @@
       "regime",
       "rv",
       "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_nasdaq100_rsi3_mean_reversion": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "mean_reversion",
+      "regime",
+      "reversion"
     ],
     "regimes": [
       "HIGH_VOL",
@@ -1399,6 +1433,22 @@
       "TRANSITIONING"
     ]
   },
+  "S_robust_min_variance_hedge": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "ad8944b86def7516",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "rv",
+      "theta",
+      "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_robust_minimum_variance_hedge": {
     "regime_set_hash": "c722b3f150c07554",
     "direction_hash": "1bf63c90337ee1c5",
@@ -1534,6 +1584,20 @@
       "TRANSITIONING"
     ]
   },
+  "S_spy_three_down_days_mean_reversion": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "mean_reversion",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
   "S_tr_02_hurst_regime_flip": {
     "regime_set_hash": "10b0b5eb7bebe610",
     "direction_hash": "ad8944b86def7516",
@@ -1619,6 +1683,20 @@
       "HIGH_VOL",
       "LOW_VOL",
       "TRANSITIONING"
+    ]
+  },
+  "S_two_day_pullback_atr_uptrend": {
+    "regime_set_hash": "970ea11307e52229",
+    "direction_hash": "a8f3862b96300e62",
+    "formula_tokens": [
+      "atr",
+      "regime",
+      "reversion"
+    ],
+    "regimes": [
+      "LOW_VOL",
+      "TRANSITIONING",
+      "TREND"
     ]
   },
   "S_valuation_bounded_tsmom": {
@@ -1711,6 +1789,21 @@
     "formula_tokens": [
       "regime",
       "value"
+    ],
+    "regimes": [
+      "HIGH_VOL",
+      "LOW_VOL",
+      "TRANSITIONING"
+    ]
+  },
+  "S_weekend_effect_monday_short": {
+    "regime_set_hash": "c722b3f150c07554",
+    "direction_hash": "1bf63c90337ee1c5",
+    "formula_tokens": [
+      "atr",
+      "correlation",
+      "regime",
+      "rv"
     ],
     "regimes": [
       "HIGH_VOL",

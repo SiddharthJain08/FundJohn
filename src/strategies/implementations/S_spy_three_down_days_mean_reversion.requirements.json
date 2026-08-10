@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_spy_three_down_days_mean_reversion",
+  "required": ["prices"],
+  "optional": []
+}

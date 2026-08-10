@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_two_day_pullback_atr_uptrend",
+  "required": ["prices"],
+  "optional": []
+}

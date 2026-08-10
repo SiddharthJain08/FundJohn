@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_intraday_first_half_hour_momentum_etf",
+  "required": ["prices", "prices_30m"],
+  "optional": ["macro"]
+}

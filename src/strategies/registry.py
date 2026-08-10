@@ -344,6 +344,18 @@ _IMPL_MAP = {
     'S_robust_min_variance_hedge': ('strategies.implementations.S_robust_min_variance_hedge', 'RobustMinVarHedge'),
     # Keim & Stambaugh 1984: Weekend effect — Monday equity returns systematically negative
     'S_weekend_effect_monday_short': ('strategies.implementations.S_weekend_effect_monday_short', 'WeekendEffectMondayShort'),
+    # Singha et al. 2026 substack: 20-day Donchian breakout + EMA trend filter on GLD, Chandelier stop
+    'S_gold_donchian_breakout_ema_filter': ('strategies.implementations.S_gold_donchian_breakout_ema_filter', 'GoldDonchianBreakoutEmaFilter'),
+    # Ryan 2026: conformal prediction intervals as the scale in fractional Kelly sizing across 8 ETFs
+    'S_conformal_kelly_etp_sizing': ('strategies.implementations.S_conformal_kelly_etp_sizing', 'ConformalKellyEtpSizing'),
+    # Johnson 2026: RSI(3)<10 oversold bounce on top-half ATRP(63) Nasdaq 100 names, 1.75% profit target
+    'S_nasdaq100_rsi3_mean_reversion': ('strategies.implementations.S_nasdaq100_rsi3_mean_reversion', 'Nasdaq100Rsi3MeanReversion'),
+    # Trading & Investing Strategies 2026: 2-day consecutive pullback > 1 ATR + 200-SMA uptrend on SPY/QQQ
+    'S_two_day_pullback_atr_uptrend': ('strategies.implementations.S_two_day_pullback_atr_uptrend', 'TwoDayPullbackAtrUptrend'),
+    # Trading & Investing Strategies 2025: 3 consecutive bearish candles (close<open) on SPY → mean-reversion long
+    'S_spy_three_down_days_mean_reversion': ('strategies.implementations.S_spy_three_down_days_mean_reversion', 'SpyThreeDownDaysMeanReversion'),
+    # QuantSeeker 2026: first 30-minute SPY/QQQ return predicts last 30-minute return → LONG at 15:30 ET
+    'S_intraday_first_half_hour_momentum_etf': ('strategies.implementations.S_intraday_first_half_hour_momentum_etf', 'IntradayFirstHalfHourMomentumEtf'),
 }
 
 

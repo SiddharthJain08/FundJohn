@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_conformal_kelly_etp_sizing",
+  "required": ["prices"],
+  "optional": []
+}
