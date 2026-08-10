@@ -32,7 +32,15 @@ def _db():
     import psycopg2
     if not _DOTENV_LOADED:
         from dotenv import load_dotenv
-        load_dotenv()
+        try:
+            load_dotenv()
+        except OSError:
+            # .env is root-owned; under the claudebot-run systemd units
+            # (weekend-maintenance-sat, sunday-research-code) it is unreadable
+            # — but those units already inject it via EnvironmentFile=, so the
+            # vars are in os.environ. The 2026-08-09 weekend-sat similarity
+            # rebuild crashed here instead of connecting; never fatal again.
+            pass
         _DOTENV_LOADED = True
     return psycopg2.connect(os.environ.get('DATABASE_URL')
                             or os.environ.get('POSTGRES_URI')
