@@ -332,6 +332,25 @@ def _run_redeploy(reason: str, run_date: str, dry_run: bool) -> int:
     rc = _spawn_orchestrator(reason, run_date, dry_run, steps=_REDEPLOY_STEPS_PRE_GATE)
     if rc != 0:
         return rc
+    # Same-day epoch (operator directive 2026-08-10): the 15:00/15:55 lane is
+    # the SOLE execution wave. A regime transition still recomputes signals
+    # under the new regime — they persist to execution_signals and join the
+    # 15:00 compute's carried pool — but the redeploy never submits orders.
+    # Motivating incident 2026-08-07: the 10:01 LOW_VOL→TRANSITIONING redeploy
+    # opened 47 positions; the 15:00 compute found zero conviction over the
+    # SAME book and tried to flatten it the same afternoon. Two waves, one
+    # day, opposite decisions. The legacy EOD-register lane keeps the full
+    # redeploy (its 15:55 leg re-trues off the redeploy's deltas by design).
+    from src.execution.signal_target_mode import sameday_signal_target_on
+    if sameday_signal_target_on():
+        logger.info('same-day lane: redeploy is SIGNALS-ONLY — skipping %s; '
+                    'execution belongs to the 15:55 wave', _REDEPLOY_STEPS_POST_GATE)
+        _post_webhook(
+            'intraday-regime',
+            f'🔁 redeploy ({reason}): signals recomputed under the new regime; '
+            f'no orders — execution deferred to the 15:55 same-day wave '
+            f'(operator directive 2026-08-10)')
+        return 0
     _run_intraday_news_gate(run_date, dry_run)
     return _spawn_orchestrator(reason, run_date, dry_run, steps=_REDEPLOY_STEPS_POST_GATE)
 
