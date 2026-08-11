@@ -72,3 +72,22 @@ def test_gross_never_increases_and_no_redistribution():
     assert sum(abs(v) for v in out.values()) <= sum(abs(v) for v in tgt.values())  # INV-1
     for t in tgt:
         assert abs(out[t]) <= abs(tgt[t]) + 1e-9   # INV-2 no survivor grows
+
+
+def test_cluster_cap_scales_with_lambda():
+    # Operator directive 2026-08-11: cap = cap_pct * lam * nav. Same book as
+    # the trim test at lam=2 -> cap $44: A kept whole, B boundary-trimmed to
+    # $4, C released. lam<=0 fails open (identity), mirroring nav<=0.
+    tgt = {'A': 40.0, 'B': 40.0, 'C': 40.0}
+    conv = {'A': 3.0, 'B': 2.0, 'C': 1.0}
+    corr = _corr({('A', 'B'): 0.9, ('A', 'C'): 0.9, ('B', 'C'): 0.9}, list(tgt))
+    out, audit = acf.cap_correlated_clusters(tgt, conv, corr, nav=100.0,
+                                             cap_pct=0.22, lam=2.0)
+    assert out['A'] == 40.0
+    assert abs(out['B'] - 4.0) < 1e-6
+    assert out['C'] == 0.0
+    assert abs(audit['released_usd'] - 76.0) < 1e-6   # 120 -> 44
+
+    ident, _ = acf.cap_correlated_clusters(tgt, conv, corr, nav=100.0,
+                                           cap_pct=0.22, lam=0.0)
+    assert ident == tgt

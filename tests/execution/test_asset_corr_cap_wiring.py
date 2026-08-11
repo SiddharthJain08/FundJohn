@@ -68,3 +68,18 @@ def test_apply_caps_correlated_cluster(monkeypatch):
     assert out['WDC'] == 0.0                       # released
     assert out['XLF'] == 20.0                      # uncorrelated, untouched
     assert sum(abs(v) for v in out.values()) < sum(abs(v) for v in tgt.values())
+
+
+def test_apply_cluster_cap_scales_with_lambda(monkeypatch):
+    """Operator directive 2026-08-11: cluster cap = cap_pct·λ·NAV. Same book
+    as above at λ=2 → cap $44: MU keeps its full $40, WDC trimmed to $4."""
+    _fake_corr(monkeypatch)
+    monkeypatch.setenv('OPENCLAW_ASSET_CORR_CAP', '1')
+    monkeypatch.setenv('OPENCLAW_ASSET_CORR_CAP_PCT', '0.22')
+    monkeypatch.setenv('OPENCLAW_ASSET_CORR_THR', '0.70')
+    tgt = {'MU': 40.0, 'WDC': 40.0, 'XLF': 20.0}
+    out = rbs._apply_asset_corr_cap(dict(tgt), {'MU': 2, 'WDC': 1, 'XLF': 3},
+                                    nav=100.0, lam=2.0)
+    assert out['MU'] == 40.0                       # fits inside the λ-scaled cap
+    assert abs(out['WDC'] - 4.0) < 1e-6            # boundary-trimmed to fill $44
+    assert out['XLF'] == 20.0

@@ -1637,7 +1637,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # same-direction clusters by releasing low-conviction redundancy (no renorm),
     # mirroring the per-ticker cap above but at the cluster level. Applied BEFORE
     # the cap-exempt option-hedge injection + broker netting.
-    target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav)
+    target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav, lam=lam)
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
@@ -2435,10 +2435,12 @@ def _load_asset_corr_cfg(default_thr: float = _ASSET_CORR_THR_DEFAULT,
             max(_ASSET_CORR_CAP_PCT_MIN, min(_ASSET_CORR_CAP_PCT_MAX, cap_pct)))
 
 
-def _apply_asset_corr_cap(target_usd, conviction, nav):
+def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0):
     """Asset-correlation cluster cap (gated, post λ×NAV scaling, dollar terms).
     Enable + threshold resolve via _load_asset_corr_cfg (pipeline_config slider →
-    env → default). OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
+    env → default). Per-cluster cap = cap_pct·λ·NAV (operator directive
+    2026-08-11: scale with the book's gross budget, mirroring the per-ticker
+    cap). OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
     changing targets. Disabled (and no shadow) -> identity (no correlation work).
     Fail-open: any error returns target_usd unchanged."""
     apply_on, corr_thr, cap_pct = _load_asset_corr_cfg()
@@ -2451,10 +2453,13 @@ def _apply_asset_corr_cap(target_usd, conviction, nav):
         window = int(os.environ.get('OPENCLAW_ASSET_CORR_WINDOW', '63'))
         corr = _ac.price_return_corr(list(target_usd), window=window)
         capped, audit = _acf.cap_correlated_clusters(
-            target_usd, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr)
+            target_usd, conviction, corr, nav, cap_pct=cap_pct, corr_thr=corr_thr,
+            lam=lam)
         logger.info(
-            'asset_corr_cap.%s: thr=%.2f cap_pct=%.2f clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
-            'apply' if apply_on else 'shadow', corr_thr, cap_pct,
+            'asset_corr_cap.%s: thr=%.2f cap_pct=%.2f lam=%.2f cap_usd=%.0f '
+            'clusters>=2=%d gross %.0f->%.0f released=%.0f %s',
+            'apply' if apply_on else 'shadow', corr_thr, cap_pct, lam,
+            cap_pct * lam * nav,
             sum(1 for c in audit['clusters'] if len(c['members']) >= 2),
             audit['total_gross_before'], audit['total_gross_after'], audit['released_usd'],
             [(c['members'], round(c['gross_before']), round(c['gross_after']))

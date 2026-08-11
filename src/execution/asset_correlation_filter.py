@@ -2,9 +2,13 @@
 
 Clusters same-direction tickers by price-return correlation (average-linkage,
 cut at distance 1 - corr_thr), keeps the highest-conviction names until the
-cluster's cumulative gross hits cap_pct * NAV (boundary name trimmed to fill),
-and RELEASES the rest (target -> 0; never redistributes). Gross is monotonically
-non-increasing. Mirrors the SP-6 per-ticker conviction cap (release, no renorm).
+cluster's cumulative gross hits cap_pct * lam * NAV (boundary name trimmed to
+fill), and RELEASES the rest (target -> 0; never redistributes). Gross is
+monotonically non-increasing. Mirrors the SP-6 per-ticker conviction cap
+(release, no renorm). The lam factor (operator directive 2026-08-11) keeps the
+cluster cap proportional to the book's gross budget lam*NAV, exactly like the
+per-ticker cap — a flat cap_pct*NAV tightened relative to the book whenever
+lam > 1 and loosened when the regime de-levers lam < 1.
 """
 from __future__ import annotations
 
@@ -39,17 +43,19 @@ def _cluster_same_direction(tickers, sign, corr, corr_thr):
 
 
 def cap_correlated_clusters(target_usd, conviction, corr, nav,
-                            cap_pct=0.22, corr_thr=0.70, single_name_cap_pct=None):
-    """Cap each correlated same-direction cluster's gross at cap_pct*nav by keeping
-    top-|conviction| names (boundary trimmed to fill) and releasing the rest.
-    Pure; gross never increases; no redistribution. Returns (capped, audit)."""
+                            cap_pct=0.22, corr_thr=0.70, single_name_cap_pct=None,
+                            lam=1.0):
+    """Cap each correlated same-direction cluster's gross at cap_pct*lam*nav by
+    keeping top-|conviction| names (boundary trimmed to fill) and releasing the
+    rest. Pure; gross never increases; no redistribution. Returns (capped, audit).
+    lam defaults to 1.0 (legacy flat-NAV cap) so existing callers are unchanged."""
     gross_in = sum(abs(v) for v in target_usd.values())
     base_audit = {'clusters': [], 'total_gross_before': gross_in,
                   'total_gross_after': gross_in, 'released_usd': 0.0}
-    if not target_usd or nav <= 0 or not corr:
+    if not target_usd or nav <= 0 or lam <= 0 or not corr:
         return dict(target_usd), base_audit            # INV-5 fail-open
     sign = {t: (1 if v > 0 else -1) for t, v in target_usd.items()}
-    cap_usd = cap_pct * nav
+    cap_usd = cap_pct * lam * nav
     clusters = _cluster_same_direction(list(target_usd), sign, corr, corr_thr)
     out = dict(target_usd)
     audit_clusters = []
@@ -63,7 +69,7 @@ def cap_correlated_clusters(target_usd, conviction, corr, nav,
         if len(cl) == 1:
             if single_name_cap_pct is None:
                 continue                               # singleton, no cluster cap
-            eff_cap = single_name_cap_pct * nav
+            eff_cap = single_name_cap_pct * lam * nav
         else:
             eff_cap = cap_usd
         ordered = sorted(cl, key=rank_key, reverse=True)
