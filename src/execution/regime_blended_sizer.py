@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 # Applied in EOD mode (OPENCLAW_EOD_RECONCILE=1) and intraday-redeploy mode
 # (OPENCLAW_INTRADAY_REDEPLOY=1) inside _sharpe_cadence_path — see the cap
 # block there for full rationale.
-PER_TICKER_CAP_SHARPE_FRAC = 0.05
+# 0.05 → 0.10 operator directive 2026-08-11 (breadth-experiment epoch: floors
+# at 0 let every signal submit; conviction expresses through SIZE, so
+# high-S_adj names get double the headroom the 0.05 era allowed).
+PER_TICKER_CAP_SHARPE_FRAC = 0.10
 
 # Hard dust floor (2026-06-08). Replaces the removed per-regime min-notional
 # PARAMETER. Fixed at Alpaca's ~$1 fractional-order minimum — NOT a tunable and
@@ -1625,9 +1628,9 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
                 _capped.append((_tkr, _usd, target_usd[_tkr]))
         if _capped:
             logger.info(
-                'regime_blended_sizer.sharpe_cadence: per-ticker cap (0.05·|sharpe|·λ·NAV) '
-                'clamped %d ticker(s): %s',
-                len(_capped),
+                'regime_blended_sizer.sharpe_cadence: per-ticker cap '
+                '(%g·|sharpe|·λ·NAV) clamped %d ticker(s): %s',
+                PER_TICKER_CAP_SHARPE_FRAC, len(_capped),
                 [(t, round(o), round(n)) for t, o, n in _capped[:10]])
 
     # Asset-correlation cluster cap (gated, default-OFF). De-grosses correlated

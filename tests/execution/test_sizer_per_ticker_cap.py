@@ -1,6 +1,9 @@
 """SP-6 per-ticker conviction cap (operator formula, 2026-06-04).
 
-    cap_usd(ticker) = 0.05 × |gate_net_sharpe(ticker)| × λ × NAV
+    cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(ticker)| × λ × NAV
+
+(0.05 at introduction; 0.10 since the 2026-08-11 breadth-experiment epoch —
+assertions below read the constant so they track operator retunes.)
 
 Bounds the few-survivor concentration failure mode: the sharpe_cadence
 normalization (Σ|target_usd| = λ×NAV) renormalizes the WHOLE book onto
@@ -14,7 +17,7 @@ conviction gate. For single-strategy tickers S_adj == daily_weight
 invariant.
 
 Contract under test:
-  1. EOD mode, single survivor → |target| clamped to 0.05·|S_adj|·λ·NAV.
+  1. EOD mode, single survivor → |target| clamped to CAP·|S_adj|·λ·NAV.
   2. EOD mode, cap not binding → targets byte-identical (no-op on fat days).
   3. Legacy (non-EOD) mode → NO cap (byte-identical legacy path).
   4. No renorm-up: shaved capital is NOT redistributed to other tickers.
@@ -35,6 +38,7 @@ import execution.regime_blended_sizer as _sizer
 
 
 NAV = 100_000.0
+CAP = _sizer.PER_TICKER_CAP_SHARPE_FRAC
 LAM = 2.0  # stubbed _load_lambda
 
 
@@ -105,7 +109,8 @@ class TestPerTickerCapEOD:
 
     def test_single_survivor_capped(self, monkeypatch):
         """1 surviving ticker (sharpe 3.5) must NOT absorb the whole λ×NAV:
-        |target| = 0.05 × 3.5 × 2.0 × 100k = $35k, not $200k."""
+        |target| = CAP × 3.5 × 2.0 × 100k ($35k at 0.05 / $70k at 0.10),
+        not $200k."""
         orders = _run_eod(
             monkeypatch,
             weights_rows=[_weights_row('S1', eff_sharpe=3.5)],
@@ -113,7 +118,7 @@ class TestPerTickerCapEOD:
         )
         opens = _open_by_ticker(orders)
         assert 'STX' in opens, f'expected an STX open, got {orders}'
-        expected_cap = 0.05 * 3.5 * LAM * NAV  # 35_000
+        expected_cap = CAP * 3.5 * LAM * NAV
         assert abs(opens['STX']['target_usd'] - expected_cap) < 1e-6, (
             f"single survivor must be capped at {expected_cap}, "
             f"got {opens['STX']['target_usd']}"
@@ -122,7 +127,7 @@ class TestPerTickerCapEOD:
 
     def test_cap_not_binding_is_noop(self, monkeypatch):
         """Fat day: 10 equal tickers → proportional target $20k each, cap
-        0.05×8×λ×NAV = $80k each → targets unchanged (byte-identical)."""
+        CAP×8×λ×NAV ($80k+ each) → targets unchanged (byte-identical)."""
         tickers = [f'T{i:02d}' for i in range(10)]
         orders = _run_eod(
             monkeypatch,
@@ -140,20 +145,22 @@ class TestPerTickerCapEOD:
         """Two tickers, one capped: the shaved capital must NOT be
         redistributed to the other (no renorm-up).
 
-        S_hi (sharpe 9 on A) + S_lo (sharpe 3.2 on B), single-strategy each so
-        corr S_adj == effective_sharpe: gross=12.2, scale=λ·NAV/12.2≈16.4k →
-        raw targets A≈147k, B≈52k. caps: A = 0.05·9·200k = 90k (binds),
-        B = 0.05·3.2·200k = 32k (binds). Both clamp; crucially B stays at ITS
-        cap, not pumped up by A's shave (total 122k < λ×NAV)."""
+        S_hi (sharpe 6 on A) + S_lo (sharpe 2.5 on B), single-strategy each so
+        corr S_adj == effective_sharpe. The cap binds for every ticker iff
+        Σ|S_adj| < 1/CAP (raw share λ·NAV·s/Σs vs cap CAP·s·λ·NAV), so the
+        fixture keeps Σ = 8.5 < 1/CAP = 10 at CAP=0.10: raw A≈141k > cap
+        120k, raw B≈59k > cap 50k. Both clamp; crucially B stays at ITS
+        cap, not pumped up by A's shave (capped gross < λ×NAV)."""
+        assert 6.0 + 2.5 < 1.0 / CAP, 'fixture premise: cap must bind for both'
         orders = _run_eod(
             monkeypatch,
-            weights_rows=[_weights_row('S_hi', eff_sharpe=9.0),
-                          _weights_row('S_lo', eff_sharpe=3.2)],
+            weights_rows=[_weights_row('S_hi', eff_sharpe=6.0),
+                          _weights_row('S_lo', eff_sharpe=2.5)],
             carried_rows=[_carried('S_hi', 'AAA'), _carried('S_lo', 'BBB')],
         )
         opens = _open_by_ticker(orders)
-        assert abs(opens['AAA']['target_usd'] - 0.05 * 9.0 * LAM * NAV) < 1e-6
-        assert abs(opens['BBB']['target_usd'] - 0.05 * 3.2 * LAM * NAV) < 1e-6
+        assert abs(opens['AAA']['target_usd'] - CAP * 6.0 * LAM * NAV) < 1e-6
+        assert abs(opens['BBB']['target_usd'] - CAP * 2.5 * LAM * NAV) < 1e-6
         total = sum(abs(o['target_usd']) for o in opens.values())
         assert total < LAM * NAV - 1, 'capped gross must land BELOW λ×NAV (no renorm-up)'
 
@@ -166,7 +173,7 @@ class TestPerTickerCapEOD:
         )
         opens = _open_by_ticker(orders)
         assert 'XYZ' in opens
-        assert abs(opens['XYZ']['target_usd'] - (-0.05 * 4.0 * LAM * NAV)) < 1e-6
+        assert abs(opens['XYZ']['target_usd'] - (-CAP * 4.0 * LAM * NAV)) < 1e-6
 
     # NOTE: the cap's self-consistency with the gate quantity (cap reads the
     # SAME corr S_adj the gate uses, not a naive sum) is covered end-to-end by

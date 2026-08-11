@@ -20,11 +20,13 @@ def test_metrics_shape_and_rec_floor():
     assert m['backstop_fires'] == {'gate': 0, 'size': 1}
     assert set(m['dist'].keys()) == {'min', 'p25', 'median', 'p75', 'max'}
     assert m['dist']['max'] == pytest.approx(4.0)
-    # would-survive set = {A,B}; both clamped by the per-ticker cap (0.05·|S_adj|·λ·NAV):
-    #   A raw 133.3k vs cap 40k; B raw 66.7k vs cap 20k -> 2 binds, post-cap gross 60k/200k.
+    # would-survive set = {A,B}; both clamped by the per-ticker cap (CAP·|S_adj|·λ·NAV):
+    #   A raw 133.3k vs cap CAP·4·200k; B raw 66.7k vs cap CAP·2·200k -> 2 binds
+    #   (raws exceed the caps at any CAP <= 0.16); post-cap gross = CAP·6·200k.
+    _cap = rbs.PER_TICKER_CAP_SHARPE_FRAC
     assert m['would_keep'] == 2
     assert m['cap_binds'] == 2
-    assert m['gross_after_cap_frac'] == pytest.approx(0.3)
+    assert m['gross_after_cap_frac'] == pytest.approx(_cap * 6.0 * 2.0 * 100000.0 / 200000.0)
     assert m['sign_flips'] == []          # all longs, no direction divergence
 
 
