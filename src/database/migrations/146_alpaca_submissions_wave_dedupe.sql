@@ -1,0 +1,25 @@
+-- 146: wave-scoped submission dedup (afternoon top-up, 2026-08-11)
+--
+-- Operator directive: the same-day EOD lane (15:00 ET compute) must be able
+-- to RE-TRUE the book after the morning intraday-redeploy wave has already
+-- traded — 2026-08-10 the afternoon's $43.2k gross target was silently
+-- discarded and the realized book stayed at the morning's $23.7k sizing.
+--
+-- That means MULTIPLE alpaca_submissions rows per (run_date, strategy_id,
+-- ticker) — one per sizing wave — so the wave-blind dedupe index must go.
+-- Idempotency moves to client_order_id (UNIQUE since 043; now embeds a
+-- _w<HHMMSS> wave tag from the sized handoff's sized_at stamp):
+--   * record_submission upserts ON CONFLICT (client_order_id) — a re-run of
+--     the same wave rebuilds the same coid and refreshes its row; a later
+--     wave inserts its own audit row instead of clobbering the morning's.
+--   * already_executed() scopes its per-order dedup to the current wave via
+--     strpos(client_order_id, '_w<HHMMSS>').
+-- Downstream consumers (alpaca_reconcile, parity_mark) key on row id and are
+-- unaffected. Append-only invariant untouched: no rows deleted; the audit
+-- trail per (run_date, strategy_id, ticker) can now only GROW (one row per
+-- wave instead of later waves overwriting earlier ones).
+--
+-- The non-unique query index alpaca_submissions_run_idx
+-- (run_date DESC, strategy_id, ticker) from 043 remains for lookups.
+
+DROP INDEX IF EXISTS alpaca_submissions_dedupe_idx;

@@ -37,6 +37,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import date, datetime, time, timezone
@@ -333,14 +334,41 @@ def check_signal_quality(conn):
     return True, f'avg EV={avg_ev_pct:+.2f}%, green={green_cnt}, {n_signals} signals'
 
 
-def already_executed(conn, run_date, strategy_id, ticker):
+def _wave_from_handoff(handoff) -> str:
+    """HHMMSS wave tag derived from the sized handoff's `sized_at` UTC stamp.
+
+    Scopes per-order idempotency (already_executed + client_order_id) to the
+    sizing pass that produced this handoff: the same-day EOD re-true (the
+    afternoon top-up, 2026-08-11) writes a FRESH handoff whose delta orders
+    must NOT be deduped against the morning redeploy wave's submissions.
+    Legacy handoffs without `sized_at` return '' → whole-day dedup + the
+    historical un-suffixed client_order_ids (byte-identical old behaviour).
+    """
+    digits = re.sub(r'[^0-9]', '', str((handoff or {}).get('sized_at') or ''))
+    return digits[8:14] if len(digits) >= 14 else ''
+
+
+def already_executed(conn, run_date, strategy_id, ticker, wave=''):
+    """True if this (run_date, strategy_id, ticker) already reached Alpaca.
+
+    `wave` (HHMMSS from _wave_from_handoff) scopes the check to the current
+    sizing wave via the coid's `_w<HHMMSS>` tag: a later same-day wave's
+    delta orders submit even though the morning wave already traded the same
+    name, while re-runs of the SAME wave stay idempotent. Empty wave =
+    legacy whole-day dedup.
+    """
     cur = conn.cursor()
-    cur.execute("""
+    sql = """
         SELECT 1 FROM alpaca_submissions
         WHERE run_date = %s AND strategy_id = %s AND ticker = %s
           AND alpaca_order_id IS NOT NULL
-        LIMIT 1
-    """, (run_date, strategy_id, ticker))
+    """
+    params = [run_date, strategy_id, ticker]
+    if wave:
+        sql += " AND strpos(client_order_id, %s) > 0"
+        params.append(f'_w{wave}')
+    sql += " LIMIT 1"
+    cur.execute(sql, params)
     hit = cur.fetchone() is not None
     cur.close()
     return hit
@@ -381,8 +409,11 @@ def _placed_or_order_target(order, resp) -> float:
 
 def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid):
     """Persist a row in alpaca_submissions tying the sized order to its
-    Alpaca order_id. UNIQUE (run_date, strategy_id, ticker) makes re-runs
-    idempotent."""
+    Alpaca order_id. UNIQUE (client_order_id) makes re-runs idempotent:
+    a re-run of the same wave rebuilds the same coid → conflict → refresh;
+    a later same-day wave (afternoon top-up, 2026-08-11) carries a fresh
+    _w<HHMMSS> coid → its OWN audit row (migration 146 dropped the old
+    wave-blind (run_date, strategy_id, ticker) unique index)."""
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO alpaca_submissions (
@@ -393,7 +424,7 @@ def record_submission(conn, run_date, order, alpaca_resp, tif, order_class, coid
           instrument_class,
           submitted_at
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
-        ON CONFLICT (run_date, strategy_id, ticker) DO UPDATE SET
+        ON CONFLICT (client_order_id) DO UPDATE SET
           alpaca_order_id = COALESCE(EXCLUDED.alpaca_order_id, alpaca_submissions.alpaca_order_id),
           alpaca_status   = EXCLUDED.alpaca_status,
           alpaca_http     = EXCLUDED.alpaca_http,
@@ -2146,6 +2177,31 @@ def _rth_position_close(ticker, coid, *, notional_usd, current_usd, equity, pct_
             order_id)
 
 
+def _build_coid(run_date, ticker, strategy_id, close_only, wave=''):
+    """Unique client_order_id: AX<date>_<ticker>_<sid>[_w<HHMMSS>][_C].
+
+    Alpaca allows 128 chars. close_only orders get a distinguishing `_C`
+    suffix so an open and a subsequent close for the same (date, ticker,
+    strategy_combo) — common under an intraday regime redeploy that flips a
+    position — don't collide on Alpaca's coid uniqueness check. `wave`
+    (HHMMSS from _wave_from_handoff) adds a `_w<HHMMSS>` tag so a later
+    same-day sizing wave (afternoon top-up, 2026-08-11) gets fresh coids —
+    the coid UNIQUE constraint is the record_submission upsert arbiter, so
+    without the tag a top-up would silently UPDATE the morning wave's audit
+    row instead of inserting its own. Truncation applies to the
+    strategy-combo segment only so both suffixes always survive — naively
+    slicing after appending would truncate the markers off (2026-05-21 USO
+    crash).
+    """
+    _coid_ticker = (ticker or 'UNKNOWN').replace(' ', '_')
+    _coid_ticker = re.sub(r'[^A-Za-z0-9._-]', '_', _coid_ticker)
+    _sid_clean = re.sub(r'[^A-Za-z0-9._-]', '_', strategy_id or 'unknown')
+    _suffix  = (f'_w{wave}' if wave else '') + ('_C' if close_only else '')
+    _prefix  = f'AX{run_date.replace("-","")}_{_coid_ticker}_'
+    _budget  = max(1, 128 - len(_prefix) - len(_suffix))
+    return _prefix + _sid_clean[:_budget] + _suffix
+
+
 def execute_single(sess, equity, order, run_date):
     """Submit one bracket order. Returns result dict.
 
@@ -2158,26 +2214,10 @@ def execute_single(sess, equity, order, run_date):
     ticker = _normalize_alpaca_symbol(raw_ticker)
 
     # Compute coid up-front from the RAW ticker + strategy_id so SKIP rows
-    # also get a unique key. Alpaca allows 128 chars on client_order_id.
-    # close_only orders get a distinguishing `_C` suffix so an open and a
-    # subsequent close for the same (date, ticker, strategy_combo) — common
-    # under an intraday regime redeploy that flips a position — don't
-    # collide on Alpaca's coid uniqueness check. Without this suffix, the
-    # CLI would reject with `client_order_id must be unique` AND the
-    # record_submission INSERT would crash on the alpaca_submissions
-    # coid unique-constraint (only the (run_date, strategy_id, ticker)
-    # constraint has ON CONFLICT handling).
-    import re as _re
-    _coid_ticker = (ticker or raw_ticker or 'UNKNOWN').replace(' ', '_')
-    _coid_ticker = _re.sub(r'[^A-Za-z0-9._-]', '_', _coid_ticker)
-    _sid_clean = _re.sub(r'[^A-Za-z0-9._-]', '_', order.get('strategy_id') or 'unknown')
-    _kind_tag = '_C' if order.get('close_only') else ''
-    # Apply truncation to the strategy-combo segment so the kind-tag suffix
-    # always lands at the end. Naively appending _C after a 128-char slice
-    # would truncate the marker off — exactly the 2026-05-21 USO crash.
-    _prefix  = f'AX{run_date.replace("-","")}_{_coid_ticker}_'
-    _budget  = max(1, 128 - len(_prefix) - len(_kind_tag))
-    coid     = _prefix + _sid_clean[:_budget] + _kind_tag
+    # also get a unique key.
+    coid = _build_coid(run_date, ticker or raw_ticker,
+                       order.get('strategy_id'), order.get('close_only'),
+                       order.get('_wave') or '')
 
     # SP-3.1 Phase A: crypto (-USD) is 24/7, fractional-qty, no bracket — and
     # _normalize_alpaca_symbol() returns None for it, which would otherwise
@@ -2728,6 +2768,16 @@ def main():
         log('Sized handoff contains zero orders — nothing to do')
         sys.exit(0)
 
+    # Wave scoping: tag every order with the handoff's sizing wave so the
+    # per-order dedup + coid construction below distinguish a same-day
+    # re-true (afternoon top-up) from a re-run of the same wave.
+    wave = _wave_from_handoff(handoff)
+    if wave:
+        log(f'[executor] sizing wave _w{wave} (sized_at={handoff.get("sized_at")}) '
+            f'— per-order dedup is wave-scoped')
+    for _o in orders:
+        _o['_wave'] = wave
+
     conn = psycopg2.connect(uri)
 
     # Gate 1: signal quality
@@ -2819,7 +2869,8 @@ def main():
         ticker = order.get('ticker') or '???'
 
         if guard_on and (ticker, sid) in dtbp_skip_keys \
-                and not already_executed(conn, run_date, sid, ticker):
+                and not already_executed(conn, run_date, sid, ticker,
+                                         order.get('_wave') or ''):
             # Dry-run must stay side-effect-free: log the would-skip, don't
             # write the skipped_dtbp audit row.
             if args.dry_run:
@@ -2839,7 +2890,8 @@ def main():
             skipped.append({'ticker': ticker, 'reason': 'flip_close did not fill — open skipped'})
             continue
 
-        if already_executed(conn, run_date, sid, ticker):
+        if already_executed(conn, run_date, sid, ticker,
+                            order.get('_wave') or ''):
             skipped.append({'ticker': ticker, 'reason': 'already executed'})
             continue
 

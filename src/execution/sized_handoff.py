@@ -6,15 +6,15 @@ fold, the on-disk handoff write, and the veto_log append.
 """
 import json
 import os
-from datetime import date
+from datetime import date, datetime, timezone
 
 
 def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
     """Persist a sized handoff for the cycle.
 
-    Mutates `payload` to add `source`/`generated_at`/`cycle_date` defaults,
-    folds the structured handoff's `prefiltered[]` into `vetoed[]`, runs
-    the alpaca_submissions idempotency guard, writes the sized handoff,
+    Mutates `payload` to add `source`/`generated_at`/`sized_at`/`cycle_date`
+    defaults, folds the structured handoff's `prefiltered[]` into `vetoed[]`,
+    runs the alpaca_submissions idempotency guard, writes the sized handoff,
     and appends veto_log rows. Returns True on success, False if the
     idempotency guard refused the write.
     """
@@ -24,6 +24,12 @@ def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
     payload.setdefault('cycle_date', run_date)
     payload['source']       = source
     payload['generated_at'] = date.today().isoformat()
+    # Wave stamp: identifies THIS sizing pass. The executor derives a
+    # _w<HHMMSS> tag from it so per-order idempotency (already_executed +
+    # client_order_id) is scoped to the wave, not the whole run_date —
+    # required for the same-day afternoon top-up (2026-08-11) to submit
+    # fresh delta orders after a morning redeploy wave already traded.
+    payload['sized_at'] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
     # Fold any prefiltered signals from the structured handoff into the
     # sized handoff's `vetoed` list so send_report's digest reflects
@@ -81,12 +87,40 @@ def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
                 _pure_flatten = bool(_orders) and all(
                     (o.get('strategy_id') or '') == '__close_orphan__'
                     for o in _orders)
+                # Same-day top-up lane (operator directive 2026-08-11): the
+                # 15:00 ET EOD compute is the AUTHORITATIVE same-day sizing.
+                # When the morning intraday redeploy already traded, this
+                # lane's payload is a fresh set of deltas vs the LIVE broker
+                # book (which already includes the morning fills) — writing it
+                # is exactly the intended top-up/re-true into the close. The
+                # executor's wave-scoped dedup (sized_at → _w<HHMMSS> coid
+                # tag) keeps re-runs of THIS wave idempotent while letting its
+                # orders through past the morning wave's submissions.
+                # 2026-08-10 incident: the afternoon compute targeted $43.2k
+                # gross vs the morning's $23.7k and the whole re-size was
+                # silently discarded here — realized book stayed at 45% of the
+                # authoritative target. Kill-switch: OPENCLAW_SAMEDAY_TOPUP=0.
+                # Deliberately NOT enabled for the intraday-redeploy lane
+                # (every 5-min HMM transition re-truing the book) and not for
+                # empty payloads (nothing to execute — keep the earlier
+                # handoff for send_report / d-1 context).
+                _topup_lane = (
+                    os.environ.get('OPENCLAW_EOD_RECONCILE') == '1'
+                    and os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') != '1'
+                    and os.environ.get('OPENCLAW_SAMEDAY_TOPUP', '1') != '0')
                 if already > 0 and _pure_flatten:
                     print(f'[sized_handoff] {already} Alpaca submission(s) already exist for '
                           f'{run_date}, but this payload is a PURE FLATTEN '
                           f'({len(_orders)} __close_orphan__ close(s), no opens) — '
                           f'writing it over the earlier sized handoff so the '
                           f'liquidation actually reaches the executor.')
+                elif already > 0 and _topup_lane and _orders:
+                    print(f'[sized_handoff] {already} Alpaca submission(s) already exist for '
+                          f'{run_date}, but this is the authoritative same-day EOD compute — '
+                          f'RE-TRUE: writing the fresh sized handoff ({len(_orders)} order(s), '
+                          f'deltas vs the live broker book) over the earlier wave. Executor '
+                          f'dedup is wave-scoped via sized_at={payload["sized_at"]}. '
+                          f'Disable with OPENCLAW_SAMEDAY_TOPUP=0.')
                 elif already > 0:
                     # An intraday regime-redeploy (or a same-cycle re-run) has
                     # already submitted this run_date's orders. Do NOT abort:
@@ -99,18 +133,15 @@ def finalize_sized_payload(run_date: str, payload: dict, source: str) -> bool:
                     # Instead, leave the existing sized handoff intact
                     # (send_report and trade_handoff_builder's d-1 context both
                     # read it) and return True so the cycle proceeds to
-                    # alpaca -> reconcile -> report -> health. We deliberately
-                    # do NOT write a fresh handoff here: that would inject this
-                    # lane's residual delta orders as NEW submissions
-                    # (re-truing into the close is a separate operator-policy
-                    # choice, not this fix). The executor's per-order
-                    # already_executed() idempotency then skips every filled
-                    # order, so nothing is re-submitted — verified no-op:
-                    # re-running alpaca on an all-filled handoff yields
-                    # submitted=0 with no cancel/close preamble. (It will still
+                    # alpaca -> reconcile -> report -> health. The executor's
+                    # per-order already_executed() idempotency then skips every
+                    # filled order, so nothing is re-submitted. (It will still
                     # retry any order that FAILED earlier in the day — its
                     # existing per-order retry semantics.) Override with
                     # OPENCLAW_FORCE_RESIZE=1 to deliberately re-size.
+                    # (Reached by: the intraday-redeploy lane, the top-up
+                    # kill-switch, empty-orders payloads, and non-same-day
+                    # deployments without OPENCLAW_EOD_RECONCILE.)
                     print(f'[sized_handoff] {already} Alpaca submission(s) already exist for '
                           f'{run_date} (intraday redeploy or same-cycle re-run already executed '
                           f"today's target) — leaving the existing sized handoff intact and "
