@@ -5,10 +5,11 @@ cut at distance 1 - corr_thr), keeps the highest-conviction names until the
 cluster's cumulative gross hits cap_pct * lam * NAV (boundary name trimmed to
 fill), and RELEASES the rest (target -> 0; never redistributes). Gross is
 monotonically non-increasing. Mirrors the SP-6 per-ticker conviction cap
-(release, no renorm). The lam factor (operator directive 2026-08-11) keeps the
-cluster cap proportional to the book's gross budget lam*NAV, exactly like the
-per-ticker cap — a flat cap_pct*NAV tightened relative to the book whenever
-lam > 1 and loosened when the regime de-levers lam < 1.
+(release, no renorm). The lam factor (operator directive 2026-08-11) scales the
+cluster cap with the GLOBAL position-sizing lambda (1.85 as of 2026-08-11):
+cap = cap_pct * lam * NAV. Note the caller contract — lam is the global λ, NOT
+the regime-dampened effective leverage; the per-regime liquidity_param is a
+separate de-leverage control, unrelated to λ, and must not shrink this cap.
 """
 from __future__ import annotations
 

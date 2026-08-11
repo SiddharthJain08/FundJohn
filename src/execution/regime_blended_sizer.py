@@ -1637,7 +1637,13 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # same-direction clusters by releasing low-conviction redundancy (no renorm),
     # mirroring the per-ticker cap above but at the cluster level. Applied BEFORE
     # the cap-exempt option-hedge injection + broker netting.
-    target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav, lam=lam)
+    # Cap = cap_pct × λ_GLOBAL × NAV (operator ruling 2026-08-11): the GLOBAL
+    # sizing lambda (position_sizing_lambda, 1.85; intraday variant on the
+    # redeploy lane), NOT the regime-dampened effective lam used for gross
+    # scaling above — the per-regime liquidity_param is a separate de-leverage
+    # control, unrelated to λ, and must not shrink the cluster cap.
+    target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,
+                                       lam=lam_global)
 
     # SP-5.1b-ii: inject option delta-hedge targets ON TOP of the normalized
     # equity target_usd (post-normalization, cap-exempt). Gate default-OFF:
@@ -2438,9 +2444,11 @@ def _load_asset_corr_cfg(default_thr: float = _ASSET_CORR_THR_DEFAULT,
 def _apply_asset_corr_cap(target_usd, conviction, nav, lam=1.0):
     """Asset-correlation cluster cap (gated, post λ×NAV scaling, dollar terms).
     Enable + threshold resolve via _load_asset_corr_cfg (pipeline_config slider →
-    env → default). Per-cluster cap = cap_pct·λ·NAV (operator directive
-    2026-08-11: scale with the book's gross budget, mirroring the per-ticker
-    cap). OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
+    env → default). Per-cluster cap = cap_pct·λ·NAV where λ is the GLOBAL
+    position_sizing_lambda the caller passes (operator ruling 2026-08-11:
+    the per-regime liquidity_param dampener is a separate de-leverage control,
+    unrelated to λ — callers must NOT pass the blended effective lam).
+    OPENCLAW_ASSET_CORR_CAP_SHADOW=1 logs the would-be cap without
     changing targets. Disabled (and no shadow) -> identity (no correlation work).
     Fail-open: any error returns target_usd unchanged."""
     apply_on, corr_thr, cap_pct = _load_asset_corr_cfg()

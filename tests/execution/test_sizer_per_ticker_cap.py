@@ -75,7 +75,7 @@ def _weights_row(sid, eff_sharpe, daily_weight=None, cadence_days=1.0):
             'effective_sharpe': eff_sharpe, 'cadence_days': cadence_days}
 
 
-def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None):
+def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None, params=None):
     """Drive size_positions through the full sharpe_cadence path with all
     external surfaces (weights DB, carried-set DB, λ DB, broker, confirmer)
     stubbed. The corr-adjusted gate is unconditional; clear all ortho flags so
@@ -96,7 +96,7 @@ def _run_eod(monkeypatch, weights_rows, carried_rows, broker=None):
         return _sizer.size_positions(
             signals=[], account_state=_account(), regime={'state': 'LOW_VOL'},
             run_date=date(2026, 6, 4), strategy_state={},
-            regime_params=_params(), confirmer=lambda proposals: {},
+            regime_params=params or _params(), confirmer=lambda proposals: {},
         )
 
 
@@ -215,4 +215,33 @@ class TestLegacyPathUncapped:
         assert 'STX' in opens
         assert abs(opens['STX']['target_usd'] - LAM * NAV) < 1e-6, (
             'legacy path must remain uncapped (byte-identical when EOD gate is off)'
+        )
+
+
+class TestClusterCapLambdaWiring:
+
+    def test_cluster_cap_receives_global_lambda_not_blended(self, monkeypatch):
+        """Operator ruling 2026-08-11: the asset-corr cluster cap scales with
+        the GLOBAL position_sizing_lambda, NOT the regime-dampened effective
+        lam (= lam_global x liquidity_param) used for gross scaling. With
+        liquidity_param 0.5 the blended lam is LAM*0.5 — the wrapper must
+        still receive LAM."""
+        seen = {}
+
+        def spy(target_usd, conviction, nav, lam=1.0):
+            seen['lam'] = lam
+            return target_usd
+
+        monkeypatch.setattr(_sizer, '_apply_asset_corr_cap', spy)
+        params = dict(_params())
+        params['liquidity_param'] = 0.5
+        _run_eod(
+            monkeypatch,
+            weights_rows=[_weights_row('S1', eff_sharpe=3.5)],
+            carried_rows=[_carried('S1', 'STX')],
+            params=params,
+        )
+        assert seen.get('lam') == LAM, (
+            f"cluster cap must receive the global lambda {LAM}, "
+            f"got {seen.get('lam')} (blended would be {LAM * 0.5})"
         )
