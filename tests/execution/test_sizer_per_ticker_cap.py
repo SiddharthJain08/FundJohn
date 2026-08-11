@@ -245,3 +245,30 @@ class TestClusterCapLambdaWiring:
             f"cluster cap must receive the global lambda {LAM}, "
             f"got {seen.get('lam')} (blended would be {LAM * 0.5})"
         )
+
+
+class TestPerTickerCapGlobalLambda:
+
+    def test_per_ticker_cap_uses_global_lambda_not_blended(self, monkeypatch):
+        """Operator ruling 2026-08-11: the per-ticker cap scales with the
+        GLOBAL position_sizing_lambda, not the regime-blended effective lam.
+        liquidity_param 0.5 -> gross scale uses blended lam (LAM*0.5 = 1.0x
+        NAV -> raw $100k), but the cap must be CAP*3.5*LAM*NAV = $70k
+        (blended would give $35k)."""
+        params = dict(_params())
+        params['liquidity_param'] = 0.5
+        orders = _run_eod(
+            monkeypatch,
+            weights_rows=[_weights_row('S1', eff_sharpe=3.5)],
+            carried_rows=[_carried('S1', 'STX')],
+            params=params,
+        )
+        opens = _open_by_ticker(orders)
+        assert 'STX' in opens
+        expected = CAP * 3.5 * LAM * NAV            # global-lambda cap: $70k
+        blended = CAP * 3.5 * (LAM * 0.5) * NAV     # the wrong (old) value
+        got = opens['STX']['target_usd']
+        assert abs(got - expected) < 1e-6, (
+            f'cap must use global lambda: expected {expected}, got {got} '
+            f'(blended-lam cap would be {blended})'
+        )

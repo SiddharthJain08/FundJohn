@@ -312,7 +312,8 @@ def _corr_adjusted_maps(ticker_meta, weight_by_strat, eff_weight_by_strat, sim):
 
 
 def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_w,
-                                   legacy_floor, lam, nav, nb_g, nb_s):
+                                   legacy_floor, lam, nav, nb_g, nb_s,
+                                   lam_cap=None):
     """Pure shadow metrics for the corr-adjusted gate vs the live gate. Routes nothing.
 
     Reports |S_adj| distribution; live-vs-would-keep counts; a recommended floor that
@@ -338,6 +339,10 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
     # Would-survive set under the recommended floor (selection by |S_adj|).
     survivors = {t: size_adj[t] for t in size_adj if abs(gate_adj.get(t, 0.0)) >= rec_floor}
     denom = lam * nav
+    # Cap denominator mirrors the live sizer: GLOBAL λ (operator ruling
+    # 2026-08-11), while sizing normalization uses the blended lam. Defaults
+    # to lam so legacy callers see identical numbers.
+    cap_denom = (lam_cap if lam_cap is not None else lam) * nav
     gross = sum(abs(v) for v in survivors.values())
     cap_binds = 0
     capped_gross = 0.0
@@ -345,7 +350,7 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
     if gross > 0 and denom > 0:
         for t, v in survivors.items():
             tgt = v / gross * denom
-            cap = PER_TICKER_CAP_SHARPE_FRAC * abs(gate_adj.get(t, 0.0)) * denom
+            cap = PER_TICKER_CAP_SHARPE_FRAC * abs(gate_adj.get(t, 0.0)) * cap_denom
             if abs(tgt) > cap:
                 cap_binds += 1
                 tgt = cap if tgt > 0 else -cap
@@ -1497,7 +1502,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     try:
         _m = _corr_cumsharpe_shadow_metrics(
             gate_net_sharpe, _size_adj, gate_net_sharpe, dict(ticker_w),
-            equity_gate_floor, lam, nav, _nb_g, _nb_s)
+            equity_gate_floor, lam, nav, _nb_g, _nb_s, lam_cap=lam_global)
         _line = ('corr_cumsharpe.live[%s]: dist=%s live_keep=%d would_keep=%d '
                  'rec_floor=%.4f cap_binds=%d gross_after_cap=%.3f sign_flips=%s '
                  'backstop=%s top_dollar_moves=%s' % (
@@ -1611,9 +1616,11 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # (the old min-notional drop+renorm that used to feed it was removed
     # 2026-06-08). Applied BEFORE the cap-exempt option hedge injection +
     # broker netting. Fires on EOD mode (OPENCLAW_EOD_RECONCILE=1) AND on
-    # intraday redeploy (OPENCLAW_INTRADAY_REDEPLOY=1; W3 F2c); lam is
-    # already the intraday λ on the intraday path (C2). The plain daily
-    # cadence path (neither flag) stays byte-identical (its multi-day
+    # intraday redeploy (OPENCLAW_INTRADAY_REDEPLOY=1; W3 F2c); the cap's λ
+    # is lam_global — position_sizing_lambda (or its intraday variant on the
+    # redeploy path, C2), NEVER the regime-blended lam (operator ruling
+    # 2026-08-11: liquidity_param de-levers gross, not the caps). The plain
+    # daily cadence path (neither flag) stays byte-identical (its multi-day
     # accumulation makes few-survivor days structurally rare).
     # Missing gate value → fail-open (target untouched).
     if os.environ.get('OPENCLAW_EOD_RECONCILE') == '1' or os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1':
@@ -1622,7 +1629,10 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             _gs = gate_net_sharpe.get(_tkr)
             if _gs is None:
                 continue
-            _cap = PER_TICKER_CAP_SHARPE_FRAC * abs(_gs) * lam * nav
+            # GLOBAL λ (operator ruling 2026-08-11, same as the cluster cap):
+            # the per-regime liquidity_param dampener de-levers GROSS (via the
+            # blended `lam` in `scale` above) but must not shrink the cap.
+            _cap = PER_TICKER_CAP_SHARPE_FRAC * abs(_gs) * lam_global * nav
             if abs(_usd) > _cap:
                 target_usd[_tkr] = _cap if _usd > 0 else -_cap
                 _capped.append((_tkr, _usd, target_usd[_tkr]))
