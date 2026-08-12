@@ -102,6 +102,20 @@ def _resolve_intended_bracket(conn, ticker: str, side: str):
 
 _RATE_LIMIT_BACKOFF = (2, 5, 10)
 
+# `alpaca order list` returns 50 rows by DEFAULT and caps --limit at 500.
+# Every open-order coverage read must page at the cap: on 2026-08-12 the
+# 204-position breadth book (183 open orders) truncated coverage to the
+# first 50 rows — ~140 OCO-protected positions read as naked, and every
+# "reattach" was rejected against the shares its own resting OCO reserves.
+_OPEN_ORDERS_ARGS = ('order', 'list', '--status', 'open', '--limit', '500')
+_OPEN_ORDERS_CAP = 500
+
+
+def _warn_if_capped(payload) -> None:
+    if isinstance(payload, list) and len(payload) >= _OPEN_ORDERS_CAP:
+        log(f'⚠ open-order list hit the {_OPEN_ORDERS_CAP}-row CLI cap — '
+            f'coverage may be truncated; naked audit unreliable this pass')
+
 
 def _is_rate_limited(err: dict | None) -> bool:
     if not err:
@@ -167,10 +181,11 @@ def fetch_active_stops() -> dict[str, float]:
     """Map ticker -> total qty already covered by an active stop / stop_limit
     order. Sums across multiple stops on the same symbol so a position with
     2 partial stops is counted correctly."""
-    ok, payload, err = _run_cli(['order', 'list', '--status', 'open'])
+    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
     if not ok:
         log(f'order list failed: {(err or {}).get("error","unknown")} — treating as no active stops')
         return {}
+    _warn_if_capped(payload)
     out: dict[str, float] = {}
     for o in payload or []:
         t = (o.get('type') or o.get('order_type') or '').lower()
@@ -478,11 +493,12 @@ def fetch_tp_covered(linked_only: bool = False) -> dict[str, float]:
         gives ZERO downside protection and must NOT mask a missing stop — that
         conflation left 12 positions naked 2026-06-16→06-18 (the bare 16:05 TP
         made stop_reattach skip the GTC stop, then the day-TIF TP expired)."""
-    ok, payload, err = _run_cli(['order', 'list', '--status', 'open'])
+    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
     cov: dict[str, float] = {}
     if not ok:
         log(f'order list failed (tp cover): {(err or {}).get("error","unknown")}')
         return cov
+    _warn_if_capped(payload)
     for o in (payload or []):
         otype = o.get('order_type') or o.get('type')
         if otype != 'limit':
@@ -513,7 +529,7 @@ def cancel_stops_for(symbol: str, dry_run: bool, include_reserving: bool = False
     direction) survives. Safe because the caller's failure path re-submits
     a full-qty bare stop.
     Returns count canceled."""
-    ok, payload, err = _run_cli(['order', 'list', '--status', 'open'])
+    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
     if not ok:
         return 0
     n = 0
@@ -781,10 +797,11 @@ def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
                 pos_syms.add(p.get('symbol'))
         except (TypeError, ValueError):
             pos_syms.add(p.get('symbol'))
-    ok, orders, _ = _run_cli(['order', 'list', '--status', 'open'])
+    ok, orders, _ = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
     if not ok:
         log('orphan sweep skipped: order list unavailable')
         return []
+    _warn_if_capped(orders)
     cancelled: list[str] = []
     for o in (orders or []):
         sym = o.get('symbol')

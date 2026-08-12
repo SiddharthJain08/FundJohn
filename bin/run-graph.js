@@ -39,7 +39,11 @@ async function main() {
     process.exit(1);
   }
   console.log(JSON.stringify(out, null, 2));
-  process.exit(0);
+  // An aborted run must exit nonzero: the redeploy wrapper
+  // (scripts/redeploy_pipeline.py) only sees this process's exit code, and
+  // rc=0 on a mid-graph abort let the 2026-08-12 handoff OOM (rc=137) report
+  // "completed exit_code 0" — no retry, no alert, zero orders submitted.
+  process.exit(out && out.status === 'aborted' ? 1 : 0);
 }
 
 main().catch((e) => { console.error('ERROR', e); process.exit(1); });
