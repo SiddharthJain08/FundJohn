@@ -957,4 +957,11 @@ if __name__ == '__main__':
     if args.dry_run:
         print(f'[handoff] dry-run skip for {args.date}')
         sys.exit(0)
+    # Periodic co-tenant sampling: this step was the OOM victim on 2026-08-12
+    # (rc=137 at 3.85GB with an unidentified 2.39GB python3 co-resident). A
+    # DONE-time footprint dies with the process; 15s samples in the step log
+    # survive a SIGKILL and name who shared the box.
+    from execution.memory_footprint import memory_footprint, start_periodic_logger  # noqa: E402
+    start_periodic_logger('[handoff]')
     build(args.date)
+    print(f'[handoff] done{memory_footprint()}', flush=True)
