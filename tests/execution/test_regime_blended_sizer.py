@@ -233,10 +233,12 @@ class TestIntradayRedeployConvictionCap:
 
     def test_intraday_single_survivor_capped(self, monkeypatch):
         """Single over-cap survivor on the intraday path must be clamped to
-        cap = PER_TICKER_CAP_SHARPE_FRAC × |sharpe| × λ × NAV.
+        cap = PER_TICKER_CAP_SHARPE_FRAC × (|sharpe|+1) × λ × NAV
+        (single-λ + (|S|+1) operator rulings 2026-08-12: the intraday lane
+        uses the same global λ and the same cap formula as EOD).
 
         Without the C3 gate fix this test is RED (cap not applied on intraday
-        path → target = full λ×NAV = $200k instead of $35k).
+        path → target = full λ×NAV = $200k instead of $90k).
 
         W3 C4 note: the signal-set-health gate (floor=10) is active on the
         intraday path. Nine dummy signals with sharpe=0.5 pad len(active) to
@@ -254,7 +256,7 @@ class TestIntradayRedeployConvictionCap:
         )
         opens = _open_by_ticker_cap(orders)
         assert 'STX' in opens, f'expected STX open order, got {orders}'
-        expected_cap = 0.05 * 3.5 * _CAP_LAM * _CAP_NAV  # 35_000
+        expected_cap = _sizer.PER_TICKER_CAP_SHARPE_FRAC * (3.5 + 1.0) * _CAP_LAM * _CAP_NAV  # 90_000
         assert abs(opens['STX']['target_usd'] - expected_cap) < 1e-6, (
             f'intraday survivor must be capped at {expected_cap}; '
             f'got {opens["STX"]["target_usd"]}'

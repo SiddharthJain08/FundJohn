@@ -22,14 +22,22 @@ from execution.alpaca_executor import _spot_price
 
 logger = logging.getLogger(__name__)
 
-# SP-6 per-ticker conviction cap fraction (operator formula 2026-06-04):
-# cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe| × λ × NAV.
+# SP-6 per-ticker conviction cap fraction (operator formula 2026-06-04;
+# +1 floor 2026-08-12):
+# cap_usd(ticker) = PER_TICKER_CAP_SHARPE_FRAC × (|gate_net_sharpe|+1) × λ × NAV.
 # Applied in EOD mode (OPENCLAW_EOD_RECONCILE=1) and intraday-redeploy mode
 # (OPENCLAW_INTRADAY_REDEPLOY=1) inside _sharpe_cadence_path — see the cap
 # block there for full rationale.
 # 0.05 → 0.10 operator directive 2026-08-11 (breadth-experiment epoch: floors
 # at 0 let every signal submit; conviction expresses through SIZE, so
 # high-S_adj names get double the headroom the 0.05 era allowed).
+# |S| → (|S|+1) operator directive 2026-08-12: at TRANSITIONING breadth
+# (28 names, median S_adj 0.27) the pure-|S| cap bound gross to ~40% of
+# λ·NAV; the +1 floor (≥0.1·λ·NAV headroom per name) lets normalization
+# reach λ·NAV on thin-breadth days while still bounding true outliers.
+# (|S|+1), NOT |S+1|: gate_net_sharpe is SIGNED — net-short tickers carry
+# negative S, and |S+1| would collapse the cap exactly on high-conviction
+# shorts.
 PER_TICKER_CAP_SHARPE_FRAC = 0.10
 
 # Hard dust floor (2026-06-08). Replaces the removed per-regime min-notional
@@ -205,7 +213,7 @@ def _derive_action(kind: str, out_current: float, out_target: float, dir_sign: i
     return 'flip_to_long' if tgt > 0 else 'flip_to_short'   # opposite-sign delta (defensive)
 
 
-def _load_lambda(default: float = 2.0, *, intraday: bool = False) -> float:
+def _load_lambda(default: float = 2.0) -> float:
     """Read position_sizing_lambda from pipeline_config; fall back to default
     on any error. Bounded clamp guards against operator-pasted garbage.
 
@@ -214,11 +222,12 @@ def _load_lambda(default: float = 2.0, *, intraday: bool = False) -> float:
     gross). Pre-existing values above 2.0 silently clamp on next cycle —
     intentional, since trading over 2× overnight would violate Reg T.
 
-    intraday=True reads position_sizing_lambda_intraday instead, allowing
-    intraday regime-change redeploys to size at a lower leverage (e.g. 1×
-    NAV) without touching the overnight target. Set by the redeploy driver
-    via OPENCLAW_INTRADAY_REDEPLOY=1 in the subprocess env."""
-    key = 'position_sizing_lambda_intraday' if intraday else 'position_sizing_lambda'
+    2026-08-12 operator ruling: ONE lambda everywhere. The dashboard-
+    configured position_sizing_lambda governs every lane — the separate
+    position_sizing_lambda_intraday key is RETIRED (its stale 1× value
+    sized the whole 08-12 intraday redeploy at half the intended gross).
+    A row for the old key may linger in pipeline_config; nothing reads it."""
+    key = 'position_sizing_lambda'
     try:
         import psycopg2
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
@@ -318,7 +327,7 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
 
     Reports |S_adj| distribution; live-vs-would-keep counts; a recommended floor that
     preserves ~the live surviving-ticker count; non-PSD backstop fires; per-ticker-cap
-    binding frequency + post-cap gross fraction (cap = PER_TICKER_CAP_SHARPE_FRAC·|S_adj|·
+    binding frequency + post-cap gross fraction (cap = PER_TICKER_CAP_SHARPE_FRAC·(|S_adj|+1)·
     λ·NAV — this is what the operator needs to decide whether to retune the cap before the
     flip); direction flips vs the legacy sizing (matters with SIZE_SCALAR live + the wᵢ²
     numerator); and the top post-cap dollar reallocations. Δ$ and cap modeling are computed
@@ -350,7 +359,7 @@ def _corr_cumsharpe_shadow_metrics(gate_adj, size_adj, legacy_gate, live_ticker_
     if gross > 0 and denom > 0:
         for t, v in survivors.items():
             tgt = v / gross * denom
-            cap = PER_TICKER_CAP_SHARPE_FRAC * abs(gate_adj.get(t, 0.0)) * cap_denom
+            cap = PER_TICKER_CAP_SHARPE_FRAC * (abs(gate_adj.get(t, 0.0)) + 1.0) * cap_denom
             if abs(tgt) > cap:
                 cap_binds += 1
                 tgt = cap if tgt > 0 else -cap
@@ -1320,7 +1329,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # row can't slip past the sizer. Historically sharpe_cadence skipped
     # liquidity_param entirely; operator added it 2026-05-16 so per-regime
     # target gross matches the documented intent (TRANSITIONING 1.5×, etc.).
-    lam_global   = _load_lambda(intraday=(os.environ.get('OPENCLAW_INTRADAY_REDEPLOY') == '1'))
+    lam_global   = _load_lambda()   # ONE λ for every lane (operator ruling 2026-08-12)
     liq_regime   = float(params.get('liquidity_param', 1.0)) if params else 1.0
     lam = lam_global * max(0.0, min(1.0, liq_regime))
     # Equity conviction-gate floor: the per-regime corr floor (min_corr_cum_sharpe),
@@ -1601,7 +1610,7 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             logger.warning('size_scalar.shadow failed (%s)', e)
 
     # SP-6 per-ticker conviction cap (operator formula, 2026-06-04):
-    #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × |gate_net_sharpe(t)| × λ × NAV
+    #     cap_usd(t) = PER_TICKER_CAP_SHARPE_FRAC × (|gate_net_sharpe(t)|+1) × λ × NAV
     # Bounds the few-survivor concentration failure: Σ|target| = λ×NAV
     # renormalizes onto whatever cleared the cum-sharpe gate, so a 1-survivor
     # day would otherwise put the ENTIRE λ×NAV into one name (2026-06-03
@@ -1617,8 +1626,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # 2026-06-08). Applied BEFORE the cap-exempt option hedge injection +
     # broker netting. Fires on EOD mode (OPENCLAW_EOD_RECONCILE=1) AND on
     # intraday redeploy (OPENCLAW_INTRADAY_REDEPLOY=1; W3 F2c); the cap's λ
-    # is lam_global — position_sizing_lambda (or its intraday variant on the
-    # redeploy path, C2), NEVER the regime-blended lam (operator ruling
+    # is lam_global — position_sizing_lambda (ONE λ for every lane since the
+    # 2026-08-12 ruling), NEVER the regime-blended lam (operator ruling
     # 2026-08-11: liquidity_param de-levers gross, not the caps). The plain
     # daily cadence path (neither flag) stays byte-identical (its multi-day
     # accumulation makes few-survivor days structurally rare).
@@ -1632,14 +1641,16 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
             # GLOBAL λ (operator ruling 2026-08-11, same as the cluster cap):
             # the per-regime liquidity_param dampener de-levers GROSS (via the
             # blended `lam` in `scale` above) but must not shrink the cap.
-            _cap = PER_TICKER_CAP_SHARPE_FRAC * abs(_gs) * lam_global * nav
+            # (|S|+1) — operator formula 2026-08-12; S is SIGNED (net-short
+            # tickers negative) so the +1 rides the magnitude, never the sign.
+            _cap = PER_TICKER_CAP_SHARPE_FRAC * (abs(_gs) + 1.0) * lam_global * nav
             if abs(_usd) > _cap:
                 target_usd[_tkr] = _cap if _usd > 0 else -_cap
                 _capped.append((_tkr, _usd, target_usd[_tkr]))
         if _capped:
             logger.info(
                 'regime_blended_sizer.sharpe_cadence: per-ticker cap '
-                '(%g·|sharpe|·λ·NAV) clamped %d ticker(s): %s',
+                '(%g·(|sharpe|+1)·λ·NAV) clamped %d ticker(s): %s',
                 PER_TICKER_CAP_SHARPE_FRAC, len(_capped),
                 [(t, round(o), round(n)) for t, o, n in _capped[:10]])
 
@@ -1648,8 +1659,8 @@ def _sharpe_cadence_path(signals, account_state, regime_state, params, confirmer
     # mirroring the per-ticker cap above but at the cluster level. Applied BEFORE
     # the cap-exempt option-hedge injection + broker netting.
     # Cap = cap_pct × λ_GLOBAL × NAV (operator ruling 2026-08-11): the GLOBAL
-    # sizing lambda (position_sizing_lambda, 1.85; intraday variant on the
-    # redeploy lane), NOT the regime-dampened effective lam used for gross
+    # sizing lambda (position_sizing_lambda; ONE λ for every lane since
+    # 2026-08-12), NOT the regime-dampened effective lam used for gross
     # scaling above — the per-regime liquidity_param is a separate de-leverage
     # control, unrelated to λ, and must not shrink the cluster cap.
     target_usd = _apply_asset_corr_cap(target_usd, gate_net_sharpe, nav,

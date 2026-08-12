@@ -80,7 +80,9 @@ def _opens(orders):
 def test_on_path_activates_and_caps_on_corr_sadj(monkeypatch):
     # Two perfectly-correlated strategies (rho=1) on AAA, daily_weight 3 each.
     # S_adj = 18 / sqrt(36) = 3.0 (no double-count) — NOT the naive sum 6.
-    # EOD per-ticker cap = 0.05 * |S_adj=3.0| * LAM * NAV = $30k.
+    # EOD per-ticker cap = CAP_FRAC * (|S_adj=3.0|+1) * LAM * NAV
+    # (reads the live constant so operator retunes don't strand this test —
+    # the hardcoded 0.05-era literal it used to carry did exactly that).
     sim = {'S1': {'S1': 1.0, 'S2': 1.0}, 'S2': {'S2': 1.0, 'S1': 1.0}}
     orders = _run(monkeypatch,
                   weights_rows=[_weights_row('S1', 3.0), _weights_row('S2', 3.0)],
@@ -88,7 +90,8 @@ def test_on_path_activates_and_caps_on_corr_sadj(monkeypatch):
                   sim=sim, min_corr_cum_sharpe=1.0)
     opens = _opens(orders)
     assert 'AAA' in opens, f'AAA should survive the corr gate, got {orders}'
-    assert abs(opens['AAA']['target_usd'] - 0.05 * 3.0 * LAM * NAV) < 1e-6, (
+    _expected = _sizer.PER_TICKER_CAP_SHARPE_FRAC * (3.0 + 1.0) * LAM * NAV
+    assert abs(opens['AAA']['target_usd'] - _expected) < 1e-6, (
         f"cap must reflect S_adj=3.0 (corr-deflated), got {opens['AAA']['target_usd']}")
 
 

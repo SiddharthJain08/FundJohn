@@ -389,10 +389,12 @@ def _spawn_orchestrator(reason: str, run_date: str, dry_run: bool,
     # already_executed() guard prevents resubmitting filled orders, so
     # opting into FORCE_RESIZE here is safe and necessary.
     env['OPENCLAW_FORCE_RESIZE'] = '1'
-    # Signal to the sizer that this is an intraday redeploy — _load_lambda
-    # will read position_sizing_lambda_intraday (default 1× NAV) instead of
-    # the overnight position_sizing_lambda (typically 1.85×). This prevents
-    # over-leveraging on intraday regime-change redeploys.
+    # Signal to the sizer that this is an intraday redeploy. Since the
+    # single-λ ruling (2026-08-12) this NO LONGER changes leverage — the
+    # retired position_sizing_lambda_intraday key sized the whole 08-12
+    # redeploy at a stale 1×. The flag now only drives lane semantics:
+    # zero-conviction-flatten exclusion, the thin-signal-set abort, the
+    # sized-handoff top-up-lane exclusion, and the corr-diag log-spam guard.
     env['OPENCLAW_INTRADAY_REDEPLOY'] = '1'
     try:
         proc = subprocess.run(cmd, env=env, timeout=ORCHESTRATOR_TIMEOUT_S, check=False)
