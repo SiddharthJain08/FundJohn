@@ -127,7 +127,7 @@ class NoNewsMomentum(BaseStrategy):
             return []
 
         eq = self._equity_rows(prices)
-        if len(eq) < self.min_lookback or not self._month_boundary(eq.index):
+        if len(eq) < self.min_lookback or not (self._month_boundary(eq.index) or self.cadence_reset(regime)):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

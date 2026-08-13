@@ -79,7 +79,7 @@ class AstLowVolatilityFactorEffectInStocks(BaseStrategy):
             return []
 
         # Only rebalance at month-end
-        if not self._is_month_end(prices):
+        if not (self._is_month_end(prices) or self.cadence_reset(regime)):
             print("[debug] signals=0", file=sys.stderr)
             return []
 

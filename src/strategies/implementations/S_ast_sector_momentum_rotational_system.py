@@ -77,7 +77,7 @@ class SectorMomentumRotationalSystem(BaseStrategy):
         if not hasattr(idx[-1], 'month') or not hasattr(idx[-2], 'month'):
             print('[debug] signals=0', file=sys.stderr)
             return []
-        if idx[-1].month == idx[-2].month:
+        if idx[-1].month == idx[-2].month and not self.cadence_reset(regime):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

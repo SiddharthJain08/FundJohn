@@ -61,7 +61,7 @@ class MomentumFactorCombinedWithAssetGrowthEffect(BaseStrategy):
         current_month = latest_date.month
         current_year = latest_date.year
         month_dates = [d for d in prices.index if d.month == current_month and d.year == current_year]
-        if not month_dates or latest_date != month_dates[-1]:
+        if not month_dates or (latest_date != month_dates[-1] and not self.cadence_reset(regime)):
             print(f'[debug] signals=0', file=sys.stderr)
             return []
 

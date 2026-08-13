@@ -98,7 +98,7 @@ class AstTimeSeriesMomentumEffect(BaseStrategy):
             return []
 
         # Monthly rebalance only
-        if not self._is_month_boundary(prices):
+        if not (self._is_month_boundary(prices) or self.cadence_reset(regime)):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

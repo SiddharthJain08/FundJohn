@@ -75,7 +75,7 @@ class AssetClassTrendFollowing(BaseStrategy):
         # Detected by the last two index entries crossing a month boundary.
         if len(prices.index) < 2:
             return []
-        if prices.index[-1].month == prices.index[-2].month:
+        if prices.index[-1].month == prices.index[-2].month and not self.cadence_reset(regime):
             return []
 
         sma_period = self.parameters.get('sma_period', SMA_PERIOD)

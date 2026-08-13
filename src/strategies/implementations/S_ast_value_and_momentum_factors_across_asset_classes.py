@@ -83,7 +83,7 @@ class AstValueAndMomentumFactorsAcrossAssetClasses(BaseStrategy):
         if len(all_dates) < 2:
             print('[debug] signals=0', file=sys.stderr)
             return []
-        if all_dates[-1].month == all_dates[-2].month:
+        if all_dates[-1].month == all_dates[-2].month and not self.cadence_reset(regime):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

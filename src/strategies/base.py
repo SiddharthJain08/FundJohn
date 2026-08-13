@@ -176,6 +176,18 @@ class BaseStrategy(ABC):
         """Check if this strategy should generate signals in current regime."""
         return regime_state in (self.active_in_regimes or [])
 
+    def cadence_reset(self, regime) -> bool:
+        """True on a regime-flip day. The engine stamps regime['cadence_reset']
+        when the regime-of-record differs from the regime the last persisted
+        signal set was built under (operator directive 2026-08-13): on a flip,
+        every rebalance-cadence strategy emits its current book same-day and
+        cadence persistence restarts from that day. Rebalance-calendar gates
+        (month/week/fortnight boundary checks) must OR themselves with this.
+        Timing-edge strategies (turn-of-month, expiration week, Monday effect,
+        annual fundamentals windows, seasonality) must NOT consult it — their
+        calendar IS the signal, not a rebalance schedule."""
+        return bool(isinstance(regime, dict) and regime.get('cadence_reset'))
+
     def position_scale(self, regime_state: str) -> float:
         """Regime-adjusted position scale."""
         return REGIME_POSITION_SCALE.get(regime_state, 0.35)

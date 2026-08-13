@@ -1387,6 +1387,53 @@ def _slice_aux(aux_data: dict, universe_set: set) -> dict:
     return out
 
 
+def _stamp_cadence_reset_on_flip(cur, regime) -> None:
+    """Regime-flip day detection (operator directive 2026-08-13).
+
+    On the day the regime-of-record changes, the new regime's book must be
+    built same-day by EVERY eligible strategy — not just the ones whose
+    rebalance calendar happens to land on the flip. Compare today's regime
+    against the regime the most recent persisted signal set was built under;
+    on mismatch stamp regime['cadence_reset']=True, which rebalance-calendar
+    strategies OR into their boundary gates (StrategyBase.cadence_reset).
+    Cadence persistence then restarts naturally from the flip-day signal_date.
+
+    Covers both lanes (EOD signals step and the intraday-redeploy signals
+    fragment) because both run this engine. Same-day second runs see the
+    flip-day signals already tagged with the new regime → no re-stamp, so
+    the forced emission fires exactly once per flip.
+
+    Fail-quiet on DB errors (no stamp): a transient DB hiccup must degrade to
+    the historical calendar-gated behavior, never force a mass emission.
+    Kill switch OPENCLAW_CADENCE_RESET_ON_FLIP=0; manual force
+    OPENCLAW_FORCE_CADENCE_RESET=1 (e.g. re-running an aborted flip day)."""
+    if not isinstance(regime, dict) or not regime.get('state'):
+        return
+    if os.environ.get('OPENCLAW_FORCE_CADENCE_RESET') == '1':
+        regime['cadence_reset'] = True
+        logger.warning('[engine] cadence reset FORCED via OPENCLAW_FORCE_CADENCE_RESET=1 '
+                       '— all rebalance-cadence strategies emit this run')
+        return
+    if os.environ.get('OPENCLAW_CADENCE_RESET_ON_FLIP', '1') != '1':
+        return
+    try:
+        cur.execute("""SELECT regime_state FROM execution_signals
+                       WHERE regime_state IS NOT NULL
+                       ORDER BY signal_date DESC, id DESC LIMIT 1""")
+        row = cur.fetchone()
+    except Exception as e:
+        logger.warning('[engine] regime-flip probe failed (%s) — cadence gates unchanged', e)
+        return
+    prev = row[0] if row else None
+    if prev is not None and prev == regime['state']:
+        return
+    regime['cadence_reset'] = True
+    logger.warning('[engine] 🔁 REGIME FLIP DAY: %s → %s — cadence-gate bypass armed: '
+                   'all eligible rebalance-cadence strategies emit today; cadence '
+                   'windows restart from today (operator directive 2026-08-13)',
+                   prev or '(no prior signals)', regime['state'])
+
+
 def run_strategies(strategies, prices, regime, universe, aux_data,
                    strategy_universes=None) -> dict:
     """
@@ -2136,6 +2183,7 @@ def main():
         regime = load_regime(cur)
         regime_state = regime['state']
         logger.info(f"Regime: {regime_state} (VIX={regime.get('vix_level')})")
+        _stamp_cadence_reset_on_flip(cur, regime)
 
         # 2. Strategies
         strategies = load_approved_strategies(cur)

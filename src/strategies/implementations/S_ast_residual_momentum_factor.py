@@ -69,7 +69,7 @@ class AstResidualMomentumFactor(BaseStrategy):
             return []
 
         # Monthly rebalance only — skip all other trading days
-        if not self._is_month_start(prices):
+        if not (self._is_month_start(prices) or self.cadence_reset(regime)):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

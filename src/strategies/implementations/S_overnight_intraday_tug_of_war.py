@@ -86,7 +86,7 @@ class OvernightIntradayTugOfWar(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        if not self._month_boundary(prices):
+        if not (self._month_boundary(prices) or self.cadence_reset(regime)):
             print('[debug] signals=0', file=sys.stderr)
             return []
 

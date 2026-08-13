@@ -38,7 +38,7 @@ class ThreeDPCACharacteristicFactors(BaseStrategy):
 
         # Monthly rebalance gate
         if isinstance(prices.index, pd.DatetimeIndex) and len(prices.index) >= 2:
-            if prices.index[-1].month == prices.index[-2].month:
+            if prices.index[-1].month == prices.index[-2].month and not self.cadence_reset(regime):
                 return []
 
         scale    = self.position_scale(regime_state)

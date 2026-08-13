@@ -153,7 +153,7 @@ class RegimeAgeMomentum(BaseStrategy):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
-        if not self._week_boundary(eq.index):
+        if not (self._week_boundary(eq.index) or self.cadence_reset(regime)):
             print('[debug] signals=0', file=sys.stderr)
             return []
 
