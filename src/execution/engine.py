@@ -1417,9 +1417,12 @@ def _stamp_cadence_reset_on_flip(cur, regime) -> None:
     if os.environ.get('OPENCLAW_CADENCE_RESET_ON_FLIP', '1') != '1':
         return
     try:
+        # created_at tiebreak matters on a double-flip day: same signal_date can
+        # carry rows from two regimes; the NEWEST mint must win or the probe
+        # would re-force emission against an already-current book.
         cur.execute("""SELECT regime_state FROM execution_signals
                        WHERE regime_state IS NOT NULL
-                       ORDER BY signal_date DESC, id DESC LIMIT 1""")
+                       ORDER BY signal_date DESC, created_at DESC NULLS LAST LIMIT 1""")
         row = cur.fetchone()
     except Exception as e:
         logger.warning('[engine] regime-flip probe failed (%s) — cadence gates unchanged', e)
