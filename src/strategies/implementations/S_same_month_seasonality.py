@@ -44,6 +44,7 @@ class SameMonthSeasonality(BaseStrategy):
                          'same-month return over prior years (>=4 obs) at month start; no short leg.')
     tier              = 2
     signal_frequency  = 'monthly'
+    calendar_edge     = True   # window IS the signal; ports across regime flips (2026-08-13)
     min_lookback      = 1008          # ~4 years of trading days
     active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
     MAX_SIGNALS       = 12

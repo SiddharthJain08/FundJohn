@@ -42,6 +42,7 @@ class EarningsQualityFactor(BaseStrategy):
                          'firms, rebalanced annually.')
     tier              = 2
     signal_frequency  = 'annual'
+    calendar_edge     = True   # window IS the signal; ports across regime flips (2026-08-13)
     min_lookback      = 252
     active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL']
 

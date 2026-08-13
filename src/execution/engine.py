@@ -1504,6 +1504,13 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
             signals = strat.generate_signals(strat_prices, strat_regime, strat_universe, strat_aux)
             _gen_s = time.perf_counter() - _t_gen
             _apply_regime_overrides_to_signals(strat.id, signals, strat_regime_str)
+            if signals and getattr(strat, 'calendar_edge', False):
+                # Stamp travels in signal_params (jsonb) so the sizer's loaders
+                # can port this signal across regime flips for the rest of its
+                # cadence window, gated on eligibility (operator 2026-08-13).
+                for _s in signals:
+                    _s.signal_params = {**(getattr(_s, 'signal_params', None) or {}),
+                                        'calendar_edge': True}
             results[strat.id] = signals or []
             # Per-strategy input diagnostics (§2 Phase A, 2026-08-06 spec): 36
             # approved strategies ran clean and returned [] on every live day

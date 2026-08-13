@@ -495,6 +495,23 @@ def _recent_active_counts(lookback: int = 10) -> list[int]:
         return []
 
 
+# Shared regime scope for both signal loaders (operator directives 2026-08-13).
+# Keep: signals minted under the CURRENT regime. Also keep: calendar-edge
+# signals (strategy's calendar window IS the signal — stamped into
+# signal_params at mint by run_strategies) minted under ANOTHER regime, but
+# only while the strategy is eligible in the current regime — a calendar
+# strategy holds its signal through regime changes within its cadence window
+# as long as each regime is within the strategy's qualification standard.
+# Consumes TWO regime_state params. String comparison (not ::boolean cast) so
+# a malformed stamp can never raise mid-query.
+_REGIME_SCOPE_CLAUSE = '''AND (regime_state = %s
+                           OR (COALESCE(signal_params->>'calendar_edge', '') IN ('true', '1')
+                               AND EXISTS (SELECT 1 FROM strategy_regime_params srp
+                                           WHERE srp.strategy_id = execution_signals.strategy_id
+                                             AND srp.regime_state = %s
+                                             AND srp.eligible)))'''
+
+
 def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                                    cadence_by_strat: dict[str, float] | None = None,
                                    regime_state: str | None = None) -> list[dict]:
@@ -558,11 +575,9 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
     try:
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                # Regime-scoped (operator directive 2026-08-13) — same rationale
-                # as _load_active_window_signals: prior-regime APPROVED rows must
-                # not survive a regime flip; the flip-day cadence reset re-mints
-                # the book under the new regime.
-                _rg = 'AND regime_state = %s' if regime_state else ''
+                # Regime-scoped (operator directives 2026-08-13) — same rationale
+                # + calendar-edge porting exception as _load_active_window_signals.
+                _rg = _REGIME_SCOPE_CLAUSE if regime_state else ''
                 cur.execute(f'''
                     SELECT DISTINCT ON (strategy_id, ticker)
                            strategy_id, ticker, direction, signal_date,
@@ -575,7 +590,8 @@ def _load_approved_carried_signals(weight_by_strat: dict[str, float],
                       AND strategy_id = ANY(%s)
                       {_rg}
                     ORDER BY strategy_id, ticker, target_date DESC, signal_date DESC
-                ''', (today, earliest, sids, regime_state) if regime_state else (today, earliest, sids))
+                ''', (today, earliest, sids, regime_state, regime_state) if regime_state
+                     else (today, earliest, sids))
                 rows = cur.fetchall()
                 cur.execute("""SELECT symbol FROM alpaca_tradable_universe
                               WHERE status='active' AND tradable=TRUE""")
@@ -704,12 +720,15 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
     try:
         with psycopg2.connect(os.environ['POSTGRES_URI']) as c:
             with c.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                # Regime-scoped (operator directive 2026-08-13): a signal minted
-                # under another regime must never feed this regime's book — the
-                # flip-day cadence reset (engine._stamp_cadence_reset_on_flip)
-                # supplies a fresh full set the day the regime changes, so
-                # scoping here cannot starve the book.
-                _rg = 'AND regime_state = %s' if regime_state else ''
+                # Regime-scoped (operator directives 2026-08-13): a rebalancer's
+                # signal minted under another regime must never feed this
+                # regime's book — the flip-day cadence reset supplies a fresh
+                # set the day the regime changes. EXCEPTION: calendar-edge
+                # strategies (signal_params.calendar_edge, stamped at mint)
+                # cannot re-mint off-window, so their signals PORT across the
+                # flip for the rest of their cadence window — but only into
+                # regimes the strategy is eligible for.
+                _rg = _REGIME_SCOPE_CLAUSE if regime_state else ''
                 cur.execute(f'''
                     SELECT DISTINCT ON (strategy_id, ticker)
                            strategy_id, ticker, direction, signal_date,
@@ -721,7 +740,8 @@ def _load_active_window_signals(regime_state: str, weight_by_strat: dict[str, fl
                       AND signal_date >= %s
                       {_rg}
                     ORDER BY strategy_id, ticker, signal_date DESC
-                ''', (sids, earliest, regime_state) if regime_state else (sids, earliest))
+                ''', (sids, earliest, regime_state, regime_state) if regime_state
+                     else (sids, earliest))
                 rows = cur.fetchall()
                 # Load the Alpaca tradable universe so delisted / halted /
                 # unsupported tickers (FX, indexes, crypto) get dropped at

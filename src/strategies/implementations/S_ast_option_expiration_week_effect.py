@@ -59,6 +59,7 @@ class OptionExpirationWeekEffect(BaseStrategy):
     )
     tier              = 2
     signal_frequency  = 'daily'
+    calendar_edge     = True   # window IS the signal; ports across regime flips (2026-08-13)
     min_lookback      = 1
     # Calendar-driven structural effect — dealer hedging occurs in all regimes.
     active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']

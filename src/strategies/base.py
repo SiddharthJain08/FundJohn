@@ -116,6 +116,14 @@ class BaseStrategy(ABC):
     description:      str = ''
     tier:             int = 3
     signal_frequency: str = 'daily'
+    # Calendar-edge strategy: its calendar window IS the signal (turn-of-month,
+    # expiration week, Monday effect, annual fundamentals windows, seasonality).
+    # Two consequences (operator directives 2026-08-13): exempt from the
+    # regime-flip cadence_reset bypass (it cannot re-mint off-window), and its
+    # persisted signals PORT ACROSS regime flips for the rest of their cadence
+    # window — but only into regimes the strategy is eligible for
+    # (strategy_regime_params.eligible; enforced in the sizer's loaders).
+    calendar_edge:    bool = False
     min_lookback:     int = 20
     active_in_regimes: List[str] = None
     # Safety cap: generate_signals should not return more than this many signals.

@@ -33,6 +33,7 @@ class AstTurnOfTheMonthInEquityIndexes(BaseStrategy):
     )
     tier              = 2
     signal_frequency  = 'daily'
+    calendar_edge     = True   # window IS the signal; ports across regime flips (2026-08-13)
     min_lookback      = 30
     active_in_regimes = ['LOW_VOL', 'TRANSITIONING', 'HIGH_VOL', 'CRISIS']
     MAX_SIGNALS       = 1

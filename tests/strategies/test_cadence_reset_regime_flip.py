@@ -195,13 +195,23 @@ def _capture_queries(monkeypatch):
     return log
 
 
+def _assert_scoped_with_calendar_port(sql, params):
+    # current-regime scope…
+    assert 'regime_state = %s' in sql
+    # …with the calendar-edge porting exception, gated on eligibility in the
+    # CURRENT regime (a calendar signal holds through regime changes within
+    # its cadence window only while each regime is within the strategy's
+    # qualification standard — operator directive 2026-08-13).
+    assert "signal_params->>'calendar_edge'" in sql
+    assert 'srp.eligible' in sql
+    assert tuple(params).count('TRANSITIONING') == 2
+
+
 def test_active_window_loader_scopes_to_regime(monkeypatch):
     import execution.regime_blended_sizer as _sizer
     log = _capture_queries(monkeypatch)
     _sizer._load_active_window_signals('TRANSITIONING', {'S1': 1.0}, {'S1': 5.0})
-    sql, params = log[0]
-    assert 'regime_state = %s' in sql
-    assert 'TRANSITIONING' in params
+    _assert_scoped_with_calendar_port(*log[0])
 
 
 def test_approved_carried_loader_scopes_to_regime(monkeypatch):
@@ -209,9 +219,7 @@ def test_approved_carried_loader_scopes_to_regime(monkeypatch):
     log = _capture_queries(monkeypatch)
     _sizer._load_approved_carried_signals({'S1': 1.0}, {'S1': 5.0},
                                           regime_state='TRANSITIONING')
-    sql, params = log[0]
-    assert 'regime_state = %s' in sql
-    assert 'TRANSITIONING' in params
+    _assert_scoped_with_calendar_port(*log[0])
 
 
 def test_approved_carried_loader_unscoped_without_regime(monkeypatch):
@@ -222,3 +230,56 @@ def test_approved_carried_loader_unscoped_without_regime(monkeypatch):
                                           regime_state=None)
     sql, params = log[0]
     assert 'regime_state = %s' not in sql
+
+
+# ── 5. calendar-edge classification + mint-time stamping ─────────────────────
+
+def _impl_class(mod_name):
+    import importlib
+    import inspect
+    m = importlib.import_module(f'strategies.implementations.{mod_name}')
+    from strategies.base import BaseStrategy as _B
+    for _, obj in inspect.getmembers(m, inspect.isclass):
+        if issubclass(obj, _B) and obj is not _B and obj.__module__ == m.__name__:
+            return obj
+    raise AssertionError(f'no strategy class in {mod_name}')
+
+
+def test_calendar_edge_classification():
+    for mod in ('S_weekend_effect_monday_short', 'S_same_month_seasonality',
+                'S_ast_turn_of_the_month_in_equity_indexes',
+                'S_ast_option_expiration_week_effect'):
+        assert _impl_class(mod).calendar_edge is True, mod
+    # rebalancers stay portable-OFF: they re-mint on flip day instead
+    for mod in ('S_ast_time_series_momentum_effect', 'S_amihud_illiquidity_premium'):
+        assert _impl_class(mod).calendar_edge is False, mod
+
+
+def test_run_strategies_stamps_calendar_edge(monkeypatch):
+    import execution.engine as _eng
+    monkeypatch.setattr(_eng, 'is_eligible', lambda sid, regime: True)
+    monkeypatch.setattr(_eng, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(_eng, '_apply_regime_overrides_to_signals',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(_eng, 'calendar_for', lambda ic: 'equity')
+    monkeypatch.setattr(_eng, 'apply_equity_calendar', lambda p: p)
+
+    class _Sig:
+        pass
+
+    class _Cal:
+        id = 'cal'
+        calendar_edge = True
+
+        def generate_signals(self, prices, regime, universe, aux_data):
+            return [_Sig()]
+
+    class _Reb:
+        id = 'reb'
+
+        def generate_signals(self, prices, regime, universe, aux_data):
+            return [_Sig()]
+
+    res = _eng.run_strategies([_Cal(), _Reb()], None, {'state': 'LOW_VOL'}, [], {})
+    assert res['cal'][0].signal_params == {'calendar_edge': True}
+    assert getattr(res['reb'][0], 'signal_params', None) in (None, {})
