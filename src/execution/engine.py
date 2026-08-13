@@ -1473,8 +1473,20 @@ def run_strategies(strategies, prices, regime, universe, aux_data,
                 strat_regime = regime
                 strat_regime_str = equity_regime_str
             if not is_eligible(strat.id, strat_regime_str):
-                logger.info('[engine] %s skipped — regime %s not eligible (strategy_regime_params)', strat.id, strat_regime_str)
-                continue
+                if getattr(strat, 'calendar_edge', False):
+                    # Calendar-edge run-through (operator directive 2026-08-13):
+                    # the window IS the signal, so record it whenever the window
+                    # opens even in a non-qualifying regime. The sizer's
+                    # _REGIME_SCOPE_CLAUSE holds the mint dormant until the next
+                    # qualifying regime within its cadence window — it cannot
+                    # size in this regime.
+                    logger.info('[engine] %s regime %s not eligible — calendar-edge: '
+                                'recording window-open signals anyway (dormant until '
+                                'a qualifying regime within cadence)',
+                                strat.id, strat_regime_str)
+                else:
+                    logger.info('[engine] %s skipped — regime %s not eligible (strategy_regime_params)', strat.id, strat_regime_str)
+                    continue
             # Eligibility is decided SOLELY by the DB gate above — the activation
             # slider derived from backtest performance (strategy_regime_params).
             # The strategy's own should_run(active_in_regimes) is a stale SECOND

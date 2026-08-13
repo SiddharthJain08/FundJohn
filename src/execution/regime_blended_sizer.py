@@ -496,15 +496,26 @@ def _recent_active_counts(lookback: int = 10) -> list[int]:
 
 
 # Shared regime scope for both signal loaders (operator directives 2026-08-13).
-# Keep: signals minted under the CURRENT regime. Also keep: calendar-edge
-# signals (strategy's calendar window IS the signal — stamped into
-# signal_params at mint by run_strategies) minted under ANOTHER regime, but
-# only while the strategy is eligible in the current regime — a calendar
-# strategy holds its signal through regime changes within its cadence window
-# as long as each regime is within the strategy's qualification standard.
+# Two disjoint regimes of trust:
+#   • Rebalancer signals (no calendar_edge stamp): kept ONLY when minted under
+#     the CURRENT regime — the flip-day cadence reset re-mints their book, so
+#     prior-regime rows must never leak in.
+#   • Calendar-edge signals (stamped into signal_params at mint by
+#     run_strategies): the MINT regime is irrelevant — the engine records them
+#     whenever their calendar window opens, INCLUDING in a non-qualifying
+#     regime (the regime gate lets calendar strategies run-through). They size
+#     only while the strategy is ELIGIBLE in the current regime, so a
+#     window-open mint lies dormant until the next qualifying regime within
+#     its cadence window, and holds through multiple regimes as long as each
+#     is within the strategy's qualification standard. Mint-regime trust alone
+#     would be WRONG here: weights rows exist for ineligible strategies
+#     (load_current has no eligibility filter), so a same-regime dormant mint
+#     would otherwise trade immediately in the unqualified regime.
 # Consumes TWO regime_state params. String comparison (not ::boolean cast) so
 # a malformed stamp can never raise mid-query.
-_REGIME_SCOPE_CLAUSE = '''AND (regime_state = %s
+_REGIME_SCOPE_CLAUSE = '''AND (
+                           (COALESCE(signal_params->>'calendar_edge', '') NOT IN ('true', '1')
+                            AND regime_state = %s)
                            OR (COALESCE(signal_params->>'calendar_edge', '') IN ('true', '1')
                                AND EXISTS (SELECT 1 FROM strategy_regime_params srp
                                            WHERE srp.strategy_id = execution_signals.strategy_id

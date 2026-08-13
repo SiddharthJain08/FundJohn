@@ -196,12 +196,16 @@ def _capture_queries(monkeypatch):
 
 
 def _assert_scoped_with_calendar_port(sql, params):
-    # current-regime scope…
+    # rebalancer branch: current-regime mints only, and explicitly NOT
+    # calendar-edge — a calendar mint recorded during a non-qualifying regime
+    # is tagged with the CURRENT regime and must not ride the mint-regime
+    # branch into the book (weights rows exist for ineligible strategies).
     assert 'regime_state = %s' in sql
-    # …with the calendar-edge porting exception, gated on eligibility in the
-    # CURRENT regime (a calendar signal holds through regime changes within
-    # its cadence window only while each regime is within the strategy's
-    # qualification standard — operator directive 2026-08-13).
+    assert "NOT IN ('true', '1')" in sql
+    # calendar branch: mint regime irrelevant; eligibility in the CURRENT
+    # regime is the sole gate (a calendar signal lies dormant until the next
+    # qualifying regime within cadence, and holds through multiple regimes
+    # while each is within the strategy's qualification standard).
     assert "signal_params->>'calendar_edge'" in sql
     assert 'srp.eligible' in sql
     assert tuple(params).count('TRANSITIONING') == 2
@@ -283,3 +287,41 @@ def test_run_strategies_stamps_calendar_edge(monkeypatch):
     res = _eng.run_strategies([_Cal(), _Reb()], None, {'state': 'LOW_VOL'}, [], {})
     assert res['cal'][0].signal_params == {'calendar_edge': True}
     assert getattr(res['reb'][0], 'signal_params', None) in (None, {})
+
+
+def test_regime_gate_runthrough_records_calendar_mints(monkeypatch):
+    """Operator directive 2026-08-13: a calendar strategy whose window opens
+    during a NON-qualifying regime still runs and records its signals (they
+    lie dormant until a qualifying regime); rebalancers stay gate-skipped."""
+    import execution.engine as _eng
+    monkeypatch.setattr(_eng, 'is_eligible', lambda sid, regime: False)
+    monkeypatch.setattr(_eng, 'instrument_class_for', lambda sid: 'equity')
+    monkeypatch.setattr(_eng, '_apply_regime_overrides_to_signals',
+                        lambda *a, **k: None)
+    monkeypatch.setattr(_eng, 'calendar_for', lambda ic: 'equity')
+    monkeypatch.setattr(_eng, 'apply_equity_calendar', lambda p: p)
+
+    class _Sig:
+        pass
+
+    class _Cal:
+        id = 'cal'
+        calendar_edge = True
+        active_in_regimes = ['LOW_VOL']
+
+        def generate_signals(self, prices, regime, universe, aux_data):
+            return [_Sig()]
+
+    class _Reb:
+        id = 'reb'
+
+        def generate_signals(self, prices, regime, universe, aux_data):
+            return [_Sig()]
+
+    cal = _Cal()
+    res = _eng.run_strategies([cal, _Reb()], None, {'state': 'HIGH_VOL'}, [], {})
+    assert res['cal'] and res['cal'][0].signal_params == {'calendar_edge': True}, \
+        'calendar mint must be recorded despite ineligible regime'
+    assert 'HIGH_VOL' in cal.active_in_regimes, \
+        'run-through must widen active_in_regimes so should_run cannot veto'
+    assert 'reb' not in res, 'rebalancers must stay regime-gate-skipped'
