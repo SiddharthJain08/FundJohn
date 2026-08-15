@@ -147,6 +147,8 @@ _IMPL_MAP = {
     'S_labor_day_week_momentum_reversal': ('strategies.implementations.S_labor_day_week_momentum_reversal', 'LaborDayWeekMomentumReversal'),
     'S_financial_constraint_kz_factor': ('strategies.implementations.S_financial_constraint_kz_factor', 'FinancialConstraintKZFactor'),
     'S_january_btm_size_seasonal': ('strategies.implementations.S_january_btm_size_seasonal', 'JanuaryBTMSizeSeasonal'),
+    # Heston & Sadka 2008: same-calendar-month return persistence — LONG top decile
+    'S_same_month_seasonality': ('strategies.implementations.S_same_month_seasonality', 'SameMonthSeasonality'),
     'S_fama_french_three_factor_composite': ('strategies.implementations.S_fama_french_three_factor_composite', 'FamaFrenchThreeFactorComposite'),
     'S_spx_death_cross_contrarian_fade': ('strategies.implementations.S_spx_death_cross_contrarian_fade', 'SpxDeathCrossContrarianFade'),
     'S_growth_inflation_sector_timing':  ('strategies.implementations.S_growth_inflation_sector_timing',  'GrowthInflationSectorTiming'),
@@ -356,6 +358,14 @@ _IMPL_MAP = {
     'S_spy_three_down_days_mean_reversion': ('strategies.implementations.S_spy_three_down_days_mean_reversion', 'SpyThreeDownDaysMeanReversion'),
     # QuantSeeker 2026: first 30-minute SPY/QQQ return predicts last 30-minute return → LONG at 15:30 ET
     'S_intraday_first_half_hour_momentum_etf': ('strategies.implementations.S_intraday_first_half_hour_momentum_etf', 'IntradayFirstHalfHourMomentumEtf'),
+    # Chehab et al. 2026: MINGLE — jointly learned factor exposures + exposure-similarity graph Laplacian min-var
+    'S_mingle_factor_graph_portfolio': ('strategies.implementations.S_mingle_factor_graph_portfolio', 'MingleFactorGraphPortfolio'),
+    # Döbelt 2026: sector-aware LSTM — 60-day reversal + sector-quintile momentum predicts cross-sectional outperformance
+    'S_lstm_sector_embedding_reversal_momentum': ('strategies.implementations.S_lstm_sector_embedding_reversal_momentum', 'LSTMSectorEmbeddingReversalMomentum'),
+    # Döbelt 2026: sector-aware LSTM proxy — reversal + 12m industry momentum, SP500 universe
+    'S_lstm_sector_embedding_sp500': ('strategies.implementations.S_lstm_sector_embedding_sp500', 'LSTMSectorEmbeddingSP500'),
+    # QuantSeeker 2026: HAR-RV + VIX timing composite predicts S&P 500 drawdowns → LONG/FLAT SPY
+    'S_vol_indicators_sp500_drawdown_timing': ('strategies.implementations.S_vol_indicators_sp500_drawdown_timing', 'VolIndicatorsSP500DrawdownTiming'),
 }
 
 

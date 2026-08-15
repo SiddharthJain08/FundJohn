@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_mingle_factor_graph_portfolio",
+  "required": ["prices"],
+  "optional": []
+}

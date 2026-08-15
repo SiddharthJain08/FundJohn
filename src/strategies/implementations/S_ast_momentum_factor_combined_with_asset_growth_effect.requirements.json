@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_ast_momentum_factor_combined_with_asset_growth_effect",
-  "required": ["prices", "financials"],
-  "optional": []
-}

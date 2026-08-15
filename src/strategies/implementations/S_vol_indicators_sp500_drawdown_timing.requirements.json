@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_vol_indicators_sp500_drawdown_timing",
+  "required": ["prices", "macro"],
+  "optional": []
+}

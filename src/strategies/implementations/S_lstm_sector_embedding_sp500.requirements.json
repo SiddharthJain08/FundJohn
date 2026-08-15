@@ -1,0 +1,5 @@
+{
+  "strategy_id": "S_lstm_sector_embedding_sp500",
+  "required": ["prices", "macro", "financials"],
+  "optional": []
+}

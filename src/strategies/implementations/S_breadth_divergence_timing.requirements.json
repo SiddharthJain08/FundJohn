@@ -1,6 +1,0 @@
-{
-  "strategy_id": "S_breadth_divergence_timing",
-  "instrument_class": "etp",
-  "required": ["prices"],
-  "optional": []
-}

@@ -1,5 +1,0 @@
-{
-  "strategy_id": "S_ast_combining_fundamental_fscore_and_equity_short_term_reversals",
-  "required": ["prices", "financials"],
-  "optional": []
-}
