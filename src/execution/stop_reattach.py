@@ -103,18 +103,69 @@ def _resolve_intended_bracket(conn, ticker: str, side: str):
 _RATE_LIMIT_BACKOFF = (2, 5, 10)
 
 # `alpaca order list` returns 50 rows by DEFAULT and caps --limit at 500.
-# Every open-order coverage read must page at the cap: on 2026-08-12 the
+# Every open-order coverage read must page THROUGH the cap: on 2026-08-12 the
 # 204-position breadth book (183 open orders) truncated coverage to the
 # first 50 rows — ~140 OCO-protected positions read as naked, and every
 # "reattach" was rejected against the shares its own resting OCO reserves.
-_OPEN_ORDERS_ARGS = ('order', 'list', '--status', 'open', '--limit', '500')
+# 2026-08-18: coverage reads now keyset-paginate with --after-order-id until
+# a short page, so correctness no longer depends on the book staying under
+# any fixed row count (the naked audit is the wrong place to discover a
+# breadth wave crossed 500 — the 08-12 incident at 50 rows, one silent flag
+# away). Current book at the change: 153 open orders, one page.
+_OPEN_ORDERS_PAGE_ARGS = ('order', 'list', '--status', 'open',
+                          '--limit', '500', '--direction', 'asc')
 _OPEN_ORDERS_CAP = 500
+_OPEN_ORDERS_MAX_PAGES = 40      # 20k rows — far above any sane book
 
 
-def _warn_if_capped(payload) -> None:
-    if isinstance(payload, list) and len(payload) >= _OPEN_ORDERS_CAP:
-        log(f'⚠ open-order list hit the {_OPEN_ORDERS_CAP}-row CLI cap — '
-            f'coverage may be truncated; naked audit unreliable this pass')
+def _fetch_open_orders() -> tuple[bool, list, dict | None]:
+    """Fetch ALL open orders, paging with --after-order-id (keyset, exclusive)
+    in --direction asc until a short page. Returns (ok, orders, err) shaped
+    like a single _run_cli page so call sites keep their error handling.
+
+    ok=False only when the FIRST page fails (no coverage at all — callers
+    treat it as 'listing unavailable'). A LATER page failure, a stalled
+    cursor, or the page bound returns ok=True with what was gathered plus a
+    loud truncation warning: partial coverage beats none, and worst-case
+    equals the old single-page behavior. Rows are deduped by order id —
+    an order submitted mid-pagination shifts the keyset window, never
+    duplicates or skips existing rows."""
+    orders: list = []
+    seen: set[str] = set()
+    cursor = None
+    for page in range(_OPEN_ORDERS_MAX_PAGES):
+        args = list(_OPEN_ORDERS_PAGE_ARGS)
+        if cursor:
+            args += ['--after-order-id', cursor]
+        ok, payload, err = _run_cli(args, timeout=30)
+        if not ok or not isinstance(payload, list):
+            if page == 0:
+                return False, [], err
+            log(f'⚠ open-order pagination failed on page {page + 1} '
+                f'({(err or {}).get("error", "unknown")}) — proceeding with '
+                f'{len(orders)} rows; coverage may be truncated')
+            return True, orders, None
+        new = 0
+        last_id = None
+        for o in payload:
+            oid = (o or {}).get('id') or (o or {}).get('order_id')
+            if oid:
+                last_id = oid
+                if oid in seen:
+                    continue
+                seen.add(oid)
+            orders.append(o)
+            new += 1
+        if len(payload) < _OPEN_ORDERS_CAP:
+            return True, orders, None
+        if not last_id or new == 0:
+            log(f'⚠ open-order pagination stalled (no cursor progress on page '
+                f'{page + 1}) — proceeding with {len(orders)} rows')
+            return True, orders, None
+        cursor = last_id
+    log(f'⚠ open-order pagination hit the {_OPEN_ORDERS_MAX_PAGES}-page bound — '
+        f'proceeding with {len(orders)} rows; coverage may be truncated')
+    return True, orders, None
 
 
 def _is_rate_limited(err: dict | None) -> bool:
@@ -181,11 +232,10 @@ def fetch_active_stops() -> dict[str, float]:
     """Map ticker -> total qty already covered by an active stop / stop_limit
     order. Sums across multiple stops on the same symbol so a position with
     2 partial stops is counted correctly."""
-    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
+    ok, payload, err = _fetch_open_orders()
     if not ok:
         log(f'order list failed: {(err or {}).get("error","unknown")} — treating as no active stops')
         return {}
-    _warn_if_capped(payload)
     out: dict[str, float] = {}
     for o in payload or []:
         t = (o.get('type') or o.get('order_type') or '').lower()
@@ -240,9 +290,14 @@ def latest_broker_bracket(ticker: str, position_side: str) -> dict | None:
     Returns {'entry': None, 'stop': float, 'target': float, 'order_id': str}
     or None when no bracket with both legs is found."""
     open_side = 'buy' if position_side == 'long' else 'sell'
-    # 45s: the full nested history is the heaviest CLI call in the pass and
-    # the one that hit the 15s ceiling when the broker API ran slow.
+    # 45s: the nested history is the heaviest CLI call in the pass and the one
+    # that hit the 15s ceiling when the broker API ran slow. 2026-08-18:
+    # --symbols added — the unfiltered newest-500 window stopped reaching this
+    # ticker's brackets once the account's order history outgrew it (the same
+    # truncation class as the open-order coverage reads; server-side filter
+    # keeps the whole 500-row budget on THIS ticker).
     ok, payload, err = _run_cli(['order', 'list', '--status', 'all',
+                                 '--symbols', ticker,
                                  '--nested', '--limit', '500'], timeout=45)
     if not ok:
         log(f'order history fetch failed ({(err or {}).get("error","unknown")})')
@@ -493,12 +548,11 @@ def fetch_tp_covered(linked_only: bool = False) -> dict[str, float]:
         gives ZERO downside protection and must NOT mask a missing stop — that
         conflation left 12 positions naked 2026-06-16→06-18 (the bare 16:05 TP
         made stop_reattach skip the GTC stop, then the day-TIF TP expired)."""
-    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
+    ok, payload, err = _fetch_open_orders()
     cov: dict[str, float] = {}
     if not ok:
         log(f'order list failed (tp cover): {(err or {}).get("error","unknown")}')
         return cov
-    _warn_if_capped(payload)
     for o in (payload or []):
         otype = o.get('order_type') or o.get('type')
         if otype != 'limit':
@@ -529,7 +583,7 @@ def cancel_stops_for(symbol: str, dry_run: bool, include_reserving: bool = False
     direction) survives. Safe because the caller's failure path re-submits
     a full-qty bare stop.
     Returns count canceled."""
-    ok, payload, err = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
+    ok, payload, err = _fetch_open_orders()
     if not ok:
         return 0
     n = 0
@@ -797,11 +851,10 @@ def sweep_orphan_exits(dry_run: bool, only: str | None = None) -> list[str]:
                 pos_syms.add(p.get('symbol'))
         except (TypeError, ValueError):
             pos_syms.add(p.get('symbol'))
-    ok, orders, _ = _run_cli([*_OPEN_ORDERS_ARGS], timeout=30)
+    ok, orders, _ = _fetch_open_orders()
     if not ok:
         log('orphan sweep skipped: order list unavailable')
         return []
-    _warn_if_capped(orders)
     cancelled: list[str] = []
     for o in (orders or []):
         sym = o.get('symbol')

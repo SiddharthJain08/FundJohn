@@ -1457,7 +1457,7 @@ def _cancel_open_crypto_stops(api_symbol: str) -> int:
 
     2026-08-18: server-side --symbols filter added (accepts the slashed crypto
     form, verified live) — the unfiltered call returned the 50-row default page
-    and the equity open-order flood pushed crypto stops off it entirely. See
+    and the 150+-order equity book pushed crypto stops off it. See
     _cancel_open_equity_orders for the full incident note."""
     ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open',
                                          '--symbols', api_symbol, '--limit', '500'],
@@ -1527,14 +1527,14 @@ def _cancel_open_equity_orders(ticker: str) -> int:
     a best-effort guard (the close must proceed regardless).
 
     2026-08-18: the listing MUST be server-side filtered with --symbols. The
-    unfiltered form returns the CLI's default 50-row page, so once the open
-    book outgrew a page (3,696 open orders on 08-18) the ticker's OCO legs
-    were almost never in it → nothing cancelled → every orphan close 403'd
-    "insufficient qty available (available: 0)" (261/356 on 08-14, 89/92 on
-    08-17). Same truncation class as the 08-12 stop_reattach --limit fix, and
-    --limit alone is NOT enough here (cap is 500 < book size) — the per-symbol
-    filter is the load-bearing part; --limit 500 is belt for a pathological
-    per-symbol order count."""
+    unfiltered form returns the CLI's default 50-row page, and the open book
+    has been well past a page since the 08-12/08-13 breadth waves (183 orders
+    on 08-12; 153 on 08-18) — the ticker's OCO legs were usually not in the
+    page → nothing cancelled → the orphan close 403'd "insufficient qty
+    available (available: 0)" (261/356 rejected 08-14, 89/92 on 08-17). Same
+    truncation class as the 08-12 stop_reattach fix. The per-symbol filter is
+    the load-bearing part — it keeps correctness independent of total book
+    size; --limit 500 is belt for a pathological per-symbol order count."""
     ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open',
                                          '--symbols', ticker, '--limit', '500'],
                                         timeout=10)
