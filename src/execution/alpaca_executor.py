@@ -1453,8 +1453,15 @@ def _cancel_open_crypto_stops(api_symbol: str) -> int:
     'BTC/USD'). A resting sell stop reserves the position, so a close/flatten
     would 403 unless the stop is cancelled first. Returns count cancelled.
     Returns 0 on any CLI-error response; a CLI subprocess hang can still raise
-    TimeoutExpired, so the caller wraps this in a best-effort guard."""
-    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
+    TimeoutExpired, so the caller wraps this in a best-effort guard.
+
+    2026-08-18: server-side --symbols filter added (accepts the slashed crypto
+    form, verified live) — the unfiltered call returned the 50-row default page
+    and the equity open-order flood pushed crypto stops off it entirely. See
+    _cancel_open_equity_orders for the full incident note."""
+    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open',
+                                         '--symbols', api_symbol, '--limit', '500'],
+                                        timeout=10)
     if not ok or not isinstance(payload, list):
         return 0
     n = 0
@@ -1517,8 +1524,20 @@ def _cancel_open_equity_orders(ticker: str) -> int:
 
     Returns the count cancelled. Returns 0 on any CLI-error response; a CLI
     subprocess hang can still raise TimeoutExpired, so the caller wraps this in
-    a best-effort guard (the close must proceed regardless)."""
-    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open'], timeout=10)
+    a best-effort guard (the close must proceed regardless).
+
+    2026-08-18: the listing MUST be server-side filtered with --symbols. The
+    unfiltered form returns the CLI's default 50-row page, so once the open
+    book outgrew a page (3,696 open orders on 08-18) the ticker's OCO legs
+    were almost never in it → nothing cancelled → every orphan close 403'd
+    "insufficient qty available (available: 0)" (261/356 on 08-14, 89/92 on
+    08-17). Same truncation class as the 08-12 stop_reattach --limit fix, and
+    --limit alone is NOT enough here (cap is 500 < book size) — the per-symbol
+    filter is the load-bearing part; --limit 500 is belt for a pathological
+    per-symbol order count."""
+    ok, payload, _err = _run_alpaca_cli(['order', 'list', '--status', 'open',
+                                         '--symbols', ticker, '--limit', '500'],
+                                        timeout=10)
     if not ok or not isinstance(payload, list):
         return 0
     cancelled_ids: list[str] = []
@@ -1544,6 +1563,31 @@ def _cancel_open_equity_orders(ticker: str) -> int:
                 log(f'  ↳ cancel-settle poll timed out for {oid} (proceeding to close)')
         except Exception as _px:   # noqa: BLE001 — best-effort; close must proceed
             log(f'  ↳ cancel-settle poll errored for {oid} (proceeding to close): {_px}')
+    # 2026-08-18: the order-status poll above is NOT the release condition. We
+    # cancel (and poll) the OCO PARENT — the only top-level row `order list`
+    # returns — but the broker releases the qty hold when the LEG finishes
+    # cancelling, which can lag the parent's terminal status by many seconds
+    # around the open (proven live 13:30:09 cancel ACK → close 403 at 13:30:22
+    # → leg released 13:30:28). Poll the POSITION's qty_available — the exact
+    # precondition the close needs — with a short bound. Best-effort: timeout
+    # or any error proceeds to the close and degrades to the pre-change 403.
+    try:
+        import time as _time
+        for _ in range(20):                       # ≤ 10s at 0.5s
+            ok_p, pos_p, _pe = _run_alpaca_cli(
+                ['position', 'get', '--symbol-or-asset-id', ticker], timeout=10)
+            if not ok_p or not isinstance(pos_p, dict):
+                break                             # no position / CLI error — nothing to wait on
+            avail = abs(float(pos_p.get('qty_available') or 0))
+            held  = abs(float(pos_p.get('qty') or 0))
+            if held == 0 or avail >= held:
+                break                             # hold released (or already flat)
+            _time.sleep(0.5)
+        else:
+            log(f'  ↳ qty_available still held for {ticker} after cancel settle '
+                f'(proceeding to close)')
+    except Exception:   # noqa: BLE001 — best-effort; close must proceed
+        pass
     return n
 
 

@@ -910,6 +910,26 @@ class LifecycleStateMachine:
 # eligible regime. Called by execution.strategy_weights.rebuild() after a
 # fresh weights computation. Demotion target: candidate (back to research).
 # ─────────────────────────────────────────────────────────────────────────────
+def _sync_registry_demotion(sid: str, status: str = "pending_approval") -> None:
+    """Close the engine's trade gate for a demoted strategy.
+
+    The engine trades on strategy_registry.status='approved', NOT on the
+    manifest state. Promotion is registry-first (promotion_service.js →
+    registry_sync.js writes the registry, then the manifest); until 2026-08-18
+    this Python demote path wrote ONLY the manifest, so every auto-demotion of
+    a promoted strategy stranded a stale 'approved' row — 15 accumulated by
+    08-18, each one an open trade gate waiting on an eligibility re-arm.
+
+    'pending_approval' mirrors REGISTRY_STATUS_FOR[candidate] in
+    src/lib/promotion_service.js — keep the two in sync. A missing registry
+    row is fine (UPDATE matches 0 rows): there is no gate to close.
+    """
+    import psycopg2
+    with psycopg2.connect(os.environ["POSTGRES_URI"]) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE strategy_registry SET status = %s WHERE id = %s",
+                    (status, sid))
+
+
 def auto_demote_negative_sharpe(
     reason: str = "auto_demote_negative_sharpe",
     actor:  str = "strategy_weights_engine",
@@ -919,6 +939,14 @@ def auto_demote_negative_sharpe(
     EVERY regime in its eligible_regimes list. Returns the list of demoted
     strategy_ids. A strategy with at least one positive-Sharpe eligible
     regime stays live (excluded from the bad regimes via weight=0 rows).
+
+    Registry-first (2026-08-18): each demotion closes the registry trade gate
+    BEFORE touching the manifest, mirroring promotion_service.js. If the
+    registry sync fails the manifest demotion for that sid is SKIPPED (it
+    retries at the next weights rebuild) — never the half-state where the
+    dashboard shows candidate while the engine's gate is still open. The
+    inverse half-state (registry closed, manifest still live) is the safe
+    drift direction and surfaces as the ⚠️ "not trading" badge.
     """
     # Lazy import to avoid a cycle at module load (strategy_weights imports
     # from this module too).
@@ -938,12 +966,21 @@ def auto_demote_negative_sharpe(
     demoted: list[str] = []
     for sid in targets:
         try:
+            _sync_registry_demotion(sid)
+        except Exception as e:
+            logger.warning("auto_demote: %s — registry sync FAILED, manifest "
+                           "demotion skipped this pass (retries next rebuild): %s",
+                           sid, e)
+            continue
+        try:
             lsm.transition(sid, StrategyState.CANDIDATE, actor=actor, reason=reason)
             demoted.append(sid)
         except LifecycleError as e:
-            logger.warning("auto_demote: %s — lifecycle blocked: %s", sid, e)
+            logger.warning("auto_demote: %s — lifecycle blocked (registry gate "
+                           "already closed; shows as 'not trading' badge): %s", sid, e)
         except Exception as e:
-            logger.warning("auto_demote: %s — error: %s", sid, e)
+            logger.warning("auto_demote: %s — error (registry gate already "
+                           "closed; shows as 'not trading' badge): %s", sid, e)
     if demoted:
         lsm.save_manifest(path)
         logger.info("auto_demote: demoted %d strategies: %s", len(demoted), demoted)

@@ -116,6 +116,74 @@ class TestCancelHelper(unittest.TestCase):
         self.assertEqual(n, 0)
         self.assertTrue(all('order cancel' not in _cmd(c) for c in mock_cli.call_args_list))
 
+    def test_listing_is_symbol_filtered_and_paginated(self):
+        """2026-08-18: the open-order listing MUST carry --symbols <ticker> and
+        --limit 500. The unfiltered form returns the CLI's default 50-row page;
+        once the open book outgrew a page (3,696 open orders on 08-18) the
+        ticker's OCO legs were almost never in it → nothing cancelled → every
+        orphan close 403'd "insufficient qty available (available: 0)"
+        (261/356 rejected 08-14, 89/92 on 08-17). --symbols is the load-bearing
+        part: --limit alone caps at 500 < book size."""
+        responses = {
+            'order list': (True, [{'id': 'oid-A1', 'symbol': 'AAPL'}], None),
+            'order cancel': (True, {'status': 'canceled'}, None),
+        }
+        with patch.object(ae, '_run_alpaca_cli',
+                          side_effect=_needle_cli(responses)) as mock_cli:
+            n = ae._cancel_open_equity_orders('AAPL')
+        self.assertEqual(n, 1)
+        list_cmds = [_cmd(c) for c in mock_cli.call_args_list if 'order list' in _cmd(c)]
+        self.assertEqual(len(list_cmds), 1)
+        self.assertIn('--symbols AAPL', list_cmds[0])
+        self.assertIn('--limit 500', list_cmds[0])
+
+    def test_crypto_listing_is_symbol_filtered_and_paginated(self):
+        """The crypto sibling (_cancel_open_crypto_stops) had the identical
+        unpaginated listing — the equity open-order flood pushed crypto stops
+        off the 50-row page. Same pin: --symbols (slashed crypto form) +
+        --limit 500."""
+        responses = {
+            'order list': (True, [{'id': 'oid-C1', 'symbol': 'ETH/USD'}], None),
+            'order cancel': (True, {'status': 'canceled'}, None),
+        }
+        with patch.object(ae, '_run_alpaca_cli',
+                          side_effect=_needle_cli(responses)) as mock_cli:
+            n = ae._cancel_open_crypto_stops('ETH/USD')
+        self.assertEqual(n, 1)
+        list_cmds = [_cmd(c) for c in mock_cli.call_args_list if 'order list' in _cmd(c)]
+        self.assertEqual(len(list_cmds), 1)
+        self.assertIn('--symbols ETH/USD', list_cmds[0])
+        self.assertIn('--limit 500', list_cmds[0])
+
+    def test_polls_position_qty_available_after_cancels(self):
+        """2026-08-18 settle-race hardening: after cancelling + polling the OCO
+        PARENT (the only top-level row `order list` returns), the helper polls
+        the POSITION's qty_available. The broker releases the qty hold when the
+        LEG finishes cancelling, which can lag the parent's terminal status by
+        many seconds around the open — proven live 08-18: cancel ACK 13:30:09,
+        close 403 13:30:22, leg release 13:30:28. qty_available is the close's
+        actual precondition; order status is not."""
+        seq = {'polls': 0}
+
+        def _cli(args, timeout=30):
+            joined = ' '.join(str(a) for a in args)
+            if 'order list' in joined:
+                return (True, [{'id': 'oid-A1', 'symbol': 'AAPL'}], None)
+            if 'order cancel' in joined:
+                return (True, {'status': 'canceled'}, None)
+            if 'position get' in joined:
+                seq['polls'] += 1
+                if seq['polls'] == 1:   # first poll: leg still holds the qty
+                    return (True, {'qty': '3', 'qty_available': '0'}, None)
+                return (True, {'qty': '3', 'qty_available': '3'}, None)
+            raise AssertionError(f'unexpected CLI call: {joined}')
+
+        with patch.object(ae, '_run_alpaca_cli', side_effect=_cli):
+            n = ae._cancel_open_equity_orders('AAPL')
+        self.assertEqual(n, 1)
+        # polled at least twice: held on the first pass, released on the second
+        self.assertEqual(seq['polls'], 2)
+
     def test_order_id_only_fallback_still_cancelled(self):
         """MINOR finding: every prior fixture carried 'id', so the
         `o.get('id') or o.get('order_id')` fallback was unexercised. An order
